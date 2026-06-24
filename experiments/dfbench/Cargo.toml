@@ -1,0 +1,31 @@
+# Standalone experiment — NOT part of the Helix build (separate Cargo.toml, not a
+# workspace member). Measures whether a homegrown columnar engine can be "fast enough"
+# vs Polars, and how much smaller, to inform the DataFrame-backend decision.
+[package]
+name = "dfbench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rayon = "1"
+# Same feature set as Helix (known to compile) — the bench only needs Polars working as
+# the baseline; its footprint is irrelevant (only homegrown_only's size is measured).
+polars = { version = "0.54", features = [
+    "lazy", "streaming", "csv", "parquet", "ipc", "json", "strings",
+    "is_in", "round_series", "cum_agg", "dtype-full", "performant",
+] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[[bin]]
+name = "bench"
+path = "src/bench.rs"
+
+# Homegrown engine only (no polars) — for an honest binary-size measurement.
+[[bin]]
+name = "homegrown_only"
+path = "src/homegrown_only.rs"
