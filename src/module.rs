@@ -79,8 +79,10 @@ pub fn load(entry: &Path) -> Result<Loaded, String> {
 
 struct Module {
     stmts: Vec<Stmt>,
-    /// Each import's alias mapped to the loaded module's index.
+    /// Each whole-module import's alias mapped to the loaded module's index.
     imports: Vec<(String, usize)>,
+    /// Each selectively-imported name mapped to the module it came from.
+    selected: Vec<(String, usize)>,
 }
 
 #[derive(Default)]
@@ -120,7 +122,7 @@ impl Loader {
         // resolver below never hunts for a `python/...helix` file). `python` itself
         // is a predefined global, so the lowered assign just calls a method on it.
         for s in stmts.iter_mut() {
-            if let Stmt::Import { segments, alias, line, col } = s
+            if let Stmt::Import { segments, alias, selected: _, line, col } = s
                 && segments.first().map(|x| x.as_str()) == Some("python") {
                     if segments.len() < 2 {
                         return Err(HelixError::new(
@@ -152,8 +154,9 @@ impl Loader {
 
         let dir = canon.parent().unwrap_or_else(|| Path::new("."));
         let mut imports = Vec::new();
+        let mut selected_names = Vec::new();
         for s in &stmts {
-            if let Stmt::Import { segments, alias, line, col } = s {
+            if let Stmt::Import { segments, alias, selected, line, col } = s {
                 // Resolve `import a.b.c` → `a/b/c.helix`, trying this module's own
                 // directory first (local imports win), then each search root (stdlib /
                 // `HELIX_PATH`).
@@ -176,15 +179,22 @@ impl Loader {
                     return Err(err.render(&src, &fname));
                 };
                 let dep_idx = self.load_file(&dep_path)?;
-                // Key the import by the alias — that's the name user code reaches it
-                // through (`alias.member`).
-                imports.push((alias.clone(), dep_idx));
+                match selected {
+                    // Selective: each chosen name resolves to the dependency directly.
+                    Some(names) => {
+                        for n in names {
+                            selected_names.push((n.clone(), dep_idx));
+                        }
+                    }
+                    // Whole module: reached through the alias (`alias.member`).
+                    None => imports.push((alias.clone(), dep_idx)),
+                }
             }
         }
 
         self.in_progress.pop();
         let idx = self.modules.len();
-        self.modules.push(Module { stmts, imports });
+        self.modules.push(Module { stmts, imports, selected: selected_names });
         self.by_path.insert(canon, idx);
         Ok(idx)
     }
@@ -199,6 +209,9 @@ struct Ctx {
     top_level: HashSet<String>,
     /// Each import alias → that dependency's prefix.
     imports: HashMap<String, String>,
+    /// Each selectively-imported name → its dependency's prefix, so a bare reference
+    /// rewrites to the dependency's mangled name.
+    selected: HashMap<String, String>,
 }
 
 fn rewrite_module(modules: &[Module], idx: usize) -> Vec<Stmt> {
@@ -208,6 +221,11 @@ fn rewrite_module(modules: &[Module], idx: usize) -> Vec<Stmt> {
         top_level: top_level_names(&m.stmts),
         imports: m
             .imports
+            .iter()
+            .map(|(n, dep)| (n.clone(), format!("m{dep}")))
+            .collect(),
+        selected: m
+            .selected
             .iter()
             .map(|(n, dep)| (n.clone(), format!("m{dep}")))
             .collect(),
@@ -297,8 +315,12 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing => {}
         Expr::Ident { name, .. } => {
-            if !bound.contains(name) && ctx.top_level.contains(name) {
-                *name = mangle(&ctx.prefix, name);
+            if !bound.contains(name) {
+                if ctx.top_level.contains(name) {
+                    *name = mangle(&ctx.prefix, name);
+                } else if let Some(dep) = ctx.selected.get(name) {
+                    *name = mangle(dep, name);
+                }
             }
         }
         Expr::Interp(parts) => {
@@ -328,11 +350,12 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
             for a in args.iter_mut() {
                 rw(a, ctx, bound);
             }
-            if !bound.contains(name)
-                && !crate::interp::BUILTIN_FNS.contains(&name.as_str())
-                && ctx.top_level.contains(name)
-            {
-                *name = mangle(&ctx.prefix, name);
+            if !bound.contains(name) && !crate::interp::BUILTIN_FNS.contains(&name.as_str()) {
+                if ctx.top_level.contains(name) {
+                    *name = mangle(&ctx.prefix, name);
+                } else if let Some(dep) = ctx.selected.get(name) {
+                    *name = mangle(dep, name);
+                }
             }
         }
         Expr::Method { recv, args, .. } => {

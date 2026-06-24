@@ -388,6 +388,16 @@ fn stdlib_module_resolves_on_the_search_path() {
 }
 
 #[test]
+fn selective_import_binds_names_unqualified() {
+    // `import m.{a, b}` brings the chosen names into scope without the namespace, and a
+    // local definition of the same name shadows the import.
+    let src = "import std.stats.{iqr, spread}\nprint(iqr([1.0, 2.0, 3.0, 4.0, 5.0]))\nprint(spread([10.0, 4.0, 7.0]))\n";
+    let (out, stderr, code) = run_source(src, &[("HELIX_PATH", ".")], "selimport");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "2.0\n6.0"); // IQR = 2; range = 10 - 4
+}
+
+#[test]
 fn missing_stdlib_module_reports_the_search_path() {
     // Without the search path the same import fails with a clear message.
     let src = "import std.stats as st\nprint(st.iqr([1.0, 2.0]))\n";

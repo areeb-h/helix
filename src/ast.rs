@@ -214,8 +214,12 @@ pub enum Stmt {
         /// Path segments, e.g. `["math", "stats"]` for `import math.stats`.
         segments: Vec<String>,
         /// The namespace the module is reached through — the `as` name, or the
-        /// last path segment when no `as` clause is given.
+        /// last path segment when no `as` clause is given. Unused for a selective
+        /// import, which binds the chosen names directly rather than a namespace.
         alias: String,
+        /// A selective import (`import math.stats.{mean, std}`) brings these names
+        /// into scope unqualified; `None` imports the whole module as `alias`.
+        selected: Option<Vec<String>>,
         line: usize,
         col: usize,
     },

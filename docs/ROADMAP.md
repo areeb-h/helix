@@ -301,7 +301,10 @@ motivates this phase.
       after the importing file's own directory (local imports win). The first stdlib
       module, `std/stats.helix`, ships helpers (`iqr`, `zscores`, `standard_error`, …)
       composed from the built-in aggregations.
-- [ ] Selective import (`from m import f`).
+- [x] **Selective import** — `import std.stats.{iqr, zscores}` brings the chosen
+      names into scope unqualified (resolving to the source module), with a local
+      definition of the same name shadowing the import. No new keyword: the brace tail
+      mirrors the existing dotted-path syntax.
 - [ ] Cross-module runtime-error caret attribution (message and line:col are
       correct; the caret may point at the entry file).
 

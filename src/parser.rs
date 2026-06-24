@@ -148,14 +148,37 @@ impl Parser {
                 .ident_name("after `import`")
                 .map_err(|e| e.hint("import a module by name, e.g. `import stats` or `import lib.stats`."))?;
             let mut segments = vec![first];
-            // Dotted path: `import lib.stats` → `lib/stats.helix`.
+            let mut selected: Option<Vec<String>> = None;
+            // Dotted path: `import lib.stats` → `lib/stats.helix`. A `.{a, b}` tail
+            // instead selects names to bring into scope unqualified.
             while matches!(self.peek(), Tok::Dot) {
                 self.advance();
+                if matches!(self.peek(), Tok::LBrace) {
+                    self.advance(); // consume `{`
+                    let mut names = Vec::new();
+                    loop {
+                        names.push(self.ident_name("to import inside `{ }`")?);
+                        if matches!(self.peek(), Tok::Comma) {
+                            self.advance();
+                            if matches!(self.peek(), Tok::RBrace) {
+                                break; // trailing comma
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    self.eat(&Tok::RBrace, "to close the import list").map_err(|e| {
+                        e.hint("a selective import looks like `import lib.stats.{mean, std}`.")
+                    })?;
+                    selected = Some(names);
+                    break; // nothing follows a selective list
+                }
                 segments.push(self.ident_name("after `.` in the module path")?);
             }
             // Optional `as alias` — `as` is contextual (only special here), so it
-            // stays usable as an ordinary identifier everywhere else.
-            let alias = if matches!(self.peek(), Tok::Ident(n) if n == "as") {
+            // stays usable as an ordinary identifier everywhere else. A selective
+            // import binds its names directly, so it takes no alias.
+            let alias = if selected.is_none() && matches!(self.peek(), Tok::Ident(n) if n == "as") {
                 self.advance();
                 self.ident_name("after `as`")
                     .map_err(|e| e.hint("give the module an alias, e.g. `import lib.stats as stats`."))?
@@ -163,7 +186,7 @@ impl Parser {
                 // Default the namespace to the last path segment.
                 segments.last().unwrap().clone()
             };
-            return Ok(Stmt::Import { segments, alias, line: l, col: c });
+            return Ok(Stmt::Import { segments, alias, selected, line: l, col: c });
         }
         // `fn name(a, b) = expr`
         if matches!(self.peek(), Tok::Fn) {
