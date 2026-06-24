@@ -238,15 +238,14 @@ pub(crate) use analysis::*;
 /// If `e` is a `range(...)` call with 1 or 2 arguments, return its `(start, end)`
 /// where a 1-argument range has `None` start (i.e. 0). Enables range fusion.
 fn as_range_call(e: &Expr) -> Option<(Option<&Expr>, &Expr)> {
-    if let Expr::Call { name, args, .. } = e {
-        if name == "range" {
+    if let Expr::Call { name, args, .. } = e
+        && name == "range" {
             return match args.len() {
                 1 => Some((None, &args[0])),
                 2 => Some((Some(&args[0]), &args[1])),
                 _ => None,
             };
         }
-    }
     None
 }
 
@@ -355,8 +354,8 @@ impl Compiler {
                 // edge where the message may differ — both still reject.)
                 if !*mutable {
                     for name in names {
-                        if let Some(i) = self.globals.iter().position(|g| g == name) {
-                            if !self.global_mut[i] {
+                        if let Some(i) = self.globals.iter().position(|g| g == name)
+                            && !self.global_mut[i] {
                                 b.emit(
                                     Op::Raise(
                                         std::rc::Rc::new(format!(
@@ -373,7 +372,6 @@ impl Compiler {
                                 );
                                 return Ok(());
                             }
-                        }
                     }
                 }
                 let mut slots: Vec<u32> = Vec::with_capacity(names.len());
@@ -765,16 +763,36 @@ impl Compiler {
                 if n == "join"
                     && matches!(self.recv_type(recv), Some(Type::DataFrame) | Some(Type::Unknown))
                 {
-                    // A no-argument `join` has no operand to compile; bail to the
-                    // tree-walker, which emits the precise "needs a DataFrame" error.
-                    let other = args.first().ok_or(Unsupported)?;
+                    // Evaluate the receiver first (matching the tree-walker's order, so
+                    // its side effects run before any error).
                     self.compile_expr(b, recv)?;
-                    self.compile_expr(b, other)?;
-                    b.emit(
-                        Op::DfJoin { spec: std::rc::Rc::new(args[1..].to_vec()) },
-                        *line,
-                        *col,
-                    );
+                    match args.first() {
+                        Some(other) => {
+                            self.compile_expr(b, other)?;
+                            b.emit(
+                                Op::DfJoin { spec: std::rc::Rc::new(args[1..].to_vec()) },
+                                *line,
+                                *col,
+                            );
+                        }
+                        // No operand to join with. Emit the same diagnostic the
+                        // tree-walker produces, keeping the compiler total (no
+                        // `Unsupported` for a type-checked program).
+                        None => {
+                            b.emit(
+                                Op::Raise(
+                                    std::rc::Rc::new(
+                                        "`join` needs a DataFrame to join with".to_string(),
+                                    ),
+                                    std::rc::Rc::new(
+                                        "e.g. `samples.join(meta, sample_id)`.".to_string(),
+                                    ),
+                                ),
+                                *line,
+                                *col,
+                            );
+                        }
+                    }
                     return Ok(());
                 }
                 if matches!(self.recv_type(recv), Some(Type::GroupBy))

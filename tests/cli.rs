@@ -366,6 +366,34 @@ fn join_combines_frames_on_a_key() {
     assert_eq!(out.trim(), "3\n4");
 }
 
+#[test]
+fn join_without_an_operand_is_a_clean_error() {
+    // A no-argument `join` type-checks (DataFrame args are the unchecked runtime
+    // boundary), so the compiler must stay total and emit the friendly diagnostic
+    // rather than the "internal error ... please report" totality breach.
+    let src = "s = read_csv(\"examples/data/samples.csv\")\nprint(s.join())\n";
+    let (out, stderr, code) = run_source(src, &[], "joinerr");
+    assert_ne!(code, Some(0), "stdout:\n{out}");
+    assert!(
+        stderr.contains("`join` needs a DataFrame to join with"),
+        "stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("internal error"), "stderr:\n{stderr}");
+}
+
+#[test]
+fn join_on_an_unknown_key_is_a_clean_error() {
+    // Keys are validated against both schemas up front, so a typo reads as a Helix
+    // error naming the frame and listing valid columns — not Polars' lazy-plan dump.
+    let src = "s = read_csv(\"examples/data/samples.csv\")\nm = read_csv(\"examples/data/sample_meta.csv\")\nprint(s.join(m, no_such_key).count())\n";
+    let (out, stderr, code) = run_source(src, &[], "joinkey");
+    assert_ne!(code, Some(0), "stdout:\n{out}");
+    assert!(
+        stderr.contains("no column `no_such_key` in the left frame"),
+        "stderr:\n{stderr}"
+    );
+}
+
 // Real network fetch — ignored by default so the suite stays offline-friendly.
 // Run with: `cargo test -- --ignored`.
 #[cfg(feature = "http")]

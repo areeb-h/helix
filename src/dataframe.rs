@@ -188,6 +188,29 @@ pub fn join(
                 .hint("use \"inner\", \"left\", \"right\", or \"outer\"."))
         }
     };
+    // Validate keys against both schemas up front, so a typo reads as a clean Helix
+    // error ("no column ... in the left frame") rather than Polars' lazy-plan dump at
+    // collect time — matching the eager checking the column verbs get from `to_polars`.
+    let left_cols = column_names(left, line, col)?;
+    let right_cols = column_names(right, line, col)?;
+    for k in keys {
+        if !left_cols.contains(k) {
+            return Err(HelixError::new(
+                format!("no column `{}` in the left frame", k),
+                line,
+                col,
+            )
+            .hint(format!("left columns: {}", left_cols.join(", "))));
+        }
+        if !right_cols.contains(k) {
+            return Err(HelixError::new(
+                format!("no column `{}` in the right frame", k),
+                line,
+                col,
+            )
+            .hint(format!("right columns: {}", right_cols.join(", "))));
+        }
+    }
     let on: Vec<Expr> = keys.iter().map(|k| pcol(k.as_str())).collect();
     Ok(left.clone().join(
         right.clone(),
