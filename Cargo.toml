@@ -11,10 +11,11 @@ name = "helix"
 path = "src/main.rs"
 
 [profile.release]
-opt-level = 3
+opt-level = 3        # keep speed — Helix is performance-first; do NOT use "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
+strip = true         # drop debug symbols — pure size win, no perf cost (ADR 0009)
 
 # A fast dev profile that still optimizes dependencies (Polars) so the REPL and
 # tests aren't crippled by a debug-built Polars.
@@ -58,7 +59,19 @@ pyo3-polars = { version = "0.27", optional = true }
 # (our 0.17); used to hand a Helix Tensor to/from Python's NumPy.
 numpy = { version = "0.28", optional = true }
 
+# Verified HTTPS downloads for managed runtimes / packages / toolchains / self-update
+# (ADR 0010), behind the `managed` feature so the pure core stays dependency-free.
+# rustls (not OpenSSL) keeps the binary self-contained; sha2 is the trust boundary.
+ureq = { version = "2", optional = true }
+sha2 = { version = "0.10", optional = true }
+# Pure-Rust gzip+tar extraction for managed runtimes (miniz_oxide backend — no zlib
+# system dep, keeps the binary self-contained). Behind `managed`.
+flate2 = { version = "1", optional = true }
+tar = { version = "0.4", optional = true }
+
 [features]
 default = []
 # Enable the embedded-CPython bridge: `cargo build --features python`.
 python = ["dep:pyo3", "dep:pyo3-polars", "dep:numpy"]
+# Managed runtimes: verified downloads + extraction (managed Python, etc.).
+managed = ["dep:ureq", "dep:sha2", "dep:flate2", "dep:tar"]

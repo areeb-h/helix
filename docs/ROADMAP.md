@@ -275,6 +275,18 @@ gap analysis that motivates this phase.
 - [ ] **Python → Helix** (Helix as an installable CPython extension) for calling
       Helix from Python on hot paths.
 
+### Distribution & install — see [ADR 0009](adr/0009-distribution-and-install.md)
+- [x] **A real `helix` CLI** — `helix run` / `eval` / `repl` / `version` / `help`
+      (plus the `helix <script.helix>` shorthand). No more `cargo run`.
+- [x] **`cargo install --path .`** + **`install.sh`** (the eventual `curl | sh`
+      one-liner: downloads a prebuilt binary, falls back to a source build) +
+      **`.github/workflows/release.yml`** (cross-builds the self-contained core for
+      linux/macOS/Windows on a tag). Ready; prebuilt downloads activate once the
+      repo is on GitHub.
+- [ ] Package-manager presence (Homebrew, Scoop/winget, `cargo binstall`); a
+      Windows `install.ps1`. The differentiator: **managed Python for interop**
+      (uv-style) so interop "just works" and stays reproducible.
+
 ### Packaging, tooling, trust
 - [ ] **Package manager + lockfile** — the distribution half of modules (path/git
       deps buildable locally; a registry needs hosting). The Python environment

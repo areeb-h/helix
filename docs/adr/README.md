@@ -15,6 +15,8 @@ we make them deliberately and in the open.
 | [0006](0006-concurrency-and-scale.md) | Concurrency, parallelism & scale | 📝 proposed (DataFrame layer live) |
 | [0007](0007-tensor-backend.md) | Tensor backend (ndarray now, GPU later) | 🛠 CPU core implemented |
 | [0008](0008-cpython-interop.md) | CPython interop (Helix → Python) | 🛠 v1 implemented (feature-gated) |
+| [0009](0009-distribution-and-install.md) | Distribution & installation | 🛠 CLI + source install; releases wired |
+| [0010](0010-networking-privacy-security.md) | Networking, privacy & security | 📝 proposed (governs the first network code) |
 
 ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
 (23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a

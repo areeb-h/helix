@@ -10,16 +10,44 @@ It aims to combine **Python's readability**, **R's data workflow**, **Rust's
 safety**, **Julia's scientific elegance**, **SQL's intuitive data operations**,
 and **Arrow's zero-copy memory model** — without inheriting their footguns.
 
-## Status: Phase 1 (early)
+## Install
 
-A working tree-walking interpreter for the core language. This is real and runs
-today; the heavy machinery (DataFrames, tensors, JIT, GPU) is on the roadmap
-below.
+Helix is a **single self-contained binary** — no runtime to install (no Python, no
+system BLAS; the core links nothing external).
 
+```sh
+# one-line install — downloads the prebuilt binary for your platform,
+# or falls back to a source build if no release is available
+curl -LsSf https://raw.githubusercontent.com/areeb/helix/main/install.sh | sh
+
+# or, with Rust installed, from a checkout:
+cargo install --path .
 ```
-cargo run -- examples/tour.helix     # run a script
-cargo run                            # start the REPL
+
+Then use it like any language CLI:
+
+```sh
+helix run examples/tour.helix     # run a script
+helix eval "print(1 + 2)"         # a one-liner
+helix repl                        # interactive session
+helix help                        # all commands
 ```
+
+> Prebuilt one-line installs activate once the project is published on GitHub with a
+> release tag (the [release workflow](.github/workflows/release.yml) is wired and
+> ready); until then the installer source-builds, which needs Rust. The
+> distribution plan — and how it aims to beat npm/pip/Mojo on the install
+> experience — is [ADR 0009](docs/adr/0009-distribution-and-install.md).
+
+## Status
+
+Well past a prototype: a tree-walking interpreter **plus** a bytecode VM and a
+Cranelift JIT (native code that beats Node/Python on scalar recursion), lazy
+Polars/Arrow **DataFrames**, ndarray **tensors** with linear algebra, a static type
+checker, a **module system**, and a feature-gated **CPython interop** layer
+(call NumPy/polars/etc. — see [docs/python-interop.md](docs/python-interop.md)).
+130+ tests, zero warnings. The remaining roadmap (GPU, package manager, bundled
+Python) is below.
 
 ## What works today
 

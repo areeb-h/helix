@@ -243,6 +243,45 @@ fn subdirectory_import_resolves_nested_path() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn cli_subcommands_work() {
+    // `helix eval "<code>"`
+    let (out, _, code) = run(&["eval", "print(6 * 7)"], &[], "");
+    assert_eq!(code, Some(0), "eval failed");
+    assert_eq!(out.trim(), "42");
+
+    // `helix version`
+    let (vout, _, vcode) = run(&["version"], &[], "");
+    assert_eq!(vcode, Some(0));
+    assert!(vout.contains("helix"), "version: {vout:?}");
+
+    // `helix run <file>` matches the bare-path shorthand.
+    let path = std::env::temp_dir().join("helix_cli_run.helix");
+    std::fs::write(&path, "print(\"hi\")\n").unwrap();
+    let (rout, _, rcode) = run(&["run", path.to_str().unwrap()], &[], "");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(rcode, Some(0));
+    assert_eq!(rout.trim(), "hi");
+}
+
+#[cfg(not(feature = "managed"))]
+#[test]
+fn python_subcommand_without_managed_feature_errors() {
+    // A default build still parses `helix python …` but explains how to enable it.
+    let (_, stderr, code) = run(&["python", "install"], &[], "");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("managed-runtime support"), "stderr: {stderr:?}");
+}
+
+#[cfg(feature = "managed")]
+#[test]
+fn python_dir_prints_the_managed_runtime_path() {
+    // Offline command — no download. (`install` needs network, so it isn't tested here.)
+    let (out, stderr, code) = run(&["python", "dir"], &[], "");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert!(out.contains("helix"), "expected a .../helix/python path, got: {out:?}");
+}
+
 // --- Python interop (Phase 6) ------------------------------------------------
 // These run against whichever feature set the suite was built with: the
 // feature-gated tests need `cargo test --features python` (and a Python

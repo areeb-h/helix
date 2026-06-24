@@ -14,7 +14,9 @@ mod error;
 mod interp;
 mod jit;
 mod lexer;
+mod managed;
 mod module;
+mod net;
 mod parser;
 mod python;
 mod tensor;
@@ -43,17 +45,85 @@ fn main() -> ExitCode {
 fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
-        Some("--help") | Some("-h") => {
-            print_help();
-            ExitCode::SUCCESS
-        }
-        Some("--version") | Some("-V") => {
+        // No args (or `repl`) → interactive session. The REPL drives the
+        // tree-walker line by line, so give it the big stack.
+        None | Some("repl") => run_on_big_stack(repl),
+        Some("--version") | Some("-V") | Some("version") => {
             println!("helix {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
+        Some("--help") | Some("-h") | Some("help") => {
+            print_help();
+            ExitCode::SUCCESS
+        }
+        // `helix run <script>` — the explicit form.
+        Some("run") => match args.get(2) {
+            Some(path) => run_file(path),
+            None => {
+                eprintln!("error: `helix run` needs a script path, e.g. `helix run main.helix`");
+                ExitCode::FAILURE
+            }
+        },
+        // `helix eval "<code>"` — run a one-liner.
+        Some("eval") | Some("-e") => match args.get(2) {
+            Some(code) => run_eval(code),
+            None => {
+                eprintln!("error: `helix eval` needs code, e.g. `helix eval \"print(1 + 2)\"`");
+                ExitCode::FAILURE
+            }
+        },
+        // `helix python <…>` — manage CPython runtimes for interop.
+        Some("python") => run_python_cli(&args),
+        // Shorthand: `helix script.helix` runs a file directly.
         Some(path) => run_file(path),
-        // The REPL drives the tree-walker line by line, so give it the big stack.
-        None => run_on_big_stack(repl),
+    }
+}
+
+/// `helix python <subcommand>` — manage managed CPython runtimes (behind the
+/// `managed` feature; a build without it explains how to get it).
+fn run_python_cli(args: &[String]) -> ExitCode {
+    #[cfg(feature = "managed")]
+    {
+        match managed::cli(&args[2..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    }
+    #[cfg(not(feature = "managed"))]
+    {
+        let _ = args;
+        eprintln!("error: this build has no managed-runtime support");
+        eprintln!("help: rebuild with `cargo build --features managed`.");
+        ExitCode::FAILURE
+    }
+}
+
+/// Run a one-liner passed on the command line (`helix eval "..."`). Single source
+/// (no imports); errors render against a `<eval>` filename.
+fn run_eval(code: &str) -> ExitCode {
+    let tokens = match lexer::lex(code) {
+        Ok(t) => t,
+        Err(e) => {
+            eprint!("{}", e.render(code, "<eval>"));
+            return ExitCode::FAILURE;
+        }
+    };
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            eprint!("{}", e.render(code, "<eval>"));
+            return ExitCode::FAILURE;
+        }
+    };
+    match run_program(&program, code, "<eval>", false) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(rendered) => {
+            eprint!("{}", rendered);
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -75,8 +145,15 @@ where
 fn print_help() {
     println!(
         "Helix {} — a scientific programming language\n\n\
-         USAGE:\n    helix <script.helix>   run a script\n    helix                  start the REPL\n\n\
-         OPTIONS:\n    -h, --help     show this help\n    -V, --version  show the version",
+         USAGE:\n    \
+         helix <script.helix>     run a script (shorthand)\n    \
+         helix run <script>       run a script\n    \
+         helix eval \"<code>\"       run a one-liner\n    \
+         helix repl               start an interactive session\n    \
+         helix version            show the version\n    \
+         helix help               show this help\n\n\
+         The default `helix` is a self-contained binary. A build with the `python`\n\
+         feature adds CPython interop (see docs/python-interop.md).",
         env!("CARGO_PKG_VERSION")
     );
 }
