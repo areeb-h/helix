@@ -296,7 +296,12 @@ motivates this phase.
 - [x] **Aliases** `import lib.stats as st` (`as` is contextual and remains usable as
       an ordinary identifier). Verified on both engines; cross-module calls, globals,
       local shadowing, cycle and missing-module errors.
-- [ ] Selective import (`from m import f`); a stdlib search path.
+- [x] **Standard-library search path** — a non-local `import std.stats` resolves
+      against `HELIX_PATH` and the install-relative `std/` directory beside the binary,
+      after the importing file's own directory (local imports win). The first stdlib
+      module, `std/stats.helix`, ships helpers (`iqr`, `zscores`, `standard_error`, …)
+      composed from the built-in aggregations.
+- [ ] Selective import (`from m import f`).
 - [ ] Cross-module runtime-error caret attribution (message and line:col are
       correct; the caret may point at the entry file).
 

@@ -378,6 +378,25 @@ fn join_combines_frames_on_a_key() {
 }
 
 #[test]
+fn stdlib_module_resolves_on_the_search_path() {
+    // `import std.stats` is not beside the script, so it resolves via the search path
+    // (`HELIX_PATH`). The stdlib helper composes the built-in aggregations.
+    let src = "import std.stats as st\nprint(st.iqr([1.0, 2.0, 3.0, 4.0, 5.0]))\nprint(st.spread([1.0, 2.0, 3.0, 4.0, 5.0]))\n";
+    let (out, stderr, code) = run_source(src, &[("HELIX_PATH", ".")], "stdpath");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "2.0\n4.0"); // IQR = q75 - q25 = 4 - 2; range = 5 - 1
+}
+
+#[test]
+fn missing_stdlib_module_reports_the_search_path() {
+    // Without the search path the same import fails with a clear message.
+    let src = "import std.stats as st\nprint(st.iqr([1.0, 2.0]))\n";
+    let (_out, stderr, code) = run_source(src, &[], "stdpathmiss");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("cannot find module `std.stats`"), "stderr:\n{stderr}");
+}
+
+#[test]
 fn descriptive_statistics_and_correlation() {
     // Population statistics (so var == std^2) plus Pearson correlation, with the
     // missing-propagation rule: a `missing` in either series yields `missing`.

@@ -27,12 +27,40 @@ pub struct Loaded {
     pub multi_module: bool,
 }
 
+/// The directories searched for a non-local import (`import std.stats`), in priority
+/// order after the importing file's own directory: every `HELIX_PATH` entry, then the
+/// install-relative standard-library locations beside the executable. A stdlib module
+/// `std/stats.helix` is found because some root *contains* a `std/` directory.
+fn search_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(p) = std::env::var_os("HELIX_PATH") {
+        roots.extend(std::env::split_paths(&p));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        roots.push(dir.to_path_buf()); // <exe_dir>/std/...
+        roots.push(dir.join("../lib/helix")); // <prefix>/lib/helix/std/... (FHS install)
+    }
+    roots
+}
+
+/// Build the relative file path an import resolves to: `import a.b.c` → `a/b/c.helix`.
+fn import_rel_path(segments: &[String]) -> PathBuf {
+    let mut rel = PathBuf::new();
+    for seg in &segments[..segments.len() - 1] {
+        rel.push(seg);
+    }
+    rel.push(format!("{}.helix", segments.last().unwrap()));
+    rel
+}
+
 /// Load `entry` and everything it transitively imports, returning the combined
 /// statement list. A single-file program is returned unchanged (no namespacing).
 /// On a lex/parse/resolve error the message is already rendered (with the
 /// *correct* module's filename and caret).
 pub fn load(entry: &Path) -> Result<Loaded, String> {
-    let mut loader = Loader::default();
+    let mut loader = Loader { roots: search_roots(), ..Loader::default() };
     loader.load_file(entry)?;
     // Single file, no imports: hand back the unmodified AST so nothing is mangled
     // and error messages stay pristine — the overwhelmingly common case.
@@ -61,6 +89,8 @@ struct Loader {
     by_path: HashMap<PathBuf, usize>,
     /// Canonical paths currently being loaded — for cycle detection.
     in_progress: Vec<PathBuf>,
+    /// Search roots for non-local imports (stdlib / `HELIX_PATH`).
+    roots: Vec<PathBuf>,
 }
 
 impl Loader {
@@ -124,18 +154,27 @@ impl Loader {
         let mut imports = Vec::new();
         for s in &stmts {
             if let Stmt::Import { segments, alias, line, col } = s {
-                // `import a.b.c` → `<dir>/a/b/c.helix` (relative to this module).
-                let mut dep_path = dir.to_path_buf();
-                for seg in &segments[..segments.len() - 1] {
-                    dep_path.push(seg);
-                }
-                dep_path.push(format!("{}.helix", segments.last().unwrap()));
-                if !dep_path.is_file() {
+                // Resolve `import a.b.c` → `a/b/c.helix`, trying this module's own
+                // directory first (local imports win), then each search root (stdlib /
+                // `HELIX_PATH`).
+                let rel = import_rel_path(segments);
+                let local = dir.join(&rel);
+                let dep_path = if local.is_file() {
+                    local
+                } else if let Some(found) =
+                    self.roots.iter().map(|r| r.join(&rel)).find(|p| p.is_file())
+                {
+                    found
+                } else {
                     let shown = segments.join(".");
-                    return Err(HelixError::new(format!("cannot find module `{shown}`"), *line, *col)
-                        .hint(format!("expected a file `{}`.", dep_path.display()))
-                        .render(&src, &fname));
-                }
+                    let mut err =
+                        HelixError::new(format!("cannot find module `{shown}`"), *line, *col)
+                            .hint(format!("expected `{}` beside this file", rel.display()));
+                    if !self.roots.is_empty() {
+                        err = err.hint("or on the search path (`HELIX_PATH` / the stdlib)");
+                    }
+                    return Err(err.render(&src, &fname));
+                };
                 let dep_idx = self.load_file(&dep_path)?;
                 // Key the import by the alias — that's the name user code reaches it
                 // through (`alias.member`).

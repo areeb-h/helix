@@ -1,0 +1,29 @@
+# std.stats — common statistical helpers composed from the built-in core.
+#
+# Part of the Helix standard library: import it from anywhere on the search path
+# (`HELIX_PATH` in development, the install-relative `std/` directory otherwise):
+#
+#   import std.stats as st
+#   st.iqr(measurements)
+#
+# Every helper inherits the core's missing-data semantics: one absent value makes the
+# result absent. The functions take an array of numbers and reuse the built-in
+# aggregations, so they stay one line and never diverge from the engine.
+
+# Standard error of the mean: how precisely the sample mean estimates the population
+# mean. Shrinks as the sample grows.
+fn standard_error(xs) = xs.std() / sqrt(xs.count())
+
+# Coefficient of variation: spread relative to the mean, a unitless measure that
+# compares variability across series on different scales.
+fn coefficient_of_variation(xs) = xs.std() / xs.mean()
+
+# Interquartile range: the spread of the middle 50% of the data, robust to outliers.
+fn iqr(xs) = xs.quantile(0.75) - xs.quantile(0.25)
+
+# Range: the gap between the largest and smallest values.
+fn spread(xs) = xs.max() - xs.min()
+
+# Z-scores: each value re-expressed as standard deviations from the mean. Broadcasts
+# over the array, so the result is an array the same length as the input.
+fn zscores(xs) = (xs - xs.mean()) / xs.std()
