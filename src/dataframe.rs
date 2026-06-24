@@ -13,6 +13,8 @@ use polars::prelude::*;
 // otherwise shadow Polars' `pcol()` column constructor.
 use polars::prelude::col as pcol;
 
+use std::rc::Rc;
+
 use crate::ast::{BinOp, Expr as Ast, UnOp};
 use crate::error::HelixError;
 use crate::value::Value;
@@ -257,6 +259,52 @@ pub fn row_count(lf: &LazyFrame, line: usize, col: usize) -> Result<usize, Helix
     )?;
     let n = pl(df.column("n").and_then(|c| c.get(0)), "could not count rows", line, col)?;
     Ok(n.try_extract::<u64>().unwrap_or(0) as usize)
+}
+
+/// Materialize a single column as a Helix `Array` (`df.column("age")`), so the array
+/// statistics and verbs apply directly to a frame's data. Polars nulls become
+/// `missing`, so the missing-propagation rule carries through (e.g.
+/// `df.column("qual").median()` is `missing` if any value is absent; chain
+/// `.drop_missing()` first to skip them). The column name is validated up front for a
+/// clean error, mirroring the join-key check.
+pub fn column_values(lf: &LazyFrame, name: &str, line: usize, col: usize) -> Result<Vec<Value>, HelixError> {
+    let cols = column_names(lf, line, col)?;
+    if !cols.iter().any(|c| c == name) {
+        return Err(HelixError::new(format!("no column `{}` in the DataFrame", name), line, col)
+            .hint(format!("columns: {}", cols.join(", "))));
+    }
+    let msg = format!("could not read column `{}`", name);
+    let df = pl(lf.clone().select([pcol(name)]).collect(), &msg, line, col)?;
+    let column = pl(df.column(name), &msg, line, col)?;
+    let mut out = Vec::with_capacity(column.len());
+    for i in 0..column.len() {
+        out.push(anyvalue_to_value(&pl(column.get(i), &msg, line, col)?));
+    }
+    Ok(out)
+}
+
+/// Convert one Polars cell to a Helix value. Nulls map to `missing`; integers and
+/// floats of any width widen to `Int`/`Float`; strings and booleans map across
+/// directly; any remaining dtype (dates, categoricals, …) falls back to its string
+/// form so the conversion is total and never panics.
+fn anyvalue_to_value(av: &AnyValue) -> Value {
+    match av {
+        AnyValue::Null => Value::Missing,
+        AnyValue::Boolean(b) => Value::Bool(*b),
+        AnyValue::Int8(n) => Value::Int(*n as i64),
+        AnyValue::Int16(n) => Value::Int(*n as i64),
+        AnyValue::Int32(n) => Value::Int(*n as i64),
+        AnyValue::Int64(n) => Value::Int(*n),
+        AnyValue::UInt8(n) => Value::Int(*n as i64),
+        AnyValue::UInt16(n) => Value::Int(*n as i64),
+        AnyValue::UInt32(n) => Value::Int(*n as i64),
+        AnyValue::UInt64(n) => Value::Int(*n as i64),
+        AnyValue::Float32(f) => Value::Float(*f as f64),
+        AnyValue::Float64(f) => Value::Float(*f),
+        AnyValue::String(s) => Value::Str(Rc::new((*s).to_string())),
+        AnyValue::StringOwned(s) => Value::Str(Rc::new(s.to_string())),
+        other => Value::Str(Rc::new(other.to_string())),
+    }
 }
 
 /// Materialize a lazy frame **once** into memory and re-wrap it as lazy, so every

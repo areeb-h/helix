@@ -303,6 +303,8 @@ pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type
         "group" => Type::GroupBy,
         "count" => Type::Int,
         "columns" => Type::Array(Box::new(Type::String)),
+        // One column's values as an array; element type is the runtime schema boundary.
+        "column" => array_of_unknown(),
         _ => return Err(unknown_method("DataFrame", name, DF_METHODS, line, col)),
     })
 }

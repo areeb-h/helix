@@ -47,6 +47,9 @@
         // names, the other frame, the join type) at the unchecked runtime boundary.
         ok("read_csv(\"p.csv\").with({adult: age >= 18}).select(name, adult).count()");
         ok("read_csv(\"a.csv\").join(read_csv(\"b.csv\"), id, \"left\").sort(id).count()");
+        // `column` bridges a frame to an array, so the array statistics chain off it.
+        ok("read_csv(\"p.csv\").column(\"age\").median()");
+        ok("correlation(read_csv(\"p.csv\").column(\"a\"), read_csv(\"p.csv\").column(\"b\"))");
     }
 
     #[test]

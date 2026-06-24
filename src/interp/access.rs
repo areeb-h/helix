@@ -169,6 +169,19 @@ pub(crate) fn pattern_parts(
 /// the VM can dispatch them after evaluating args. The column-argument verbs
 /// (`where`/`select`/`sort`/`group`) are not here — they take unevaluated ASTs
 /// and remain on the tree-walker. Mirrors the matching arms of `eval_df_method`.
+/// The single column-name argument of `df.column("age")` — an evaluated string.
+/// Shared by both engines (the tree-walker evaluates the AST arg first).
+pub(crate) fn column_arg(args: &[Value], line: usize, col: usize) -> Result<String, HelixError> {
+    if args.len() != 1 {
+        return Err(HelixError::new("`column` takes one column name", line, col)
+            .hint("e.g. `df.column(\"age\")`."));
+    }
+    match &args[0] {
+        Value::Str(s) => Ok((**s).clone()),
+        other => Err(type_err("column", "a column name string", other, line, col)),
+    }
+}
+
 pub(crate) fn df_value_method(
     lf: &Rc<LazyFrame>,
     name: &str,
@@ -208,9 +221,15 @@ pub(crate) fn df_value_method(
             let n = as_int(&args[0], "head", line, col)?.max(0) as usize;
             Ok(Value::DataFrame(Rc::new(dataframe::head(lf, n))))
         }
+        "column" => {
+            let name = column_arg(&args, line, col)?;
+            Ok(Value::Array(Rc::new(dataframe::column_values(lf, &name, line, col)?)))
+        }
         _ => {
-            const DF_METHODS: &[&str] =
-                &["where", "select", "sort", "group", "head", "count", "columns", "cache"];
+            const DF_METHODS: &[&str] = &[
+                "where", "select", "sort", "group", "with", "join", "column", "head", "count",
+                "columns", "cache",
+            ];
             let mut err =
                 HelixError::new(format!("a DataFrame has no method `{}`", name), line, col);
             if let Some(s) = suggest(name, DF_METHODS) {

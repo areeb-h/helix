@@ -269,8 +269,8 @@ const TENSOR_METHODS: &[&str] = &[
     "matmul", "dot", "norm", "det", "inv", "solve", "is_missing",
 ];
 const DF_METHODS: &[&str] = &[
-    "where", "filter", "select", "sort", "group", "with", "join", "head", "count", "columns",
-    "cache", "is_missing",
+    "where", "filter", "select", "sort", "group", "with", "join", "column", "head", "count",
+    "columns", "cache", "is_missing",
 ];
 const GROUPBY_AGGS: &[&str] = &["mean", "sum", "min", "max", "count", "std", "is_missing"];
 

@@ -377,6 +377,25 @@ fn descriptive_statistics_and_correlation() {
 }
 
 #[test]
+fn column_extracts_values_for_statistics() {
+    // `df.column(name)` materializes a column as an array, so the array statistics
+    // apply directly to loaded data. Polars nulls become `missing`, so `drop_missing`
+    // composes before an aggregation.
+    let src = "p = read_csv(\"examples/data/patients.csv\")\nprint(p.column(\"age\").median())\nv = read_vcf(\"examples/data/variants.vcf\")\nprint(v.column(\"qual\").drop_missing().count())\n";
+    let (out, stderr, code) = run_source(src, &[], "dfcolumn");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "43.0\n6"); // median of 8 ages; 6 non-null quals
+}
+
+#[test]
+fn column_with_unknown_name_is_a_clean_error() {
+    let src = "print(read_csv(\"examples/data/patients.csv\").column(\"nope\"))\n";
+    let (_out, stderr, code) = run_source(src, &[], "dfcolerr");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("no column `nope`"), "stderr:\n{stderr}");
+}
+
+#[test]
 fn correlation_on_mismatched_lengths_is_a_clean_error() {
     let src = "print(correlation([1, 2], [1, 2, 3]))\n";
     let (_out, stderr, code) = run_source(src, &[], "corrlen");

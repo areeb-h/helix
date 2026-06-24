@@ -172,11 +172,14 @@ based so `var == std²` and array verbs agree with the DataFrame group aggregati
       record (the `describe()` analogue), alongside the existing `mean`/`std`.
 - [x] Bivariate: `correlation(xs, ys)` (Pearson r; symmetric, undefined on a
       constant series).
+- [x] DataFrame-column statistics: `df.column(name)` materializes a column as an
+      array (Polars nulls → `missing`), so the array statistics and verbs apply to
+      loaded data — e.g. `df.column("age").median()`, or `drop_missing()` first.
 - [ ] Inferential statistics: t-test / z-test returning `{statistic, df, p_value}`,
       needing a special-functions layer (`erf`, regularized incomplete beta).
 - [ ] Distributions: normal/t/binomial pdf/cdf/quantile on that same layer.
-- [ ] DataFrame-column statistics: extract a column as an array, and whole-frame
-      column aggregations (`df.median(col)`, `df.correlation(c1, c2)`).
+- [ ] Whole-frame aggregation shorthands (`df.median(col)`, `df.correlation(c1, c2)`)
+      over the `column` accessor, if the explicit form proves verbose in practice.
 - [ ] Sample (`n - 1`) variants where inferential work needs them.
 
 ## Phase 3.7 — Data access & APIs (shipped)

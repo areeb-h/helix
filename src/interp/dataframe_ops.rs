@@ -204,6 +204,14 @@ impl super::Interp {
                 }
                 Ok(Value::Int(dataframe::row_count(&lf, line, col)? as i64))
             }
+            "column" => {
+                // The column name is an evaluated string (unlike the column verbs,
+                // whose bare-ident args stay unevaluated). Evaluate, then share the
+                // VM path's extraction so the two engines never diverge.
+                let vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<_, _>>()?;
+                let name = column_arg(&vals, line, col)?;
+                Ok(Value::Array(Rc::new(dataframe::column_values(&lf, &name, line, col)?)))
+            }
             "cache" => {
                 if !args.is_empty() {
                     return Err(HelixError::new("`cache` takes no arguments", line, col)
@@ -223,8 +231,8 @@ impl super::Interp {
             }
             _ => {
                 const DF_METHODS: &[&str] = &[
-                    "where", "select", "sort", "group", "with", "join", "head", "count", "columns",
-                    "cache",
+                    "where", "select", "sort", "group", "with", "join", "column", "head", "count",
+                    "columns", "cache",
                 ];
                 let mut err = HelixError::new(
                     format!("a DataFrame has no method `{}`", name),

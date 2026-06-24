@@ -21,3 +21,14 @@ print("summary: ", resting_hr.summary())
 # is symmetric, so it reads as a plain function of the two series.
 age = [41, 38, 55, 44, 47, 60, 35, 52]
 print("r(age, hr):", correlation(age, resting_hr))
+
+# The same statistics apply to real data: `df.column(name)` pulls a DataFrame column
+# out as an array. Polars nulls arrive as `missing`, so `drop_missing` composes ahead
+# of an aggregation when you want to skip absent values rather than propagate them.
+patients = read_csv("examples/data/patients.csv")
+print("median patient age:", patients.column("age").median())
+print("resting-hr summary: ", patients.column("resting_hr").summary())
+print(
+    "r(age, hr) in cohort:",
+    correlation(patients.column("age"), patients.column("resting_hr")),
+)
