@@ -27,7 +27,10 @@ fast, memory-safe surface.
       Demo: [examples/variants.helix](../examples/variants.helix). v1 is a hand-rolled
       parser for plain VCF; gzip/BGZF/BCF and full INFO typing via `noodles` is the next
       step. (No-arg grouped `count()` for rows-per-group is a small follow-up.)
-- [ ] `read_fastq` (quality scores, `missing`-aware), `read_gff`/`read_bed`.
+- [x] **`read_fastq`** — FASTQ reads as records `{id, seq, qual, length}` (via
+      `needletail`); `seq` is a DNA value and `qual` the Phred string. Demo:
+      [examples/sequencing.helix](../examples/sequencing.helix).
+- [ ] `read_gff` / `read_bed`.
 - [ ] BAM/CRAM via `noodles` (memory-mapped, streaming; the local-first capability).
 - [ ] RNA (`fold`, `translate`), protein sequences; an ADR for the bio type model.
 - [~] Python interop for adoption (calling into Biopython and existing pipelines).

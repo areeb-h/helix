@@ -1,0 +1,13 @@
+# Sequencing reads: read_fastq parses a FASTQ file into records
+# {id, seq, qual, length}, where seq is a first-class DNA value.
+#   helix run examples/sequencing.helix
+
+reads = read_fastq("examples/data/reads.fastq")
+
+print("reads:", reads.count())
+print("total bases:", reads.map(it.length).sum())
+print("mean GC content:", reads.map(it.seq.gc_content()).mean())
+
+first = reads.first()
+print("first read:", first.id, first.seq)
+print("quality:", first.qual)

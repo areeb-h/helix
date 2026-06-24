@@ -327,6 +327,15 @@ fn record_string_indexing() {
 }
 
 #[test]
+fn read_fastq_parses_reads_with_quality() {
+    // FASTQ -> records {id, seq, qual, length}; sequence methods apply to `seq`.
+    let src = "r = read_fastq(\"examples/data/reads.fastq\")\nprint(r.count())\nprint(r.first().length)\nprint(r.first().seq.gc_content())\n";
+    let (out, stderr, code) = run_source(src, &[], "fastq");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "3\n12\n0.5"); // 3 reads; first is 12 bp; GC = 0.5
+}
+
+#[test]
 fn read_vcf_makes_variants_queryable() {
     // The bio flagship: a VCF becomes a DataFrame the normal verbs work on. INFO
     // fields (gene) are columns alongside the fixed ones (qual). No group-by here, so

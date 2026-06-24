@@ -141,6 +141,13 @@ impl super::Interp {
                     other => Err(type_err("read_fasta", "a string path", other, line, col)),
                 }
             }
+            "read_fastq" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => crate::bio::read_fastq(s, line, col),
+                    other => Err(type_err("read_fastq", "a string path", other, line, col)),
+                }
+            }
             "write_parquet" => {
                 arity(name, &args, 2, line, col)?;
                 match (&args[0], &args[1]) {

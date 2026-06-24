@@ -93,14 +93,14 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::DataFrame)
         }
-        "read_fasta" => {
+        "read_fasta" | "read_fastq" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 return Err(type_err(name, "a string path", &args[0], line, col));
             }
-            // An array of `{id, seq, length}` records; element kept `Unknown` so
+            // An array of sequence records; element kept `Unknown` so
             // field/sequence-method access stays permissive.
             Ok(Type::Array(Box::new(Type::Unknown)))
         }

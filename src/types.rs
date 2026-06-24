@@ -275,8 +275,8 @@ const DF_METHODS: &[&str] = &[
 const GROUPBY_AGGS: &[&str] = &["mean", "sum", "min", "max", "count", "std", "is_missing"];
 
 const BUILTIN_FNS: &[&str] = &[
-    "print", "dna", "range", "read_csv", "read_parquet", "read_fasta", "read_vcf", "write_parquet",
-    "tensor",
+    "print", "dna", "range", "read_csv", "read_parquet", "read_fasta", "read_fastq", "read_vcf",
+    "write_parquet", "tensor",
     "zeros",
     "ones", "eye", "sqrt", "cbrt", "abs", "exp", "ln", "log10", "log2", "log", "sin", "cos", "tan",
     "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "floor", "ceil", "round", "trunc",
