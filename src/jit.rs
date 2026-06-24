@@ -627,13 +627,13 @@ fn gen_cond<'a>(
 pub unsafe fn call_i64(ptr: *const u8, args: &[i64]) -> i64 {
     unsafe {
         match args.len() {
-            0 => std::mem::transmute::<_, extern "C" fn() -> i64>(ptr)(),
-            1 => std::mem::transmute::<_, extern "C" fn(i64) -> i64>(ptr)(args[0]),
-            2 => std::mem::transmute::<_, extern "C" fn(i64, i64) -> i64>(ptr)(args[0], args[1]),
-            3 => std::mem::transmute::<_, extern "C" fn(i64, i64, i64) -> i64>(ptr)(
+            0 => std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr)(),
+            1 => std::mem::transmute::<*const u8, extern "C" fn(i64) -> i64>(ptr)(args[0]),
+            2 => std::mem::transmute::<*const u8, extern "C" fn(i64, i64) -> i64>(ptr)(args[0], args[1]),
+            3 => std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64) -> i64>(ptr)(
                 args[0], args[1], args[2],
             ),
-            4 => std::mem::transmute::<_, extern "C" fn(i64, i64, i64, i64) -> i64>(ptr)(
+            4 => std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64, i64) -> i64>(ptr)(
                 args[0], args[1], args[2], args[3],
             ),
             _ => unreachable!("JIT arity is capped at {MAX_ARITY}"),
@@ -645,7 +645,7 @@ pub unsafe fn call_i64(ptr: *const u8, args: &[i64]) -> i64 {
 /// `extern "C" fn(i64,i64,i64)->i64` produced by [`define_reduce_loop`].
 pub unsafe fn call_reduce(ptr: *const u8, start: i64, end: i64, init: i64) -> i64 {
     unsafe {
-        std::mem::transmute::<_, extern "C" fn(i64, i64, i64) -> i64>(ptr)(start, end, init)
+        std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64) -> i64>(ptr)(start, end, init)
     }
 }
 
@@ -654,13 +654,13 @@ pub unsafe fn call_reduce(ptr: *const u8, start: i64, end: i64, init: i64) -> i6
 pub unsafe fn call_f64(ptr: *const u8, args: &[f64]) -> f64 {
     unsafe {
         match args.len() {
-            0 => std::mem::transmute::<_, extern "C" fn() -> f64>(ptr)(),
-            1 => std::mem::transmute::<_, extern "C" fn(f64) -> f64>(ptr)(args[0]),
-            2 => std::mem::transmute::<_, extern "C" fn(f64, f64) -> f64>(ptr)(args[0], args[1]),
-            3 => std::mem::transmute::<_, extern "C" fn(f64, f64, f64) -> f64>(ptr)(
+            0 => std::mem::transmute::<*const u8, extern "C" fn() -> f64>(ptr)(),
+            1 => std::mem::transmute::<*const u8, extern "C" fn(f64) -> f64>(ptr)(args[0]),
+            2 => std::mem::transmute::<*const u8, extern "C" fn(f64, f64) -> f64>(ptr)(args[0], args[1]),
+            3 => std::mem::transmute::<*const u8, extern "C" fn(f64, f64, f64) -> f64>(ptr)(
                 args[0], args[1], args[2],
             ),
-            4 => std::mem::transmute::<_, extern "C" fn(f64, f64, f64, f64) -> f64>(ptr)(
+            4 => std::mem::transmute::<*const u8, extern "C" fn(f64, f64, f64, f64) -> f64>(ptr)(
                 args[0], args[1], args[2], args[3],
             ),
             _ => unreachable!("JIT arity is capped at {MAX_ARITY}"),

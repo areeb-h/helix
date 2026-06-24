@@ -260,8 +260,8 @@ impl super::Checker {
                     return Ok(Type::Unknown); // malformed → runtime errors; don't false-positive
                 }
                 let init_t = self.synth(&args[0])?;
-                if let Expr::Lambda { params, body } = &args[1] {
-                    if params.len() == 2 {
+                if let Expr::Lambda { params, body } = &args[1]
+                    && params.len() == 2 {
                         let body_t = self.with_two(
                             &params[0],
                             init_t.clone(),
@@ -271,7 +271,6 @@ impl super::Checker {
                         )?;
                         return Ok(join(&init_t, &body_t));
                     }
-                }
                 Ok(Type::Unknown)
             }
             _ => {
@@ -313,7 +312,7 @@ impl super::Checker {
             .iter()
             .map(|n| (n.clone(), self.env.get(n).cloned()))
             .collect();
-        for (n, t) in names.iter().zip(types.into_iter()) {
+        for (n, t) in names.iter().zip(types) {
             self.env.insert(n.clone(), t);
         }
         let result = self.synth(body);

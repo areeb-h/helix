@@ -101,7 +101,7 @@ impl Interp {
             } => {
                 let v = self.eval(value)?;
                 let parts = destructure_parts(&v, names.len(), *line, *col)?;
-                for (n, val) in names.iter().zip(parts.into_iter()) {
+                for (n, val) in names.iter().zip(parts) {
                     self.bind(n, val, *mutable, *line, *col)?;
                 }
                 Ok(StmtOutcome {
@@ -497,9 +497,6 @@ impl Interp {
         }
     }
 
-    /// Evaluate `map`/`filter`/`where`/`reduce`. The argument expression is run
-    /// once per element with `it` (and, for `reduce`, `acc`) bound in scope.
-
     /// Apply a function: bind its parameters over the current scope, evaluate
     /// the body, then restore. Because the function's own name stays bound
     /// throughout, recursion works.
@@ -539,7 +536,7 @@ impl Interp {
             .iter()
             .map(|p| (p.clone(), self.env.remove(p)))
             .collect();
-        for (p, a) in params.iter().zip(args.into_iter()) {
+        for (p, a) in params.iter().zip(args) {
             self.env
                 .insert(p.clone(), Binding { value: a, mutable: false });
         }
@@ -553,10 +550,6 @@ impl Interp {
         self.depth -= 1;
         result
     }
-
-    /// Dispatch a verb on a DataFrame. Column arguments arrive unevaluated so
-    /// that `where(age > 40)` and `select(name, age)` can read column names
-    /// directly. Predicates are lowered to Polars expressions.
 
     fn eval_with_two(
         &mut self,

@@ -170,7 +170,7 @@ impl super::Interp {
             .iter()
             .map(|n| (n.clone(), self.env.remove(n)))
             .collect();
-        for (n, v) in names.iter().zip(parts.into_iter()) {
+        for (n, v) in names.iter().zip(parts) {
             self.env
                 .insert(n.clone(), Binding { value: v, mutable: false });
         }

@@ -356,34 +356,33 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // result). Otherwise all-numeric + an f64 version → native f64
                 // (Float result; the float-only or mixed/float case). All of the
                 // function's internal recursion then stays native.
-                if let Some(nf) = jit_for_idx[idx] {
-                    if nargs == nf.arity {
-                        let tail = &stack[start..];
-                        // The f64 specialization always returns Float, so it is
-                        // only valid when EVERY argument is Float (then every op,
-                        // and returning a param, yields Float — matching the
-                        // interpreter). For MIXED Int/Float args the result type
-                        // depends on what the function does (e.g. `f(a,b)=b` keeps
-                        // an Int `b`), so those fall through to the VM, which
-                        // handles type-mixing correctly.
-                        let all_float = tail.iter().all(|v| matches!(v, Value::Float(_)));
-                        if all_int && nf.i64_ptr.is_some() {
-                            let iargs: Vec<i64> = tail
-                                .iter()
-                                .map(|v| if let Value::Int(n) = v { *n } else { 0 })
-                                .collect();
-                            stack.truncate(start);
-                            let r = unsafe { crate::jit::call_i64(nf.i64_ptr.unwrap(), &iargs) };
-                            stack.push(Value::Int(r));
-                            continue;
-                        }
-                        if all_float && nf.f64_ptr.is_some() {
-                            let fargs: Vec<f64> = tail.iter().map(|v| v.as_f64().unwrap()).collect();
-                            stack.truncate(start);
-                            let r = unsafe { crate::jit::call_f64(nf.f64_ptr.unwrap(), &fargs) };
-                            stack.push(Value::Float(r));
-                            continue;
-                        }
+                if let Some(nf) = jit_for_idx[idx]
+                    && nargs == nf.arity
+                {
+                    let tail = &stack[start..];
+                    // The f64 specialization always returns Float, so it is only
+                    // valid when EVERY argument is Float (then every op, and
+                    // returning a param, yields Float — matching the interpreter).
+                    // For MIXED Int/Float args the result type depends on what the
+                    // function does (e.g. `f(a,b)=b` keeps an Int `b`), so those
+                    // fall through to the VM, which handles type-mixing correctly.
+                    let all_float = tail.iter().all(|v| matches!(v, Value::Float(_)));
+                    if all_int && let Some(ptr) = nf.i64_ptr {
+                        let iargs: Vec<i64> = tail
+                            .iter()
+                            .map(|v| if let Value::Int(n) = v { *n } else { 0 })
+                            .collect();
+                        stack.truncate(start);
+                        let r = unsafe { crate::jit::call_i64(ptr, &iargs) };
+                        stack.push(Value::Int(r));
+                        continue;
+                    }
+                    if all_float && let Some(ptr) = nf.f64_ptr {
+                        let fargs: Vec<f64> = tail.iter().map(|v| v.as_f64().unwrap()).collect();
+                        stack.truncate(start);
+                        let r = unsafe { crate::jit::call_f64(ptr, &fargs) };
+                        stack.push(Value::Float(r));
+                        continue;
                     }
                 }
                 let callee = &program.funcs[idx];
@@ -469,11 +468,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 locals.truncate(frame.base);
                 // A memoization miss: record the result so future calls with the
                 // same arguments return instantly (bounded for safety).
-                if let Some(key) = frame.memo_key {
-                    if memo.len() < MEMO_MAX_ENTRIES {
+                if let Some(key) = frame.memo_key
+                    && memo.len() < MEMO_MAX_ENTRIES {
                         memo.insert(key, ret.clone());
                     }
-                }
                 stack.push(ret);
             }
             Op::MakeArray(n) => {
@@ -549,7 +547,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::Destructure(slots) => {
                 let v = stack.pop().unwrap();
                 let parts = crate::interp::destructure_parts(&v, slots.len(), line, col)?;
-                for (slot, val) in slots.iter().zip(parts.into_iter()) {
+                for (slot, val) in slots.iter().zip(parts) {
                     globals[*slot as usize] = val;
                 }
             }
@@ -559,7 +557,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let v = stack.pop().unwrap();
                 let parts = crate::interp::pattern_parts(&v, slots.len(), line, col)?;
                 let base = frames[fi].base;
-                for (slot, val) in slots.iter().zip(parts.into_iter()) {
+                for (slot, val) in slots.iter().zip(parts) {
                     locals[base + *slot as usize] = val;
                 }
             }

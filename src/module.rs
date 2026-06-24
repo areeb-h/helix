@@ -90,8 +90,8 @@ impl Loader {
         // resolver below never hunts for a `python/...helix` file). `python` itself
         // is a predefined global, so the lowered assign just calls a method on it.
         for s in stmts.iter_mut() {
-            if let Stmt::Import { segments, alias, line, col } = s {
-                if segments.first().map(|x| x.as_str()) == Some("python") {
+            if let Stmt::Import { segments, alias, line, col } = s
+                && segments.first().map(|x| x.as_str()) == Some("python") {
                     if segments.len() < 2 {
                         return Err(HelixError::new(
                             "`import python` needs a module, e.g. `import python.numpy`",
@@ -118,7 +118,6 @@ impl Loader {
                         col: c,
                     };
                 }
-            }
         }
 
         let dir = canon.parent().unwrap_or_else(|| Path::new("."));
@@ -237,8 +236,8 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
     // `dep.member(...)` / `dep.member` where `dep` is an imported module → a direct
     // reference to the dependency's mangled name. Handled before generic recursion
     // because they replace the whole node.
-    if let Expr::Method { recv, name, args, line, col } = e {
-        if let Some(dep) = module_of(recv, ctx, bound) {
+    if let Expr::Method { recv, name, args, line, col } = e
+        && let Some(dep) = module_of(recv, ctx, bound) {
             for a in args.iter_mut() {
                 rw(a, ctx, bound);
             }
@@ -250,13 +249,11 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
             };
             return;
         }
-    }
-    if let Expr::Field { recv, name, line, col } = e {
-        if let Some(dep) = module_of(recv, ctx, bound) {
+    if let Expr::Field { recv, name, line, col } = e
+        && let Some(dep) = module_of(recv, ctx, bound) {
             *e = Expr::Ident { name: mangle(&dep, name), line: *line, col: *col };
             return;
         }
-    }
 
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing => {}
@@ -311,10 +308,8 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
         }
         Expr::Slice { recv, start, stop, step, .. } => {
             rw(recv, ctx, bound);
-            for o in [start, stop, step] {
-                if let Some(x) = o {
-                    rw(x, ctx, bound);
-                }
+            for x in [start, stop, step].into_iter().flatten() {
+                rw(x, ctx, bound);
             }
         }
         Expr::Lambda { params, body } => {

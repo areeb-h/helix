@@ -161,7 +161,7 @@
                 match (&a[0], &a[1]) {
                     (Value::Tuple(t0), Value::Tuple(t1)) => {
                         assert!(matches!(&t0[0], Value::Str(s) if &**s == "a"));
-                        assert_eq!(matches!(&t0[1], Value::Int(3)), true);
+                        assert!(matches!(&t0[1], Value::Int(3)));
                         assert!(matches!(&t1[0], Value::Str(s) if &**s == "b"));
                     }
                     _ => panic!("expected tuples"),

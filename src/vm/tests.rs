@@ -318,7 +318,7 @@
             // predicate referencing a global variable → the resolve_var path
             format!("t = 40\n{csv}.where(age > t).count()"),
             // grouped aggregation over an unevaluated column
-            format!("read_csv(\"examples/data/genes.csv\").group(species).mean(expression).count()"),
+            "read_csv(\"examples/data/genes.csv\").group(species).mean(expression).count()".to_string(),
         ];
         for src in &cases {
             assert_eq!(run_vm_typed(src), run_tw(src), "VM ≠ tree-walker on `{src}`");
@@ -414,7 +414,7 @@
     /// the cap/float fall-throughs, and overflow wrapping are all diffed.
     #[test]
     fn differential_reduce_loops_with_jit() {
-        let mut rng = 0x0DDC0FFEE_BADF00Du64;
+        let mut rng = 0x0DDC_0FFE_EBAD_F00Du64;
         let binders = vec!["acc".to_string(), "x".to_string()];
         for _ in 0..10_000 {
             // A body over {acc, x}: when it stays in {ints, + - *, comparisons in
@@ -478,11 +478,10 @@
                 .map(|_| CHARS[(next(&mut rng) % CHARS.len() as u64) as usize] as char)
                 .collect();
             // Must return Ok or Err — never unwind. A panic fails the test.
-            if let Ok(toks) = lexer::lex(&s) {
-                if let Ok(ast) = parser::parse(toks) {
+            if let Ok(toks) = lexer::lex(&s)
+                && let Ok(ast) = parser::parse(toks) {
                     let _ = crate::types::check(&ast);
                 }
-            }
         }
     }
 

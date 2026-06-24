@@ -445,8 +445,8 @@ impl Checker {
         }
         let body_t = body_result?;
 
-        if let Some(rt) = &ret_ann {
-            if !compatible(&body_t, rt) {
+        if let Some(rt) = &ret_ann
+            && !compatible(&body_t, rt) {
                 return Err(HelixError::new(
                     format!(
                         "function `{}` is declared to return {}, but its body produces {}",
@@ -457,7 +457,6 @@ impl Checker {
                 )
                 .hint("make the body match the `->` return type, or drop the annotation."));
             }
-        }
 
         // Store the final signature (inferred return if not annotated).
         let final_ret = ret_ann.unwrap_or(body_t);

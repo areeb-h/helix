@@ -5,6 +5,10 @@
 
 use super::*;
 
+/// A top-level function reduced to the parts the memoization analysis reads:
+/// its name, parameter list, and body expression (all borrowed from `program`).
+type FuncSig<'a> = (&'a str, &'a [(String, Option<crate::ast::TypeAnn>)], &'a Expr);
+
 /// The names of functions that are **safe and worthwhile to memoize**:
 ///   * **pure** — never reaches `print`/`read_*`/`write_*` (transitively), so a
 ///     cache hit can't skip a side effect;
@@ -17,7 +21,7 @@ use super::*;
 /// This is the static half of the automatic "under the hood" cache; the VM gates
 /// on all-`Int` arguments at runtime (float keys are excluded — NaN/precision).
 pub fn memoizable_fns(program: &[Stmt]) -> HashSet<String> {
-    let funcs: Vec<(&str, &[(String, Option<crate::ast::TypeAnn>)], &Expr)> = program
+    let funcs: Vec<FuncSig> = program
         .iter()
         .filter_map(|s| match s {
             Stmt::Func { name, params, body, .. } => Some((name.as_str(), params.as_slice(), body)),
@@ -148,11 +152,10 @@ fn count_self_calls(e: &Expr, name: &str) -> usize {
 }
 
 fn count_self_calls_into(e: &Expr, name: &str, n: &mut usize) {
-    if let Expr::Call { name: callee, .. } = e {
-        if callee == name {
+    if let Expr::Call { name: callee, .. } = e
+        && callee == name {
             *n += 1;
         }
-    }
     for child in children(e) {
         count_self_calls_into(child, name, n);
     }
