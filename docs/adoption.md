@@ -53,9 +53,11 @@ Grounded in the current source, not aspirations:
    What remains absent is the *distribution* half — a package manager, a registry,
    versioned dependencies, reproducible environments — without which a third-party
    ecosystem cannot form.
-3. **No user-facing error handling.** No `try`/`catch`, no surfaced `Result`/`?` in
-   the language; a runtime error aborts the program. Acceptable for scripts, but
-   insufficient for a system built on the language.
+3. **Error handling has a v1.** `try EXPR` evaluates `EXPR` and catches any runtime
+   error, yielding a record `{ok, value, error}`, so failures are recoverable
+   instead of aborting the program. Programs that use `try` currently run on the
+   tree-walker (the bytecode VM does not yet implement exception handling). A
+   surfaced `Result`/`?` form is not yet provided.
 4. **An approximately 40-function standard library.** `print`, `range`,
    `read_csv`/`parquet`/`fasta`, `write_parquet`, tensor constructors, and a math
    library, plus the Array/String/Dna/Tensor/DataFrame methods. No plotting, no

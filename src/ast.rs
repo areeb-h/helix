@@ -166,6 +166,14 @@ pub enum Expr {
         line: usize,
         col: usize,
     },
+    /// `try EXPR` — evaluate `EXPR`, catching any runtime error. Yields a record
+    /// `{ok, value, error}`: on success `{ok: true, value: <result>, error: missing}`,
+    /// on a runtime error `{ok: false, value: missing, error: <message>}`.
+    Try {
+        expr: Box<Expr>,
+        line: usize,
+        col: usize,
+    },
 }
 
 #[derive(Debug, Clone)]

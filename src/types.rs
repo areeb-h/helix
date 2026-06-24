@@ -730,6 +730,18 @@ impl Checker {
                 let et = self.synth(else_branch)?;
                 Ok(join(&tt, &et))
             }
+            // `try EXPR` yields `{ok: Bool, value: <EXPR's type>, error: String}`. A
+            // type error inside EXPR is still reported (try catches runtime errors,
+            // not compile-time ones). On the error path `value` is `missing`, which is
+            // compatible with the success type, so field access stays sound.
+            Expr::Try { expr, .. } => {
+                let vt = self.synth(expr)?;
+                Ok(Type::Record(vec![
+                    ("ok".to_string(), Type::Bool),
+                    ("value".to_string(), vt),
+                    ("error".to_string(), Type::String),
+                ]))
+            }
         }
     }
 

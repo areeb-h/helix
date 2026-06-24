@@ -604,6 +604,20 @@ impl Compiler {
                 let end = b.code.len() as u32;
                 b.code[jend] = Op::Jump(end);
             }
+            // `try` runs on the tree-walker: the runner routes any program that uses
+            // it there (see `main.rs` and `bytecode::uses_try`), because the VM does
+            // not yet implement exception handling. This arm exists only for match
+            // completeness and is not reached in practice.
+            Expr::Try { line, col, .. } => {
+                b.emit(
+                    Op::Raise(
+                        std::rc::Rc::new("`try` is not supported by the bytecode VM".to_string()),
+                        std::rc::Rc::new("internal routing error; please report it".to_string()),
+                    ),
+                    *line,
+                    *col,
+                );
+            }
             Expr::Let { bindings, body } => {
                 b.scopes.push(Vec::new());
                 let saved_next = b.next_slot;

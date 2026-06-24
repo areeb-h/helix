@@ -489,6 +489,11 @@ impl Interp {
                     self.eval(else_branch)
                 }
             }
+            // `try EXPR` — evaluate `EXPR`, catching any runtime error into a record.
+            Expr::Try { expr, .. } => Ok(match self.eval(expr) {
+                Ok(v) => try_ok(v),
+                Err(e) => try_err(e.message),
+            }),
         }
     }
 
@@ -697,6 +702,26 @@ fn comp_arity(name: &str, example: &str, line: usize, col: usize) -> HelixError 
         col,
     )
     .hint(format!("e.g. `xs.{}{}`.", name, example))
+}
+
+/// The result record of `try EXPR` on success: `{ok: true, value: v, error: missing}`.
+/// Shared by both engines so the record shape is identical.
+pub(crate) fn try_ok(v: Value) -> Value {
+    Value::Record(Rc::new(vec![
+        ("ok".to_string(), Value::Bool(true)),
+        ("value".to_string(), v),
+        ("error".to_string(), Value::Missing),
+    ]))
+}
+
+/// The result record of `try EXPR` on a runtime error:
+/// `{ok: false, value: missing, error: <message>}`.
+pub(crate) fn try_err(message: String) -> Value {
+    Value::Record(Rc::new(vec![
+        ("ok".to_string(), Value::Bool(false)),
+        ("value".to_string(), Value::Missing),
+        ("error".to_string(), Value::Str(Rc::new(message))),
+    ]))
 }
 
 /// Every built-in function name, used both for routing and for "did you mean".

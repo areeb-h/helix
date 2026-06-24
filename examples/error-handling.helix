@@ -1,0 +1,20 @@
+# Error handling: `try EXPR` evaluates EXPR and catches any runtime error, yielding
+# a record {ok, value, error}. On success: {ok: true, value: <result>, error: missing}.
+# On a runtime error: {ok: false, value: missing, error: <message>}. The program
+# continues instead of aborting.
+#   helix run examples/error-handling.helix
+
+# Inspect the outcome and branch on it.
+result = try parse_json("[1, 2, 3]")
+if result.ok then print("parsed:", result.value) else print("failed:", result.error)
+
+# A failing operation is caught rather than aborting the program.
+broken = try parse_json("not valid json")
+print("ok?", broken.ok)
+print("error:", broken.error)
+
+# Recover with a default value via grouping and `??`.
+config = (try parse_json("[malformed")).value ?? "(default)"
+print("config:", config)
+
+print("the program runs to completion")

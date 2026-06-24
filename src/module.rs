@@ -335,6 +335,7 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
             rw(then_branch, ctx, bound);
             rw(else_branch, ctx, bound);
         }
+        Expr::Try { expr, .. } => rw(expr, ctx, bound),
     }
 }
 

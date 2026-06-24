@@ -94,7 +94,9 @@ Lexer → parser → AST → tree-walking interpreter.
       `.is_missing()`, `.drop_missing()`, propagating aggregations.
 - [x] Elementwise broadcasting for arithmetic (`xs - xs.mean()`, `xs + ys`).
 - [x] Additional array methods: `take`, `drop`, `zip`, `enumerate`, `any`, `all`.
-- [ ] Errors-as-values: `Result` + `?` ([ADR 0004](adr/0004-functions-errors-mutability.md)).
+- [~] Error handling: `try EXPR` yields `{ok, value, error}` and catches runtime
+      errors (done; runs on the tree-walker). A `Result` + `?` form
+      ([ADR 0004](adr/0004-functions-errors-mutability.md)) and VM support remain.
 - [x] A test suite (44 unit tests in `interp.rs`); golden-output tests for
       `examples/` remain to be added.
 
@@ -315,8 +317,10 @@ motivates this phase.
       dependencies buildable locally; a registry requires hosting). The Python
       environment should be pinned here as well (related to the bundled-CPython work).
 - [ ] **Jupyter kernel** — to support scientists in their existing environment.
-- [ ] **Errors-as-values** (`Result` + `?`, [ADR 0004](adr/0004-functions-errors-mutability.md)),
-      which also enables *recoverable* Python errors.
+- [~] **Error handling.** `try EXPR` -> `{ok, value, error}` is implemented (runs on
+      the tree-walker). Remaining: a `Result` + `?` form
+      ([ADR 0004](adr/0004-functions-errors-mutability.md)), VM support, and
+      catching it across the Python-interop boundary (recoverable Python errors).
 - [ ] **Semantics freeze and compatibility policy**, and a reproducible CI benchmark.
 
 ## Phase 6 — GPU

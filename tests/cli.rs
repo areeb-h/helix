@@ -298,6 +298,25 @@ fn json_round_trips_through_the_cli() {
 }
 
 #[test]
+fn try_catches_runtime_errors() {
+    // `try EXPR` yields {ok, value, error}; a runtime error is caught (not aborting),
+    // and recovery composes with `??`.
+    let src = concat!(
+        "ok = try (10 * 2)\n",
+        "print(ok.ok)\n",                                   // true
+        "print(ok.value)\n",                                // 20
+        "bad = try [1, 2, 3][99]\n",
+        "print(bad.ok)\n",                                  // false (out-of-bounds caught)
+        "v = (try parse_json(\"[1,\")).value ?? \"fallback\"\n",
+        "print(v)\n",                                       // fallback
+        "print(\"continues\")\n",                           // program did not abort
+    );
+    let (out, stderr, code) = run_source(src, &[], "try");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "true\n20\nfalse\nfallback\ncontinues");
+}
+
+#[test]
 fn record_string_indexing() {
     // `r["key"]` — dynamic field access; an absent key is `missing` (the optional
     // accessor). Useful for JSON whose keys aren't valid identifiers.

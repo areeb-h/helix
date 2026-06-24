@@ -215,10 +215,12 @@ fn run_program(program: &[ast::Stmt], src: &str, filename: &str, multi: bool) ->
     // receiver-polymorphic methods (DataFrame/Tensor column-verbs) correctly.
     let types = types::check(program).map_err(|e| render_err(e, src, filename, multi))?;
 
-    // `HELIX_NOVM=1` forces the tree-walker — kept only for A/B benchmarking and to
-    // confirm the two engines agree. It recurses on the native stack, so it runs on
-    // a big-stack thread (scoped, to borrow `program`/`src` without cloning).
-    if std::env::var_os("HELIX_NOVM").is_some() {
+    // The tree-walker runs in two cases: `HELIX_NOVM=1` (A/B benchmarking and engine
+    // agreement), and any program that uses `try`, since error recovery is currently
+    // implemented in the tree-walker but not the bytecode VM. The tree-walker recurses
+    // on the native stack, so it runs on a big-stack thread (scoped, to borrow
+    // `program`/`src` without cloning).
+    if std::env::var_os("HELIX_NOVM").is_some() || bytecode::uses_try(program) {
         return std::thread::scope(|scope| {
             std::thread::Builder::new()
                 .stack_size(2 * 1024 * 1024 * 1024)

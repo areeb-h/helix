@@ -5,6 +5,17 @@
 - **Deciders:** Areeb + Claude
 - **Research:** [Domain 4](../research/2026-06-21-foundational-design.md#domain-4--functions-errors--mutability) (Hoare foundation high/3-0; syntax synthesis medium)
 
+## Implementation status
+
+A first error-handling form is implemented: `try EXPR` evaluates `EXPR` and catches
+any runtime error, yielding a record `{ok, value, error}` (`{ok: true, value, error:
+missing}` on success; `{ok: false, value: missing, error: <message>}` on failure).
+This is expression-based and reuses records and `missing`, consistent with the
+language's design, and it recovers from failures without aborting the program.
+Programs that use `try` run on the tree-walker (the bytecode VM does not yet
+implement exception handling). A `Result` + `?` propagation form, as discussed below,
+remains future work.
+
 ## Context
 
 Three intertwined decisions remain before Helix is a self-sufficient language:

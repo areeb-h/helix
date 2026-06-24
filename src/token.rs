@@ -33,6 +33,7 @@ pub enum Tok {
     Let,
     In,
     Missing,
+    Try,
 
     // Symbols
     Eq,      // =
@@ -88,6 +89,7 @@ impl Tok {
             Tok::Let => "`let`".into(),
             Tok::In => "`in`".into(),
             Tok::Missing => "`missing`".into(),
+            Tok::Try => "`try`".into(),
             Tok::Eq => "`=`".into(),
             Tok::EqEq => "`==`".into(),
             Tok::Ne => "`!=`".into(),

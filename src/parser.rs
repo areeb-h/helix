@@ -632,6 +632,11 @@ impl Parser {
                     col: c,
                 })
             }
+            Tok::Try => {
+                self.advance();
+                let e = self.unary()?;
+                Ok(Expr::Try { expr: Box::new(e), line: l, col: c })
+            }
             _ => self.power(),
         }
     }
