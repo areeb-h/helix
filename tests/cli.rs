@@ -356,6 +356,16 @@ fn with_derives_columns_from_expressions() {
     assert_eq!(out.trim(), "3"); // 3 of 6 variants have qual > 50
 }
 
+#[test]
+fn join_combines_frames_on_a_key() {
+    // `a.join(b, key)` defaults to an inner join; a trailing string picks the type.
+    // samples has S1..S4; sample_meta has S1..S3, S5 — so inner keeps 3, left keeps 4.
+    let src = "s = read_csv(\"examples/data/samples.csv\")\nm = read_csv(\"examples/data/sample_meta.csv\")\nprint(s.join(m, sample_id).count())\nprint(s.join(m, sample_id, \"left\").count())\n";
+    let (out, stderr, code) = run_source(src, &[], "join");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "3\n4");
+}
+
 // Real network fetch — ignored by default so the suite stays offline-friendly.
 // Run with: `cargo test -- --ignored`.
 #[cfg(feature = "http")]

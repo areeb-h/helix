@@ -29,6 +29,37 @@ pub(crate) fn column_name_args(
     args.iter().map(|a| arg_as_column_name(a, line, col)).collect()
 }
 
+/// Parse the trailing arguments of `a.join(b, key.., [how])`: the key columns are
+/// bare identifiers; an optional final string literal selects the join type. Shared
+/// by the tree-walker (`eval_df_method`) and the VM (compiled into `Op::DfJoin`).
+pub(crate) fn parse_join_spec(
+    args: &[Expr],
+    line: usize,
+    col: usize,
+) -> Result<(Vec<String>, String), HelixError> {
+    let mut keys = Vec::new();
+    let mut how = String::from("inner");
+    for (i, a) in args.iter().enumerate() {
+        match a {
+            Expr::Ident { name, .. } => keys.push(name.clone()),
+            Expr::Str(s) if i == args.len() - 1 => how = s.clone(),
+            _ => {
+                return Err(HelixError::new(
+                    "a join key must be a bare column name",
+                    line,
+                    col,
+                )
+                .hint("e.g. `samples.join(meta, sample_id)`, with an optional join type like `\"left\"` last."))
+            }
+        }
+    }
+    if keys.is_empty() {
+        return Err(HelixError::new("`join` needs at least one key column", line, col)
+            .hint("e.g. `samples.join(meta, sample_id)`."));
+    }
+    Ok((keys, how))
+}
+
 /// A DataFrame column-verb that takes *unevaluated* column/predicate ASTs:
 /// `where`/`filter`/`select`/`sort`/`group`. The single source of truth for both
 /// the tree-walker ([`Interp::eval_df_method`]) and the VM (`Op::DfDispatch`).
@@ -130,6 +161,34 @@ impl super::Interp {
                 let resolve = |n: &str| env.get(n).map(|b| b.value.clone());
                 df_column_verb(&lf, name, args, &resolve, line, col)
             }
+            "join" => {
+                // The first argument is an *evaluated* DataFrame; the rest are key
+                // columns (and an optional join-type string), parsed unevaluated.
+                let other = match args.first() {
+                    Some(e) => self.eval(e)?,
+                    None => {
+                        return Err(HelixError::new(
+                            "`join` needs a DataFrame to join with",
+                            line,
+                            col,
+                        )
+                        .hint("e.g. `samples.join(meta, sample_id)`."))
+                    }
+                };
+                let right = match other {
+                    Value::DataFrame(lf) => lf,
+                    v => {
+                        return Err(HelixError::new(
+                            format!("`join` expects a DataFrame, found {}", v.type_name()),
+                            line,
+                            col,
+                        ))
+                    }
+                };
+                let (keys, how) = parse_join_spec(&args[1..], line, col)?;
+                let out = dataframe::join(&lf, &right, &keys, &how, line, col)?;
+                Ok(Value::DataFrame(Rc::new(out)))
+            }
             "head" => {
                 if args.len() != 1 {
                     return Err(HelixError::new("`head` takes a row count", line, col)
@@ -164,7 +223,8 @@ impl super::Interp {
             }
             _ => {
                 const DF_METHODS: &[&str] = &[
-                    "where", "select", "sort", "group", "with", "head", "count", "columns", "cache",
+                    "where", "select", "sort", "group", "with", "join", "head", "count", "columns",
+                    "cache",
                 ];
                 let mut err = HelixError::new(
                     format!("a DataFrame has no method `{}`", name),

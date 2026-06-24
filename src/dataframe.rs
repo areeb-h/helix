@@ -166,6 +166,37 @@ pub fn sort(lf: &LazyFrame, names: &[String]) -> LazyFrame {
         .sort_by_exprs(exprs, SortMultipleOptions::default())
 }
 
+/// Join two frames on one or more shared key columns (`a.join(b, id)`). `how` is
+/// one of `inner` (the default), `left`, `right`, or `outer`. The key columns
+/// must exist in both frames; non-key columns from `right` are appended, with a
+/// `_right` suffix on any name that collides with a left column.
+pub fn join(
+    left: &LazyFrame,
+    right: &LazyFrame,
+    keys: &[String],
+    how: &str,
+    line: usize,
+    col: usize,
+) -> Result<LazyFrame, HelixError> {
+    let join_type = match how {
+        "inner" => JoinType::Inner,
+        "left" => JoinType::Left,
+        "right" => JoinType::Right,
+        "outer" | "full" => JoinType::Full,
+        _ => {
+            return Err(HelixError::new(format!("unknown join type `{}`", how), line, col)
+                .hint("use \"inner\", \"left\", \"right\", or \"outer\"."))
+        }
+    };
+    let on: Vec<Expr> = keys.iter().map(|k| pcol(k.as_str())).collect();
+    Ok(left.clone().join(
+        right.clone(),
+        on.clone(),
+        on,
+        JoinArgs::new(join_type).with_suffix(Some("_right".into())),
+    ))
+}
+
 pub fn head(lf: &LazyFrame, n: usize) -> LazyFrame {
     // Clamp rather than truncate via `as u32` (which wrapped large counts).
     lf.clone().limit(n.min(u32::MAX as usize) as u32)

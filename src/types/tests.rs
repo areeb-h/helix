@@ -43,6 +43,10 @@
         // column names are the runtime schema boundary — never type-checked
         ok("read_csv(\"x.csv\").where(age > 40 and hr < 75).select(name, age).sort(age).count()");
         ok("read_csv(\"g.csv\").group(species).mean(expression).columns()");
+        // `with` derives columns; `join` combines frames — both keep their args (column
+        // names, the other frame, the join type) at the unchecked runtime boundary.
+        ok("read_csv(\"p.csv\").with({adult: age >= 18}).select(name, adult).count()");
+        ok("read_csv(\"a.csv\").join(read_csv(\"b.csv\"), id, \"left\").sort(id).count()");
     }
 
     #[test]

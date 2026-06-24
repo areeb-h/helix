@@ -99,6 +99,14 @@ pub enum Op {
         args: std::rc::Rc<Vec<Expr>>,
         locals: std::rc::Rc<Vec<(String, u32)>>,
     },
+    /// Pop two DataFrames — the right operand then the left receiver — and join
+    /// them on shared key columns. Unlike the column verbs, the right operand is a
+    /// fully evaluated value, so it is compiled and pushed normally; `spec` carries
+    /// the *unevaluated* tail — the key column identifiers and an optional trailing
+    /// join-type string — parsed at runtime (where diagnostics are native).
+    DfJoin {
+        spec: std::rc::Rc<Vec<Expr>>,
+    },
     /// Pop a GroupBy receiver and apply an aggregation over one *unevaluated*
     /// column (`mean`/`sum`/`min`/`max`/`count`/`std`). Emitted only when the type
     /// checker proved the receiver is a GroupBy.

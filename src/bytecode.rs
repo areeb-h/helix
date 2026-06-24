@@ -758,6 +758,25 @@ impl Compiler {
                     );
                     return Ok(());
                 }
+                // `join` mixes an evaluated DataFrame operand with by-name key columns,
+                // so it can't ride the column-verb op. Compile the receiver and the
+                // right operand as values (left then right on the stack), and carry the
+                // keys/join-type — parsed from the unevaluated tail — in the op itself.
+                if n == "join"
+                    && matches!(self.recv_type(recv), Some(Type::DataFrame) | Some(Type::Unknown))
+                {
+                    // A no-argument `join` has no operand to compile; bail to the
+                    // tree-walker, which emits the precise "needs a DataFrame" error.
+                    let other = args.first().ok_or(Unsupported)?;
+                    self.compile_expr(b, recv)?;
+                    self.compile_expr(b, other)?;
+                    b.emit(
+                        Op::DfJoin { spec: std::rc::Rc::new(args[1..].to_vec()) },
+                        *line,
+                        *col,
+                    );
+                    return Ok(());
+                }
                 if matches!(self.recv_type(recv), Some(Type::GroupBy))
                     && matches!(n, "mean" | "sum" | "min" | "max" | "count" | "std")
                 {

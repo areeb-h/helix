@@ -613,6 +613,24 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     crate::interp::df_column_verb(&lf, name.as_str(), args.as_slice(), &resolve, line, col)?;
                 stack.push(result);
             }
+            Op::DfJoin { spec } => {
+                // Stack order: left receiver pushed first, then the right operand.
+                let right = stack.pop().unwrap();
+                let left = stack.pop().unwrap();
+                let as_df = |v: &Value| match v {
+                    Value::DataFrame(lf) => Ok(lf.clone()),
+                    other => Err(HelixError::new(
+                        format!("`join` expects a DataFrame, found {}", other.type_name()),
+                        line,
+                        col,
+                    )),
+                };
+                let lf = as_df(&left)?;
+                let rf = as_df(&right)?;
+                let (keys, how) = crate::interp::parse_join_spec(spec.as_slice(), line, col)?;
+                let out = crate::dataframe::join(&lf, &rf, &keys, &how, line, col)?;
+                stack.push(Value::DataFrame(std::rc::Rc::new(out)));
+            }
             Op::GroupByAgg { name, args } => {
                 let recv = stack.pop().unwrap();
                 let (lf, keys) = match &recv {

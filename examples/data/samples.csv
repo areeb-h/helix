@@ -1,0 +1,5 @@
+sample_id,gene,expression
+S1,BRCA1,12.4
+S2,BRCA1,8.1
+S3,TP53,15.0
+S4,EGFR,3.2
