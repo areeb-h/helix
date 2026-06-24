@@ -27,7 +27,7 @@ mutable systems; there is no case in which the data changes underneath the cache
    reuses the in-memory result:
 
    ```helix
-   big = read_csv("huge.csv").cache()
+   big = io.read_csv("huge.csv").cache()
    big.count()                  # reads the file once (here)
    big.where(age > 40).count()  # no re-scan — operates on memory
    ```

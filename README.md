@@ -82,7 +82,7 @@ grade = if score > 90 then "A" else "B"
 
 # DataFrames (Polars/Arrow-backed) use the same `where`/`sort` verbs as arrays.
 # `where(age > 40)` lowers to a native Polars filter rather than an interpreter loop.
-patients = read_csv("patients.csv")
+patients = io.read_csv("patients.csv")
 patients
     .where(age > 40 and resting_hr < 75)
     .select(name, diagnosis)
@@ -176,10 +176,10 @@ seq.kmers(3)
   `map`, `filter`, `where`, `reduce`, `any`, `all`, `drop_missing`, `is_missing`.
 - String methods: `upper`, `lower`, `count`, `reverse`.
 - **DataFrames** backed by **Polars (latest), held as a lazy `LazyFrame`**:
-  `read_csv(path)` / `read_parquet(path)`, then `where(predicate)`,
+  `io.read_csv(path)` / `io.read_parquet(path)`, then `where(predicate)`,
   `select(cols…)`, `sort(cols…)`, `group(keys…)` + a grouped
   `mean`/`sum`/`min`/`max`/`count`/`std`, plus `head(n)`, `count()`, `columns()`,
-  and `write_parquet(df, path)` (streaming sink).
+  and `io.write_parquet(df, path)` (streaming sink).
   Verbs only *extend the query plan*; it materializes once, at `print`/`count`,
   so a single chain is **delegated to Polars' lazy execution** (columnar,
   multi-threaded, with projection and predicate pushdown). Predicates such as

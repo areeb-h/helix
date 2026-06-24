@@ -14,15 +14,15 @@ differentiated focus area. See positioning notes in memory and below.
 Parsing is delegated to the Rust bio ecosystem (`needletail`, `noodles`, `rust-bio`)
 in the same manner that DataFrames rely on Polars; Helix provides the consistent,
 fast, memory-safe surface.
-- [x] **`read_fasta(path)`** → array of `{id, seq, length}` records via
+- [x] **`bio.read_fasta(path)`** → array of `{id, seq, length}` records via
       `needletail` (FASTA/FASTQ, gzip-aware). `seq` is a `Dna` (ambiguous bases
       like `N` preserved). Demo: [examples/genomics.helix](../examples/genomics.helix).
 - [x] **Sequence ops**: `gc_content`, `complement`, `reverse_complement`,
       `kmers(k)`, `find(motif)` (→ index or `missing`), slicing; plus `Array.top(n)`
       (frequency histogram) so `seq.kmers(9).top(20)` works.
-- [x] **`read_vcf(path)` → DataFrame**: variant tables flow directly into the existing
+- [x] **`bio.read_vcf(path)` → DataFrame**: variant tables flow directly into the existing
       `where`/`group`/`count` verbs, demonstrating the unified model
-      (`read_vcf(...).where(gene == "BRCA1").group(consequence).count(pos)`). The eight
+      (`bio.read_vcf(...).where(gene == "BRCA1").group(consequence).count(pos)`). The eight
       fixed columns plus every INFO field (`gene`, `consequence`, …) become columns.
       Demo: [examples/variants.helix](../examples/variants.helix). A hand-rolled parser
       reads both plain `.vcf` and gzipped/BGZF `.vcf.gz` (magic-byte sniffing, multi-member
@@ -101,8 +101,9 @@ Lexer → parser → AST → tree-walking interpreter.
 - [~] Error handling: `try EXPR` yields `{ok, value, error}` and catches runtime
       errors (done; runs on the tree-walker). A `Result` + `?` form
       ([ADR 0004](adr/0004-functions-errors-mutability.md)) and VM support remain.
-- [x] A test suite (44 unit tests in `interp.rs`); golden-output tests for
-      `examples/` remain to be added.
+- [x] A test suite (~135 in-crate unit tests + ~42 CLI integration tests), including a
+      seeded VM-vs-tree-walker differential oracle and a CLI check that every example
+      runs identically on both engines.
 
 ## Phase 2/5 — Type system and tooling
 - [x] **Static type checker** (`src/types.rs`) — bidirectional, localized
@@ -173,32 +174,32 @@ estimators they require.
 - [x] Descriptive array methods: `median`, `var`, `quantile(p)` (type-7 linear
       interpolation), and `summary()` → a `{count, mean, std, min, median, max}`
       record (the `describe()` analogue), alongside the existing `mean`/`std`.
-- [x] Bivariate: `correlation(xs, ys)` (Pearson r; symmetric, undefined on a
+- [x] Bivariate: `stats.correlation(xs, ys)` (Pearson r; symmetric, undefined on a
       constant series).
 - [x] DataFrame-column statistics: `df.column(name)` materializes a column as an
       array (Polars nulls → `missing`), so the array statistics and verbs apply to
       loaded data — e.g. `df.column("age").median()`, or `drop_missing()` first.
 - [x] Special-functions layer: `erf`, log-gamma, and the regularized incomplete beta
       (Abramowitz & Stegun / Numerical Recipes), accurate to better than 1e-7.
-- [x] Inferential: `t_test(a, b)` — Welch's two-sample t-test → `{statistic, df,
+- [x] Inferential: `stats.t_test(a, b)` — Welch's two-sample t-test → `{statistic, df,
       p_value}` — and the normal distribution functions `normal_cdf`/`normal_pdf`/`erf`
       (broadcasting math). Verified against R's reference values.
-- [x] `linear_regression(x, y)` — ordinary least-squares fit → `{slope, intercept,
+- [x] `stats.linear_regression(x, y)` — ordinary least-squares fit → `{slope, intercept,
       r_squared, slope_std_error, slope_p_value}` (slope inference on `n - 2` df).
       Predictions need no special method: broadcast `fit.slope * x + fit.intercept`.
-- [x] `multiple_regression(predictors, y)` — OLS on several predictors via the normal
+- [x] `stats.multiple_regression(predictors, y)` — OLS on several predictors via the normal
       equations → `{coefficients, std_errors, p_values, r_squared, adj_r_squared}`
       (parameter-indexed arrays, intercept first). Rejects collinear predictors.
 - [ ] More distributions: Student's-t / binomial / chi-squared pdf/cdf/quantile, and
       one-sample / paired t-tests, on the same special-functions layer.
-- [ ] Whole-frame aggregation shorthands (`df.median(col)`, `df.correlation(c1, c2)`)
+- [ ] Whole-frame aggregation shorthands (`df.median(col)`, `df.stats.correlation(c1, c2)`)
       over the `column` accessor, if the explicit form proves verbose in practice.
 
 ## Phase 3.7 — Data access & APIs (shipped)
-- [x] **JSON** — `parse_json(str)` (object→record, array→array, scalars, `null`→
-      `missing`) and `to_json(value)`. Pure compute, always available. See
+- [x] **JSON** — `json.parse(str)` (object→record, array→array, scalars, `null`→
+      `missing`) and `json.stringify(value)`. Pure compute, always available. See
       [ADR 0010](adr/0010-networking-privacy-security.md).
-- [x] **HTTP client** — `http_get(url)` → `{status, body}` for fetching REST APIs;
+- [x] **HTTP client** — `http.get(url)` → `{status, body}` for fetching REST APIs;
       body is typically fed to `parse_json`. Default-on (`http` feature;
       `--no-default-features` for a network-free binary). Demo:
       [examples/api/fetch.helix](../examples/api/fetch.helix).
@@ -296,15 +297,13 @@ motivates this phase.
 - [x] **Aliases** `import lib.stats as st` (`as` is contextual and remains usable as
       an ordinary identifier). Verified on both engines; cross-module calls, globals,
       local shadowing, cycle and missing-module errors.
-- [x] **Standard-library search path** — a non-local `import std.stats` resolves
-      against `HELIX_PATH` and the install-relative `std/` directory beside the binary,
-      after the importing file's own directory (local imports win). The stdlib is
-      seeded with `std.stats` (`iqr`, `zscores`, `standard_error`, …) and `std.seq`
-      (`mean_gc`, `at_content`, `total_length`), each composed from the built-in core.
-- [x] **Selective import** — `import std.stats.{iqr, zscores}` brings the chosen
-      names into scope unqualified (resolving to the source module), with a local
-      definition of the same name shadowing the import. No new keyword: the brace tail
-      mirrors the existing dotted-path syntax.
+- [x] **Standard-library search path** — a non-local `import a.b` resolves against
+      `HELIX_PATH` and the install-relative location beside the binary, after the
+      importing file's own directory (local imports win). General machinery for shared
+      user libraries (and a future Helix-source stdlib once there is a package manager).
+- [x] **Selective import** — `import lib.mod.{f, g}` brings the chosen names into scope
+      unqualified (resolving to the source module), with a local definition of the same
+      name shadowing the import. No new keyword: the brace tail mirrors the dotted path.
 - [x] **Cross-module error attribution** — each module is given a global line range,
       so an error's line unambiguously identifies its file; the renderer maps it back
       to the owning module's source and local line, showing the right file, line, and
@@ -373,8 +372,10 @@ motivates this phase.
       expression graphs to fused CPU/GPU kernels.
 
 ## Correctness and robustness (ongoing)
-- [x] **Leak-free by construction** — no `unsafe`, no interior mutability, therefore
-      no `Rc` cycles and an acyclic value graph. Backed by a deterministic
+- [x] **Leak-free by construction** — no interior mutability, therefore no `Rc` cycles
+      and an acyclic value graph. The interpreter core is fully safe; the only `unsafe`
+      is confined to the JIT's native-call boundary (`src/jit.rs`, see
+      [memory-safety.md](memory-safety.md)). Backed by a deterministic
       `Rc::strong_count` test and a flat-RSS empirical check. See
       [memory-safety.md](memory-safety.md).
 - [x] **Deep recursion** — the interpreter runs on a 2 GiB-stack thread; a

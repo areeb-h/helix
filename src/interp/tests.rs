@@ -1,6 +1,26 @@
     use super::*;
     use crate::value::Value;
 
+    /// Every name in the registry must have a `call_builtin` dispatch arm. Calling with
+    /// no arguments yields an arity or type error for a real builtin; only a *missing*
+    /// arm produces "is not a known function". This closes the registry-name-without-
+    /// implementation gap by construction, complementing the registry's uniqueness test.
+    #[test]
+    fn every_registry_builtin_is_dispatchable() {
+        let mut interp = Interp::new();
+        for path in crate::registry::names() {
+            if path == "print" {
+                continue; // succeeds with no args (prints a blank line); nothing to assert
+            }
+            if let Err(e) = interp.call_builtin(path, vec![], 0, 0) {
+                assert!(
+                    !e.message.contains("is not a known function"),
+                    "registry builtin `{path}` has no `call_builtin` arm"
+                );
+            }
+        }
+    }
+
     /// Run a program and return the value of its final statement.
     fn last(src: &str) -> Result<Value, HelixError> {
         let tokens = crate::lexer::lex(src)?;
