@@ -1,0 +1,24 @@
+# Data access: fetch over HTTP, parse the JSON response, work with the result.
+#   helix run examples/api/fetch.helix
+#
+# `http_get(url)` returns a record {status, body}; `parse_json(str)` turns a JSON
+# string into Helix values (object -> record, array -> array, etc.). Record fields
+# are reached as `r.field`, or `r["key"]` for keys that aren't valid identifiers
+# (e.g. `r["first-name"]`); an absent key is `missing`.
+
+resp = http_get("https://jsonplaceholder.typicode.com/todos/1")
+print("status:", resp.status)
+
+todo = parse_json(resp.body)
+print("title:", todo.title)
+print("completed:", todo.completed)
+
+# A list endpoint -> a JSON array -> a Helix array the usual verbs work on.
+all = parse_json(http_get("https://jsonplaceholder.typicode.com/todos").body)
+print("total todos:", all.count())
+done = all.where(it.completed).count()
+print("completed:", done)
+
+# Producing JSON is the inverse: a record (or array) -> a JSON string.
+summary = {source: "jsonplaceholder", first: todo.title}
+print(to_json(summary))

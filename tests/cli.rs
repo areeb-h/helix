@@ -282,6 +282,41 @@ fn python_dir_prints_the_managed_runtime_path() {
     assert!(out.contains("helix"), "expected a .../helix/python path, got: {out:?}");
 }
 
+#[test]
+fn json_round_trips_through_the_cli() {
+    // Build a record (no string braces → no interpolation snag), serialize, re-parse,
+    // and access fields — exercises to_json + parse_json + record access end to end.
+    let src = "r = {a: 1, b: [2, 3]}\ns = to_json(r)\nprint(s)\nd = parse_json(s)\nprint(d.a)\nprint(d.b.sum())\n";
+    let (out, stderr, code) = run_source(src, &[], "json");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "{\"a\":1,\"b\":[2,3]}");
+    assert_eq!(lines[1], "1"); // d.a
+    assert_eq!(lines[2], "5"); // d.b.sum()
+}
+
+#[test]
+fn record_string_indexing() {
+    // `r["key"]` — dynamic field access; an absent key is `missing` (the optional
+    // accessor). Useful for JSON whose keys aren't valid identifiers.
+    let src = "r = {a: 1, b: 2}\nprint(r[\"a\"])\nprint(r[\"b\"])\nprint(r[\"z\"].is_missing())\n";
+    let (out, stderr, code) = run_source(src, &[], "recidx");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "1\n2\ntrue");
+}
+
+// Real network fetch — ignored by default so the suite stays offline-friendly.
+// Run with: `cargo test -- --ignored`.
+#[cfg(feature = "http")]
+#[test]
+#[ignore]
+fn http_get_returns_a_status() {
+    let src = "r = http_get(\"https://example.com\")\nprint(r.status)\n";
+    let (out, stderr, code) = run_source(src, &[], "http");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "200");
+}
+
 // --- Python interop (Phase 6) ------------------------------------------------
 // These run against whichever feature set the suite was built with: the
 // feature-gated tests need `cargo test --features python` (and a Python

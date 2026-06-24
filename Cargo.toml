@@ -47,6 +47,9 @@ polars = { version = "0.54", features = [
 ] }
 # Fast, deterministic hashing for the interpreter environment.
 rustc-hash = "2"
+# JSON for `parse_json`/`to_json` — consuming and producing API/data payloads.
+# Pure compute, no network, always available (a core data capability).
+serde_json = "1"
 # CPython interop (Helix -> Python), behind the off-by-default `python` feature so
 # the core binary stays self-contained (no libpython dependency unless enabled).
 # `abi3-py38` builds against the stable ABI (one build spans Python 3.8+);
@@ -70,8 +73,12 @@ flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 
 [features]
-default = []
+# HTTP data-fetching is on by default (a core scientific capability); build with
+# `--no-default-features` for a network-free binary on locked-down machines.
+default = ["http"]
+# `http_get` — fetch data over HTTP(S) from a Helix program.
+http = ["dep:ureq"]
 # Enable the embedded-CPython bridge: `cargo build --features python`.
 python = ["dep:pyo3", "dep:pyo3-polars", "dep:numpy"]
 # Managed runtimes: verified downloads + extraction (managed Python, etc.).
-managed = ["dep:ureq", "dep:sha2", "dep:flate2", "dep:tar"]
+managed = ["http", "dep:sha2", "dep:flate2", "dep:tar"]

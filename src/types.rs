@@ -280,6 +280,7 @@ const BUILTIN_FNS: &[&str] = &[
     "ones", "eye", "sqrt", "cbrt", "abs", "exp", "ln", "log10", "log2", "log", "sin", "cos", "tan",
     "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "floor", "ceil", "round", "trunc",
     "sign", "degrees", "radians", "hypot", "min", "max", "to_array", "to_dataframe", "to_tensor",
+    "parse_json", "to_json", "http_get",
 ];
 
 const MATH_UNARY_FLOAT: &[&str] = &[
@@ -597,7 +598,22 @@ impl Checker {
             } => {
                 let rt = self.synth(recv)?;
                 let it = self.synth(index)?;
-                // index must be an integer (Unknown/Missing pass)
+                // `r["key"]` — a string index is dynamic record-field access, allowed
+                // on records and Unknown (e.g. a `parse_json` result). The key is
+                // dynamic, so the result is Unknown; an absent key is `missing` at
+                // runtime.
+                if matches!(it, Type::String) {
+                    return match rt {
+                        Type::Record(_) | Type::Unknown | Type::Missing => Ok(Type::Unknown),
+                        other => Err(HelixError::new(
+                            format!("a value of type {} cannot be indexed by a string", other),
+                            *line,
+                            *col,
+                        )
+                        .hint("string indexing `r[\"key\"]` works on records.")),
+                    };
+                }
+                // otherwise the index must be an integer (Unknown/Missing pass)
                 if !compatible(&it, &Type::Int) {
                     return Err(type_err("index", "an integer", &it, *line, *col));
                 }

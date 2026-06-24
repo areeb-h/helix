@@ -44,6 +44,49 @@ impl super::Interp {
                 // Bring a Python NumPy f64 array into Helix as a native Tensor.
                 crate::python::to_tensor(args.into_iter().next().unwrap(), line, col)
             }
+            "parse_json" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => {
+                        crate::json::parse(s).map_err(|e| HelixError::new(e, line, col))
+                    }
+                    other => Err(type_err("parse_json", "a JSON string", other, line, col)),
+                }
+            }
+            "to_json" => {
+                arity(name, &args, 1, line, col)?;
+                crate::json::stringify(&args[0])
+                    .map(|s| Value::Str(Rc::new(s)))
+                    .map_err(|e| HelixError::new(e, line, col))
+            }
+            "http_get" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(url) => {
+                        #[cfg(feature = "http")]
+                        {
+                            let (status, body) =
+                                crate::http::get(url).map_err(|e| HelixError::new(e, line, col))?;
+                            // `{status, body}` — body is usually fed to `parse_json`.
+                            Ok(Value::Record(Rc::new(vec![
+                                ("status".to_string(), Value::Int(status)),
+                                ("body".to_string(), Value::Str(Rc::new(body))),
+                            ])))
+                        }
+                        #[cfg(not(feature = "http"))]
+                        {
+                            let _ = url;
+                            Err(HelixError::new(
+                                "this build has no HTTP support",
+                                line,
+                                col,
+                            )
+                            .hint("build without `--no-default-features`, or with `--features http`."))
+                        }
+                    }
+                    other => Err(type_err("http_get", "a URL string", other, line, col)),
+                }
+            }
             "read_csv" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {

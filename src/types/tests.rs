@@ -54,7 +54,7 @@
         assert!(emsg("5 and true").contains("boolean"));
         assert!(emsg("range(1, 2, 3)").contains("1 or 2"));
         assert!(emsg("fn f(x: Int) -> String = x + 1").contains("declared to return"));
-        assert!(emsg("xs = [1, 2]\nxs[\"a\"]").contains("integer"));
+        assert!(emsg("xs = [1, 2]\nxs[\"a\"]").contains("cannot be indexed by a string"));
         assert!(emsg("undefinedvar").contains("not defined"));
         assert!(emsg("dna(5)").contains("expected a string"));
     }

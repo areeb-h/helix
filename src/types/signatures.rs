@@ -188,6 +188,26 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Tensor)
         }
+        "parse_json" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            // The JSON shape isn't known statically — Unknown (the permissive top).
+            Ok(Type::Unknown)
+        }
+        "to_json" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            Ok(Type::String)
+        }
+        "http_get" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            // Returns a `{status, body}` record; Unknown keeps field access permissive.
+            Ok(Type::Unknown)
+        }
         _ => Ok(Type::Unknown), // unreachable (BUILTIN_FNS gated), but stay permissive
     }
 }

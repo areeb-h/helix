@@ -65,13 +65,19 @@ that legitimately decrypts traffic on most institutional machines. So:
   file and an index." Massive overkill; also re-introduces the async-runtime weight D2
   avoids. Likewise no websockets / SFTP / custom protocols — plain HTTPS from CDNs /
   GitHub Releases.
-- **Language-level networking is a deliberate non-goal of the core.** A Helix *program*
-  does not natively speak HTTP/gRPC/Kafka/etc. — the core stays local-first. When data
-  must come over the network: (1) Polars already reads CSV/Parquet/JSON from URLs /
-  object stores (can be enabled behind a feature later); (2) for arbitrary protocols,
-  the escape hatch is **Python interop** (`import python.requests`,
-  `import python.grpc`), exactly like the rest of the ecosystem strategy (ADR 0008).
-  Native protocol support is delegated, not built into the language.
+- **Data-access HTTP + JSON ARE core language capabilities** (this corrects an earlier
+  draft of this ADR that called language networking a non-goal — that conflated the
+  *toolchain's* network posture with what a *program* can do). Fetching and consuming
+  data is a core scientific task, so **`http_get` and `parse_json`/`to_json` ship in
+  the default build** (the `http` feature, default-on; `--no-default-features` gives a
+  network-free binary for locked-down machines).
+- **But serving APIs, gRPC, websockets, Kafka, etc. are out of the core.** That's
+  web-backend territory — niche for scientists and heavy (protobuf/HTTP-2/servers).
+  The escape hatch is **Python interop** (`import python.grpc`, `import python.fastapi`),
+  consistent with the rest of the ecosystem strategy (ADR 0008).
+- **A program's `http_get` is distinct from the toolchain's posture.** The *tool* still
+  never phones home (telemetry opt-in; downloads verified). A user calling `http_get`
+  is an explicit program action — a capability, not the toolchain reaching out.
 
 ### D3 — Privacy / telemetry: opt-in, off by default, no personal data
 

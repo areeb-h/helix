@@ -151,6 +151,20 @@ Lexer → parser → AST → tree-walking interpreter.
 - [ ] Complex numbers as a first-class type (`2 + 3i`), if demand warrants.
 - [ ] Parallel array combinators (rayon `map`/`filter`/`reduce`) for big arrays.
 
+## Phase 3.7 — Data access & APIs (shipped)
+- [x] **JSON** — `parse_json(str)` (object→record, array→array, scalars, `null`→
+      `missing`) and `to_json(value)`. Pure compute, always available. See
+      [ADR 0010](adr/0010-networking-privacy-security.md).
+- [x] **HTTP client** — `http_get(url)` → `{status, body}` for fetching REST APIs;
+      body is typically fed to `parse_json`. Default-on (`http` feature;
+      `--no-default-features` for a network-free binary). Demo:
+      [examples/api/fetch.helix](../examples/api/fetch.helix).
+- [x] **String-keyed record access `r["key"]`** — dynamic field access for JSON keys
+      that aren't valid identifiers (e.g. `d["first-name"]`); an absent key is
+      `missing` (the safe/optional accessor; `.field` stays the typo-catching one).
+- [ ] `http_post`/headers/auth; reading CSV/Parquet/JSON straight from a URL.
+- [ ] Serving APIs / gRPC / websockets stay out of the core — via Python interop.
+
 ## Phase 4 — Tensor engine (foundation shipped)
 - [x] Native `Tensor` type (ndarray-backed, `f64`, dynamic rank) — see
       [ADR 0007](adr/0007-tensor-backend.md). `tensor(nested)`, `zeros`/`ones`/`eye`.
