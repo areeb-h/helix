@@ -377,6 +377,24 @@ fn descriptive_statistics_and_correlation() {
 }
 
 #[test]
+fn inferential_statistics_t_test_and_normal() {
+    // The normal CDF (broadcasting math) and Welch's two-sample t-test. The t-test
+    // returns a {statistic, df, p_value} record whose fields are reachable.
+    let src = "print(normal_cdf(0.0))\ncontrol = [5.1, 4.9, 5.0, 5.2, 4.8, 5.0]\ntreated = [5.6, 5.8, 5.5, 5.9, 5.7, 5.4]\nr = t_test(control, treated)\nprint(r.p_value < 0.01)\nprint(r.statistic < 0.0)\n";
+    let (out, stderr, code) = run_source(src, &[], "ttest");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "0.5\ntrue\ntrue"); // strong, significant difference
+}
+
+#[test]
+fn t_test_on_constant_samples_is_a_clean_error() {
+    let src = "print(t_test([2, 2, 2], [2, 2, 2]))\n";
+    let (_out, stderr, code) = run_source(src, &[], "ttesterr");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("t-test is undefined"), "stderr:\n{stderr}");
+}
+
+#[test]
 fn column_extracts_values_for_statistics() {
     // `df.column(name)` materializes a column as an array, so the array statistics
     // apply directly to loaded data. Polars nulls become `missing`, so `drop_missing`

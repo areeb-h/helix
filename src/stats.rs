@@ -83,6 +83,160 @@ pub fn pearson(xs: &[f64], ys: &[f64]) -> Option<f64> {
     }
 }
 
+/// Sample variance (divides by `n - 1`, Bessel's correction). Used by inferential
+/// statistics, where the data is a sample of a larger population. Precondition:
+/// `xs` has at least two elements.
+pub fn sample_variance(xs: &[f64]) -> f64 {
+    let m = mean(xs);
+    let sq: Vec<f64> = xs.iter().map(|x| (x - m).powi(2)).collect();
+    neumaier_sum(&sq) / (xs.len() as f64 - 1.0)
+}
+
+// ---- Special functions -----------------------------------------------------
+// Standard numerical algorithms (Abramowitz & Stegun, Numerical Recipes) for the
+// error function, log-gamma, and the regularized incomplete beta — the machinery the
+// normal and Student's-t distribution functions need. Accurate to better than 1e-7,
+// which is ample for reported p-values.
+
+/// The error function, via the Abramowitz & Stegun 7.1.26 rational approximation
+/// (maximum absolute error ~1.5e-7).
+pub fn erf(x: f64) -> f64 {
+    if x == 0.0 {
+        return 0.0; // exact; the approximation below leaves ~1e-9 here otherwise
+    }
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * x);
+    let y = 1.0
+        - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
+            + 0.254_829_592)
+            * t
+            * (-x * x).exp();
+    sign * y
+}
+
+/// Standard normal cumulative distribution function, `P(Z <= x)`.
+pub fn normal_cdf(x: f64) -> f64 {
+    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
+}
+
+/// Standard normal probability density at `x`.
+pub fn normal_pdf(x: f64) -> f64 {
+    const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7; // 1 / sqrt(2*pi)
+    INV_SQRT_2PI * (-0.5 * x * x).exp()
+}
+
+/// Natural log of the gamma function for `x > 0` (Lanczos approximation, g = 5).
+fn gammaln(x: f64) -> f64 {
+    const COF: [f64; 6] = [
+        76.180_091_729_471_46,
+        -86.505_320_329_416_77,
+        24.014_098_240_830_91,
+        -1.231_739_572_450_155,
+        0.120_865_097_386_617_9e-2,
+        -0.539_523_938_495_3e-5,
+    ];
+    let mut tmp = x + 5.5;
+    tmp -= (x + 0.5) * tmp.ln();
+    let mut ser = 1.000_000_000_190_015;
+    let mut y = x;
+    for c in COF {
+        y += 1.0;
+        ser += c / y;
+    }
+    -tmp + (2.506_628_274_631_000_5 * ser / x).ln()
+}
+
+/// Continued-fraction expansion for the incomplete beta function (Numerical Recipes
+/// `betacf`), evaluated by the modified Lentz method.
+fn betacf(a: f64, b: f64, x: f64) -> f64 {
+    const MAXIT: usize = 200;
+    const EPS: f64 = 3.0e-12;
+    const FPMIN: f64 = 1.0e-300;
+    let qab = a + b;
+    let qap = a + 1.0;
+    let qam = a - 1.0;
+    let mut c = 1.0;
+    let mut d = 1.0 - qab * x / qap;
+    if d.abs() < FPMIN {
+        d = FPMIN;
+    }
+    d = 1.0 / d;
+    let mut h = d;
+    for m in 1..=MAXIT {
+        let m = m as f64;
+        let m2 = 2.0 * m;
+        // Even step.
+        let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+        d = 1.0 + aa * d;
+        if d.abs() < FPMIN {
+            d = FPMIN;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < FPMIN {
+            c = FPMIN;
+        }
+        d = 1.0 / d;
+        h *= d * c;
+        // Odd step.
+        let aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+        d = 1.0 + aa * d;
+        if d.abs() < FPMIN {
+            d = FPMIN;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < FPMIN {
+            c = FPMIN;
+        }
+        d = 1.0 / d;
+        let del = d * c;
+        h *= del;
+        if (del - 1.0).abs() < EPS {
+            break;
+        }
+    }
+    h
+}
+
+/// The regularized incomplete beta function `I_x(a, b)` (Numerical Recipes `betai`).
+/// `x` is clamped to `[0, 1]`. This is the workhorse behind the Student's-t CDF.
+pub fn betai(a: f64, b: f64, x: f64) -> f64 {
+    let x = x.clamp(0.0, 1.0);
+    if x == 0.0 || x == 1.0 {
+        return x;
+    }
+    let bt = (gammaln(a + b) - gammaln(a) - gammaln(b) + a * x.ln() + b * (1.0 - x).ln()).exp();
+    if x < (a + 1.0) / (a + b + 2.0) {
+        bt * betacf(a, b, x) / a
+    } else {
+        1.0 - bt * betacf(b, a, 1.0 - x) / b
+    }
+}
+
+/// Welch's two-sample t-test (does not assume equal variances — R's `t.test`
+/// default). Returns `(t statistic, Welch–Satterthwaite degrees of freedom, two-sided
+/// p-value)`, or `None` when a sample has fewer than two values or the combined
+/// standard error is zero (both samples constant), where the test is undefined.
+pub fn welch_t_test(xs: &[f64], ys: &[f64]) -> Option<(f64, f64, f64)> {
+    let (n1, n2) = (xs.len() as f64, ys.len() as f64);
+    if xs.len() < 2 || ys.len() < 2 {
+        return None;
+    }
+    let v1 = sample_variance(xs);
+    let v2 = sample_variance(ys);
+    let se2 = v1 / n1 + v2 / n2;
+    if se2 == 0.0 {
+        return None;
+    }
+    let t = (mean(xs) - mean(ys)) / se2.sqrt();
+    // Welch–Satterthwaite degrees of freedom.
+    let df =
+        se2 * se2 / ((v1 / n1).powi(2) / (n1 - 1.0) + (v2 / n2).powi(2) / (n2 - 1.0));
+    // Two-sided p-value from the Student's-t survival function.
+    let p = betai(df / 2.0, 0.5, df / (df + t * t));
+    Some((t, df, p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +281,48 @@ mod tests {
         assert!(approx(pearson(&xs, &up).unwrap(), 1.0));
         assert!(approx(pearson(&xs, &down).unwrap(), -1.0));
         assert_eq!(pearson(&xs, &[3.0, 3.0, 3.0, 3.0]), None); // constant series
+    }
+
+    fn close(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() < tol
+    }
+
+    #[test]
+    fn erf_and_normal_match_known_values() {
+        assert!(close(erf(0.0), 0.0, 1e-7));
+        assert!(close(erf(1.0), 0.842_700_79, 1e-6));
+        assert!(close(erf(-1.0), -0.842_700_79, 1e-6)); // odd function
+        assert!(close(normal_cdf(0.0), 0.5, 1e-7));
+        assert!(close(normal_cdf(1.96), 0.975, 1e-3)); // the canonical 95% bound
+        assert!(close(normal_cdf(-1.96), 0.025, 1e-3));
+        assert!(close(normal_pdf(0.0), 0.398_942_28, 1e-7)); // 1/sqrt(2*pi)
+    }
+
+    #[test]
+    fn betai_is_a_cdf_and_symmetric() {
+        assert_eq!(betai(2.0, 3.0, 0.0), 0.0);
+        assert_eq!(betai(2.0, 3.0, 1.0), 1.0);
+        // The symmetric beta is 0.5 at the midpoint.
+        assert!(close(betai(3.0, 3.0, 0.5), 0.5, 1e-9));
+        // Reflection identity I_x(a,b) = 1 - I_{1-x}(b,a).
+        assert!(close(betai(2.0, 5.0, 0.3), 1.0 - betai(5.0, 2.0, 0.7), 1e-9));
+    }
+
+    #[test]
+    fn welch_t_test_matches_a_reference_case() {
+        // x = 1..5, y = 2,4,6,8,10. R's t.test(x, y) gives t = -1.8974, df = 5.8822,
+        // p = 0.1085 (Welch). Match the statistic and df tightly; p within tolerance.
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [2.0, 4.0, 6.0, 8.0, 10.0];
+        let (t, df, p) = welch_t_test(&x, &y).unwrap();
+        assert!(close(t, -1.897_37, 1e-4), "t = {t}");
+        assert!(close(df, 5.882_35, 1e-4), "df = {df}");
+        assert!(close(p, 0.1085, 2e-3), "p = {p}");
+        // Identical samples → zero statistic and a p-value of 1 (no difference).
+        let (t0, _, p0) = welch_t_test(&x, &x).unwrap();
+        assert!(close(t0, 0.0, 1e-12) && close(p0, 1.0, 1e-9));
+        // Too few values, or both samples constant → undefined.
+        assert_eq!(welch_t_test(&[1.0], &y), None);
+        assert_eq!(welch_t_test(&[2.0, 2.0], &[2.0, 2.0]), None);
     }
 }

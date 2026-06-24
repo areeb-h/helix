@@ -60,6 +60,9 @@
         ok("s = [1, 2, 3].summary()\ns.mean + s.std + s.median");
         // `correlation` is a Float-valued function of two arrays.
         ok("sqrt(correlation([1, 2, 3], [3, 2, 1]) * 1.0)");
+        // Inferential: `t_test` is a record; the normal functions broadcast like math.
+        ok("r = t_test([1.0, 2.0, 3.0], [2.0, 3.0, 4.0])\nr.statistic + r.df + r.p_value");
+        ok("normal_cdf(1.96) + erf(1.0) + normal_pdf(0.0)");
     }
 
     #[test]

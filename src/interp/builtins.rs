@@ -198,9 +198,13 @@ impl super::Interp {
             }
             // ---- math standard library (broadcasts over arrays, propagates missing) ----
             "sqrt" | "cbrt" | "exp" | "ln" | "log10" | "log2" | "sin" | "cos" | "tan" | "asin"
-            | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "degrees" | "radians" => {
+            | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "degrees" | "radians" | "erf"
+            | "normal_cdf" | "normal_pdf" => {
                 arity(name, &args, 1, line, col)?;
                 let f: fn(f64) -> f64 = match name {
+                    "erf" => crate::stats::erf,
+                    "normal_cdf" => crate::stats::normal_cdf,
+                    "normal_pdf" => crate::stats::normal_pdf,
                     "sqrt" => f64::sqrt,
                     "cbrt" => f64::cbrt,
                     "exp" => f64::exp,
@@ -326,6 +330,33 @@ impl super::Interp {
                         col,
                     )
                     .hint("a constant series has no spread to correlate.")),
+                }
+            }
+            "t_test" => {
+                arity(name, &args, 2, line, col)?;
+                // Welch's two-sample t-test → {statistic, df, p_value}. `missing` in
+                // either sample propagates; each needs at least two values.
+                let xs = num_array(name, &args[0], line, col)?;
+                let ys = num_array(name, &args[1], line, col)?;
+                let (xs, ys) = match (xs, ys) {
+                    (Some(xs), Some(ys)) => (xs, ys),
+                    _ => return Ok(Value::Missing),
+                };
+                match crate::stats::welch_t_test(&xs, &ys) {
+                    Some((t, df, p)) => {
+                        let fields = vec![
+                            ("statistic".to_string(), Value::Float(t)),
+                            ("df".to_string(), Value::Float(df)),
+                            ("p_value".to_string(), Value::Float(p)),
+                        ];
+                        Ok(Value::Record(Rc::new(fields)))
+                    }
+                    None => Err(HelixError::new(
+                        "t-test is undefined: each sample needs at least two values with spread",
+                        line,
+                        col,
+                    )
+                    .hint("two constant samples have no variance to compare.")),
                 }
             }
             _ => {

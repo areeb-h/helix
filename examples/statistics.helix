@@ -32,3 +32,18 @@ print(
     "r(age, hr) in cohort:",
     correlation(patients.column("age"), patients.column("resting_hr")),
 )
+
+# Inferential statistics: is a treatment's effect distinguishable from a control?
+# Welch's two-sample t-test (no equal-variance assumption) returns a record with the
+# statistic, the degrees of freedom, and a two-sided p-value.
+control = [5.1, 4.9, 5.0, 5.2, 4.8, 5.0]
+treated = [5.6, 5.8, 5.5, 5.9, 5.7, 5.4]
+result = t_test(control, treated)
+print("t statistic:", result.statistic)
+print("p-value:    ", result.p_value)
+print("significant at 0.05:", result.p_value < 0.05)
+
+# The normal distribution functions back the inferential layer and stand alone too;
+# like the rest of the math stdlib they broadcast over arrays and propagate `missing`.
+print("P(Z < 1.96):", normal_cdf(1.96))
+print("density at 0, 1, 2:", normal_pdf([0.0, 1.0, 2.0]))

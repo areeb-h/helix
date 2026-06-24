@@ -186,6 +186,27 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Float)
         }
+        "t_test" => {
+            if args.len() != 2 {
+                return Err(arity_err(name, 2, args.len(), line, col));
+            }
+            if any(args, |t| matches!(t, Type::Unknown)) {
+                return Ok(Type::Unknown);
+            }
+            if any(args, |t| matches!(t, Type::Missing)) {
+                return Ok(Type::Missing);
+            }
+            for a in args {
+                if !matches!(a, Type::Array(_)) {
+                    return Err(type_err(name, "an array of numbers", a, line, col));
+                }
+            }
+            Ok(Type::Record(vec![
+                ("statistic".to_string(), Type::Float),
+                ("df".to_string(), Type::Float),
+                ("p_value".to_string(), Type::Float),
+            ]))
+        }
         "to_array" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));

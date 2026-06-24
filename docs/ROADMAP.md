@@ -164,9 +164,11 @@ Lexer → parser → AST → tree-walking interpreter.
 - [ ] Complex numbers as a first-class type (`2 + 3i`), if demand warrants.
 - [ ] Parallel array combinators (rayon `map`/`filter`/`reduce`) for large arrays.
 
-## Phase 3.6 — Statistics core (descriptive + bivariate shipped)
-The "R-for-statistics" surface (`src/stats.rs`), missing-propagating and population-
-based so `var == std²` and array verbs agree with the DataFrame group aggregations.
+## Phase 3.6 — Statistics core (descriptive, bivariate, inferential shipped)
+The "R-for-statistics" surface (`src/stats.rs`). Descriptive statistics are
+missing-propagating and population-based so `var == std²` and array verbs agree with
+the DataFrame group aggregations; inferential statistics use the sample (`n - 1`)
+estimators they require.
 - [x] Descriptive array methods: `median`, `var`, `quantile(p)` (type-7 linear
       interpolation), and `summary()` → a `{count, mean, std, min, median, max}`
       record (the `describe()` analogue), alongside the existing `mean`/`std`.
@@ -175,12 +177,15 @@ based so `var == std²` and array verbs agree with the DataFrame group aggregati
 - [x] DataFrame-column statistics: `df.column(name)` materializes a column as an
       array (Polars nulls → `missing`), so the array statistics and verbs apply to
       loaded data — e.g. `df.column("age").median()`, or `drop_missing()` first.
-- [ ] Inferential statistics: t-test / z-test returning `{statistic, df, p_value}`,
-      needing a special-functions layer (`erf`, regularized incomplete beta).
-- [ ] Distributions: normal/t/binomial pdf/cdf/quantile on that same layer.
+- [x] Special-functions layer: `erf`, log-gamma, and the regularized incomplete beta
+      (Abramowitz & Stegun / Numerical Recipes), accurate to better than 1e-7.
+- [x] Inferential: `t_test(a, b)` — Welch's two-sample t-test → `{statistic, df,
+      p_value}` — and the normal distribution functions `normal_cdf`/`normal_pdf`/`erf`
+      (broadcasting math). Verified against R's reference values.
+- [ ] More distributions: Student's-t / binomial / chi-squared pdf/cdf/quantile, and
+      one-sample / paired t-tests, on the same special-functions layer.
 - [ ] Whole-frame aggregation shorthands (`df.median(col)`, `df.correlation(c1, c2)`)
       over the `column` accessor, if the explicit form proves verbose in practice.
-- [ ] Sample (`n - 1`) variants where inferential work needs them.
 
 ## Phase 3.7 — Data access & APIs (shipped)
 - [x] **JSON** — `parse_json(str)` (object→record, array→array, scalars, `null`→
