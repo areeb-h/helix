@@ -13,7 +13,9 @@ zero-copy memory model**, while avoiding their respective pitfalls.
 ## Install
 
 Helix is a **single self-contained binary** — no runtime to install (no Python, no
-system BLAS; the core links nothing external).
+system BLAS; the core links nothing external). It is large (~65 MB) because of the
+embedded Polars engine, but starts instantly and links no system libraries beyond the
+C runtime — see [binary size](docs/binary-size.md) for the analysis.
 
 ```sh
 # one-line install — downloads the prebuilt binary for your platform,
