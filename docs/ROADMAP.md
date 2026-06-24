@@ -298,9 +298,9 @@ motivates this phase.
       local shadowing, cycle and missing-module errors.
 - [x] **Standard-library search path** — a non-local `import std.stats` resolves
       against `HELIX_PATH` and the install-relative `std/` directory beside the binary,
-      after the importing file's own directory (local imports win). The first stdlib
-      module, `std/stats.helix`, ships helpers (`iqr`, `zscores`, `standard_error`, …)
-      composed from the built-in aggregations.
+      after the importing file's own directory (local imports win). The stdlib is
+      seeded with `std.stats` (`iqr`, `zscores`, `standard_error`, …) and `std.seq`
+      (`mean_gc`, `at_content`, `total_length`), each composed from the built-in core.
 - [x] **Selective import** — `import std.stats.{iqr, zscores}` brings the chosen
       names into scope unqualified (resolving to the source module), with a local
       definition of the same name shadowing the import. No new keyword: the brace tail

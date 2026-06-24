@@ -402,6 +402,16 @@ fn stdlib_module_resolves_on_the_search_path() {
 }
 
 #[test]
+fn stdlib_seq_module_analyzes_sequences() {
+    // The bio stdlib module composes the DNA methods with the array verbs, applied to
+    // FASTQ reads pulled in via the search path.
+    let src = "import std.seq.{mean_gc, total_length}\nr = read_fastq(\"examples/data/reads.fastq\")\nseqs = r.map(x => x.seq)\nprint(total_length(seqs))\nprint(mean_gc(seqs) > 0.4)\n";
+    let (out, stderr, code) = run_source(src, &[("HELIX_PATH", ".")], "stdseq");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "36\ntrue"); // 3 reads x 12 bp; mean GC ~0.44
+}
+
+#[test]
 fn selective_import_binds_names_unqualified() {
     // `import m.{a, b}` brings the chosen names into scope without the namespace, and a
     // local definition of the same name shadows the import.
