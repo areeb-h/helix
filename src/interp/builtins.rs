@@ -290,6 +290,44 @@ impl super::Interp {
                 let pick_first = if name == "min" { a <= b } else { a >= b };
                 Ok(if pick_first { args[0].clone() } else { args[1].clone() })
             }
+            "correlation" => {
+                arity(name, &args, 2, line, col)?;
+                // `missing` in either series propagates (ADR-0001); a non-array, a
+                // length mismatch, or a non-numeric element is a clean error.
+                let xs = num_array(name, &args[0], line, col)?;
+                let ys = num_array(name, &args[1], line, col)?;
+                let (xs, ys) = match (xs, ys) {
+                    (Some(xs), Some(ys)) => (xs, ys),
+                    _ => return Ok(Value::Missing),
+                };
+                if xs.len() != ys.len() {
+                    return Err(HelixError::new(
+                        format!(
+                            "`correlation` needs two equal-length arrays, got {} and {}",
+                            xs.len(),
+                            ys.len()
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+                if xs.is_empty() {
+                    return Err(HelixError::new(
+                        "cannot compute `correlation` of empty arrays",
+                        line,
+                        col,
+                    ));
+                }
+                match crate::stats::pearson(&xs, &ys) {
+                    Some(r) => Ok(Value::Float(r)),
+                    None => Err(HelixError::new(
+                        "correlation is undefined: one of the series has zero variance",
+                        line,
+                        col,
+                    )
+                    .hint("a constant series has no spread to correlate.")),
+                }
+            }
             _ => {
                 let mut err =
                     HelixError::new(format!("`{}` is not a known function", name), line, col);
@@ -300,4 +338,25 @@ impl super::Interp {
             }
         }
     }
+}
+
+/// Extract a numeric `Vec<f64>` from an array argument. Returns `Ok(None)` when any
+/// element is `missing` (so the caller can propagate `missing`), and errors if the
+/// value is not an array or holds a non-numeric element.
+fn num_array(who: &str, v: &Value, line: usize, col: usize) -> Result<Option<Vec<f64>>, HelixError> {
+    let items = match v {
+        Value::Array(items) => items,
+        other => return Err(type_err(who, "an array of numbers", other, line, col)),
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for el in items.iter() {
+        match el {
+            Value::Missing => return Ok(None),
+            _ => match el.as_f64() {
+                Some(x) => out.push(x),
+                None => return Err(type_err(who, "an array of numbers", el, line, col)),
+            },
+        }
+    }
+    Ok(Some(out))
 }

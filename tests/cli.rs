@@ -367,6 +367,27 @@ fn join_combines_frames_on_a_key() {
 }
 
 #[test]
+fn descriptive_statistics_and_correlation() {
+    // Population statistics (so var == std^2) plus Pearson correlation, with the
+    // missing-propagation rule: a `missing` in either series yields `missing`.
+    let src = "xs = [2, 4, 4, 4, 5, 5, 7, 9]\nprint(xs.median())\nprint(xs.var())\nprint(xs.std())\nprint(correlation([1, 2, 3, 4], [2, 4, 6, 8]))\nprint(correlation([1, 2, 3], [1, missing, 3]))\n";
+    let (out, stderr, code) = run_source(src, &[], "stats");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "4.5\n4.0\n2.0\n1.0\nmissing");
+}
+
+#[test]
+fn correlation_on_mismatched_lengths_is_a_clean_error() {
+    let src = "print(correlation([1, 2], [1, 2, 3]))\n";
+    let (_out, stderr, code) = run_source(src, &[], "corrlen");
+    assert_ne!(code, Some(0));
+    assert!(
+        stderr.contains("equal-length arrays"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn join_without_an_operand_is_a_clean_error() {
     // A no-argument `join` type-checks (DataFrame args are the unchecked runtime
     // boundary), so the compiler must stay total and emit the friendly diagnostic

@@ -169,6 +169,23 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 Type::Float
             })
         }
+        "correlation" => {
+            if args.len() != 2 {
+                return Err(arity_err(name, 2, args.len(), line, col));
+            }
+            if any(args, |t| matches!(t, Type::Unknown)) {
+                return Ok(Type::Unknown);
+            }
+            if any(args, |t| matches!(t, Type::Missing)) {
+                return Ok(Type::Missing);
+            }
+            for a in args {
+                if !matches!(a, Type::Array(_)) {
+                    return Err(type_err(name, "an array of numbers", a, line, col));
+                }
+            }
+            Ok(Type::Float)
+        }
         "to_array" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
@@ -214,7 +231,16 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
 
 pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "mean" | "std" => Type::Float,
+        "mean" | "std" | "median" | "var" | "quantile" => Type::Float,
+        // A descriptive overview record (the `describe()` analogue).
+        "summary" => Type::Record(vec![
+            ("count".to_string(), Type::Int),
+            ("mean".to_string(), Type::Float),
+            ("std".to_string(), Type::Float),
+            ("min".to_string(), Type::Float),
+            ("median".to_string(), Type::Float),
+            ("max".to_string(), Type::Float),
+        ]),
         "sum" => Type::Num,
         "min" | "max" | "first" | "last" => el.clone(),
         "count" => Type::Int,

@@ -152,7 +152,8 @@ Lexer → parser → AST → tree-walking interpreter.
 - [ ] **Cross-statement caching** — reusing a DataFrame binding re-scans the file.
 - [ ] Additional IO: Arrow IPC, JSON, FASTA; `write_csv`.
 - [ ] DataFrame `missing` as the Arrow validity bitmap (unified with ADR 0001).
-- [ ] Derived columns (`df.with(bmi = weight / height)`), joins.
+- [x] Derived columns (`df.with({bmi: weight / height})`) and joins
+      (`df.join(other, key)`, inner/left/right/outer; keys validated eagerly).
 - [ ] Formal benchmarks: variance/CI, against pandas/DuckDB; 100M+ rows.
 
 ## Phase 3.5 — Math & numerics core (shipped)
@@ -162,6 +163,21 @@ Lexer → parser → AST → tree-walking interpreter.
 - [x] Interpreter perf: `rustc-hash` env, edition-2024, deps optimized in dev.
 - [ ] Complex numbers as a first-class type (`2 + 3i`), if demand warrants.
 - [ ] Parallel array combinators (rayon `map`/`filter`/`reduce`) for large arrays.
+
+## Phase 3.6 — Statistics core (descriptive + bivariate shipped)
+The "R-for-statistics" surface (`src/stats.rs`), missing-propagating and population-
+based so `var == std²` and array verbs agree with the DataFrame group aggregations.
+- [x] Descriptive array methods: `median`, `var`, `quantile(p)` (type-7 linear
+      interpolation), and `summary()` → a `{count, mean, std, min, median, max}`
+      record (the `describe()` analogue), alongside the existing `mean`/`std`.
+- [x] Bivariate: `correlation(xs, ys)` (Pearson r; symmetric, undefined on a
+      constant series).
+- [ ] Inferential statistics: t-test / z-test returning `{statistic, df, p_value}`,
+      needing a special-functions layer (`erf`, regularized incomplete beta).
+- [ ] Distributions: normal/t/binomial pdf/cdf/quantile on that same layer.
+- [ ] DataFrame-column statistics: extract a column as an array, and whole-frame
+      column aggregations (`df.median(col)`, `df.correlation(c1, c2)`).
+- [ ] Sample (`n - 1`) variants where inferential work needs them.
 
 ## Phase 3.7 — Data access & APIs (shipped)
 - [x] **JSON** — `parse_json(str)` (object→record, array→array, scalars, `null`→

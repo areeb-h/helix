@@ -11,9 +11,9 @@ use crate::error::{suggest, HelixError};
 use crate::value::Value;
 
 const ARRAY_METHODS: &[&str] = &[
-    "mean", "std", "sum", "min", "max", "count", "normalize", "sort", "reverse", "first", "last",
-    "map", "filter", "where", "reduce", "any", "all", "take", "drop", "zip", "enumerate", "top",
-    "drop_missing", "is_missing",
+    "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count",
+    "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
+    "all", "take", "drop", "zip", "enumerate", "top", "drop_missing", "is_missing",
 ];
 const STRING_METHODS: &[&str] = &["upper", "lower", "count", "reverse"];
 const DNA_METHODS: &[&str] = &[
@@ -123,6 +123,73 @@ fn array_method(
             let xs = numeric_vec(items, "std", line, col)?;
             empty_guard(&xs, "std", line, col)?;
             Ok(Value::Float(population_std(&xs)))
+        }
+        "median" => {
+            no_args(name)?;
+            if has_missing(items) {
+                return Ok(Value::Missing);
+            }
+            let xs = numeric_vec(items, "median", line, col)?;
+            empty_guard(&xs, "median", line, col)?;
+            Ok(Value::Float(crate::stats::median(&xs)))
+        }
+        "var" => {
+            no_args(name)?;
+            if has_missing(items) {
+                return Ok(Value::Missing);
+            }
+            let xs = numeric_vec(items, "var", line, col)?;
+            empty_guard(&xs, "var", line, col)?;
+            Ok(Value::Float(crate::stats::variance(&xs)))
+        }
+        "quantile" => {
+            // One argument: the probability `p` in [0, 1] (e.g. `xs.quantile(0.95)`).
+            if args.len() != 1 {
+                return Err(HelixError::new(
+                    format!("`quantile` takes one probability in [0, 1], got {}", args.len()),
+                    line,
+                    col,
+                )
+                .hint("e.g. `xs.quantile(0.95)` for the 95th percentile."));
+            }
+            let p = match args[0].as_f64() {
+                Some(p) => p,
+                None => return Err(type_err("quantile", "a number in [0, 1]", &args[0], line, col)),
+            };
+            if !(0.0..=1.0).contains(&p) {
+                return Err(HelixError::new(
+                    format!("`quantile` needs a probability in [0, 1], got {}", p),
+                    line,
+                    col,
+                )
+                .hint("0 is the minimum, 0.5 the median, 1 the maximum."));
+            }
+            if has_missing(items) {
+                return Ok(Value::Missing);
+            }
+            let xs = numeric_vec(items, "quantile", line, col)?;
+            empty_guard(&xs, "quantile", line, col)?;
+            Ok(Value::Float(crate::stats::quantile(&xs, p)))
+        }
+        "summary" => {
+            no_args(name)?;
+            if has_missing(items) {
+                return Ok(Value::Missing);
+            }
+            let mut xs = numeric_vec(items, "summary", line, col)?;
+            empty_guard(&xs, "summary", line, col)?;
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            // A descriptive overview (the `describe()` analogue): count, central
+            // tendency, spread, and the three order-statistic extremes/center.
+            let fields = vec![
+                ("count".to_string(), Value::Int(xs.len() as i64)),
+                ("mean".to_string(), Value::Float(crate::stats::mean(&xs))),
+                ("std".to_string(), Value::Float(crate::stats::std(&xs))),
+                ("min".to_string(), Value::Float(xs[0])),
+                ("median".to_string(), Value::Float(crate::stats::quantile_sorted(&xs, 0.5))),
+                ("max".to_string(), Value::Float(xs[xs.len() - 1])),
+            ];
+            Ok(Value::Record(Rc::new(fields)))
         }
         "sum" => {
             no_args(name)?;

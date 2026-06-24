@@ -1,0 +1,23 @@
+# Descriptive and bivariate statistics. Run from the project root:
+#   helix examples/statistics.helix
+#
+# Helix uses POPULATION statistics (variance/std divide by n), so `var` equals
+# `std` squared and the array verbs agree with the DataFrame group aggregations.
+# Every aggregation propagates `missing`: one absent value makes the result absent.
+
+resting_hr = [72, 65, 80, 68, 75, 90, 62, 78]
+
+# Single-sample summaries: central tendency, spread, and order statistics.
+print("mean:    ", resting_hr.mean())
+print("median:  ", resting_hr.median())
+print("std:     ", resting_hr.std())
+print("variance:", resting_hr.var())
+print("p90:     ", resting_hr.quantile(0.9))
+
+# `summary` returns a record — the `describe()` analogue — for a quick overview.
+print("summary: ", resting_hr.summary())
+
+# Bivariate: does resting heart rate track age across these subjects? Pearson's r
+# is symmetric, so it reads as a plain function of the two series.
+age = [41, 38, 55, 44, 47, 60, 35, 52]
+print("r(age, hr):", correlation(age, resting_hr))

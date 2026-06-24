@@ -50,6 +50,16 @@
     }
 
     #[test]
+    fn statistics_typecheck() {
+        // Descriptive stats on a numeric array yield Float; `quantile` takes one arg.
+        ok("[1, 2, 3].median() + [1, 2, 3].var() + [1.0].quantile(0.5)");
+        // `summary` is a record; its fields are reachable and numeric.
+        ok("s = [1, 2, 3].summary()\ns.mean + s.std + s.median");
+        // `correlation` is a Float-valued function of two arrays.
+        ok("sqrt(correlation([1, 2, 3], [3, 2, 1]) * 1.0)");
+    }
+
+    #[test]
     fn catches_provable_errors() {
         assert!(emsg("5 + \"x\"").contains("needs numbers"));
         assert!(emsg("if 5 then 1 else 2").contains("must be a boolean"));

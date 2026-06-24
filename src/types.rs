@@ -250,9 +250,9 @@ fn unknown_method(type_name: &str, name: &str, candidates: &[&str], line: usize,
 }
 
 const ARRAY_METHODS: &[&str] = &[
-    "mean", "std", "sum", "min", "max", "count", "normalize", "sort", "reverse", "first", "last",
-    "map", "filter", "where", "reduce", "any", "all", "take", "drop", "zip", "enumerate", "top",
-    "drop_missing", "is_missing",
+    "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count",
+    "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
+    "all", "take", "drop", "zip", "enumerate", "top", "drop_missing", "is_missing",
 ];
 const STRING_METHODS: &[&str] = &["upper", "lower", "count", "reverse", "is_missing"];
 const DNA_METHODS: &[&str] = &[
@@ -280,8 +280,8 @@ const BUILTIN_FNS: &[&str] = &[
     "zeros",
     "ones", "eye", "sqrt", "cbrt", "abs", "exp", "ln", "log10", "log2", "log", "sin", "cos", "tan",
     "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "floor", "ceil", "round", "trunc",
-    "sign", "degrees", "radians", "hypot", "min", "max", "to_array", "to_dataframe", "to_tensor",
-    "parse_json", "to_json", "http_get",
+    "sign", "degrees", "radians", "hypot", "min", "max", "correlation", "to_array", "to_dataframe",
+    "to_tensor", "parse_json", "to_json", "http_get",
 ];
 
 const MATH_UNARY_FLOAT: &[&str] = &[
