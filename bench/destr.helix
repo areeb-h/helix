@@ -1,0 +1,5 @@
+a, b = (10, 20)
+x, y, z = [1, 2, 3]
+mut p, q = (5, 7)
+p = p + q
+print("a+b={a + b}, x*y*z={x * y * z}, p={p}")

@@ -1,0 +1,9 @@
+species,gene,expression
+human,BRCA1,8.2
+human,TP53,9.1
+human,EGFR,7.5
+mouse,BRCA1,6.4
+mouse,TP53,7.0
+mouse,EGFR,5.9
+yeast,BRCA1,3.1
+yeast,TP53,4.2

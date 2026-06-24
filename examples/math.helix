@@ -1,0 +1,28 @@
+# Math standard library + the `**` power operator.
+#   helix examples/math.helix
+
+# `**` is right-associative and binds tighter than unary minus.
+print("2 ** 10:    ", 2 ** 10)        # 1024 (stays Int)
+print("-2 ** 2:    ", -2 ** 2)        # -4   = -(2 ** 2)
+print("2 ** 3 ** 2:", 2 ** 3 ** 2)    # 512  = 2 ** (3 ** 2)
+print("2.0 ** 0.5: ", 2.0 ** 0.5)     # float power
+
+# Constants are predefined immutable bindings.
+print("pi:", pi, " e:", e)
+
+# Transcendental functions.
+print("sqrt(2):  ", sqrt(2))
+print("sin(pi/2):", sin(pi / 2))
+print("ln(e):    ", ln(e))
+print("log(8, 2):", log(8, 2))
+print("hypot 3,4:", hypot(3, 4))
+
+# Everything broadcasts over arrays and propagates `missing`.
+print("sqrt array: ", sqrt([1, 4, 9, 16]))
+print("abs array:  ", abs([-1, 2, -3]))
+print("floor/ceil: ", floor(2.7), ceil(2.1), round(2.5))
+print("sqrt(missing):", sqrt(missing))
+
+# Composes with functions and comprehensions, of course.
+fn magnitude(xs) = sqrt(xs.map(it ** 2).sum())
+print("magnitude [3,4]:", magnitude([3, 4]))

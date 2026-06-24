@@ -1,0 +1,26 @@
+# Optional typed function signatures — checked statically, before anything runs.
+#   helix examples/typed.helix
+#
+# Helix infers types everywhere; annotations are optional documentation that the
+# type checker verifies. Mistakes are caught at "compile time" with the same
+# friendly, caret-annotated errors as everything else.
+
+# Annotations are optional and checked against inference:
+fn area(w: Int, h: Int) -> Int = w * h
+fn hypotenuse(a: Float, b: Float) -> Float = sqrt(a * a + b * b)
+
+print("area 3x4:   ", area(3, 4))
+print("hypotenuse: ", hypotenuse(3.0, 4.0))
+
+# Inference works with no annotations at all — types are figured out for you:
+fn scale(xs, factor) = xs.map(it * factor)
+print("scaled:", scale([1, 2, 3], 10))
+
+# The checker runs over the WHOLE program before execution, so a type error
+# anywhere prevents any side effects. Try uncommenting either line below — the
+# program will refuse to run, pointing a caret at the mistake:
+
+# print(5 + "oops")                       # operator `+` needs numbers
+# fn bad(x: Int) -> String = x + 1        # body produces Int, not String
+
+print("all type-checked and run.")

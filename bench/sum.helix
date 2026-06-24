@@ -1,0 +1,1 @@
+print(range(10000000).reduce(0, (acc, x) => (acc + x) % 1000000007))

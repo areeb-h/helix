@@ -1,0 +1,66 @@
+# Tensors — dense n-dimensional numeric arrays (ndarray-backed).
+#   helix examples/tensors.helix
+
+# Build from nested arrays; shape is inferred.
+a = tensor([[1, 2], [3, 4]])
+print("a =")
+print(a)
+print("shape:", a.shape(), " ndim:", a.ndim())
+
+# Elementwise arithmetic with NumPy-style broadcasting.
+print("a + 10 =")
+print(a + 10)
+print("a * a =")
+print(a * a)
+
+# Broadcasting a row vector across rows (shape [2] stretches over [2,2]):
+print("a + [10, 20] =")
+print(a + tensor([10, 20]))
+
+# Reductions.
+print("sum:", a.sum(), " mean:", a.mean(), " max:", a.max())
+
+# Linear algebra: matrix multiply and transpose.
+b = tensor([[1, 0], [1, 1]])
+print("a matmul b =")
+print(a.matmul(b))
+print("transpose of a =")
+print(a.transpose())
+
+# Constructors.
+print("zeros([2,3]) =")
+print(zeros([2, 3]))
+print("identity eye(3) =")
+print(eye(3))
+
+# The math stdlib broadcasts over tensors too.
+print("sqrt(a) =")
+print(sqrt(a))
+
+# Reshape.
+print("reshape to [4,1] =")
+print(tensor([1, 2, 3, 4]).reshape([4, 1]))
+
+# Indexing and slicing the first axis (Python-style):
+print("row a[0]:    ", a[0])        # [1, 2]
+print("a[0][1]:     ", a[0][1])     # 2  (scalar)
+print("a[1:]:       ", a[1:])       # [[3, 4]]
+v = tensor([10, 20, 30, 40])
+print("v[1:3]:      ", v[1:3])      # [20, 30]
+print("v reversed:  ", v[::-1])
+
+# Axis-wise reductions: reduce along one axis instead of the whole tensor.
+print("column sums  (sum axis 0):", a.sum(0))   # [4, 6]
+print("row means    (mean axis 1):", a.mean(1)) # [1.5, 3.5]
+
+# Vector dot product and matrix-vector product.
+print("dot([1,2,3], [4,5,6]):", tensor([1, 2, 3]).dot(tensor([4, 5, 6])))
+print("a @ [1, 1]:", a.matmul(tensor([1, 1])))
+
+# Linear algebra (pure-Rust Gaussian elimination, no BLAS dependency).
+print("det(a):  ", a.det())
+print("norm(a): ", a.norm())
+print("inverse of a =")
+print(a.inv())
+# Solve a x = [1, 1]:
+print("solve a x = [1,1]:", a.solve(tensor([1, 1])))

@@ -1,0 +1,48 @@
+[package]
+name = "helix"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "Helix — a modern scientific programming language."
+license = "MIT"
+
+[[bin]]
+name = "helix"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# A fast dev profile that still optimizes dependencies (Polars) so the REPL and
+# tests aren't crippled by a debug-built Polars.
+[profile.dev.package."*"]
+opt-level = 3
+
+[dependencies]
+cranelift-codegen = "0.132.2"
+cranelift-frontend = "0.132.2"
+cranelift-jit = "0.132.2"
+cranelift-module = "0.132.2"
+cranelift-native = "0.132.2"
+ndarray = "0.17.2"
+needletail = "0.7.3"
+# Latest Polars — Arrow-columnar, lazy, multi-threaded execution engine.
+polars = { version = "0.54", features = [
+    "lazy",
+    "streaming",
+    "csv",
+    "parquet",
+    "ipc",
+    "json",
+    "strings",
+    "is_in",
+    "round_series",
+    "cum_agg",
+    "dtype-full",
+    "performant",
+] }
+# Fast, deterministic hashing for the interpreter environment.
+rustc-hash = "2"

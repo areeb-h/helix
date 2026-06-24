@@ -1,0 +1,32 @@
+# Tuples + destructuring — clean multiple values and multiple returns.
+#   helix examples/tuples.helix
+
+# A tuple is a fixed-size, heterogeneous group: `(a, b, ...)`.
+point = (3, 4)
+print("point {point}, x={point[0]}, y={point[1]}")
+
+pair = ("Ada", 41)        # heterogeneous
+print("name {pair[0]}, age {pair[1]}")
+
+# Destructuring assignment — unpack a tuple into names:
+a, b = (1, 2)
+print("a={a}, b={b}")
+
+# A function can return several values as a tuple; the caller unpacks them:
+fn divmod(x, y) = (x / y, x % y)
+q, r = divmod(17, 5)
+print("17 / 5 = {q} rem {r}")
+
+# `zip` and `enumerate` now yield real tuples — and lambda parameters can
+# destructure them, so you write `(name, age)` instead of `it[0]`, `it[1]`:
+names = ["Ada", "Ben", "Cara"]
+ages = [41, 38, 55]
+print("zipped:  {names.zip(ages)}")
+print("labeled: {names.zip(ages).map((name, age) => "{name} ({age})")}")
+print("indexed: {names.enumerate().map((i, name) => "{i}. {name}")}")
+
+# Destructuring also works with `mut`, and from arrays of known length:
+mut lo, hi = (0, 100)
+print("range {lo}..{hi}")
+x, y, z = [1, 2, 3]
+print("xyz {x} {y} {z}")

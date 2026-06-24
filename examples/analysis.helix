@@ -1,0 +1,36 @@
+# Comprehensions and if-expressions — run with:  helix examples/analysis.helix
+
+scores = [42, 88, 67, 91, 55, 73, 30, 99]
+
+# Filter, transform, and aggregate in one readable chain.
+# `it` is the current element. `where` and `filter` are the same operation —
+# `where` is the data-query spelling that DataFrames will reuse in Phase 3.
+passing = scores.where(it >= 60)
+print("passing scores:", passing)
+print("how many passed:", passing.count())
+print("average of passers:", passing.mean())
+
+# map builds a new array; chains read top-to-bottom.
+curved = scores
+    .map(it + 5)
+    .where(it <= 100)
+print("curved & capped:", curved)
+
+# reduce names both binders explicitly — the accumulator and each element.
+# (More than one binder, so you name them; there is no magic `it`/`acc` here.)
+total = scores.reduce(0, (acc, x) => acc + x)
+print("sum via reduce:", total)
+
+# if is an expression — it yields a value you can bind or print.
+top = scores.max()
+verdict = if top >= 90 then "excellent" else "keep going"
+print("top score", top, "->", verdict)
+
+# Expressions compose: tag each score pass/fail.
+labels = scores.map(if it >= 60 then "pass" else "fail")
+print("labels:", labels)
+
+# `it` is the shorthand. When you nest, name the binder so it stays clear:
+grid = [[1, 2], [3, 4]]
+bumped = grid.map(row => row.map(value => value + 1))
+print("bumped grid:", bumped)

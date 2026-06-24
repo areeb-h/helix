@@ -1,0 +1,24 @@
+# DataFrames — the marquee Phase 3 feature. Run from the project root:
+#   helix examples/dataframes.helix
+#
+# Backed by Polars (Arrow columnar, lazy). The SAME `where`/`sort` verbs you use
+# on arrays work here — `where(age > 40)` lowers to a native Polars filter.
+
+patients = read_csv("examples/data/patients.csv")
+
+print("columns:", patients.columns())
+print("rows:", patients.count())
+
+# SQL-intuitive query: filter, pick columns, sort — reads top to bottom.
+older = patients
+    .where(age > 40)
+    .select(name, age, diagnosis)
+    .sort(age)
+print(older)
+
+# Predicates compose with `and`/`or` and arithmetic, just like everywhere else.
+print(patients.where(age > 40 and resting_hr < 75))
+
+# Grouping: one obvious verb, then an aggregation.
+genes = read_csv("examples/data/genes.csv")
+print(genes.group(species).mean(expression))

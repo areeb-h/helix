@@ -1,0 +1,31 @@
+# Local bindings with `let ... in` — give intermediate values a name without
+# leaving the expression world. (Helix uses `let ... in` rather than indented
+# blocks because indentation would collide with multi-line dot-chains.)
+#   helix examples/bindings.helix
+
+# A single local:
+print(let x = 5 in x * x + 1)
+
+# Several locals — sequential, so later ones can use earlier ones:
+print(let a = 10, b = a * 2, c = b + a in c)
+
+# The natural home is a function body that needs intermediates:
+fn variance(xs) =
+    let m = xs.mean(),
+        n = xs.count()
+    in xs.map((it - m) ** 2).sum() / n
+
+print("variance: {variance([2, 4, 4, 4, 5, 5, 7, 9])}")
+
+# Return several results as a tuple, then destructure at the call site:
+fn summarize(xs) =
+    let lo = xs.min(),
+        hi = xs.max(),
+        avg = xs.mean()
+    in (lo, hi, avg)
+
+low, high, mean = summarize([3, 1, 4, 1, 5, 9, 2, 6])
+print("low {low}, high {high}, mean {mean}")
+
+# `let` is just an expression, so it nests and composes with everything:
+print([1, 2, 3, 4].map(let half = 2 in it / half))

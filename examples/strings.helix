@@ -1,0 +1,28 @@
+# String interpolation + the `??` missing-default operator.
+#   helix examples/strings.helix
+#
+# Any string interpolates `{expr}` (no `f` prefix). Use `{{` / `}}` for literal
+# braces. Embedded expressions are type-checked at compile time, like everything.
+
+name = "Ada"
+age = 41
+print("Hello {name}, you are {age}.")
+
+# Any expression works inside the braces — calls, arithmetic, even `if`:
+xs = [3, 1, 4, 1, 5, 9]
+print("mean {xs.mean()}, max {xs.max()}, n {xs.count()}")
+print("{age} in 10 years is {age + 10}")
+print("grade: {if xs.mean() > 3 then "pass" else "fail"}")
+
+# Literal braces:
+print("a set looks like {{1, 2, 3}}")
+
+# `??` supplies a default when a value is `missing` (best-of-TypeScript):
+timeout = missing
+print("timeout = {timeout ?? 30}")
+print("present = {age ?? 0}")
+
+# Composes with functions and chains:
+fn greet(who) = "Hi {who}!"
+print(greet("Helix"))
+print([1, 2, 3].map(it * it).map("sq={it}"))

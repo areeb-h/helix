@@ -1,0 +1,4 @@
+r = {name: "Ada", age: 41}
+t = (10, 20, 30)
+xs = [1, 2, 3, 4, 5]
+print("{r.name} is {r.age}, t[1]={t[1]}, slice={xs[1:4]}, rev={xs[::-1]}")

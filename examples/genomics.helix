@@ -1,0 +1,26 @@
+# Genomics — Helix's flagship domain.
+# Read a real FASTA file and analyse it with the same dot-chain syntax used
+# everywhere else. No Biopython, no pandas, no glue.
+
+genome = read_fasta("examples/data/sample.fa")
+
+print("Sequences:   {genome.count()}")
+print("Total bases: {genome.map(it.length).sum()}")
+print("IDs:         {genome.map(it.id)}")
+
+# Per-sequence GC content (a Dna method, mapped over the records).
+print("GC content:  {genome.map(it.seq.gc_content())}")
+
+# Work with a single sequence — field access then sequence methods.
+first = genome[0]
+print("")
+print("{first.id}: {first.length} bp, GC {first.seq.gc_content()}")
+print("  first 30 bases: {first.seq[:30]}")
+print("  reverse comp:   {first.seq.reverse_complement()[:30]}")
+
+# Find a motif — returns the index, or `missing` if absent (composes with `??`).
+print("  ATGCGT at:      {first.seq.find("ATGCGT")}")
+print("  GGGGGGGG at:    {first.seq.find("GGGGGGGG") ?? -1}")
+
+# k-mer analysis: the 5 most frequent 4-mers across the first sequence.
+print("  top 4-mers:     {first.seq.kmers(4).top(5)}")

@@ -1,0 +1,10 @@
+/target
+Cargo.lock
+
+# Local Claude Code settings (machine-specific)
+.claude/
+
+# Editor / OS scratch
+*.swp
+*~
+.DS_Store

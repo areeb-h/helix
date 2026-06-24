@@ -1,0 +1,6 @@
+nums = [4, 8, 15, 16, 23, 42]
+seq = dna("ATGCGCGCTAGC")
+df = read_csv("examples/data/patients.csv")
+print("sum={nums.sum()}, mean={nums.mean()}, sorted={nums.sort()}")
+print("gc={seq.gc_content()}, find_TAG={seq.find("TAG")}, top2mer={seq.kmers(2).top(2)}")
+print("rows={df.count()}, cols={df.columns()}")

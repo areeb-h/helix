@@ -1,0 +1,33 @@
+# Records — structured data with named fields (best of Python dicts + TS objects).
+#   helix examples/records.helix
+#
+# `{name: value, ...}` builds a record (ordered, identifier keys). Access fields
+# with `.name` (no parens). Methods still use `()`, so the two never collide.
+
+patient = {name: "Ada", age: 41, diagnosis: "flu"}
+print(patient)
+print("{patient.name} is {patient.age}, dx {patient.diagnosis}")
+
+# Records compose with everything — arrays of records, records of arrays:
+cohort = [
+    {name: "Ada", age: 41},
+    {name: "Ben", age: 38},
+    {name: "Cara", age: 55},
+]
+print("names: {cohort.map(it.name)}")
+print("mean age: {cohort.map(it.age).mean()}")
+
+# Nested records and field chains:
+study = {title: "trial", lead: {name: "Dr. Vance", lab: "B12"}}
+print("lead: {study.lead.name} in lab {study.lead.lab}")
+
+# Records play with `??` and interpolation. (Accessing a field that doesn't
+# exist is a compile-time error — typos are caught — so `??` defaults a field
+# whose *value* is missing.)
+config = {retries: 3, timeout: missing}
+print("retries {config.retries}, timeout {config.timeout ?? 30}")
+
+# A function returning a record (clean multiple results):
+fn stats(xs) = {mean: xs.mean(), std: xs.std(), n: xs.count()}
+s = stats([2, 4, 4, 4, 5, 5, 7, 9])
+print("mean {s.mean}, std {s.std}, n {s.n}")

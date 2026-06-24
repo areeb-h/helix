@@ -1,0 +1,17 @@
+# Demonstrates Helix's friendly errors. Uncomment one line at a time.
+
+# Immutable reassignment is caught with a fix hint:
+# x = 1
+# x = 2
+
+# Typos suggest the closest method:
+# xs = [1, 2, 3]
+# xs.maen()
+
+# No "truthiness" surprises:
+# if_value = 5 and true
+
+# Invalid DNA bases are rejected at the source position:
+# seq = dna("ATBX")
+
+print("Uncomment a line above to see Helix errors in action.")

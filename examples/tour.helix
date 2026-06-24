@@ -1,0 +1,40 @@
+# A short tour of Helix v0.1 — run with:  helix examples/tour.helix
+
+# --- Variables: immutable by default ---
+x = 42
+name = "Areeb"
+print("hello", name)
+
+# Mutability is explicit:
+mut counter = 0
+counter = counter + 1
+print("counter is", counter)
+
+# --- Arrays and statistics ---
+xs = [1, 2, 3, 4]
+print("mean:", xs.mean())
+print("std: ", xs.std())
+print("sum: ", xs.sum())
+print("normalized:", xs.normalize())
+print("sorted desc:", xs.sort().reverse())
+
+# Indexing, including from the end:
+print("first:", xs[0], "last:", xs[-1])
+
+# --- Multi-line dot-chains read top to bottom ---
+result = [10, 5, 8, 3, 9]
+    .sort()
+    .reverse()
+print("top scores:", result)
+
+# --- DNA sequences ---
+seq = dna("ATGCGTAC")
+print("sequence:    ", seq)
+print("gc content:  ", seq.gc_content())
+print("complement:  ", seq.complement())
+print("rev-comp:    ", seq.reverse_complement())
+print("3-mers:      ", seq.kmers(3))
+
+# --- Booleans use words, not symbols ---
+ready = true
+print("go?", ready and not false)

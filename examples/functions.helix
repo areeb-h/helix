@@ -1,0 +1,27 @@
+# User-defined functions — run with:  helix examples/functions.helix
+# A function body is an expression (no braces), so it composes with everything.
+
+fn square(x) = x * x
+fn area(w, h) = w * h
+fn normalize(xs) = (xs - xs.mean()) / xs.std()
+
+print("square 7:", square(7))
+print("area 3x4:", area(3, 4))
+print("normalized:", normalize([1, 2, 3, 4]))
+
+# Composes with if-expressions and comprehensions:
+fn grade(score) = if score >= 90 then "A" else "B"
+print("grade 95:", grade(95))
+print("grades: ", [95, 80, 99].map(grade(it)))
+
+# Recursion works — the function's own name stays in scope:
+fn fact(n) = if n <= 1 then 1 else n * fact(n - 1)
+print("5! =", fact(5))
+
+# A `=>` function is first-class: store it, then call it.
+double = x => x + x
+print("double 21:", double(21))
+
+# Functions handle missing the same way everything else does:
+fn safe_double(x) = x + x
+print("safe_double missing:", safe_double(missing))
