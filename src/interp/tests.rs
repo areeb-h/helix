@@ -955,3 +955,63 @@
             .message
             .contains("yes/no"));
     }
+
+    #[test]
+    fn dataframe_column_extracts_typed_values_and_nulls() {
+        // A string column comes back as `Str` values.
+        assert!(matches!(
+            last("bio.read_vcf(\"examples/data/variants.vcf\").column(\"chrom\").first()").unwrap(),
+            Value::Str(s) if &*s == "chr17"
+        ));
+        // The VCF `id` column has `.` entries → Polars nulls → `missing`; `drop_missing`
+        // leaves the 4 named variants of 6 (rows 3 and 5 are `.`).
+        assert!(matches!(
+            last("bio.read_vcf(\"examples/data/variants.vcf\").column(\"id\").drop_missing().count()")
+                .unwrap(),
+            Value::Int(4)
+        ));
+    }
+
+    #[test]
+    fn dataframe_join_suffixes_colliding_columns() {
+        // A self-join shares the non-key columns (gene, expression), which take a
+        // `_right` suffix; the key (sample_id) coalesces. 3 cols → 5 after the join.
+        let v = last(
+            "s = io.read_csv(\"examples/data/samples.csv\")\ns.join(s, sample_id).columns()",
+        )
+        .unwrap();
+        match v {
+            Value::Array(cols) => {
+                let names: Vec<String> = cols.iter().map(|c| format!("{c}")).collect();
+                assert!(names.contains(&"gene_right".to_string()), "got {names:?}");
+                assert_eq!(names.len(), 5, "got {names:?}");
+            }
+            other => panic!("expected an array of column names, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dataframe_with_replaces_columns_and_reads_variables() {
+        // `with` can replace an existing column and resolve a bare name to a Helix
+        // variable (the resolve_var path) rather than a column. ages * 10 > 400 for 5/8.
+        assert!(matches!(
+            last("factor = 10\np = io.read_csv(\"examples/data/patients.csv\")\np.with({age: age * factor}).where(age > 400).count()")
+                .unwrap(),
+            Value::Int(5)
+        ));
+    }
+
+    #[test]
+    fn dataframe_group_std_and_fully_filtered() {
+        // A grouped `std` aggregation runs (3 species → 3 rows).
+        assert!(matches!(
+            last("io.read_csv(\"examples/data/genes.csv\").group(species).std(expression).count()")
+                .unwrap(),
+            Value::Int(3)
+        ));
+        // A predicate excluding every row yields an empty frame, not an error.
+        assert!(matches!(
+            last("io.read_csv(\"examples/data/patients.csv\").where(age > 1000).count()").unwrap(),
+            Value::Int(0)
+        ));
+    }

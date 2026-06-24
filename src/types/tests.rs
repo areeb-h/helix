@@ -82,6 +82,16 @@
         assert!(emsg("xs = [1, 2]\nxs[\"a\"]").contains("cannot be indexed by a string"));
         assert!(emsg("undefinedvar").contains("not defined"));
         assert!(emsg("dna(5)").contains("expected a string"));
+        // namespaced builtins are type-checked: wrong argument types and arities are caught
+        assert!(emsg("stats.correlation(1, 2)").contains("array"));
+        assert!(emsg("bio.read_vcf(5)").contains("string"));
+        assert!(emsg("sqrt(1, 2)").contains("argument"));
+        // a bare namespace is not a value; a retired flat name points at its new path
+        assert!(emsg("x = stats").contains("namespace"));
+        assert!(emsg("read_vcf(\"x\")").contains("not a known function")); // retired flat name
+        // method typos suggest the right method; a wrong receiver type is rejected
+        assert!(emsg("\"abc\".gc_content()").contains("no method"));
+        assert!(emsg("xs = [1, 2]\nxs.summary().nope").contains("field"));
     }
 
     #[test]
