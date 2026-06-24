@@ -47,3 +47,15 @@ print("significant at 0.05:", result.p_value < 0.05)
 # like the rest of the math stdlib they broadcast over arrays and propagate `missing`.
 print("P(Z < 1.96):", normal_cdf(1.96))
 print("density at 0, 1, 2:", normal_pdf([0.0, 1.0, 2.0]))
+
+# Linear regression: fit `y ~ x` by ordinary least squares. The result carries the
+# line, the fit quality, and inference on the slope (standard error and p-value).
+fit = linear_regression(patients.column("age"), patients.column("resting_hr"))
+print("slope:    ", fit.slope)
+print("intercept:", fit.intercept)
+print("r_squared:", fit.r_squared)
+print("slope p:  ", fit.slope_p_value)
+
+# Predictions need no special method — broadcast the fitted line over any inputs.
+new_ages = [30.0, 45.0, 60.0]
+print("predicted hr:", fit.slope * new_ages + fit.intercept)

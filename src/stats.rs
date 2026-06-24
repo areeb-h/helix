@@ -237,6 +237,59 @@ pub fn welch_t_test(xs: &[f64], ys: &[f64]) -> Option<(f64, f64, f64)> {
     Some((t, df, p))
 }
 
+/// The result of an ordinary least-squares simple linear regression `y ~ x`:
+/// the fitted line plus the coefficient of determination and inference on the slope.
+pub struct LinFit {
+    pub slope: f64,
+    pub intercept: f64,
+    pub r_squared: f64,
+    pub slope_std_error: f64,
+    pub slope_p_value: f64,
+}
+
+/// Ordinary least-squares fit of `y = intercept + slope * x`, with the slope's
+/// standard error and two-sided p-value (Student's t on `n - 2` degrees of freedom).
+/// Returns `None` unless there are at least three points and both `x` and `y` have
+/// nonzero variance — the conditions under which the slope and its inference are
+/// defined. Precondition: `xs` and `ys` have equal length.
+pub fn linear_regression(xs: &[f64], ys: &[f64]) -> Option<LinFit> {
+    let n = xs.len();
+    if n < 3 {
+        return None; // need n - 2 >= 1 residual degrees of freedom for inference
+    }
+    let mx = mean(xs);
+    let my = mean(ys);
+    let mut sxy = 0.0;
+    let mut sxx = 0.0;
+    let mut syy = 0.0;
+    for (&x, &y) in xs.iter().zip(ys) {
+        let dx = x - mx;
+        let dy = y - my;
+        sxy += dx * dy;
+        sxx += dx * dx;
+        syy += dy * dy;
+    }
+    if sxx == 0.0 || syy == 0.0 {
+        return None; // a constant predictor or response has no relationship to fit
+    }
+    let slope = sxy / sxx;
+    let intercept = my - slope * mx;
+    let r_squared = (sxy * sxy) / (sxx * syy);
+    // Residual sum of squares and the slope's standard error.
+    let rss = syy - slope * sxy; // == syy * (1 - r_squared)
+    let resid_var = rss / (n as f64 - 2.0);
+    let slope_std_error = (resid_var / sxx).sqrt();
+    // Two-sided p-value for H0: slope = 0, via the t survival function.
+    let slope_p_value = if slope_std_error == 0.0 {
+        0.0 // a perfect fit: the slope is infinitely well determined
+    } else {
+        let t = slope / slope_std_error;
+        let df = n as f64 - 2.0;
+        betai(df / 2.0, 0.5, df / (df + t * t))
+    };
+    Some(LinFit { slope, intercept, r_squared, slope_std_error, slope_p_value })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +377,26 @@ mod tests {
         // Too few values, or both samples constant → undefined.
         assert_eq!(welch_t_test(&[1.0], &y), None);
         assert_eq!(welch_t_test(&[2.0, 2.0], &[2.0, 2.0]), None);
+    }
+
+    #[test]
+    fn linear_regression_matches_a_textbook_fit() {
+        // x = 1..5, y = 2,4,5,4,5. R's lm gives intercept 2.2, slope 0.6, R^2 0.6,
+        // and a slope p-value of 0.1240.
+        let x = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = [2.0, 4.0, 5.0, 4.0, 5.0];
+        let f = linear_regression(&x, &y).unwrap();
+        assert!(close(f.slope, 0.6, 1e-9), "slope = {}", f.slope);
+        assert!(close(f.intercept, 2.2, 1e-9), "intercept = {}", f.intercept);
+        assert!(close(f.r_squared, 0.6, 1e-9), "r2 = {}", f.r_squared);
+        assert!(close(f.slope_std_error, 0.282_842_7, 1e-6), "se = {}", f.slope_std_error);
+        assert!(close(f.slope_p_value, 0.1240, 2e-3), "p = {}", f.slope_p_value);
+        // A perfect line: slope 2, intercept 0, R^2 = 1, p-value 0.
+        let perfect = linear_regression(&x, &[2.0, 4.0, 6.0, 8.0, 10.0]).unwrap();
+        assert!(close(perfect.slope, 2.0, 1e-9) && close(perfect.r_squared, 1.0, 1e-12));
+        assert!(close(perfect.slope_p_value, 0.0, 1e-12));
+        // Too few points, or no variance in x / y → undefined.
+        assert!(linear_regression(&[1.0, 2.0], &[1.0, 2.0]).is_none());
+        assert!(linear_regression(&[2.0, 2.0, 2.0], &y).is_none());
     }
 }

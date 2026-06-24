@@ -359,6 +359,46 @@ impl super::Interp {
                     .hint("two constant samples have no variance to compare.")),
                 }
             }
+            "linear_regression" => {
+                arity(name, &args, 2, line, col)?;
+                // OLS fit of `y ~ x` → {slope, intercept, r_squared, slope_std_error,
+                // slope_p_value}. `missing` in either series propagates.
+                let xs = num_array(name, &args[0], line, col)?;
+                let ys = num_array(name, &args[1], line, col)?;
+                let (xs, ys) = match (xs, ys) {
+                    (Some(xs), Some(ys)) => (xs, ys),
+                    _ => return Ok(Value::Missing),
+                };
+                if xs.len() != ys.len() {
+                    return Err(HelixError::new(
+                        format!(
+                            "`linear_regression` needs two equal-length arrays, got {} and {}",
+                            xs.len(),
+                            ys.len()
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+                match crate::stats::linear_regression(&xs, &ys) {
+                    Some(f) => {
+                        let fields = vec![
+                            ("slope".to_string(), Value::Float(f.slope)),
+                            ("intercept".to_string(), Value::Float(f.intercept)),
+                            ("r_squared".to_string(), Value::Float(f.r_squared)),
+                            ("slope_std_error".to_string(), Value::Float(f.slope_std_error)),
+                            ("slope_p_value".to_string(), Value::Float(f.slope_p_value)),
+                        ];
+                        Ok(Value::Record(Rc::new(fields)))
+                    }
+                    None => Err(HelixError::new(
+                        "linear regression is undefined: need at least three points and variance in both x and y",
+                        line,
+                        col,
+                    )
+                    .hint("a constant predictor or response has no line to fit.")),
+                }
+            }
             _ => {
                 let mut err =
                     HelixError::new(format!("`{}` is not a known function", name), line, col);

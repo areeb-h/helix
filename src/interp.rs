@@ -725,8 +725,8 @@ pub(crate) const BUILTIN_FNS: &[&str] = &[
     "ones", "eye", "sqrt", "cbrt", "abs", "exp", "ln", "log10", "log2", "log", "sin", "cos", "tan",
     "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "floor", "ceil", "round", "trunc",
     "sign", "degrees", "radians", "hypot", "min", "max", "erf", "normal_cdf", "normal_pdf",
-    "correlation", "t_test", "to_array", "to_dataframe", "to_tensor", "parse_json", "to_json",
-    "http_get",
+    "correlation", "t_test", "linear_regression", "to_array", "to_dataframe", "to_tensor",
+    "parse_json", "to_json", "http_get",
 ];
 
 /// Apply a scalar operation across a value, broadcasting over arrays and

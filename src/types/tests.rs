@@ -63,6 +63,8 @@
         // Inferential: `t_test` is a record; the normal functions broadcast like math.
         ok("r = t_test([1.0, 2.0, 3.0], [2.0, 3.0, 4.0])\nr.statistic + r.df + r.p_value");
         ok("normal_cdf(1.96) + erf(1.0) + normal_pdf(0.0)");
+        // `linear_regression` is a record; predictions broadcast the fitted line.
+        ok("f = linear_regression([1.0, 2.0, 3.0], [2.0, 4.0, 5.0])\nf.slope * 6.0 + f.intercept");
     }
 
     #[test]

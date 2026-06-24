@@ -395,6 +395,24 @@ fn t_test_on_constant_samples_is_a_clean_error() {
 }
 
 #[test]
+fn linear_regression_fits_and_predicts() {
+    // OLS fit of a textbook dataset (R: intercept 2.2, slope 0.6, R^2 0.6), with
+    // predictions recovered by broadcasting `slope * x + intercept`.
+    let src = "x = [1.0, 2.0, 3.0, 4.0, 5.0]\ny = [2.0, 4.0, 5.0, 4.0, 5.0]\nf = linear_regression(x, y)\nprint(f.slope)\nprint(f.intercept)\nprint(f.r_squared)\nprint(f.slope * 6.0 + f.intercept)\n";
+    let (out, stderr, code) = run_source(src, &[], "lm");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "0.6\n2.2\n0.6\n5.8"); // predicted y at x = 6
+}
+
+#[test]
+fn linear_regression_without_variance_is_a_clean_error() {
+    let src = "print(linear_regression([1, 1, 1], [1, 2, 3]))\n";
+    let (_out, stderr, code) = run_source(src, &[], "lmerr");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("linear regression is undefined"), "stderr:\n{stderr}");
+}
+
+#[test]
 fn column_extracts_values_for_statistics() {
     // `df.column(name)` materializes a column as an array, so the array statistics
     // apply directly to loaded data. Polars nulls become `missing`, so `drop_missing`

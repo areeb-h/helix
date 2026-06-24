@@ -182,6 +182,10 @@ estimators they require.
 - [x] Inferential: `t_test(a, b)` — Welch's two-sample t-test → `{statistic, df,
       p_value}` — and the normal distribution functions `normal_cdf`/`normal_pdf`/`erf`
       (broadcasting math). Verified against R's reference values.
+- [x] `linear_regression(x, y)` — ordinary least-squares fit → `{slope, intercept,
+      r_squared, slope_std_error, slope_p_value}` (slope inference on `n - 2` df).
+      Predictions need no special method: broadcast `fit.slope * x + fit.intercept`.
+- [ ] Multiple regression (several predictors) via the tensor engine's `solve`/`inv`.
 - [ ] More distributions: Student's-t / binomial / chi-squared pdf/cdf/quantile, and
       one-sample / paired t-tests, on the same special-functions layer.
 - [ ] Whole-frame aggregation shorthands (`df.median(col)`, `df.correlation(c1, c2)`)
