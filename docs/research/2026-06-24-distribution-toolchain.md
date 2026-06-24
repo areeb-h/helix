@@ -5,9 +5,9 @@ Cited research grounding the toolchain/version-management decisions in
 Method: 5-angle fan-out (108 agents), 26 primary sources, 122 candidate claims →
 **25 verified by 3-vote adversarial check, 0 refuted**, synthesized to 6 findings.
 
-**The throughline:** for a single self-contained CLI, adopt **Go's auto-toolchain
-ergonomics, uv's managed-runtime mechanics, Rust's edition/channel stability model,
-and Sigstore-based provenance — from day one.**
+**The overarching recommendation:** for a single self-contained CLI, adopt **Go's
+auto-toolchain ergonomics, uv's managed-runtime mechanics, Rust's edition/channel
+stability model, and Sigstore-based provenance, from day one.**
 
 ## Verified findings (all 3-0)
 
@@ -62,7 +62,7 @@ implicit-by-default download on first use, with an explicit subcommand to manage
 and a manual opt-out.**
 *Source:* [uv python versions](https://docs.astral.sh/uv/concepts/python-versions/).
 
-### 6. Managed Python — the path-rewrite fix that kills "can't find libpython"
+### 6. Managed Python — the path-rewrite fix that eliminates "can't find libpython"
 python-build-standalone distributions are highly portable but **embed absolute
 build-time paths** (in `_sysconfigdata_*.py`, the config `Makefile`, and
 `PYTHON.json` — e.g. `/build`, `/install`). A freshly extracted distribution is **not
@@ -74,11 +74,11 @@ fully move-anywhere relocatable (macOS dylib install names, `pyvenv.cfg`,
 *Sources:* [python-build-standalone docs](https://gregoryszorc.com/docs/python-build-standalone/main/),
 [uv python versions](https://docs.astral.sh/uv/concepts/python-versions/).
 
-## Honest gaps — NOT resolved by verified claims
+## Open gaps — NOT resolved by verified claims
 
 The verification pass produced **no surviving claims** for four areas the brief
-asked about. These must **not** be treated as decided; they need a follow-up pass
-(relevant sources *were* fetched — listed below — but their claims didn't reach the
+addressed. These must **not** be treated as decided; they require a follow-up pass
+(relevant sources *were* fetched — listed below — but their claims did not reach the
 verified top-25):
 
 1. **curl|sh install security matrix** — the criticisms and safer alternatives, and
@@ -104,16 +104,16 @@ verified top-25):
 
 A focused follow-up (111 agents, 28 sources) closed the gaps:
 
-### A. Install delivery — harden curl|sh, don't abandon it
+### A. Install delivery — harden curl|sh rather than abandon it
 `curl … | sh` is the **de-facto primary pattern** (uv, rustup, Deno, Bun) and users
-expect it — but ship it **hardened**, plus alternatives:
+expect it, but it should ship **hardened**, with alternatives:
 - **In the script:** TLS-only, `set -euf`, idempotent, fail closed on partial
   download; verify a checksum/signature before executing the binary.
 - **Offer an inspect-before-run path** (download → read → run) and a **direct binary
   download**, prominently.
 - **Signature verification:** **minisign sidecar** (via cargo-binstall) + Sigstore
   attestations. *Refuted:* piped `sget … | bash` (sget is archived) — **adopt the
-  pattern, not that tool**.
+  pattern, not that tool.**
 - **Broad package-manager matrix:** Homebrew, WinGet, Scoop, Docker.
 - **Reject bare `curl | bash` with no verification and no alternative.**
 *Sources:* [uv install](https://docs.astral.sh/uv/getting-started/installation/),
@@ -164,8 +164,8 @@ ecosystem forms.
   predictable backlash.)
 - **Binary size (the core is ~65 MB):** apply `strip = true`, `panic = "abort"`
   (already set), `lto = "fat"` + `codegen-units = 1` (already set). **Do NOT use
-  `opt-level = "z"`** — it trades the speed that is Helix's whole point. `strip` is the
-  free win (symbols only, no perf cost).
+  `opt-level = "z"`** — it sacrifices the runtime speed that is central to Helix.
+  `strip` removes symbols only and has no performance cost.
 - **Dirs/uninstall/PATH:** follow **XDG base directories** (+ platform equivalents:
   macOS `~/Library`, Windows `%LOCALAPPDATA%`) for cached managed runtimes; ship a
   clean **uninstall** (binary + caches + managed Python); manage PATH across bash/zsh/

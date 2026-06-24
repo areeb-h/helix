@@ -1,34 +1,35 @@
 # ADR 0001 — Missing data & absence
 
-- **Status:** proposed
+- **Status:** Proposed
 - **Date:** 2026-06-21
 - **Deciders:** Areeb + Claude
 - **Research:** [Domain 1](../research/2026-06-21-foundational-design.md#domain-1--missing-data--absence) (high confidence, 3-0 verified)
 
 ## Context
 
-A scientific language lives or dies on how it represents "no value." This is the
-single most consequential and least reversible decision: it touches every scalar,
-every column, every aggregation. Helix's constraints — *no surprises*, *one
-obvious way*, *strong static typing*, *zero-copy columnar storage* — sharply
-narrow the options.
+The representation of "no value" is among the most consequential and least
+reversible decisions in a scientific language: it touches every scalar, every
+column, and every aggregation. Helix's constraints — *no surprises*, *one obvious
+way*, *strong static typing*, *zero-copy columnar storage* — sharply narrow the
+options.
 
-There are two physical worlds that must feel like one to the user:
-- **Scalars** want a compile-time-checked tagged absence (Option/Maybe).
-- **Columns** *need* a runtime validity bitmap for zero-copy/SIMD efficiency.
+Two physical representations must present a single semantics to the user:
+- **Scalars** require a compile-time-checked tagged absence (Option/Maybe).
+- **Columns** require a runtime validity bitmap for zero-copy/SIMD efficiency.
 
-## What others did, and what went wrong
+## Prior approaches and their documented shortcomings
 
 | Approach | Who | Documented pain |
 |---|---|---|
 | Null references | ALGOL W → Java, C, … | Hoare's "billion-dollar mistake": unchecked deref → crashes/CVEs |
 | Reuse float `NaN` as missing | pandas (default) | int/bool columns can't hold it → silent **int→float coercion**; `NaN != NaN` breaks equality |
 | Multiple per-type sentinels | pandas `NaN`/`None`/`NaT` | three incompatible markers; "which one?" lore |
-| Dedicated `missing` value | Julia, R `NA`, SQL `NULL` | battle-tested; propagation is a *policy* the caller must understand |
-| Validity bitmap | Apache Arrow | the right columnar substrate (1 = present, 0 = null) |
+| Dedicated `missing` value | Julia, R `NA`, SQL `NULL` | well-established; propagation is a *policy* the caller must understand |
+| Validity bitmap | Apache Arrow | the appropriate columnar substrate (1 = present, 0 = null) |
 
-Hoare's own prescribed fix (1965!): represent absence as a **tagged union with a
-discrimination test**, checked at compile time. That is the Option/Maybe pattern.
+Hoare's prescribed remedy (1965) is to represent absence as a **tagged union with
+a discrimination test**, checked at compile time. This is the Option/Maybe
+pattern.
 
 ## Decision
 
@@ -36,7 +37,7 @@ discrimination test**, checked at compile time. That is the Option/Maybe pattern
 representations chosen by the compiler.**
 
 - **Scalars:** absence is a tagged union (an `Option`-equivalent). Inference
-  hides the type; the type checker *forces* you to handle the missing branch.
+  hides the type; the type checker *requires* handling of the missing branch.
 - **Columns:** absence is physically the **Arrow validity bitmap** — zero-copy,
   SIMD-friendly, ecosystem-interoperable.
 - `missing` is its **own value, distinct from float `NaN`**, so an `Int` column
@@ -70,22 +71,24 @@ column.drop_missing().mean()  # opt out, visibly
 
 ## Rationale
 
-- Satisfies *no surprises* (Hoare-safe, compile-time-forced handling) **and**
-  *zero-copy* (Arrow bitmap) simultaneously — the two-world tension is resolved
-  by separating representation from semantics.
-- Distinct `missing` ≠ `NaN` kills pandas' int→float coercion class of bugs
-  outright.
+- Satisfies *no surprises* (Hoare-safe, compile-time-enforced handling) **and**
+  *zero-copy* (Arrow bitmap) simultaneously — the tension between the two
+  representations is resolved by separating representation from semantics.
+- A distinct `missing` (not equal to `NaN`) eliminates pandas' class of
+  int→float coercion bugs entirely.
 - Propagate-by-default aggregation is the conservative choice: a missing result
-  is loud and correct; silent skipping (R/pandas default) hides data loss.
+  is explicit and correct, whereas silent skipping (the R/pandas default) hides
+  data loss.
 
 ## Rejected alternatives
 
 - **Null/nil references** — Hoare's mistake; defeats compile-time safety.
 - **Float `NaN` as the marker** — type widening, no int/bool missing, conflates
   "not a number" with "no value."
-- **Multiple per-type sentinels** — the pandas mess; violates one obvious way.
-- **Two unrelated mechanisms for scalars vs columns** — reproduces the split;
-  we expose one semantics with two representations instead.
+- **Multiple per-type sentinels** — the pandas approach; violates one obvious
+  way.
+- **Two unrelated mechanisms for scalars vs columns** — reproduces the split.
+  Helix exposes one semantics with two representations instead.
 
 ## Consequences
 

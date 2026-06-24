@@ -5,9 +5,9 @@
 > DataFrame/Tensor sharing and a bundled interpreter are planned (see the roadmap at
 > the bottom). Design rationale: [ADR 0008](adr/0008-cpython-interop.md).
 
-Helix can't (yet) replace NumPy, pysam, scikit-learn, or PyTorch — so it calls
-them. Write your pipeline in Helix and reach into Python only where a library is
-needed.
+Helix does not yet replace NumPy, pysam, scikit-learn, or PyTorch; it calls them
+instead. A pipeline is written in Helix, reaching into Python only where a library
+is needed.
 
 ## Enabling it
 
@@ -19,11 +19,11 @@ cargo build --features python          # or: cargo run --features python <script
 ```
 
 A Python interpreter must be available on the system (the build links against it),
-and any Python packages you import (`numpy`, `pysam`, …) must be installed in that
+and any imported Python packages (`numpy`, `pysam`, …) must be installed in that
 environment (`pip install numpy`). The standard library (`math`, `statistics`,
-`json`, …) always works.
+`json`, …) is always available.
 
-If you use `python` in a Helix built **without** the feature, you get a clear error:
+Using `python` in a Helix built **without** the feature produces a clear error:
 
 ```
 error: Helix was built without Python support
@@ -43,8 +43,8 @@ print(stats.mean([1.0, 2.0, 3.0]))    # 2.0
 ```
 
 `import python.<module>` maps to the Python module `<module>`; submodules use dots
-(`import python.os.path as p`). The alias defaults to the last segment when you omit
-`as`.
+(`import python.os.path as p`). The alias defaults to the last segment when `as` is
+omitted.
 
 ## Calling functions and reading attributes
 
@@ -59,8 +59,8 @@ print(m.floor(3.7))         # 3
 
 ## What converts, and what stays opaque
 
-This is the most important rule to understand. **Immutable scalars convert to
-native Helix values; everything else stays an opaque Python handle.**
+The governing rule is as follows. **Immutable scalars convert to native Helix
+values; everything else remains an opaque Python handle.**
 
 | Python value | In Helix |
 |---|---|
@@ -71,9 +71,10 @@ native Helix values; everything else stays an opaque Python handle.**
 | `None` | `missing` |
 | `list`, `dict`, objects, NumPy arrays, … | **opaque `PyObject`** |
 
-Why: auto-copying a Python `list` into a native Helix array would silently lose the
-list's identity and mutability (a lesson learned the hard way by other languages —
-see the ADR). So containers stay opaque until you explicitly ask for a copy:
+Rationale: auto-copying a Python `list` into a native Helix array would silently
+lose the list's identity and mutability (a problem documented in other languages;
+see the ADR). Containers therefore remain opaque until a copy is explicitly
+requested:
 
 ```helix
 builtins = python.import("builtins")
@@ -83,9 +84,9 @@ print(to_array(nums))       # [0, 1, 2, 3, 4]      — explicit materialization
 print(to_array(nums).sum()) # 10                   — now native methods work
 ```
 
-`to_array(x)` turns any Python iterable (or an already-native array) into a Helix
-`Array`. Going the other way is automatic: Helix `Int`/`Float`/`Bool`/`String`/
-`missing`/`Array` convert to Python when you pass them as arguments.
+`to_array(x)` converts any Python iterable (or an already-native array) into a Helix
+`Array`. The reverse direction is automatic: Helix `Int`/`Float`/`Bool`/`String`/
+`missing`/`Array` convert to Python when passed as arguments.
 
 ## DataFrames (zero-copy)
 
@@ -95,9 +96,9 @@ needs the Python `polars` package (`pip install polars`).
 
 - **Helix → Python:** pass a Helix DataFrame to any Python function and it arrives
   as a `polars.DataFrame`.
-- **Python → Helix:** `to_dataframe(x)` brings a Python `polars.DataFrame` back as a
-  **first-class Helix DataFrame** — the normal lazy verbs (`where`/`select`/`sort`/
-  `group`/`count`) then work on it.
+- **Python → Helix:** `to_dataframe(x)` returns a Python `polars.DataFrame` as a
+  **first-class Helix DataFrame** — the standard lazy verbs (`where`/`select`/`sort`/
+  `group`/`count`) then operate on it.
 
 ```helix
 df = read_csv("examples/data/patients.csv")     # a Helix DataFrame
@@ -111,8 +112,9 @@ back = to_dataframe(pl.concat([df]))             # back is a Helix DataFrame aga
 print(back.where(age > 40).select(name))         # native verbs work on it
 ```
 
-The missing-data model lines up for free: Helix's `missing` is Arrow's validity
-bitmap, which is exactly what polars uses — so nulls round-trip with no translation.
+The missing-data models align directly: Helix's `missing` is Arrow's validity
+bitmap, which is the same representation polars uses, so nulls round-trip with no
+translation.
 
 ## Tensors (NumPy)
 
@@ -121,8 +123,8 @@ needs the Python `numpy` package (`pip install numpy`).
 
 - **Helix → Python:** pass a Tensor to a Python function and it arrives as a NumPy
   `float64` array.
-- **Python → Helix:** `to_tensor(x)` brings a NumPy `f64` array back as a native
-  Helix Tensor (the verbs `shape`/`reshape`/`matmul`/`sum`/… then work on it).
+- **Python → Helix:** `to_tensor(x)` returns a NumPy `f64` array as a native Helix
+  Tensor (the verbs `shape`/`reshape`/`matmul`/`sum`/… then operate on it).
 
 ```helix
 t = tensor([[1.0, 2.0], [3.0, 4.0]])
@@ -136,9 +138,9 @@ print(t.matmul(inv))                      # native verb: ~ the identity matrix
 
 Unlike DataFrames, **Tensor interop copies** at the boundary (it does not share
 buffers): Helix tensors are immutable and shared, whereas NumPy arrays are mutable,
-so each side gets an independent buffer — which keeps Helix's immutability guarantee
-intact. The copy is fine under the "cross the boundary once" rule. Only `f64` arrays
-are supported (Helix tensors are `f64`).
+so each side receives an independent buffer, preserving Helix's immutability
+guarantee. The copy is acceptable under the "cross the boundary once" rule. Only
+`f64` arrays are supported (Helix tensors are `f64`).
 
 ## Errors
 
@@ -156,13 +158,13 @@ error: python error: ModuleNotFoundError: No module named 'no_such_module_xyz'
   |     ^
 ```
 
-(There is no `try`/`catch` in Helix yet, so a Python error stops the program rather
-than being recoverable. That will change when Helix gains error handling.)
+(Helix does not yet provide `try`/`catch`, so a Python error stops the program
+rather than being recoverable. This will change when Helix gains error handling.)
 
 ## Performance: cross the boundary once
 
-Each Helix→Python call has overhead (and holds Python's GIL). Don't call a tiny
-Python function in a tight Helix loop:
+Each Helix→Python call has overhead and holds Python's GIL. A small Python function
+should not be called in a tight Helix loop:
 
 ```helix
 # Slow — crosses the language boundary ten million times:
@@ -172,8 +174,9 @@ for-style: ten_million_values.map(x => py_fn(x))
 py_fn(ten_million_values)
 ```
 
-Many scientific libraries do their heavy work in native C/Rust and release the GIL
-during it, so a single call over a big array is cheap; the cost is per-call.
+Many scientific libraries perform their heavy work in native C/Rust and release the
+GIL during it, so a single call over a large array is inexpensive; the cost is
+per-call.
 
 ## A complete example
 
@@ -199,9 +202,9 @@ Run it with `cargo run --features python examples/python/interop.helix`.
 
 - **Truly zero-copy (buffer-sharing) Tensors.** Tensor↔NumPy works now (above) but
   *copies*; a future DLPack path could share GPU/large buffers where the mutability
-  semantics allow it. (`to_array` also copies plain Python lists — fine, lists aren't
+  semantics allow it. (`to_array` also copies plain Python lists, since lists are not
   Arrow-backed.)
-- **A bundled Python.** Today the feature build links the system Python; the plan is
-  to bundle a relocatable CPython so a Python-enabled Helix ships self-contained.
+- **A bundled Python.** The current feature build links the system Python; the plan
+  is to bundle a relocatable CPython so a Python-enabled Helix ships self-contained.
 - **Recoverable errors** (needs `try`/`catch`), and **Python → Helix** (calling
   Helix from Python for performance-critical sections).

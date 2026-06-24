@@ -1,27 +1,28 @@
 # ADR 0007 — Tensor backend
 
-- **Status:** proposed
+- **Status:** Proposed
 - **Date:** 2026-06-21
 - **Deciders:** Areeb + Claude
 
 ## Context
 
 Phase 4 adds a native `Tensor` type for dense n-dimensional numeric arrays —
-the substrate for linear algebra, scientific computing, and (later) ML. Like the
-DataFrame decision (ADR 0003), the principle is **don't reinvent**: pick a mature
-engine for the hard parts (n-dim storage, broadcasting, BLAS, later GPU/autodiff)
-and keep a clean Helix surface API on top.
+the substrate for linear algebra, scientific computing, and (later) ML. As with the
+DataFrame decision (ADR 0003), the principle is **do not reinvent**: select a mature
+engine for the difficult parts (n-dim storage, broadcasting, BLAS, later GPU/autodiff)
+and maintain a clean Helix surface API on top.
 
 The roadmap is explicit: **Phase 4 = tensors (CPU), Phase 6 = GPU**, with ML in
-between. So the tensor surface must be stable across a CPU-now / GPU-later split.
+between. The tensor surface must therefore remain stable across a CPU-now /
+GPU-later split.
 
 ## Options
 
 | Backend | What it gives | Cost |
 |---|---|---|
-| **ndarray** | Mature pure-Rust n-dim arrays, NumPy-like, optional BLAS, great ergonomics | CPU only; no autodiff/GPU |
-| **candle-core** | Tensors with CPU/CUDA/Metal + autodiff; built for ML/LLMs | Heavier, `Result`-everywhere + `Device`/`DType` ceremony; friction for simple scientific use |
-| **burn** | Full DL framework, backend-agnostic, autodiff | Framework-y; overkill for a language's base tensor type |
+| **ndarray** | Mature pure-Rust n-dim arrays, NumPy-like, optional BLAS, strong ergonomics | CPU only; no autodiff/GPU |
+| **candle-core** | Tensors with CPU/CUDA/Metal + autodiff; built for ML/LLMs | Heavier; `Result`-everywhere plus `Device`/`DType` ceremony; friction for simple scientific use |
+| **burn** | Full DL framework, backend-agnostic, autodiff | Framework-oriented; excessive for a language's base tensor type |
 
 ## Decision
 
@@ -38,29 +39,29 @@ GPU + autodiff backend**, plugged in behind the same API.
 
 ## Rationale
 
-- **Ergonomics for the actual audience.** Most scientific tensor use isn't NN
-  training — it's array math and linear algebra. ndarray's NumPy-like surface fits
+- **Ergonomics for the intended audience.** Most scientific tensor use is not NN
+  training; it is array math and linear algebra. The ndarray NumPy-like surface fits
   that far better than candle's `Device`/`DType`/`Result` ceremony, which would
-  make `tensor([[1,2],[3,4]]).sum()` needlessly heavy.
-- **Ships now, pure Rust.** No system deps (BLAS is optional), fast to build,
-  composes with the existing immutable `Rc`-shared value model.
+  make `tensor([[1,2],[3,4]]).sum()` unnecessarily heavy.
+- **Ships now, pure Rust.** No system dependencies (BLAS is optional), fast to build,
+  and composes with the existing immutable `Rc`-shared value model.
 - **The surface API is backend-independent.** `shape`/`reshape`/`matmul`/
   elementwise ops mean the same thing on CPU or GPU, so a later candle/GPU backend
-  slots in behind them — exactly the Phase 4→6 split the roadmap already commits to.
-- **Autodiff isn't needed yet.** It becomes load-bearing only for ML *training*
+  fits behind them — precisely the Phase 4→6 split the roadmap already commits to.
+- **Autodiff is not required yet.** It becomes essential only for ML *training*
   (a later phase); that requirement — not general tensor math — is what may force
-  candle/burn, and we'll adopt it *when* it does, not speculatively.
+  candle/burn, and it will be adopted *when* required, not speculatively.
 
 ## Rejected alternatives
 
-- **candle-core now** — autodiff/GPU are real, but the ceremony taxes every simple
-  tensor op today, for a capability Phase 4 doesn't need. Adopt for Phase 6.
-- **burn now** — a whole DL framework as the base numeric type is overkill and
-  framework-coupling we don't want yet.
-- **Hand-rolled tensor** — exactly the "don't reinvent vectorization/BLAS" mistake
-  we avoided for DataFrames; rejected.
-- **Reusing Polars/Arrow for tensors** — columnar ≠ dense n-dim numeric; wrong
-  data model.
+- **candle-core now** — autodiff/GPU are valuable, but the ceremony taxes every simple
+  tensor op today, for a capability Phase 4 does not need. Adopt for Phase 6.
+- **burn now** — a full DL framework as the base numeric type is excessive and
+  introduces framework coupling that is premature.
+- **Hand-written tensor** — precisely the "do not reinvent vectorization/BLAS"
+  mistake avoided for DataFrames; rejected.
+- **Reusing Polars/Arrow for tensors** — columnar storage is not dense n-dim
+  numeric storage; the wrong data model.
 
 ## Consequences
 
@@ -69,12 +70,12 @@ GPU + autodiff backend**, plugged in behind the same API.
   stdlib (`broadcast_unary`) extend to tensors.
 - A future GPU backend must preserve identical surface semantics (a CPU and GPU
   `matmul` must agree to numerical tolerance).
-- `f64`-only for now; mixed dtypes (`f32`, int tensors) are a later addition.
+- `f64`-only for now; mixed dtypes (`f32`, integer tensors) are a later addition.
 
 ## Open questions
 
-- When ML training lands, do we add candle as a *second* backend (CPU stays
-  ndarray, GPU/autodiff via candle) or migrate wholesale? Surface stability is
-  what buys us the option.
-- Broadcasting/dtype-promotion rules between `Tensor` and `Array`/scalars — keep
-  them identical to the arithmetic broadcasting already shipped for arrays.
+- When ML training lands, whether to add candle as a *second* backend (CPU remains
+  ndarray, GPU/autodiff via candle) or migrate wholesale. Surface stability
+  preserves the option.
+- Broadcasting and dtype-promotion rules between `Tensor` and `Array`/scalars —
+  to remain identical to the arithmetic broadcasting already shipped for arrays.

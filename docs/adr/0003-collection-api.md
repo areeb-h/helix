@@ -1,6 +1,6 @@
 # ADR 0003 — Collection API unity
 
-- **Status:** proposed
+- **Status:** Proposed
 - **Date:** 2026-06-21
 - **Deciders:** Areeb + Claude
 - **Research:** [Domain 3](../research/2026-06-21-foundational-design.md#domain-3--collection-api-unity--one-obvious-way) (pandas anti-pattern high/3-0; synthesis medium)
@@ -8,18 +8,18 @@
 ## Context
 
 "One obvious way" is most at risk in the collection API, because Helix has four
-collection-like types — `Array`, `DataFrame`, `Tensor`, `Dna` — and the
-temptation is to give each its own bespoke verbs. pandas is the cautionary tale:
-`loc`/`iloc`/`at`/chained indexing, view-vs-copy ambiguity, per-dtype quirks. The
-research **explicitly affirms** Helix's already-shipped `where == filter`
-decision as "the correct governing law of the whole collection API."
+collection-like types — `Array`, `DataFrame`, `Tensor`, `Dna` — and the natural
+temptation is to give each its own bespoke verbs. pandas illustrates the hazard:
+`loc`/`iloc`/`at`/chained indexing, view-vs-copy ambiguity, and per-dtype quirks.
+The research **explicitly affirms** Helix's already-shipped `where == filter`
+decision as the correct governing principle of the entire collection API.
 
-## What others did, and what went wrong
+## Prior approaches and their documented shortcomings
 
-- **pandas** — multiple overlapping indexers and sentinels; users can't predict
-  view vs copy or whether an assignment sticks → silent bugs, lore-heavy learning
-  curve. The archetypal "many obvious ways" failure.
-- **dplyr / LINQ / Rust iterators** — consistent verb vocabularies that compose;
+- **pandas** — multiple overlapping indexers and sentinels; users cannot predict
+  view vs copy or whether an assignment persists, producing silent bugs and a
+  lore-heavy learning curve. The archetypal "many obvious ways" failure.
+- **dplyr / LINQ / Rust iterators** — consistent, composable verb vocabularies;
   the positive model (medium confidence — synthesis, not independently verified).
 - **Julia multiple dispatch** — one generic API across array types via dispatch.
 - **Arrow compute kernels** — a uniform columnar operation substrate.
@@ -39,9 +39,9 @@ seq.where(it == "G").len()                      # Dna
 ```
 
 - **One verb per concept, everywhere.** `where == filter` already collapsed to
-  one operation; extend the discipline so `map`, `reduce`, `group`, `sort`,
-  `select` each have exactly one spelling across all four types. No `loc`/`iloc`
-  proliferation, ever.
+  one operation; this discipline extends so that `map`, `reduce`, `group`,
+  `sort`, and `select` each have exactly one spelling across all four types,
+  without `loc`/`iloc` proliferation.
 - **Abstraction = static traits.** Each type implements the protocol; verbs
   resolve to type-specific implementations (Arrow kernels for DataFrame, SIMD for
   Tensor) behind one identical surface. Static dispatch suits the JIT/GPU
@@ -55,12 +55,12 @@ seq.where(it == "G").len()                      # Dna
 
 ## Rationale
 
-- Directly extends a decision the research validated; keeps the language's most
-  user-facing surface predictable.
-- Static traits give Julia-like "one API across types" while preserving static
+- Directly extends a decision the research validated, and keeps the language's
+  most user-facing surface predictable.
+- Static traits provide Julia-like "one API across types" while preserving static
   guarantees and JIT specialization.
-- Lazy-by-default on big collections is where the zero-copy/lazy principle pays
-  off, without a second syntax.
+- Lazy-by-default on large collections is where the zero-copy/lazy principle
+  delivers its benefit, without a second syntax.
 
 ## Rejected alternatives
 
@@ -70,9 +70,9 @@ seq.where(it == "G").len()                      # Dna
   keep the discipline.
 - **Untyped duck-typed protocol** — forfeits static guarantees and JIT
   specialization.
-- **Dynamic multiple dispatch (Julia-style) as the core mechanism** — powerful,
+- **Dynamic multiple dispatch (Julia-style) as the core mechanism** — capable,
   but static trait dispatch is a better fit for Helix's compile-time-checking and
-  JIT goals. (Revisit only if generic-over-types ergonomics demand it.)
+  JIT goals. To be revisited only if generic-over-types ergonomics require it.
 
 ## Consequences
 

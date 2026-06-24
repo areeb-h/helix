@@ -17,7 +17,7 @@ for Helix with rejected alternatives. The decisions distilled from it live in
 
 ### What existing languages/libraries did
 
-**Null references (the original sin).** Tony Hoare invented the null reference in
+**Null references.** Tony Hoare invented the null reference in
 1965 in ALGOL W, "simply because it was so easy to implement," despite designing
 a type system whose goal was that "all use of references should be absolutely
 safe" ([InfoQ keynote](https://www.infoq.com/presentations/Null-References-The-Billion-Dollar-Mistake-Tony-Hoare/)).
@@ -43,7 +43,7 @@ dedicated sentinel, not a reused numeric NaN ([Julia manual](https://docs.julial
   `false | missing` → `missing`. Follows SQL NULL / R NA. **Confidence: high**
   (3-0). *(A competing claim mis-stating the short-circuit case was refuted 0-3.)*
 
-**Pandas' inconsistency (the cautionary tale).** Pandas uses different sentinels
+**Pandas' inconsistency.** Pandas uses different sentinels
 per dtype — `np.nan` (a float) and `None` for object dtype, `pd.NaT` for
 datetime ([Van den Bossche, pandas core dev](https://jorisvandenbossche.github.io/blog/2019/11/30/pandas-consistent-missing-values/)).
 **Confidence: high** (3-0, primary). Worse, default integer/boolean columns
@@ -52,7 +52,7 @@ column to float ([same](https://jorisvandenbossche.github.io/blog/2019/11/30/pan
 **Confidence: high** (3-0). The fix pandas adopted is the **masked-array /
 validity-bitmap** approach.
 
-**Arrow's validity bitmap (the columnar substrate).** Apache Arrow encodes
+**Arrow's validity bitmap.** Apache Arrow encodes
 missing values with a **separate dedicated validity bitmap buffer**, one bit per
 element across all types except unions; a set bit (1) = present, unset (0) =
 null ([Arrow spec](https://arrow.apache.org/docs/format/Columnar.html)).
@@ -61,10 +61,10 @@ null ([Arrow spec](https://arrow.apache.org/docs/format/Columnar.html)).
 ### The documented pain
 1. **Null:** unchecked dereferences → runtime crashes and vulnerabilities.
 2. **Pandas:** int→float coercion on first NaN, three incompatible sentinels,
-   `np.nan != np.nan` breaking equality — bugs pandas devs themselves set out to
-   fix with `pd.NA`.
-3. **Two-world tension:** scalars want a compile-time-checked `Option`; columns
-   *need* a runtime validity bitmap for zero-copy/SIMD. A naive design uses two
+   `np.nan != np.nan` breaking equality — defects pandas developers themselves set out
+   to fix with `pd.NA`.
+3. **Two-world tension:** scalars require a compile-time-checked `Option`; columns
+   require a runtime validity bitmap for zero-copy and SIMD. A naive design uses two
    unrelated mechanisms, reproducing the pandas split.
 
 ### Recommended approach for Helix
@@ -90,8 +90,8 @@ semantics.**
   compile-time safety.
 - *Reusing float `NaN`* — forces type widening, can't represent missing in
   int/bool, conflates "not a number" with "no value."
-- *Multiple per-type sentinels (`NaN`/`None`/`NaT`)* — the pandas mess; violates
-  one obvious way.
+- *Multiple per-type sentinels (`NaN`/`None`/`NaT`)* — the pandas inconsistency;
+  violates one obvious way.
 - *Two unrelated mechanisms for scalars vs columns* — reproduces the split;
   expose one semantics with two physical representations.
 
@@ -146,12 +146,14 @@ sound-gradual boundary contracts in the hot path.**
   compile-time column safety where a sample file exists at build time.
 - **Runtime-schema DataFrames:** schema is a runtime value carried by the
   DataFrame; column access is checked at the load boundary and first use,
-  producing signature educational errors ("column `age` not found; available:
-  ...") rather than HM noise. The value is statically a `DataFrame`; its
+  producing precise educational errors ("column `age` not found; available:
+  ...") rather than Hindley-Milner unification noise. The value is statically a
+  `DataFrame`; its
   column-level schema is dynamic-but-validated.
 - **Keep the boundary coarse:** validate schema once at the boundary, never
-  per-value — that is what produces the 105x valleys. A good JIT can recover
-  overhead (Pycket), but the safer design never makes it necessary.
+  per-value — per-value validation is what produces the 105x valleys. An optimizing
+  JIT can recover the overhead (Pycket), but the coarse-boundary design avoids
+  incurring it.
 
 ### Rejected alternatives
 - *Whole-program Hindley-Milner* — poor non-local errors.
@@ -166,8 +168,8 @@ sound-gradual boundary contracts in the hot path.**
 ## Domain 3 — Collection API Unity / "One Obvious Way"
 
 ### What existing languages/libraries did
-The directly-verified evidence is the **pandas indexing mess as negative
-exemplar** and **Arrow compute kernels / masked columns as positive substrate**.
+The directly-verified evidence is the pandas indexing inconsistency as a negative
+example and Arrow compute kernels / masked columns as a positive substrate.
 Pandas exposes multiple overlapping indexers (`loc`/`iloc`/`at`/chained indexing
 with `SettingWithCopyWarning`); its missing-value/dtype inconsistencies
 ([Van den Bossche](https://jorisvandenbossche.github.io/blog/2019/11/30/pandas-consistent-missing-values/),
@@ -176,18 +178,19 @@ different semantics. The dplyr/LINQ/Rust-iterator/Julia-dispatch comparisons
 below are **design synthesis grounded in that verified pain — confidence: medium.**
 
 ### The documented pain
-Pandas' multiple-indexing surface is the archetypal "many obvious ways" failure:
-users can't predict view-vs-copy, whether assignment sticks, or which sentinel a
-column uses → silent correctness bugs and a lore-heavy learning curve. Directly
-antithetical to Helix's "one obvious way" + "consistency over cleverness."
+Pandas' multiple-indexing surface is a representative "many obvious ways" failure:
+users cannot predict view-versus-copy behavior, whether assignment persists, or which
+sentinel a column uses, resulting in silent correctness bugs and a steep, convention-heavy
+learning curve. This is directly contrary to Helix's "one obvious way" and "consistency
+over cleverness" principles.
 
 ### Recommended approach for Helix
 **One verb protocol — `map`, `filter`/`where`, `reduce`, `group`, `sort` —
 meaning the same thing across `Array`, `DataFrame`, `Tensor`, `Dna`, dispatched
 through a trait/protocol, with strict naming discipline (one verb per concept).**
-This builds directly on Phase 1's shipped `map`/`filter`/`where`/`reduce` with
-`it`/`acc`, and the deliberate `where == filter` decision — **the research
-explicitly affirms that instinct as the correct governing law.**
+This builds directly on Phase 1's implemented `map`/`filter`/`where`/`reduce` with
+`it`/`acc`, and the deliberate `where == filter` decision, which the research
+affirms as the correct governing principle.
 - **One verb per concept, everywhere.** Extend `where==filter` discipline so
   group/sort/reduce have exactly one spelling across all four types. No
   `loc`/`iloc`/`at` proliferation.

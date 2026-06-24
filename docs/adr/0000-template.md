@@ -1,30 +1,30 @@
 # ADR NNNN — <title>
 
-- **Status:** proposed
+- **Status:** Proposed
 - **Date:** <YYYY-MM-DD>
 - **Deciders:** Areeb + Claude
 - **Research:** [link to findings](../research/)
 
 ## Context
 
-What is the problem? What forces are at play? What Helix principles constrain
-the answer (one obvious way, immutable by default, no surprises, great errors,
-zero-copy)?
+The problem, the forces at play, and the Helix principles that constrain the
+answer (one obvious way, immutable by default, no surprises, great errors,
+zero-copy).
 
-## What others did, and what went wrong
+## Prior approaches and their documented shortcomings
 
-A short table or list: language/library → approach → documented pain it caused.
-Cited from research. This is the "learn from mistakes" section.
+A table or list: language/library → approach → documented pain it caused. Cited
+from research.
 
 ## Decision
 
-The single chosen approach, stated concretely — ideally with Helix syntax
-examples so it's unambiguous.
+The single chosen approach, stated concretely — with Helix syntax examples for
+precision.
 
 ## Rationale
 
-Why this beats the alternatives *for a scientific language built from scratch*.
-Tie back to Helix principles.
+Why this approach is preferable to the alternatives for a scientific language
+built from scratch, with reference to Helix principles.
 
 ## Rejected alternatives
 
@@ -33,9 +33,9 @@ Tie back to Helix principles.
 
 ## Consequences
 
-What becomes easier, what becomes harder, what this commits us to in later
-phases (DataFrames, tensors, JIT).
+What becomes easier, what becomes harder, and what this commits the project to
+in later phases (DataFrames, tensors, JIT).
 
 ## Open questions
 
-Anything deferred to a follow-up decision.
+Items deferred to a follow-up decision.

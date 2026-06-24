@@ -1,10 +1,10 @@
 # Helix DataFrame benchmarks
 
-**One-line summary:** Helix already scales to multi-million-row analytical
-queries by compiling high-level syntax into **Polars lazy DataFrame operations**.
-A 50M-row filter→group→mean→sort→head query runs in **~0.20s from Parquet**
-(~2.3s from CSV) on the machine below. These are **warm-cache smoke tests with
-isolated phases**, not a controlled benchmark — read the caveats.
+**Summary:** Helix scales to multi-million-row analytical queries by compiling
+high-level syntax into **Polars lazy DataFrame operations**. A 50M-row
+filter→group→mean→sort→head query runs in **~0.20s from Parquet** (~2.3s from CSV)
+on the machine described below. These are **warm-cache smoke tests with isolated
+phases**, not a controlled benchmark; the caveats below apply.
 
 ## Methodology
 
@@ -13,7 +13,7 @@ isolated phases**, not a controlled benchmark — read the caveats.
 - **Machine:** AMD Ryzen 7 7700X, 6 cores visible to WSL2, Ubuntu.
 - **Timing:** `/usr/bin/time -f "%e %M"` → elapsed wall seconds + peak RSS.
   **Best of 3** runs per case.
-- **Phases isolated** (this is the point — the earlier smoke test conflated them):
+- **Phases isolated** (the earlier smoke test conflated them):
   - *interpreter startup* — a script that just prints, no data;
   - *count-only* — `read_*(path).count()`;
   - *query-only* — `read_*(path).where(x > 500).group(grp).mean(y).sort(grp).head(5)`.
@@ -41,41 +41,41 @@ isolated phases**, not a controlled benchmark — read the caveats.
 | 50M count() | 0.00 s | 16 MB |
 | 50M where+group+sort+head | 0.20 s | 637 MB |
 
-Conversion (for reference): 50M-row CSV (1.4 GB) → Parquet (57 MB, **~24×**) via
-the **streaming sink** at **1.52 GB peak RSS** — down from 4.76 GB on the old
-eager path (a 3.1× reduction). Memory isn't fully bounded yet because the CSV
-scan side still buffers, but it no longer materializes the whole frame.
+Conversion (for reference): 50M-row CSV (1.4 GB) to Parquet (57 MB, **~24×**) via
+the **streaming sink** at **1.52 GB peak RSS** — reduced from 4.76 GB on the prior
+eager path (a 3.1× reduction). Memory is not yet fully bounded because the CSV scan
+side still buffers, but it no longer materializes the entire frame.
 
-## What the numbers actually show
+## Interpretation of the results
 
-- **Helix adds ~nothing.** Interpreter startup is ~0s / 6 MB; essentially all
-  wall time is Polars data work. The "compile syntax → lazy plan → Polars" design
-  is not adding meaningful overhead.
-- **`count()` on Parquet is O(1).** 0.00s / 16 MB at *every* size — Parquet stores
-  the row count in metadata, so no scan happens. CSV `count()` must parse rows, so
-  it scales (0.05 → 0.50s).
-- **Parquet query is ~10× faster than CSV and ~3× lighter** (50M: 0.20s/637 MB vs
-  2.32s/1970 MB) — projection pushdown (only `x`, `grp`, `y` are read) and
-  predicate pushdown, both of which Polars derives from the lazy plan.
-- **CSV is parse-bound** and scales roughly linearly (~0.046 s per million rows
-  for the query).
+- **Helix adds negligible overhead.** Interpreter startup is ~0s / 6 MB;
+  essentially all wall time is Polars data work. The "compile syntax → lazy plan →
+  Polars" design adds no meaningful overhead.
+- **`count()` on Parquet is O(1).** 0.00s / 16 MB at *every* size, because Parquet
+  stores the row count in metadata and no scan occurs. CSV `count()` must parse
+  rows, so it scales (0.05 to 0.50s).
+- **Parquet query is ~10× faster than CSV and ~3× lighter** (50M: 0.20s/637 MB
+  versus 2.32s/1970 MB), due to projection pushdown (only `x`, `grp`, `y` are read)
+  and predicate pushdown, both of which Polars derives from the lazy plan.
+- **CSV is parse-bound** and scales approximately linearly (~0.046 s per million
+  rows for the query).
 
-## Cold vs warm cache (the honest disk story)
+## Cold versus warm cache
 
-Evicted each file from the page cache with `posix_fadvise(DONTNEED)` (no root
-needed; `scripts/coldbench.sh`), then timed the 50M query cold, then warm:
+Each file was evicted from the page cache with `posix_fadvise(DONTNEED)` (no root
+required; `scripts/coldbench.sh`); the 50M query was then timed cold, then warm:
 
 | | cold | warm |
 |---|---:|---:|
 | CSV 50M (1.4 GB) | **26.78 s** | 3.17 s |
 | Parquet 50M (57 MB) | **0.52 s** | 0.22 s |
 
-- **Cold CSV is disk-bound** — reading 1.4 GB off disk dominates (8.4× slower than
-  warm). This is the real "not billion-safe yet" caveat for CSV.
-- **Cold Parquet (0.52 s) beats *warm* CSV (3.17 s)** — the file is 24× smaller, so
-  there's far less to read. Parquet is the path that stays fast cold.
+- **Cold CSV is disk-bound** — reading 1.4 GB from disk dominates (8.4× slower than
+  warm). This is the principal scalability caveat for CSV.
+- **Cold Parquet (0.52 s) is faster than *warm* CSV (3.17 s)** — the file is 24×
+  smaller, so there is far less to read. Parquet remains fast when cold.
 
-## Helix vs raw Python-Polars (50M Parquet, warm, best of 3)
+## Helix versus raw Python-Polars (50M Parquet, warm, best of 3)
 
 Identical query, `scripts/compare.sh`:
 
@@ -85,43 +85,45 @@ Identical query, `scripts/compare.sh`:
 | Python — total wall (incl. `import polars`) | 0.28 s |
 | Python — query-only (`perf_counter`, pure Polars) | 0.125 s |
 
-- The **pure query execution is the same engine** (~0.125 s) — as it must be,
-  since Helix calls Polars.
-- Helix's **~75 ms overhead** over pure-query is process start + building the lazy
-  plan, including one extra schema/metadata read used to resolve column names in
-  the predicate. Small, and a candidate to cache.
+- The **pure query execution uses the same engine** (~0.125 s), as expected, since
+  Helix calls Polars.
+- Helix's **~75 ms overhead** over the pure query is process start plus building the
+  lazy plan, including one additional schema/metadata read used to resolve column
+  names in the predicate. This is small and a candidate for caching.
 - Helix is **faster end-to-end than Python** here only because a compiled binary
-  pays no `import polars` tax — not because the query is faster.
-- Takeaway: Helix delegates efficiently and adds no meaningful query overhead.
-  (Python Polars 1.41.2 vs Helix's Rust Polars 0.54 — close enough to compare.)
+  incurs no `import polars` cost, not because the query is faster.
+- Conclusion: Helix delegates efficiently and adds no meaningful query overhead.
+  (Python Polars 1.41.2 versus Helix's Rust Polars 0.54 — sufficiently close to
+  compare.)
 
-## Caveats (do not over-read these)
+## Caveats
 
-1. **Cold cache now measured** (via `posix_fadvise(DONTNEED)` per-file eviction —
-   advisory, not a full `drop_caches`, but no root needed). Cold CSV is ~8×
-   slower (disk-bound on 1.4 GB); cold Parquet stays fast. The main matrix above
+1. **Cold cache is now measured** (via `posix_fadvise(DONTNEED)` per-file eviction —
+   advisory, not a full `drop_caches`, but requiring no root). Cold CSV is ~8×
+   slower (disk-bound on 1.4 GB); cold Parquet remains fast. The main matrix above
    is warm-cache; the cold/warm table is separate.
-2. **Separate statements = separate executions.** Helix collects at each terminal
-   op, so `big.count()` then `print(big.where(...))` are **two passes that each
-   re-scan the file** — there is no cross-statement caching/fusion. The benchmark
-   isolates count-only vs query-only precisely to avoid conflating them. Fusion
-   happens *within* a single chain, not across statements.
-3. **`write_parquet` now streams** via Polars' `sink` API — 50M-row write peaked
-   at 1.52 GB (was 4.76 GB eager). Not yet *bounded-constant* (the CSV scan side
-   buffers), but no longer materializes the whole frame.
-4. **Not a controlled benchmark.** Single machine, best-of-3 (no variance/CI).
-   Now compared against **raw Python-Polars** (above) — which confirms Helix adds
-   no query overhead — but *not* yet against pandas or DuckDB. This measures
-   *that Helix delegates efficiently*, not a full cross-tool comparison.
-5. `user + sys > real` (from the earlier run) indicates good throughput, but
-   `sys` is dominated by I/O/kernel work — it is **not** a clean proof of
-   multicore compute. Polars *does* execute multi-threaded, but that claim should
-   rest on profiling, not on `time` output alone.
+2. **Separate statements are separate executions.** Helix collects at each terminal
+   operation, so `big.count()` followed by `print(big.where(...))` are **two passes
+   that each re-scan the file**; there is no cross-statement caching or fusion. The
+   benchmark isolates count-only from query-only precisely to avoid conflating them.
+   Fusion occurs *within* a single chain, not across statements.
+3. **`write_parquet` now streams** via Polars' `sink` API — the 50M-row write peaked
+   at 1.52 GB (previously 4.76 GB eager). It is not yet *bounded-constant* (the CSV
+   scan side buffers), but no longer materializes the entire frame.
+4. **Not a controlled benchmark.** Single machine, best-of-3 (no variance or
+   confidence intervals). It is now compared against **raw Python-Polars** (above),
+   which confirms Helix adds no query overhead, but not yet against pandas or DuckDB.
+   This measures *that Helix delegates efficiently*, not a full cross-tool
+   comparison.
+5. `user + sys > real` (from the earlier run) indicates good throughput, but `sys`
+   is dominated by I/O and kernel work; it is **not** a clean proof of multicore
+   compute. Polars does execute multi-threaded, but that claim should rest on
+   profiling rather than on `time` output alone.
 
-## Honest verdict
+## Conclusion
 
-The architecture is right: high-level Helix syntax lowers to a Polars lazy plan
-that executes columnar and multi-threaded, and the interpreter overhead is
-negligible. Multi-million-row analytical queries are already fast. Formal
-benchmarks (cold cache, variance, vs-pandas/DuckDB, streaming writes, wider
-schemas) are future work — see the roadmap.
+The architecture is sound: high-level Helix syntax lowers to a Polars lazy plan that
+executes columnar and multi-threaded, and the interpreter overhead is negligible.
+Multi-million-row analytical queries are already fast. Formal benchmarks (cold
+cache, variance, comparison against pandas and DuckDB, streaming writes, wider
+schemas) are future work; see the roadmap.
