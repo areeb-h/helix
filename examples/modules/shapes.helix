@@ -1,0 +1,13 @@
+# Multi-file program. Run from the project root:
+#   helix examples/modules/shapes.helix
+#
+# `import geometry` loads the sibling `geometry.helix`; its definitions are reached
+# as `geometry.area`, `geometry.PI`, etc. Modules can also live in subdirectories
+# (`import lib.geometry` → `lib/geometry.helix`) and be aliased
+# (`import lib.geometry as geo` → reached as `geo.area`).
+
+import geometry
+
+print("rectangle 3x4 -> area", geometry.area(3, 4), "perimeter", geometry.perimeter(3, 4))
+print("circle r=2 -> area", geometry.circle_area(2))
+print("pi from the module:", geometry.PI)

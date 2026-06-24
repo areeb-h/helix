@@ -197,5 +197,19 @@ pub enum Stmt {
         line: usize,
         col: usize,
     },
+    /// `import a.b.c [as alias]` — load the module at the relative path
+    /// `a/b/c.helix` and make its public (top-level) definitions reachable as
+    /// `alias.member` (the alias defaults to the last path segment, `c`). Resolved
+    /// and stripped by the module loader before type-checking; the rest of the
+    /// pipeline never sees it.
+    Import {
+        /// Path segments, e.g. `["math", "stats"]` for `import math.stats`.
+        segments: Vec<String>,
+        /// The namespace the module is reached through — the `as` name, or the
+        /// last path segment when no `as` clause is given.
+        alias: String,
+        line: usize,
+        col: usize,
+    },
     Expr(Expr),
 }

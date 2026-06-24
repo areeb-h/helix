@@ -1,0 +1,11 @@
+# A small importable module: `import geometry` from a sibling file makes every
+# top-level definition below reachable as `geometry.<name>`. A library module has
+# no top-level side effects (no `print`) — only definitions.
+
+PI = 3.141592653589793
+
+fn area(w, h) = w * h
+
+fn perimeter(w, h) = 2 * (w + h)
+
+fn circle_area(r) = PI * r * r

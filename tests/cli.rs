@@ -143,3 +143,102 @@ fn repl_evaluates_and_exits_on_eof() {
     assert_eq!(code, Some(0), "REPL should exit cleanly on EOF");
     assert!(stdout.contains("42"), "REPL did not echo the result: {stdout:?}");
 }
+
+/// Write `files` into a fresh temp directory and run `entry` (resolved there, so
+/// the loader's sibling-import resolution works). Returns (stdout, stderr, code).
+fn run_modules(
+    files: &[(&str, &str)],
+    entry: &str,
+    env: &[(&str, &str)],
+    tag: &str,
+) -> (String, String, Option<i32>) {
+    let dir = std::env::temp_dir().join(format!("helix_mod_{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, src) in files {
+        std::fs::write(dir.join(name), src).unwrap();
+    }
+    let entry_path = dir.join(entry);
+    let r = run(&[entry_path.to_str().unwrap()], env, "");
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+#[test]
+fn module_program_runs_and_matches_engines() {
+    // The committed multi-file example: shapes.helix imports geometry.helix.
+    let entry = "examples/modules/shapes.helix";
+    let (vm, stderr, code) = run(&[entry], &[], "");
+    assert_eq!(code, Some(0), "modules example failed; stderr:\n{stderr}");
+    assert!(vm.contains("area 12"), "unexpected output: {vm:?}");
+    let (tw, _, _) = run(&[entry], &[("HELIX_NOVM", "1")], "");
+    assert_eq!(vm, tw, "VM and tree-walker disagree on the modules example");
+}
+
+#[test]
+fn cross_module_calls_and_local_shadowing() {
+    let lib = "fn double(x) = x * 2\nfn quad(x) = double(double(x))\nN = 7\n";
+    // `double` is redefined locally in main — it must shadow the module's `double`.
+    let main = "import lib\nprint(lib.quad(3))\nprint(lib.N)\nfn double(x) = x + 100\nprint(double(1))\n";
+    let (out, stderr, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "shadow");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "12\n7\n101", "got: {out:?}"); // quad(3)=12, N=7, local double(1)=101
+}
+
+#[test]
+fn import_cycle_is_rejected() {
+    let a = "import b\nprint(1)\n";
+    let b = "import a\nprint(2)\n";
+    let (_, stderr, code) =
+        run_modules(&[("a.helix", a), ("b.helix", b)], "a.helix", &[], "cycle");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("cycle"), "stderr: {stderr:?}");
+}
+
+#[test]
+fn missing_module_is_a_clean_error() {
+    let (_, stderr, code) =
+        run_modules(&[("m.helix", "import nope\nprint(1)\n")], "m.helix", &[], "missing");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("cannot find module"), "stderr: {stderr:?}");
+}
+
+#[test]
+fn import_alias_renames_the_namespace() {
+    let lib = "fn mean2(a, b) = (a + b) / 2\nPI = 3\n";
+    // `as st` makes the module reachable as `st`, not `stats`.
+    let main = "import stats as st\nprint(st.mean2(2, 4))\nprint(st.PI)\n";
+    let (out, stderr, code) =
+        run_modules(&[("stats.helix", lib), ("main.helix", main)], "main.helix", &[], "alias");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "3.0\n3", "got: {out:?}"); // division always yields Float
+    // The bare module name is NOT in scope when aliased.
+    let main_bad = "import stats as st\nprint(stats.PI)\n";
+    let (_, stderr2, code2) = run_modules(
+        &[("stats.helix", lib), ("main.helix", main_bad)],
+        "main.helix",
+        &[],
+        "alias_bare",
+    );
+    assert_ne!(code2, Some(0), "bare name should not resolve when aliased");
+    assert!(!stderr2.is_empty());
+}
+
+#[test]
+fn subdirectory_import_resolves_nested_path() {
+    // `import lib.stats` resolves to the nested file `lib/stats.helix`.
+    let dir = std::env::temp_dir().join("helix_mod_subdir");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(dir.join("lib").join("stats.helix"), "fn mean2(a, b) = (a + b) / 2\n").unwrap();
+    std::fs::write(dir.join("main.helix"), "import lib.stats\nprint(stats.mean2(10, 20))\n").unwrap();
+    let entry = dir.join("main.helix");
+    let (vm, stderr, code) = run(&[entry.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(vm.trim(), "15.0", "got: {vm:?}"); // division always yields Float
+    // Both engines agree.
+    let (tw, _, _) = run(&[entry.to_str().unwrap()], &[("HELIX_NOVM", "1")], "");
+    assert_eq!(vm, tw, "VM and tree-walker disagree on a subdirectory import");
+    let _ = std::fs::remove_dir_all(&dir);
+}

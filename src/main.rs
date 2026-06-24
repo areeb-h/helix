@@ -14,6 +14,7 @@ mod error;
 mod interp;
 mod jit;
 mod lexer;
+mod module;
 mod parser;
 mod tensor;
 mod token;
@@ -24,6 +25,7 @@ mod vm;
 use std::io::{self, Write};
 use std::process::ExitCode;
 
+use error::HelixError;
 use interp::Interp;
 use value::Value;
 
@@ -79,14 +81,21 @@ fn print_help() {
 }
 
 fn run_file(path: &str) -> ExitCode {
-    let src = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read `{}`: {}", path, e);
+    // The module loader reads, lexes, parses, and namespaces the entry file plus
+    // everything it imports into one statement list. (A single file passes through
+    // unchanged.) Lex/parse/resolve errors come back already rendered.
+    let loaded = match module::load(std::path::Path::new(path)) {
+        Ok(l) => l,
+        Err(rendered) => {
+            eprint!("{}", rendered);
             return ExitCode::FAILURE;
         }
     };
-    match run_source(&src, path) {
+    // The entry source, for rendering type/runtime errors. For a multi-file program
+    // the caret may point into a dependency while showing the entry file — a known
+    // v1 limitation; the message and line:col are still accurate.
+    let src = std::fs::read_to_string(path).unwrap_or_default();
+    match run_program(&loaded.stmts, &src, path, loaded.multi_module) {
         Ok(()) => ExitCode::SUCCESS,
         Err(rendered) => {
             eprint!("{}", rendered);
@@ -95,15 +104,35 @@ fn run_file(path: &str) -> ExitCode {
     }
 }
 
-/// Lex, parse, and run a whole source string. On failure returns the rendered
-/// (caret-annotated) error ready to print.
-fn run_source(src: &str, filename: &str) -> Result<(), String> {
-    let tokens = lexer::lex(src).map_err(|e| e.render(src, filename))?;
-    let program = parser::parse(tokens).map_err(|e| e.render(src, filename))?;
-    // Static type check before any execution — a type error prevents side effects.
+/// Strip internal module prefixes (`m<N>$`) from a rendered error so users never
+/// see namespacing artifacts. A no-op for single-file programs (no such prefixes).
+fn strip_mangling(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == 'm' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && j < chars.len() && chars[j] == '$' {
+                i = j + 1; // skip `m<digits>$`
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Type-check and run an already-loaded program. On failure returns the rendered,
+/// caret-annotated error (with namespacing prefixes stripped for multi-file runs).
+fn run_program(program: &[ast::Stmt], src: &str, filename: &str, multi: bool) -> Result<(), String> {
     // The inferred receiver types feed the compiler so it can route
     // receiver-polymorphic methods (DataFrame/Tensor column-verbs) correctly.
-    let types = types::check(&program).map_err(|e| e.render(src, filename))?;
+    let types = types::check(program).map_err(|e| render_err(e, src, filename, multi))?;
 
     // `HELIX_NOVM=1` forces the tree-walker — kept only for A/B benchmarking and to
     // confirm the two engines agree. It recurses on the native stack, so it runs on
@@ -114,7 +143,7 @@ fn run_source(src: &str, filename: &str) -> Result<(), String> {
                 .stack_size(2 * 1024 * 1024 * 1024)
                 .spawn_scoped(scope, || {
                     let mut interp = Interp::new();
-                    interp.run(&program).map_err(|e| e.render(src, filename))
+                    interp.run(program).map_err(|e| render_err(e, src, filename, multi))
                 })
                 .expect("failed to spawn interpreter thread")
                 .join()
@@ -125,15 +154,15 @@ fn run_source(src: &str, filename: &str) -> Result<(), String> {
     // The VM is the sole automatic engine: the compiler is *total* for any
     // type-checked program (no `Unsupported` fallback), so there is no silent
     // tree-walker path. The VM recurses on the heap, so it runs on the main thread.
-    match bytecode::compile_with_types(&program, Some(types)) {
+    match bytecode::compile_with_types(program, Some(types)) {
         Ok(prog) => {
             // `HELIX_NOJIT=1` disables native compilation (keeps the VM) for A/B.
             let jit = if std::env::var_os("HELIX_NOJIT").is_some() {
                 None
             } else {
-                jit::build(&program, &prog.reduce_loops)
+                jit::build(program, &prog.reduce_loops)
             };
-            vm::run(&prog, jit.as_ref()).map_err(|e| e.render(src, filename))?
+            vm::run(&prog, jit.as_ref()).map_err(|e| render_err(e, src, filename, multi))?
         }
         // Unreachable for a type-checked program (the compiler is total). Surface it
         // as an internal error rather than silently falling back to the tree-walker.
@@ -145,6 +174,13 @@ fn run_source(src: &str, filename: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Render a runtime/type error, stripping module-namespacing prefixes for
+/// multi-file programs so users never see the internal `m<N>$` names.
+fn render_err(e: HelixError, src: &str, filename: &str, multi: bool) -> String {
+    let r = e.render(src, filename);
+    if multi { strip_mangling(&r) } else { r }
 }
 
 fn repl() -> ExitCode {

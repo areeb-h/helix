@@ -8,3 +8,4 @@ Cargo.lock
 *.swp
 *~
 .DS_Store
+COMMIT_MSG.tmp

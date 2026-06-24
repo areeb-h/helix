@@ -23,6 +23,7 @@ pub enum Tok {
     // Keywords
     Mut,
     Fn,
+    Import,
     And,
     Or,
     Not,
@@ -77,6 +78,7 @@ impl Tok {
             Tok::False => "`false`".into(),
             Tok::Mut => "`mut`".into(),
             Tok::Fn => "`fn`".into(),
+            Tok::Import => "`import`".into(),
             Tok::And => "`and`".into(),
             Tok::Or => "`or`".into(),
             Tok::Not => "`not`".into(),

@@ -336,6 +336,8 @@ impl Compiler {
                 }
                 Ok(())
             }
+            // Stripped by the module loader before compilation (see `Stmt::Import`).
+            Stmt::Import { .. } => Ok(()),
             Stmt::Func { name, params, body, .. } => self.compile_func(name, params, body),
             Stmt::Expr(e) => {
                 self.compile_expr(b, e)?;

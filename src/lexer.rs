@@ -92,6 +92,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                 let tok = match word.as_str() {
                     "mut" => Tok::Mut,
                     "fn" => Tok::Fn,
+                    "import" => Tok::Import,
                     "and" => Tok::And,
                     "or" => Tok::Or,
                     "not" => Tok::Not,

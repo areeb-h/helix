@@ -37,9 +37,13 @@ Grounded in the current source, not aspirations:
 1. **No Python interop / FFI.** Can't call NumPy, PyTorch, pysam, samtools, or any
    existing library. For ML this is dead on arrival; for bio it rules out the de
    facto toolchain. *This is the single most important gap.*
-2. **No module system, no packages, no imports.** Programs are a single file. There
-   is no way to split a codebase, share code, or build a third-party ecosystem — so
-   an ecosystem cannot even begin to exist.
+2. **A module system now exists, but no packages.** `import name` loads a sibling
+   `name.helix` and reaches its definitions as `name.member`; modules can also live
+   in subdirectories (`import lib.stats` → `lib/stats.helix`) and be aliased
+   (`import lib.stats as st`), so a codebase can span files and folders (done).
+   What's still missing is the *distribution* half — a package manager,
+   a registry, versioned dependencies, reproducible environments — without which a
+   third-party ecosystem still can't form.
 3. **No user-facing error handling.** No `try`/`catch`, no surfaced `Result`/`?` in
    the language — a runtime error aborts the program. Fine for scripts, unworkable
    for anything someone builds a system on.
@@ -99,7 +103,8 @@ Python and don't need the ML stack.** Win that, then widen.
 ## The bar to viability (in order)
 
 1. **Modules + a package manager + reproducible environments.** Table stakes; no
-   ecosystem without them.
+   ecosystem without them. *(Modules — `import`/namespacing — now exist; the package
+   manager + registry + lockfiles remain.)*
 2. **Python interop (call CPython).** The highest-leverage single feature. With it,
    "Helix can't do X" becomes "drop into Python for X" — adoption stops being all-or-
    nothing. Without it, adoption in science is ~impossible.

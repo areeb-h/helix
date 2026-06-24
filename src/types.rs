@@ -388,6 +388,8 @@ impl Checker {
                 self.synth(e)?;
                 Ok(())
             }
+            // Stripped by the module loader before type-checking (see `Stmt::Import`).
+            Stmt::Import { .. } => Ok(()),
         }
     }
 

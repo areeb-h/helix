@@ -119,6 +119,15 @@ impl Interp {
                     is_expr: false,
                 })
             }
+            // Imports are resolved and stripped by the module loader before
+            // execution; reaching here means one was used outside a file (e.g. the
+            // REPL), which isn't supported.
+            Stmt::Import { line, col, .. } => Err(HelixError::new(
+                "`import` is only allowed at the top level of a file",
+                *line,
+                *col,
+            )
+            .hint("run a multi-module program from a file, not the REPL.")),
             Stmt::Expr(e) => {
                 let v = self.eval(e)?;
                 Ok(StmtOutcome {

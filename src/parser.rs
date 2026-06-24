@@ -140,6 +140,31 @@ impl Parser {
     }
 
     fn statement(&mut self) -> Result<Stmt, HelixError> {
+        // `import a.b.c [as alias]` — load the module at `a/b/c.helix`.
+        if matches!(self.peek(), Tok::Import) {
+            let (l, c) = self.pos();
+            self.advance();
+            let first = self
+                .ident_name("after `import`")
+                .map_err(|e| e.hint("import a module by name, e.g. `import stats` or `import lib.stats`."))?;
+            let mut segments = vec![first];
+            // Dotted path: `import lib.stats` → `lib/stats.helix`.
+            while matches!(self.peek(), Tok::Dot) {
+                self.advance();
+                segments.push(self.ident_name("after `.` in the module path")?);
+            }
+            // Optional `as alias` — `as` is contextual (only special here), so it
+            // stays usable as an ordinary identifier everywhere else.
+            let alias = if matches!(self.peek(), Tok::Ident(n) if n == "as") {
+                self.advance();
+                self.ident_name("after `as`")
+                    .map_err(|e| e.hint("give the module an alias, e.g. `import lib.stats as stats`."))?
+            } else {
+                // Default the namespace to the last path segment.
+                segments.last().unwrap().clone()
+            };
+            return Ok(Stmt::Import { segments, alias, line: l, col: c });
+        }
         // `fn name(a, b) = expr`
         if matches!(self.peek(), Tok::Fn) {
             let (l, c) = self.pos();
