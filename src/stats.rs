@@ -290,6 +290,119 @@ pub fn linear_regression(xs: &[f64], ys: &[f64]) -> Option<LinFit> {
     Some(LinFit { slope, intercept, r_squared, slope_std_error, slope_p_value })
 }
 
+/// The result of an ordinary least-squares multiple regression `y ~ x1 + x2 + ...`.
+/// The vectors are parallel and parameter-indexed: index 0 is the intercept, then one
+/// entry per predictor in the order supplied.
+pub struct MultiFit {
+    pub coefficients: Vec<f64>,
+    pub std_errors: Vec<f64>,
+    pub p_values: Vec<f64>,
+    pub r_squared: f64,
+    pub adj_r_squared: f64,
+}
+
+/// Invert a square matrix by Gauss-Jordan elimination with partial pivoting. Returns
+/// `None` if the matrix is singular (to within a small pivot tolerance).
+fn invert(m: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+    let n = m.len();
+    // Augment with the identity: [m | I].
+    let mut a: Vec<Vec<f64>> = m
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let mut r = row.clone();
+            r.extend((0..n).map(|j| if i == j { 1.0 } else { 0.0 }));
+            r
+        })
+        .collect();
+    for col in 0..n {
+        // Partial pivot: move the largest-magnitude entry in this column to the diagonal.
+        let mut piv = col;
+        for r in (col + 1)..n {
+            if a[r][col].abs() > a[piv][col].abs() {
+                piv = r;
+            }
+        }
+        if a[piv][col].abs() < 1e-12 {
+            return None; // singular (e.g. collinear predictors)
+        }
+        a.swap(col, piv);
+        let d = a[col][col];
+        a[col].iter_mut().for_each(|x| *x /= d);
+        let pivot_row = a[col].clone();
+        for (r, row) in a.iter_mut().enumerate() {
+            if r != col {
+                let f = row[col];
+                for (x, p) in row.iter_mut().zip(&pivot_row) {
+                    *x -= f * p;
+                }
+            }
+        }
+    }
+    Some(a.iter().map(|row| row[n..].to_vec()).collect())
+}
+
+/// Ordinary least-squares multiple regression of `y` on the given predictor columns
+/// (each of length `n`), fitting `y = b0 + b1*x1 + ... + bp*xp` via the normal
+/// equations `(XᵀX) b = Xᵀy`. Returns the coefficients (intercept first), their
+/// standard errors and two-sided p-values (t on `n - k` degrees of freedom, `k` the
+/// parameter count), and the R² / adjusted-R². Returns `None` when there is no
+/// predictor, fewer observations than parameters plus one, a length mismatch, a
+/// constant response, or collinear predictors (a singular `XᵀX`).
+pub fn multiple_regression(predictors: &[Vec<f64>], y: &[f64]) -> Option<MultiFit> {
+    let n = y.len();
+    let p = predictors.len();
+    let k = p + 1; // parameters, including the intercept
+    if p == 0 || n <= k || predictors.iter().any(|c| c.len() != n) {
+        return None;
+    }
+    // X[i][j]: column 0 is the intercept (all ones), columns 1..=p are the predictors.
+    let xij = |i: usize, j: usize| if j == 0 { 1.0 } else { predictors[j - 1][i] };
+    // Normal equations: XᵀX (k×k) and Xᵀy (k).
+    let mut xtx = vec![vec![0.0; k]; k];
+    let mut xty = vec![0.0; k];
+    for a in 0..k {
+        for (b, slot) in xtx[a].iter_mut().enumerate() {
+            *slot = (0..n).map(|i| xij(i, a) * xij(i, b)).sum();
+        }
+        xty[a] = (0..n).map(|i| xij(i, a) * y[i]).sum();
+    }
+    let inv = invert(&xtx)?;
+    let beta: Vec<f64> = (0..k)
+        .map(|a| (0..k).map(|b| inv[a][b] * xty[b]).sum())
+        .collect();
+    // Residual and total sums of squares.
+    let rss: f64 = (0..n)
+        .map(|i| {
+            let yhat: f64 = (0..k).map(|j| beta[j] * xij(i, j)).sum();
+            (y[i] - yhat).powi(2)
+        })
+        .sum();
+    let ybar = mean(y);
+    let tss: f64 = y.iter().map(|v| (v - ybar).powi(2)).sum();
+    if tss == 0.0 {
+        return None; // constant response: nothing to explain
+    }
+    let r_squared = 1.0 - rss / tss;
+    let df = (n - k) as f64;
+    let adj_r_squared = 1.0 - (1.0 - r_squared) * (n - 1) as f64 / df;
+    let resid_var = rss / df;
+    let mut std_errors = Vec::with_capacity(k);
+    let mut p_values = Vec::with_capacity(k);
+    for j in 0..k {
+        let se = (resid_var * inv[j][j]).sqrt();
+        let pv = if se == 0.0 {
+            0.0 // a perfect fit determines every coefficient exactly
+        } else {
+            let t = beta[j] / se;
+            betai(df / 2.0, 0.5, df / (df + t * t))
+        };
+        std_errors.push(se);
+        p_values.push(pv);
+    }
+    Some(MultiFit { coefficients: beta, std_errors, p_values, r_squared, adj_r_squared })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,5 +511,43 @@ mod tests {
         // Too few points, or no variance in x / y → undefined.
         assert!(linear_regression(&[1.0, 2.0], &[1.0, 2.0]).is_none());
         assert!(linear_regression(&[2.0, 2.0, 2.0], &y).is_none());
+    }
+
+    #[test]
+    fn multiple_regression_recovers_a_known_plane() {
+        // y = 1 + 2*x1 + 3*x2 exactly → coefficients [1, 2, 3], R^2 = 1.
+        let x1 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let x2 = vec![2.0, 1.0, 4.0, 3.0, 5.0];
+        let y: Vec<f64> = (0..5).map(|i| 1.0 + 2.0 * x1[i] + 3.0 * x2[i]).collect();
+        let f = multiple_regression(&[x1, x2], &y).unwrap();
+        assert!(close(f.coefficients[0], 1.0, 1e-6), "b0 = {}", f.coefficients[0]);
+        assert!(close(f.coefficients[1], 2.0, 1e-6), "b1 = {}", f.coefficients[1]);
+        assert!(close(f.coefficients[2], 3.0, 1e-6), "b2 = {}", f.coefficients[2]);
+        assert!(close(f.r_squared, 1.0, 1e-9), "r2 = {}", f.r_squared);
+    }
+
+    #[test]
+    fn multiple_regression_with_one_predictor_equals_simple() {
+        // A single-predictor multiple regression must match `linear_regression`.
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![2.0, 4.0, 5.0, 4.0, 5.0];
+        let m = multiple_regression(std::slice::from_ref(&x), &y).unwrap();
+        let s = linear_regression(&x, &y).unwrap();
+        assert!(close(m.coefficients[0], s.intercept, 1e-9));
+        assert!(close(m.coefficients[1], s.slope, 1e-9));
+        assert!(close(m.r_squared, s.r_squared, 1e-9));
+    }
+
+    #[test]
+    fn multiple_regression_rejects_degenerate_inputs() {
+        let x = vec![1.0, 2.0, 3.0, 4.0];
+        // Collinear predictors (x2 = 2*x1) → singular XᵀX.
+        let x2: Vec<f64> = x.iter().map(|v| 2.0 * v).collect();
+        let y = vec![1.0, 3.0, 2.0, 5.0];
+        assert!(multiple_regression(&[x.clone(), x2], &y).is_none());
+        // Fewer observations than parameters + 1.
+        assert!(multiple_regression(&[vec![1.0, 2.0], vec![3.0, 1.0]], &[1.0, 2.0]).is_none());
+        // No predictors at all.
+        assert!(multiple_regression(&[], &y).is_none());
     }
 }

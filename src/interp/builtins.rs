@@ -399,6 +399,40 @@ impl super::Interp {
                     .hint("a constant predictor or response has no line to fit.")),
                 }
             }
+            "multiple_regression" => {
+                arity(name, &args, 2, line, col)?;
+                // OLS fit of `y` on several predictor columns. The first argument is an
+                // array of predictor arrays; the second is the response. `missing`
+                // anywhere propagates. The result's coefficients/std_errors/p_values are
+                // parameter-indexed arrays (index 0 is the intercept).
+                let preds = num_arrays(name, &args[0], line, col)?;
+                let y = num_array(name, &args[1], line, col)?;
+                let (preds, y) = match (preds, y) {
+                    (Some(preds), Some(y)) => (preds, y),
+                    _ => return Ok(Value::Missing),
+                };
+                let floats = |xs: Vec<f64>| {
+                    Value::Array(Rc::new(xs.into_iter().map(Value::Float).collect()))
+                };
+                match crate::stats::multiple_regression(&preds, &y) {
+                    Some(f) => {
+                        let fields = vec![
+                            ("coefficients".to_string(), floats(f.coefficients)),
+                            ("std_errors".to_string(), floats(f.std_errors)),
+                            ("p_values".to_string(), floats(f.p_values)),
+                            ("r_squared".to_string(), Value::Float(f.r_squared)),
+                            ("adj_r_squared".to_string(), Value::Float(f.adj_r_squared)),
+                        ];
+                        Ok(Value::Record(Rc::new(fields)))
+                    }
+                    None => Err(HelixError::new(
+                        "multiple regression is undefined: need more observations than predictors, equal-length non-collinear predictors, and variance in y",
+                        line,
+                        col,
+                    )
+                    .hint("e.g. `multiple_regression([x1, x2], y)` with enough rows.")),
+                }
+            }
             _ => {
                 let mut err =
                     HelixError::new(format!("`{}` is not a known function", name), line, col);
@@ -409,6 +443,30 @@ impl super::Interp {
             }
         }
     }
+}
+
+/// Extract a slice of numeric columns from an array-of-arrays argument (the predictor
+/// matrix of `multiple_regression`). Returns `Ok(None)` if any element anywhere is
+/// `missing`; errors if the outer value is not an array, or any inner value is not a
+/// numeric array.
+fn num_arrays(
+    who: &str,
+    v: &Value,
+    line: usize,
+    col: usize,
+) -> Result<Option<Vec<Vec<f64>>>, HelixError> {
+    let outer = match v {
+        Value::Array(items) => items,
+        other => return Err(type_err(who, "an array of predictor arrays", other, line, col)),
+    };
+    let mut cols = Vec::with_capacity(outer.len());
+    for el in outer.iter() {
+        match num_array(who, el, line, col)? {
+            Some(c) => cols.push(c),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(cols))
 }
 
 /// Extract a numeric `Vec<f64>` from an array argument. Returns `Ok(None)` when any

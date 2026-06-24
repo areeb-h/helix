@@ -65,6 +65,8 @@
         ok("normal_cdf(1.96) + erf(1.0) + normal_pdf(0.0)");
         // `linear_regression` is a record; predictions broadcast the fitted line.
         ok("f = linear_regression([1.0, 2.0, 3.0], [2.0, 4.0, 5.0])\nf.slope * 6.0 + f.intercept");
+        // `multiple_regression` returns a record whose coefficients are an array.
+        ok("m = multiple_regression([[1.0, 2.0, 3.0]], [2.0, 4.0, 5.0])\nm.coefficients[0] + m.r_squared");
     }
 
     #[test]

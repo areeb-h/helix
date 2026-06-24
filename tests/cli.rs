@@ -413,6 +413,24 @@ fn linear_regression_without_variance_is_a_clean_error() {
 }
 
 #[test]
+fn multiple_regression_recovers_coefficients() {
+    // y = 1 + 2*x1 + 3*x2 exactly → coefficients [1, 2, 3], R^2 = 1. The result's
+    // coefficients/p_values are parameter-indexed arrays (index 0 is the intercept).
+    let src = "x1 = [1.0, 2.0, 3.0, 4.0, 5.0]\nx2 = [2.0, 1.0, 4.0, 3.0, 5.0]\ny = [9.0, 8.0, 19.0, 18.0, 26.0]\nf = multiple_regression([x1, x2], y)\nc = f.coefficients\nprint(c.count())\nprint(f.r_squared)\nprint(round(c[0]) == 1 and round(c[1]) == 2 and round(c[2]) == 3)\n";
+    let (out, stderr, code) = run_source(src, &[], "mlr");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "3\n1.0\ntrue"); // 3 coefficients; perfect fit; b = [1, 2, 3]
+}
+
+#[test]
+fn multiple_regression_on_collinear_predictors_is_a_clean_error() {
+    let src = "print(multiple_regression([[1, 2, 3, 4], [2, 4, 6, 8]], [1, 3, 2, 5]))\n";
+    let (_out, stderr, code) = run_source(src, &[], "mlrerr");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("multiple regression is undefined"), "stderr:\n{stderr}");
+}
+
+#[test]
 fn column_extracts_values_for_statistics() {
     // `df.column(name)` materializes a column as an array, so the array statistics
     // apply directly to loaded data. Polars nulls become `missing`, so `drop_missing`

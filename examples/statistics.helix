@@ -59,3 +59,14 @@ print("slope p:  ", fit.slope_p_value)
 # Predictions need no special method — broadcast the fitted line over any inputs.
 new_ages = [30.0, 45.0, 60.0]
 print("predicted hr:", fit.slope * new_ages + fit.intercept)
+
+# Multiple regression generalizes to several predictors: pass an array of predictor
+# columns and the response. Coefficients are parameter-indexed (index 0 is the
+# intercept), with a standard error and p-value for each, plus R^2 and adjusted R^2.
+x1 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+x2 = [4.0, 1.0, 3.0, 7.0, 2.0, 5.0]
+outcome = [10.0, 8.0, 14.0, 22.0, 13.0, 21.0]
+model = multiple_regression([x1, x2], outcome)
+print("coefficients:", model.coefficients)
+print("p-values:    ", model.p_values)
+print("R^2:", model.r_squared, "adjusted:", model.adj_r_squared)

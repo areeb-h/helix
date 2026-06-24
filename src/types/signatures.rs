@@ -230,6 +230,31 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 ("slope_p_value".to_string(), Type::Float),
             ]))
         }
+        "multiple_regression" => {
+            if args.len() != 2 {
+                return Err(arity_err(name, 2, args.len(), line, col));
+            }
+            if any(args, |t| matches!(t, Type::Unknown)) {
+                return Ok(Type::Unknown);
+            }
+            if any(args, |t| matches!(t, Type::Missing)) {
+                return Ok(Type::Missing);
+            }
+            // First arg: an array of predictor arrays. Second: the response array.
+            for a in args {
+                if !matches!(a, Type::Array(_)) {
+                    return Err(type_err(name, "an array", a, line, col));
+                }
+            }
+            let nums = || Type::Array(Box::new(Type::Float));
+            Ok(Type::Record(vec![
+                ("coefficients".to_string(), nums()),
+                ("std_errors".to_string(), nums()),
+                ("p_values".to_string(), nums()),
+                ("r_squared".to_string(), Type::Float),
+                ("adj_r_squared".to_string(), Type::Float),
+            ]))
+        }
         "to_array" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
