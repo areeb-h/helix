@@ -701,7 +701,8 @@ fn comp_arity(name: &str, example: &str, line: usize, col: usize) -> HelixError 
 
 /// Every built-in function name, used both for routing and for "did you mean".
 pub(crate) const BUILTIN_FNS: &[&str] = &[
-    "print", "dna", "range", "read_csv", "read_parquet", "read_fasta", "write_parquet", "tensor",
+    "print", "dna", "range", "read_csv", "read_parquet", "read_fasta", "read_vcf", "write_parquet",
+    "tensor",
     "zeros",
     "ones", "eye", "sqrt", "cbrt", "abs", "exp", "ln", "log10", "log2", "log", "sin", "cos", "tan",
     "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "floor", "ceil", "round", "trunc",

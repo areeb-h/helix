@@ -1,0 +1,20 @@
+# Computational biology flagship: a VCF file becomes a queryable DataFrame, so
+# genomic variants flow through the SAME verbs as any other table (the unified model).
+#   helix run examples/variants.helix
+#
+# read_vcf exposes the fixed columns (chrom, pos, id, ref, alt, qual, filter) plus
+# every INFO field (here: gene, consequence, af) as columns.
+
+variants = read_vcf("examples/data/variants.vcf")
+
+print("total variants:", variants.count())
+print("columns:", variants.columns())
+
+# The killer demo: filter by gene, group by consequence, count — pure tabular verbs.
+# (`count(pos)` counts variants per group; `pos` is always present.)
+print("--- BRCA1 variants by consequence ---")
+print(variants.where(gene == "BRCA1").group(consequence).count(pos))
+
+# Fixed and INFO columns mix freely.
+print("--- high-quality variants (qual > 50) ---")
+print(variants.where(qual > 50).select(chrom, pos, gene))

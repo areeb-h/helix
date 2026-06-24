@@ -19,9 +19,13 @@ surface.
 - [x] **Sequence ops**: `gc_content`, `complement`, `reverse_complement`,
       `kmers(k)`, `find(motif)` (→ index or `missing`), slicing; plus `Array.top(n)`
       (frequency histogram) so `seq.kmers(9).top(20)` works.
-- [ ] **`read_vcf(path)` → DataFrame** (via `noodles-vcf`): variant tables flow
-      straight into the existing `where`/`group`/`count` verbs — the unified-model
-      demo (`variants.where(gene == "BRCA1").group(consequence).count()`).
+- [x] **`read_vcf(path)` → DataFrame**: variant tables flow straight into the existing
+      `where`/`group`/`count` verbs — the unified-model demo
+      (`read_vcf(...).where(gene == "BRCA1").group(consequence).count(pos)`). The eight
+      fixed columns plus every INFO field (`gene`, `consequence`, …) become columns.
+      Demo: [examples/variants.helix](../examples/variants.helix). v1 is a hand-rolled
+      parser for plain VCF; gzip/BGZF/BCF + full INFO typing via `noodles` is the next
+      step. (No-arg grouped `count()` = rows-per-group is a small follow-up.)
 - [ ] `read_fastq` (quality scores → `missing`-aware), `read_gff`/`read_bed`.
 - [ ] BAM/CRAM via `noodles` (memory-mapped, streaming — the local-first edge).
 - [ ] RNA (`fold`, `translate`), protein sequences; an ADR for the bio type model.

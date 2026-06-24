@@ -45,8 +45,9 @@ Well past a prototype: a tree-walking interpreter **plus** a bytecode VM and a
 Cranelift JIT (native code that beats Node/Python on scalar recursion), lazy
 Polars/Arrow **DataFrames**, ndarray **tensors** with linear algebra, a static type
 checker, a **module system**, **data access** (`http_get` + `parse_json`/`to_json`
-for REST APIs), and a feature-gated **CPython interop** layer (call NumPy/polars/etc.
-— see [docs/python-interop.md](docs/python-interop.md)). 130+ tests, zero warnings. The remaining roadmap (GPU, package manager, bundled
+for REST APIs), **genomics** (`read_fasta`, `read_vcf` → a queryable DataFrame), and a
+feature-gated **CPython interop** layer (call NumPy/polars/etc. — see
+[docs/python-interop.md](docs/python-interop.md)). 130+ tests, zero warnings. The remaining roadmap (GPU, package manager, bundled
 Python) is below.
 
 ## What works today

@@ -25,6 +25,7 @@ mod tensor;
 mod token;
 mod types;
 mod value;
+mod vcf;
 mod vm;
 
 use std::io::{self, Write};

@@ -78,7 +78,9 @@ fn every_example_runs_clean() {
 fn vm_matches_tree_walker_via_cli() {
     for path in example_files() {
         let name = path.file_name().unwrap().to_str().unwrap();
-        if name == "dataframes.helix" {
+        // Excluded: group-by emits rows in Polars' nondeterministic order, so the two
+        // engines can print the same rows in a different order.
+        if name == "dataframes.helix" || name == "variants.helix" {
             continue;
         }
         let rel = format!("examples/{name}");
@@ -303,6 +305,17 @@ fn record_string_indexing() {
     let (out, stderr, code) = run_source(src, &[], "recidx");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "1\n2\ntrue");
+}
+
+#[test]
+fn read_vcf_makes_variants_queryable() {
+    // The bio flagship: a VCF becomes a DataFrame the normal verbs work on. INFO
+    // fields (gene) are columns alongside the fixed ones (qual). No group-by here, so
+    // counts are deterministic.
+    let src = "v = read_vcf(\"examples/data/variants.vcf\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\nprint(v.where(qual > 50).count())\n";
+    let (out, stderr, code) = run_source(src, &[], "vcf");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "6\n3\n3"); // 6 variants; 3 in BRCA1; 3 with qual > 50
 }
 
 // Real network fetch — ignored by default so the suite stays offline-friendly.

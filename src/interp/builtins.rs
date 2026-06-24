@@ -97,6 +97,16 @@ impl super::Interp {
                     other => Err(type_err("read_csv", "a string path", other, line, col)),
                 }
             }
+            "read_vcf" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => {
+                        let lf = crate::vcf::read_vcf(s, line, col)?;
+                        Ok(Value::DataFrame(Rc::new(lf)))
+                    }
+                    other => Err(type_err("read_vcf", "a string path", other, line, col)),
+                }
+            }
             "range" => match args.len() {
                 1 => {
                     let n = as_int(&args[0], "range", line, col)?;

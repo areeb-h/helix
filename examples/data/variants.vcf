@@ -1,0 +1,11 @@
+##fileformat=VCFv4.2
+##INFO=<ID=gene,Number=1,Type=String,Description="Gene symbol">
+##INFO=<ID=consequence,Number=1,Type=String,Description="Variant consequence">
+##INFO=<ID=af,Number=1,Type=Float,Description="Allele frequency">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr17	43044295	rs28897696	A	G	60	PASS	gene=BRCA1;consequence=missense;af=0.001
+chr17	43045711	rs80357064	C	T	45	PASS	gene=BRCA1;consequence=synonymous;af=0.02
+chr17	43091983	.	T	C	30	q10	gene=BRCA1;consequence=missense;af=0.005
+chr13	32315474	rs80359550	G	A	55	PASS	gene=BRCA2;consequence=missense;af=0.003
+chr13	32338763	.	AG	A	38	PASS	gene=BRCA2;consequence=frameshift;af=0.001
+chr7	140753336	rs113488022	A	T	70	PASS	gene=BRAF;consequence=missense;af=0.0008
