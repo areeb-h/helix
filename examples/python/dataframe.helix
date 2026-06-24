@@ -1,0 +1,22 @@
+# Zero-copy DataFrame interop (Phase 7). Requires a Python-enabled build AND the
+# Python `polars` package:
+#   pip install polars
+#   cargo run --features python examples/python/dataframe.helix
+#
+# A Helix DataFrame is Polars/Arrow-backed, so it crosses to/from Python's polars
+# by sharing the Arrow buffers — no row-by-row copying. `to_dataframe(x)` brings a
+# Python frame back as a first-class Helix DataFrame the normal verbs operate on.
+
+df = read_csv("examples/data/patients.csv")
+
+# Hand the Helix DataFrame to Python: it arrives as a polars.DataFrame.
+builtins = python.import("builtins")
+print("rows (counted in Python):", builtins.len(df))
+
+# Round-trip through Python's polars and back into Helix.
+pl = python.import("polars")
+back = to_dataframe(pl.concat([df]))
+
+# `back` is a real Helix DataFrame — the existing lazy verbs work on it.
+print("over-40 patients:")
+print(back.where(age > 40).sort(age).select(name))

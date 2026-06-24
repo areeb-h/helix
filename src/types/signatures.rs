@@ -169,6 +169,25 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 Type::Float
             })
         }
+        "to_array" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            // Materializes a Python iterable (or array) — element type is Unknown.
+            Ok(array_of_unknown())
+        }
+        "to_dataframe" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            Ok(Type::DataFrame)
+        }
+        "to_tensor" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            Ok(Type::Tensor)
+        }
         _ => Ok(Type::Unknown), // unreachable (BUILTIN_FNS gated), but stay permissive
     }
 }

@@ -25,7 +25,9 @@ surface.
 - [ ] `read_fastq` (quality scores → `missing`-aware), `read_gff`/`read_bed`.
 - [ ] BAM/CRAM via `noodles` (memory-mapped, streaming — the local-first edge).
 - [ ] RNA (`fold`, `translate`), protein sequences; an ADR for the bio type model.
-- [ ] Python interop for adoption (call into Biopython / existing pipelines).
+- [~] Python interop for adoption (call into Biopython / existing pipelines) —
+      **v1 shipped** (`import python.pysam`, etc.); see
+      [Phase 7](#phase-7--adoption--ecosystem). Zero-copy BAM/array sharing pending.
 
 ## Phase 1 — Core interpreter ✅ (current)
 
@@ -103,8 +105,8 @@ Lexer → parser → AST → tree-walking interpreter.
       optional compile-time "schema pin".
 - [ ] `Maybe`/`Int?` nullable tracking (deferred from ADR-0001 — checker uses a
       bottom `Missing` type for now).
-- [ ] Module system + imports.
-- [ ] Package manager.
+- [x] **Module system + imports** — see [Phase 7](#phase-7--adoption--ecosystem).
+- [ ] Package manager — see [Phase 7](#phase-7--adoption--ecosystem).
 
 ## Phase 3 — DataFrame engine (lazy core shipped)
 - [x] Back DataFrames with **latest Polars (0.54)** on **Rust 1.96 / edition
@@ -216,6 +218,71 @@ The staged plan, each step independently valuable:
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode fn registration), then
       array/loop kernels (the bridge to Track C).
+
+## Phase 7 — Adoption & ecosystem
+
+The "viability bar" — the work that turns an impressive compiler into a language
+people can actually adopt. See [docs/adoption.md](adoption.md) for the honest
+gap analysis that motivates this phase.
+
+### Modules (shipped)
+- [x] **`import name`** loads a sibling `name.helix`; its top-level definitions are
+      reached as `name.member`. A loader resolves the import graph (dependency
+      order, dedup by canonical path, cycle detection), then rewrites every module
+      into one namespaced flat AST the existing pipeline runs unchanged. Single-file
+      programs are untouched (pristine errors); multi-file error messages strip the
+      internal namespacing.
+- [x] **Subdirectory / path imports** `import lib.stats` → `lib/stats.helix`
+      (relative to the importer, nested arbitrarily deep).
+- [x] **Aliases** `import lib.stats as st` (`as` is contextual — still usable as an
+      ordinary identifier). Verified on both engines; cross-module calls, globals,
+      local shadowing, cycle + missing-module errors.
+- [ ] Selective import (`from m import f`); a stdlib search path.
+- [ ] Cross-module runtime-error caret attribution (message + line:col are correct;
+      the caret may point at the entry file).
+
+### CPython interop (v1 shipped) — see [ADR 0008](adr/0008-cpython-interop.md), [guide](python-interop.md)
+- [x] **Feature-gated bridge** (`cargo build --features python`, off by default so
+      the core binary stays self-contained). Embeds CPython via PyO3.
+- [x] **`import python.math as m` / `python.import("numpy")`** — both surface forms
+      (the statement form lowers to the expression form). Attribute access + method
+      calls forward to Python.
+- [x] **Opaque-by-default conversion** (the PyCall→PythonCall lesson): immutable
+      scalars convert to native Helix values; lists/dicts/objects stay opaque
+      `PyObject` handles (identity + mutability preserved); `to_array(x)` is the
+      explicit materialization. Python exceptions become Helix diagnostics
+      (`python error: <Type>: <msg>`); v1 aborts (no `try`/`catch` yet).
+- [x] Works identically on the VM and the tree-walker; default + feature test
+      suites both green, zero warnings. Example: [examples/python/interop.helix](../examples/python/interop.helix).
+- [~] **Zero-copy scientific bridge (the differentiator).**
+      - [x] **DataFrame ↔ Python polars** — a Helix DataFrame crosses to/from
+        Python's `polars` by sharing the Arrow buffers (via `pyo3-polars`);
+        `to_dataframe(x)` brings a Python frame back as a first-class Helix
+        DataFrame; `missing` ↔ Arrow validity bitmap with no translation. Verified
+        round-trip on both engines.
+      - [x] **`Tensor` ↔ Python NumPy** — a Helix Tensor crosses to/from NumPy
+        `f64` arrays (via `rust-numpy`); `to_tensor(x)` brings a NumPy array back as
+        a first-class Helix Tensor. Copies at the boundary (NumPy is mutable, Helix
+        tensors are immutable — each side gets its own buffer). Verified round-trip
+        on both engines.
+      - [ ] Truly buffer-sharing tensors via **DLPack** (GPU/large arrays) where
+        mutability allows; `f32`/int dtypes.
+      - [ ] pandas/pyarrow frames via the Arrow C stream interface; chunked Series
+        via the stream interface (avoid a rechunk copy).
+- [ ] **Bundled relocatable CPython** (python-build-standalone / `pyembed`) so the
+      feature build ships self-contained — closes Mojo's #1 footgun (runtime
+      "can't find libpython").
+- [ ] **Python → Helix** (Helix as an installable CPython extension) for calling
+      Helix from Python on hot paths.
+
+### Packaging, tooling, trust
+- [ ] **Package manager + lockfile** — the distribution half of modules (path/git
+      deps buildable locally; a registry needs hosting). The Python environment
+      should be pinned here too (ties into the bundled-CPython work).
+- [ ] **Jupyter kernel** — meet scientists where they work.
+- [ ] **Errors-as-values** (`Result` + `?`, [ADR 0004](adr/0004-functions-errors-mutability.md))
+      — also unblocks *recoverable* Python errors.
+- [ ] **Semantics freeze + compatibility policy**, and a reproducible CI benchmark.
 
 ## Phase 6 — GPU
 - [ ] Offload tensor/dataframe kernels to GPU (candle backend).

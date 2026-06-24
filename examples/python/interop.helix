@@ -1,0 +1,21 @@
+# CPython interop (Phase 6, v1). Requires a Python-enabled build:
+#   cargo run --features python examples/python/interop.helix
+# (The default Helix build has no Python support — this prints a rebuild hint.)
+#
+# `import python.<module> [as alias]` embeds CPython and exposes the module;
+# `python.import("<module>")` is the equivalent expression form. Results convert
+# opaque-by-default: scalars become native Helix values, but containers/objects
+# stay opaque `<python ...>` handles until `to_array(...)` materializes them.
+
+import python.math as m
+print("sqrt(16) =", m.sqrt(16.0))
+print("pi =", m.pi)
+
+stats = python.import("statistics")
+print("mean =", stats.mean([1.0, 2.0, 3.0, 4.0]))
+
+# A Python list is opaque until you explicitly convert it.
+builtins = python.import("builtins")
+nums = builtins.list(builtins.range(0, 5))
+print("opaque:", nums)
+print("native sum:", to_array(nums).sum())

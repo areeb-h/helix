@@ -61,6 +61,12 @@ pub enum Value {
     Missing,
     /// The result of statements that produce no value (e.g. `print`).
     Unit,
+    /// An opaque handle to a Python value (a module, function, or object) from the
+    /// embedded-CPython bridge. Held behind `crate::python::PyHandle` so all pyo3
+    /// contact stays in `src/python.rs`; cloning shares one strong Python reference
+    /// and dropping releases it. See ADR/Phase 6. The `python` global is a handle
+    /// too (a namespace marker). Always compiled; only its bridge body is gated.
+    PyObject(Rc<crate::python::PyHandle>),
 }
 
 impl Value {
@@ -81,6 +87,7 @@ impl Value {
             Value::Dna(_) => "Dna",
             Value::Missing => "Missing",
             Value::Unit => "Unit",
+            Value::PyObject(_) => "PyObject",
         }
     }
 
@@ -114,6 +121,7 @@ impl fmt::Debug for Value {
             Value::Function { params, .. } => write!(f, "Function(params={:?})", params),
             Value::VmFunc { arity, .. } => write!(f, "Function(arity={})", arity),
             Value::Tensor(t) => write!(f, "Tensor(shape={:?})", t.shape()),
+            Value::PyObject(h) => write!(f, "PyObject({})", h.repr()),
             other => write!(f, "{}", other),
         }
     }
@@ -138,6 +146,7 @@ impl fmt::Display for Value {
             Value::VmFunc { arity, .. } => write!(f, "<function/{}>", arity),
             Value::Missing => write!(f, "missing"),
             Value::Unit => write!(f, "()"),
+            Value::PyObject(h) => write!(f, "{}", h.repr()),
             Value::Array(items) => {
                 write!(f, "[")?;
                 for (i, v) in items.iter().enumerate() {

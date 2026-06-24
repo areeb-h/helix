@@ -180,14 +180,16 @@ pub struct Compiler {
 /// back as before.
 pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>) -> R<Program> {
     let mut c = Compiler {
-        // Seed the math constants as immutable globals so scalar programs that
-        // use `pi`/`e`/`inf` still compile (the tree-walker predefines them).
-        globals: vec!["pi".into(), "e".into(), "inf".into()],
-        global_mut: vec![false, false, false],
+        // Seed the math constants and the `python` interop entry point as immutable
+        // globals so programs that use `pi`/`e`/`inf`/`python` compile (the
+        // tree-walker predefines the same bindings).
+        globals: vec!["pi".into(), "e".into(), "inf".into(), "python".into()],
+        global_mut: vec![false, false, false, false],
         global_init: vec![
             Value::Float(std::f64::consts::PI),
             Value::Float(std::f64::consts::E),
             Value::Float(f64::INFINITY),
+            Value::PyObject(std::rc::Rc::new(crate::python::PyHandle::namespace())),
         ],
         func_names: vec!["<main>".into()],
         func_arity: vec![0], // main takes no params

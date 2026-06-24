@@ -29,7 +29,7 @@ strong static typing with heavy inference; educational errors; memory efficiency
 
 ## The journey, stage by stage
 
-Each stage shipped working, tested code (the test count grew 44 → 102).
+Each stage shipped working, tested code (the test count grew 44 → 130+).
 
 1. **Core interpreter** — lexer → parser → AST → tree-walking interpreter. Immutable
    bindings + `mut`, Int/Float/String/Bool/Array/Dna/Function, word-based booleans,
@@ -60,6 +60,15 @@ Each stage shipped working, tested code (the test count grew 44 → 102).
 11. **Genomics flagship** ([ROADMAP §Flagship](ROADMAP.md)) — real FASTA via
     `needletail`; `read_fasta`, `gc_content`, `kmers`, `find`, `Array.top`; the
     [genomics demo](../examples/genomics.helix) runs end-to-end.
+12. **Module system** ([ROADMAP §7](ROADMAP.md)) — `import name` / `import lib.stats
+    as st`; a loader resolves the import graph and rewrites every module into one
+    namespaced AST the existing pipeline runs unchanged. Single files stay untouched.
+13. **CPython interop, v1** ([ADR-0008](adr/0008-cpython-interop.md),
+    [guide](python-interop.md)) — the adoption unlock. Behind a feature flag (so the
+    core binary stays self-contained), Helix embeds CPython: `import python.numpy as
+    np`, attribute/method calls forward to Python, scalars convert back, containers
+    stay opaque until `to_array`, exceptions become Helix errors. So Helix can call
+    the real scientific stack *before* it has built its own.
 
 ---
 
@@ -158,8 +167,9 @@ by a `Rc::strong_count` test and flat-RSS measurement. Full argument:
   yet); no joins/derived columns.
 - **Tensors:** no slicing/stacking, single dtype (`f64`), no GPU/autodiff yet.
 - **Bio:** FASTA only so far — VCF→DataFrame, FASTQ, GFF/BED, BAM are next.
-- **Types:** no `Maybe`/nullable tracking, no modules/packages, no column-level
-  DataFrame typing.
+- **Types:** no `Maybe`/nullable tracking, no column-level DataFrame typing.
+- **Ecosystem:** modules + a v1 Python bridge shipped ([Phase 7](ROADMAP.md)); still
+  no package manager, no zero-copy DataFrame/Tensor sharing, no bundled interpreter.
 - **No async/threads at the language level** (data-parallelism is implicit via Polars).
 
 These are tracked, not hidden. See [ROADMAP.md](ROADMAP.md).
@@ -172,8 +182,10 @@ These are tracked, not hidden. See [ROADMAP.md](ROADMAP.md).
   interpreter: register VM + quickening), **Track B (JIT — shipped, widening)**, Track C
   (the unified fusing graph: Polars + JIT + tensor compiler, CPU→GPU).
 - **Flagship bio** ([ROADMAP.md](ROADMAP.md)): FASTA ✓ → VCF→DataFrame → FASTQ/GFF/BED →
-  BAM (mmap/streaming) → RNA/protein → Python interop.
-- **Correctness/safety:** leak-free + parity-tested at every engine boundary; 102 tests,
+  BAM (mmap/streaming) → RNA/protein → Python interop (v1 ✓).
+- **Adoption** ([ROADMAP §7](ROADMAP.md), [adoption.md](adoption.md)): modules ✓ →
+  CPython interop v1 ✓ → zero-copy Arrow/DLPack sharing → package manager → Jupyter.
+- **Correctness/safety:** leak-free + parity-tested at every engine boundary; 130+ tests,
   zero warnings, maintained as a gate.
 
 ---
@@ -187,7 +199,10 @@ These are tracked, not hidden. See [ROADMAP.md](ROADMAP.md).
 - [performance-roadmap.md](performance-roadmap.md) — the three perf tracks, cited.
 - [memory-safety.md](memory-safety.md) — the leak-freedom argument + tests.
 - [benchmarks.md](benchmarks.md) — DataFrame benchmark methodology + numbers.
+- [adoption.md](adoption.md) — the honest "would anyone switch?" gap analysis.
+- [python-interop.md](python-interop.md) — using Python from Helix (the v1 bridge).
 - [adr/](adr/) — accepted decision records (missing data, types, collections, functions,
-  syntax, concurrency, tensors).
-- `examples/` — runnable programs, incl. [genomics.helix](../examples/genomics.helix).
+  syntax, concurrency, tensors, CPython interop).
+- `examples/` — runnable programs, incl. [genomics.helix](../examples/genomics.helix)
+  and [python/interop.helix](../examples/python/interop.helix).
 - `scripts/` — `langbench.sh`, `vmparity.sh`, benchmark + parity harnesses.

@@ -1,0 +1,25 @@
+# Tensor interop with NumPy (Phase 7). Requires a Python-enabled build AND NumPy:
+#   pip install numpy
+#   cargo run --features python examples/python/tensor.helix
+#
+# A Helix Tensor (dense f64, ndarray-backed) crosses to NumPy and back. The copy is
+# deliberate: Helix tensors are immutable and shared, NumPy arrays are mutable, so
+# each side gets an independent buffer. `to_tensor(x)` brings a NumPy f64 array back
+# as a first-class Helix Tensor the native verbs work on.
+
+t = tensor([[1.0, 2.0], [3.0, 4.0]])
+np = python.import("numpy")
+
+# to_py: the Tensor becomes a NumPy array; np.sum returns a scalar -> Helix Float.
+print("sum via numpy:", np.sum(t))
+
+# Use a NumPy routine, then bring the result home as a Helix Tensor.
+la = python.import("numpy.linalg")
+inv = to_tensor(la.inv(t))
+print("inverse (from numpy.linalg):")
+print(inv)
+
+# `inv` is a real Helix Tensor — native methods apply.
+print("shape:", inv.shape())
+print("matmul check (t . inv should be identity):")
+print(t.matmul(inv))

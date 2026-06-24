@@ -279,7 +279,7 @@ const BUILTIN_FNS: &[&str] = &[
     "zeros",
     "ones", "eye", "sqrt", "cbrt", "abs", "exp", "ln", "log10", "log2", "log", "sin", "cos", "tan",
     "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "floor", "ceil", "round", "trunc",
-    "sign", "degrees", "radians", "hypot", "min", "max",
+    "sign", "degrees", "radians", "hypot", "min", "max", "to_array", "to_dataframe", "to_tensor",
 ];
 
 const MATH_UNARY_FLOAT: &[&str] = &[
@@ -315,6 +315,10 @@ impl Checker {
         env.insert("pi".to_string(), Type::Float);
         env.insert("e".to_string(), Type::Float);
         env.insert("inf".to_string(), Type::Float);
+        // The `python` interop entry point types as `Unknown`, so `python.import(...)`
+        // and any method/attribute chain off a Python value never errors (Python
+        // values ride the same permissive boundary as DataFrame columns).
+        env.insert("python".to_string(), Type::Unknown);
         Checker { env, types: FxHashMap::default() }
     }
 

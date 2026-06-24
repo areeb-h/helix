@@ -309,6 +309,44 @@ impl Parser {
         }
     }
 
+    /// Like `ident_name`, but also accepts a reserved keyword as the name — used
+    /// for member access after `.`, where a keyword can only be a member (so
+    /// `python.import(...)`, `x.in`, etc. parse). Returns the keyword's source text.
+    fn member_name(&mut self, ctx: &str) -> Result<String, HelixError> {
+        let kw = match self.peek() {
+            Tok::Ident(n) => Some(n.clone()),
+            Tok::Mut => Some("mut".to_string()),
+            Tok::Fn => Some("fn".to_string()),
+            Tok::Import => Some("import".to_string()),
+            Tok::And => Some("and".to_string()),
+            Tok::Or => Some("or".to_string()),
+            Tok::Not => Some("not".to_string()),
+            Tok::If => Some("if".to_string()),
+            Tok::Then => Some("then".to_string()),
+            Tok::Else => Some("else".to_string()),
+            Tok::Let => Some("let".to_string()),
+            Tok::In => Some("in".to_string()),
+            Tok::Missing => Some("missing".to_string()),
+            Tok::True => Some("true".to_string()),
+            Tok::False => Some("false".to_string()),
+            _ => None,
+        };
+        match kw {
+            Some(n) => {
+                self.advance();
+                Ok(n)
+            }
+            None => {
+                let (l, c) = self.pos();
+                Err(HelixError::new(
+                    format!("expected a name {}, found {}", ctx, self.peek().describe()),
+                    l,
+                    c,
+                ))
+            }
+        }
+    }
+
     /// Parse a function-signature type annotation: one capitalized type word.
     fn parse_type_ann(&mut self) -> Result<TypeAnn, HelixError> {
         let (l, c) = self.pos();
@@ -625,7 +663,7 @@ impl Parser {
                 Tok::Dot => {
                     let (l, c) = self.pos();
                     self.advance();
-                    let name = self.ident_name("after `.`")?;
+                    let name = self.member_name("after `.`")?;
                     // `.name(...)` is a method call; `.name` (no parens) is record
                     // field access — one obvious way: parens mean a call.
                     if matches!(self.peek(), Tok::LParen) {

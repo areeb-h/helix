@@ -83,7 +83,43 @@ impl Loader {
             .map_err(|e| format!("error: cannot read `{}`: {}\n", canon.display(), e))?;
         let fname = canon.to_string_lossy().into_owned();
         let toks = crate::lexer::lex(&src).map_err(|e| e.render(&src, &fname))?;
-        let stmts = crate::parser::parse(toks).map_err(|e| e.render(&src, &fname))?;
+        let mut stmts = crate::parser::parse(toks).map_err(|e| e.render(&src, &fname))?;
+
+        // Lower `import python.a.b [as alias]` into `alias = python.import("a.b")`
+        // before resolving file imports — so it rides the normal pipeline (and the
+        // resolver below never hunts for a `python/...helix` file). `python` itself
+        // is a predefined global, so the lowered assign just calls a method on it.
+        for s in stmts.iter_mut() {
+            if let Stmt::Import { segments, alias, line, col } = s {
+                if segments.first().map(|x| x.as_str()) == Some("python") {
+                    if segments.len() < 2 {
+                        return Err(HelixError::new(
+                            "`import python` needs a module, e.g. `import python.numpy`",
+                            *line,
+                            *col,
+                        )
+                        .hint("Python modules import as `import python.<module> [as alias]`.")
+                        .render(&src, &fname));
+                    }
+                    let module = segments[1..].join(".");
+                    let alias = alias.clone();
+                    let (l, c) = (*line, *col);
+                    *s = Stmt::Assign {
+                        name: alias,
+                        mutable: false,
+                        value: Expr::Method {
+                            recv: Box::new(Expr::Ident { name: "python".to_string(), line: l, col: c }),
+                            name: "import".to_string(),
+                            args: vec![Expr::Str(module)],
+                            line: l,
+                            col: c,
+                        },
+                        line: l,
+                        col: c,
+                    };
+                }
+            }
+        }
 
         let dir = canon.parent().unwrap_or_else(|| Path::new("."));
         let mut imports = Vec::new();

@@ -242,6 +242,7 @@ pub(crate) fn eval_field(r: &Value, name: &str, line: usize, col: usize) -> Resu
                 err
             }),
         Value::Missing => Ok(Value::Missing), // propagate
+        Value::PyObject(h) => crate::python::getattr(h, name, line, col),
         other => Err(HelixError::new(
             format!("a value of type {} has no field `{}`", other.type_name(), name),
             line,

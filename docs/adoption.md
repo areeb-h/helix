@@ -34,9 +34,17 @@ answer is no, so the quality is moot for adoption.
 
 Grounded in the current source, not aspirations:
 
-1. **No Python interop / FFI.** Can't call NumPy, PyTorch, pysam, samtools, or any
-   existing library. For ML this is dead on arrival; for bio it rules out the de
-   facto toolchain. *This is the single most important gap.*
+1. **Python interop now has a working v1 (the single most important gap, now
+   cracked open).** A feature-gated CPython bridge (`cargo build --features python`)
+   embeds Python via PyO3: `import python.math as m` / `python.import("numpy")`
+   loads a module, attribute access and method calls forward to Python, scalars
+   convert back natively, containers/objects stay opaque until `to_array(...)`, and
+   Python exceptions surface as Helix errors. So Helix can already call real Python
+   libraries. Still v1, deliberately scoped: no zero-copy DataFrame/Tensor bridge
+   (Arrow C Data Interface / DLPack — the differentiator) yet, no bundled
+   interpreter (uses the ambient Python), and no Python→Helix direction. The default
+   build stays self-contained (no libpython) and prints a rebuild hint if you use
+   `python` without the feature.
 2. **A module system now exists, but no packages.** `import name` loads a sibling
    `name.helix` and reaches its definitions as `name.member`; modules can also live
    in subdirectories (`import lib.stats` → `lib/stats.helix`) and be aliased

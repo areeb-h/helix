@@ -46,3 +46,19 @@ polars = { version = "0.54", features = [
 ] }
 # Fast, deterministic hashing for the interpreter environment.
 rustc-hash = "2"
+# CPython interop (Helix -> Python), behind the off-by-default `python` feature so
+# the core binary stays self-contained (no libpython dependency unless enabled).
+# `abi3-py38` builds against the stable ABI (one build spans Python 3.8+);
+# `auto-initialize` lazily starts the interpreter on first use.
+pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py38"], optional = true }
+# Zero-copy Rust-Polars <-> Python-Polars interchange (via Arrow). Matches our
+# polars 0.54 and pyo3 0.28; used to hand a Helix DataFrame to/from Python.
+pyo3-polars = { version = "0.27", optional = true }
+# ndarray <-> NumPy bridge. numpy 0.28 unifies on pyo3 ^0.28 and ndarray <=0.17
+# (our 0.17); used to hand a Helix Tensor to/from Python's NumPy.
+numpy = { version = "0.28", optional = true }
+
+[features]
+default = []
+# Enable the embedded-CPython bridge: `cargo build --features python`.
+python = ["dep:pyo3", "dep:pyo3-polars", "dep:numpy"]

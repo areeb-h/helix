@@ -14,9 +14,11 @@ we make them deliberately and in the open.
 | [0005](0005-syntax-conventions.md) | Syntax & surface conventions | ✅ accepted |
 | [0006](0006-concurrency-and-scale.md) | Concurrency, parallelism & scale | 📝 proposed (DataFrame layer live) |
 | [0007](0007-tensor-backend.md) | Tensor backend (ndarray now, GPU later) | 🛠 CPU core implemented |
+| [0008](0008-cpython-interop.md) | CPython interop (Helix → Python) | 🛠 v1 implemented (feature-gated) |
 
-Each is grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
-(23 of 25 claims survived 3-vote adversarial verification).
+ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
+(23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a
+[2026-06-24 interop research pass](../research/2026-06-24-python-interop.md).
 
 Status legend: 🔬 researching · 📝 proposed · 🛠 implementing · ✅ accepted · ❌ superseded
 

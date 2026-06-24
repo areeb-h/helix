@@ -16,6 +16,7 @@ mod jit;
 mod lexer;
 mod module;
 mod parser;
+mod python;
 mod tensor;
 mod token;
 mod types;

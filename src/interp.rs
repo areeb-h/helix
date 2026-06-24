@@ -56,6 +56,16 @@ impl Interp {
             "inf".to_string(),
             Binding { value: Value::Float(f64::INFINITY), mutable: false },
         );
+        // The `python` interop entry point — an opaque namespace handle. Always
+        // present; without the `python` build feature its methods return a clean
+        // "rebuild with --features python" error (see `crate::python`).
+        env.insert(
+            "python".to_string(),
+            Binding {
+                value: Value::PyObject(std::rc::Rc::new(crate::python::PyHandle::namespace())),
+                mutable: false,
+            },
+        );
         Interp { env, depth: 0 }
     }
 
@@ -695,7 +705,7 @@ pub(crate) const BUILTIN_FNS: &[&str] = &[
     "zeros",
     "ones", "eye", "sqrt", "cbrt", "abs", "exp", "ln", "log10", "log2", "log", "sin", "cos", "tan",
     "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "floor", "ceil", "round", "trunc",
-    "sign", "degrees", "radians", "hypot", "min", "max",
+    "sign", "degrees", "radians", "hypot", "min", "max", "to_array", "to_dataframe", "to_tensor",
 ];
 
 /// Apply a scalar operation across a value, broadcasting over arrays and

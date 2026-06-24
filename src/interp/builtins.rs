@@ -27,6 +27,23 @@ impl super::Interp {
                     other => Err(type_err("dna", "a string", other, line, col)),
                 }
             }
+            "to_array" => {
+                arity(name, &args, 1, line, col)?;
+                // Explicit, on-demand materialization of a Python iterable into a
+                // native Helix Array (the visible escape hatch from opaque-by-default).
+                crate::python::to_array(args.into_iter().next().unwrap(), line, col)
+            }
+            "to_dataframe" => {
+                arity(name, &args, 1, line, col)?;
+                // Bring a Python polars/pandas/pyarrow frame into Helix as a native
+                // DataFrame, zero-copy via Arrow.
+                crate::python::to_dataframe(args.into_iter().next().unwrap(), line, col)
+            }
+            "to_tensor" => {
+                arity(name, &args, 1, line, col)?;
+                // Bring a Python NumPy f64 array into Helix as a native Tensor.
+                crate::python::to_tensor(args.into_iter().next().unwrap(), line, col)
+            }
             "read_csv" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {

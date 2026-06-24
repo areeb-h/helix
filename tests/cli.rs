@@ -242,3 +242,111 @@ fn subdirectory_import_resolves_nested_path() {
     assert_eq!(vm, tw, "VM and tree-walker disagree on a subdirectory import");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- Python interop (Phase 6) ------------------------------------------------
+// These run against whichever feature set the suite was built with: the
+// feature-gated tests need `cargo test --features python` (and a Python
+// interpreter on the box); the default build instead asserts the friendly
+// "rebuild with --features python" error.
+
+fn run_script(src: &str, env: &[(&str, &str)], tag: &str) -> (String, String, Option<i32>) {
+    let dir = std::env::temp_dir().join(format!("helix_py_{tag}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("main.helix");
+    std::fs::write(&path, src).unwrap();
+    let r = run(&[path.to_str().unwrap()], env, "");
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn python_import_math_on_both_engines() {
+    // Both surface syntaxes: the statement form (sugar) and the expression form.
+    let src = "import python.math as m\nprint(m.sqrt(16.0))\nmod = python.import(\"math\")\nprint(mod.gcd(12, 18))\n";
+    let (vm, stderr, code) = run_script(src, &[], "math_vm");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(vm.trim(), "4.0\n6", "got: {vm:?}");
+    let (tw, _, _) = run_script(src, &[("HELIX_NOVM", "1")], "math_tw");
+    assert_eq!(vm, tw, "VM and tree-walker disagree on Python interop");
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn python_object_is_opaque_until_to_array() {
+    // A Python list stays an opaque PyObject (NOT silently an Array); `to_array`
+    // is the explicit, on-demand materialization into a native Helix Array.
+    let src = "import python.builtins as b\nxs = b.list(b.range(0, 4))\nprint(xs)\nprint(to_array(xs).sum())\n";
+    let (out, stderr, code) = run_script(src, &[], "opaque");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "<python list>\n6", "got: {out:?}");
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn python_exception_becomes_a_helix_error() {
+    let src = "m = python.import(\"no_such_module_xyz\")\nprint(m)\n";
+    let (_, stderr, code) = run_script(src, &[], "pymiss");
+    assert_ne!(code, Some(0));
+    assert!(
+        stderr.contains("python error: ModuleNotFoundError"),
+        "stderr: {stderr:?}"
+    );
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn python_dataframe_round_trips_zero_copy() {
+    // A Helix DataFrame flows out to Python's polars (len() = rows) and back via
+    // `to_dataframe`, becoming a first-class Helix DataFrame again. Needs the Python
+    // `polars` package; skip cleanly if it isn't installed so the suite stays portable.
+    // The relative CSV path resolves because `run` sets cwd to the manifest dir.
+    let src = concat!(
+        "df = read_csv(\"examples/data/patients.csv\")\n",
+        "print(python.import(\"builtins\").len(df))\n",
+        "back = to_dataframe(python.import(\"polars\").concat([df]))\n",
+        "print(back.count())\n",
+    );
+    let (out, stderr, code) = run_script(src, &[], "dfroundtrip");
+    if stderr.contains("No module named 'polars'") {
+        eprintln!("skipping python_dataframe_round_trips_zero_copy: Python polars not installed");
+        return;
+    }
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "8\n8", "got: {out:?}"); // 8 patients, preserved across the round-trip
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn python_tensor_round_trips_via_numpy() {
+    // A Helix Tensor crosses to NumPy and back via `to_tensor`, becoming a
+    // first-class Helix Tensor again. Needs Python `numpy`; skip if it's absent.
+    let src = concat!(
+        "t = tensor([[1.0, 2.0], [3.0, 4.0]])\n",
+        "np = python.import(\"numpy\")\n",
+        "print(np.sum(t))\n",                  // to_py: Tensor -> NumPy -> scalar
+        "print(to_tensor(np.transpose(t)).shape())\n", // round-trip -> native verb
+    );
+    let (out, stderr, code) = run_script(src, &[], "tensorroundtrip");
+    if stderr.contains("No module named 'numpy'") {
+        eprintln!("skipping python_tensor_round_trips_via_numpy: Python numpy not installed");
+        return;
+    }
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "10.0\n[2, 2]", "got: {out:?}");
+}
+
+#[cfg(not(feature = "python"))]
+#[test]
+fn python_without_feature_errors_with_rebuild_hint() {
+    // The default build has the `python` global and parses `python.import`, but
+    // calling it fails loudly with a build hint — never a cryptic runtime crash.
+    let src = "m = python.import(\"math\")\nprint(m)\n";
+    let (_, stderr, code) = run_script(src, &[], "nopy");
+    assert_ne!(code, Some(0));
+    assert!(
+        stderr.contains("without Python support"),
+        "stderr: {stderr:?}"
+    );
+}
