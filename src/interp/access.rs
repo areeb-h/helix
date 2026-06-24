@@ -226,16 +226,13 @@ pub(crate) fn df_value_method(
             Ok(Value::Array(Rc::new(dataframe::column_values(lf, &name, line, col)?)))
         }
         _ => {
-            const DF_METHODS: &[&str] = &[
-                "where", "select", "sort", "group", "with", "join", "column", "head", "count",
-                "columns", "cache",
-            ];
+            let methods = crate::registry::methods_of(crate::registry::DF_METHODS);
             let mut err =
                 HelixError::new(format!("a DataFrame has no method `{}`", name), line, col);
-            if let Some(s) = suggest(name, DF_METHODS) {
+            if let Some(s) = suggest(name, &methods) {
                 err = err.hint(format!("did you mean `{}`?", s));
             } else {
-                err = err.hint(format!("DataFrame methods: {}", DF_METHODS.join(", ")));
+                err = err.hint(format!("DataFrame methods: {}", methods.join(", ")));
             }
             Err(err)
         }

@@ -55,7 +55,9 @@ pub fn memoizable_fns(program: &[Stmt]) -> HashSet<String> {
         for &(name, _, body) in &funcs {
             if !impure.contains(name)
                 && (has_method(body)
-                    || any_call(body, &|n| IMPURE_BUILTINS.contains(&n) || impure.contains(n)))
+                    || any_call(body, &|n| {
+                        crate::registry::is_impure_builtin(n) || impure.contains(n)
+                    }))
             {
                 impure.insert(name);
                 changed = true;

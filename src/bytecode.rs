@@ -25,19 +25,7 @@
 use std::collections::HashSet;
 
 use crate::ast::{BinOp, Expr, InterpPart, Stmt, UnOp};
-use crate::interp::BUILTIN_FNS;
 use crate::value::Value;
-
-/// Builtins with side effects (output) or non-reproducible results (IO). A
-/// function that reaches any of these — directly or through another function —
-/// is impure and must never be memoized.
-const IMPURE_BUILTINS: &[&str] = &[
-    "print",
-    "read_csv",
-    "read_parquet",
-    "read_fasta",
-    "write_parquet",
-];
 
 /// Defensive sentinel for a compilation that could not be lowered. The compiler is
 /// total for any type-checked program, so this is never constructed in practice; if
@@ -634,7 +622,7 @@ impl Compiler {
             }
             Expr::Call { name, args, line, col } => {
                 // Builtins win over user names, matching the tree-walker.
-                if BUILTIN_FNS.contains(&name.as_str()) {
+                if crate::registry::lookup(name).is_some() {
                     for a in args {
                         self.compile_expr(b, a)?;
                     }

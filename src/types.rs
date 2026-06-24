@@ -218,13 +218,14 @@ fn arity_err(name: &str, want: usize, got: usize, line: usize, col: usize) -> He
 /// Field access `x.name` on something that isn't a record. If `name` is actually
 /// a method of that type, nudge the user to call it with `()`.
 fn field_on_non_record(t: &Type, name: &str, line: usize, col: usize) -> HelixError {
+    use crate::registry as reg;
     let methods: &[&str] = match t {
-        Type::Array(_) => ARRAY_METHODS,
-        Type::String => STRING_METHODS,
-        Type::Dna => DNA_METHODS,
-        Type::Tensor => TENSOR_METHODS,
-        Type::DataFrame => DF_METHODS,
-        Type::GroupBy => GROUPBY_AGGS,
+        Type::Array(_) => reg::ARRAY_METHODS,
+        Type::String => reg::STRING_METHODS,
+        Type::Dna => reg::DNA_METHODS,
+        Type::Tensor => reg::TENSOR_METHODS,
+        Type::DataFrame => reg::DF_METHODS,
+        Type::GroupBy => reg::GROUPBY_METHODS,
         _ => &[],
     };
     let err = HelixError::new(
@@ -248,42 +249,6 @@ fn unknown_method(type_name: &str, name: &str, candidates: &[&str], line: usize,
     }
     err
 }
-
-const ARRAY_METHODS: &[&str] = &[
-    "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count",
-    "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
-    "all", "take", "drop", "zip", "enumerate", "top", "drop_missing", "is_missing",
-];
-const STRING_METHODS: &[&str] = &["upper", "lower", "count", "reverse", "is_missing"];
-const DNA_METHODS: &[&str] = &[
-    "gc_content",
-    "reverse_complement",
-    "complement",
-    "kmers",
-    "find",
-    "length",
-    "is_missing",
-];
-const TENSOR_METHODS: &[&str] = &[
-    "shape", "ndim", "count", "sum", "mean", "min", "max", "flatten", "reshape", "transpose", "t",
-    "matmul", "dot", "norm", "det", "inv", "solve", "is_missing",
-];
-const DF_METHODS: &[&str] = &[
-    "where", "filter", "select", "sort", "group", "with", "join", "column", "head", "count",
-    "columns", "cache", "is_missing",
-];
-const GROUPBY_AGGS: &[&str] = &["mean", "sum", "min", "max", "count", "std", "is_missing"];
-
-const BUILTIN_FNS: &[&str] = &[
-    "print", "dna", "range", "read_csv", "read_parquet", "read_fasta", "read_fastq", "read_vcf",
-    "write_parquet", "tensor",
-    "zeros",
-    "ones", "eye", "sqrt", "cbrt", "abs", "exp", "ln", "log10", "log2", "log", "sin", "cos", "tan",
-    "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "floor", "ceil", "round", "trunc",
-    "sign", "degrees", "radians", "hypot", "min", "max", "erf", "normal_cdf", "normal_pdf",
-    "correlation", "t_test", "linear_regression", "multiple_regression", "to_array",
-    "to_dataframe", "to_tensor", "parse_json", "to_json", "http_get",
-];
 
 const MATH_UNARY_FLOAT: &[&str] = &[
     "sqrt", "cbrt", "exp", "ln", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",

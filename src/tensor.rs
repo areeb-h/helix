@@ -195,10 +195,6 @@ pub fn scalar_op(op: &BinOp, t: &Tensor, s: f64, tensor_left: bool) -> Tensor {
 
 // ---------- methods ----------
 
-const TENSOR_METHODS: &[&str] = &[
-    "shape", "ndim", "count", "sum", "mean", "min", "max", "flatten", "reshape", "transpose", "t",
-    "matmul", "dot", "norm", "det", "inv", "solve",
-];
 
 // ---------- pure-Rust linear algebra (Gaussian elimination, no BLAS dep) ----------
 
@@ -574,10 +570,11 @@ pub fn method(
                 line,
                 col,
             );
-            if let Some(s) = suggest(name, TENSOR_METHODS) {
+            let methods = crate::registry::methods_of(crate::registry::TENSOR_METHODS);
+            if let Some(s) = suggest(name, &methods) {
                 err = err.hint(format!("did you mean `{}`?", s));
             } else {
-                err = err.hint(format!("Tensor methods: {}", TENSOR_METHODS.join(", ")));
+                err = err.hint(format!("Tensor methods: {}", methods.join(", ")));
             }
             Err(err)
         }

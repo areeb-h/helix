@@ -429,7 +429,7 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
             for a in args.iter_mut() {
                 rw(a, ctx, bound);
             }
-            if !bound.contains(name) && !crate::interp::BUILTIN_FNS.contains(&name.as_str()) {
+            if !bound.contains(name) && crate::registry::lookup(name).is_none() {
                 if ctx.top_level.contains(name) {
                     *name = mangle(&ctx.prefix, name);
                 } else if let Some(dep) = ctx.selected.get(name) {

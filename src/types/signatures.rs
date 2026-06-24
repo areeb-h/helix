@@ -321,7 +321,15 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         "zip" => Type::Array(Box::new(Type::Tuple(vec![el.clone(), Type::Unknown]))),
         // `(value, count)` tuples for the n most frequent elements.
         "top" => Type::Array(Box::new(Type::Tuple(vec![el.clone(), Type::Int]))),
-        _ => return Err(unknown_method("Array", name, ARRAY_METHODS, line, col)),
+        _ => {
+            return Err(unknown_method(
+                "Array",
+                name,
+                &crate::registry::methods_of(crate::registry::ARRAY_METHODS),
+                line,
+                col,
+            ))
+        }
     })
 }
 
@@ -329,7 +337,15 @@ pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<
     Ok(match name {
         "upper" | "lower" | "reverse" => Type::String,
         "count" => Type::Int,
-        _ => return Err(unknown_method("String", name, STRING_METHODS, line, col)),
+        _ => {
+            return Err(unknown_method(
+                "String",
+                name,
+                &crate::registry::methods_of(crate::registry::STRING_METHODS),
+                line,
+                col,
+            ))
+        }
     })
 }
 
@@ -341,7 +357,15 @@ pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Typ
         "kmers" => Type::Array(Box::new(Type::String)),
         // 0-based index of the motif, or `missing` when absent.
         "find" => Type::Int,
-        _ => return Err(unknown_method("Dna", name, DNA_METHODS, line, col)),
+        _ => {
+            return Err(unknown_method(
+                "Dna",
+                name,
+                &crate::registry::methods_of(crate::registry::DNA_METHODS),
+                line,
+                col,
+            ))
+        }
     })
 }
 
@@ -360,7 +384,15 @@ pub(super) fn tensor_method_type(name: &str, nargs: usize, line: usize, col: usi
         "flatten" | "reshape" | "transpose" | "t" | "inv" | "solve" => Type::Tensor,
         "matmul" | "dot" => Type::Unknown, // Float for vec·vec, Tensor otherwise
         "norm" | "det" => Type::Float,
-        _ => return Err(unknown_method("Tensor", name, TENSOR_METHODS, line, col)),
+        _ => {
+            return Err(unknown_method(
+                "Tensor",
+                name,
+                &crate::registry::methods_of(crate::registry::TENSOR_METHODS),
+                line,
+                col,
+            ))
+        }
     })
 }
 
@@ -374,13 +406,29 @@ pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type
         "columns" => Type::Array(Box::new(Type::String)),
         // One column's values as an array; element type is the runtime schema boundary.
         "column" => array_of_unknown(),
-        _ => return Err(unknown_method("DataFrame", name, DF_METHODS, line, col)),
+        _ => {
+            return Err(unknown_method(
+                "DataFrame",
+                name,
+                &crate::registry::methods_of(crate::registry::DF_METHODS),
+                line,
+                col,
+            ))
+        }
     })
 }
 
 pub(super) fn groupby_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
         "mean" | "sum" | "min" | "max" | "count" | "std" => Type::DataFrame,
-        _ => return Err(unknown_method("GroupBy", name, GROUPBY_AGGS, line, col)),
+        _ => {
+            return Err(unknown_method(
+                "GroupBy",
+                name,
+                &crate::registry::methods_of(crate::registry::GROUPBY_METHODS),
+                line,
+                col,
+            ))
+        }
     })
 }

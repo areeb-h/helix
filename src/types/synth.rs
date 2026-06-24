@@ -119,7 +119,7 @@ impl super::Checker {
         line: usize,
         col: usize,
     ) -> Result<Type, HelixError> {
-        if BUILTIN_FNS.contains(&name) {
+        if crate::registry::lookup(name).is_some() {
             return builtin_type(name, args, line, col);
         }
         // user-defined function?
@@ -163,7 +163,7 @@ impl super::Checker {
             .hint("only functions and the built-ins can be called."));
         }
         // unknown — suggest from builtins + user functions
-        let mut cands: Vec<String> = BUILTIN_FNS.iter().map(|s| s.to_string()).collect();
+        let mut cands: Vec<String> = crate::registry::names().map(|s| s.to_string()).collect();
         cands.extend(
             self.env
                 .iter()

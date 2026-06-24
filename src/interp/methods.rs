@@ -10,20 +10,6 @@ use std::rc::Rc;
 use crate::error::{suggest, HelixError};
 use crate::value::Value;
 
-const ARRAY_METHODS: &[&str] = &[
-    "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count",
-    "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
-    "all", "take", "drop", "zip", "enumerate", "top", "drop_missing", "is_missing",
-];
-const STRING_METHODS: &[&str] = &["upper", "lower", "count", "reverse"];
-const DNA_METHODS: &[&str] = &[
-    "gc_content",
-    "reverse_complement",
-    "complement",
-    "kmers",
-    "find",
-    "length",
-];
 
 pub(crate) fn call_method(
     recv: &Value,
@@ -358,7 +344,13 @@ fn array_method(
                 .collect();
             Ok(Value::Array(Rc::new(out)))
         }
-        _ => Err(unknown_method("Array", name, ARRAY_METHODS, line, col)),
+        _ => Err(unknown_method(
+            "Array",
+            name,
+            &crate::registry::methods_of(crate::registry::ARRAY_METHODS),
+            line,
+            col,
+        )),
     }
 }
 
@@ -418,7 +410,13 @@ fn string_method(
         "lower" => Ok(Value::Str(Rc::new(s.to_lowercase()))),
         "count" => Ok(Value::Int(s.chars().count() as i64)),
         "reverse" => Ok(Value::Str(Rc::new(s.chars().rev().collect()))),
-        _ => Err(unknown_method("String", name, STRING_METHODS, line, col)),
+        _ => Err(unknown_method(
+            "String",
+            name,
+            &crate::registry::methods_of(crate::registry::STRING_METHODS),
+            line,
+            col,
+        )),
     }
 }
 
@@ -515,7 +513,13 @@ fn dna_method(
             }
             Ok(Value::Array(Rc::new(out)))
         }
-        _ => Err(unknown_method("Dna", name, DNA_METHODS, line, col)),
+        _ => Err(unknown_method(
+            "Dna",
+            name,
+            &crate::registry::methods_of(crate::registry::DNA_METHODS),
+            line,
+            col,
+        )),
     }
 }
 

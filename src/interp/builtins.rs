@@ -436,7 +436,8 @@ impl super::Interp {
             _ => {
                 let mut err =
                     HelixError::new(format!("`{}` is not a known function", name), line, col);
-                if let Some(s) = suggest(name, BUILTIN_FNS) {
+                let cands: Vec<&str> = crate::registry::names().collect();
+                if let Some(s) = suggest(name, &cands) {
                     err = err.hint(format!("did you mean `{}`?", s));
                 }
                 Err(err)

@@ -327,7 +327,7 @@ impl Interp {
                 for a in args {
                     vals.push(self.eval(a)?);
                 }
-                if BUILTIN_FNS.contains(&name.as_str()) {
+                if crate::registry::lookup(name).is_some() {
                     return self.call_builtin(name, vals, *line, *col);
                 }
                 // A user-defined (or anonymous, stored-in-a-variable) function?
@@ -348,7 +348,7 @@ impl Interp {
                     .hint("only functions and the built-ins `print`/`dna`/`range` can be called."));
                 }
                 // Unknown — suggest the closest known function name.
-                let mut cands: Vec<String> = BUILTIN_FNS.iter().map(|s| s.to_string()).collect();
+                let mut cands: Vec<String> = crate::registry::names().map(|s| s.to_string()).collect();
                 cands.extend(
                     self.env
                         .iter()
@@ -717,17 +717,6 @@ pub(crate) fn try_err(message: String) -> Value {
     ]))
 }
 
-/// Every built-in function name, used both for routing and for "did you mean".
-pub(crate) const BUILTIN_FNS: &[&str] = &[
-    "print", "dna", "range", "read_csv", "read_parquet", "read_fasta", "read_fastq", "read_vcf",
-    "write_parquet", "tensor",
-    "zeros",
-    "ones", "eye", "sqrt", "cbrt", "abs", "exp", "ln", "log10", "log2", "log", "sin", "cos", "tan",
-    "asin", "acos", "atan", "atan2", "sinh", "cosh", "tanh", "floor", "ceil", "round", "trunc",
-    "sign", "degrees", "radians", "hypot", "min", "max", "erf", "normal_cdf", "normal_pdf",
-    "correlation", "t_test", "linear_regression", "multiple_regression", "to_array",
-    "to_dataframe", "to_tensor", "parse_json", "to_json", "http_get",
-];
 
 /// Apply a scalar operation across a value, broadcasting over arrays and
 /// propagating `missing` — the spine of the math standard library.
