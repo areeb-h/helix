@@ -9,12 +9,14 @@
 //!     churn on every function call.
 //!   * **The AST is walked once**, not re-traversed on every execution.
 //!
-//! It is deliberately *partial*: anything it doesn't yet know how to compile
-//! (arrays, methods/comprehensions, records, tensors, DataFrames, lambdas, …)
-//! makes [`compile`] return [`Unsupported`], and the caller transparently falls
-//! back to the tree-walker. So the VM accelerates the scalar / control-flow /
-//! recursion core — exactly where interpreter overhead dominates — while every
-//! program keeps running. Opcodes are added over time to widen its reach.
+//! It is *total*: every type-checked program lowers to bytecode (arrays, methods,
+//! comprehensions, records, tensors, DataFrames, lambdas, …), so the VM is the sole
+//! automatic engine — there is no silent tree-walker fallback. A user error in an
+//! otherwise type-checked program compiles to an `Op::Raise` that reports it at
+//! runtime, never to [`Unsupported`]; that sentinel remains only as a defensive
+//! backstop, surfaced by the runner as an internal error if it were ever returned.
+//! (The tree-walker still runs under `HELIX_NOVM` for A/B checks and for `try`,
+//! whose error recovery the VM does not yet implement.)
 //!
 //! Semantics are kept identical to the tree-walker by reusing its value type and
 //! its arithmetic/boolean helpers (`interp::eval_binary`, `eval_unary`, …), so
@@ -37,8 +39,11 @@ const IMPURE_BUILTINS: &[&str] = &[
     "write_parquet",
 ];
 
-/// Sentinel: this program uses a construct the compiler doesn't support yet, so
-/// the caller should run it on the tree-walker instead.
+/// Defensive sentinel for a compilation that could not be lowered. The compiler is
+/// total for any type-checked program, so this is never constructed in practice; if
+/// it ever were, the runner surfaces it as an internal error rather than silently
+/// falling back to the tree-walker. Retained so the lowering helpers keep a fallible
+/// signature, leaving room to reintroduce a guarded fallback should one be needed.
 #[derive(Debug)]
 pub struct Unsupported;
 
@@ -171,13 +176,12 @@ pub struct Compiler {
     types: Option<crate::types::TypeMap>,
 }
 
-/// Compile a whole program to bytecode, or return [`Unsupported`] so the caller
-/// falls back to the tree-walker. Never partially compiles: it's all-or-nothing
-/// per program, which keeps the VM and the fallback path cleanly separated.
-/// Compile, optionally using the type checker's inferred receiver types to route
-/// receiver-polymorphic methods (DataFrame/Tensor column-verbs). Pass `None` to
-/// compile without a prior type-check (tests/fuzzers) — then such methods fall
-/// back as before.
+/// Compile a whole program to bytecode. Total for any type-checked program (see the
+/// module docs); the [`Unsupported`] return is a defensive backstop, not a routine
+/// tree-walker fallback. Optionally takes the type checker's inferred receiver types
+/// to route receiver-polymorphic methods (DataFrame/Tensor column-verbs); pass `None`
+/// to compile without a prior type-check (tests/fuzzers), where such methods route by
+/// runtime receiver type instead.
 pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>) -> R<Program> {
     let mut c = Compiler {
         // Seed the math constants and the `python` interop entry point as immutable

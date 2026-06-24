@@ -6,10 +6,6 @@
 use super::*;
 
 impl super::Compiler {
-    /// loop. The element binder lives in a fresh local slot, and the body is
-    /// compiled inline (so outer variables are reached directly — no closures).
-    /// Cases the loop form doesn't cover (multi-parameter binders, malformed
-    /// `reduce`) return `Unsupported` and fall back to the tree-walker.
     /// Declare a comprehension element binder pattern. For a single binder
     /// (`it`/`x`) `CompNext` writes straight into its slot. For a multi-binder
     /// pattern (`(a, b)`) `CompNext` writes the element into a hidden slot, which
