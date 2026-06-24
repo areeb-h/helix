@@ -64,7 +64,25 @@ pub(crate) fn df_column_verb(
             let names = column_name_args(args, line, col)?;
             Ok(Value::GroupBy { lf: lf.clone(), keys: Rc::new(names) })
         }
-        _ => unreachable!("df_column_verb only handles where/filter/select/sort/group"),
+        "with" => {
+            // `df.with({name: expr, ...})` — add or replace columns from expressions
+            // over existing columns, e.g. `df.with({bmi: weight / height})`.
+            let fields = match args {
+                [crate::ast::Expr::Record(fields)] => fields,
+                _ => {
+                    return Err(HelixError::new("`with` takes a record of new columns", line, col)
+                        .hint("e.g. `df.with({bmi: weight / height})`."))
+                }
+            };
+            let columns = dataframe::column_names(lf, line, col)?;
+            let mut exprs = Vec::with_capacity(fields.len());
+            for (cname, vexpr) in fields {
+                let e = dataframe::to_polars(vexpr, &columns, resolve_var)?;
+                exprs.push(e.alias(cname.as_str()));
+            }
+            Ok(Value::DataFrame(Rc::new(dataframe::with_columns(lf, exprs))))
+        }
+        _ => unreachable!("df_column_verb only handles where/filter/select/sort/group/with"),
     }
 }
 
@@ -107,7 +125,7 @@ impl super::Interp {
         col: usize,
     ) -> Result<Value, HelixError> {
         match name {
-            "where" | "filter" | "select" | "sort" | "group" => {
+            "where" | "filter" | "select" | "sort" | "group" | "with" => {
                 let env = &self.env;
                 let resolve = |n: &str| env.get(n).map(|b| b.value.clone());
                 df_column_verb(&lf, name, args, &resolve, line, col)
@@ -146,7 +164,7 @@ impl super::Interp {
             }
             _ => {
                 const DF_METHODS: &[&str] = &[
-                    "where", "select", "sort", "group", "head", "count", "columns", "cache",
+                    "where", "select", "sort", "group", "with", "head", "count", "columns", "cache",
                 ];
                 let mut err = HelixError::new(
                     format!("a DataFrame has no method `{}`", name),

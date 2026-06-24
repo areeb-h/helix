@@ -743,7 +743,7 @@ impl Compiler {
                 // only correct disambiguation — `where`/`sort`/`min` mean different
                 // things per receiver type, and column args can't compile as values.
                 if matches!(self.recv_type(recv), Some(Type::DataFrame))
-                    && matches!(n, "where" | "filter" | "select" | "sort" | "group")
+                    && matches!(n, "where" | "filter" | "select" | "sort" | "group" | "with")
                 {
                     self.compile_expr(b, recv)?;
                     let locals = std::rc::Rc::new(b.in_scope_locals());
@@ -790,7 +790,7 @@ impl Compiler {
                 // op, which validates the receiver at runtime (a real DataFrame
                 // works; anything else raises). The type checker already rejects
                 // `array.select(...)`, so a wrong concrete type can't reach here.
-                if matches!(n, "select" | "group") {
+                if matches!(n, "select" | "group" | "with") {
                     self.compile_expr(b, recv)?;
                     let locals = std::rc::Rc::new(b.in_scope_locals());
                     b.emit(

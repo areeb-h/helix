@@ -271,7 +271,7 @@ pub(super) fn tensor_method_type(name: &str, nargs: usize, line: usize, col: usi
 
 pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "where" | "filter" | "select" | "sort" | "head" | "cache" => Type::DataFrame,
+        "where" | "filter" | "select" | "sort" | "head" | "cache" | "with" => Type::DataFrame,
         "group" => Type::GroupBy,
         "count" => Type::Int,
         "columns" => Type::Array(Box::new(Type::String)),

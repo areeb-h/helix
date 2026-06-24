@@ -19,6 +19,10 @@ print(older)
 # Predicates compose with `and`/`or` and arithmetic, just like everywhere else.
 print(patients.where(age > 40 and resting_hr < 75))
 
+# Derived columns: `with` adds (or replaces) columns computed over existing ones.
+# Each value expression names bare columns, like the predicate verbs.
+print(patients.with({adult: age >= 18, hr_per_decade: resting_hr / (age / 10)}))
+
 # Grouping: one obvious verb, then an aggregation.
 genes = read_csv("examples/data/genes.csv")
 print(genes.group(species).mean(expression))

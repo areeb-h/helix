@@ -346,6 +346,16 @@ fn read_vcf_makes_variants_queryable() {
     assert_eq!(out.trim(), "6\n3\n3"); // 6 variants; 3 in BRCA1; 3 with qual > 50
 }
 
+#[test]
+fn with_derives_columns_from_expressions() {
+    // `df.with({name: expr, ...})` adds columns computed over existing ones. The
+    // value expressions reference bare column names, like the other column verbs.
+    let src = "v = read_vcf(\"examples/data/variants.vcf\")\nd = v.with({strong: qual > 50})\nprint(d.where(strong).count())\n";
+    let (out, stderr, code) = run_source(src, &[], "with");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "3"); // 3 of 6 variants have qual > 50
+}
+
 // Real network fetch — ignored by default so the suite stays offline-friendly.
 // Run with: `cargo test -- --ignored`.
 #[cfg(feature = "http")]

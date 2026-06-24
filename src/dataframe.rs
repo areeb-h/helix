@@ -154,6 +154,12 @@ pub fn select(lf: &LazyFrame, names: &[String]) -> LazyFrame {
     lf.clone().select(exprs)
 }
 
+/// Add or replace columns from `name = expr` pairs (`df.with({bmi: weight / height})`).
+/// An expression aliased to an existing column name replaces that column.
+pub fn with_columns(lf: &LazyFrame, exprs: Vec<Expr>) -> LazyFrame {
+    lf.clone().with_columns(exprs)
+}
+
 pub fn sort(lf: &LazyFrame, names: &[String]) -> LazyFrame {
     let exprs: Vec<Expr> = names.iter().map(|n| pcol(n.as_str())).collect();
     lf.clone()
