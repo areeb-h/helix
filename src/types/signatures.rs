@@ -84,7 +84,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Array(Box::new(Type::Int)))
         }
-        "read_csv" | "read_parquet" | "read_vcf" => {
+        "io.read_csv" | "io.read_parquet" | "bio.read_vcf" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
@@ -93,7 +93,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::DataFrame)
         }
-        "read_fasta" | "read_fastq" => {
+        "bio.read_fasta" | "bio.read_fastq" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
@@ -104,15 +104,15 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             // field/sequence-method access stays permissive.
             Ok(Type::Array(Box::new(Type::Unknown)))
         }
-        "write_parquet" => {
+        "io.write_parquet" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::DataFrame) {
-                return Err(type_err("write_parquet", "a DataFrame", &args[0], line, col));
+                return Err(type_err("io.write_parquet", "a DataFrame", &args[0], line, col));
             }
             if !compatible(&args[1], &Type::String) {
-                return Err(type_err("write_parquet", "a string path", &args[1], line, col));
+                return Err(type_err("io.write_parquet", "a string path", &args[1], line, col));
             }
             Ok(Type::Unit)
         }
@@ -169,7 +169,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 Type::Float
             })
         }
-        "correlation" => {
+        "stats.correlation" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));
             }
@@ -186,7 +186,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Float)
         }
-        "t_test" => {
+        "stats.t_test" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));
             }
@@ -207,7 +207,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 ("p_value".to_string(), Type::Float),
             ]))
         }
-        "linear_regression" => {
+        "stats.linear_regression" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));
             }
@@ -230,7 +230,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 ("slope_p_value".to_string(), Type::Float),
             ]))
         }
-        "multiple_regression" => {
+        "stats.multiple_regression" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));
             }
@@ -255,6 +255,41 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 ("adj_r_squared".to_string(), Type::Float),
             ]))
         }
+        // Descriptive-statistics helpers: one array of numbers in, a scalar (or, for
+        // `zscores`, an array) out. `bio.mean_gc`/`bio.total_length` take an array too.
+        "stats.standard_error"
+        | "stats.coefficient_of_variation"
+        | "stats.iqr"
+        | "stats.spread"
+        | "stats.zscores"
+        | "bio.mean_gc"
+        | "bio.total_length" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            match &args[0] {
+                Type::Unknown => Ok(Type::Unknown),
+                Type::Missing => Ok(Type::Missing),
+                Type::Array(_) => Ok(match name {
+                    "stats.zscores" => Type::Array(Box::new(Type::Float)),
+                    "bio.total_length" => Type::Int,
+                    _ => Type::Float,
+                }),
+                other => Err(type_err(name, "an array", other, line, col)),
+            }
+        }
+        // `bio.at_content` takes a single DNA sequence.
+        "bio.at_content" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            match &args[0] {
+                Type::Unknown => Ok(Type::Unknown),
+                Type::Missing => Ok(Type::Missing),
+                Type::Dna => Ok(Type::Float),
+                other => Err(type_err(name, "a DNA sequence", other, line, col)),
+            }
+        }
         "to_array" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
@@ -274,20 +309,20 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Tensor)
         }
-        "parse_json" => {
+        "json.parse" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
             // The JSON shape isn't known statically — Unknown (the permissive top).
             Ok(Type::Unknown)
         }
-        "to_json" => {
+        "json.stringify" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
             Ok(Type::String)
         }
-        "http_get" => {
+        "http.get" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }

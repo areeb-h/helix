@@ -4,7 +4,7 @@
 # Backed by Polars (Arrow columnar, lazy). The SAME `where`/`sort` verbs you use
 # on arrays work here — `where(age > 40)` lowers to a native Polars filter.
 
-patients = read_csv("examples/data/patients.csv")
+patients = io.read_csv("examples/data/patients.csv")
 
 print("columns:", patients.columns())
 print("rows:", patients.count())
@@ -24,11 +24,11 @@ print(patients.where(age > 40 and resting_hr < 75))
 print(patients.with({adult: age >= 18, hr_per_decade: resting_hr / (age / 10)}))
 
 # Grouping: one obvious verb, then an aggregation.
-genes = read_csv("examples/data/genes.csv")
+genes = io.read_csv("examples/data/genes.csv")
 print(genes.group(species).mean(expression))
 
 # Joining: combine two frames on a shared key column. Defaults to an inner join;
 # a trailing string ("left"/"right"/"outer") selects another join type.
-samples = read_csv("examples/data/samples.csv")
-meta = read_csv("examples/data/sample_meta.csv")
+samples = io.read_csv("examples/data/samples.csv")
+meta = io.read_csv("examples/data/sample_meta.csv")
 print(samples.join(meta, sample_id).sort(sample_id))

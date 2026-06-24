@@ -44,22 +44,22 @@ impl super::Interp {
                 // Bring a Python NumPy f64 array into Helix as a native Tensor.
                 crate::python::to_tensor(args.into_iter().next().unwrap(), line, col)
             }
-            "parse_json" => {
+            "json.parse" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => {
                         crate::json::parse(s).map_err(|e| HelixError::new(e, line, col))
                     }
-                    other => Err(type_err("parse_json", "a JSON string", other, line, col)),
+                    other => Err(type_err("json.parse", "a JSON string", other, line, col)),
                 }
             }
-            "to_json" => {
+            "json.stringify" => {
                 arity(name, &args, 1, line, col)?;
                 crate::json::stringify(&args[0])
                     .map(|s| Value::Str(Rc::new(s)))
                     .map_err(|e| HelixError::new(e, line, col))
             }
-            "http_get" => {
+            "http.get" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(url) => {
@@ -84,27 +84,27 @@ impl super::Interp {
                             .hint("build without `--no-default-features`, or with `--features http`."))
                         }
                     }
-                    other => Err(type_err("http_get", "a URL string", other, line, col)),
+                    other => Err(type_err("http.get", "a URL string", other, line, col)),
                 }
             }
-            "read_csv" => {
+            "io.read_csv" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => {
                         let lf = dataframe::read_csv(s, line, col)?;
                         Ok(Value::DataFrame(Rc::new(lf)))
                     }
-                    other => Err(type_err("read_csv", "a string path", other, line, col)),
+                    other => Err(type_err("io.read_csv", "a string path", other, line, col)),
                 }
             }
-            "read_vcf" => {
+            "bio.read_vcf" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => {
                         let lf = crate::vcf::read_vcf(s, line, col)?;
                         Ok(Value::DataFrame(Rc::new(lf)))
                     }
-                    other => Err(type_err("read_vcf", "a string path", other, line, col)),
+                    other => Err(type_err("bio.read_vcf", "a string path", other, line, col)),
                 }
             }
             "range" => match args.len() {
@@ -124,31 +124,31 @@ impl super::Interp {
                 )
                 .hint("use `range(n)` or `range(start, stop)`.")),
             },
-            "read_parquet" => {
+            "io.read_parquet" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => {
                         let lf = dataframe::read_parquet(s, line, col)?;
                         Ok(Value::DataFrame(Rc::new(lf)))
                     }
-                    other => Err(type_err("read_parquet", "a string path", other, line, col)),
+                    other => Err(type_err("io.read_parquet", "a string path", other, line, col)),
                 }
             }
-            "read_fasta" => {
+            "bio.read_fasta" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => crate::bio::read_fasta(s, line, col),
-                    other => Err(type_err("read_fasta", "a string path", other, line, col)),
+                    other => Err(type_err("bio.read_fasta", "a string path", other, line, col)),
                 }
             }
-            "read_fastq" => {
+            "bio.read_fastq" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => crate::bio::read_fastq(s, line, col),
-                    other => Err(type_err("read_fastq", "a string path", other, line, col)),
+                    other => Err(type_err("bio.read_fastq", "a string path", other, line, col)),
                 }
             }
-            "write_parquet" => {
+            "io.write_parquet" => {
                 arity(name, &args, 2, line, col)?;
                 match (&args[0], &args[1]) {
                     (Value::DataFrame(lf), Value::Str(p)) => {
@@ -156,9 +156,9 @@ impl super::Interp {
                         Ok(Value::Unit)
                     }
                     (Value::DataFrame(_), other) => {
-                        Err(type_err("write_parquet", "a string path", other, line, col))
+                        Err(type_err("io.write_parquet", "a string path", other, line, col))
                     }
-                    (other, _) => Err(type_err("write_parquet", "a DataFrame", other, line, col)),
+                    (other, _) => Err(type_err("io.write_parquet", "a DataFrame", other, line, col)),
                 }
             }
             // ---- tensor constructors ----
@@ -199,12 +199,12 @@ impl super::Interp {
             // ---- math standard library (broadcasts over arrays, propagates missing) ----
             "sqrt" | "cbrt" | "exp" | "ln" | "log10" | "log2" | "sin" | "cos" | "tan" | "asin"
             | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "degrees" | "radians" | "erf"
-            | "normal_cdf" | "normal_pdf" => {
+            | "stats.normal_cdf" | "stats.normal_pdf" => {
                 arity(name, &args, 1, line, col)?;
                 let f: fn(f64) -> f64 = match name {
                     "erf" => crate::stats::erf,
-                    "normal_cdf" => crate::stats::normal_cdf,
-                    "normal_pdf" => crate::stats::normal_pdf,
+                    "stats.normal_cdf" => crate::stats::normal_cdf,
+                    "stats.normal_pdf" => crate::stats::normal_pdf,
                     "sqrt" => f64::sqrt,
                     "cbrt" => f64::cbrt,
                     "exp" => f64::exp,
@@ -294,7 +294,7 @@ impl super::Interp {
                 let pick_first = if name == "min" { a <= b } else { a >= b };
                 Ok(if pick_first { args[0].clone() } else { args[1].clone() })
             }
-            "correlation" => {
+            "stats.correlation" => {
                 arity(name, &args, 2, line, col)?;
                 // `missing` in either series propagates (ADR-0001); a non-array, a
                 // length mismatch, or a non-numeric element is a clean error.
@@ -332,7 +332,7 @@ impl super::Interp {
                     .hint("a constant series has no spread to correlate.")),
                 }
             }
-            "t_test" => {
+            "stats.t_test" => {
                 arity(name, &args, 2, line, col)?;
                 // Welch's two-sample t-test → {statistic, df, p_value}. `missing` in
                 // either sample propagates; each needs at least two values.
@@ -359,7 +359,7 @@ impl super::Interp {
                     .hint("two constant samples have no variance to compare.")),
                 }
             }
-            "linear_regression" => {
+            "stats.linear_regression" => {
                 arity(name, &args, 2, line, col)?;
                 // OLS fit of `y ~ x` → {slope, intercept, r_squared, slope_std_error,
                 // slope_p_value}. `missing` in either series propagates.
@@ -399,7 +399,7 @@ impl super::Interp {
                     .hint("a constant predictor or response has no line to fit.")),
                 }
             }
-            "multiple_regression" => {
+            "stats.multiple_regression" => {
                 arity(name, &args, 2, line, col)?;
                 // OLS fit of `y` on several predictor columns. The first argument is an
                 // array of predictor arrays; the second is the response. `missing`
@@ -433,6 +433,102 @@ impl super::Interp {
                     .hint("e.g. `multiple_regression([x1, x2], y)` with enough rows.")),
                 }
             }
+            // --- descriptive statistics helpers (one numeric array; missing propagates) ---
+            "stats.standard_error"
+            | "stats.coefficient_of_variation"
+            | "stats.iqr"
+            | "stats.spread"
+            | "stats.zscores" => {
+                arity(name, &args, 1, line, col)?;
+                let xs = match num_array(name, &args[0], line, col)? {
+                    Some(xs) => xs,
+                    None => return Ok(Value::Missing),
+                };
+                if xs.is_empty() {
+                    return Err(HelixError::new(
+                        format!("cannot compute `{}` of an empty array", name),
+                        line,
+                        col,
+                    ));
+                }
+                match name {
+                    "stats.standard_error" => {
+                        Ok(Value::Float(crate::stats::std(&xs) / (xs.len() as f64).sqrt()))
+                    }
+                    "stats.coefficient_of_variation" => {
+                        Ok(Value::Float(crate::stats::std(&xs) / crate::stats::mean(&xs)))
+                    }
+                    "stats.iqr" => Ok(Value::Float(
+                        crate::stats::quantile(&xs, 0.75) - crate::stats::quantile(&xs, 0.25),
+                    )),
+                    "stats.spread" => {
+                        let (mut lo, mut hi) = (xs[0], xs[0]);
+                        for &x in &xs {
+                            lo = lo.min(x);
+                            hi = hi.max(x);
+                        }
+                        Ok(Value::Float(hi - lo))
+                    }
+                    // z-scores: each value's distance from the mean in standard deviations.
+                    _ => {
+                        let (m, sd) = (crate::stats::mean(&xs), crate::stats::std(&xs));
+                        if sd == 0.0 {
+                            return Err(HelixError::new(
+                                "cannot compute z-scores: the values have zero spread",
+                                line,
+                                col,
+                            )
+                            .hint("a constant series has no standard deviation to scale by."));
+                        }
+                        let out: Vec<Value> =
+                            xs.iter().map(|x| Value::Float((x - m) / sd)).collect();
+                        Ok(Value::Array(Rc::new(out)))
+                    }
+                }
+            }
+            // --- sequence helpers over DNA values (missing propagates) ---
+            "bio.at_content" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Missing => Ok(Value::Missing),
+                    Value::Dna(s) => Ok(Value::Float(1.0 - dna_gc_content(s, name, line, col)?)),
+                    other => Err(type_err(name, "a DNA sequence", other, line, col)),
+                }
+            }
+            "bio.mean_gc" | "bio.total_length" => {
+                arity(name, &args, 1, line, col)?;
+                let items = match &args[0] {
+                    Value::Array(items) => items,
+                    Value::Missing => return Ok(Value::Missing),
+                    other => return Err(type_err(name, "an array of DNA sequences", other, line, col)),
+                };
+                if items.iter().any(|v| matches!(v, Value::Missing)) {
+                    return Ok(Value::Missing);
+                }
+                let seqs: Vec<&Rc<String>> = items
+                    .iter()
+                    .map(|v| match v {
+                        Value::Dna(s) => Ok(s),
+                        other => Err(type_err(name, "an array of DNA sequences", other, line, col)),
+                    })
+                    .collect::<Result<_, _>>()?;
+                if name == "bio.total_length" {
+                    Ok(Value::Int(seqs.iter().map(|s| s.len() as i64).sum()))
+                } else {
+                    if seqs.is_empty() {
+                        return Err(HelixError::new(
+                            "cannot compute `bio.mean_gc` of no sequences",
+                            line,
+                            col,
+                        ));
+                    }
+                    let total: f64 = seqs
+                        .iter()
+                        .map(|s| dna_gc_content(s, name, line, col))
+                        .sum::<Result<f64, _>>()?;
+                    Ok(Value::Float(total / seqs.len() as f64))
+                }
+            }
             _ => {
                 let mut err =
                     HelixError::new(format!("`{}` is not a known function", name), line, col);
@@ -444,6 +540,20 @@ impl super::Interp {
             }
         }
     }
+}
+
+/// The GC fraction of a DNA sequence (`who` names the calling builtin for errors).
+/// Errors on an empty sequence, which has no composition to measure.
+fn dna_gc_content(s: &str, who: &str, line: usize, col: usize) -> Result<f64, HelixError> {
+    if s.is_empty() {
+        return Err(HelixError::new(
+            format!("cannot compute `{}` of an empty sequence", who),
+            line,
+            col,
+        ));
+    }
+    let gc = s.chars().filter(|c| *c == 'G' || *c == 'C').count();
+    Ok(gc as f64 / s.len() as f64)
 }
 
 /// Extract a slice of numeric columns from an array-of-arrays argument (the predictor

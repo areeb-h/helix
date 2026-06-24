@@ -5,7 +5,8 @@
     /// expression (the trailing `Pop` is stripped so the value survives).
     fn vm_val(src: &str) -> Value {
         let toks = lexer::lex(src).unwrap();
-        let ast = parser::parse(toks).unwrap();
+        let mut ast = parser::parse(toks).unwrap();
+        crate::namespace::resolve(&mut ast);
         let mut prog = bytecode::compile_with_types(&ast, None).expect("expected this program to compile to bytecode");
         if matches!(prog.funcs[0].code.last(), Some(Op::Pop)) {
             prog.funcs[0].code.pop();
@@ -17,7 +18,8 @@
     /// The same source through the reference tree-walker.
     fn tw_val(src: &str) -> Value {
         let toks = lexer::lex(src).unwrap();
-        let ast = parser::parse(toks).unwrap();
+        let mut ast = parser::parse(toks).unwrap();
+        crate::namespace::resolve(&mut ast);
         let mut interp = Interp::new();
         let mut last = Value::Unit;
         for stmt in &ast {
@@ -275,7 +277,8 @@
 
     fn run_tw(src: &str) -> Result<String, ()> {
         let toks = lexer::lex(src).map_err(|_| ())?;
-        let ast = parser::parse(toks).map_err(|_| ())?;
+        let mut ast = parser::parse(toks).map_err(|_| ())?;
+        crate::namespace::resolve(&mut ast);
         let mut interp = Interp::new();
         let mut last = Value::Unit;
         for stmt in &ast {
@@ -292,7 +295,8 @@
     /// receiver's inferred type rather than falling back to the tree-walker.
     fn run_vm_typed(src: &str) -> Result<String, ()> {
         let toks = lexer::lex(src).map_err(|_| ())?;
-        let ast = parser::parse(toks).map_err(|_| ())?;
+        let mut ast = parser::parse(toks).map_err(|_| ())?;
+        crate::namespace::resolve(&mut ast);
         let types = crate::types::check(&ast).map_err(|_| ())?;
         let mut prog = bytecode::compile_with_types(&ast, Some(types)).map_err(|_| ())?;
         if matches!(prog.funcs[0].code.last(), Some(Op::Pop)) {
@@ -310,7 +314,7 @@
     /// oracle. Locks in Phase 4 of the one-engine collapse.
     #[test]
     fn dataframe_column_verbs_run_on_vm() {
-        let csv = "read_csv(\"examples/data/patients.csv\")";
+        let csv = "io.read_csv(\"examples/data/patients.csv\")";
         let cases = [
             format!("{csv}.where(age > 40).count()"),
             format!("{csv}.where(age > 40 and resting_hr < 75).count()"),
@@ -318,7 +322,7 @@
             // predicate referencing a global variable → the resolve_var path
             format!("t = 40\n{csv}.where(age > t).count()"),
             // grouped aggregation over an unevaluated column
-            "read_csv(\"examples/data/genes.csv\").group(species).mean(expression).count()".to_string(),
+            "io.read_csv(\"examples/data/genes.csv\").group(species).mean(expression).count()".to_string(),
         ];
         for src in &cases {
             assert_eq!(run_vm_typed(src), run_tw(src), "VM ≠ tree-walker on `{src}`");
@@ -357,7 +361,8 @@
             }
             let src = std::fs::read_to_string(&path).unwrap();
             let toks = lexer::lex(&src).unwrap_or_else(|_| panic!("lex failed: {path:?}"));
-            let ast = parser::parse(toks).unwrap_or_else(|_| panic!("parse failed: {path:?}"));
+            let mut ast = parser::parse(toks).unwrap_or_else(|_| panic!("parse failed: {path:?}"));
+            crate::namespace::resolve(&mut ast);
             let types =
                 crate::types::check(&ast).unwrap_or_else(|_| panic!("type-check failed: {path:?}"));
             bytecode::compile_with_types(&ast, Some(types)).unwrap_or_else(|_| {

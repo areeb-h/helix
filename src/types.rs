@@ -252,7 +252,7 @@ fn unknown_method(type_name: &str, name: &str, candidates: &[&str], line: usize,
 
 const MATH_UNARY_FLOAT: &[&str] = &[
     "sqrt", "cbrt", "exp", "ln", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
-    "sinh", "cosh", "tanh", "degrees", "radians", "erf", "normal_cdf", "normal_pdf",
+    "sinh", "cosh", "tanh", "degrees", "radians", "erf", "stats.normal_cdf", "stats.normal_pdf",
 ];
 
 // ---------- the checker ----------
@@ -455,6 +455,14 @@ impl Checker {
             }
             Expr::Ident { name, line, col } => match self.env.get(name) {
                 Some(t) => Ok(t.clone()),
+                // A native namespace used as a bare value (or as the receiver of a field
+                // access, `bio.read_vcf` without a call) — point the user at calling it.
+                None if crate::namespace::is_namespace(name) => Err(HelixError::new(
+                    format!("`{}` is a namespace, not a value", name),
+                    *line,
+                    *col,
+                )
+                .hint(format!("call one of its functions, e.g. `{}.<name>(...)`.", name))),
                 None => {
                     let names: Vec<&str> = self.env.keys().map(|s| s.as_str()).collect();
                     let mut err =

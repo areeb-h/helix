@@ -5,16 +5,16 @@
 #   helix run examples/error-handling.helix
 
 # Inspect the outcome and branch on it.
-result = try parse_json("[1, 2, 3]")
+result = try json.parse("[1, 2, 3]")
 if result.ok then print("parsed:", result.value) else print("failed:", result.error)
 
 # A failing operation is caught rather than aborting the program.
-broken = try parse_json("not valid json")
+broken = try json.parse("not valid json")
 print("ok?", broken.ok)
 print("error:", broken.error)
 
 # Recover with a default value via grouping and `??`.
-config = (try parse_json("[malformed")).value ?? "(default)"
+config = (try json.parse("[malformed")).value ?? "(default)"
 print("config:", config)
 
 print("the program runs to completion")

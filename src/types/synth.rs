@@ -172,7 +172,10 @@ impl super::Checker {
         );
         let cand_refs: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
         let mut err = HelixError::new(format!("`{}` is not a known function", name), line, col);
-        if let Some(s) = suggest(name, &cand_refs) {
+        // A builtin that moved under a namespace gets a precise hint over fuzzy matching.
+        if let Some(path) = crate::namespace::retired_path(name) {
+            err = err.hint(format!("it is now `{}` — call it under its namespace.", path));
+        } else if let Some(s) = suggest(name, &cand_refs) {
             err = err.hint(format!("did you mean `{}`?", s));
         }
         Err(err)

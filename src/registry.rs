@@ -27,13 +27,13 @@ pub struct BuiltinDef {
 pub static BUILTINS: &[BuiltinDef] = &[
     // --- effectful / non-reproducible (I/O, output, network) -> not memoizable ---
     BuiltinDef { path: "print", pure: false },
-    BuiltinDef { path: "read_csv", pure: false },
-    BuiltinDef { path: "read_parquet", pure: false },
-    BuiltinDef { path: "read_fasta", pure: false },
-    BuiltinDef { path: "read_fastq", pure: false },
-    BuiltinDef { path: "read_vcf", pure: false },
-    BuiltinDef { path: "write_parquet", pure: false },
-    BuiltinDef { path: "http_get", pure: false },
+    BuiltinDef { path: "io.read_csv", pure: false },
+    BuiltinDef { path: "io.read_parquet", pure: false },
+    BuiltinDef { path: "bio.read_fasta", pure: false },
+    BuiltinDef { path: "bio.read_fastq", pure: false },
+    BuiltinDef { path: "bio.read_vcf", pure: false },
+    BuiltinDef { path: "io.write_parquet", pure: false },
+    BuiltinDef { path: "http.get", pure: false },
     // --- constructors / conversions ---
     BuiltinDef { path: "dna", pure: true },
     BuiltinDef { path: "range", pure: true },
@@ -74,16 +74,26 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "min", pure: true },
     BuiltinDef { path: "max", pure: true },
     BuiltinDef { path: "erf", pure: true },
-    BuiltinDef { path: "normal_cdf", pure: true },
-    BuiltinDef { path: "normal_pdf", pure: true },
     // --- statistics ---
-    BuiltinDef { path: "correlation", pure: true },
-    BuiltinDef { path: "t_test", pure: true },
-    BuiltinDef { path: "linear_regression", pure: true },
-    BuiltinDef { path: "multiple_regression", pure: true },
+    BuiltinDef { path: "stats.normal_cdf", pure: true },
+    BuiltinDef { path: "stats.normal_pdf", pure: true },
+    BuiltinDef { path: "stats.correlation", pure: true },
+    BuiltinDef { path: "stats.t_test", pure: true },
+    BuiltinDef { path: "stats.linear_regression", pure: true },
+    BuiltinDef { path: "stats.multiple_regression", pure: true },
+    // --- statistics: descriptive helpers (formerly the std.stats Helix module) ---
+    BuiltinDef { path: "stats.standard_error", pure: true },
+    BuiltinDef { path: "stats.coefficient_of_variation", pure: true },
+    BuiltinDef { path: "stats.iqr", pure: true },
+    BuiltinDef { path: "stats.spread", pure: true },
+    BuiltinDef { path: "stats.zscores", pure: true },
+    // --- sequence helpers (formerly the std.seq Helix module) ---
+    BuiltinDef { path: "bio.at_content", pure: true },
+    BuiltinDef { path: "bio.mean_gc", pure: true },
+    BuiltinDef { path: "bio.total_length", pure: true },
     // --- data formats ---
-    BuiltinDef { path: "parse_json", pure: true },
-    BuiltinDef { path: "to_json", pure: true },
+    BuiltinDef { path: "json.parse", pure: true },
+    BuiltinDef { path: "json.stringify", pure: true },
 ];
 
 /// Methods universal to every receiver type (handled before the per-type dispatch).

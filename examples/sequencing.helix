@@ -2,7 +2,7 @@
 # {id, seq, qual, length}, where seq is a first-class DNA value.
 #   helix run examples/sequencing.helix
 
-reads = read_fastq("examples/data/reads.fastq")
+reads = bio.read_fastq("examples/data/reads.fastq")
 
 print("reads:", reads.count())
 print("total bases:", reads.map(it.length).sum())

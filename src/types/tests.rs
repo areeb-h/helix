@@ -2,7 +2,8 @@
 
     fn tc(src: &str) -> Result<(), HelixError> {
         let toks = crate::lexer::lex(src)?;
-        let prog = crate::parser::parse(toks)?;
+        let mut prog = crate::parser::parse(toks)?;
+        crate::namespace::resolve(&mut prog);
         check(&prog).map(|_| ())
     }
     fn ok(src: &str) {
@@ -41,15 +42,15 @@
     #[test]
     fn dataframe_columns_unchecked() {
         // column names are the runtime schema boundary — never type-checked
-        ok("read_csv(\"x.csv\").where(age > 40 and hr < 75).select(name, age).sort(age).count()");
-        ok("read_csv(\"g.csv\").group(species).mean(expression).columns()");
+        ok("io.read_csv(\"x.csv\").where(age > 40 and hr < 75).select(name, age).sort(age).count()");
+        ok("io.read_csv(\"g.csv\").group(species).mean(expression).columns()");
         // `with` derives columns; `join` combines frames — both keep their args (column
         // names, the other frame, the join type) at the unchecked runtime boundary.
-        ok("read_csv(\"p.csv\").with({adult: age >= 18}).select(name, adult).count()");
-        ok("read_csv(\"a.csv\").join(read_csv(\"b.csv\"), id, \"left\").sort(id).count()");
+        ok("io.read_csv(\"p.csv\").with({adult: age >= 18}).select(name, adult).count()");
+        ok("io.read_csv(\"a.csv\").join(io.read_csv(\"b.csv\"), id, \"left\").sort(id).count()");
         // `column` bridges a frame to an array, so the array statistics chain off it.
-        ok("read_csv(\"p.csv\").column(\"age\").median()");
-        ok("correlation(read_csv(\"p.csv\").column(\"a\"), read_csv(\"p.csv\").column(\"b\"))");
+        ok("io.read_csv(\"p.csv\").column(\"age\").median()");
+        ok("stats.correlation(io.read_csv(\"p.csv\").column(\"a\"), io.read_csv(\"p.csv\").column(\"b\"))");
     }
 
     #[test]
@@ -59,14 +60,14 @@
         // `summary` is a record; its fields are reachable and numeric.
         ok("s = [1, 2, 3].summary()\ns.mean + s.std + s.median");
         // `correlation` is a Float-valued function of two arrays.
-        ok("sqrt(correlation([1, 2, 3], [3, 2, 1]) * 1.0)");
+        ok("sqrt(stats.correlation([1, 2, 3], [3, 2, 1]) * 1.0)");
         // Inferential: `t_test` is a record; the normal functions broadcast like math.
-        ok("r = t_test([1.0, 2.0, 3.0], [2.0, 3.0, 4.0])\nr.statistic + r.df + r.p_value");
-        ok("normal_cdf(1.96) + erf(1.0) + normal_pdf(0.0)");
+        ok("r = stats.t_test([1.0, 2.0, 3.0], [2.0, 3.0, 4.0])\nr.statistic + r.df + r.p_value");
+        ok("stats.normal_cdf(1.96) + erf(1.0) + stats.normal_pdf(0.0)");
         // `linear_regression` is a record; predictions broadcast the fitted line.
-        ok("f = linear_regression([1.0, 2.0, 3.0], [2.0, 4.0, 5.0])\nf.slope * 6.0 + f.intercept");
+        ok("f = stats.linear_regression([1.0, 2.0, 3.0], [2.0, 4.0, 5.0])\nf.slope * 6.0 + f.intercept");
         // `multiple_regression` returns a record whose coefficients are an array.
-        ok("m = multiple_regression([[1.0, 2.0, 3.0]], [2.0, 4.0, 5.0])\nm.coefficients[0] + m.r_squared");
+        ok("m = stats.multiple_regression([[1.0, 2.0, 3.0]], [2.0, 4.0, 5.0])\nm.coefficients[0] + m.r_squared");
     }
 
     #[test]
@@ -189,7 +190,8 @@
             let src = std::fs::read_to_string(format!("examples/{}.helix", name))
                 .unwrap_or_else(|_| panic!("read examples/{}.helix", name));
             let toks = crate::lexer::lex(&src).expect("lex");
-            let prog = crate::parser::parse(toks).expect("parse");
+            let mut prog = crate::parser::parse(toks).expect("parse");
+            crate::namespace::resolve(&mut prog);
             let r = check(&prog);
             assert!(
                 r.is_ok(),

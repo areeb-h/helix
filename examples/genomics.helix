@@ -2,7 +2,7 @@
 # Read a real FASTA file and analyse it with the same dot-chain syntax used
 # everywhere else. No Biopython, no pandas, no glue.
 
-genome = read_fasta("examples/data/sample.fa")
+genome = bio.read_fasta("examples/data/sample.fa")
 
 print("Sequences:   {genome.count()}")
 print("Total bases: {genome.map(it.length).sum()}")

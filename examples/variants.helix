@@ -5,7 +5,7 @@
 # read_vcf exposes the fixed columns (chrom, pos, id, ref, alt, qual, filter) plus
 # every INFO field (here: gene, consequence, af) as columns.
 
-variants = read_vcf("examples/data/variants.vcf")
+variants = bio.read_vcf("examples/data/variants.vcf")
 
 print("total variants:", variants.count())
 print("columns:", variants.columns())

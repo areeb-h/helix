@@ -7,7 +7,7 @@
 # by sharing the Arrow buffers — no row-by-row copying. `to_dataframe(x)` brings a
 # Python frame back as a first-class Helix DataFrame the normal verbs operate on.
 
-df = read_csv("examples/data/patients.csv")
+df = io.read_csv("examples/data/patients.csv")
 
 # Hand the Helix DataFrame to Python: it arrives as a polars.DataFrame.
 builtins = python.import("builtins")

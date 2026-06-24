@@ -20,17 +20,17 @@ print("summary: ", resting_hr.summary())
 # Bivariate: does resting heart rate track age across these subjects? Pearson's r
 # is symmetric, so it reads as a plain function of the two series.
 age = [41, 38, 55, 44, 47, 60, 35, 52]
-print("r(age, hr):", correlation(age, resting_hr))
+print("r(age, hr):", stats.correlation(age, resting_hr))
 
 # The same statistics apply to real data: `df.column(name)` pulls a DataFrame column
 # out as an array. Polars nulls arrive as `missing`, so `drop_missing` composes ahead
 # of an aggregation when you want to skip absent values rather than propagate them.
-patients = read_csv("examples/data/patients.csv")
+patients = io.read_csv("examples/data/patients.csv")
 print("median patient age:", patients.column("age").median())
 print("resting-hr summary: ", patients.column("resting_hr").summary())
 print(
     "r(age, hr) in cohort:",
-    correlation(patients.column("age"), patients.column("resting_hr")),
+    stats.correlation(patients.column("age"), patients.column("resting_hr")),
 )
 
 # Inferential statistics: is a treatment's effect distinguishable from a control?
@@ -38,19 +38,19 @@ print(
 # statistic, the degrees of freedom, and a two-sided p-value.
 control = [5.1, 4.9, 5.0, 5.2, 4.8, 5.0]
 treated = [5.6, 5.8, 5.5, 5.9, 5.7, 5.4]
-result = t_test(control, treated)
+result = stats.t_test(control, treated)
 print("t statistic:", result.statistic)
 print("p-value:    ", result.p_value)
 print("significant at 0.05:", result.p_value < 0.05)
 
 # The normal distribution functions back the inferential layer and stand alone too;
 # like the rest of the math stdlib they broadcast over arrays and propagate `missing`.
-print("P(Z < 1.96):", normal_cdf(1.96))
-print("density at 0, 1, 2:", normal_pdf([0.0, 1.0, 2.0]))
+print("P(Z < 1.96):", stats.normal_cdf(1.96))
+print("density at 0, 1, 2:", stats.normal_pdf([0.0, 1.0, 2.0]))
 
 # Linear regression: fit `y ~ x` by ordinary least squares. The result carries the
 # line, the fit quality, and inference on the slope (standard error and p-value).
-fit = linear_regression(patients.column("age"), patients.column("resting_hr"))
+fit = stats.linear_regression(patients.column("age"), patients.column("resting_hr"))
 print("slope:    ", fit.slope)
 print("intercept:", fit.intercept)
 print("r_squared:", fit.r_squared)
@@ -66,7 +66,7 @@ print("predicted hr:", fit.slope * new_ages + fit.intercept)
 x1 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 x2 = [4.0, 1.0, 3.0, 7.0, 2.0, 5.0]
 outcome = [10.0, 8.0, 14.0, 22.0, 13.0, 21.0]
-model = multiple_regression([x1, x2], outcome)
+model = stats.multiple_regression([x1, x2], outcome)
 print("coefficients:", model.coefficients)
 print("p-values:    ", model.p_values)
 print("R^2:", model.r_squared, "adjusted:", model.adj_r_squared)

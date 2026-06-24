@@ -302,7 +302,7 @@ fn python_dir_prints_the_managed_runtime_path() {
 fn json_round_trips_through_the_cli() {
     // Build a record (no string braces → no interpolation snag), serialize, re-parse,
     // and access fields — exercises to_json + parse_json + record access end to end.
-    let src = "r = {a: 1, b: [2, 3]}\ns = to_json(r)\nprint(s)\nd = parse_json(s)\nprint(d.a)\nprint(d.b.sum())\n";
+    let src = "r = {a: 1, b: [2, 3]}\ns = json.stringify(r)\nprint(s)\nd = json.parse(s)\nprint(d.a)\nprint(d.b.sum())\n";
     let (out, stderr, code) = run_source(src, &[], "json");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     let lines: Vec<&str> = out.lines().collect();
@@ -321,7 +321,7 @@ fn try_catches_runtime_errors() {
         "print(ok.value)\n",                                // 20
         "bad = try [1, 2, 3][99]\n",
         "print(bad.ok)\n",                                  // false (out-of-bounds caught)
-        "v = (try parse_json(\"[1,\")).value ?? \"fallback\"\n",
+        "v = (try json.parse(\"[1,\")).value ?? \"fallback\"\n",
         "print(v)\n",                                       // fallback
         "print(\"continues\")\n",                           // program did not abort
     );
@@ -343,7 +343,7 @@ fn record_string_indexing() {
 #[test]
 fn read_fastq_parses_reads_with_quality() {
     // FASTQ -> records {id, seq, qual, length}; sequence methods apply to `seq`.
-    let src = "r = read_fastq(\"examples/data/reads.fastq\")\nprint(r.count())\nprint(r.first().length)\nprint(r.first().seq.gc_content())\n";
+    let src = "r = bio.read_fastq(\"examples/data/reads.fastq\")\nprint(r.count())\nprint(r.first().length)\nprint(r.first().seq.gc_content())\n";
     let (out, stderr, code) = run_source(src, &[], "fastq");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "3\n12\n0.5"); // 3 reads; first is 12 bp; GC = 0.5
@@ -354,7 +354,7 @@ fn read_vcf_accepts_gzipped_files() {
     // Real-world VCFs are bgzipped `.vcf.gz`; the reader sniffs the gzip magic bytes
     // and decompresses transparently, so a `.vcf.gz` queries identically to its plain
     // form (the fixture is the gzip of examples/data/variants.vcf).
-    let src = "v = read_vcf(\"examples/data/variants.vcf.gz\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\n";
+    let src = "v = bio.read_vcf(\"examples/data/variants.vcf.gz\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\n";
     let (out, stderr, code) = run_source(src, &[], "vcfgz");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "6\n3"); // identical to the plain-VCF result
@@ -365,7 +365,7 @@ fn read_vcf_makes_variants_queryable() {
     // The bio flagship: a VCF becomes a DataFrame the normal verbs work on. INFO
     // fields (gene) are columns alongside the fixed ones (qual). No group-by here, so
     // counts are deterministic.
-    let src = "v = read_vcf(\"examples/data/variants.vcf\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\nprint(v.where(qual > 50).count())\n";
+    let src = "v = bio.read_vcf(\"examples/data/variants.vcf\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\nprint(v.where(qual > 50).count())\n";
     let (out, stderr, code) = run_source(src, &[], "vcf");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "6\n3\n3"); // 6 variants; 3 in BRCA1; 3 with qual > 50
@@ -375,7 +375,7 @@ fn read_vcf_makes_variants_queryable() {
 fn with_derives_columns_from_expressions() {
     // `df.with({name: expr, ...})` adds columns computed over existing ones. The
     // value expressions reference bare column names, like the other column verbs.
-    let src = "v = read_vcf(\"examples/data/variants.vcf\")\nd = v.with({strong: qual > 50})\nprint(d.where(strong).count())\n";
+    let src = "v = bio.read_vcf(\"examples/data/variants.vcf\")\nd = v.with({strong: qual > 50})\nprint(d.where(strong).count())\n";
     let (out, stderr, code) = run_source(src, &[], "with");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "3"); // 3 of 6 variants have qual > 50
@@ -385,56 +385,62 @@ fn with_derives_columns_from_expressions() {
 fn join_combines_frames_on_a_key() {
     // `a.join(b, key)` defaults to an inner join; a trailing string picks the type.
     // samples has S1..S4; sample_meta has S1..S3, S5 — so inner keeps 3, left keeps 4.
-    let src = "s = read_csv(\"examples/data/samples.csv\")\nm = read_csv(\"examples/data/sample_meta.csv\")\nprint(s.join(m, sample_id).count())\nprint(s.join(m, sample_id, \"left\").count())\n";
+    let src = "s = io.read_csv(\"examples/data/samples.csv\")\nm = io.read_csv(\"examples/data/sample_meta.csv\")\nprint(s.join(m, sample_id).count())\nprint(s.join(m, sample_id, \"left\").count())\n";
     let (out, stderr, code) = run_source(src, &[], "join");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "3\n4");
 }
 
 #[test]
-fn stdlib_module_resolves_on_the_search_path() {
-    // `import std.stats` is not beside the script, so it resolves via the search path
-    // (`HELIX_PATH`). The stdlib helper composes the built-in aggregations.
-    let src = "import std.stats as st\nprint(st.iqr([1.0, 2.0, 3.0, 4.0, 5.0]))\nprint(st.spread([1.0, 2.0, 3.0, 4.0, 5.0]))\n";
-    let (out, stderr, code) = run_source(src, &[("HELIX_PATH", ".")], "stdpath");
+fn import_resolves_on_the_search_path() {
+    // A module that is not beside the script resolves via `HELIX_PATH` — the mechanism
+    // shared user libraries (and a future stdlib) rely on.
+    let lib = std::env::temp_dir().join("helix_sp_lib");
+    let _ = std::fs::remove_dir_all(&lib);
+    std::fs::create_dir_all(lib.join("tools")).unwrap();
+    std::fs::write(lib.join("tools").join("util.helix"), "fn triple(x) = x * 3\n").unwrap();
+    let src = "import tools.util as u\nprint(u.triple(7))\n";
+    let (out, stderr, code) =
+        run_source(src, &[("HELIX_PATH", lib.to_str().unwrap())], "searchpath");
+    let _ = std::fs::remove_dir_all(&lib);
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
-    assert_eq!(out.trim(), "2.0\n4.0"); // IQR = q75 - q25 = 4 - 2; range = 5 - 1
+    assert_eq!(out.trim(), "21");
 }
 
 #[test]
-fn stdlib_seq_module_analyzes_sequences() {
-    // The bio stdlib module composes the DNA methods with the array verbs, applied to
-    // FASTQ reads pulled in via the search path.
-    let src = "import std.seq.{mean_gc, total_length}\nr = read_fastq(\"examples/data/reads.fastq\")\nseqs = r.map(x => x.seq)\nprint(total_length(seqs))\nprint(mean_gc(seqs) > 0.4)\n";
-    let (out, stderr, code) = run_source(src, &[("HELIX_PATH", ".")], "stdseq");
+fn bio_sequence_helpers_over_fastq() {
+    // The native `bio.*` sequence helpers over the reads of a FASTQ file.
+    let src = "r = bio.read_fastq(\"examples/data/reads.fastq\")\nseqs = r.map(x => x.seq)\nprint(bio.total_length(seqs))\nprint(bio.mean_gc(seqs) > 0.4)\n";
+    let (out, stderr, code) = run_source(src, &[], "bioseq");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "36\ntrue"); // 3 reads x 12 bp; mean GC ~0.44
 }
 
 #[test]
 fn selective_import_binds_names_unqualified() {
-    // `import m.{a, b}` brings the chosen names into scope without the namespace, and a
-    // local definition of the same name shadows the import.
-    let src = "import std.stats.{iqr, spread}\nprint(iqr([1.0, 2.0, 3.0, 4.0, 5.0]))\nprint(spread([10.0, 4.0, 7.0]))\n";
-    let (out, stderr, code) = run_source(src, &[("HELIX_PATH", ".")], "selimport");
+    // `import m.{a, b}` brings the chosen names into scope without the namespace.
+    let lib = "fn triple(x) = x * 3\nfn quad(x) = x * 4\n";
+    let main = "import lib.{triple, quad}\nprint(triple(5))\nprint(quad(2))\n";
+    let (out, stderr, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "selimp");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
-    assert_eq!(out.trim(), "2.0\n6.0"); // IQR = 2; range = 10 - 4
+    assert_eq!(out.trim(), "15\n8");
 }
 
 #[test]
-fn missing_stdlib_module_reports_the_search_path() {
-    // Without the search path the same import fails with a clear message.
-    let src = "import std.stats as st\nprint(st.iqr([1.0, 2.0]))\n";
-    let (_out, stderr, code) = run_source(src, &[], "stdpathmiss");
+fn missing_module_on_search_path_is_a_clean_error() {
+    // An import found neither locally nor on the search path fails with a clear message.
+    let src = "import nowhere.lib as x\nprint(1)\n";
+    let (_out, stderr, code) = run_source(src, &[], "missmod");
     assert_ne!(code, Some(0));
-    assert!(stderr.contains("cannot find module `std.stats`"), "stderr:\n{stderr}");
+    assert!(stderr.contains("cannot find module `nowhere.lib`"), "stderr:\n{stderr}");
 }
 
 #[test]
 fn descriptive_statistics_and_correlation() {
     // Population statistics (so var == std^2) plus Pearson correlation, with the
     // missing-propagation rule: a `missing` in either series yields `missing`.
-    let src = "xs = [2, 4, 4, 4, 5, 5, 7, 9]\nprint(xs.median())\nprint(xs.var())\nprint(xs.std())\nprint(correlation([1, 2, 3, 4], [2, 4, 6, 8]))\nprint(correlation([1, 2, 3], [1, missing, 3]))\n";
+    let src = "xs = [2, 4, 4, 4, 5, 5, 7, 9]\nprint(xs.median())\nprint(xs.var())\nprint(xs.std())\nprint(stats.correlation([1, 2, 3, 4], [2, 4, 6, 8]))\nprint(stats.correlation([1, 2, 3], [1, missing, 3]))\n";
     let (out, stderr, code) = run_source(src, &[], "stats");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "4.5\n4.0\n2.0\n1.0\nmissing");
@@ -444,7 +450,7 @@ fn descriptive_statistics_and_correlation() {
 fn inferential_statistics_t_test_and_normal() {
     // The normal CDF (broadcasting math) and Welch's two-sample t-test. The t-test
     // returns a {statistic, df, p_value} record whose fields are reachable.
-    let src = "print(normal_cdf(0.0))\ncontrol = [5.1, 4.9, 5.0, 5.2, 4.8, 5.0]\ntreated = [5.6, 5.8, 5.5, 5.9, 5.7, 5.4]\nr = t_test(control, treated)\nprint(r.p_value < 0.01)\nprint(r.statistic < 0.0)\n";
+    let src = "print(stats.normal_cdf(0.0))\ncontrol = [5.1, 4.9, 5.0, 5.2, 4.8, 5.0]\ntreated = [5.6, 5.8, 5.5, 5.9, 5.7, 5.4]\nr = stats.t_test(control, treated)\nprint(r.p_value < 0.01)\nprint(r.statistic < 0.0)\n";
     let (out, stderr, code) = run_source(src, &[], "ttest");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "0.5\ntrue\ntrue"); // strong, significant difference
@@ -452,7 +458,7 @@ fn inferential_statistics_t_test_and_normal() {
 
 #[test]
 fn t_test_on_constant_samples_is_a_clean_error() {
-    let src = "print(t_test([2, 2, 2], [2, 2, 2]))\n";
+    let src = "print(stats.t_test([2, 2, 2], [2, 2, 2]))\n";
     let (_out, stderr, code) = run_source(src, &[], "ttesterr");
     assert_ne!(code, Some(0));
     assert!(stderr.contains("t-test is undefined"), "stderr:\n{stderr}");
@@ -462,7 +468,7 @@ fn t_test_on_constant_samples_is_a_clean_error() {
 fn linear_regression_fits_and_predicts() {
     // OLS fit of a textbook dataset (R: intercept 2.2, slope 0.6, R^2 0.6), with
     // predictions recovered by broadcasting `slope * x + intercept`.
-    let src = "x = [1.0, 2.0, 3.0, 4.0, 5.0]\ny = [2.0, 4.0, 5.0, 4.0, 5.0]\nf = linear_regression(x, y)\nprint(f.slope)\nprint(f.intercept)\nprint(f.r_squared)\nprint(f.slope * 6.0 + f.intercept)\n";
+    let src = "x = [1.0, 2.0, 3.0, 4.0, 5.0]\ny = [2.0, 4.0, 5.0, 4.0, 5.0]\nf = stats.linear_regression(x, y)\nprint(f.slope)\nprint(f.intercept)\nprint(f.r_squared)\nprint(f.slope * 6.0 + f.intercept)\n";
     let (out, stderr, code) = run_source(src, &[], "lm");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "0.6\n2.2\n0.6\n5.8"); // predicted y at x = 6
@@ -470,7 +476,7 @@ fn linear_regression_fits_and_predicts() {
 
 #[test]
 fn linear_regression_without_variance_is_a_clean_error() {
-    let src = "print(linear_regression([1, 1, 1], [1, 2, 3]))\n";
+    let src = "print(stats.linear_regression([1, 1, 1], [1, 2, 3]))\n";
     let (_out, stderr, code) = run_source(src, &[], "lmerr");
     assert_ne!(code, Some(0));
     assert!(stderr.contains("linear regression is undefined"), "stderr:\n{stderr}");
@@ -480,7 +486,7 @@ fn linear_regression_without_variance_is_a_clean_error() {
 fn multiple_regression_recovers_coefficients() {
     // y = 1 + 2*x1 + 3*x2 exactly → coefficients [1, 2, 3], R^2 = 1. The result's
     // coefficients/p_values are parameter-indexed arrays (index 0 is the intercept).
-    let src = "x1 = [1.0, 2.0, 3.0, 4.0, 5.0]\nx2 = [2.0, 1.0, 4.0, 3.0, 5.0]\ny = [9.0, 8.0, 19.0, 18.0, 26.0]\nf = multiple_regression([x1, x2], y)\nc = f.coefficients\nprint(c.count())\nprint(f.r_squared)\nprint(round(c[0]) == 1 and round(c[1]) == 2 and round(c[2]) == 3)\n";
+    let src = "x1 = [1.0, 2.0, 3.0, 4.0, 5.0]\nx2 = [2.0, 1.0, 4.0, 3.0, 5.0]\ny = [9.0, 8.0, 19.0, 18.0, 26.0]\nf = stats.multiple_regression([x1, x2], y)\nc = f.coefficients\nprint(c.count())\nprint(f.r_squared)\nprint(round(c[0]) == 1 and round(c[1]) == 2 and round(c[2]) == 3)\n";
     let (out, stderr, code) = run_source(src, &[], "mlr");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "3\n1.0\ntrue"); // 3 coefficients; perfect fit; b = [1, 2, 3]
@@ -488,7 +494,7 @@ fn multiple_regression_recovers_coefficients() {
 
 #[test]
 fn multiple_regression_on_collinear_predictors_is_a_clean_error() {
-    let src = "print(multiple_regression([[1, 2, 3, 4], [2, 4, 6, 8]], [1, 3, 2, 5]))\n";
+    let src = "print(stats.multiple_regression([[1, 2, 3, 4], [2, 4, 6, 8]], [1, 3, 2, 5]))\n";
     let (_out, stderr, code) = run_source(src, &[], "mlrerr");
     assert_ne!(code, Some(0));
     assert!(stderr.contains("multiple regression is undefined"), "stderr:\n{stderr}");
@@ -499,7 +505,7 @@ fn column_extracts_values_for_statistics() {
     // `df.column(name)` materializes a column as an array, so the array statistics
     // apply directly to loaded data. Polars nulls become `missing`, so `drop_missing`
     // composes before an aggregation.
-    let src = "p = read_csv(\"examples/data/patients.csv\")\nprint(p.column(\"age\").median())\nv = read_vcf(\"examples/data/variants.vcf\")\nprint(v.column(\"qual\").drop_missing().count())\n";
+    let src = "p = io.read_csv(\"examples/data/patients.csv\")\nprint(p.column(\"age\").median())\nv = bio.read_vcf(\"examples/data/variants.vcf\")\nprint(v.column(\"qual\").drop_missing().count())\n";
     let (out, stderr, code) = run_source(src, &[], "dfcolumn");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "43.0\n6"); // median of 8 ages; 6 non-null quals
@@ -507,7 +513,7 @@ fn column_extracts_values_for_statistics() {
 
 #[test]
 fn column_with_unknown_name_is_a_clean_error() {
-    let src = "print(read_csv(\"examples/data/patients.csv\").column(\"nope\"))\n";
+    let src = "print(io.read_csv(\"examples/data/patients.csv\").column(\"nope\"))\n";
     let (_out, stderr, code) = run_source(src, &[], "dfcolerr");
     assert_ne!(code, Some(0));
     assert!(stderr.contains("no column `nope`"), "stderr:\n{stderr}");
@@ -515,7 +521,7 @@ fn column_with_unknown_name_is_a_clean_error() {
 
 #[test]
 fn correlation_on_mismatched_lengths_is_a_clean_error() {
-    let src = "print(correlation([1, 2], [1, 2, 3]))\n";
+    let src = "print(stats.correlation([1, 2], [1, 2, 3]))\n";
     let (_out, stderr, code) = run_source(src, &[], "corrlen");
     assert_ne!(code, Some(0));
     assert!(
@@ -529,7 +535,7 @@ fn join_without_an_operand_is_a_clean_error() {
     // A no-argument `join` type-checks (DataFrame args are the unchecked runtime
     // boundary), so the compiler must stay total and emit the friendly diagnostic
     // rather than the "internal error ... please report" totality breach.
-    let src = "s = read_csv(\"examples/data/samples.csv\")\nprint(s.join())\n";
+    let src = "s = io.read_csv(\"examples/data/samples.csv\")\nprint(s.join())\n";
     let (out, stderr, code) = run_source(src, &[], "joinerr");
     assert_ne!(code, Some(0), "stdout:\n{out}");
     assert!(
@@ -543,7 +549,7 @@ fn join_without_an_operand_is_a_clean_error() {
 fn join_on_an_unknown_key_is_a_clean_error() {
     // Keys are validated against both schemas up front, so a typo reads as a Helix
     // error naming the frame and listing valid columns — not Polars' lazy-plan dump.
-    let src = "s = read_csv(\"examples/data/samples.csv\")\nm = read_csv(\"examples/data/sample_meta.csv\")\nprint(s.join(m, no_such_key).count())\n";
+    let src = "s = io.read_csv(\"examples/data/samples.csv\")\nm = io.read_csv(\"examples/data/sample_meta.csv\")\nprint(s.join(m, no_such_key).count())\n";
     let (out, stderr, code) = run_source(src, &[], "joinkey");
     assert_ne!(code, Some(0), "stdout:\n{out}");
     assert!(
@@ -558,7 +564,7 @@ fn join_on_an_unknown_key_is_a_clean_error() {
 #[test]
 #[ignore]
 fn http_get_returns_a_status() {
-    let src = "r = http_get(\"https://example.com\")\nprint(r.status)\n";
+    let src = "r = http.get(\"https://example.com\")\nprint(r.status)\n";
     let (out, stderr, code) = run_source(src, &[], "http");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "200");
@@ -624,7 +630,7 @@ fn python_dataframe_round_trips_zero_copy() {
     // `polars` package; skip cleanly if it isn't installed so the suite stays portable.
     // The relative CSV path resolves because `run` sets cwd to the manifest dir.
     let src = concat!(
-        "df = read_csv(\"examples/data/patients.csv\")\n",
+        "df = io.read_csv(\"examples/data/patients.csv\")\n",
         "print(python.import(\"builtins\").len(df))\n",
         "back = to_dataframe(python.import(\"polars\").concat([df]))\n",
         "print(back.count())\n",
