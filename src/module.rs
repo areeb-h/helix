@@ -19,12 +19,35 @@ use std::path::{Path, PathBuf};
 use crate::ast::{Expr, InterpPart, Stmt};
 use crate::error::HelixError;
 
+/// One source file's place in the flattened program: the global line it starts at
+/// (1-based), and its source text and filename. Errors are rendered against the file
+/// whose line range contains the error, with the line mapped back to a local number.
+pub struct Span {
+    pub start_line: usize,
+    pub source: String,
+    pub filename: String,
+}
+
 /// The result of loading an entry file and its import graph.
 pub struct Loaded {
     pub stmts: Vec<Stmt>,
+    /// Source spans in ascending global-line order, for error attribution.
+    pub spans: Vec<Span>,
     /// True if more than one file was loaded (so names were namespaced and error
     /// messages need the internal `m<N>$` prefixes stripped before display).
     pub multi_module: bool,
+}
+
+/// Resolve a (global) error line to the file it belongs to and the line within that
+/// file, given the spans in ascending start order. For a single-file program (one
+/// span starting at line 1) this is the identity.
+pub fn locate(spans: &[Span], line: usize) -> (&str, &str, usize) {
+    let span = spans
+        .iter()
+        .rev()
+        .find(|s| s.start_line <= line)
+        .unwrap_or(&spans[0]);
+    (&span.source, &span.filename, line - span.start_line + 1)
 }
 
 /// The directories searched for a non-local import (`import std.stats`), in priority
@@ -65,16 +88,27 @@ pub fn load(entry: &Path) -> Result<Loaded, String> {
     // Single file, no imports: hand back the unmodified AST so nothing is mangled
     // and error messages stay pristine — the overwhelmingly common case.
     if loader.modules.len() == 1 {
-        let stmts = loader.modules.into_iter().next().unwrap().stmts;
-        return Ok(Loaded { stmts, multi_module: false });
+        let m = loader.modules.into_iter().next().unwrap();
+        let span = Span { start_line: 1, source: m.source, filename: m.filename };
+        return Ok(Loaded { stmts: m.stmts, spans: vec![span], multi_module: false });
     }
     // Modules are in post-order (each dependency before the module that imports it,
-    // entry last), so concatenating their rewrites preserves define-before-use.
+    // entry last), so concatenating their rewrites preserves define-before-use. Each
+    // module's line numbers are offset into a global range so a runtime error's line
+    // unambiguously identifies its source file (see `Loaded::locate`).
     let mut out = Vec::new();
+    let mut spans = Vec::with_capacity(loader.modules.len());
+    let mut offset = 0usize;
     for idx in 0..loader.modules.len() {
-        out.extend(rewrite_module(&loader.modules, idx));
+        spans.push(Span {
+            start_line: offset + 1,
+            source: loader.modules[idx].source.clone(),
+            filename: loader.modules[idx].filename.clone(),
+        });
+        out.extend(rewrite_module(&loader.modules, idx, offset));
+        offset += loader.modules[idx].source.lines().count();
     }
-    Ok(Loaded { stmts: out, multi_module: true })
+    Ok(Loaded { stmts: out, spans, multi_module: true })
 }
 
 struct Module {
@@ -83,6 +117,10 @@ struct Module {
     imports: Vec<(String, usize)>,
     /// Each selectively-imported name mapped to the module it came from.
     selected: Vec<(String, usize)>,
+    /// This module's own source and filename, for rendering errors against the file
+    /// the erroring code actually came from (not the entry file).
+    source: String,
+    filename: String,
 }
 
 #[derive(Default)]
@@ -194,7 +232,13 @@ impl Loader {
 
         self.in_progress.pop();
         let idx = self.modules.len();
-        self.modules.push(Module { stmts, imports, selected: selected_names });
+        self.modules.push(Module {
+            stmts,
+            imports,
+            selected: selected_names,
+            source: src,
+            filename: fname,
+        });
         self.by_path.insert(canon, idx);
         Ok(idx)
     }
@@ -212,9 +256,39 @@ struct Ctx {
     /// Each selectively-imported name → its dependency's prefix, so a bare reference
     /// rewrites to the dependency's mangled name.
     selected: HashMap<String, String>,
+    /// Added to every line number, mapping this module into its global line range.
+    line_offset: usize,
 }
 
-fn rewrite_module(modules: &[Module], idx: usize) -> Vec<Stmt> {
+/// Add `off` to a statement's own line number (its sub-expressions are handled by `rw`).
+fn offset_stmt_line(s: &mut Stmt, off: usize) {
+    match s {
+        Stmt::Assign { line, .. }
+        | Stmt::Destructure { line, .. }
+        | Stmt::Func { line, .. }
+        | Stmt::Import { line, .. } => *line += off,
+        Stmt::Expr(_) => {}
+    }
+}
+
+/// Add `off` to an expression node's own line number (line-bearing variants only).
+fn offset_expr_line(e: &mut Expr, off: usize) {
+    match e {
+        Expr::Ident { line, .. }
+        | Expr::Field { line, .. }
+        | Expr::Unary { line, .. }
+        | Expr::Binary { line, .. }
+        | Expr::Call { line, .. }
+        | Expr::Method { line, .. }
+        | Expr::Index { line, .. }
+        | Expr::Slice { line, .. }
+        | Expr::If { line, .. }
+        | Expr::Try { line, .. } => *line += off,
+        _ => {}
+    }
+}
+
+fn rewrite_module(modules: &[Module], idx: usize, line_offset: usize) -> Vec<Stmt> {
     let m = &modules[idx];
     let ctx = Ctx {
         prefix: format!("m{idx}"),
@@ -229,6 +303,7 @@ fn rewrite_module(modules: &[Module], idx: usize) -> Vec<Stmt> {
             .iter()
             .map(|(n, dep)| (n.clone(), format!("m{dep}")))
             .collect(),
+        line_offset,
     };
     let mut out = Vec::with_capacity(m.stmts.len());
     for s in &m.stmts {
@@ -266,6 +341,7 @@ fn mangle(prefix: &str, name: &str) -> String {
 }
 
 fn rewrite_stmt(s: &mut Stmt, ctx: &Ctx) {
+    offset_stmt_line(s, ctx.line_offset);
     match s {
         Stmt::Func { name, params, body, .. } => {
             *name = mangle(&ctx.prefix, name);
@@ -290,6 +366,9 @@ fn rewrite_stmt(s: &mut Stmt, ctx: &Ctx) {
 /// Rewrite an expression in place. `bound` is the set of local names in scope
 /// (parameters, `let` bindings) — those are never mangled.
 fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
+    // Offset this node's line into the module's global range first, so any node the
+    // rewrites below synthesize from `*line` inherits the corrected number.
+    offset_expr_line(e, ctx.line_offset);
     // `dep.member(...)` / `dep.member` where `dep` is an imported module → a direct
     // reference to the dependency's mangled name. Handled before generic recursion
     // because they replace the whole node.

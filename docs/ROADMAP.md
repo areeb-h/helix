@@ -305,8 +305,10 @@ motivates this phase.
       names into scope unqualified (resolving to the source module), with a local
       definition of the same name shadowing the import. No new keyword: the brace tail
       mirrors the existing dotted-path syntax.
-- [ ] Cross-module runtime-error caret attribution (message and line:col are
-      correct; the caret may point at the entry file).
+- [x] **Cross-module error attribution** — each module is given a global line range,
+      so an error's line unambiguously identifies its file; the renderer maps it back
+      to the owning module's source and local line, showing the right file, line, and
+      caret (previously the caret could point at the entry file).
 
 ### CPython interop (v1 complete) — see [ADR 0008](adr/0008-cpython-interop.md), [guide](python-interop.md)
 - [x] **Feature-gated bridge** (`cargo build --features python`, off by default so

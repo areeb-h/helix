@@ -122,7 +122,12 @@ fn run_eval(code: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match run_program(&program, code, "<eval>", false) {
+    let spans = vec![module::Span {
+        start_line: 1,
+        source: code.to_string(),
+        filename: "<eval>".to_string(),
+    }];
+    match run_program(&program, &spans, false) {
         Ok(()) => ExitCode::SUCCESS,
         Err(rendered) => {
             eprint!("{}", rendered);
@@ -173,11 +178,9 @@ fn run_file(path: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // The entry source, for rendering type/runtime errors. For a multi-file program
-    // the caret may point into a dependency while showing the entry file — a known
-    // v1 limitation; the message and line:col are still accurate.
-    let src = std::fs::read_to_string(path).unwrap_or_default();
-    match run_program(&loaded.stmts, &src, path, loaded.multi_module) {
+    // Errors render against the spans the loader produced, so a cross-module error
+    // points at the dependency's own source and line (not the entry file).
+    match run_program(&loaded.stmts, &loaded.spans, loaded.multi_module) {
         Ok(()) => ExitCode::SUCCESS,
         Err(rendered) => {
             eprint!("{}", rendered);
@@ -211,10 +214,10 @@ fn strip_mangling(s: &str) -> String {
 
 /// Type-check and run an already-loaded program. On failure returns the rendered,
 /// caret-annotated error (with namespacing prefixes stripped for multi-file runs).
-fn run_program(program: &[ast::Stmt], src: &str, filename: &str, multi: bool) -> Result<(), String> {
+fn run_program(program: &[ast::Stmt], spans: &[module::Span], multi: bool) -> Result<(), String> {
     // The inferred receiver types feed the compiler so it can route
     // receiver-polymorphic methods (DataFrame/Tensor column-verbs) correctly.
-    let types = types::check(program).map_err(|e| render_err(e, src, filename, multi))?;
+    let types = types::check(program).map_err(|e| render_err(e, spans, multi))?;
 
     // The tree-walker runs in two cases: `HELIX_NOVM=1` (A/B benchmarking and engine
     // agreement), and any program that uses `try`, since error recovery is currently
@@ -227,7 +230,7 @@ fn run_program(program: &[ast::Stmt], src: &str, filename: &str, multi: bool) ->
                 .stack_size(2 * 1024 * 1024 * 1024)
                 .spawn_scoped(scope, || {
                     let mut interp = Interp::new();
-                    interp.run(program).map_err(|e| render_err(e, src, filename, multi))
+                    interp.run(program).map_err(|e| render_err(e, spans, multi))
                 })
                 .expect("failed to spawn interpreter thread")
                 .join()
@@ -246,7 +249,7 @@ fn run_program(program: &[ast::Stmt], src: &str, filename: &str, multi: bool) ->
             } else {
                 jit::build(program, &prog.reduce_loops)
             };
-            vm::run(&prog, jit.as_ref()).map_err(|e| render_err(e, src, filename, multi))?
+            vm::run(&prog, jit.as_ref()).map_err(|e| render_err(e, spans, multi))?
         }
         // Unreachable for a type-checked program (the compiler is total). Surface it
         // as an internal error rather than silently falling back to the tree-walker.
@@ -260,9 +263,13 @@ fn run_program(program: &[ast::Stmt], src: &str, filename: &str, multi: bool) ->
     Ok(())
 }
 
-/// Render a runtime/type error, stripping module-namespacing prefixes for
+/// Render a runtime/type error against the file it came from. The error's (global)
+/// line is mapped back to its owning module's source and local line, so a cross-module
+/// error shows the right file and caret. Module-namespacing prefixes are stripped for
 /// multi-file programs so users never see the internal `m<N>$` names.
-fn render_err(e: HelixError, src: &str, filename: &str, multi: bool) -> String {
+fn render_err(mut e: HelixError, spans: &[module::Span], multi: bool) -> String {
+    let (src, filename, local_line) = module::locate(spans, e.line);
+    e.line = local_line;
     let r = e.render(src, filename);
     if multi { strip_mangling(&r) } else { r }
 }

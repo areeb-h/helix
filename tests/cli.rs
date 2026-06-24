@@ -189,6 +189,20 @@ fn cross_module_calls_and_local_shadowing() {
 }
 
 #[test]
+fn cross_module_runtime_error_points_at_the_dependency() {
+    // A runtime error inside an imported module must render against that module's own
+    // file and local line — not the entry file. `boom` is on line 2 of lib.helix.
+    let lib = "# lib\nfn boom(n) = [10, 20, 30][n]\n";
+    let main = "import lib\nprint(\"start\")\nprint(lib.boom(99))\n";
+    let (_out, stderr, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "caret");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("lib.helix:2:"), "should point at lib.helix line 2:\n{stderr}");
+    assert!(stderr.contains("[10, 20, 30][n]"), "should show lib's source line:\n{stderr}");
+    assert!(!stderr.contains("main.helix"), "must not point at the entry file:\n{stderr}");
+}
+
+#[test]
 fn import_cycle_is_rejected() {
     let a = "import b\nprint(1)\n";
     let b = "import a\nprint(2)\n";
