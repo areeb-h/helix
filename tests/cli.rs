@@ -336,6 +336,17 @@ fn read_fastq_parses_reads_with_quality() {
 }
 
 #[test]
+fn read_vcf_accepts_gzipped_files() {
+    // Real-world VCFs are bgzipped `.vcf.gz`; the reader sniffs the gzip magic bytes
+    // and decompresses transparently, so a `.vcf.gz` queries identically to its plain
+    // form (the fixture is the gzip of examples/data/variants.vcf).
+    let src = "v = read_vcf(\"examples/data/variants.vcf.gz\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\n";
+    let (out, stderr, code) = run_source(src, &[], "vcfgz");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "6\n3"); // identical to the plain-VCF result
+}
+
+#[test]
 fn read_vcf_makes_variants_queryable() {
     // The bio flagship: a VCF becomes a DataFrame the normal verbs work on. INFO
     // fields (gene) are columns alongside the fixed ones (qual). No group-by here, so

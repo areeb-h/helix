@@ -67,9 +67,11 @@ numpy = { version = "0.28", optional = true }
 # rustls (not OpenSSL) keeps the binary self-contained; sha2 is the trust boundary.
 ureq = { version = "2", optional = true }
 sha2 = { version = "0.10", optional = true }
-# Pure-Rust gzip+tar extraction for managed runtimes (miniz_oxide backend — no zlib
-# system dep, keeps the binary self-contained). Behind `managed`.
-flate2 = { version = "1", optional = true }
+# Pure-Rust gzip (miniz_oxide backend — no zlib system dep, keeps the binary
+# self-contained). Core, not optional: reading gzipped/BGZF bioinformatics files
+# (`.vcf.gz`) is a flagship capability, and the managed-runtime extraction reuses it.
+flate2 = "1"
+# tar extraction for managed runtimes. Behind `managed`.
 tar = { version = "0.4", optional = true }
 
 [features]
@@ -81,4 +83,4 @@ http = ["dep:ureq"]
 # Enable the embedded-CPython bridge: `cargo build --features python`.
 python = ["dep:pyo3", "dep:pyo3-polars", "dep:numpy"]
 # Managed runtimes: verified downloads + extraction (managed Python, etc.).
-managed = ["http", "dep:sha2", "dep:flate2", "dep:tar"]
+managed = ["http", "dep:sha2", "dep:tar"]

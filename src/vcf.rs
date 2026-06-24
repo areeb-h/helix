@@ -9,18 +9,36 @@
 //!
 //! The eight fixed columns (`chrom`, `pos`, `id`, `ref`, `alt`, `qual`, `filter`)
 //! plus every `INFO` key (e.g. `gene`, `consequence`) become DataFrame columns.
-//! `.` is read as a null. v1 is a hand-rolled parser for plain (uncompressed) VCF;
-//! gzip/BGZF/BCF and full INFO typing are a later upgrade (delegating to `noodles`).
+//! `.` is read as a null. Both plain `.vcf` and gzipped/BGZF `.vcf.gz` are accepted
+//! (the magic bytes are sniffed). Full INFO typing and binary BCF are a later upgrade
+//! (delegating to `noodles`).
 
 use std::collections::HashMap;
+use std::io::Read;
 
+use flate2::read::MultiGzDecoder;
 use polars::prelude::*;
 
 use crate::error::HelixError;
 
+/// Read a possibly-gzipped text file. The gzip magic bytes (`0x1f 0x8b`) trigger a
+/// multi-member decoder, which transparently handles both plain gzip and BGZF — the
+/// block-gzip `bgzip` produces for `.vcf.gz`, a concatenation of gzip members.
+pub(crate) fn read_text_maybe_gzip(path: &str) -> std::io::Result<String> {
+    let bytes = std::fs::read(path)?;
+    if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
+        let mut s = String::new();
+        MultiGzDecoder::new(&bytes[..]).read_to_string(&mut s)?;
+        Ok(s)
+    } else {
+        String::from_utf8(bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
 pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<LazyFrame, HelixError> {
     let err = |msg: String| HelixError::new(msg, line, col);
-    let text = std::fs::read_to_string(path)
+    let text = read_text_maybe_gzip(path)
         .map_err(|e| err(format!("could not open VCF `{path}`: {e}")))?;
 
     let mut chrom: Vec<String> = Vec::new();

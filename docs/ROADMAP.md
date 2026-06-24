@@ -24,9 +24,10 @@ fast, memory-safe surface.
       `where`/`group`/`count` verbs, demonstrating the unified model
       (`read_vcf(...).where(gene == "BRCA1").group(consequence).count(pos)`). The eight
       fixed columns plus every INFO field (`gene`, `consequence`, …) become columns.
-      Demo: [examples/variants.helix](../examples/variants.helix). v1 is a hand-rolled
-      parser for plain VCF; gzip/BGZF/BCF and full INFO typing via `noodles` is the next
-      step. (No-arg grouped `count()` for rows-per-group is a small follow-up.)
+      Demo: [examples/variants.helix](../examples/variants.helix). A hand-rolled parser
+      reads both plain `.vcf` and gzipped/BGZF `.vcf.gz` (magic-byte sniffing, multi-member
+      decode). Binary BCF and full INFO typing via `noodles` are the next step. (No-arg
+      grouped `count()` for rows-per-group is a small follow-up.)
 - [x] **`read_fastq`** — FASTQ reads as records `{id, seq, qual, length}` (via
       `needletail`); `seq` is a DNA value and `qual` the Phred string. Demo:
       [examples/sequencing.helix](../examples/sequencing.helix).
