@@ -185,6 +185,25 @@ pub fn resolve(root_dir: &Path) -> Result<(Lockfile, BTreeMap<String, PathBuf>),
     Ok((Lockfile { version: LOCK_VERSION, packages }, dirs))
 }
 
+/// Resolve dependencies for **running** a project. Like [`resolve`], but if a
+/// `helix.lock` exists the current resolution must match it exactly — a dependency
+/// whose source has drifted since `helix sync` is a hard error, not a silent
+/// difference. This makes reproducibility an enforced property: you cannot run with
+/// dependencies that don't match the committed lockfile (stricter than Cargo, which
+/// silently updates). No lockfile yet → resolve directly (a first run before `sync`).
+pub fn resolve_for_run(root: &Path) -> Result<BTreeMap<String, PathBuf>, HelixError> {
+    let (lock, dirs) = resolve(root)?;
+    if let Some(existing) = Lockfile::load(root)?
+        && existing != lock
+    {
+        return Err(err(
+            "the project's dependencies no longer match `helix.lock`".to_string(),
+        )
+        .hint("a dependency's source changed since `helix sync`; run `helix sync` to update."));
+    }
+    Ok(dirs)
+}
+
 /// A content hash of a package's source tree: the sha256 over every `.helix` file
 /// (sorted by relative path), each contributing its path and bytes. Deterministic
 /// across machines, so the lockfile detects any change to a dependency's source.
@@ -325,6 +344,33 @@ mod tests {
         std::fs::write(base.join("dep/lib.helix"), "fn f(x) = x + 2\n").unwrap();
         let (lock3, _) = resolve(&base.join("app")).unwrap();
         assert_ne!(lock3.packages[0].sha256, h1, "hash must track source changes");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn run_resolution_enforces_the_lockfile() {
+        let base = std::env::temp_dir().join(format!("helix_pkglock_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("dep")).unwrap();
+        std::fs::create_dir_all(base.join("app")).unwrap();
+        std::fs::write(base.join("dep/lib.helix"), "fn f(x) = x\n").unwrap();
+        let app = base.join("app");
+        std::fs::write(
+            app.join("helix.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n",
+        )
+        .unwrap();
+
+        // No lock yet → a first run resolves fine.
+        assert!(resolve_for_run(&app).is_ok());
+        // `sync` writes the lock; the matching state still runs.
+        let (lock, _) = resolve(&app).unwrap();
+        lock.write(&app).unwrap();
+        assert!(resolve_for_run(&app).is_ok());
+        // The dependency's source drifts → running now errors (reproducibility enforced).
+        std::fs::write(base.join("dep/lib.helix"), "fn f(x) = x + 1\n").unwrap();
+        assert!(resolve_for_run(&app).is_err());
 
         let _ = std::fs::remove_dir_all(&base);
     }

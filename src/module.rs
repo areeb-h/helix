@@ -78,8 +78,14 @@ fn project_deps(entry: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
     let mut dir = canon.parent();
     while let Some(d) = dir {
         if d.join("helix.toml").is_file() {
-            let (_lock, dirs) =
-                crate::pkg::resolve(d).map_err(|e| format!("error: {}\n", e.message))?;
+            // Resolve, and (if locked) verify the sources still match `helix.lock`.
+            let dirs = crate::pkg::resolve_for_run(d).map_err(|e| {
+                let mut s = format!("error: {}\n", e.message);
+                if let Some(h) = &e.hint {
+                    s.push_str(&format!("  {h}\n"));
+                }
+                s
+            })?;
             return Ok(dirs);
         }
         dir = d.parent();
