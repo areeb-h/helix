@@ -412,7 +412,7 @@ fn run_program(program: &[ast::Stmt], spans: &[module::Span], multi: bool) -> Re
             let jit = if std::env::var_os("HELIX_NOJIT").is_some() {
                 None
             } else {
-                jit::build(program, &prog.reduce_loops)
+                jit::build(program, &prog.reduce_loops, &prog.map_kernels, &prog.filter_kernels)
             };
             vm::run(&prog, jit.as_ref()).map_err(|e| render_err(e, spans, multi))?
         }

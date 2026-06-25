@@ -158,6 +158,18 @@ pub enum Op {
     /// loop. Otherwise it falls through to the identical `CompInitRange` loop — so
     /// every non-`Int`, over-cap, or no-JIT case takes the oracle-matched path.
     TryJitReduce { loop_idx: u32, acc_slot: u32, after: u32 },
+    /// Fast path for a JIT-eligible `arr.map(it => body)`. At this point the receiver
+    /// is on the stack top. If it is an `Int` array AND a native map kernel for
+    /// `kernel_idx` compiled, the VM pops it, runs the native (optionally parallel)
+    /// kernel over the packed `&[i64]`, pushes the resulting `Int` array, and jumps to
+    /// `after` (the comprehension's convergence point). Otherwise it falls through to
+    /// the identical `CompInit` bytecode loop — so every non-`Int`, `missing`, or
+    /// no-JIT case takes the oracle-matched path.
+    TryJitMap { kernel_idx: u32, after: u32 },
+    /// Fast path for a JIT-eligible `arr.filter(it => pred)` / `where`. Same protocol
+    /// as `TryJitMap`, but the native kernel evaluates the boolean predicate per
+    /// element and keeps the elements for which it holds (order preserved).
+    TryJitFilter { kernel_idx: u32, after: u32 },
     /// Raise a runtime error with the given message and hint. Used where the
     /// program is statically known to be an error but the error should still fire
     /// at the point of execution (e.g. reassigning an immutable global, after its
@@ -270,6 +282,20 @@ pub struct ReduceLoop {
     pub body: Expr,
 }
 
+/// A JIT-eligible `map`/`filter` body the compiler asked the JIT to compile into a
+/// native per-element kernel over a packed `&[i64]`. For `map` the JIT lowers `body`
+/// to a fused loop `dst[i] = body(src[i])`; for `filter` to a compaction loop keeping
+/// `src[i]` where `body(src[i])` holds. Indexed by the `kernel_idx` of the matching
+/// [`Op::TryJitMap`] / [`Op::TryJitFilter`].
+#[derive(Debug, Clone)]
+pub struct ArrayKernel {
+    /// The element binder name (the lambda's single parameter).
+    pub binder: String,
+    /// The body (a value expression for `map`, a boolean predicate for `filter`),
+    /// evaluated over `{binder}` as `i64`.
+    pub body: Expr,
+}
+
 /// One compiled code unit: a function body or the top-level `main`.
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -302,6 +328,12 @@ pub struct Program {
     /// Handed to [`crate::jit::build`] so the native loop and the bytecode agree on
     /// which sites are eligible — a single source of truth, no two-pass coupling.
     pub reduce_loops: Vec<ReduceLoop>,
+    /// JIT-eligible `map` bodies, indexed by [`Op::TryJitMap::kernel_idx`]. Handed to
+    /// [`crate::jit::build`] (same single-source-of-truth contract as `reduce_loops`).
+    pub map_kernels: Vec<ArrayKernel>,
+    /// JIT-eligible `filter`/`where` predicates, indexed by
+    /// [`Op::TryJitFilter::kernel_idx`].
+    pub filter_kernels: Vec<ArrayKernel>,
     /// Global slot names, aligned with `global_init`. Lets the VM resolve a bare
     /// name to a global's runtime value inside a DataFrame predicate
     /// (`df.where(age > threshold)`) — the column-verb `resolve_var`.

@@ -210,6 +210,9 @@ pub struct Compiler {
     builtins: Vec<String>,
     /// Accumulated JIT reduce-loop requests (see [`Program::reduce_loops`]).
     reduce_loops: Vec<ReduceLoop>,
+    /// Accumulated JIT `map`/`filter` kernel requests (see [`Program::map_kernels`]).
+    map_kernels: Vec<ArrayKernel>,
+    filter_kernels: Vec<ArrayKernel>,
     /// Inferred receiver types from the type checker (see [`crate::types::TypeMap`]),
     /// used to route receiver-polymorphic methods. `None` when compiling without a
     /// prior type-check (tests/fuzzers) — then such methods fall back as before.
@@ -240,6 +243,8 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         funcs: vec![None], // slot 0 reserved for main
         builtins: Vec::new(),
         reduce_loops: Vec::new(),
+        map_kernels: Vec::new(),
+        filter_kernels: Vec::new(),
         types,
     };
 
@@ -271,6 +276,8 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         global_init: c.global_init,
         memoizable,
         reduce_loops: c.reduce_loops,
+        map_kernels: c.map_kernels,
+        filter_kernels: c.filter_kernels,
         global_names: std::rc::Rc::new(c.globals),
     })
 }

@@ -599,6 +599,42 @@ fn imports_resolve_from_the_project_root() {
 }
 
 #[test]
+fn native_map_filter_kernels_agree_across_all_paths() {
+    // `map`/`filter` over an Int array compile to a native JIT kernel on the VM. The
+    // result must be byte-identical across: the VM native kernel (default), the
+    // tree-walker oracle (HELIX_NOVM), the bytecode loop (HELIX_NOJIT), and the
+    // forced-parallel path (HELIX_PAR_MIN=1) — proving the fast paths and the
+    // thread-chunked path stay faithful to the sequential semantics.
+    let src = "xs = range(0, 1000)\n\
+               m = xs.map(x => x * x - 3 * x + 1)\n\
+               f = xs.filter(x => x % 7 == 0)\n\
+               g = xs.map(x => if x > 500 then x * 2 else 0 - x)\n\
+               print(m.sum())\nprint(f.count())\nprint(f.sum())\nprint(g.sum())\n";
+    let (vm, stderr, code) = run_source(src, &[], "kern_vm");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    let (tw, _, _) = run_source(src, &[("HELIX_NOVM", "1")], "kern_tw");
+    let (nojit, _, _) = run_source(src, &[("HELIX_NOJIT", "1")], "kern_nojit");
+    let (par, _, _) = run_source(src, &[("HELIX_PAR_MIN", "1")], "kern_par");
+    assert_eq!(vm, tw, "native kernel vs tree-walker oracle");
+    assert_eq!(vm, nojit, "native kernel vs bytecode loop");
+    assert_eq!(vm, par, "native kernel vs forced-parallel");
+    assert!(!vm.trim().is_empty());
+}
+
+#[test]
+fn ineligible_map_bodies_fall_through_correctly() {
+    // A float array (no Int kernel) and a non-arithmetic body both bypass the kernel
+    // and run the bytecode loop — still correct, and identical to the tree-walker.
+    let src = "print([1.0, 4.0, 9.0].map(x => x * 2.0).sum())\n\
+               print([1,2,3].map(x => sqrt(x * 1.0)).count())\n";
+    let (vm, stderr, code) = run_source(src, &[], "fall_vm");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    let (tw, _, _) = run_source(src, &[("HELIX_NOVM", "1")], "fall_tw");
+    assert_eq!(vm, tw);
+    assert_eq!(vm.trim(), "28.0\n3");
+}
+
+#[test]
 fn assertions_raise_with_a_message_and_are_catchable() {
     // A passing assert is silent; a failing one raises a clean, catchable error.
     let (out, stderr, code) = run_source(

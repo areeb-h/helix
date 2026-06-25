@@ -819,6 +819,49 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 }
                 // else: fall through (ip already advanced) to CompInitRange.
             }
+            Op::TryJitMap { kernel_idx, after } => {
+                // Receiver is on the stack top. Take the native (optionally parallel)
+                // kernel only for an `Int` array with a compiled kernel; otherwise fall
+                // through to the identical `CompInit` bytecode loop (the oracle path).
+                let ptr = match (jit, stack.last()) {
+                    (Some(j), Some(Value::Array(a)))
+                        if matches!(&**a, crate::value::ArrayData::Ints(_)) =>
+                    {
+                        j.map_kernel(*kernel_idx as usize)
+                    }
+                    _ => None,
+                };
+                if let Some(ptr) = ptr {
+                    let arr = stack.pop().unwrap();
+                    if let Value::Array(a) = &arr
+                        && let crate::value::ArrayData::Ints(v) = &**a
+                    {
+                        let out = unsafe { crate::jit::run_map_kernel(ptr, v) };
+                        stack.push(Value::int_array(out));
+                        frames[fi].ip = *after as usize;
+                    }
+                }
+            }
+            Op::TryJitFilter { kernel_idx, after } => {
+                let ptr = match (jit, stack.last()) {
+                    (Some(j), Some(Value::Array(a)))
+                        if matches!(&**a, crate::value::ArrayData::Ints(_)) =>
+                    {
+                        j.filter_kernel(*kernel_idx as usize)
+                    }
+                    _ => None,
+                };
+                if let Some(ptr) = ptr {
+                    let arr = stack.pop().unwrap();
+                    if let Value::Array(a) = &arr
+                        && let crate::value::ArrayData::Ints(v) = &**a
+                    {
+                        let out = unsafe { crate::jit::run_filter_kernel(ptr, v) };
+                        stack.push(Value::int_array(out));
+                        frames[fi].ip = *after as usize;
+                    }
+                }
+            }
             Op::CompInitRange => {
                 // Pop [start, end], validate as integers (matching `range`), and
                 // iterate lazily — no array. Validate start first (arg order).

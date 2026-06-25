@@ -34,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{F64, I64};
-use cranelift_codegen::ir::{AbiParam, InstBuilder, Type, Value as ClValue};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Type, Value as ClValue};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -85,6 +85,12 @@ pub struct Jit {
     /// `loop_idx` of [`crate::bytecode::Op::TryJitReduce`]. `None` for a site that
     /// the JIT declined (kept as a slot so indices stay aligned with the compiler).
     reduce_ptrs: Vec<Option<*const u8>>,
+    /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len)` map kernels,
+    /// indexed by [`crate::bytecode::Op::TryJitMap`]'s `kernel_idx`.
+    map_ptrs: Vec<Option<*const u8>>,
+    /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len) -> i64` (kept count)
+    /// filter kernels, indexed by [`crate::bytecode::Op::TryJitFilter`]'s `kernel_idx`.
+    filter_ptrs: Vec<Option<*const u8>>,
 }
 
 impl Jit {
@@ -94,6 +100,14 @@ impl Jit {
     /// The native reduce loop for site `idx`, if one compiled.
     pub fn reduce_loop(&self, idx: usize) -> Option<*const u8> {
         self.reduce_ptrs.get(idx).copied().flatten()
+    }
+    /// The native map kernel for site `idx`, if one compiled.
+    pub fn map_kernel(&self, idx: usize) -> Option<*const u8> {
+        self.map_ptrs.get(idx).copied().flatten()
+    }
+    /// The native filter kernel for site `idx`, if one compiled.
+    pub fn filter_kernel(&self, idx: usize) -> Option<*const u8> {
+        self.filter_ptrs.get(idx).copied().flatten()
     }
 }
 
@@ -106,7 +120,12 @@ struct FnDef<'a> {
 /// Compile every eligible numeric function — and every JIT-eligible `reduce` loop
 /// the compiler flagged — to native code, or `None` if nothing is eligible (so the
 /// caller skips JIT setup).
-pub fn build(program: &[Stmt], reduce_loops: &[crate::bytecode::ReduceLoop]) -> Option<Jit> {
+pub fn build(
+    program: &[Stmt],
+    reduce_loops: &[crate::bytecode::ReduceLoop],
+    map_kernels: &[crate::bytecode::ArrayKernel],
+    filter_kernels: &[crate::bytecode::ArrayKernel],
+) -> Option<Jit> {
     // The native call transmutes Cranelift output to `extern "C"`, which matches
     // the convention we force (SystemV) only on x86-64 Linux. On every other
     // target, decline to JIT and let the VM run everything — correct, just not
@@ -122,7 +141,11 @@ pub fn build(program: &[Stmt], reduce_loops: &[crate::bytecode::ReduceLoop]) -> 
             _ => None,
         })
         .collect();
-    if funcs.is_empty() && reduce_loops.is_empty() {
+    if funcs.is_empty()
+        && reduce_loops.is_empty()
+        && map_kernels.is_empty()
+        && filter_kernels.is_empty()
+    {
         return None;
     }
 
@@ -230,7 +253,17 @@ pub fn build(program: &[Stmt], reduce_loops: &[crate::bytecode::ReduceLoop]) -> 
         }
     }
 
-    if compiled.is_empty() && reduce_ids.iter().all(|r| r.is_none()) {
+    // Compile each flagged `map`/`filter` body into a native kernel over a packed
+    // `&[i64]` (the perf path that also unlocks parallelism). Same defensive
+    // re-check + per-site `None` slot as the reduce loops.
+    let map_ids = define_array_kernels(&mut module, map_kernels, "map", false);
+    let filter_ids = define_array_kernels(&mut module, filter_kernels, "filter", true);
+
+    if compiled.is_empty()
+        && reduce_ids.iter().all(|r| r.is_none())
+        && map_ids.iter().all(|r| r.is_none())
+        && filter_ids.iter().all(|r| r.is_none())
+    {
         return None;
     }
     module.finalize_definitions().ok()?;
@@ -247,12 +280,57 @@ pub fn build(program: &[Stmt], reduce_loops: &[crate::bytecode::ReduceLoop]) -> 
         }
     }
 
-    let reduce_ptrs: Vec<Option<*const u8>> = reduce_ids
-        .into_iter()
-        .map(|id| id.map(|id| module.get_finalized_function(id)))
-        .collect();
+    let finalize = |ids: Vec<Option<FuncId>>, module: &JITModule| -> Vec<Option<*const u8>> {
+        ids.into_iter().map(|id| id.map(|id| module.get_finalized_function(id))).collect()
+    };
+    let reduce_ptrs = finalize(reduce_ids, &module);
+    let map_ptrs = finalize(map_ids, &module);
+    let filter_ptrs = finalize(filter_ids, &module);
 
-    Some(Jit { _module: module, by_name, reduce_ptrs })
+    Some(Jit { _module: module, by_name, reduce_ptrs, map_ptrs, filter_ptrs })
+}
+
+/// Declare + define a batch of `map`/`filter` kernels, returning one slot per kernel
+/// (`None` for any the JIT declined). `is_filter` selects the predicate/compaction
+/// codegen and the `-> i64` (kept-count) signature.
+fn define_array_kernels(
+    module: &mut JITModule,
+    kernels: &[crate::bytecode::ArrayKernel],
+    tag: &str,
+    is_filter: bool,
+) -> Vec<Option<FuncId>> {
+    let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
+    let mut ctx = module.make_context();
+    let mut bctx = FunctionBuilderContext::new();
+    for (i, k) in kernels.iter().enumerate() {
+        let eligible = if is_filter {
+            filter_kernel_eligible(&k.body, &k.binder)
+        } else {
+            map_kernel_eligible(&k.body, &k.binder)
+        };
+        if !eligible {
+            ids.push(None);
+            continue;
+        }
+        let mut sig = module.make_signature();
+        sig.call_conv = CallConv::SystemV;
+        for _ in 0..3 {
+            sig.params.push(AbiParam::new(I64)); // src, dst, len
+        }
+        if is_filter {
+            sig.returns.push(AbiParam::new(I64)); // kept count
+        }
+        let id = match module.declare_function(&format!("{tag}${i}"), Linkage::Local, &sig) {
+            Ok(id) => id,
+            Err(_) => {
+                ids.push(None);
+                continue;
+            }
+        };
+        let ok = define_array_kernel(module, &mut ctx, &mut bctx, id, k, is_filter);
+        ids.push(ok.map(|()| id));
+    }
+    ids
 }
 
 /// Build the JIT module, or `None` on any setup failure (so the caller falls
@@ -289,6 +367,24 @@ pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str) -> bool {
     locals.insert(pa);
     locals.insert(pb);
     value_eligible(body, &no_fns, &locals, NumKind::Int)
+}
+
+/// True if a `map` body is a pure `i64` value expression over its single binder — the
+/// same shape as a reduce body, so the JIT can lower it to a per-element kernel.
+pub fn map_kernel_eligible(body: &Expr, binder: &str) -> bool {
+    let no_fns: HashSet<&str> = HashSet::new();
+    let mut locals: HashSet<&str> = HashSet::new();
+    locals.insert(binder);
+    value_eligible(body, &no_fns, &locals, NumKind::Int)
+}
+
+/// True if a `filter`/`where` predicate is a single pure `i64` comparison over its
+/// binder (`it > 5`, `it % 2 == 0`, …) — what `gen_cond` can lower to a native test.
+pub fn filter_kernel_eligible(body: &Expr, binder: &str) -> bool {
+    let no_fns: HashSet<&str> = HashSet::new();
+    let mut locals: HashSet<&str> = HashSet::new();
+    locals.insert(binder);
+    cond_eligible(body, &no_fns, &locals, NumKind::Int)
 }
 
 fn eligible_set<'a>(funcs: &[FnDef<'a>], kind: NumKind) -> HashSet<&'a str> {
@@ -523,6 +619,119 @@ fn define_reduce_loop(
     Some(())
 }
 
+/// Emit a native per-element kernel over a packed `i64` buffer:
+/// - **map** `extern "C" fn(src,dst,len)`: `for i in 0..len { dst[i] = body(src[i]) }`.
+/// - **filter** `extern "C" fn(src,dst,len)->i64`: a branchless compaction —
+///   `store dst[w]=src[i]; w += pred(src[i])` — returning `w` (kept count), so
+///   `dst[0..w]` holds the kept elements in order. Integer arithmetic wraps, matching
+///   the interpreter's release semantics and the bytecode loop byte-for-byte.
+fn define_array_kernel<'a>(
+    module: &mut JITModule,
+    ctx: &mut cranelift_codegen::Context,
+    bctx: &mut FunctionBuilderContext,
+    fid: FuncId,
+    k: &'a crate::bytecode::ArrayKernel,
+    is_filter: bool,
+) -> Option<()> {
+    ctx.func.signature.call_conv = CallConv::SystemV;
+    for _ in 0..3 {
+        ctx.func.signature.params.push(AbiParam::new(I64)); // src, dst, len
+    }
+    if is_filter {
+        ctx.func.signature.returns.push(AbiParam::new(I64));
+    }
+
+    let mut b = FunctionBuilder::new(&mut ctx.func, bctx);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    b.seal_block(entry);
+    let src = b.block_params(entry)[0];
+    let dst = b.block_params(entry)[1];
+    let len = b.block_params(entry)[2];
+
+    let i_var = b.declare_var(I64); // read cursor
+    let w_var = b.declare_var(I64); // write cursor (filter); == i for map
+    let src_var = b.declare_var(I64);
+    let dst_var = b.declare_var(I64);
+    let len_var = b.declare_var(I64);
+    let zero = b.ins().iconst(I64, 0);
+    b.def_var(i_var, zero);
+    b.def_var(w_var, zero);
+    b.def_var(src_var, src);
+    b.def_var(dst_var, dst);
+    b.def_var(len_var, len);
+
+    let header = b.create_block();
+    let body_blk = b.create_block();
+    let exit_blk = b.create_block();
+    b.ins().jump(header, &[]);
+
+    // header: `i < len ?`
+    b.switch_to_block(header);
+    let iv = b.use_var(i_var);
+    let lv = b.use_var(len_var);
+    let cond = b.ins().icmp(IntCC::SignedLessThan, iv, lv);
+    b.ins().brif(cond, body_blk, &[], exit_blk, &[]);
+
+    b.switch_to_block(body_blk);
+    b.seal_block(body_blk);
+    // elem = src[i]
+    let iv2 = b.use_var(i_var);
+    let ioff = b.ins().imul_imm(iv2, 8);
+    let srcp = b.use_var(src_var);
+    let saddr = b.ins().iadd(srcp, ioff);
+    let elem = b.ins().load(I64, MemFlags::trusted(), saddr, 0);
+    let elem_var = b.declare_var(I64);
+    b.def_var(elem_var, elem);
+
+    let mut vars: HashMap<&'a str, Variable> = HashMap::new();
+    vars.insert(k.binder.as_str(), elem_var);
+    let no_fns: HashMap<&str, FuncId> = HashMap::new();
+
+    if is_filter {
+        // dst[w] = elem; w += (pred ? 1 : 0)
+        let wv = b.use_var(w_var);
+        let woff = b.ins().imul_imm(wv, 8);
+        let dstp = b.use_var(dst_var);
+        let daddr = b.ins().iadd(dstp, woff);
+        b.ins().store(MemFlags::trusted(), elem, daddr, 0);
+        let keep = gen_cond(&mut b, &k.body, &mut vars, &no_fns, module, NumKind::Int);
+        let keep64 = b.ins().uextend(I64, keep);
+        let wv2 = b.use_var(w_var);
+        let nw = b.ins().iadd(wv2, keep64);
+        b.def_var(w_var, nw);
+    } else {
+        // dst[i] = body(elem)
+        let r = gen_value(&mut b, &k.body, &mut vars, &no_fns, module, NumKind::Int);
+        let iv3 = b.use_var(i_var);
+        let doff = b.ins().imul_imm(iv3, 8);
+        let dstp = b.use_var(dst_var);
+        let daddr = b.ins().iadd(dstp, doff);
+        b.ins().store(MemFlags::trusted(), r, daddr, 0);
+    }
+
+    let iv4 = b.use_var(i_var);
+    let ni = b.ins().iadd_imm(iv4, 1);
+    b.def_var(i_var, ni);
+    b.ins().jump(header, &[]);
+    b.seal_block(header);
+
+    b.switch_to_block(exit_blk);
+    b.seal_block(exit_blk);
+    if is_filter {
+        let wv = b.use_var(w_var);
+        b.ins().return_(&[wv]);
+    } else {
+        b.ins().return_(&[]);
+    }
+
+    b.finalize();
+    module.define_function(fid, ctx).ok()?;
+    module.clear_context(ctx);
+    Some(())
+}
+
 fn gen_value<'a>(
     b: &mut FunctionBuilder,
     e: &'a Expr,
@@ -695,6 +904,87 @@ pub unsafe fn call_reduce(ptr: *const u8, start: i64, end: i64, init: i64) -> i6
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64) -> i64>(ptr)(start, end, init)
     }
+}
+
+/// How many worker threads to split an `n`-element kernel across.
+///
+/// Parallel execution is implemented and correct, but **opt-in**: for the current class
+/// of integer map/filter kernels the work is memory-bound (the input/output traffic
+/// dwarfs the per-element arithmetic, which has no loops or calls), so splitting across
+/// threads adds contention without adding memory bandwidth — it rarely beats, and can
+/// regress, the single-threaded native kernel. The big, reliable win here is the native
+/// kernel itself (no per-element boxing or bytecode dispatch). Set `HELIX_PAR_MIN=<k>`
+/// to enable threads (parallelize inputs ≥ 2k across cores) — useful on different
+/// hardware and for the compute-heavier kernels a later phase will admit (helper-fn
+/// calls in bodies). Default (unset) → always sequential.
+fn parallel_chunks(n: usize) -> usize {
+    let Some(min_per_thread) = std::env::var("HELIX_PAR_MIN")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&m| m > 0)
+    else {
+        return 1;
+    };
+    if n < 2 * min_per_thread {
+        return 1;
+    }
+    let cores = std::thread::available_parallelism().map(|c| c.get()).unwrap_or(1);
+    cores.min(n / min_per_thread).max(1)
+}
+
+/// Run a native map kernel over `src`, returning the mapped buffer (same length, same
+/// order). Large inputs fan out across worker threads over disjoint input/output
+/// chunks: the kernel is stateless native code over scalars (no `Rc`, no shared state),
+/// so concurrent calls are **race-free by construction**, and a function pointer is
+/// `Send`/`Sync`, so nothing unsafe crosses the boundary. The result is identical to a
+/// sequential run (chunks are contiguous and ordered). SAFETY: `ptr` is a finalized
+/// `extern "C" fn(*const i64,*mut i64,i64)` from [`define_array_kernel`].
+pub unsafe fn run_map_kernel(ptr: *const u8, src: &[i64]) -> Vec<i64> {
+    let mut dst = vec![0i64; src.len()];
+    if src.is_empty() {
+        return dst;
+    }
+    let f: extern "C" fn(*const i64, *mut i64, i64) = unsafe { std::mem::transmute(ptr) };
+    let threads = parallel_chunks(src.len());
+    if threads <= 1 {
+        f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64);
+        return dst;
+    }
+    let chunk = src.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (s, d) in src.chunks(chunk).zip(dst.chunks_mut(chunk)) {
+            scope.spawn(move || f(s.as_ptr(), d.as_mut_ptr(), s.len() as i64));
+        }
+    });
+    dst
+}
+
+/// Run a native filter kernel over `src`, returning the kept elements in order. Large
+/// inputs fan out per chunk (each produces its kept sub-vector); the parts are
+/// concatenated in chunk order, so the result is identical to a sequential run. Same
+/// soundness argument as [`run_map_kernel`]. SAFETY: `ptr` is a finalized
+/// `extern "C" fn(*const i64,*mut i64,i64)->i64` (kept count) from [`define_array_kernel`].
+pub unsafe fn run_filter_kernel(ptr: *const u8, src: &[i64]) -> Vec<i64> {
+    if src.is_empty() {
+        return Vec::new();
+    }
+    let f: extern "C" fn(*const i64, *mut i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    let run = |s: &[i64]| -> Vec<i64> {
+        let mut d = vec![0i64; s.len()];
+        let kept = f(s.as_ptr(), d.as_mut_ptr(), s.len() as i64);
+        d.truncate(kept as usize);
+        d
+    };
+    let threads = parallel_chunks(src.len());
+    if threads <= 1 {
+        return run(src);
+    }
+    let chunk = src.len().div_ceil(threads);
+    let parts: Vec<Vec<i64>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = src.chunks(chunk).map(|s| scope.spawn(move || run(s))).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    parts.concat()
 }
 
 /// Call an `f64`-specialized JIT function. SAFETY: as [`call_i64`], with an

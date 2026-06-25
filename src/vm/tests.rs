@@ -268,7 +268,7 @@
             prog.funcs[0].code.pop();
             prog.funcs[0].pos.pop();
         }
-        let jit = crate::jit::build(&ast, &prog.reduce_loops);
+        let jit = crate::jit::build(&ast, &prog.reduce_loops, &prog.map_kernels, &prog.filter_kernels);
         match exec(&prog, jit.as_ref()) {
             Ok(mut s) => Ok(format!("{}", s.pop().unwrap_or(Value::Unit))),
             Err(_) => Err(()),
@@ -689,7 +689,7 @@
         let toks = lexer::lex("fn f(x) = 10.0 / x\nf(0.0)").unwrap();
         let ast = parser::parse(toks).unwrap();
         let prog = bytecode::compile_with_types(&ast, None).unwrap();
-        let jit = crate::jit::build(&ast, &prog.reduce_loops);
+        let jit = crate::jit::build(&ast, &prog.reduce_loops, &prog.map_kernels, &prog.filter_kernels);
         let err = exec(&prog, jit.as_ref()).unwrap_err();
         assert!(err.message.contains("division by zero"), "got: {}", err.message);
     }
@@ -714,7 +714,7 @@
             prog.funcs[0].code.pop();
             prog.funcs[0].pos.pop();
         }
-        let jit = crate::jit::build(&ast, &prog.reduce_loops);
+        let jit = crate::jit::build(&ast, &prog.reduce_loops, &prog.map_kernels, &prog.filter_kernels);
         exec(&prog, jit.as_ref()).unwrap().pop().unwrap_or(Value::Unit)
     }
 

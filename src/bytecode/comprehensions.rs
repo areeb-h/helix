@@ -58,6 +58,32 @@ impl super::Compiler {
         let kind = if name == "map" { CompKind::Map } else { CompKind::Filter };
 
         self.compile_expr(b, recv)?;
+
+        // JIT fast path: a pure single-binder body over an `Int` array runs as a native
+        // (optionally parallel) kernel. Runtime-guarded — non-`Int` arrays, `missing`,
+        // ineligible bodies, and no-JIT builds fall through to the bytecode loop below.
+        // The guard's `after` target is patched to the convergence point once known.
+        let is_map = matches!(kind, CompKind::Map);
+        let kernel_guard: Option<(usize, u32)> = if params.len() == 1
+            && (if is_map {
+                crate::jit::map_kernel_eligible(body, &params[0])
+            } else {
+                crate::jit::filter_kernel_eligible(body, &params[0])
+            }) {
+            let kernel = ArrayKernel { binder: params[0].clone(), body: body.clone() };
+            if is_map {
+                let idx = self.map_kernels.len() as u32;
+                self.map_kernels.push(kernel);
+                Some((b.emit(Op::TryJitMap { kernel_idx: idx, after: 0 }, line, col), idx))
+            } else {
+                let idx = self.filter_kernels.len() as u32;
+                self.filter_kernels.push(kernel);
+                Some((b.emit(Op::TryJitFilter { kernel_idx: idx, after: 0 }, line, col), idx))
+            }
+        } else {
+            None
+        };
+
         let init_at = b.emit(Op::CompInit(kind, 0), line, col);
 
         b.scopes.push(Vec::new());
@@ -91,6 +117,16 @@ impl super::Compiler {
 
         let done_at = b.code.len() as u32;
         b.code[jump_done] = Op::Jump(done_at);
+
+        // The native kernel pushes its result array and lands here, where both the
+        // bytecode-loop and missing-source paths converge with the result on the stack.
+        if let Some((at, idx)) = kernel_guard {
+            b.code[at] = if is_map {
+                Op::TryJitMap { kernel_idx: idx, after: done_at }
+            } else {
+                Op::TryJitFilter { kernel_idx: idx, after: done_at }
+            };
+        }
 
         b.scopes.pop();
         b.next_slot = saved_next;
