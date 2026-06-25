@@ -599,6 +599,68 @@ fn imports_resolve_from_the_project_root() {
 }
 
 #[test]
+fn assertions_raise_with_a_message_and_are_catchable() {
+    // A passing assert is silent; a failing one raises a clean, catchable error.
+    let (out, stderr, code) = run_source(
+        "assert(1 < 2)\nr = try assert(false, \"nope\")\nprint(r.ok)\nprint(r.error)\n",
+        &[],
+        "assertok",
+    );
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "false\nassertion failed: nope");
+
+    // An uncaught failure exits non-zero with the message.
+    let (_o, stderr, code) = run_source("assert_eq(1, 2)\n", &[], "assertfail");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("assertion failed: 1 != 2"), "stderr:\n{stderr}");
+}
+
+#[test]
+fn helix_test_runs_test_files_and_reports() {
+    // `helix test` discovers `*_test.helix` files, runs each in isolation, and exits
+    // non-zero iff any failed. A test passes by running to completion without raising;
+    // `assert*` raise on failure.
+    let dir = std::env::temp_dir().join("helix_testrun");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("math.helix"), "fn double(x) = x * 2\n").unwrap();
+    // Passing: imports a project module (root-anchored), asserts.
+    std::fs::write(
+        dir.join("math_test.helix"),
+        "import math\nfn test_double() = assert_eq(math.double(3), 6)\ntest_double()\n",
+    )
+    .unwrap();
+    // Passing nested test (float closeness).
+    std::fs::write(
+        dir.join("sub/calc_test.helix"),
+        "fn test_close() = assert_close(0.1 + 0.2, 0.3)\ntest_close()\n",
+    )
+    .unwrap();
+    // A non-test file must be ignored.
+    std::fs::write(dir.join("helper.helix"), "print(\"should not run\")\n").unwrap();
+
+    // All pass → exit 0, summary present.
+    let (out, stderr, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}\nout:\n{out}");
+    assert!(out.contains("2 passed"), "out:\n{out}");
+    assert!(!out.contains("should not run"), "ran a non-test file:\n{out}");
+
+    // Add a failing test → exit 1, the failure and its assertion message are reported.
+    std::fs::write(
+        dir.join("broken_test.helix"),
+        "fn test_bad() = assert_eq(2 + 2, 5)\ntest_bad()\n",
+    )
+    .unwrap();
+    let (out, _stderr, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "a failing test must exit non-zero:\n{out}");
+    assert!(out.contains("FAIL"), "out:\n{out}");
+    assert!(out.contains("4 != 5"), "out:\n{out}");
+    assert!(out.contains("2 passed, 1 failed"), "out:\n{out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn missing_module_on_search_path_is_a_clean_error() {
     // An import found neither locally nor on the search path fails with a clear message.
     let src = "import nowhere.lib as x\nprint(1)\n";

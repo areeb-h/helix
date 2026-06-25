@@ -93,6 +93,11 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "bio.at_content", pure: true },
     BuiltinDef { path: "bio.mean_gc", pure: true },
     BuiltinDef { path: "bio.total_length", pure: true },
+    // --- testing / assertions (guards that raise a catchable error on failure) ---
+    // Impure so they always run (never memoized away) — the check is the point.
+    BuiltinDef { path: "assert", pure: false },
+    BuiltinDef { path: "assert_eq", pure: false },
+    BuiltinDef { path: "assert_close", pure: false },
     // --- data formats ---
     BuiltinDef { path: "json.parse", pure: true },
     BuiltinDef { path: "json.stringify", pure: true },

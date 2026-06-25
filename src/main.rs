@@ -99,6 +99,8 @@ fn run() -> ExitCode {
         Some("sync") => pkg_result(pkg::cli_sync()),
         // `helix verify` — check the project matches helix.lock (CI gate; no build/run).
         Some("verify") => pkg_result(pkg::cli_verify()),
+        // `helix test [path]` — run `*_test.helix` files and report pass/fail.
+        Some("test") => cli_test(&args),
         // Shorthand: `helix script.helix` runs a file directly.
         Some(path) => run_file(path),
     }
@@ -244,6 +246,7 @@ fn print_help() {
          helix add <name> ...     add a dependency (--path <dir> | --url <tarball>)\n    \
          helix sync               resolve dependencies and write helix.lock\n    \
          helix verify             check the project matches helix.lock (no build)\n    \
+         helix test [path]        run *_test.helix files and report pass/fail\n    \
          helix version            show the version\n    \
          helix help               show this help\n\n\
          The default `helix` is a self-contained binary. A build with the `python`\n\
@@ -255,30 +258,106 @@ fn print_help() {
 fn run_file(path: &str) -> ExitCode {
     // The whole pipeline runs on the big stack (see `run_on_big_stack`) so the
     // front-end's AST recursion can't overflow before the depth guard fires.
-    run_on_big_stack(|| {
-        // The module loader reads, lexes, parses, and namespaces the entry file plus
-        // everything it imports into one statement list. (A single file passes through
-        // unchanged.) Lex/parse/resolve errors come back already rendered.
-        let mut loaded = match module::load(std::path::Path::new(path)) {
-            Ok(l) => l,
-            Err(rendered) => {
-                eprint!("{}", rendered);
-                return ExitCode::FAILURE;
-            }
-        };
-        // Resolve `bio.read_vcf(...)`-style namespaced calls into direct builtin calls
-        // before type-checking and execution.
-        namespace::resolve(&mut loaded.stmts);
-        // Errors render against the spans the loader produced, so a cross-module error
-        // points at the dependency's own source and line (not the entry file).
-        match run_program(&loaded.stmts, &loaded.spans, loaded.multi_module) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(rendered) => {
-                eprint!("{}", rendered);
-                ExitCode::FAILURE
-            }
+    run_on_big_stack(|| match run_file_capture(std::path::Path::new(path)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(rendered) => {
+            eprint!("{}", rendered);
+            ExitCode::FAILURE
         }
     })
+}
+
+/// Load, namespace-resolve, type-check and run a file, returning the rendered (already
+/// caret-annotated) error instead of printing it. Must be called on the big stack. The
+/// shared core of `helix run` and `helix test`.
+fn run_file_capture(path: &std::path::Path) -> Result<(), String> {
+    // The module loader reads, lexes, parses, and namespaces the entry file plus
+    // everything it imports into one statement list. (A single file passes through
+    // unchanged.) Lex/parse/resolve errors come back already rendered.
+    let mut loaded = module::load(path)?;
+    // Resolve `bio.read_vcf(...)`-style namespaced calls into direct builtin calls
+    // before type-checking and execution.
+    namespace::resolve(&mut loaded.stmts);
+    // Errors render against the spans the loader produced, so a cross-module error
+    // points at the dependency's own source and line (not the entry file).
+    run_program(&loaded.stmts, &loaded.spans, loaded.multi_module)
+}
+
+/// `helix test [path]` — discover and run test files (any file named `*_test.helix`
+/// under `path`, default the current directory), each in isolation through the normal
+/// pipeline. A file passes if it runs to completion without raising — `assert`,
+/// `assert_eq`, and `assert_close` raise on failure. Reports per-file results and a
+/// summary, exiting non-zero if any file failed. The built-in test runner: no framework
+/// to install, no config — name a file `*_test.helix` and it runs.
+fn cli_test(args: &[String]) -> ExitCode {
+    use std::path::PathBuf;
+    let root = args
+        .get(2)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    run_on_big_stack(move || {
+        let mut files = Vec::new();
+        if root.is_file() {
+            files.push(root.clone());
+        } else {
+            collect_test_files(&root, &mut files);
+        }
+        files.sort();
+        if files.is_empty() {
+            println!("no tests found (looked for `*_test.helix` under {})", root.display());
+            return ExitCode::SUCCESS;
+        }
+        println!("running {} test file{}", files.len(), if files.len() == 1 { "" } else { "s" });
+        // Display paths relative to the search root (its parent when the root is a single
+        // file, so the file's own name still shows).
+        let base = if root.is_file() { root.parent().unwrap_or(&root) } else { root.as_path() };
+        let mut failed = 0usize;
+        for f in &files {
+            let shown = f.strip_prefix(base).unwrap_or(f).display();
+            match run_file_capture(f) {
+                Ok(()) => println!("  ok    {shown}"),
+                Err(rendered) => {
+                    failed += 1;
+                    println!("  FAIL  {shown}");
+                    // Indent the rendered error so it reads as detail under the failure.
+                    for line in rendered.lines() {
+                        println!("        {line}");
+                    }
+                }
+            }
+        }
+        let passed = files.len() - failed;
+        println!();
+        if failed == 0 {
+            println!("{passed} passed");
+            ExitCode::SUCCESS
+        } else {
+            println!("{passed} passed, {failed} failed");
+            ExitCode::FAILURE
+        }
+    })
+}
+
+/// Recursively collect `*_test.helix` files under `dir`, skipping hidden directories
+/// (`.git`, etc.). Unreadable directories are silently skipped.
+fn collect_test_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue; // hidden files/dirs (.git, .helix caches, …)
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_test_files(&path, out);
+        } else if name.ends_with("_test.helix") {
+            out.push(path);
+        }
+    }
 }
 
 /// Strip internal module prefixes (`m<N>$`) from a rendered error so users never

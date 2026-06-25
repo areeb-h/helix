@@ -60,6 +60,47 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
     }
     match name {
         "print" => Ok(Type::Unit),
+        "assert" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(HelixError::new(
+                    format!("`assert` takes a condition and an optional message, got {} arguments", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            if !compatible(&args[0], &Type::Bool) {
+                return Err(type_err("assert", "a boolean condition", &args[0], line, col));
+            }
+            if let Some(msg) = args.get(1)
+                && !compatible(msg, &Type::String)
+            {
+                return Err(type_err("assert", "a string message", msg, line, col));
+            }
+            Ok(Type::Unit)
+        }
+        // `assert_eq` accepts any two comparable values; `assert_close` needs numbers
+        // (plus an optional tolerance). Equality/closeness is checked at runtime.
+        "assert_eq" => {
+            if args.len() != 2 {
+                return Err(arity_err(name, 2, args.len(), line, col));
+            }
+            Ok(Type::Unit)
+        }
+        "assert_close" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(HelixError::new(
+                    format!("`assert_close` takes two numbers and an optional tolerance, got {} arguments", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            for a in args {
+                if !is_numeric(a) && !matches!(a, Type::Unknown) {
+                    return Err(type_err("assert_close", "a number", a, line, col));
+                }
+            }
+            Ok(Type::Unit)
+        }
         "dna" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));

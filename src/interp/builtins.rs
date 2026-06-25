@@ -26,6 +26,72 @@ impl super::Interp {
                 println!("{}", parts.join(" "));
                 Ok(Value::Unit)
             }
+            "assert" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(HelixError::new(
+                        format!("`assert` takes 1 or 2 arguments, got {}", args.len()),
+                        line,
+                        col,
+                    ));
+                }
+                match &args[0] {
+                    Value::Bool(true) => Ok(Value::Unit),
+                    Value::Bool(false) | Value::Missing => {
+                        // A `missing` condition is not provably true → a failed assertion.
+                        let msg = match args.get(1) {
+                            Some(Value::Str(s)) => format!("assertion failed: {s}"),
+                            Some(other) => format!(
+                                "assertion failed: {}",
+                                crate::value::display_value(other, line, col)?
+                            ),
+                            None => "assertion failed".to_string(),
+                        };
+                        Err(HelixError::new(msg, line, col))
+                    }
+                    other => Err(type_err("assert", "a boolean condition", other, line, col)),
+                }
+            }
+            "assert_eq" => {
+                arity(name, &args, 2, line, col)?;
+                if values_equal(&args[0], &args[1]) {
+                    Ok(Value::Unit)
+                } else {
+                    let a = crate::value::display_value(&args[0], line, col)?;
+                    let b = crate::value::display_value(&args[1], line, col)?;
+                    Err(HelixError::new(format!("assertion failed: {a} != {b}"), line, col))
+                }
+            }
+            "assert_close" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(HelixError::new(
+                        format!("`assert_close` takes 2 or 3 arguments, got {}", args.len()),
+                        line,
+                        col,
+                    ));
+                }
+                let num = |v: &Value| -> Result<f64, HelixError> {
+                    match v {
+                        Value::Int(i) => Ok(*i as f64),
+                        Value::Float(f) => Ok(*f),
+                        other => Err(type_err("assert_close", "a number", other, line, col)),
+                    }
+                };
+                let (a, b) = (num(&args[0])?, num(&args[1])?);
+                // Default tolerance suits the f64 round-off of typical scientific compute.
+                let tol = match args.get(2) {
+                    Some(v) => num(v)?,
+                    None => 1e-9,
+                };
+                if (a - b).abs() <= tol {
+                    Ok(Value::Unit)
+                } else {
+                    Err(HelixError::new(
+                        format!("assertion failed: {a} is not within {tol} of {b}"),
+                        line,
+                        col,
+                    ))
+                }
+            }
             "dna" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
