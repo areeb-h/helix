@@ -159,6 +159,27 @@
     }
 
     #[test]
+    fn string_and_join_methods() {
+        assert!(matches!(last(r#""a,b,c".split(",").count()"#).unwrap(), Value::Int(3)));
+        assert!(matches!(last(r#""  hi  ".trim()"#).unwrap(), Value::Str(s) if s.as_str() == "hi"));
+        assert!(
+            matches!(last(r#""a-b-c".replace("-", "_")"#).unwrap(), Value::Str(s) if s.as_str() == "a_b_c")
+        );
+        assert!(matches!(last(r#""hello".contains("ell")"#).unwrap(), Value::Bool(true)));
+        assert!(matches!(last(r#""hello".starts_with("he")"#).unwrap(), Value::Bool(true)));
+        assert!(matches!(last(r#""hello".ends_with("xo")"#).unwrap(), Value::Bool(false)));
+        assert!(
+            matches!(last(r#"["a","b","c"].join("-")"#).unwrap(), Value::Str(s) if s.as_str() == "a-b-c")
+        );
+        // `join` renders non-string elements too.
+        assert!(matches!(last(r#"[1,2,3].join(",")"#).unwrap(), Value::Str(s) if s.as_str() == "1,2,3"));
+        // Round-trips: split then join.
+        assert!(
+            matches!(last(r#""x|y|z".split("|").join(",")"#).unwrap(), Value::Str(s) if s.as_str() == "x,y,z")
+        );
+    }
+
+    #[test]
     fn normalize_is_zero_mean() {
         let mean = float("[1, 2, 3, 4].normalize().mean()");
         assert!(mean.abs() < 1e-12);

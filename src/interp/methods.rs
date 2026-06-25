@@ -416,6 +416,14 @@ fn array_method(
             }
             Ok(Value::array(sorted))
         }
+        "join" => {
+            arity("join", args, 1, line, col)?;
+            let sep = str_arg(args, 0, "join", line, col)?;
+            // Each element is rendered with its normal display (a string element is
+            // its raw text, not a quoted form), then joined: `[1,2,3].join("-")`.
+            let joined = items.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(sep);
+            Ok(Value::Str(Rc::new(joined)))
+        }
         "reverse" => {
             no_args(name)?;
             let mut v: Vec<Value> = items.to_vec();
@@ -550,18 +558,73 @@ fn string_method(
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
-    if !args.is_empty() {
-        return Err(HelixError::new(
-            format!("`{}` takes no arguments, got {}", name, args.len()),
-            line,
-            col,
-        ));
-    }
+    // Arity check; methods that take arguments call it with their own count.
+    let arity = |n: usize| -> Result<(), HelixError> {
+        if args.len() != n {
+            return Err(HelixError::new(
+                format!(
+                    "`{}` expects {} argument{}, got {}",
+                    name,
+                    n,
+                    if n == 1 { "" } else { "s" },
+                    args.len()
+                ),
+                line,
+                col,
+            ));
+        }
+        Ok(())
+    };
     match name {
-        "upper" => Ok(Value::Str(Rc::new(s.to_uppercase()))),
-        "lower" => Ok(Value::Str(Rc::new(s.to_lowercase()))),
-        "count" => Ok(Value::Int(s.chars().count() as i64)),
-        "reverse" => Ok(Value::Str(Rc::new(s.chars().rev().collect()))),
+        "upper" => {
+            arity(0)?;
+            Ok(Value::Str(Rc::new(s.to_uppercase())))
+        }
+        "lower" => {
+            arity(0)?;
+            Ok(Value::Str(Rc::new(s.to_lowercase())))
+        }
+        "count" => {
+            arity(0)?;
+            Ok(Value::Int(s.chars().count() as i64))
+        }
+        "reverse" => {
+            arity(0)?;
+            Ok(Value::Str(Rc::new(s.chars().rev().collect())))
+        }
+        "trim" => {
+            arity(0)?;
+            Ok(Value::Str(Rc::new(s.trim().to_string())))
+        }
+        "split" => {
+            arity(1)?;
+            let sep = str_arg(args, 0, name, line, col)?;
+            if sep.is_empty() {
+                return Err(HelixError::new("`split` separator cannot be empty", line, col)
+                    .hint("split on a non-empty string, e.g. `s.split(\",\")`."));
+            }
+            let parts: Vec<Value> =
+                s.split(sep).map(|p| Value::Str(Rc::new(p.to_string()))).collect();
+            Ok(Value::array(parts))
+        }
+        "replace" => {
+            arity(2)?;
+            let from = str_arg(args, 0, name, line, col)?;
+            let to = str_arg(args, 1, name, line, col)?;
+            Ok(Value::Str(Rc::new(s.replace(from, to))))
+        }
+        "contains" => {
+            arity(1)?;
+            Ok(Value::Bool(s.contains(str_arg(args, 0, name, line, col)?)))
+        }
+        "starts_with" => {
+            arity(1)?;
+            Ok(Value::Bool(s.starts_with(str_arg(args, 0, name, line, col)?)))
+        }
+        "ends_with" => {
+            arity(1)?;
+            Ok(Value::Bool(s.ends_with(str_arg(args, 0, name, line, col)?)))
+        }
         _ => Err(unknown_method(
             "String",
             name,
@@ -569,6 +632,20 @@ fn string_method(
             line,
             col,
         )),
+    }
+}
+
+/// Pull argument `i` as a `&str`, with a clean type error otherwise.
+fn str_arg<'a>(
+    args: &'a [Value],
+    i: usize,
+    who: &str,
+    line: usize,
+    col: usize,
+) -> Result<&'a str, HelixError> {
+    match &args[i] {
+        Value::Str(a) => Ok(a.as_str()),
+        other => Err(type_err(who, "a string", other, line, col)),
     }
 }
 

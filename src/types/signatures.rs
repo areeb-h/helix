@@ -356,6 +356,7 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         "zip" => Type::Array(Box::new(Type::Tuple(vec![el.clone(), Type::Unknown]))),
         // `(value, count)` tuples for the n most frequent elements.
         "top" => Type::Array(Box::new(Type::Tuple(vec![el.clone(), Type::Int]))),
+        "join" => Type::String,
         _ => {
             return Err(unknown_method(
                 "Array",
@@ -370,8 +371,10 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
 
 pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "upper" | "lower" | "reverse" => Type::String,
+        "upper" | "lower" | "reverse" | "trim" | "replace" => Type::String,
         "count" => Type::Int,
+        "split" => Type::Array(Box::new(Type::String)),
+        "contains" | "starts_with" | "ends_with" => Type::Bool,
         _ => {
             return Err(unknown_method(
                 "String",

@@ -105,11 +105,14 @@ pub static UNIVERSAL_METHODS: &[&str] = &["is_missing"];
 pub static ARRAY_METHODS: &[&str] = &[
     "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count",
     "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
-    "all", "take", "drop", "zip", "enumerate", "top", "drop_missing",
+    "all", "take", "drop", "zip", "enumerate", "top", "drop_missing", "join",
 ];
 
 /// String methods.
-pub static STRING_METHODS: &[&str] = &["upper", "lower", "count", "reverse"];
+pub static STRING_METHODS: &[&str] = &[
+    "upper", "lower", "count", "reverse", "trim", "split", "replace", "contains", "starts_with",
+    "ends_with",
+];
 
 /// DNA-sequence methods.
 pub static DNA_METHODS: &[&str] =
