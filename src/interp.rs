@@ -543,24 +543,28 @@ impl Interp {
             Expr::Match { scrutinee, arms, line, col } => {
                 let v = self.eval(scrutinee)?;
                 for (pat, body) in arms {
-                    match pattern_match(pat, &v) {
-                        Some(Some((name, val))) => {
-                            // A binding pattern: install it (save/restore), eval body.
-                            let prev =
-                                self.env.insert(name.clone(), Binding { value: val, mutable: false });
-                            let result = self.eval(body);
+                    if let Some(binds) = pattern_match(pat, &v) {
+                        // Install every binding (save/restore), evaluate the arm body.
+                        let mut saved: Vec<(String, Option<Binding>)> =
+                            Vec::with_capacity(binds.len());
+                        for (name, val) in binds {
+                            let prev = self
+                                .env
+                                .insert(name.clone(), Binding { value: val, mutable: false });
+                            saved.push((name, prev));
+                        }
+                        let result = self.eval(body);
+                        for (name, prev) in saved.into_iter().rev() {
                             match prev {
                                 Some(b) => {
-                                    self.env.insert(name.clone(), b);
+                                    self.env.insert(name, b);
                                 }
                                 None => {
                                     self.env.remove(&name);
                                 }
                             }
-                            return result;
                         }
-                        Some(None) => return self.eval(body), // wildcard/literal: no binding
-                        None => {}
+                        return result;
                     }
                 }
                 Err(HelixError::new("no `match` arm matched the value", *line, *col)
@@ -784,22 +788,67 @@ fn comp_arity(name: &str, example: &str, line: usize, col: usize) -> HelixError 
     .hint(format!("e.g. `xs.{}{}`.", name, example))
 }
 
-/// Test a `match` pattern against a value. `None` means no match; `Some(None)`
-/// matches with no binding (a literal or `_`); `Some(Some((name, val)))` matches and
-/// binds `name` to `val` (a binding pattern). Shared by the tree-walker AND the VM
-/// (whose `MatchTest` op calls this), so the two engines match identically.
-pub(crate) fn pattern_match(pat: &crate::ast::Pattern, v: &Value) -> Option<Option<(String, Value)>> {
+/// Match `pat` against `v`. `None` means no match; `Some(binds)` means it matched,
+/// binding the listed names (left-to-right; empty for a pure literal or `_`).
+/// Recursive for tuple/record patterns. Shared by the tree-walker AND the VM (whose
+/// `MatchArm` op calls this), so the two engines match identically.
+pub(crate) fn pattern_match(pat: &crate::ast::Pattern, v: &Value) -> Option<Vec<(String, Value)>> {
     use crate::ast::Pattern;
-    let lit = |matched: bool| if matched { Some(None) } else { None };
+    let lit = |matched: bool| if matched { Some(Vec::new()) } else { None };
     match pat {
-        Pattern::Wildcard => Some(None),
-        Pattern::Bind(name) => Some(Some((name.clone(), v.clone()))),
+        Pattern::Wildcard => Some(Vec::new()),
+        Pattern::Bind(name) => Some(vec![(name.clone(), v.clone())]),
         Pattern::Int(i) => lit(matches!(v, Value::Int(x) if x == i)),
         Pattern::Float(f) => lit(matches!(v, Value::Float(x) if x == f)),
         Pattern::Str(s) => lit(matches!(v, Value::Str(x) if x.as_str() == s.as_str())),
         Pattern::Bool(b) => lit(matches!(v, Value::Bool(x) if x == b)),
         Pattern::Missing => lit(matches!(v, Value::Missing)),
+        Pattern::Tuple(pats) => {
+            let items = match v {
+                Value::Tuple(items) => items,
+                _ => return None,
+            };
+            if items.len() != pats.len() {
+                return None;
+            }
+            let mut binds = Vec::new();
+            for (p, item) in pats.iter().zip(items.iter()) {
+                binds.extend(pattern_match(p, item)?);
+            }
+            Some(binds)
+        }
+        Pattern::Record(fields) => {
+            let rec = match v {
+                Value::Record(rec) => rec,
+                _ => return None,
+            };
+            let mut binds = Vec::new();
+            for (key, subpat) in fields {
+                // Only the listed fields are required (a partial match).
+                let fv = rec.iter().find(|(k, _)| k.as_str() == key.as_str()).map(|(_, val)| val)?;
+                binds.extend(pattern_match(subpat, fv)?);
+            }
+            Some(binds)
+        }
     }
+}
+
+/// The names a pattern binds, left-to-right — the static counterpart of the values
+/// `pattern_match` returns (same order). Used by the compiler (to declare an arm's
+/// locals) and by the free-variable and module-rewrite passes.
+pub(crate) fn pattern_binding_names(pat: &crate::ast::Pattern) -> Vec<String> {
+    use crate::ast::Pattern;
+    fn go(pat: &Pattern, out: &mut Vec<String>) {
+        match pat {
+            Pattern::Bind(name) => out.push(name.clone()),
+            Pattern::Tuple(pats) => pats.iter().for_each(|p| go(p, out)),
+            Pattern::Record(fields) => fields.iter().for_each(|(_, p)| go(p, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    go(pat, &mut out);
+    out
 }
 
 /// The interned field names of a `try` result record (`ok`/`value`/`error`),

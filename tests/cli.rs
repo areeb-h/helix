@@ -455,6 +455,25 @@ fn match_works_on_both_engines() {
 }
 
 #[test]
+fn match_nested_patterns_on_both_engines() {
+    // Tuple + record patterns (with a partial match), and the killer case:
+    // destructuring a `try` result. Identical on both engines.
+    let src = concat!(
+        "print(match (1, 2) { (a, b) => a + b })\n",
+        "print(match {a: 1, b: 2} { {b: x} => x, _ => 0 })\n",
+        "fn unwrap(r) = match r { {ok: true, value: v} => v, _ => -1 }\n",
+        "print(unwrap(try (20 / 4)))\n",
+        "print(unwrap(try (1 / 0)))\n",
+    );
+    let (vm, e1, c1) = run_source(src, &[], "matchn_vm");
+    assert_eq!(c1, Some(0), "stderr:\n{e1}");
+    assert_eq!(vm.trim(), "3\n2\n5.0\n-1"); // tuple sum; record field; try ok; try err
+    let (tw, _, c2) = run_source(src, &[("HELIX_NOVM", "1")], "matchn_tw");
+    assert_eq!(c2, Some(0));
+    assert_eq!(vm, tw, "VM and tree-walker disagree on nested patterns");
+}
+
+#[test]
 fn with_derives_columns_from_expressions() {
     // `df.with({name: expr, ...})` adds columns computed over existing ones. The
     // value expressions reference bare column names, like the other column verbs.

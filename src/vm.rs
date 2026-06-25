@@ -267,11 +267,19 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.push(binary(o, v, cv, line, col)?);
             }
             Op::Jump(t) => frames[fi].ip = *t as usize,
-            Op::MatchTest(pat) => {
-                // Reuse the tree-walker's matcher so the engines agree exactly; a
-                // clean `Bool` (no 3-valued `missing`) for the following `JumpIfFalse`.
+            Op::MatchArm(pat) => {
+                // Reuse the tree-walker's matcher so the engines agree exactly. On a
+                // match, push the bound values then `true`; else push `false`.
                 let v = stack.pop().unwrap();
-                stack.push(Value::Bool(crate::interp::pattern_match(pat, &v).is_some()));
+                match crate::interp::pattern_match(pat, &v) {
+                    Some(binds) => {
+                        for (_, val) in binds {
+                            stack.push(val);
+                        }
+                        stack.push(Value::Bool(true));
+                    }
+                    None => stack.push(Value::Bool(false)),
+                }
             }
             Op::JumpIfFalse(t) => {
                 let c = stack.pop().unwrap();

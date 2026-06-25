@@ -35,10 +35,12 @@ pub enum Op {
     ConstBinary(u32, BinOp),
     /// Unconditional jump to an instruction index.
     Jump(u32),
-    /// `match` arm test: pop the scrutinee value, push `Bool` of whether it matches
-    /// this **literal** pattern (`Bind`/`Wildcard` arms are compiled directly, never
-    /// via this op). Holds the pattern so the VM reuses the tree-walker's matcher.
-    MatchTest(std::rc::Rc<crate::ast::Pattern>),
+    /// `match` arm: pop the scrutinee and run this pattern. On a match, push the bound
+    /// values (left-to-right) then `Bool(true)`; on no match, push `Bool(false)`. The
+    /// compiler declares one local per bound name and stores them after a match.
+    /// Reuses the tree-walker's `pattern_match`, so the engines agree exactly (and the
+    /// `missing`/literal test is a clean `Bool`, not `==`'s 3-valued `missing`).
+    MatchArm(std::rc::Rc<crate::ast::Pattern>),
     /// Pop a boolean condition; jump if it is `false`. Used only for `if`, so it
     /// owns the "`if` condition is `missing`" / non-boolean error wording.
     JumpIfFalse(u32),

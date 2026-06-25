@@ -338,13 +338,24 @@ fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String
             collect_free(scrutinee, bound, free);
             for (pat, body) in arms {
                 let n = bound.len();
-                // A binding pattern introduces a local for the arm body.
-                if let crate::ast::Pattern::Bind(name) = pat {
-                    bound.push(name.as_str());
-                }
+                // A pattern's bindings (possibly several, for tuple/record patterns)
+                // are locals of the arm body.
+                push_pattern_binds(pat, bound);
                 collect_free(body, bound, free);
                 bound.truncate(n);
             }
         }
+    }
+}
+
+/// Push a pattern's bound names (`&str`, borrowing the AST) — recursive for
+/// tuple/record patterns.
+fn push_pattern_binds<'a>(pat: &'a crate::ast::Pattern, out: &mut Vec<&'a str>) {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Bind(name) => out.push(name.as_str()),
+        Pattern::Tuple(pats) => pats.iter().for_each(|p| push_pattern_binds(p, out)),
+        Pattern::Record(fields) => fields.iter().for_each(|(_, p)| push_pattern_binds(p, out)),
+        _ => {}
     }
 }

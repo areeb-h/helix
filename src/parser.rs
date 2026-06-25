@@ -903,12 +903,56 @@ impl Parser {
                     )),
                 }
             }
+            Tok::LParen => {
+                self.advance();
+                if matches!(self.peek(), Tok::RParen) {
+                    self.advance();
+                    return Ok(Pattern::Tuple(Vec::new()));
+                }
+                let first = self.parse_pattern()?;
+                if matches!(self.peek(), Tok::Comma) {
+                    let mut pats = vec![first];
+                    while matches!(self.peek(), Tok::Comma) {
+                        self.advance();
+                        if matches!(self.peek(), Tok::RParen) {
+                            break; // trailing comma / `(p,)`
+                        }
+                        pats.push(self.parse_pattern()?);
+                    }
+                    self.eat(&Tok::RParen, "to close a tuple pattern")?;
+                    Ok(Pattern::Tuple(pats))
+                } else {
+                    self.eat(&Tok::RParen, "to close a grouped pattern")?;
+                    Ok(first) // `(p)` just groups
+                }
+            }
+            Tok::LBrace => {
+                self.advance();
+                let mut fields = Vec::new();
+                while !matches!(self.peek(), Tok::RBrace) {
+                    let key = self.ident_name("as a record-pattern field")?;
+                    let subpat = if matches!(self.peek(), Tok::Colon) {
+                        self.advance();
+                        self.parse_pattern()?
+                    } else {
+                        Pattern::Bind(key.clone()) // `{field}` shorthand binds the field
+                    };
+                    fields.push((key, subpat));
+                    if matches!(self.peek(), Tok::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.eat(&Tok::RBrace, "to close a record pattern")?;
+                Ok(Pattern::Record(fields))
+            }
             other => Err(HelixError::new(
                 format!("expected a pattern, found {}", other.describe()),
                 l,
                 c,
             )
-            .hint("a pattern is a literal (`0`, `\"x\"`, `true`, `missing`), a name to bind, or `_`.")),
+            .hint("a pattern is a literal, `_`, a name, a tuple `(a, b)`, or a record `{ok: true, value: v}`.")),
         }
     }
 

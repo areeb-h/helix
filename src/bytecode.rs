@@ -678,9 +678,10 @@ impl Compiler {
                 b.code[jok] = Op::TryOk(end_ip);
             }
             Expr::Match { scrutinee, arms, line, col } => {
-                use crate::ast::Pattern;
                 // Evaluate the scrutinee once into a temp local, then test each arm in
-                // order. Each arm jumps to the end after producing its result.
+                // order: `LoadLocal + MatchArm` leaves the bound values (if any) and a
+                // bool; `JumpIfFalse` skips to the next arm on a miss, else the values
+                // are stored into the arm's locals and the body runs.
                 b.scopes.push(Vec::new());
                 let saved_next = b.next_slot;
                 self.compile_expr(b, scrutinee)?;
@@ -689,35 +690,24 @@ impl Compiler {
 
                 let mut end_jumps: Vec<usize> = Vec::new();
                 for (pat, body) in arms {
-                    match pat {
-                        // `_` — always matches, binds nothing.
-                        Pattern::Wildcard => {
-                            self.compile_expr(b, body)?;
-                            end_jumps.push(b.emit(Op::Jump(0), *line, *col));
-                        }
-                        // `name` — always matches, binds the scrutinee in the arm.
-                        Pattern::Bind(name) => {
-                            b.scopes.push(Vec::new());
-                            let saved2 = b.next_slot;
-                            let bslot = b.declare_local(name);
-                            b.emit(Op::LoadLocal(m_slot), *line, *col);
-                            b.emit(Op::StoreLocal(bslot), *line, *col);
-                            self.compile_expr(b, body)?;
-                            b.scopes.pop();
-                            b.next_slot = saved2;
-                            end_jumps.push(b.emit(Op::Jump(0), *line, *col));
-                        }
-                        // A literal pattern: test the scrutinee; skip the arm on a miss.
-                        _ => {
-                            b.emit(Op::LoadLocal(m_slot), *line, *col);
-                            b.emit(Op::MatchTest(std::rc::Rc::new(pat.clone())), *line, *col);
-                            let jnext = b.emit(Op::JumpIfFalse(0), *line, *col);
-                            self.compile_expr(b, body)?;
-                            end_jumps.push(b.emit(Op::Jump(0), *line, *col));
-                            let next_at = b.code.len() as u32;
-                            b.code[jnext] = Op::JumpIfFalse(next_at);
-                        }
+                    let names = crate::interp::pattern_binding_names(pat);
+                    b.scopes.push(Vec::new());
+                    let saved2 = b.next_slot;
+                    let slots: Vec<u32> = names.iter().map(|n| b.declare_local(n)).collect();
+                    b.emit(Op::LoadLocal(m_slot), *line, *col);
+                    b.emit(Op::MatchArm(std::rc::Rc::new(pat.clone())), *line, *col);
+                    let jnext = b.emit(Op::JumpIfFalse(0), *line, *col);
+                    // Matched: the bound values are on the stack in order; store them
+                    // into the arm's locals (top is the last, so store in reverse).
+                    for slot in slots.iter().rev() {
+                        b.emit(Op::StoreLocal(*slot), *line, *col);
                     }
+                    self.compile_expr(b, body)?;
+                    end_jumps.push(b.emit(Op::Jump(0), *line, *col));
+                    b.scopes.pop();
+                    b.next_slot = saved2;
+                    let next_at = b.code.len() as u32;
+                    b.code[jnext] = Op::JumpIfFalse(next_at);
                 }
                 // Fell through every arm: no match (the tree-walker's error).
                 b.emit(

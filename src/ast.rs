@@ -89,6 +89,12 @@ pub enum Pattern {
     Bool(bool),
     /// `missing` — matches only an absent value.
     Missing,
+    /// `(p, q)` — matches a tuple of the same arity, element-wise.
+    Tuple(Vec<Pattern>),
+    /// `{key: p, ...}` — matches a record that has each listed field, with each
+    /// field's sub-pattern matching. Only the listed fields are checked (a partial
+    /// match); the killer case is destructuring a `try` result: `{ok: true, value: v}`.
+    Record(Vec<(String, Pattern)>),
 }
 
 #[derive(Debug, Clone)]

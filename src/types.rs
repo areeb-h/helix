@@ -716,23 +716,25 @@ impl Checker {
                 ]))
             }
             Expr::Match { scrutinee, arms, .. } => {
-                let st = self.synth(scrutinee)?;
+                let _ = self.synth(scrutinee)?;
                 let mut result: Option<Type> = None;
                 for (pat, body) in arms {
-                    // A binding pattern gives the name the scrutinee's type in the arm.
-                    let saved = if let crate::ast::Pattern::Bind(name) = pat {
-                        Some((name.clone(), self.env.insert(name.clone(), st.clone())))
-                    } else {
-                        None
-                    };
+                    // A pattern's bound names are in scope for the arm body. Their
+                    // precise types depend on the (possibly nested) pattern position,
+                    // so the permissive checker gives each `Unknown`.
+                    let names = crate::interp::pattern_binding_names(pat);
+                    let saved: Vec<(String, Option<Type>)> = names
+                        .iter()
+                        .map(|n| (n.clone(), self.env.insert(n.clone(), Type::Unknown)))
+                        .collect();
                     let bt = self.synth(body)?;
-                    if let Some((name, prev)) = saved {
+                    for (n, prev) in saved.into_iter().rev() {
                         match prev {
                             Some(t) => {
-                                self.env.insert(name, t);
+                                self.env.insert(n, t);
                             }
                             None => {
-                                self.env.remove(&name);
+                                self.env.remove(&n);
                             }
                         }
                     }

@@ -476,8 +476,8 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
             rw(scrutinee, ctx, bound);
             for (pat, body) in arms.iter_mut() {
                 let mut b = bound.clone();
-                if let crate::ast::Pattern::Bind(name) = pat {
-                    b.insert(name.clone());
+                for name in crate::interp::pattern_binding_names(pat) {
+                    b.insert(name);
                 }
                 rw(body, ctx, &b);
             }
