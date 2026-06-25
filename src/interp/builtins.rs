@@ -409,7 +409,7 @@ impl super::Interp {
                     _ => return Ok(Value::Missing),
                 };
                 let floats = |xs: Vec<f64>| {
-                    Value::Array(Rc::new(xs.into_iter().map(Value::Float).collect()))
+                    Value::array(xs.into_iter().map(Value::Float).collect())
                 };
                 match crate::stats::multiple_regression(&preds, &y) {
                     Some(f) => {
@@ -490,7 +490,7 @@ impl super::Interp {
                         }
                         let out: Vec<Value> =
                             xs.iter().map(|x| Value::Float((x - m) / sd)).collect();
-                        Ok(Value::Array(Rc::new(out)))
+                        Ok(Value::array(out))
                     }
                 }
             }
@@ -510,10 +510,11 @@ impl super::Interp {
                     Value::Missing => return Ok(Value::Missing),
                     other => return Err(type_err(name, "an array of DNA sequences", other, line, col)),
                 };
-                if items.iter().any(|v| matches!(v, Value::Missing)) {
+                let vals = items.to_values();
+                if vals.iter().any(|v| matches!(v, Value::Missing)) {
                     return Ok(Value::Missing);
                 }
-                let seqs: Vec<&Rc<String>> = items
+                let seqs: Vec<&Rc<String>> = vals
                     .iter()
                     .map(|v| match v {
                         Value::Dna(s) => Ok(s),
@@ -579,7 +580,7 @@ fn num_arrays(
         other => return Err(type_err(who, "an array of predictor arrays", other, line, col)),
     };
     let mut cols = Vec::with_capacity(outer.len());
-    for el in outer.iter() {
+    for el in outer.to_values().iter() {
         match num_array(who, el, line, col)? {
             Some(c) => cols.push(c),
             None => return Ok(None),
@@ -598,7 +599,7 @@ fn num_array(who: &str, v: &Value, line: usize, col: usize) -> Result<Option<Vec
         other => return Err(type_err(who, "an array of numbers", other, line, col)),
     };
     let mut out = Vec::with_capacity(items.len());
-    for el in items.iter() {
+    for el in items.to_values().iter() {
         match el {
             Value::Missing => return Ok(None),
             Value::Float(f) if f.is_nan() => return Ok(None),

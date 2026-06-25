@@ -121,7 +121,7 @@ fn memo_arg(v: &Value) -> MemoArg {
 /// What a comprehension iterates: a materialized array, or — for a fused
 /// `range(...)` — a lazy integer counter (no array allocated at all).
 enum CompSource {
-    Array { arr: std::rc::Rc<Vec<Value>>, idx: usize },
+    Array { arr: std::rc::Rc<crate::value::ArrayData>, idx: usize },
     Range { cur: i64, end: i64 },
 }
 
@@ -494,7 +494,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::MakeArray(n) => {
                 let start = stack.len() - *n as usize;
                 let items: Vec<Value> = stack.split_off(start);
-                stack.push(Value::Array(std::rc::Rc::new(items)));
+                stack.push(Value::array_sniff(items));
             }
             Op::Index => {
                 let idx = stack.pop().unwrap();
@@ -772,7 +772,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     match &mut it.source {
                         CompSource::Array { arr, idx } => {
                             if *idx < arr.len() {
-                                let el = arr[*idx].clone();
+                                let el = arr.get(*idx);
                                 *idx += 1;
                                 Some(el)
                             } else {
@@ -827,7 +827,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             }
             Op::CompEnd => {
                 let it = iters.pop().unwrap();
-                stack.push(Value::Array(std::rc::Rc::new(it.builder)));
+                stack.push(Value::array_sniff(it.builder));
             }
             Op::CompEndDiscard => {
                 iters.pop();

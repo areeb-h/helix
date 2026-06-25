@@ -237,7 +237,7 @@ impl Interp {
                 for it in items {
                     vals.push(self.eval(it)?);
                 }
-                Ok(Value::Array(Rc::new(vals)))
+                Ok(Value::array_sniff(vals))
             }
             Expr::Tuple(items) => {
                 let mut vals = Vec::with_capacity(items.len());
@@ -749,9 +749,12 @@ fn broadcast_unary(
 ) -> Result<Value, HelixError> {
     match v {
         Value::Array(items) => {
-            let out: Result<Vec<Value>, HelixError> =
-                items.iter().map(|e| broadcast_unary(e, scalar)).collect();
-            Ok(Value::Array(Rc::new(out?)))
+            let out: Result<Vec<Value>, HelixError> = items
+                .to_values()
+                .iter()
+                .map(|e| broadcast_unary(e, scalar))
+                .collect();
+            Ok(Value::array(out?))
         }
         // Apply the scalar op to every tensor element (math fns yield Float).
         Value::Tensor(t) => {
@@ -831,6 +834,7 @@ fn two_nums(
 fn tensor_shape_arg(v: &Value, line: usize, col: usize) -> Result<Vec<usize>, HelixError> {
     match v {
         Value::Array(items) => items
+            .to_values()
             .iter()
             .map(|x| match x {
                 Value::Int(i) if *i >= 0 => Ok(*i as usize),
@@ -858,13 +862,15 @@ fn int_range(a: i64, b: i64, line: usize, col: usize) -> Result<Value, HelixErro
         )
         .hint("ranges are materialized eagerly — keep them under 100 million elements."));
     }
-    let mut v = Vec::with_capacity(len.max(0) as usize);
+    // A packed `Int` column — half the memory of boxed `Value`s, and the typed
+    // fast paths below reduce/index it without ever materializing `Value`s.
+    let mut v: Vec<i64> = Vec::with_capacity(len.max(0) as usize);
     let mut x = a;
     while x < b {
-        v.push(Value::Int(x));
+        v.push(x);
         x += 1;
     }
-    Ok(Value::Array(Rc::new(v)))
+    Ok(Value::int_array(v))
 }
 
 fn make_dna(s: &str, line: usize, col: usize) -> Result<Value, HelixError> {

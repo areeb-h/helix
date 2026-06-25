@@ -22,8 +22,8 @@ fn shape_of(v: &Value, line: usize, col: usize) -> Result<Vec<usize>, HelixError
             if items.is_empty() {
                 return Ok(vec![0]);
             }
-            let sub = shape_of(&items[0], line, col)?;
-            for it in items.iter() {
+            let sub = shape_of(&items.get(0), line, col)?;
+            for it in items.to_values().iter() {
                 if shape_of(it, line, col)? != sub {
                     return Err(HelixError::new(
                         "tensor rows must all have the same shape (ragged array)",
@@ -51,7 +51,7 @@ fn flatten_into(v: &Value, out: &mut Vec<f64>, line: usize, col: usize) -> Resul
         Value::Int(i) => out.push(*i as f64),
         Value::Float(f) => out.push(*f),
         Value::Array(items) => {
-            for it in items.iter() {
+            for it in items.to_values().iter() {
                 flatten_into(it, out, line, col)?;
             }
         }
@@ -304,6 +304,7 @@ fn as_2d_square(t: &Tensor, name: &str, line: usize, col: usize) -> Result<Array
 fn as_usize_shape(v: &Value, line: usize, col: usize) -> Result<Vec<usize>, HelixError> {
     match v {
         Value::Array(items) => items
+            .to_values()
             .iter()
             .map(|x| match x {
                 Value::Int(i) if *i >= 0 => Ok(*i as usize),
@@ -355,7 +356,7 @@ pub fn method(
         "shape" => {
             no_args(name)?;
             let dims: Vec<Value> = t.shape().iter().map(|d| Value::Int(*d as i64)).collect();
-            Ok(Value::Array(Rc::new(dims)))
+            Ok(Value::array(dims))
         }
         "ndim" => {
             no_args(name)?;

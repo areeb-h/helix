@@ -5,6 +5,7 @@
 //! this sharing is always safe — a first taste of the "zero-copy where possible"
 //! principle (Arrow-backed columns come in a later phase).
 
+use std::borrow::Cow;
 use std::fmt;
 use std::rc::Rc;
 
@@ -20,7 +21,11 @@ pub enum Value {
     Float(f64),
     Str(Rc<String>),
     Bool(bool),
-    Array(Rc<Vec<Value>>),
+    /// An immutable array. Held behind [`ArrayData`], which stores a homogeneous
+    /// numeric array as a packed `Vec<i64>`/`Vec<f64>` (half the memory of boxed
+    /// `Value`s, and cache/SIMD-friendly) and falls back to `Vec<Value>` for
+    /// heterogeneous/nested data — a scientific language's central data structure.
+    Array(Rc<ArrayData>),
     /// A fixed-size, heterogeneous tuple: `(1, "a", true)`.
     Tuple(Rc<Vec<Value>>),
     /// An ordered record with identifier keys: `{name: "Ada", age: 41}`.
@@ -77,6 +82,57 @@ pub enum Value {
     PyObject(Rc<crate::python::PyHandle>),
 }
 
+/// The backing store of a [`Value::Array`]. Homogeneous numeric arrays are kept as
+/// packed primitive `Vec`s — half the footprint of `Vec<Value>` (8 vs 16 bytes per
+/// element) and contiguous, so reductions are cache-friendly and vectorizable.
+/// Anything heterogeneous, nested, or containing `missing`/strings/bools uses
+/// `Values`. Element access materializes a scalar `Value` on demand.
+#[derive(Debug, Clone)]
+pub enum ArrayData {
+    /// General case: heterogeneous, nested, or non-numeric elements.
+    Values(Vec<Value>),
+    /// Homogeneous `Int` (e.g. `range(...)`, an all-int literal, an int column).
+    Ints(Vec<i64>),
+    /// Homogeneous `Float`.
+    Floats(Vec<f64>),
+}
+
+impl ArrayData {
+    pub fn len(&self) -> usize {
+        match self {
+            ArrayData::Values(v) => v.len(),
+            ArrayData::Ints(v) => v.len(),
+            ArrayData::Floats(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The element at `i` as a `Value` (materializes one scalar for typed arrays).
+    /// Callers index in range (bounds are checked at the language level first).
+    pub fn get(&self, i: usize) -> Value {
+        match self {
+            ArrayData::Values(v) => v[i].clone(),
+            ArrayData::Ints(v) => Value::Int(v[i]),
+            ArrayData::Floats(v) => Value::Float(v[i]),
+        }
+    }
+
+    /// View the elements as `[Value]`. **Zero-cost** for the general (`Values`)
+    /// case — a borrow — and materializes a fresh `Vec<Value>` only for a typed
+    /// array. The fallback path for any operation without a typed fast path.
+    pub fn to_values(&self) -> Cow<'_, [Value]> {
+        match self {
+            ArrayData::Values(v) => Cow::Borrowed(v),
+            ArrayData::Ints(v) => Cow::Owned(v.iter().map(|&n| Value::Int(n)).collect()),
+            ArrayData::Floats(v) => Cow::Owned(v.iter().map(|&f| Value::Float(f)).collect()),
+        }
+    }
+
+}
+
 /// The payload of a [`Value::GroupBy`] — the grouped frame plus its key columns,
 /// held behind an `Rc` so the `Value` variant is one word wide.
 pub struct GroupByData {
@@ -106,6 +162,44 @@ impl Value {
     /// here so the wrapping lives in one place.
     pub fn dataframe(df: Df) -> Value {
         Value::DataFrame(Rc::new(df))
+    }
+
+    /// A general (`Values`) array. The default array constructor — use the typed
+    /// ones below only when the elements are known-homogeneous primitives.
+    pub fn array(items: Vec<Value>) -> Value {
+        Value::Array(Rc::new(ArrayData::Values(items)))
+    }
+
+    /// A packed `Int` array (half the memory of boxed `Value`s).
+    pub fn int_array(items: Vec<i64>) -> Value {
+        Value::Array(Rc::new(ArrayData::Ints(items)))
+    }
+
+    /// A packed `Float` array.
+    pub fn float_array(items: Vec<f64>) -> Value {
+        Value::Array(Rc::new(ArrayData::Floats(items)))
+    }
+
+    /// Build an array, **packing** it into a typed `Int`/`Float` column when the
+    /// elements are homogeneous primitives (half the memory) — otherwise a general
+    /// `Values` array. One O(n) scan; use for array literals and other places that
+    /// build a `Vec<Value>` that is often homogeneous.
+    pub fn array_sniff(items: Vec<Value>) -> Value {
+        if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Int(_))) {
+            let ints = items
+                .iter()
+                .map(|v| if let Value::Int(i) = v { *i } else { 0 })
+                .collect();
+            Value::int_array(ints)
+        } else if !items.is_empty() && items.iter().all(|v| matches!(v, Value::Float(_))) {
+            let floats = items
+                .iter()
+                .map(|v| if let Value::Float(f) = v { *f } else { 0.0 })
+                .collect();
+            Value::float_array(floats)
+        } else {
+            Value::array(items)
+        }
     }
 
     pub fn type_name(&self) -> &'static str {
@@ -187,7 +281,7 @@ impl fmt::Display for Value {
             Value::PyObject(h) => write!(f, "{}", h.repr()),
             Value::Array(items) => {
                 write!(f, "[")?;
-                for (i, v) in items.iter().enumerate() {
+                for (i, v) in items.to_values().iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -246,7 +340,7 @@ pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, Helix
         }),
         Value::Array(items) => {
             let mut s = String::from("[");
-            for (i, it) in items.iter().enumerate() {
+            for (i, it) in items.to_values().iter().enumerate() {
                 if i > 0 {
                     s.push_str(", ");
                 }

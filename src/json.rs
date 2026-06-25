@@ -25,7 +25,7 @@ fn from_serde(v: serde_json::Value) -> Value {
             None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
         },
         J::String(s) => Value::Str(Rc::new(s)),
-        J::Array(xs) => Value::Array(Rc::new(xs.into_iter().map(from_serde).collect())),
+        J::Array(xs) => Value::array(xs.into_iter().map(from_serde).collect()),
         // JSON objects become records; keys are arbitrary strings (identifier keys
         // are reachable as `r.field`).
         J::Object(map) => {
@@ -50,7 +50,10 @@ fn to_serde(v: &Value) -> Result<serde_json::Value, String> {
         Value::Float(f) => serde_json::Number::from_f64(*f).map(J::Number).unwrap_or(J::Null),
         Value::Str(s) => J::String((**s).clone()),
         Value::Dna(s) => J::String((**s).clone()),
-        Value::Array(xs) | Value::Tuple(xs) => {
+        Value::Array(xs) => {
+            J::Array(xs.to_values().iter().map(to_serde).collect::<Result<_, _>>()?)
+        }
+        Value::Tuple(xs) => {
             J::Array(xs.iter().map(to_serde).collect::<Result<_, _>>()?)
         }
         Value::Record(fields) => {

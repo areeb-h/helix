@@ -135,7 +135,7 @@
     fn multiline_dot_chain() {
         let v = last("[3, 1, 2]\n    .sort()\n    .reverse()").unwrap();
         match v {
-            Value::Array(a) => {
+            Value::Array(a) => { let a = a.to_values();
                 let got: Vec<i64> = a
                     .iter()
                     .map(|x| if let Value::Int(i) = x { *i } else { -1 })
@@ -177,7 +177,7 @@
     fn array_top_frequencies() {
         // most common elements as (value, count) tuples, ties broken by value
         match last("[\"a\", \"b\", \"a\", \"c\", \"a\", \"b\"].top(2)").unwrap() {
-            Value::Array(a) => {
+            Value::Array(a) => { let a = a.to_values();
                 assert_eq!(a.len(), 2);
                 match (&a[0], &a[1]) {
                     (Value::Tuple(t0), Value::Tuple(t1)) => {
@@ -300,7 +300,7 @@
     #[test]
     fn map_doubles() {
         match last("[1, 2, 3].map(it * 2)").unwrap() {
-            Value::Array(a) => {
+            Value::Array(a) => { let a = a.to_values();
                 let got: Vec<i64> = a
                     .iter()
                     .map(|x| if let Value::Int(i) = x { *i } else { -1 })
@@ -392,7 +392,7 @@
     #[test]
     fn missing_map_propagates_elementwise() {
         match last("[1, missing, 3].map(it + 10)").unwrap() {
-            Value::Array(a) => {
+            Value::Array(a) => { let a = a.to_values();
                 assert!(matches!(a[0], Value::Int(11)));
                 assert!(matches!(a[1], Value::Missing));
                 assert!(matches!(a[2], Value::Int(13)));
@@ -405,10 +405,10 @@
     fn nested_map_with_named_binders() {
         // the readability win: name binders so nesting is unambiguous
         match last("[[1, 2], [3, 4]].map(row => row.map(v => v + 1))").unwrap() {
-            Value::Array(a) => {
+            Value::Array(a) => { let a = a.to_values();
                 assert_eq!(a.len(), 2);
                 match &a[1] {
-                    Value::Array(inner) => assert!(matches!(inner[1], Value::Int(5))),
+                    Value::Array(inner) => assert!(matches!(inner.get(1), Value::Int(5))),
                     other => panic!("expected inner array, got {:?}", other),
                 }
             }
@@ -484,7 +484,7 @@
     #[test]
     fn broadcast_propagates_missing() {
         match last("[1, missing, 3] + 10").unwrap() {
-            Value::Array(a) => {
+            Value::Array(a) => { let a = a.to_values();
                 assert!(matches!(a[0], Value::Int(11)));
                 assert!(matches!(a[1], Value::Missing));
             }
@@ -530,7 +530,7 @@
     #[test]
     fn tensor_construction_and_shape() {
         match last("tensor([[1, 2], [3, 4]]).shape()").unwrap() {
-            Value::Array(a) => {
+            Value::Array(a) => { let a = a.to_values();
                 assert!(matches!(a[0], Value::Int(2)));
                 assert!(matches!(a[1], Value::Int(2)));
             }
@@ -770,6 +770,7 @@
         let nums = |src: &str| -> Vec<i64> {
             match last(src).unwrap() {
                 Value::Array(a) => a
+                    .to_values()
                     .iter()
                     .map(|v| if let Value::Int(i) = v { *i } else { -999 })
                     .collect(),
@@ -880,7 +881,7 @@
     #[test]
     fn math_broadcasts_over_array() {
         match last("sqrt([1, 4, 9])").unwrap() {
-            Value::Array(a) => {
+            Value::Array(a) => { let a = a.to_values();
                 assert!(matches!(a[2], Value::Float(x) if (x - 3.0).abs() < 1e-9));
             }
             other => panic!("expected array, got {:?}", other),
@@ -981,7 +982,7 @@
         )
         .unwrap();
         match v {
-            Value::Array(cols) => {
+            Value::Array(cols) => { let cols = cols.to_values();
                 let names: Vec<String> = cols.iter().map(|c| format!("{c}")).collect();
                 assert!(names.contains(&"gene_right".to_string()), "got {names:?}");
                 assert_eq!(names.len(), 5, "got {names:?}");

@@ -220,7 +220,7 @@ impl super::Interp {
                 // VM path's extraction so the two engines never diverge.
                 let vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<_, _>>()?;
                 let name = column_arg(&vals, line, col)?;
-                Ok(Value::Array(Rc::new(lf.column_values(&name, line, col)?)))
+                Ok(Value::array_sniff(lf.column_values(&name, line, col)?))
             }
             "cache" => {
                 if !args.is_empty() {
@@ -238,7 +238,7 @@ impl super::Interp {
                     .into_iter()
                     .map(|c| Value::Str(Rc::new(c)))
                     .collect();
-                Ok(Value::Array(Rc::new(names)))
+                Ok(Value::array(names))
             }
             _ => {
                 let methods = crate::registry::methods_of(crate::registry::DF_METHODS);

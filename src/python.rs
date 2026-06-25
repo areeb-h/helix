@@ -247,7 +247,7 @@ mod imp {
                         let item = item.map_err(|e| py_err(py, e, line, col))?;
                         out.push(from_py(py, &item, line, col)?);
                     }
-                    Ok(Value::Array(Rc::new(out)))
+                    Ok(Value::array(out))
                 }),
                 Kind::Namespace => Err(HelixError::new(
                     "`to_array` cannot convert the `python` namespace",
@@ -352,7 +352,7 @@ mod imp {
             Value::Missing => py.None().into_bound(py),
             Value::Array(items) => {
                 let mut elems = Vec::with_capacity(items.len());
-                for it in items.iter() {
+                for it in items.to_values().iter() {
                     elems.push(to_py(py, it, line, col)?);
                 }
                 PyList::new(py, elems)

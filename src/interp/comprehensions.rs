@@ -35,10 +35,10 @@ impl super::Interp {
                 }
                 let (params, body) = comprehension_params(&args[0]);
                 let mut out = Vec::with_capacity(items.len());
-                for el in items.iter() {
+                for el in items.to_values().iter() {
                     out.push(self.eval_with_pattern(&params, el.clone(), body, line, col)?);
                 }
-                Ok(Value::Array(Rc::new(out)))
+                Ok(Value::array_sniff(out))
             }
             "filter" | "where" => {
                 if args.len() != 1 {
@@ -46,7 +46,7 @@ impl super::Interp {
                 }
                 let (params, body) = comprehension_params(&args[0]);
                 let mut out = Vec::new();
-                for el in items.iter() {
+                for el in items.to_values().iter() {
                     let keep = self.eval_with_pattern(&params, el.clone(), body, line, col)?;
                     match keep {
                         Value::Bool(true) => out.push(el.clone()),
@@ -65,7 +65,7 @@ impl super::Interp {
                         }
                     }
                 }
-                Ok(Value::Array(Rc::new(out)))
+                Ok(Value::array_sniff(out))
             }
             "any" | "all" => {
                 if args.len() != 1 {
@@ -73,7 +73,7 @@ impl super::Interp {
                 }
                 let (params, body) = comprehension_params(&args[0]);
                 let mut seen_missing = false;
-                for el in items.iter() {
+                for el in items.to_values().iter() {
                     match self.eval_with_pattern(&params, el.clone(), body, line, col)? {
                         Value::Bool(b) => {
                             if name == "any" && b {
@@ -143,7 +143,7 @@ impl super::Interp {
                     }
                 };
                 let mut acc = self.eval(&args[0])?;
-                for el in items.iter() {
+                for el in items.to_values().iter() {
                     acc = self.eval_with_two(pa, acc, pb, el.clone(), body)?;
                 }
                 Ok(acc)

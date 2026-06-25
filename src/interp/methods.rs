@@ -26,7 +26,12 @@ pub(crate) fn call_method(
         return Ok(Value::Bool(matches!(recv, Value::Missing)));
     }
     match recv {
-        Value::Array(items) => array_method(items, name, &args, line, col),
+        Value::Array(items) => match array_numeric_fast(items, name, &args, line, col)? {
+            // A typed array's numeric reduction reads the packed buffer directly.
+            Some(v) => Ok(v),
+            // Everything else materializes to `Value`s and runs the general path.
+            None => array_method(&items.to_values(), name, &args, line, col),
+        },
         Value::Str(s) => string_method(s, name, &args, line, col),
         Value::Dna(s) => dna_method(s, name, &args, line, col),
         Value::Tensor(t) => crate::tensor::method(t, name, &args, line, col),
@@ -72,8 +77,110 @@ fn missing_or_nan(items: &[Value]) -> bool {
         .any(|v| matches!(v, Value::Missing) || matches!(v, Value::Float(f) if f.is_nan()))
 }
 
+/// Numeric-reduction fast path for **typed** arrays (`Ints`/`Floats`): read the
+/// packed buffer directly, never materializing a `Vec<Value>`. Returns `Ok(None)`
+/// for a `Values` array, a non-reduction method, an argument-bearing call, or a
+/// `Float` array containing `NaN` — so the caller's general, missing/NaN-aware path
+/// runs and the result matches the untyped array exactly. Typed arrays are
+/// missing-free by construction, so no missing check is needed here.
+fn array_numeric_fast(
+    ad: &crate::value::ArrayData,
+    name: &str,
+    args: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<Option<Value>, HelixError> {
+    use crate::value::ArrayData;
+    if !matches!(
+        name,
+        "count" | "sum" | "mean" | "std" | "var" | "median" | "min" | "max"
+    ) || !args.is_empty()
+    {
+        return Ok(None);
+    }
+    match ad {
+        ArrayData::Values(_) => Ok(None),
+        ArrayData::Ints(xs) => array_int_reduce(xs, name, line, col).map(Some),
+        ArrayData::Floats(xs) => {
+            // A `NaN` flips the answer to `missing` under ADR-0001; defer so the
+            // general path matches the untyped result exactly.
+            if xs.iter().any(|x| x.is_nan()) {
+                Ok(None)
+            } else {
+                array_float_reduce(xs, name, line, col).map(Some)
+            }
+        }
+    }
+}
+
+fn array_int_reduce(xs: &[i64], name: &str, line: usize, col: usize) -> Result<Value, HelixError> {
+    match name {
+        "count" => Ok(Value::Int(xs.len() as i64)),
+        "sum" => {
+            // i128 accumulate; stay exact `Int` if it fits, else compensated `Float`.
+            let wide: i128 = xs.iter().map(|&n| n as i128).sum();
+            Ok(match i64::try_from(wide) {
+                Ok(n) => Value::Int(n),
+                Err(_) => {
+                    let fs: Vec<f64> = xs.iter().map(|&n| n as f64).collect();
+                    Value::Float(neumaier_sum(&fs))
+                }
+            })
+        }
+        "min" | "max" => {
+            if xs.is_empty() {
+                empty_guard(&Vec::<f64>::new(), name, line, col)?;
+            }
+            let best = if name == "min" {
+                *xs.iter().min().unwrap()
+            } else {
+                *xs.iter().max().unwrap()
+            };
+            Ok(Value::Int(best))
+        }
+        // mean/std/var/median: widen to f64 (still half a `Vec<Value>`).
+        _ => {
+            let fs: Vec<f64> = xs.iter().map(|&n| n as f64).collect();
+            float_stat(&fs, name, line, col)
+        }
+    }
+}
+
+fn array_float_reduce(xs: &[f64], name: &str, line: usize, col: usize) -> Result<Value, HelixError> {
+    match name {
+        "count" => Ok(Value::Int(xs.len() as i64)),
+        "sum" => Ok(Value::Float(neumaier_sum(xs))),
+        "min" | "max" => {
+            if xs.is_empty() {
+                empty_guard(&Vec::<f64>::new(), name, line, col)?;
+            }
+            let mut best = xs[0];
+            for &x in &xs[1..] {
+                if (name == "min" && x < best) || (name == "max" && x > best) {
+                    best = x;
+                }
+            }
+            Ok(Value::Float(best))
+        }
+        _ => float_stat(xs, name, line, col),
+    }
+}
+
+/// Shared `f64` reductions (`mean`/`std`/`var`/`median`) — identical kernels to the
+/// general `array_method` path, so a typed array's result matches the untyped one.
+fn float_stat(xs: &[f64], name: &str, line: usize, col: usize) -> Result<Value, HelixError> {
+    empty_guard(xs, name, line, col)?;
+    Ok(match name {
+        "mean" => Value::Float(neumaier_sum(xs) / xs.len() as f64),
+        "std" => Value::Float(population_std(xs)),
+        "var" => Value::Float(crate::stats::variance(xs)),
+        "median" => Value::Float(crate::stats::median(xs)),
+        _ => unreachable!("float_stat only handles mean/std/var/median"),
+    })
+}
+
 fn array_method(
-    items: &Rc<Vec<Value>>,
+    items: &[Value],
     name: &str,
     args: &[Value],
     line: usize,
@@ -246,25 +353,25 @@ fn array_method(
                 .hint("normalize rescales by spread; a constant column has no spread."));
             }
             let out: Vec<Value> = xs.iter().map(|x| Value::Float((x - mean) / sd)).collect();
-            Ok(Value::Array(Rc::new(out)))
+            Ok(Value::array(out))
         }
         "drop_missing" => {
             no_args(name)?;
             // Common case: nothing to drop → share the input array (an `Rc` bump,
             // zero allocation) instead of copying every element into a new `Vec`.
             if !items.iter().any(|v| matches!(v, Value::Missing)) {
-                return Ok(Value::Array(Rc::clone(items)));
+                return Ok(Value::array(items.to_vec()));
             }
             let out: Vec<Value> = items
                 .iter()
                 .filter(|v| !matches!(v, Value::Missing))
                 .cloned()
                 .collect();
-            Ok(Value::Array(Rc::new(out)))
+            Ok(Value::array(out))
         }
         "sort" => {
             no_args(name)?;
-            let mut sorted: Vec<Value> = (**items).clone();
+            let mut sorted: Vec<Value> = items.to_vec();
             // numeric sort if all numeric, else lexical if all strings
             if items.iter().all(|v| v.as_f64().is_some()) {
                 sorted.sort_by(|a, b| {
@@ -285,13 +392,13 @@ fn array_method(
                     col,
                 ));
             }
-            Ok(Value::Array(Rc::new(sorted)))
+            Ok(Value::array(sorted))
         }
         "reverse" => {
             no_args(name)?;
-            let mut v: Vec<Value> = (**items).clone();
+            let mut v: Vec<Value> = items.to_vec();
             v.reverse();
-            Ok(Value::Array(Rc::new(v)))
+            Ok(Value::array(v))
         }
         "first" | "last" => {
             no_args(name)?;
@@ -309,18 +416,18 @@ fn array_method(
             arity("take", args, 1, line, col)?;
             let n = as_int(&args[0], "take", line, col)?.max(0) as usize;
             let out: Vec<Value> = items.iter().take(n).cloned().collect();
-            Ok(Value::Array(Rc::new(out)))
+            Ok(Value::array(out))
         }
         "drop" => {
             arity("drop", args, 1, line, col)?;
             let n = as_int(&args[0], "drop", line, col)?.max(0) as usize;
             let out: Vec<Value> = items.iter().skip(n).cloned().collect();
-            Ok(Value::Array(Rc::new(out)))
+            Ok(Value::array(out))
         }
         "zip" => {
             arity("zip", args, 1, line, col)?;
             let other = match &args[0] {
-                Value::Array(a) => a.clone(),
+                Value::Array(a) => a.to_values().into_owned(),
                 v => {
                     return Err(HelixError::new(
                         format!("`zip` needs an array, but got a {}", v.type_name()),
@@ -334,7 +441,7 @@ fn array_method(
             let out: Vec<Value> = (0..n)
                 .map(|i| Value::Tuple(Rc::new(vec![items[i].clone(), other[i].clone()])))
                 .collect();
-            Ok(Value::Array(Rc::new(out)))
+            Ok(Value::array(out))
         }
         "enumerate" => {
             no_args(name)?;
@@ -343,7 +450,7 @@ fn array_method(
                 .enumerate()
                 .map(|(i, v)| Value::Tuple(Rc::new(vec![Value::Int(i as i64), v.clone()])))
                 .collect();
-            Ok(Value::Array(Rc::new(out)))
+            Ok(Value::array(out))
         }
         "top" => {
             arity("top", args, 1, line, col)?;
@@ -365,7 +472,7 @@ fn array_method(
                 .take(n)
                 .map(|(v, c)| Value::Tuple(Rc::new(vec![v, Value::Int(c)])))
                 .collect();
-            Ok(Value::Array(Rc::new(out)))
+            Ok(Value::array(out))
         }
         _ => Err(unknown_method(
             "Array",
@@ -534,7 +641,7 @@ fn dna_method(
             for w in chars.windows(k) {
                 out.push(Value::Str(Rc::new(w.iter().collect())));
             }
-            Ok(Value::Array(Rc::new(out)))
+            Ok(Value::array(out))
         }
         _ => Err(unknown_method(
             "Dna",

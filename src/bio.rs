@@ -41,7 +41,7 @@ pub fn read_fasta(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
             ("length".to_string(), Value::Int(length)),
         ])));
     }
-    Ok(Value::Array(Rc::new(records)))
+    Ok(Value::array(records))
 }
 
 /// `read_fastq(path)` → an array of sequencing-read records `{id, seq, qual, length}`.
@@ -76,5 +76,5 @@ pub fn read_fastq(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
             ("length".to_string(), Value::Int(length)),
         ])));
     }
-    Ok(Value::Array(Rc::new(records)))
+    Ok(Value::array(records))
 }

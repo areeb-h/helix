@@ -61,8 +61,8 @@ pub(crate) fn eval_slice(
     match recv {
         Value::Array(items) => {
             let idxs = slice_indices(items.len() as i64, start, stop, step);
-            let out: Vec<Value> = idxs.iter().map(|&i| items[i].clone()).collect();
-            Ok(Value::Array(Rc::new(out)))
+            let out: Vec<Value> = idxs.iter().map(|&i| items.get(i)).collect();
+            Ok(Value::array(out))
         }
         Value::Str(s) => {
             let chars: Vec<char> = s.chars().collect();
@@ -104,7 +104,7 @@ pub(crate) fn destructure_parts(
 ) -> Result<Vec<Value>, HelixError> {
     let parts = match v {
         Value::Tuple(t) => (**t).clone(),
-        Value::Array(a) => (**a).clone(),
+        Value::Array(a) => a.to_values().into_owned(),
         other => {
             return Err(HelixError::new(
                 format!(
@@ -141,7 +141,7 @@ pub(crate) fn pattern_parts(
 ) -> Result<Vec<Value>, HelixError> {
     let parts = match v {
         Value::Tuple(t) => (**t).clone(),
-        Value::Array(a) => (**a).clone(),
+        Value::Array(a) => a.to_values().into_owned(),
         other => {
             return Err(HelixError::new(
                 format!(
@@ -205,7 +205,7 @@ pub(crate) fn df_value_method(
                 .into_iter()
                 .map(|c| Value::Str(Rc::new(c)))
                 .collect();
-            Ok(Value::Array(Rc::new(names)))
+            Ok(Value::array(names))
         }
         "cache" => {
             if !args.is_empty() {
@@ -224,7 +224,7 @@ pub(crate) fn df_value_method(
         }
         "column" => {
             let name = column_arg(&args, line, col)?;
-            Ok(Value::Array(Rc::new(lf.column_values(&name, line, col)?)))
+            Ok(Value::array_sniff(lf.column_values(&name, line, col)?))
         }
         _ => {
             let methods = crate::registry::methods_of(crate::registry::DF_METHODS);
@@ -295,7 +295,20 @@ pub(crate) fn eval_index(recv: &Value, idx: &Value, line: usize, col: usize) -> 
         other => return Err(type_err("index", "an integer", other, line, col)),
     };
     match recv {
-        Value::Array(items) | Value::Tuple(items) => {
+        Value::Array(items) => {
+            let n = items.len() as i64;
+            let real = if i < 0 { n + i } else { i };
+            if real < 0 || real >= n {
+                return Err(HelixError::new(
+                    format!("index {} is out of bounds for length {}", i, n),
+                    line,
+                    col,
+                )
+                .hint("valid indices run from 0 to length-1; negative indices count from the end."));
+            }
+            Ok(items.get(real as usize))
+        }
+        Value::Tuple(items) => {
             let n = items.len() as i64;
             let real = if i < 0 { n + i } else { i };
             if real < 0 || real >= n {

@@ -46,24 +46,24 @@ pub(crate) fn eval_binary(
                     .hint("elementwise operations need matching lengths."));
                 }
                 let mut out = Vec::with_capacity(a.len());
-                for (x, y) in a.iter().zip(b.iter()) {
+                for (x, y) in a.to_values().iter().zip(b.to_values().iter()) {
                     out.push(eval_binary(op, x.clone(), y.clone(), line, col)?);
                 }
-                return Ok(Value::Array(Rc::new(out)));
+                return Ok(Value::array(out));
             }
             (Value::Array(a), scalar) => {
                 let mut out = Vec::with_capacity(a.len());
-                for x in a.iter() {
+                for x in a.to_values().iter() {
                     out.push(eval_binary(op, x.clone(), scalar.clone(), line, col)?);
                 }
-                return Ok(Value::Array(Rc::new(out)));
+                return Ok(Value::array(out));
             }
             (scalar, Value::Array(b)) => {
                 let mut out = Vec::with_capacity(b.len());
-                for y in b.iter() {
+                for y in b.to_values().iter() {
                     out.push(eval_binary(op, scalar.clone(), y.clone(), line, col)?);
                 }
-                return Ok(Value::Array(Rc::new(out)));
+                return Ok(Value::array(out));
             }
             // Tensor arithmetic: tensor⊕tensor (NumPy broadcasting), tensor⊕scalar.
             (Value::Tensor(a), Value::Tensor(b)) => {
@@ -183,7 +183,11 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
         (Value::Dna(a), Value::Dna(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Array(a), Value::Array(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+            a.len() == b.len()
+                && a.to_values()
+                    .iter()
+                    .zip(b.to_values().iter())
+                    .all(|(x, y)| values_equal(x, y))
         }
         _ => false,
     }
