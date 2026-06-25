@@ -133,6 +133,63 @@ impl ArrayData {
 
 }
 
+/// An incremental, type-adaptive array builder. It accumulates packed `Int`/`Float`
+/// while the pushed elements stay homogeneous, and promotes to a general
+/// `Vec<Value>` on the first non-matching element. `finish()` yields the same array
+/// as collecting a `Vec<Value>` and calling [`Value::array_sniff`] — but a numeric
+/// comprehension result (`xs.map(...)`) never materializes the intermediate boxed
+/// `Value`s, halving the transient memory of building a numeric column.
+#[derive(Default)]
+pub enum ColumnBuilder {
+    #[default]
+    Empty,
+    Ints(Vec<i64>),
+    Floats(Vec<f64>),
+    Values(Vec<Value>),
+}
+
+impl ColumnBuilder {
+    pub fn push(&mut self, v: Value) {
+        match (std::mem::take(self), v) {
+            (ColumnBuilder::Empty, Value::Int(i)) => *self = ColumnBuilder::Ints(vec![i]),
+            (ColumnBuilder::Empty, Value::Float(f)) => *self = ColumnBuilder::Floats(vec![f]),
+            (ColumnBuilder::Empty, other) => *self = ColumnBuilder::Values(vec![other]),
+            (ColumnBuilder::Ints(mut v), Value::Int(i)) => {
+                v.push(i);
+                *self = ColumnBuilder::Ints(v);
+            }
+            (ColumnBuilder::Floats(mut v), Value::Float(f)) => {
+                v.push(f);
+                *self = ColumnBuilder::Floats(v);
+            }
+            (ColumnBuilder::Values(mut v), other) => {
+                v.push(other);
+                *self = ColumnBuilder::Values(v);
+            }
+            // Homogeneity broken: promote the packed buffer to boxed `Value`s.
+            (ColumnBuilder::Ints(v), other) => {
+                let mut vals: Vec<Value> = v.into_iter().map(Value::Int).collect();
+                vals.push(other);
+                *self = ColumnBuilder::Values(vals);
+            }
+            (ColumnBuilder::Floats(v), other) => {
+                let mut vals: Vec<Value> = v.into_iter().map(Value::Float).collect();
+                vals.push(other);
+                *self = ColumnBuilder::Values(vals);
+            }
+        }
+    }
+
+    pub fn finish(self) -> Value {
+        match self {
+            ColumnBuilder::Empty => Value::array(Vec::new()),
+            ColumnBuilder::Ints(v) => Value::int_array(v),
+            ColumnBuilder::Floats(v) => Value::float_array(v),
+            ColumnBuilder::Values(v) => Value::array(v),
+        }
+    }
+}
+
 /// The payload of a [`Value::GroupBy`] — the grouped frame plus its key columns,
 /// held behind an `Rc` so the `Value` variant is one word wide.
 pub struct GroupByData {

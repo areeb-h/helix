@@ -131,7 +131,7 @@ enum CompSource {
 struct CompIter {
     source: CompSource,
     cur_val: Value,
-    builder: Vec<Value>,
+    builder: crate::value::ColumnBuilder,
 }
 
 /// One active function invocation.
@@ -690,7 +690,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         iters.push(CompIter {
                             source: CompSource::Array { arr: a, idx: 0 },
                             cur_val: Value::Unit,
-                            builder: Vec::new(),
+                            builder: crate::value::ColumnBuilder::default(),
                         });
                     }
                     // `missing.map(...)` etc. propagate (ADR-0001).
@@ -763,7 +763,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 iters.push(CompIter {
                     source: CompSource::Range { cur: start, end },
                     cur_val: Value::Unit,
-                    builder: Vec::new(),
+                    builder: crate::value::ColumnBuilder::default(),
                 });
             }
             Op::CompNext(binder, end_target) => {
@@ -827,7 +827,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             }
             Op::CompEnd => {
                 let it = iters.pop().unwrap();
-                stack.push(Value::array_sniff(it.builder));
+                stack.push(it.builder.finish());
             }
             Op::CompEndDiscard => {
                 iters.pop();
