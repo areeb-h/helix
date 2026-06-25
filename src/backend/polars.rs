@@ -38,6 +38,35 @@ pub fn from_polars_df(df: DataFrame) -> Df {
     wrap_lazy(df.lazy())
 }
 
+/// Construct a frame from backend-agnostic [`super::ColData`] columns — the genomics
+/// readers' entry point, so all Polars `Column`/`DataFrame` construction stays in
+/// this file. A build error (duplicate column name, length mismatch) becomes a clean
+/// Helix error instead of a leaked Polars `Display`.
+pub fn build_frame(
+    columns: Vec<(String, super::ColData)>,
+    line: usize,
+    col: usize,
+) -> Result<Df, HelixError> {
+    use super::ColData;
+    let cols: Vec<Column> = columns
+        .into_iter()
+        .map(|(name, data)| {
+            let n: PlSmallStr = name.as_str().into();
+            match data {
+                ColData::Str(v) => Column::new(n, v),
+                ColData::StrOpt(v) => Column::new(n, v),
+                ColData::Int(v) => Column::new(n, v),
+                ColData::IntOpt(v) => Column::new(n, v),
+                ColData::Float(v) => Column::new(n, v),
+                ColData::Bool(v) => Column::new(n, v),
+            }
+        })
+        .collect();
+    let df = DataFrame::new_infer_height(cols)
+        .map_err(|e| HelixError::new(format!("could not build the table: {e}"), line, col))?;
+    Ok(from_polars_df(df))
+}
+
 /// Extract the underlying `LazyFrame` from a handle, for the Python bridge (which
 /// hands Arrow buffers to `polars.DataFrame`). Errors if the active backend isn't
 /// Polars — the bridge is Polars/Arrow-specific by construction.

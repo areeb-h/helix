@@ -28,8 +28,8 @@ use std::io::{BufRead, BufReader};
 
 use flate2::read::MultiGzDecoder;
 use noodles_vcf::{self as vcf, header::record::value::map::info::{Number, Type as InfoType}};
-use polars::prelude::*;
 
+use crate::backend::ColData;
 use crate::error::HelixError;
 
 /// Open `path` as a buffered byte stream, transparently decompressing gzip/BGZF.
@@ -136,22 +136,42 @@ pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<crate::backend::D
         info_rows.push(row);
     }
 
-    let mut columns: Vec<Column> = vec![
-        Column::new("chrom".into(), chrom),
-        Column::new("pos".into(), pos),
-        Column::new("id".into(), id),
-        Column::new("ref".into(), ref_),
-        Column::new("alt".into(), alt),
-        Column::new("qual".into(), qual),
-        Column::new("filter".into(), filter),
-    ];
+    // A header `Number=1` field whose records actually carry multiple values (or a
+    // type the header misdeclares) would be silently nulled by the typed column.
+    // Downgrade any such field to a string column so no data is dropped.
     for k in &info_keys {
-        columns.push(build_info_column(k, kind[k], &info_rows));
+        let mismatched = match kind[k] {
+            ColKind::Int => info_rows
+                .iter()
+                .any(|r| matches!(r.get(k), Some(c) if !matches!(c, Cell::Int(_)))),
+            ColKind::Float => info_rows
+                .iter()
+                .any(|r| matches!(r.get(k), Some(Cell::Str(_)) | Some(Cell::Bool(_)))),
+            _ => false,
+        };
+        if mismatched {
+            kind.insert(k.clone(), ColKind::Str);
+        }
     }
 
-    let df = DataFrame::new_infer_height(columns)
-        .map_err(|e| err(format!("could not build the VCF table: {e}")))?;
-    Ok(crate::backend::polars::from_polars_df(df))
+    let fixed = ["chrom", "pos", "id", "ref", "alt", "qual", "filter"];
+    let mut columns: Vec<(String, ColData)> = vec![
+        ("chrom".into(), ColData::Str(chrom)),
+        ("pos".into(), ColData::IntOpt(pos)),
+        ("id".into(), ColData::StrOpt(id)),
+        ("ref".into(), ColData::Str(ref_)),
+        ("alt".into(), ColData::Str(alt)),
+        ("qual".into(), ColData::Float(qual)),
+        ("filter".into(), ColData::StrOpt(filter)),
+    ];
+    for k in &info_keys {
+        // An INFO key colliding with a fixed column (e.g. an INFO field literally
+        // named `pos`) is prefixed rather than producing a duplicate column.
+        let cname = if fixed.contains(&k.as_str()) { format!("info_{k}") } else { k.clone() };
+        columns.push((cname, build_info_column(k, kind[k], &info_rows)));
+    }
+
+    crate::backend::build_frame(columns, line, col)
 }
 
 /// Widen an `f32` (how noodles parses a text-VCF `Float`/`QUAL`) to `f64` through
@@ -213,41 +233,31 @@ fn format_array(a: &vcf::variant::record_buf::info::field::value::Array) -> Stri
 }
 
 /// Build one typed INFO column by pulling each record's cell (or a null/`false`).
-fn build_info_column(key: &str, kind: ColKind, rows: &[HashMap<String, Cell>]) -> Column {
-    let name: PlSmallStr = key.into();
+fn build_info_column(key: &str, kind: ColKind, rows: &[HashMap<String, Cell>]) -> ColData {
     match kind {
-        ColKind::Int => {
-            let vals: Vec<Option<i64>> = rows
-                .iter()
+        ColKind::Int => ColData::IntOpt(
+            rows.iter()
                 .map(|r| match r.get(key) {
                     Some(Cell::Int(i)) => Some(*i),
                     _ => None,
                 })
-                .collect();
-            Column::new(name, vals)
-        }
-        ColKind::Float => {
-            let vals: Vec<Option<f64>> = rows
-                .iter()
+                .collect(),
+        ),
+        ColKind::Float => ColData::Float(
+            rows.iter()
                 .map(|r| match r.get(key) {
                     Some(Cell::Float(f)) => Some(*f),
                     Some(Cell::Int(i)) => Some(*i as f64),
                     _ => None,
                 })
-                .collect();
-            Column::new(name, vals)
-        }
-        ColKind::Bool => {
-            // Flag semantics: present → true, absent → false (never null).
-            let vals: Vec<bool> = rows
-                .iter()
-                .map(|r| matches!(r.get(key), Some(Cell::Bool(true))))
-                .collect();
-            Column::new(name, vals)
-        }
-        ColKind::Str => {
-            let vals: Vec<Option<String>> = rows
-                .iter()
+                .collect(),
+        ),
+        // Flag semantics: present → true, absent → false (never null).
+        ColKind::Bool => ColData::Bool(
+            rows.iter().map(|r| matches!(r.get(key), Some(Cell::Bool(true)))).collect(),
+        ),
+        ColKind::Str => ColData::StrOpt(
+            rows.iter()
                 .map(|r| match r.get(key) {
                     Some(Cell::Str(s)) => Some(s.clone()),
                     Some(Cell::Int(i)) => Some(i.to_string()),
@@ -255,8 +265,7 @@ fn build_info_column(key: &str, kind: ColKind, rows: &[HashMap<String, Cell>]) -
                     Some(Cell::Bool(b)) => Some(b.to_string()),
                     None => None,
                 })
-                .collect();
-            Column::new(name, vals)
-        }
+                .collect(),
+        ),
     }
 }

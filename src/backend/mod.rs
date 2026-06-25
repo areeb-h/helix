@@ -27,6 +27,37 @@ use crate::value::Value;
 /// `Rc` bump); the concrete engine lives behind the trait object.
 pub type Df = Rc<dyn DataHandle>;
 
+/// Backend-agnostic column data for **constructing** a frame from native readers
+/// (VCF/GFF/BED). A reader emits `Vec<(String, ColData)>` and never touches an
+/// engine type; [`build_frame`] turns it into a [`Df`]. This keeps the
+/// "polars types live in one file" seam intact for the construction path too.
+pub enum ColData {
+    /// A non-null string column.
+    Str(Vec<String>),
+    /// A nullable string column (`None` → null).
+    StrOpt(Vec<Option<String>>),
+    /// A non-null 64-bit integer column.
+    Int(Vec<i64>),
+    /// A nullable integer column.
+    IntOpt(Vec<Option<i64>>),
+    /// A nullable float column.
+    Float(Vec<Option<f64>>),
+    /// A boolean column (no nulls — e.g. a VCF Flag: present → true).
+    Bool(Vec<bool>),
+}
+
+/// Build an eager DataFrame from backend-agnostic [`ColData`] columns, routing any
+/// engine error (mismatched lengths, a duplicate column name) through the seam as a
+/// clean Helix error rather than leaking a raw engine message. Delegates to the
+/// active backend's constructor.
+pub fn build_frame(
+    columns: Vec<(String, ColData)>,
+    line: usize,
+    col: usize,
+) -> Result<Df, HelixError> {
+    polars::build_frame(columns, line, col)
+}
+
 /// A column expression in a DataFrame query (`age > 40`, `weight / height`),
 /// already **resolved**: bare names that match a column are `Col`; other names
 /// were resolved against Helix variables to a `Lit`. Backend-agnostic — each

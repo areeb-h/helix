@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 
 use noodles_gff as gff;
-use polars::prelude::*;
 
+use crate::backend::ColData;
 use crate::error::HelixError;
 use crate::vcf::{open_maybe_gzip, widen_f32};
 
@@ -62,24 +62,22 @@ pub fn read_gff(path: &str, line: usize, col: usize) -> Result<crate::backend::D
         attr_rows.push(row);
     }
 
-    let mut columns: Vec<Column> = vec![
-        Column::new("seqid".into(), seqid),
-        Column::new("source".into(), source),
-        Column::new("type".into(), ty),
-        Column::new("start".into(), start),
-        Column::new("end".into(), end),
-        Column::new("score".into(), score),
-        Column::new("strand".into(), strand),
-        Column::new("phase".into(), phase),
+    let mut columns: Vec<(String, ColData)> = vec![
+        ("seqid".into(), ColData::Str(seqid)),
+        ("source".into(), ColData::Str(source)),
+        ("type".into(), ColData::Str(ty)),
+        ("start".into(), ColData::Int(start)),
+        ("end".into(), ColData::Int(end)),
+        ("score".into(), ColData::Float(score)),
+        ("strand".into(), ColData::Str(strand)),
+        ("phase".into(), ColData::IntOpt(phase)),
     ];
     for k in &attr_keys {
         let vals: Vec<Option<String>> = attr_rows.iter().map(|r| r.get(k).cloned()).collect();
-        columns.push(Column::new(k.as_str().into(), vals));
+        columns.push((k.clone(), ColData::StrOpt(vals)));
     }
 
-    let df = DataFrame::new_infer_height(columns)
-        .map_err(|e| err(format!("could not build the GFF table: {e}")))?;
-    Ok(crate::backend::polars::from_polars_df(df))
+    crate::backend::build_frame(columns, line, col)
 }
 
 /// The single-character strand as GFF writes it.
