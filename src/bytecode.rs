@@ -213,6 +213,11 @@ pub struct Compiler {
     /// Accumulated JIT `map`/`filter` kernel requests (see [`Program::map_kernels`]).
     map_kernels: Vec<ArrayKernel>,
     filter_kernels: Vec<ArrayKernel>,
+    /// Accumulated fuseable pipelines (see [`Program::fused_kernels`]).
+    fused_kernels: Vec<FusedKernel>,
+    /// Set while emitting a fused pipeline's fall-through, so the recompiled chain takes
+    /// the ordinary per-stage path instead of re-triggering fusion (which would loop).
+    no_fuse: bool,
     /// Inferred receiver types from the type checker (see [`crate::types::TypeMap`]),
     /// used to route receiver-polymorphic methods. `None` when compiling without a
     /// prior type-check (tests/fuzzers) — then such methods fall back as before.
@@ -245,6 +250,8 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         reduce_loops: Vec::new(),
         map_kernels: Vec::new(),
         filter_kernels: Vec::new(),
+        fused_kernels: Vec::new(),
+        no_fuse: false,
         types,
     };
 
@@ -278,6 +285,7 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         reduce_loops: c.reduce_loops,
         map_kernels: c.map_kernels,
         filter_kernels: c.filter_kernels,
+        fused_kernels: c.fused_kernels,
         global_names: std::rc::Rc::new(c.globals),
     })
 }
@@ -962,6 +970,17 @@ impl Compiler {
                 // 2. Comprehensions compile to inline bytecode loops (no closures).
                 // For an Array receiver, `where`/`filter` are comprehensions (the
                 // DataFrame case was handled above).
+                //
+                // Fusion: a chain of ≥2 eligible map/filter stages (or ≥1 stage feeding a
+                // `reduce`) over an idempotent Int source compiles to ONE native loop with
+                // no intermediate arrays. Detected at the outermost method; falls back to
+                // the per-stage path for anything ineligible.
+                if !self.no_fuse
+                    && matches!(n, "map" | "filter" | "where" | "reduce")
+                    && let Some(plan) = self.collect_fusion_chain(recv, n, args)
+                {
+                    return self.compile_fused(b, recv, name, args, plan, *line, *col);
+                }
                 if matches!(n, "map" | "filter" | "where" | "reduce") {
                     return self.compile_comprehension(b, recv, name, args, *line, *col);
                 }

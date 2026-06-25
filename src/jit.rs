@@ -91,6 +91,10 @@ pub struct Jit {
     /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len) -> i64` (kept count)
     /// filter kernels, indexed by [`crate::bytecode::Op::TryJitFilter`]'s `kernel_idx`.
     filter_ptrs: Vec<Option<*const u8>>,
+    /// Native fused-pipeline kernels (one of three signatures by shape — see
+    /// [`define_fused_kernel`]), indexed by [`crate::bytecode::Op::TryJitFused`]'s
+    /// `kernel_idx`.
+    fused_ptrs: Vec<Option<*const u8>>,
 }
 
 impl Jit {
@@ -109,6 +113,10 @@ impl Jit {
     pub fn filter_kernel(&self, idx: usize) -> Option<*const u8> {
         self.filter_ptrs.get(idx).copied().flatten()
     }
+    /// The native fused-pipeline kernel for site `idx`, if one compiled.
+    pub fn fused_kernel(&self, idx: usize) -> Option<*const u8> {
+        self.fused_ptrs.get(idx).copied().flatten()
+    }
 }
 
 struct FnDef<'a> {
@@ -125,6 +133,7 @@ pub fn build(
     reduce_loops: &[crate::bytecode::ReduceLoop],
     map_kernels: &[crate::bytecode::ArrayKernel],
     filter_kernels: &[crate::bytecode::ArrayKernel],
+    fused_kernels: &[crate::bytecode::FusedKernel],
 ) -> Option<Jit> {
     // The native call transmutes Cranelift output to `extern "C"`, which matches
     // the convention we force (SystemV) only on x86-64 Linux. On every other
@@ -145,6 +154,7 @@ pub fn build(
         && reduce_loops.is_empty()
         && map_kernels.is_empty()
         && filter_kernels.is_empty()
+        && fused_kernels.is_empty()
     {
         return None;
     }
@@ -258,11 +268,13 @@ pub fn build(
     // re-check + per-site `None` slot as the reduce loops.
     let map_ids = define_array_kernels(&mut module, map_kernels, "map", false);
     let filter_ids = define_array_kernels(&mut module, filter_kernels, "filter", true);
+    let fused_ids = define_fused_kernels(&mut module, fused_kernels);
 
     if compiled.is_empty()
         && reduce_ids.iter().all(|r| r.is_none())
         && map_ids.iter().all(|r| r.is_none())
         && filter_ids.iter().all(|r| r.is_none())
+        && fused_ids.iter().all(|r| r.is_none())
     {
         return None;
     }
@@ -286,8 +298,52 @@ pub fn build(
     let reduce_ptrs = finalize(reduce_ids, &module);
     let map_ptrs = finalize(map_ids, &module);
     let filter_ptrs = finalize(filter_ids, &module);
+    let fused_ptrs = finalize(fused_ids, &module);
 
-    Some(Jit { _module: module, by_name, reduce_ptrs, map_ptrs, filter_ptrs })
+    Some(Jit { _module: module, by_name, reduce_ptrs, map_ptrs, filter_ptrs, fused_ptrs })
+}
+
+/// All stages and the reduce sink of a fused pipeline must be JIT-eligible.
+fn fusion_eligible(k: &crate::bytecode::FusedKernel) -> bool {
+    use crate::bytecode::{FusionSink, FusionStage};
+    k.stages.iter().all(|s| match s {
+        FusionStage::Map { binder, body } => map_kernel_eligible(body, binder),
+        FusionStage::Filter { binder, body } => filter_kernel_eligible(body, binder),
+    }) && match &k.sink {
+        FusionSink::Collect => true,
+        FusionSink::Reduce { pa, pb, body } => reduce_loop_eligible(body, pa, pb),
+    }
+}
+
+/// Declare + define every fuseable pipeline kernel (one slot each, `None` if declined).
+fn define_fused_kernels(
+    module: &mut JITModule,
+    kernels: &[crate::bytecode::FusedKernel],
+) -> Vec<Option<FuncId>> {
+    let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
+    let mut ctx = module.make_context();
+    let mut bctx = FunctionBuilderContext::new();
+    for (i, k) in kernels.iter().enumerate() {
+        if !fusion_eligible(k) {
+            ids.push(None);
+            continue;
+        }
+        let mut sig = module.make_signature();
+        sig.call_conv = CallConv::SystemV;
+        for _ in 0..3 {
+            sig.params.push(AbiParam::new(I64));
+        }
+        sig.returns.push(AbiParam::new(I64));
+        let id = match module.declare_function(&format!("fused${i}"), Linkage::Local, &sig) {
+            Ok(id) => id,
+            Err(_) => {
+                ids.push(None);
+                continue;
+            }
+        };
+        ids.push(define_fused_kernel(module, &mut ctx, &mut bctx, id, k).map(|()| id));
+    }
+    ids
 }
 
 /// Declare + define a batch of `map`/`filter` kernels, returning one slot per kernel
@@ -732,6 +788,159 @@ fn define_array_kernel<'a>(
     Some(())
 }
 
+/// Emit a fused pipeline as one native loop with no intermediate arrays. Threads each
+/// element through the stages in registers (a `Map` transforms it; a `Filter` branches a
+/// rejected element to the loop's continue block — stream fusion's *Skip*), then the sink
+/// (`Collect`: `dst[w]=cur; w++`, return kept count; `Reduce`: `acc=red(acc,cur)`, return
+/// acc). Source is an `Int` array (`src,…,len`) or a `range` counter (`start,end`).
+/// Signatures: array+Collect `fn(src,dst,len)->i64`; array+Reduce `fn(src,len,init)->i64`;
+/// range+Reduce `fn(start,end,init)->i64`. Integer arithmetic wraps, matching the oracle.
+fn define_fused_kernel<'a>(
+    module: &mut JITModule,
+    ctx: &mut cranelift_codegen::Context,
+    bctx: &mut FunctionBuilderContext,
+    fid: FuncId,
+    k: &'a crate::bytecode::FusedKernel,
+) -> Option<()> {
+    use crate::bytecode::{FusionSink, FusionStage};
+    let is_reduce = matches!(k.sink, FusionSink::Reduce { .. });
+
+    ctx.func.signature.call_conv = CallConv::SystemV;
+    for _ in 0..3 {
+        ctx.func.signature.params.push(AbiParam::new(I64));
+    }
+    ctx.func.signature.returns.push(AbiParam::new(I64)); // kept count, or accumulator
+
+    let mut b = FunctionBuilder::new(&mut ctx.func, bctx);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    b.seal_block(entry);
+    let (p0, p1, p2) = (b.block_params(entry)[0], b.block_params(entry)[1], b.block_params(entry)[2]);
+
+    let idx_var = b.declare_var(I64); // read cursor (array index `i`, or range counter `x`)
+    let limit_var = b.declare_var(I64);
+    let sink_var = b.declare_var(I64); // accumulator (reduce) or write cursor `w` (collect)
+    let src_var = b.declare_var(I64);
+    let dst_var = b.declare_var(I64);
+    let z = b.ins().iconst(I64, 0);
+
+    // Wire the three params to roles by shape: range → (start,end,init); array+reduce →
+    // (src,len,init); array+collect → (src,dst,len).
+    if k.source_is_range {
+        b.def_var(idx_var, p0); // x starts at `start`
+        b.def_var(limit_var, p1); // `end`
+        b.def_var(sink_var, p2); // acc init
+        b.def_var(src_var, z);
+        b.def_var(dst_var, z);
+    } else if is_reduce {
+        b.def_var(idx_var, z);
+        b.def_var(limit_var, p1); // len
+        b.def_var(sink_var, p2); // acc init
+        b.def_var(src_var, p0);
+        b.def_var(dst_var, z);
+    } else {
+        b.def_var(idx_var, z);
+        b.def_var(limit_var, p2); // len
+        b.def_var(sink_var, z); // w = 0
+        b.def_var(src_var, p0);
+        b.def_var(dst_var, p1);
+    }
+
+    let header = b.create_block();
+    let body = b.create_block();
+    let cont = b.create_block();
+    let exit = b.create_block();
+    b.ins().jump(header, &[]);
+
+    // header: idx < limit ?
+    b.switch_to_block(header);
+    let iv = b.use_var(idx_var);
+    let lv = b.use_var(limit_var);
+    let cond = b.ins().icmp(IntCC::SignedLessThan, iv, lv);
+    b.ins().brif(cond, body, &[], exit, &[]);
+
+    // body: load the element, run stages, run the sink.
+    b.switch_to_block(body);
+    b.seal_block(body);
+    let elem = if k.source_is_range {
+        b.use_var(idx_var) // the counter value itself
+    } else {
+        let i = b.use_var(idx_var);
+        let off = b.ins().imul_imm(i, 8);
+        let base = b.use_var(src_var);
+        let addr = b.ins().iadd(base, off);
+        b.ins().load(I64, MemFlags::trusted(), addr, 0)
+    };
+    let cur_var = b.declare_var(I64);
+    b.def_var(cur_var, elem);
+    let no_fns: HashMap<&str, FuncId> = HashMap::new();
+
+    // Thread the element through the stages. A Map rebinds `cur`; a Filter splits the
+    // straight-line body and sends a rejected element to `cont` (skip the sink).
+    for stage in &k.stages {
+        match stage {
+            FusionStage::Map { binder, body: bexpr } => {
+                let mut vars: HashMap<&'a str, Variable> = HashMap::new();
+                vars.insert(binder.as_str(), cur_var);
+                let nv = gen_value(&mut b, bexpr, &mut vars, &no_fns, module, NumKind::Int);
+                b.def_var(cur_var, nv);
+            }
+            FusionStage::Filter { binder, body: bexpr } => {
+                let mut vars: HashMap<&'a str, Variable> = HashMap::new();
+                vars.insert(binder.as_str(), cur_var);
+                let keep = gen_cond(&mut b, bexpr, &mut vars, &no_fns, module, NumKind::Int);
+                let accept = b.create_block();
+                b.ins().brif(keep, accept, &[], cont, &[]);
+                b.switch_to_block(accept);
+                b.seal_block(accept);
+            }
+        }
+    }
+
+    // sink
+    match &k.sink {
+        FusionSink::Collect => {
+            let w = b.use_var(sink_var);
+            let off = b.ins().imul_imm(w, 8);
+            let base = b.use_var(dst_var);
+            let addr = b.ins().iadd(base, off);
+            let cur = b.use_var(cur_var);
+            b.ins().store(MemFlags::trusted(), cur, addr, 0);
+            let nw = b.ins().iadd_imm(w, 1);
+            b.def_var(sink_var, nw);
+        }
+        FusionSink::Reduce { pa, pb, body: rbody } => {
+            let mut vars: HashMap<&'a str, Variable> = HashMap::new();
+            vars.insert(pa.as_str(), sink_var);
+            vars.insert(pb.as_str(), cur_var);
+            let nacc = gen_value(&mut b, rbody, &mut vars, &no_fns, module, NumKind::Int);
+            b.def_var(sink_var, nacc);
+        }
+    }
+    b.ins().jump(cont, &[]);
+
+    // cont: advance the cursor and loop. (Predecessors: the sink fall-through plus every
+    // filter's reject edge — all emitted above, so seal now.)
+    b.switch_to_block(cont);
+    b.seal_block(cont);
+    let i = b.use_var(idx_var);
+    let ni = b.ins().iadd_imm(i, 1);
+    b.def_var(idx_var, ni);
+    b.ins().jump(header, &[]);
+    b.seal_block(header);
+
+    b.switch_to_block(exit);
+    b.seal_block(exit);
+    let result = b.use_var(sink_var); // kept count (collect) or accumulator (reduce)
+    b.ins().return_(&[result]);
+
+    b.finalize();
+    module.define_function(fid, ctx).ok()?;
+    module.clear_context(ctx);
+    Some(())
+}
+
 fn gen_value<'a>(
     b: &mut FunctionBuilder,
     e: &'a Expr,
@@ -906,85 +1115,51 @@ pub unsafe fn call_reduce(ptr: *const u8, start: i64, end: i64, init: i64) -> i6
     }
 }
 
-/// How many worker threads to split an `n`-element kernel across.
-///
-/// Parallel execution is implemented and correct, but **opt-in**: for the current class
-/// of integer map/filter kernels the work is memory-bound (the input/output traffic
-/// dwarfs the per-element arithmetic, which has no loops or calls), so splitting across
-/// threads adds contention without adding memory bandwidth — it rarely beats, and can
-/// regress, the single-threaded native kernel. The big, reliable win here is the native
-/// kernel itself (no per-element boxing or bytecode dispatch). Set `HELIX_PAR_MIN=<k>`
-/// to enable threads (parallelize inputs ≥ 2k across cores) — useful on different
-/// hardware and for the compute-heavier kernels a later phase will admit (helper-fn
-/// calls in bodies). Default (unset) → always sequential.
-fn parallel_chunks(n: usize) -> usize {
-    let Some(min_per_thread) = std::env::var("HELIX_PAR_MIN")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&m| m > 0)
-    else {
-        return 1;
-    };
-    if n < 2 * min_per_thread {
-        return 1;
+/// Run a native map kernel over `src`, returning the mapped buffer (same length, same
+/// order). SAFETY: `ptr` is a finalized `extern "C" fn(*const i64,*mut i64,i64)` from
+/// [`define_array_kernel`].
+pub unsafe fn run_map_kernel(ptr: *const u8, src: &[i64]) -> Vec<i64> {
+    let mut dst = vec![0i64; src.len()];
+    if !src.is_empty() {
+        let f: extern "C" fn(*const i64, *mut i64, i64) = unsafe { std::mem::transmute(ptr) };
+        f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64);
     }
-    let cores = std::thread::available_parallelism().map(|c| c.get()).unwrap_or(1);
-    cores.min(n / min_per_thread).max(1)
+    dst
 }
 
-/// Run a native map kernel over `src`, returning the mapped buffer (same length, same
-/// order). Large inputs fan out across worker threads over disjoint input/output
-/// chunks: the kernel is stateless native code over scalars (no `Rc`, no shared state),
-/// so concurrent calls are **race-free by construction**, and a function pointer is
-/// `Send`/`Sync`, so nothing unsafe crosses the boundary. The result is identical to a
-/// sequential run (chunks are contiguous and ordered). SAFETY: `ptr` is a finalized
-/// `extern "C" fn(*const i64,*mut i64,i64)` from [`define_array_kernel`].
-pub unsafe fn run_map_kernel(ptr: *const u8, src: &[i64]) -> Vec<i64> {
+/// Run a native filter kernel over `src`, returning the kept elements in order. SAFETY:
+/// `ptr` is a finalized `extern "C" fn(*const i64,*mut i64,i64)->i64` (kept count) from
+/// [`define_array_kernel`].
+pub unsafe fn run_filter_kernel(ptr: *const u8, src: &[i64]) -> Vec<i64> {
     let mut dst = vec![0i64; src.len()];
     if src.is_empty() {
         return dst;
     }
-    let f: extern "C" fn(*const i64, *mut i64, i64) = unsafe { std::mem::transmute(ptr) };
-    let threads = parallel_chunks(src.len());
-    if threads <= 1 {
-        f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64);
-        return dst;
-    }
-    let chunk = src.len().div_ceil(threads);
-    std::thread::scope(|scope| {
-        for (s, d) in src.chunks(chunk).zip(dst.chunks_mut(chunk)) {
-            scope.spawn(move || f(s.as_ptr(), d.as_mut_ptr(), s.len() as i64));
-        }
-    });
+    let f: extern "C" fn(*const i64, *mut i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    let kept = f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64);
+    dst.truncate(kept as usize);
     dst
 }
 
-/// Run a native filter kernel over `src`, returning the kept elements in order. Large
-/// inputs fan out per chunk (each produces its kept sub-vector); the parts are
-/// concatenated in chunk order, so the result is identical to a sequential run. Same
-/// soundness argument as [`run_map_kernel`]. SAFETY: `ptr` is a finalized
-/// `extern "C" fn(*const i64,*mut i64,i64)->i64` (kept count) from [`define_array_kernel`].
-pub unsafe fn run_filter_kernel(ptr: *const u8, src: &[i64]) -> Vec<i64> {
+/// Run a fused `Collect` pipeline over `src` (`fn(src,dst,len)->kept`), returning the
+/// surviving elements in order. SAFETY: `ptr` is the matching kernel from
+/// [`define_fused_kernel`].
+pub unsafe fn run_fused_collect(ptr: *const u8, src: &[i64]) -> Vec<i64> {
+    let mut dst = vec![0i64; src.len()];
     if src.is_empty() {
-        return Vec::new();
+        return dst;
     }
     let f: extern "C" fn(*const i64, *mut i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
-    let run = |s: &[i64]| -> Vec<i64> {
-        let mut d = vec![0i64; s.len()];
-        let kept = f(s.as_ptr(), d.as_mut_ptr(), s.len() as i64);
-        d.truncate(kept as usize);
-        d
-    };
-    let threads = parallel_chunks(src.len());
-    if threads <= 1 {
-        return run(src);
-    }
-    let chunk = src.len().div_ceil(threads);
-    let parts: Vec<Vec<i64>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = src.chunks(chunk).map(|s| scope.spawn(move || run(s))).collect();
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
-    });
-    parts.concat()
+    let kept = f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64);
+    dst.truncate(kept as usize);
+    dst
+}
+
+/// Run a fused array→`Reduce` pipeline over `src` (`fn(src,len,init)->acc`). SAFETY: as
+/// [`run_fused_collect`].
+pub unsafe fn run_fused_reduce(ptr: *const u8, src: &[i64], init: i64) -> i64 {
+    let f: extern "C" fn(*const i64, i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    f(src.as_ptr(), src.len() as i64, init)
 }
 
 /// Call an `f64`-specialized JIT function. SAFETY: as [`call_i64`], with an

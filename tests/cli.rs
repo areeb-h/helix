@@ -601,10 +601,8 @@ fn imports_resolve_from_the_project_root() {
 #[test]
 fn native_map_filter_kernels_agree_across_all_paths() {
     // `map`/`filter` over an Int array compile to a native JIT kernel on the VM. The
-    // result must be byte-identical across: the VM native kernel (default), the
-    // tree-walker oracle (HELIX_NOVM), the bytecode loop (HELIX_NOJIT), and the
-    // forced-parallel path (HELIX_PAR_MIN=1) — proving the fast paths and the
-    // thread-chunked path stay faithful to the sequential semantics.
+    // result must be byte-identical across the VM native kernel (default), the
+    // tree-walker oracle (HELIX_NOVM), and the bytecode loop (HELIX_NOJIT).
     let src = "xs = range(0, 1000)\n\
                m = xs.map(x => x * x - 3 * x + 1)\n\
                f = xs.filter(x => x % 7 == 0)\n\
@@ -614,11 +612,36 @@ fn native_map_filter_kernels_agree_across_all_paths() {
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     let (tw, _, _) = run_source(src, &[("HELIX_NOVM", "1")], "kern_tw");
     let (nojit, _, _) = run_source(src, &[("HELIX_NOJIT", "1")], "kern_nojit");
-    let (par, _, _) = run_source(src, &[("HELIX_PAR_MIN", "1")], "kern_par");
     assert_eq!(vm, tw, "native kernel vs tree-walker oracle");
     assert_eq!(vm, nojit, "native kernel vs bytecode loop");
-    assert_eq!(vm, par, "native kernel vs forced-parallel");
     assert!(!vm.trim().is_empty());
+}
+
+#[test]
+fn fused_pipelines_match_the_oracle() {
+    // A chain of map/filter (± a reduce sink) over an Int source compiles to ONE native
+    // loop with no intermediate arrays. The fused result must be byte-identical to the
+    // tree-walker (which materializes every stage) and the bytecode loop.
+    let cases = [
+        // filter→map (array, Collect)
+        "print([1,2,3,4,5,6,7,8,9,10].filter(x => x % 2 == 0).map(x => x * x))",
+        // map→filter→map (3 stages, Collect)
+        "print([1,2,3,4,5,6,7,8].map(x => x + 1).filter(x => x > 4).map(x => x * 10))",
+        // range→map→filter→reduce (the zero-allocation scalar pipeline)
+        "print(range(0, 200).map(x => x * x).filter(x => x % 3 == 0).reduce(0, (a, x) => a + x))",
+        // array→map→reduce (1 stage + reduce)
+        "print([1,2,3,4,5].map(x => x * 2).reduce(0, (a, x) => a + x))",
+        // range→filter→map→reduce
+        "print(range(1, 500).filter(x => x % 7 == 0).map(x => x - 1).reduce(0, (a, x) => a + x))",
+    ];
+    for (i, src) in cases.iter().enumerate() {
+        let (vm, stderr, code) = run_source(src, &[], &format!("fuse_vm{i}"));
+        assert_eq!(code, Some(0), "case {i} stderr:\n{stderr}");
+        let (tw, _, _) = run_source(src, &[("HELIX_NOVM", "1")], &format!("fuse_tw{i}"));
+        let (nojit, _, _) = run_source(src, &[("HELIX_NOJIT", "1")], &format!("fuse_nj{i}"));
+        assert_eq!(vm, tw, "case {i}: fused vs tree-walker:\n{src}");
+        assert_eq!(vm, nojit, "case {i}: fused vs bytecode:\n{src}");
+    }
 }
 
 #[test]

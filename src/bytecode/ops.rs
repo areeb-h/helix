@@ -170,6 +170,14 @@ pub enum Op {
     /// as `TryJitMap`, but the native kernel evaluates the boolean predicate per
     /// element and keeps the elements for which it holds (order preserved).
     TryJitFilter { kernel_idx: u32, after: u32 },
+    /// Fast path for a fuseable `map`/`filter`/`reduce` chain (see [`FusedKernel`]). The
+    /// pipeline's source operands are on the stack (an `Int` array, or `[start,end]` for
+    /// a range; plus the `init` for a `Reduce` sink). If they are all `Int` (range within
+    /// the 100M cap) and a fused kernel compiled, the VM runs the single native loop,
+    /// pushes the result (an `Int` array for `Collect`, a scalar for `Reduce`), and jumps
+    /// to `after`. Otherwise it pops the same operands and falls through to the ordinary
+    /// per-stage chain compilation (the oracle path).
+    TryJitFused { kernel_idx: u32, after: u32 },
     /// Raise a runtime error with the given message and hint. Used where the
     /// program is statically known to be an error but the error should still fire
     /// at the point of execution (e.g. reassigning an immutable global, after its
@@ -296,6 +304,48 @@ pub struct ArrayKernel {
     pub body: Expr,
 }
 
+/// One stage of a fused pipeline (`xs.filter(g).map(f)…`). Each is a pure single-binder
+/// `i64` transform the JIT threads through one native loop with no intermediate array.
+#[derive(Debug, Clone)]
+pub enum FusionStage {
+    /// `cur = body(cur)`.
+    Map { binder: String, body: Expr },
+    /// keep `cur` only if `body(cur)` holds, else skip to the next element.
+    Filter { binder: String, body: Expr },
+}
+
+/// What a fused pipeline produces.
+#[derive(Debug, Clone)]
+pub enum FusionSink {
+    /// Build one output `Int` array from the surviving elements.
+    Collect,
+    /// Fold the surviving elements to a scalar with wrapping `i64` arithmetic (the
+    /// explicit-accumulator `reduce`, matching the existing reduce-loop semantics).
+    Reduce { pa: String, pb: String, body: Expr },
+}
+
+/// A fuseable linear pipeline the compiler asked the JIT to lower into a single native
+/// loop: a source (an `Int` array, or a `range` counter), a chain of [`FusionStage`]s,
+/// and a [`FusionSink`]. Indexed by the `kernel_idx` of [`Op::TryJitFused`].
+#[derive(Debug, Clone)]
+pub struct FusedKernel {
+    /// `true` if the source is a `range(start,end)` counter (no input array); otherwise
+    /// the source is an `Int` array passed in.
+    pub source_is_range: bool,
+    pub stages: Vec<FusionStage>,
+    pub sink: FusionSink,
+}
+
+impl FusedKernel {
+    /// How many operands `compile_fused` pushes for this shape (range: `start,end`;
+    /// array: the array; plus the `init` value for a `Reduce` sink). The VM consumes
+    /// exactly this many whether it takes the native path or falls through.
+    pub fn n_operands(&self) -> usize {
+        let src = if self.source_is_range { 2 } else { 1 };
+        src + matches!(self.sink, FusionSink::Reduce { .. }) as usize
+    }
+}
+
 /// One compiled code unit: a function body or the top-level `main`.
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -334,6 +384,9 @@ pub struct Program {
     /// JIT-eligible `filter`/`where` predicates, indexed by
     /// [`Op::TryJitFilter::kernel_idx`].
     pub filter_kernels: Vec<ArrayKernel>,
+    /// Fuseable `map`/`filter`/`reduce` pipelines, indexed by [`Op::TryJitFused`]'s
+    /// `kernel_idx` — each lowered to a single intermediate-free native loop.
+    pub fused_kernels: Vec<FusedKernel>,
     /// Global slot names, aligned with `global_init`. Lets the VM resolve a bare
     /// name to a global's runtime value inside a DataFrame predicate
     /// (`df.where(age > threshold)`) — the column-verb `resolve_var`.

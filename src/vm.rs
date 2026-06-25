@@ -862,6 +862,54 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     }
                 }
             }
+            Op::TryJitFused { kernel_idx, after } => {
+                use crate::bytecode::FusionSink;
+                // The pipeline's source operands sit on the stack (array, or [start,end];
+                // plus init for a Reduce sink). Run the single native loop when they are
+                // all `Int` (range within the 100M cap) and a kernel compiled; otherwise
+                // consume the same operands and fall through to the per-stage chain.
+                let kern = &program.fused_kernels[*kernel_idx as usize];
+                let n = kern.n_operands();
+                let len = stack.len();
+                let result: Option<Value> = jit
+                    .and_then(|j| j.fused_kernel(*kernel_idx as usize))
+                    .and_then(|ptr| {
+                        let ops = &stack[len - n..];
+                        if kern.source_is_range {
+                            match (&ops[0], &ops[1], &ops[2]) {
+                                (Value::Int(s), Value::Int(e), Value::Int(init))
+                                    if (*e as i128 - *s as i128) <= 100_000_000 =>
+                                {
+                                    Some(Value::Int(unsafe {
+                                        crate::jit::call_reduce(ptr, *s, *e, *init)
+                                    }))
+                                }
+                                _ => None,
+                            }
+                        } else if let Value::Array(a) = &ops[0]
+                            && let crate::value::ArrayData::Ints(v) = &**a
+                        {
+                            match &kern.sink {
+                                FusionSink::Collect => Some(Value::int_array(unsafe {
+                                    crate::jit::run_fused_collect(ptr, v)
+                                })),
+                                FusionSink::Reduce { .. } => match &ops[1] {
+                                    Value::Int(init) => Some(Value::Int(unsafe {
+                                        crate::jit::run_fused_reduce(ptr, v, *init)
+                                    })),
+                                    _ => None,
+                                },
+                            }
+                        } else {
+                            None
+                        }
+                    });
+                stack.truncate(len - n);
+                if let Some(v) = result {
+                    stack.push(v);
+                    frames[fi].ip = *after as usize;
+                }
+            }
             Op::CompInitRange => {
                 // Pop [start, end], validate as integers (matching `range`), and
                 // iterate lazily — no array. Validate start first (arg order).

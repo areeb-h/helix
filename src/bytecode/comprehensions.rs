@@ -414,3 +414,180 @@ impl super::Compiler {
         Ok(())
     }
 }
+
+/// The source of a fuseable pipeline, as the AST to compile for the operands.
+pub(super) enum FusionSourceExpr<'a> {
+    Array(&'a Expr),
+    Range(Option<&'a Expr>, &'a Expr),
+}
+
+/// A detected fuseable pipeline: the owned [`FusedKernel`] to register, plus the source
+/// (and `reduce` init) expressions whose operands the guard pushes.
+pub(super) struct FusionPlan<'a> {
+    source: FusionSourceExpr<'a>,
+    init: Option<&'a Expr>,
+    kernel: FusedKernel,
+}
+
+/// An expression cheap and side-effect-free to evaluate twice — the fused guard pushes
+/// the source/init for its native attempt and, on fall-through, the per-stage chain
+/// recompiles them. Restricting fusion to such sources keeps that double-evaluation
+/// unobservable.
+fn is_idempotent(e: &Expr) -> bool {
+    match e {
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Missing => true,
+        Expr::Ident { .. } => true,
+        Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().all(is_idempotent),
+        Expr::Call { name, args, .. } if name == "range" => args.iter().all(is_idempotent),
+        _ => false,
+    }
+}
+
+impl super::Compiler {
+    /// Build a `FusionStage` from a `map`/`filter`/`where` method, or `None` if it is not
+    /// a single-binder JIT-eligible stage.
+    fn fusion_stage(&self, name: &str, args: &[Expr]) -> Option<FusionStage> {
+        if args.len() != 1 {
+            return None;
+        }
+        let (params, body) = crate::interp::comprehension_params(&args[0]);
+        if params.len() != 1 {
+            return None;
+        }
+        let binder = params[0].clone();
+        if name == "map" {
+            crate::jit::map_kernel_eligible(body, &binder)
+                .then(|| FusionStage::Map { binder, body: body.clone() })
+        } else {
+            crate::jit::filter_kernel_eligible(body, &binder)
+                .then(|| FusionStage::Filter { binder, body: body.clone() })
+        }
+    }
+
+    /// Detect a fuseable pipeline rooted at an outer `map`/`filter`/`where`/`reduce`
+    /// method: walk the receiver chain collecting eligible single-binder stages down to
+    /// an idempotent `Int` array or a `range` source. Returns `None` (→ the ordinary
+    /// per-stage path) unless fusion actually removes an intermediate: a `Reduce` sink
+    /// needs ≥1 stage, a `Collect` sink needs ≥2.
+    pub(super) fn collect_fusion_chain<'a>(
+        &self,
+        recv: &'a Expr,
+        name: &str,
+        args: &'a [Expr],
+    ) -> Option<FusionPlan<'a>> {
+        // The outer method is either the reduce sink or the last (outermost) stage.
+        let mut outer_first: Vec<FusionStage> = Vec::new();
+        let (sink, init): (FusionSink, Option<&'a Expr>) = if name == "reduce" {
+            if args.len() != 2 {
+                return None;
+            }
+            let (pa, pb, body) = match &args[1] {
+                Expr::Lambda { params, body, .. } if params.len() == 2 => {
+                    (params[0].clone(), params[1].clone(), body.as_ref())
+                }
+                _ => return None,
+            };
+            if !crate::jit::reduce_loop_eligible(body, &pa, &pb) {
+                return None;
+            }
+            (FusionSink::Reduce { pa, pb, body: body.clone() }, Some(&args[0]))
+        } else {
+            outer_first.push(self.fusion_stage(name, args)?);
+            (FusionSink::Collect, None)
+        };
+
+        // Walk inward, collecting stages (outermost-first) until a non-stage receiver.
+        let mut cur = recv;
+        while let Expr::Method { recv: inner, name: m, args: margs, .. } = cur {
+            if !matches!(m.as_str(), "map" | "filter" | "where") {
+                break;
+            }
+            match self.fusion_stage(m, margs) {
+                Some(stage) => {
+                    outer_first.push(stage);
+                    cur = inner;
+                }
+                None => break,
+            }
+        }
+
+        // Pipeline order is innermost→outermost (the reverse of how we collected).
+        let mut stages = outer_first;
+        stages.reverse();
+
+        let (source, source_is_range) = if let Some((start, end)) = as_range_call(cur) {
+            (FusionSourceExpr::Range(start, end), true)
+        } else if is_idempotent(cur) {
+            (FusionSourceExpr::Array(cur), false)
+        } else {
+            return None;
+        };
+        // A range source has no array to collect into; only a Reduce sink fuses with it.
+        if source_is_range && matches!(sink, FusionSink::Collect) {
+            return None;
+        }
+        if let Some(i) = init
+            && !is_idempotent(i)
+        {
+            return None;
+        }
+        let enough = match &sink {
+            FusionSink::Reduce { .. } => !stages.is_empty(),
+            FusionSink::Collect => stages.len() >= 2,
+        };
+        if !enough {
+            return None;
+        }
+        let kernel = FusedKernel { source_is_range, stages, sink };
+        Some(FusionPlan { source, init, kernel })
+    }
+
+    /// Emit a fused pipeline: push the source (and `reduce` init) operands, a
+    /// `TryJitFused` guard, then the ordinary per-stage chain as the fall-through (the
+    /// guard discards the operands and the chain recompiles the idempotent source). The
+    /// native path produces the result and jumps past the fall-through.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn compile_fused(
+        &mut self,
+        b: &mut Builder,
+        recv: &Expr,
+        name: &str,
+        args: &[Expr],
+        plan: FusionPlan,
+        line: usize,
+        col: usize,
+    ) -> R<()> {
+        let FusionPlan { source, init, kernel } = plan;
+        let kernel_idx = self.fused_kernels.len() as u32;
+        self.fused_kernels.push(kernel);
+
+        match source {
+            FusionSourceExpr::Array(e) => self.compile_expr(b, e)?,
+            FusionSourceExpr::Range(start, end) => {
+                match start {
+                    None => {
+                        let c0 = b.add_const(Value::Int(0));
+                        b.emit(Op::Const(c0), line, col);
+                    }
+                    Some(e) => self.compile_expr(b, e)?,
+                }
+                self.compile_expr(b, end)?;
+            }
+        }
+        if let Some(i) = init {
+            self.compile_expr(b, i)?;
+        }
+        let at = b.emit(Op::TryJitFused { kernel_idx, after: 0 }, line, col);
+
+        // Fall-through: recompile the chain per-stage, with fusion suppressed so it does
+        // not re-detect itself. (The single-stage kernels still apply within it.)
+        self.no_fuse = true;
+        let r = self.compile_comprehension(b, recv, name, args, line, col);
+        self.no_fuse = false;
+        r?;
+
+        let after = b.code.len() as u32;
+        b.code[at] = Op::TryJitFused { kernel_idx, after };
+        Ok(())
+    }
+}
