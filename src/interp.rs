@@ -119,10 +119,10 @@ impl Interp {
             } => {
                 // Annotations are checker-only; the interpreter needs just names.
                 let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
-                let f = Value::Function {
+                let f = Value::Function(Rc::new(crate::value::FuncVal {
                     params: Rc::new(param_names),
                     body: Rc::new(body.clone()),
-                };
+                }));
                 self.bind(name, f, false, *line, *col)?;
                 Ok(StmtOutcome {
                     value: Value::Unit,
@@ -333,7 +333,7 @@ impl Interp {
                 }
                 // A user-defined (or anonymous, stored-in-a-variable) function?
                 let func = self.env.get(name).and_then(|b| match &b.value {
-                    Value::Function { params, body } => Some((params.clone(), body.clone())),
+                    Value::Function(g) => Some((g.params.clone(), g.body.clone())),
                     _ => None,
                 });
                 if let Some((params, body)) = func {
@@ -353,7 +353,7 @@ impl Interp {
                 cands.extend(
                     self.env
                         .iter()
-                        .filter(|(_, b)| matches!(b.value, Value::Function { .. }))
+                        .filter(|(_, b)| matches!(b.value, Value::Function(_)))
                         .map(|(k, _)| k.clone()),
                 );
                 let cand_refs: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
@@ -393,7 +393,7 @@ impl Interp {
                 // before the array comprehension path.
                 match &recv_v {
                     Value::DataFrame(lf) => {
-                        return self.eval_df_method(lf.clone(), name, args, *line, *col);
+                        return self.eval_df_method((**lf).clone(), name, args, *line, *col);
                     }
                     Value::GroupBy(g) => {
                         return self.eval_groupby_method(
@@ -459,10 +459,10 @@ impl Interp {
                 }
                 eval_slice(&recv_v, s, e, st, *line, *col)
             }
-            Expr::Lambda { params, body, .. } => Ok(Value::Function {
+            Expr::Lambda { params, body, .. } => Ok(Value::Function(Rc::new(crate::value::FuncVal {
                 params: Rc::new(params.clone()),
                 body: Rc::new((**body).clone()),
-            }),
+            }))),
             Expr::Let { bindings, body } => {
                 // Bind sequentially (later bindings see earlier ones), evaluate
                 // the body, then restore the outer scope.

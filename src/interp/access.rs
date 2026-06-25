@@ -212,7 +212,7 @@ pub(crate) fn df_value_method(
                 return Err(HelixError::new("`cache` takes no arguments", line, col)
                     .hint("e.g. `big = read_csv(\"x.csv\").cache()` to reuse without re-scanning."));
             }
-            Ok(Value::DataFrame(lf.cache(line, col)?))
+            Ok(Value::dataframe(lf.cache(line, col)?))
         }
         "head" => {
             if args.len() != 1 {
@@ -220,7 +220,7 @@ pub(crate) fn df_value_method(
                     .hint("e.g. `df.head(5)`."));
             }
             let n = as_int(&args[0], "head", line, col)?.max(0) as usize;
-            Ok(Value::DataFrame(lf.head(n)))
+            Ok(Value::dataframe(lf.head(n)))
         }
         "column" => {
             let name = column_arg(&args, line, col)?;

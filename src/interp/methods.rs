@@ -250,6 +250,11 @@ fn array_method(
         }
         "drop_missing" => {
             no_args(name)?;
+            // Common case: nothing to drop → share the input array (an `Rc` bump,
+            // zero allocation) instead of copying every element into a new `Vec`.
+            if !items.iter().any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Array(Rc::clone(items)));
+            }
             let out: Vec<Value> = items
                 .iter()
                 .filter(|v| !matches!(v, Value::Missing))

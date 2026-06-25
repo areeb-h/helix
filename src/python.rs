@@ -270,7 +270,7 @@ mod imp {
                 Kind::Object(obj) => Python::attach(|py| {
                     let pydf: pyo3_polars::PyDataFrame =
                         obj.bind(py).extract().map_err(|e| py_err(py, e, line, col))?;
-                    Ok(Value::DataFrame(crate::backend::polars::from_polars_df(pydf.0)))
+                    Ok(Value::dataframe(crate::backend::polars::from_polars_df(pydf.0)))
                 }),
                 Kind::Namespace => Err(HelixError::new(
                     "`to_dataframe` cannot convert the `python` namespace",

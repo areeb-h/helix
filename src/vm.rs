@@ -98,8 +98,25 @@ enum MemoArg {
     Float(u64),
 }
 
-/// Key into the memo table: (function index, scalar arguments).
-type MemoKey = (usize, Vec<MemoArg>);
+/// Key into the memo table: a function index plus its scalar arguments. The 1- and
+/// 2-argument cases (the overwhelming majority — `fib(n)`, `ackermann(m,n)`, …) are
+/// stored **inline** so a memoizable call needs no heap allocation for its key; only
+/// 3+ args fall back to a `Vec`.
+#[derive(Hash, PartialEq, Eq, Clone)]
+enum MemoKey {
+    A1(usize, MemoArg),
+    A2(usize, MemoArg, MemoArg),
+    An(usize, Vec<MemoArg>),
+}
+
+/// Project a (gated-scalar) argument value into a hashable memo argument.
+fn memo_arg(v: &Value) -> MemoArg {
+    match v {
+        Value::Int(n) => MemoArg::Int(*n),
+        Value::Float(f) => MemoArg::Float(f.to_bits()),
+        _ => MemoArg::Int(0), // unreachable: gated by all_scalar
+    }
+}
 
 /// What a comprehension iterates: a materialized array, or — for a fused
 /// `range(...)` — a lazy integer counter (no array allocated at all).
@@ -178,7 +195,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
         // per executed op (tens of millions of times in a hot recursion), so a
         // per-dispatch clone is pure waste.
         let op = &chunk.code[ip];
-        let (line, col) = chunk.pos[ip];
+        let (line, col) = {
+            let (l, c) = chunk.pos[ip];
+            (l as usize, c as usize)
+        };
         frames[fi].ip = ip + 1; // default advance; control-flow ops overwrite it
 
         match op {
@@ -306,15 +326,12 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // return. This turns exponential recursion (e.g. `fib`) linear —
                 // for integer *and* float arguments.
                 if program.memoizable[idx] && all_scalar {
-                    let kargs: Vec<MemoArg> = stack[start..]
-                        .iter()
-                        .map(|v| match v {
-                            Value::Int(n) => MemoArg::Int(*n),
-                            Value::Float(f) => MemoArg::Float(f.to_bits()),
-                            _ => MemoArg::Int(0), // unreachable: gated by all_scalar
-                        })
-                        .collect();
-                    let key: MemoKey = (idx, kargs);
+                    let kargs = &stack[start..];
+                    let key = match kargs.len() {
+                        1 => MemoKey::A1(idx, memo_arg(&kargs[0])),
+                        2 => MemoKey::A2(idx, memo_arg(&kargs[0]), memo_arg(&kargs[1])),
+                        _ => MemoKey::An(idx, kargs.iter().map(memo_arg).collect()),
+                    };
                     if let Some(cached) = memo.get(&key) {
                         let cached = cached.clone();
                         stack.truncate(start);
@@ -593,7 +610,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 }?;
                 stack.push(result);
             }
-            Op::DfColumnVerb { name, args, locals: lbind } => {
+            Op::DfColumnVerb(d) => {
+                let (name, args, lbind) = (&d.name, &d.args, &d.locals);
                 // A DataFrame column-verb (the type checker proved the receiver is a
                 // DataFrame). `resolve_var` resolves a bare predicate name that
                 // isn't a column to a local (via the captured slot map) or a global
@@ -641,7 +659,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let lf = as_df(&left)?;
                 let rf = as_df(&right)?;
                 let (keys, how) = crate::interp::parse_join_spec(spec.as_slice(), line, col)?;
-                stack.push(Value::DataFrame(lf.join(&rf, &keys, &how, line, col)?));
+                stack.push(Value::dataframe(lf.join(&rf, &keys, &how, line, col)?));
             }
             Op::GroupByAgg { name, args } => {
                 let recv = stack.pop().unwrap();

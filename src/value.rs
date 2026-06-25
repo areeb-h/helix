@@ -32,18 +32,25 @@ pub enum Value {
     /// extend the plan; it materializes only at `print`/`count` — so a chain fuses
     /// into one multi-threaded pass and (with the default Polars backend's
     /// streaming engine) can run over data far larger than RAM.
-    DataFrame(Df),
+    ///
+    /// Wrapped in a second `Rc` so this variant is **one word** (`Df` is a fat
+    /// `Rc<dyn DataHandle>` = two words): that keeps `Value` at 16 bytes for the
+    /// hot scalar/array paths. Cloning is still O(1) (outer `Rc` bump); the only
+    /// cost is one extra allocation at frame *creation* (a cold path) and one extra
+    /// indirection on access — both negligible since DataFrames never live in hot
+    /// VM loops.
+    DataFrame(Rc<Df>),
     /// The intermediate produced by `df.group(keys)`, consumed by an aggregation
     /// like `.mean(col)`. Boxed behind an `Rc` because it's a rare, transient value
     /// (never stored in arrays or hot loops); inlining its two-word payload would
     /// bloat *every* `Value` — and thus every VM stack push/pop/clone — for nothing.
     GroupBy(Rc<GroupByData>),
     /// A function value — from `fn name(p) = expr` or an anonymous `p => expr`.
-    /// Used by the tree-walker (which evaluates `body` directly).
-    Function {
-        params: Rc<Vec<String>>,
-        body: Rc<Expr>,
-    },
+    /// Used by the tree-walker (which evaluates `body` directly). The two `Rc`s are
+    /// collapsed behind one (`Rc<FuncVal>`) so this variant is one word, keeping
+    /// `Value` at 16 bytes; the VM uses the inline `VmFunc` instead, so this never
+    /// touches the bytecode hot path.
+    Function(Rc<FuncVal>),
     /// A function value in the **VM**: a reference to a compiled chunk
     /// (`program.funcs[idx]`) plus its arity. Equivalent to `Function` for the user
     /// (same `<function/N>` rendering and `Function` type name); the VM uses a chunk
@@ -77,16 +84,30 @@ pub struct GroupByData {
     pub keys: Rc<Vec<String>>,
 }
 
+/// The payload of a [`Value::Function`] (tree-walker function value), held behind
+/// an `Rc` so the variant is one word wide.
+pub struct FuncVal {
+    pub params: Rc<Vec<String>>,
+    pub body: Rc<Expr>,
+}
+
 // The interpreter copies `Value`s constantly (every VM stack op, every binding),
 // so its size is a hot-path constant. Keep it small: scalars and Rc-wrapped
 // collections fit in two words. A regression here (e.g. inlining a fat variant)
 // would silently tax every clone.
 const _: () = assert!(
-    std::mem::size_of::<Value>() <= 24,
-    "Value grew past 3 words — box the offending variant",
+    std::mem::size_of::<Value>() <= 16,
+    "Value grew past 2 words — box the offending variant",
 );
 
 impl Value {
+    /// Wrap a backend DataFrame handle into a `Value`. The extra `Rc` keeps the
+    /// `DataFrame` variant one word wide (see the variant's doc); construct through
+    /// here so the wrapping lives in one place.
+    pub fn dataframe(df: Df) -> Value {
+        Value::DataFrame(Rc::new(df))
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Int(_) => "Int",
@@ -99,7 +120,7 @@ impl Value {
             Value::Tensor(_) => "Tensor",
             Value::DataFrame(_) => "DataFrame",
             Value::GroupBy(_) => "GroupBy",
-            Value::Function { .. } => "Function",
+            Value::Function(_) => "Function",
             Value::VmFunc { .. } => "Function",
             Value::Dna(_) => "Dna",
             Value::Missing => "Missing",
@@ -135,7 +156,7 @@ impl fmt::Debug for Value {
         match self {
             Value::DataFrame(_) => write!(f, "DataFrame(<lazy plan>)"),
             Value::GroupBy(g) => write!(f, "GroupBy(keys={:?})", g.keys),
-            Value::Function { params, .. } => write!(f, "Function(params={:?})", params),
+            Value::Function(g) => write!(f, "Function(params={:?})", g.params),
             Value::VmFunc { arity, .. } => write!(f, "Function(arity={})", arity),
             Value::Tensor(t) => write!(f, "Tensor(shape={:?})", t.shape()),
             Value::PyObject(h) => write!(f, "PyObject({})", h.repr()),
@@ -159,7 +180,7 @@ impl fmt::Display for Value {
                 Err(e) => write!(f, "<dataframe — query failed: {}>", e),
             },
             Value::GroupBy(g) => write!(f, "<grouped by {}>", g.keys.join(", ")),
-            Value::Function { params, .. } => write!(f, "<function/{}>", params.len()),
+            Value::Function(g) => write!(f, "<function/{}>", g.params.len()),
             Value::VmFunc { arity, .. } => write!(f, "<function/{}>", arity),
             Value::Missing => write!(f, "missing"),
             Value::Unit => write!(f, "()"),

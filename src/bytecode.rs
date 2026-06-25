@@ -76,7 +76,7 @@ enum NameRef {
 struct Builder {
     code: Vec<Op>,
     consts: Vec<Value>,
-    pos: Vec<(usize, usize)>,
+    pos: Vec<(u32, u32)>,
     /// Lexical scopes of locals; each entry maps a name to its slot.
     scopes: Vec<Vec<(String, u32)>>,
     next_slot: u32,
@@ -98,7 +98,7 @@ impl Builder {
     fn emit(&mut self, op: Op, line: usize, col: usize) -> usize {
         let at = self.code.len();
         self.code.push(op);
-        self.pos.push((line, col));
+        self.pos.push((line as u32, col as u32));
         at
     }
 
@@ -738,11 +738,11 @@ impl Compiler {
                     self.compile_expr(b, recv)?;
                     let locals = std::rc::Rc::new(b.in_scope_locals());
                     b.emit(
-                        Op::DfColumnVerb {
+                        Op::DfColumnVerb(std::rc::Rc::new(DfColumnVerbData {
                             name: std::rc::Rc::new(name.clone()),
                             args: std::rc::Rc::new(args.to_vec()),
                             locals,
-                        },
+                        })),
                         *line,
                         *col,
                     );
@@ -823,11 +823,11 @@ impl Compiler {
                     self.compile_expr(b, recv)?;
                     let locals = std::rc::Rc::new(b.in_scope_locals());
                     b.emit(
-                        Op::DfColumnVerb {
+                        Op::DfColumnVerb(std::rc::Rc::new(DfColumnVerbData {
                             name: std::rc::Rc::new(name.clone()),
                             args: std::rc::Rc::new(args.to_vec()),
                             locals,
-                        },
+                        })),
                         *line,
                         *col,
                     );

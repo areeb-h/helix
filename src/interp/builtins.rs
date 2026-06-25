@@ -96,14 +96,14 @@ impl super::Interp {
             "io.read_csv" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
-                    Value::Str(s) => Ok(Value::DataFrame(dataframe::read_csv(s, line, col)?)),
+                    Value::Str(s) => Ok(Value::dataframe(dataframe::read_csv(s, line, col)?)),
                     other => Err(type_err("io.read_csv", "a string path", other, line, col)),
                 }
             }
             "bio.read_vcf" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
-                    Value::Str(s) => Ok(Value::DataFrame(crate::vcf::read_vcf(s, line, col)?)),
+                    Value::Str(s) => Ok(Value::dataframe(crate::vcf::read_vcf(s, line, col)?)),
                     other => Err(type_err("bio.read_vcf", "a string path", other, line, col)),
                 }
             }
@@ -127,7 +127,7 @@ impl super::Interp {
             "io.read_parquet" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
-                    Value::Str(s) => Ok(Value::DataFrame(dataframe::read_parquet(s, line, col)?)),
+                    Value::Str(s) => Ok(Value::dataframe(dataframe::read_parquet(s, line, col)?)),
                     other => Err(type_err("io.read_parquet", "a string path", other, line, col)),
                 }
             }

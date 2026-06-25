@@ -81,17 +81,17 @@ pub(crate) fn df_column_verb(
             }
             let columns = lf.column_names(line, col)?;
             let pred = dataframe::ast_to_colexpr(&args[0], &columns, resolve_var)?;
-            Ok(Value::DataFrame(lf.filter(&pred, line, col)?))
+            Ok(Value::dataframe(lf.filter(&pred, line, col)?))
         }
         "select" => {
             let names = column_name_args(args, line, col)?;
             crate::backend::validate_columns_exist(lf, &names, line, col)?;
-            Ok(Value::DataFrame(lf.select(&names, line, col)?))
+            Ok(Value::dataframe(lf.select(&names, line, col)?))
         }
         "sort" => {
             let names = column_name_args(args, line, col)?;
             crate::backend::validate_columns_exist(lf, &names, line, col)?;
-            Ok(Value::DataFrame(lf.sort(&names, line, col)?))
+            Ok(Value::dataframe(lf.sort(&names, line, col)?))
         }
         "group" => {
             let names = column_name_args(args, line, col)?;
@@ -117,7 +117,7 @@ pub(crate) fn df_column_verb(
                 let ce = dataframe::ast_to_colexpr(vexpr, &columns, resolve_var)?;
                 cols.push((cname.clone(), ce));
             }
-            Ok(Value::DataFrame(lf.with_columns(&cols, line, col)?))
+            Ok(Value::dataframe(lf.with_columns(&cols, line, col)?))
         }
         _ => unreachable!("df_column_verb only handles where/filter/select/sort/group/with"),
     }
@@ -146,7 +146,7 @@ pub(crate) fn groupby_agg(
                 line,
                 col,
             )?;
-            Ok(Value::DataFrame(handle.group_agg(keys, name, &value_col, line, col)?))
+            Ok(Value::dataframe(handle.group_agg(keys, name, &value_col, line, col)?))
         }
         _ => Err(HelixError::new(
             format!("a grouped DataFrame has no aggregation `{}`", name),
@@ -197,7 +197,7 @@ impl super::Interp {
                     }
                 };
                 let (keys, how) = parse_join_spec(&args[1..], line, col)?;
-                Ok(Value::DataFrame(lf.join(&right, &keys, &how, line, col)?))
+                Ok(Value::dataframe(lf.join(&right, &keys, &how, line, col)?))
             }
             "head" => {
                 if args.len() != 1 {
@@ -206,7 +206,7 @@ impl super::Interp {
                 }
                 let v = self.eval(&args[0])?;
                 let n = as_int(&v, "head", line, col)?.max(0) as usize;
-                Ok(Value::DataFrame(lf.head(n)))
+                Ok(Value::dataframe(lf.head(n)))
             }
             "count" => {
                 if !args.is_empty() {
@@ -227,7 +227,7 @@ impl super::Interp {
                     return Err(HelixError::new("`cache` takes no arguments", line, col)
                         .hint("e.g. `big = read_csv(\"x.csv\").cache()` to reuse without re-scanning."));
                 }
-                Ok(Value::DataFrame(lf.cache(line, col)?))
+                Ok(Value::dataframe(lf.cache(line, col)?))
             }
             "columns" => {
                 if !args.is_empty() {

@@ -94,11 +94,7 @@ pub enum Op {
     /// names resolve against the frame's columns first, then `locals` (by slot),
     /// then globals. Emitted only when the type checker proved the receiver is a
     /// DataFrame, so the args are genuinely columns, not values.
-    DfColumnVerb {
-        name: std::rc::Rc<String>,
-        args: std::rc::Rc<Vec<Expr>>,
-        locals: std::rc::Rc<Vec<(String, u32)>>,
-    },
+    DfColumnVerb(std::rc::Rc<DfColumnVerbData>),
     /// Pop two DataFrames — the right operand then the left receiver — and join
     /// them on shared key columns. Unlike the column verbs, the right operand is a
     /// fully evaluated value, so it is compiled and pushed normally; `spec` carries
@@ -160,6 +156,25 @@ pub enum Op {
     Return,
 }
 
+/// The payload of [`Op::DfColumnVerb`] (the only 3-field op), boxed behind one
+/// `Rc` so `Op` stays small — the dispatch loop streams every instruction, so the
+/// enum's width is a hot-path constant. DataFrame verbs are emitted at most once
+/// per source occurrence and never in hot loops, so the extra indirection is free.
+#[derive(Debug, Clone)]
+pub struct DfColumnVerbData {
+    pub name: std::rc::Rc<String>,
+    pub args: std::rc::Rc<Vec<Expr>>,
+    pub locals: std::rc::Rc<Vec<(String, u32)>>,
+}
+
+// The bytecode dispatch loop reads one `Op` per executed instruction (millions of
+// times in a hot recursion), and a program's `code` is `Vec<Op>` — so `Op`'s width
+// is both a hot-path and a memory constant. Keep the fat/rare variants boxed.
+const _: () = assert!(
+    std::mem::size_of::<Op>() <= 24,
+    "Op grew — box the offending variant (see DfColumnVerbData)",
+);
+
 /// A JIT-eligible `reduce` loop body the compiler asked the JIT to compile. The
 /// JIT lowers each to a native `extern "C" fn(i64 start, i64 end, i64 init)->i64`;
 /// the index into [`Program::reduce_loops`] is the `loop_idx` in [`Op::TryJitReduce`].
@@ -178,7 +193,9 @@ pub struct ReduceLoop {
 pub struct Chunk {
     pub code: Vec<Op>,
     pub consts: Vec<Value>,
-    pub pos: Vec<(usize, usize)>,
+    /// Source `(line, col)` per instruction, for error reporting. `u32` (not
+    /// `usize`) halves this side-table — line/col never exceed `u32` in real source.
+    pub pos: Vec<(u32, u32)>,
     pub n_params: u32,
     /// Total local slots to reserve in a frame (params + every `let` binding).
     pub n_locals: u32,
