@@ -1,6 +1,6 @@
 # ADR 0013 — Package manager (manifest, lockfile, resolution)
 
-- **Status:** In progress (v1 shipped: manifest + lockfile + path dependencies)
+- **Status:** In progress (shipped: manifest + lockfile + path & https dependencies)
 - **Date:** 2026-06-26
 - **Deciders:** Areeb + Claude
 - **Builds on:** [ADR 0009](0009-distribution-and-install.md) (decision #6: tamper-evident
@@ -59,11 +59,18 @@ package). A single flat dependency namespace in v1.
   integration (`import dep.module`), and `helix new` / `helix sync`. `sha2` is now a
   core dependency (the integrity hash is part of the toolchain). Fully offline and
   locally verifiable — the reproducibility property holds today for path deps.
-- **Next:** `git`/`https` sources (fetch via the ADR-0010 verified-download layer —
-  the lockfile already carries the hash for any source); a fetch cache under the XDG
-  data dir; `helix run` *verifying* the lockfile (error if a dependency's source drifted
-  since `sync`); `helix add`/`verify`; per-package dependency scoping; and the unified
-  Helix + managed-Python lockfile (ADR 0009 #6).
+- **Remote `https` sources shipped:** `dep = { url = "…tar.gz", sha256 = "…" }`. The
+  download is rejected unless its hash matches the pinned `sha256` (the trust boundary,
+  via the ADR-0010 verified-download layer), then unpacked into a **content-addressed
+  cache** (`$XDG_CACHE_HOME/helix/cache/<sha256>/`, override `HELIX_CACHE`) keyed by that
+  hash — a present entry was provably verified, so fetch is skipped forever after.
+  `tar`'s extraction refuses path-escape entries. The single-top-level-dir tarball layout
+  (GitHub/npm) is unwrapped automatically. The networking primitive (`src/net.rs`) is now
+  gated on `http` (default-on), not `managed`; an air-gapped build (`--no-default-features`)
+  rejects `url` deps with a clean, actionable error and stays path-only.
+- **Next:** `git` sources (rev-pinned); `helix run` already *verifies* the lockfile
+  (error if a dependency's source drifted since `sync`); `helix add`/`verify`; per-package
+  dependency scoping; and the unified Helix + managed-Python lockfile (ADR 0009 #6).
 
 ## Rejected alternatives
 

@@ -6,9 +6,11 @@
 //! check, not TLS, is the trust boundary.
 //!
 //! HTTPS-only, pure-Rust TLS (rustls via `ureq`) to keep the binary self-contained
-//! (never OpenSSL). Behind the `managed` feature so the core stays dependency-free.
+//! (never OpenSSL). Gated on the `http` feature (default-on) — the networking
+//! primitive shared by `http_get`, the package manager's remote sources, and managed
+//! runtimes. `--no-default-features` yields a network-free binary (air-gapped).
 
-#[cfg(feature = "managed")]
+#[cfg(feature = "http")]
 mod imp {
     use sha2::{Digest, Sha256};
     use std::io::Read;
@@ -82,7 +84,7 @@ mod imp {
         }
 
         // A real network round-trip — ignored by default so the suite stays offline /
-        // air-gapped-friendly. Run with: `cargo test --features managed -- --ignored`.
+        // air-gapped-friendly. Run with: `cargo test -- --ignored`.
         #[test]
         #[ignore]
         fn real_download_verifies_and_rejects_tampering() {
@@ -96,5 +98,5 @@ mod imp {
     }
 }
 
-#[cfg(feature = "managed")]
+#[cfg(feature = "http")]
 pub use imp::*;
