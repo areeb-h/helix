@@ -236,12 +236,12 @@ fn run_program(program: &[ast::Stmt], spans: &[module::Span], multi: bool) -> Re
     // receiver-polymorphic methods (DataFrame/Tensor column-verbs) correctly.
     let types = types::check(program).map_err(|e| render_err(e, spans, multi))?;
 
-    // The tree-walker runs in two cases: `HELIX_NOVM=1` (A/B benchmarking and engine
-    // agreement), and any program that uses `try`, since error recovery is currently
-    // implemented in the tree-walker but not the bytecode VM. The tree-walker recurses
-    // on the native stack, so it runs on a big-stack thread (scoped, to borrow
-    // `program`/`src` without cloning).
-    if std::env::var_os("HELIX_NOVM").is_some() || bytecode::uses_try(program) {
+    // The tree-walker now runs only under `HELIX_NOVM=1` (A/B benchmarking and the
+    // engine-agreement oracle). `try` used to force the whole program here — and with
+    // it lose the VM/JIT/memoization and the heap-recursion depth limit — but error
+    // recovery is now native in the VM (`Op::TryBegin`/`TryOk`/`TryErr` + the handler
+    // unwind), so a `try` anywhere no longer demotes the program.
+    if std::env::var_os("HELIX_NOVM").is_some() {
         // Already on the 2 GiB-stack thread (every caller wraps the pipeline in
         // `run_on_big_stack`), so the tree-walker's native-stack recursion has
         // headroom; run it directly rather than nesting another big-stack thread.

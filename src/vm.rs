@@ -147,6 +147,18 @@ struct Frame {
     memo_key: Option<MemoKey>,
 }
 
+/// An active `try` error handler (from `Op::TryBegin`). Records the exact depths of
+/// every VM stack at the point the `try` was entered, so an error anywhere inside —
+/// however deeply nested the call chain — unwinds back to here and resumes at
+/// `catch_ip`. A `Vec` of these is a LIFO stack, so the innermost `try` catches first.
+struct Handler {
+    stack_len: usize,
+    frame_depth: usize,
+    locals_len: usize,
+    iters_len: usize,
+    catch_ip: usize,
+}
+
 /// Execute a compiled program, printing output and returning the first runtime
 /// error (if any) for the caller to render. `jit`, when present, supplies native
 /// code for eligible integer functions.
@@ -177,6 +189,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
     // bytecode analysis) are pure functions of their integer arguments.
     let mut memo: HashMap<MemoKey, Value> = HashMap::new();
     let mut iters: Vec<CompIter> = Vec::new();
+    // Active `try` handlers (LIFO). Empty in the overwhelmingly common case; an
+    // error only consults it, so non-`try` programs pay nothing.
+    let mut handlers: Vec<Handler> = Vec::new();
 
     let main = &program.funcs[0];
     locals.resize(main.n_locals as usize, Value::Unit);
@@ -201,6 +216,12 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
         };
         frames[fi].ip = ip + 1; // default advance; control-flow ops overwrite it
 
+        // Run the op inside a closure so an error can be CAUGHT (routed to the
+        // nearest `try` handler) instead of propagating straight out of `exec`. An
+        // in-arm `continue` becomes `return Ok(())` (nothing runs after the match, so
+        // they're equivalent); a `return Err(..)` becomes the closure's error. LLVM
+        // inlines this single-call closure, so the dispatch loop stays zero-overhead.
+        let step: Result<(), HelixError> = (|| {
         match op {
             Op::Const(k) => stack.push(chunk.consts[*k as usize].clone()),
             Op::LoadLocal(slot) => {
@@ -336,7 +357,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         let cached = cached.clone();
                         stack.truncate(start);
                         stack.push(cached);
-                        continue;
+                        return Ok(());
                     }
                     let callee = &program.funcs[idx];
                     if nargs != callee.n_params as usize {
@@ -365,7 +386,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     locals.extend(stack.drain(start..));
                     locals.resize(base + callee.n_locals as usize, Value::Unit);
                     frames.push(Frame { func: idx, ip: 0, base, memo_key: Some(key) });
-                    continue;
+                    return Ok(());
                 }
 
                 // Native fast path: dispatch to the specialization matching the
@@ -392,14 +413,14 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         stack.truncate(start);
                         let r = unsafe { crate::jit::call_i64(ptr, &iargs) };
                         stack.push(Value::Int(r));
-                        continue;
+                        return Ok(());
                     }
                     if all_float && let Some(ptr) = nf.f64_ptr {
                         let fargs: Vec<f64> = tail.iter().map(|v| v.as_f64().unwrap()).collect();
                         stack.truncate(start);
                         let r = unsafe { crate::jit::call_f64(ptr, &fargs) };
                         stack.push(Value::Float(r));
-                        continue;
+                        return Ok(());
                     }
                 }
                 let callee = &program.funcs[idx];
@@ -867,8 +888,54 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::Raise(d) => {
                 return Err(HelixError::new((*d.msg).clone(), line, col).hint((*d.hint).clone()));
             }
+            Op::TryBegin(catch_ip) => {
+                handlers.push(Handler {
+                    stack_len: stack.len(),
+                    frame_depth: frames.len(),
+                    locals_len: locals.len(),
+                    iters_len: iters.len(),
+                    catch_ip: *catch_ip as usize,
+                });
+            }
+            Op::TryOk(end_ip) => {
+                // Body finished normally: drop the handler, wrap the value in the
+                // ok-record, and jump past the catch.
+                handlers.pop();
+                let v = stack.pop().unwrap();
+                stack.push(crate::interp::try_ok(v));
+                frames[fi].ip = *end_ip as usize;
+            }
+            Op::TryErr => {
+                // Reached via an unwind, which pushed the error message: wrap it in
+                // the err-record. (The handler was already popped during the unwind.)
+                let msg = match stack.pop().unwrap() {
+                    Value::Str(s) => (*s).clone(),
+                    other => other.to_string(),
+                };
+                stack.push(crate::interp::try_err(msg));
+            }
             Op::Pop => {
                 stack.pop();
+            }
+        }
+        Ok(())
+        })();
+        if let Err(e) = step {
+            match handlers.pop() {
+                // Caught by the nearest active `try`: unwind every VM stack to the
+                // depths recorded at `TryBegin`, resume at its catch handler with the
+                // error message on the operand stack (consumed by `Op::TryErr`).
+                Some(h) => {
+                    stack.truncate(h.stack_len);
+                    frames.truncate(h.frame_depth);
+                    locals.truncate(h.locals_len);
+                    iters.truncate(h.iters_len);
+                    let tf = frames.len() - 1;
+                    frames[tf].ip = h.catch_ip;
+                    stack.push(Value::Str(std::rc::Rc::new(e.message)));
+                }
+                // No active `try`: propagate out of the VM as a real error.
+                None => return Err(e),
             }
         }
     }

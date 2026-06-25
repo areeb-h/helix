@@ -149,6 +149,18 @@ pub enum Op {
     /// at the point of execution (e.g. reassigning an immutable global, after its
     /// value expression — and any side effects — have run).
     Raise(std::rc::Rc<RaiseData>),
+    /// `try EXPR` — push an error handler recording the current stack/frame/local/
+    /// iterator depths. If ANY op errors before the matching `TryOk`, the VM unwinds
+    /// to those depths and jumps to `catch_ip` (a `TryErr`) with the error message
+    /// pushed on the stack — so `try` runs natively on the VM, no tree-walker.
+    TryBegin(u32),
+    /// Normal completion of a `try` body: pop the handler, wrap the result value
+    /// (top of stack) in the ok-record `{ok:true, value, error:missing}`, and jump
+    /// past the catch to `end_ip`.
+    TryOk(u32),
+    /// The catch target: wrap the caught error message (top of stack) in the
+    /// err-record `{ok:false, value:missing, error:msg}`.
+    TryErr,
     /// Discard the top of the stack (an expression-statement's value).
     Pop,
     /// Return the top of the stack from the current function frame.

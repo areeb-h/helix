@@ -594,19 +594,20 @@ impl Compiler {
                 let end = b.code.len() as u32;
                 b.code[jend] = Op::Jump(end);
             }
-            // `try` runs on the tree-walker: the runner routes any program that uses
-            // it there (see `main.rs` and `bytecode::uses_try`), because the VM does
-            // not yet implement exception handling. This arm exists only for match
-            // completeness and is not reached in practice.
-            Expr::Try { line, col, .. } => {
-                b.emit(
-                    Op::raise(
-                        std::rc::Rc::new("`try` is not supported by the bytecode VM".to_string()),
-                        std::rc::Rc::new("internal routing error; please report it".to_string()),
-                    ),
-                    *line,
-                    *col,
-                );
+            // `try EXPR` compiles to a guarded region: `TryBegin(catch)` installs a
+            // handler, the body runs, `TryOk(end)` wraps the value in the ok-record on
+            // the normal path, and `TryErr` at `catch` wraps the caught message in the
+            // err-record. The VM's central error handler unwinds to the nearest
+            // handler — so `try` is native, no tree-walker fallback.
+            Expr::Try { expr, line, col } => {
+                let jbegin = b.emit(Op::TryBegin(0), *line, *col);
+                self.compile_expr(b, expr)?;
+                let jok = b.emit(Op::TryOk(0), *line, *col);
+                let catch_ip = b.code.len() as u32;
+                b.emit(Op::TryErr, *line, *col);
+                let end_ip = b.code.len() as u32;
+                b.code[jbegin] = Op::TryBegin(catch_ip);
+                b.code[jok] = Op::TryOk(end_ip);
             }
             Expr::Let { bindings, body } => {
                 b.scopes.push(Vec::new());

@@ -233,18 +233,3 @@ fn children(e: &Expr) -> Vec<&Expr> {
         Expr::Try { expr, .. } => vec![expr],
     }
 }
-
-/// True if the program uses `try` anywhere. Programs that use `try` run on the
-/// tree-walker, which supports error recovery directly; the bytecode VM does not
-/// yet implement exception handling, so the runner routes around it (see `main.rs`).
-pub(crate) fn uses_try(stmts: &[Stmt]) -> bool {
-    fn expr_uses_try(e: &Expr) -> bool {
-        matches!(e, Expr::Try { .. }) || children(e).iter().any(|c| expr_uses_try(c))
-    }
-    stmts.iter().any(|s| match s {
-        Stmt::Assign { value, .. } | Stmt::Destructure { value, .. } => expr_uses_try(value),
-        Stmt::Func { body, .. } => expr_uses_try(body),
-        Stmt::Expr(e) => expr_uses_try(e),
-        Stmt::Import { .. } => false,
-    })
-}
