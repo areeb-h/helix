@@ -347,6 +347,30 @@
         }
     }
 
+    /// `try` runs natively on the VM (commit landing it removed the whole-program
+    /// tree-walker fallback). These cases pin the VM's handler/unwind path to the
+    /// tree-walker oracle: success and error records, nested `try`, an error thrown
+    /// several call frames deep (frame unwind), a per-element `try` inside `map`
+    /// (the comprehension-iterator stack must unwind), `missing` (not an error), and
+    /// that execution continues after a caught error.
+    #[test]
+    fn try_matches_tree_walker_on_vm() {
+        let cases = [
+            "print(try (1 + 1))",                               // ok record
+            "print(try (1 / 0))",                               // caught div-by-zero
+            "r = try (1 / 0)\nprint(r.ok)\nprint(r.error)",     // error fields
+            "r = try (10 / 2)\nprint(r.ok)\nprint(r.value)",    // value field
+            "print(try (try (1 / 0)))",                         // nested try
+            "fn f(n) = if n <= 0 then 1 / 0 else f(n - 1)\nprint((try f(5)).ok)", // deep unwind
+            "print([1, 0, 2].map((x) => (try (10 / x)).ok))",   // per-element try in map
+            "r = try (missing)\nprint(r.ok)\nprint(r.value)",   // missing is not an error
+            "x = try (1 / 0)\nprint(42)",                       // recovers, then continues
+        ];
+        for src in cases {
+            assert_eq!(run_vm(src), run_tw(src), "VM ≠ tree-walker on `{src}`");
+        }
+    }
+
     /// One-engine gate: every shipped example must type-check and **compile to
     /// bytecode** — i.e. run on the VM, never fall back to the tree-walker. If a
     /// change reintroduces a fallback for an example, this fails loudly.
