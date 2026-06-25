@@ -7,87 +7,131 @@
 //! read_vcf("cohort.vcf").where(gene == "BRCA1").group(consequence).count()
 //! ```
 //!
-//! The eight fixed columns (`chrom`, `pos`, `id`, `ref`, `alt`, `qual`, `filter`)
-//! plus every `INFO` key (e.g. `gene`, `consequence`) become DataFrame columns.
-//! `.` is read as a null. Both plain `.vcf` and gzipped/BGZF `.vcf.gz` are accepted
-//! (the magic bytes are sniffed). Full INFO typing and binary BCF are a later upgrade
-//! (delegating to `noodles`).
+//! Parsing delegates to `noodles-vcf` (the bio flagship stands on the Rust bio
+//! ecosystem the way it stands on Polars), so the header drives the schema:
+//!
+//! - The eight fixed columns `chrom`, `pos`, `id`, `ref`, `alt`, `qual`, `filter`.
+//! - One column per `INFO` field **typed from its header declaration** — an
+//!   `Integer` field becomes an `i64` column, a `Float` an `f64`, a `Flag` a
+//!   `bool`, a `String`/`Character` a string. So `where(af > 0.001)` is a numeric
+//!   comparison, not a string one. Multi-valued INFO fields (`Number != 1`) are
+//!   rendered as comma-joined strings to stay queryable without list columns.
+//! - INFO keys present in the data but undeclared in the header still appear, as
+//!   string columns (a tolerance for slightly non-conformant files).
+//!
+//! Plain `.vcf` and gzipped/BGZF `.vcf.gz` are both accepted (the magic bytes are
+//! sniffed; BGZF is a concatenation of gzip members, which the multi-member decoder
+//! reads transparently).
 
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{BufRead, BufReader};
 
 use flate2::read::MultiGzDecoder;
+use noodles_vcf::{self as vcf, header::record::value::map::info::{Number, Type as InfoType}};
 use polars::prelude::*;
 
 use crate::error::HelixError;
 
-/// Read a possibly-gzipped text file. The gzip magic bytes (`0x1f 0x8b`) trigger a
-/// multi-member decoder, which transparently handles both plain gzip and BGZF — the
-/// block-gzip `bgzip` produces for `.vcf.gz`, a concatenation of gzip members.
-pub(crate) fn read_text_maybe_gzip(path: &str) -> std::io::Result<String> {
-    let bytes = std::fs::read(path)?;
-    if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
-        let mut s = String::new();
-        MultiGzDecoder::new(&bytes[..]).read_to_string(&mut s)?;
-        Ok(s)
+/// Open `path` as a buffered byte stream, transparently decompressing gzip/BGZF.
+/// BGZF (what `bgzip` produces for `.vcf.gz`) is a concatenation of gzip members,
+/// which `MultiGzDecoder` handles like any multi-member gzip. Shared by the
+/// genomics readers.
+pub(crate) fn open_maybe_gzip(path: &str) -> std::io::Result<Box<dyn BufRead>> {
+    let mut file = BufReader::new(std::fs::File::open(path)?);
+    let is_gzip = {
+        let head = file.fill_buf()?;
+        head.len() >= 2 && head[0] == 0x1f && head[1] == 0x8b
+    };
+    if is_gzip {
+        Ok(Box::new(BufReader::new(MultiGzDecoder::new(file))))
     } else {
-        String::from_utf8(bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        Ok(Box::new(file))
     }
+}
+
+/// The Polars dtype a given INFO key maps to, decided once from the header.
+#[derive(Clone, Copy)]
+enum ColKind {
+    Int,
+    Float,
+    Bool,
+    Str,
+}
+
+/// One INFO cell's value, normalized out of noodles' typed field value.
+enum Cell {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Str(String),
 }
 
 pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, HelixError> {
     let err = |msg: String| HelixError::new(msg, line, col);
-    let text = read_text_maybe_gzip(path)
-        .map_err(|e| err(format!("could not open VCF `{path}`: {e}")))?;
+
+    let inner =
+        open_maybe_gzip(path).map_err(|e| err(format!("could not open VCF `{path}`: {e}")))?;
+    let mut reader = vcf::io::Reader::new(inner);
+    let header = reader
+        .read_header()
+        .map_err(|e| err(format!("could not read VCF header in `{path}`: {e}")))?;
+
+    // The INFO schema comes from the header: a stable, declared-order key list and
+    // the column kind each maps to. A scalar (`Number=1`) Integer/Float/String gets
+    // a typed column; a Flag a bool; anything multi-valued a (joined) string.
+    let mut info_keys: Vec<String> = Vec::new();
+    let mut kind: HashMap<String, ColKind> = HashMap::new();
+    for (key, def) in header.infos() {
+        let k = match (def.ty(), def.number()) {
+            (InfoType::Flag, _) => ColKind::Bool,
+            (InfoType::Integer, Number::Count(1)) => ColKind::Int,
+            (InfoType::Float, Number::Count(1)) => ColKind::Float,
+            _ => ColKind::Str,
+        };
+        info_keys.push(key.clone());
+        kind.insert(key.clone(), k);
+    }
 
     let mut chrom: Vec<String> = Vec::new();
-    let mut pos: Vec<i64> = Vec::new();
+    let mut pos: Vec<Option<i64>> = Vec::new();
     let mut id: Vec<Option<String>> = Vec::new();
     let mut ref_: Vec<String> = Vec::new();
     let mut alt: Vec<String> = Vec::new();
     let mut qual: Vec<Option<f64>> = Vec::new();
     let mut filter: Vec<Option<String>> = Vec::new();
-    // INFO: first-seen key order + one map per record.
-    let mut info_keys: Vec<String> = Vec::new();
-    let mut info_rows: Vec<HashMap<String, String>> = Vec::new();
+    let mut info_rows: Vec<HashMap<String, Cell>> = Vec::new();
 
-    for raw in text.lines() {
-        if raw.starts_with('#') || raw.trim().is_empty() {
-            continue; // `##meta` and the `#CHROM` header line (and blanks)
-        }
-        let f: Vec<&str> = raw.split('\t').collect();
-        if f.len() < 8 {
-            return Err(err(format!(
-                "malformed VCF record (need at least 8 tab-separated columns): {raw}"
-            )));
-        }
-        chrom.push(f[0].to_string());
-        pos.push(
-            f[1].parse::<i64>()
-                .map_err(|_| err(format!("invalid POS in VCF record: `{}`", f[1])))?,
+    for result in reader.record_bufs(&header) {
+        let rec = result.map_err(|e| err(format!("malformed VCF record in `{path}`: {e}")))?;
+
+        chrom.push(rec.reference_sequence_name().to_string());
+        pos.push(rec.variant_start().map(|p| usize::from(p) as i64));
+        id.push(join_opt(rec.ids().as_ref().iter().map(|s| s.to_string()), ';'));
+        ref_.push(rec.reference_bases().to_string());
+        alt.push(
+            rec.alternate_bases()
+                .as_ref()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
         );
-        id.push(dot(f[2]));
-        ref_.push(f[3].to_string());
-        alt.push(f[4].to_string());
-        qual.push(if f[5] == "." { None } else { f[5].parse::<f64>().ok() });
-        filter.push(dot(f[6]));
+        qual.push(rec.quality_score().map(widen_f32));
+        filter.push(join_opt(rec.filters().as_ref().iter().map(|s| s.to_string()), ';'));
 
-        let mut row = HashMap::new();
-        if f[7] != "." {
-            for kv in f[7].split(';') {
-                if kv.is_empty() {
-                    continue;
-                }
-                let (k, v) = match kv.split_once('=') {
-                    Some((k, v)) => (k.to_string(), v.to_string()),
-                    None => (kv.to_string(), "true".to_string()), // a flag
-                };
-                if !info_keys.contains(&k) {
-                    info_keys.push(k.clone());
-                }
-                row.insert(k, v);
+        let info = rec.info();
+        let mut row: HashMap<String, Cell> = HashMap::new();
+        for (key, value) in info.keys().zip(info.values()) {
+            let cell = match value {
+                Some(v) => value_to_cell(v),
+                None => Cell::Bool(true), // a Flag present without a value
+            };
+            if !kind.contains_key(key) {
+                // Undeclared in the header — tolerate it as a string column.
+                info_keys.push(key.to_string());
+                kind.insert(key.to_string(), ColKind::Str);
             }
+            row.insert(key.to_string(), cell);
         }
         info_rows.push(row);
     }
@@ -101,10 +145,8 @@ pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<crate::backend::D
         Column::new("qual".into(), qual),
         Column::new("filter".into(), filter),
     ];
-    // One column per INFO key (string-valued; absent in a record → null).
     for k in &info_keys {
-        let vals: Vec<Option<String>> = info_rows.iter().map(|r| r.get(k).cloned()).collect();
-        columns.push(Column::new(k.as_str().into(), vals));
+        columns.push(build_info_column(k, kind[k], &info_rows));
     }
 
     let df = DataFrame::new_infer_height(columns)
@@ -112,10 +154,109 @@ pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<crate::backend::D
     Ok(crate::backend::polars::from_polars_df(df))
 }
 
-fn dot(s: &str) -> Option<String> {
-    if s == "." {
+/// Widen an `f32` (how noodles parses a text-VCF `Float`/`QUAL`) to `f64` through
+/// its shortest round-trip decimal, *not* a raw `as f64` cast. A raw cast exposes
+/// the binary `f32` error — `0.001_f32 as f64` is 0.00100000004…, so `af > 0.001`
+/// would spuriously match a `0.001` row. Round-tripping through the shortest decimal
+/// recovers the value the VCF author actually wrote, so comparisons behave as a
+/// scientist expects.
+fn widen_f32(f: f32) -> f64 {
+    f.to_string().parse::<f64>().unwrap_or(f as f64)
+}
+
+/// Join an iterator of strings with `sep`, yielding `None` when empty (the VCF `.`
+/// missing marker collapses to a null cell).
+fn join_opt(parts: impl Iterator<Item = String>, sep: char) -> Option<String> {
+    let joined: Vec<String> = parts.collect();
+    if joined.is_empty() {
         None
     } else {
-        Some(s.to_string())
+        Some(joined.join(&sep.to_string()))
+    }
+}
+
+/// Normalize one noodles INFO field value into a [`Cell`]. Multi-valued (`Array`)
+/// fields collapse to a comma-joined string so the column stays a plain string.
+fn value_to_cell(v: &vcf::variant::record_buf::info::field::Value) -> Cell {
+    use vcf::variant::record_buf::info::field::Value as V;
+    match v {
+        V::Integer(i) => Cell::Int(*i as i64),
+        V::Float(f) => Cell::Float(widen_f32(*f)),
+        V::Flag => Cell::Bool(true),
+        V::Character(c) => Cell::Str(c.to_string()),
+        V::String(s) => Cell::Str(s.clone()),
+        V::Array(a) => Cell::Str(format_array(a)),
+    }
+}
+
+/// Render a multi-valued INFO array as the comma-joined string VCF uses on the
+/// wire (`AF=0.01,0.02`), a missing element as `.`. Keeps the column a plain,
+/// queryable string rather than a Polars list column.
+fn format_array(a: &vcf::variant::record_buf::info::field::value::Array) -> String {
+    use vcf::variant::record_buf::info::field::value::Array as A;
+    fn join<T: ToString>(xs: &[Option<T>]) -> String {
+        xs.iter()
+            .map(|o| o.as_ref().map_or_else(|| ".".to_string(), |v| v.to_string()))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+    match a {
+        A::Integer(xs) => join(xs),
+        A::Float(xs) => xs
+            .iter()
+            .map(|o| o.map_or_else(|| ".".to_string(), |f| widen_f32(f).to_string()))
+            .collect::<Vec<_>>()
+            .join(","),
+        A::Character(xs) => join(xs),
+        A::String(xs) => join(xs),
+    }
+}
+
+/// Build one typed INFO column by pulling each record's cell (or a null/`false`).
+fn build_info_column(key: &str, kind: ColKind, rows: &[HashMap<String, Cell>]) -> Column {
+    let name: PlSmallStr = key.into();
+    match kind {
+        ColKind::Int => {
+            let vals: Vec<Option<i64>> = rows
+                .iter()
+                .map(|r| match r.get(key) {
+                    Some(Cell::Int(i)) => Some(*i),
+                    _ => None,
+                })
+                .collect();
+            Column::new(name, vals)
+        }
+        ColKind::Float => {
+            let vals: Vec<Option<f64>> = rows
+                .iter()
+                .map(|r| match r.get(key) {
+                    Some(Cell::Float(f)) => Some(*f),
+                    Some(Cell::Int(i)) => Some(*i as f64),
+                    _ => None,
+                })
+                .collect();
+            Column::new(name, vals)
+        }
+        ColKind::Bool => {
+            // Flag semantics: present → true, absent → false (never null).
+            let vals: Vec<bool> = rows
+                .iter()
+                .map(|r| matches!(r.get(key), Some(Cell::Bool(true))))
+                .collect();
+            Column::new(name, vals)
+        }
+        ColKind::Str => {
+            let vals: Vec<Option<String>> = rows
+                .iter()
+                .map(|r| match r.get(key) {
+                    Some(Cell::Str(s)) => Some(s.clone()),
+                    Some(Cell::Int(i)) => Some(i.to_string()),
+                    Some(Cell::Float(f)) => Some(f.to_string()),
+                    Some(Cell::Bool(b)) => Some(b.to_string()),
+                    None => None,
+                })
+                .collect();
+            Column::new(name, vals)
+        }
     }
 }

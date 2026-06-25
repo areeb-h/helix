@@ -30,6 +30,10 @@ cranelift-module = "0.132.2"
 cranelift-native = "0.132.2"
 ndarray = "0.17.2"
 needletail = "0.7.3"
+# Spec-compliant genomics parsers (the bio flagship stands on the Rust bio
+# ecosystem the way it stands on Polars). VCF gives header-typed INFO fields and
+# BGZF; GFF/BED add feature/interval formats. Pure Rust, no system deps.
+noodles-vcf = "0.88"
 # Latest Polars — Arrow-columnar, lazy, multi-threaded execution engine.
 polars = { version = "0.54", features = [
     "lazy",

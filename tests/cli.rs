@@ -365,10 +365,12 @@ fn read_vcf_makes_variants_queryable() {
     // The bio flagship: a VCF becomes a DataFrame the normal verbs work on. INFO
     // fields (gene) are columns alongside the fixed ones (qual). No group-by here, so
     // counts are deterministic.
-    let src = "v = bio.read_vcf(\"examples/data/variants.vcf\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\nprint(v.where(qual > 50).count())\n";
+    // `af` is a header-typed Float INFO column, so `af > 0.001` is a NUMERIC
+    // comparison (3 rows) — a plain string column would mis-compare and give 5.
+    let src = "v = bio.read_vcf(\"examples/data/variants.vcf\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\nprint(v.where(qual > 50).count())\nprint(v.where(af > 0.001).count())\n";
     let (out, stderr, code) = run_source(src, &[], "vcf");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
-    assert_eq!(out.trim(), "6\n3\n3"); // 6 variants; 3 in BRCA1; 3 with qual > 50
+    assert_eq!(out.trim(), "6\n3\n3\n3"); // 6 variants; 3 BRCA1; 3 qual>50; 3 af>0.001
 }
 
 #[test]
