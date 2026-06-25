@@ -71,6 +71,12 @@ pub enum Value {
         idx: u32,
         arity: u32,
     },
+    /// A VM **closure**: a compiled chunk plus the values it captured from its
+    /// enclosing scope (upvalues). `VmFunc` covers a non-capturing lambda; this
+    /// variant carries the captured environment for one that closes over enclosing
+    /// locals. Boxed behind an `Rc` so `Value` stays 16 bytes; renders identically
+    /// to any other function.
+    Closure(Rc<ClosureData>),
     /// A validated DNA sequence (uppercase A/C/G/T).
     Dna(Rc<String>),
     /// Absent data — distinct from any real value and from float `NaN`.
@@ -215,6 +221,16 @@ pub struct FuncVal {
     pub captured: Rc<Vec<(String, Value)>>,
 }
 
+/// The payload of a [`Value::Closure`] — a compiled-chunk index plus the values it
+/// closed over (upvalues), captured by value at creation (Helix locals are
+/// immutable, so by-value capture is exact). The VM's analogue of [`FuncVal`].
+pub struct ClosureData {
+    pub idx: u32,
+    pub arity: u32,
+    /// Captured values (`Rc` so a call can share them into the frame with no copy).
+    pub upvalues: Rc<Vec<Value>>,
+}
+
 // The interpreter copies `Value`s constantly (every VM stack op, every binding),
 // so its size is a hot-path constant. Keep it small: scalars and Rc-wrapped
 // collections fit in two words. A regression here (e.g. inlining a fat variant)
@@ -284,6 +300,7 @@ impl Value {
             Value::GroupBy(_) => "GroupBy",
             Value::Function(_) => "Function",
             Value::VmFunc { .. } => "Function",
+            Value::Closure(_) => "Function",
             Value::Dna(_) => "Dna",
             Value::Missing => "Missing",
             Value::Unit => "Unit",
@@ -320,6 +337,7 @@ impl fmt::Debug for Value {
             Value::GroupBy(g) => write!(f, "GroupBy(keys={:?})", g.keys),
             Value::Function(g) => write!(f, "Function(params={:?})", g.params),
             Value::VmFunc { arity, .. } => write!(f, "Function(arity={})", arity),
+            Value::Closure(c) => write!(f, "Function(arity={})", c.arity),
             Value::Tensor(t) => write!(f, "Tensor(shape={:?})", t.shape()),
             Value::PyObject(h) => write!(f, "PyObject({})", h.repr()),
             other => write!(f, "{}", other),
@@ -344,6 +362,7 @@ impl fmt::Display for Value {
             Value::GroupBy(g) => write!(f, "<grouped by {}>", g.keys.join(", ")),
             Value::Function(g) => write!(f, "<function/{}>", g.params.len()),
             Value::VmFunc { arity, .. } => write!(f, "<function/{}>", arity),
+            Value::Closure(c) => write!(f, "<function/{}>", c.arity),
             Value::Missing => write!(f, "missing"),
             Value::Unit => write!(f, "()"),
             Value::PyObject(h) => write!(f, "{}", h.repr()),

@@ -408,6 +408,33 @@ fn higher_order_functions_work_on_both_engines() {
 }
 
 #[test]
+fn closures_capture_on_both_engines() {
+    // Standalone closures that capture an enclosing local — returned, stored, called
+    // later — work identically on the VM (upvalues) and the tree-walker (env capture),
+    // including capturing function-valued params and two-level nesting.
+    let src = concat!(
+        "fn make(k) = (p => p + k)\n",
+        "g = make(10)\n",
+        "print(g(5))\n",
+        "fn inc(n) = n + 1\n",
+        "fn dbl(n) = n * 2\n",
+        "fn compose(f, h) = (x => f(h(x)))\n",
+        "comp = compose(inc, dbl)\n",
+        "print(comp(10))\n",
+        "fn outer(a) = (b => (cc => a + b + cc))\n",
+        "p1 = outer(1)\n",
+        "p2 = p1(2)\n",
+        "print(p2(3))\n",
+    );
+    let (vm, e1, c1) = run_source(src, &[], "clo_vm");
+    assert_eq!(c1, Some(0), "stderr:\n{e1}");
+    assert_eq!(vm.trim(), "15\n21\n6"); // make+10 then +5; inc(dbl(10)); 1+2+3
+    let (tw, _, c2) = run_source(src, &[("HELIX_NOVM", "1")], "clo_tw");
+    assert_eq!(c2, Some(0));
+    assert_eq!(vm, tw, "VM and tree-walker disagree on closures");
+}
+
+#[test]
 fn with_derives_columns_from_expressions() {
     // `df.with({name: expr, ...})` adds columns computed over existing ones. The
     // value expressions reference bare column names, like the other column verbs.

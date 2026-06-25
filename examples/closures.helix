@@ -1,0 +1,22 @@
+# Closures — a function can return a function that captures its enclosing variables,
+# and functions are first-class values you can pass around.
+
+# A "maker" that captures its argument: `adder(10)` returns a function that adds 10.
+fn adder(n) = (x => x + n)
+add10 = adder(10)
+print(add10(5)) # 15
+
+# Function composition — capturing two function-valued parameters.
+fn inc(n) = n + 1
+fn double(n) = n * 2
+fn compose(f, g) = (x => f(g(x)))
+double_then_inc = compose(inc, double)
+print(double_then_inc(20)) # inc(double(20)) = 41
+
+# Higher-order: pass a named function as an argument.
+fn apply_twice(f, x) = f(f(x))
+print(apply_twice(double, 5)) # 20
+
+# Capturing a local inside a comprehension lambda.
+fn scale_all(xs, factor) = xs.map((x) => x * factor)
+print(scale_all([1, 2, 3], 100)) # [100, 200, 300]

@@ -67,6 +67,9 @@ pub use ops::*;
 /// How an identifier resolves at compile time.
 enum NameRef {
     Local(u32),
+    /// An upvalue (index into the current function's captured environment) — a
+    /// variable closed over from an enclosing scope.
+    Upvalue(u32),
     Global(u32),
     /// A user function (callable, but not usable as a first-class value yet).
     Func(u32),
@@ -81,6 +84,13 @@ struct Builder {
     scopes: Vec<Vec<(String, u32)>>,
     next_slot: u32,
     max_slot: u32,
+    /// This function's upvalues — names closed over from an enclosing scope, each
+    /// paired with how the *enclosing* frame provides it. Populated lazily by
+    /// `resolve_upvalue`; its order is the closure's upvalue layout.
+    upvalues: Vec<(String, CaptureSrc)>,
+    /// The capturable environment of the *enclosing* function (its locals + its
+    /// upvalues, in enclosing-frame terms). Empty for `main` and top-level `fn`s.
+    enclosing: Vec<(String, CaptureSrc)>,
 }
 
 impl Builder {
@@ -92,7 +102,49 @@ impl Builder {
             scopes: vec![Vec::new()],
             next_slot: 0,
             max_slot: 0,
+            upvalues: Vec::new(),
+            enclosing: Vec::new(),
         }
+    }
+
+    /// Resolve `name` to an upvalue index — either one already captured, or a fresh
+    /// capture from the enclosing environment. `None` if it isn't capturable here.
+    fn resolve_upvalue(&mut self, name: &str) -> Option<u32> {
+        if let Some(i) = self.upvalues.iter().position(|(n, _)| n == name) {
+            return Some(i as u32);
+        }
+        let src = self.enclosing.iter().find(|(n, _)| n == name).map(|(_, s)| *s)?;
+        let idx = self.upvalues.len() as u32;
+        self.upvalues.push((name.to_string(), src));
+        Some(idx)
+    }
+
+    /// The capturable environment this function exposes to a nested lambda: each
+    /// in-scope local as a `Local(slot)` source, plus every variable reachable from
+    /// *this* function's enclosing scope, **eagerly captured into this function's own
+    /// upvalues** so the nested lambda can chain-capture it (transitive closure: a
+    /// grandchild can close over a grandparent's local). The eager registration adds
+    /// at most the enclosing names as this function's upvalues — only when it
+    /// actually contains a nested lambda (the only caller).
+    fn capturable_env(&mut self) -> Vec<(String, CaptureSrc)> {
+        let mut out: Vec<(String, CaptureSrc)> = Vec::new();
+        for scope in &self.scopes {
+            for (n, slot) in scope {
+                out.push((n.clone(), CaptureSrc::Local(*slot)));
+            }
+        }
+        let enclosing_names: Vec<String> =
+            self.enclosing.iter().map(|(n, _)| n.clone()).collect();
+        for n in enclosing_names {
+            // A local of this function shadows an enclosing name of the same name.
+            if out.iter().any(|(m, _)| *m == n) {
+                continue;
+            }
+            if let Some(uv) = self.resolve_upvalue(&n) {
+                out.push((n, CaptureSrc::Upvalue(uv)));
+            }
+        }
+        out
     }
 
     fn emit(&mut self, op: Op, line: usize, col: usize) -> usize {
@@ -276,9 +328,13 @@ impl Compiler {
         i
     }
 
-    fn resolve(&self, b: &Builder, name: &str) -> Option<NameRef> {
+    fn resolve(&self, b: &mut Builder, name: &str) -> Option<NameRef> {
         if let Some(slot) = b.resolve_local(name) {
             return Some(NameRef::Local(slot));
+        }
+        // Closed over from an enclosing scope? (Before globals: lexical order.)
+        if let Some(uv) = b.resolve_upvalue(name) {
+            return Some(NameRef::Upvalue(uv));
         }
         if let Some(i) = self.globals.iter().position(|g| g == name) {
             return Some(NameRef::Global(i as u32));
@@ -419,22 +475,31 @@ impl Compiler {
     }
 
     /// Compile an anonymous lambda body into its own chunk (like [`Self::compile_func`]
-    /// but nameless) and return its function-table index. Free variables resolve to
-    /// globals during body compilation — matching the tree-walker, which has no
-    /// captured environment (the type checker rejects local capture).
-    fn compile_lambda(&mut self, params: &[String], body: &Expr) -> R<u32> {
+    /// but nameless) and return its function-table index plus the capture sources
+    /// for its upvalues (in the *enclosing* frame's terms, for `MakeClosure`). A free
+    /// variable that names an enclosing local/upvalue becomes an upvalue; anything
+    /// else resolves to a global or function as before. `enclosing` is the defining
+    /// function's capturable environment.
+    fn compile_lambda(
+        &mut self,
+        params: &[String],
+        body: &Expr,
+        enclosing: Vec<(String, CaptureSrc)>,
+    ) -> R<(u32, Vec<CaptureSrc>)> {
         let idx = self.funcs.len() as u32;
         self.func_names.push("<lambda>".to_string());
         self.func_arity.push(params.len() as u32);
         self.funcs.push(None);
 
         let mut fb = Builder::new();
+        fb.enclosing = enclosing;
         for p in params {
             fb.declare_local(p);
         }
         self.compile_expr(&mut fb, body)?;
         fb.emit(Op::Return, 0, 0);
 
+        let captures: Vec<CaptureSrc> = fb.upvalues.iter().map(|(_, src)| *src).collect();
         let chunk = Chunk {
             code: fb.code,
             consts: fb.consts,
@@ -443,7 +508,7 @@ impl Compiler {
             n_locals: fb.max_slot,
         };
         self.funcs[idx as usize] = Some(chunk);
-        Ok(idx)
+        Ok((idx, captures))
     }
 
     fn compile_expr(&mut self, b: &mut Builder, e: &Expr) -> R<()> {
@@ -471,6 +536,9 @@ impl Compiler {
             Expr::Ident { name, line, col } => match self.resolve(b, name) {
                 Some(NameRef::Local(slot)) => {
                     b.emit(Op::LoadLocal(slot), *line, *col);
+                }
+                Some(NameRef::Upvalue(uv)) => {
+                    b.emit(Op::GetUpvalue(uv), *line, *col);
                 }
                 Some(NameRef::Global(i)) => {
                     b.emit(Op::LoadGlobal(i), *line, *col);
@@ -655,6 +723,22 @@ impl Compiler {
                         }
                         Some(NameRef::Local(slot)) => {
                             b.emit(Op::LoadLocal(slot), *line, *col);
+                            for a in args {
+                                self.compile_expr(b, a)?;
+                            }
+                            b.emit(
+                                Op::CallValue(std::rc::Rc::new(CallValueData {
+                                    nargs: args.len() as u32,
+                                    name: std::rc::Rc::new(name.clone()),
+                                })),
+                                *line,
+                                *col,
+                            );
+                        }
+                        // Calling a captured (upvalue) function value, e.g. a
+                        // function-valued parameter closed over by an inner lambda.
+                        Some(NameRef::Upvalue(uv)) => {
+                            b.emit(Op::GetUpvalue(uv), *line, *col);
                             for a in args {
                                 self.compile_expr(b, a)?;
                             }
@@ -877,9 +961,22 @@ impl Compiler {
             }
             Expr::Lambda { params, body, .. } => {
                 // A standalone lambda → a first-class function value. Its body is
-                // compiled into its own chunk; free variables resolve to globals.
-                let idx = self.compile_lambda(params, body)?;
-                b.emit(Op::MakeFunc { idx, arity: params.len() as u32 }, 0, 0);
+                // compiled into its own chunk; free variables that name enclosing
+                // locals become upvalues captured here, anything else resolves to a
+                // global. With captures it's a closure (`MakeClosure`); without, a
+                // plain function value (`MakeFunc`, no per-call allocation).
+                let enclosing = b.capturable_env();
+                let (idx, captures) = self.compile_lambda(params, body, enclosing)?;
+                let arity = params.len() as u32;
+                if captures.is_empty() {
+                    b.emit(Op::MakeFunc { idx, arity }, 0, 0);
+                } else {
+                    b.emit(
+                        Op::MakeClosure(std::rc::Rc::new(MakeClosureData { idx, arity, captures })),
+                        0,
+                        0,
+                    );
+                }
             }
             // NOTE: every `Expr` variant is now handled — `compile_expr` no longer
             // has a catch-all. The remaining whole-program fallbacks live in

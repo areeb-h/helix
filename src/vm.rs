@@ -145,6 +145,9 @@ struct Frame {
     /// If set, this call is a memoization miss: store its return value under this
     /// key when the frame returns.
     memo_key: Option<MemoKey>,
+    /// The captured environment of the closure being run (empty for a plain
+    /// function). `GetUpvalue` reads these; `MakeClosure` may copy from them.
+    upvalues: std::rc::Rc<Vec<Value>>,
 }
 
 /// An active `try` error handler (from `Op::TryBegin`). Records the exact depths of
@@ -192,10 +195,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
     // Active `try` handlers (LIFO). Empty in the overwhelmingly common case; an
     // error only consults it, so non-`try` programs pay nothing.
     let mut handlers: Vec<Handler> = Vec::new();
+    // Shared empty upvalue list for every non-closure frame — cloning is a refcount
+    // bump, so a plain call allocates nothing for upvalues.
+    let no_upvalues: std::rc::Rc<Vec<Value>> = std::rc::Rc::new(Vec::new());
 
     let main = &program.funcs[0];
     locals.resize(main.n_locals as usize, Value::Unit);
-    frames.push(Frame { func: 0, ip: 0, base: 0, memo_key: None });
+    frames.push(Frame { func: 0, ip: 0, base: 0, memo_key: None, upvalues: no_upvalues.clone() });
 
     loop {
         let fi = frames.len() - 1;
@@ -385,7 +391,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     let base = locals.len();
                     locals.extend(stack.drain(start..));
                     locals.resize(base + callee.n_locals as usize, Value::Unit);
-                    frames.push(Frame { func: idx, ip: 0, base, memo_key: Some(key) });
+                    frames.push(Frame { func: idx, ip: 0, base, memo_key: Some(key), upvalues: no_upvalues.clone() });
                     return Ok(());
                 }
 
@@ -451,18 +457,47 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // no intermediate allocation (vs `split_off`'s fresh `Vec`).
                 locals.extend(stack.drain(start..));
                 locals.resize(base + callee.n_locals as usize, Value::Unit);
-                frames.push(Frame { func: idx, ip: 0, base, memo_key: None });
+                frames.push(Frame { func: idx, ip: 0, base, memo_key: None, upvalues: no_upvalues.clone() });
             }
             Op::MakeFunc { idx, arity } => {
                 stack.push(Value::VmFunc { idx: *idx, arity: *arity });
+            }
+            Op::MakeClosure(d) => {
+                // Capture each upvalue's value from the current frame: an enclosing
+                // local (`base + slot`) or one of this frame's own upvalues.
+                let frame = frames.last().unwrap();
+                let captured: Vec<Value> = d
+                    .captures
+                    .iter()
+                    .map(|src| match src {
+                        crate::bytecode::CaptureSrc::Local(slot) => {
+                            locals[frame.base + *slot as usize].clone()
+                        }
+                        crate::bytecode::CaptureSrc::Upvalue(i) => {
+                            frame.upvalues[*i as usize].clone()
+                        }
+                    })
+                    .collect();
+                stack.push(Value::Closure(std::rc::Rc::new(crate::value::ClosureData {
+                    idx: d.idx,
+                    arity: d.arity,
+                    upvalues: std::rc::Rc::new(captured),
+                })));
+            }
+            Op::GetUpvalue(i) => {
+                let v = frames.last().unwrap().upvalues[*i as usize].clone();
+                stack.push(v);
             }
             Op::CallValue(d) => {
                 let name = &d.name;
                 let nargs = d.nargs as usize;
                 let start = stack.len() - nargs;
-                // The function value sits just below the args (loaded first).
-                let idx = match &stack[start - 1] {
-                    Value::VmFunc { idx, .. } => *idx as usize,
+                // The function value sits just below the args (loaded first). A
+                // plain `VmFunc` has no upvalues; a `Closure` carries its captured
+                // environment, which becomes the new frame's upvalues.
+                let (idx, frame_upvalues) = match &stack[start - 1] {
+                    Value::VmFunc { idx, .. } => (*idx as usize, no_upvalues.clone()),
+                    Value::Closure(c) => (c.idx as usize, c.upvalues.clone()),
                     other => {
                         return Err(HelixError::new(
                             format!("`{}` is a {}, not a function", name, other.type_name()),
@@ -499,7 +534,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 locals.extend(stack.drain(start..)); // args → callee locals
                 stack.pop(); // discard the function value (now on top)
                 locals.resize(base + callee.n_locals as usize, Value::Unit);
-                frames.push(Frame { func: idx, ip: 0, base, memo_key: None });
+                frames.push(Frame { func: idx, ip: 0, base, memo_key: None, upvalues: frame_upvalues });
             }
             Op::Return => {
                 let ret = stack.pop().unwrap();

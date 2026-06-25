@@ -55,6 +55,13 @@ pub enum Op {
     /// Push a first-class function value referencing `funcs[idx]` (from a lambda
     /// or a bare function-name used as a value).
     MakeFunc { idx: u32, arity: u32 },
+    /// Push a **closure** over `funcs[idx]`: capture the listed sources from the
+    /// current frame (an enclosing local slot or one of this frame's upvalues) by
+    /// value into the new closure's upvalues. Emitted instead of `MakeFunc` for a
+    /// lambda that closes over enclosing locals. Boxed to keep `Op` at 16 bytes.
+    MakeClosure(std::rc::Rc<MakeClosureData>),
+    /// Push upvalue `idx` of the currently executing closure.
+    GetUpvalue(u32),
     /// Call a function *value*: the stack holds `[func, arg0..argN-1]` (the value
     /// was loaded before the args). Reads the callee chunk from the value; errors
     /// (using the call-site `name`) if it isn't a function or the arity is wrong.
@@ -193,6 +200,24 @@ pub struct MethodData {
 pub struct CallValueData {
     pub nargs: u32,
     pub name: std::rc::Rc<String>,
+}
+
+/// Where a closure upvalue is captured from, in the *enclosing* frame's terms:
+/// a local stack slot, or one of the enclosing closure's own upvalues. Resolved
+/// at compile time; consumed by `Op::MakeClosure` at runtime.
+#[derive(Debug, Clone, Copy)]
+pub enum CaptureSrc {
+    Local(u32),
+    Upvalue(u32),
+}
+
+/// Payload of [`Op::MakeClosure`] — the chunk index, arity, and the ordered list
+/// of capture sources used to build the new closure's upvalues.
+#[derive(Debug, Clone)]
+pub struct MakeClosureData {
+    pub idx: u32,
+    pub arity: u32,
+    pub captures: Vec<CaptureSrc>,
 }
 
 /// Payload of [`Op::GroupByAgg`] — a grouped-aggregation's name and unevaluated
