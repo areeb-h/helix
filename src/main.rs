@@ -97,6 +97,8 @@ fn run() -> ExitCode {
         Some("add") => pkg_result(parse_add(&args)),
         // `helix sync` — resolve dependencies and (re)write the hash-pinned `helix.lock`.
         Some("sync") => pkg_result(pkg::cli_sync()),
+        // `helix verify` — check the project matches helix.lock (CI gate; no build/run).
+        Some("verify") => pkg_result(pkg::cli_verify()),
         // Shorthand: `helix script.helix` runs a file directly.
         Some(path) => run_file(path),
     }
@@ -241,6 +243,7 @@ fn print_help() {
          helix new <name>         create a helix.toml in the current directory\n    \
          helix add <name> ...     add a dependency (--path <dir> | --url <tarball>)\n    \
          helix sync               resolve dependencies and write helix.lock\n    \
+         helix verify             check the project matches helix.lock (no build)\n    \
          helix version            show the version\n    \
          helix help               show this help\n\n\
          The default `helix` is a self-contained binary. A build with the `python`\n\

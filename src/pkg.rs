@@ -237,15 +237,46 @@ pub fn resolve(root_dir: &Path) -> Result<(Lockfile, BTreeMap<String, PathBuf>),
 /// silently updates). No lockfile yet → resolve directly (a first run before `sync`).
 pub fn resolve_for_run(root: &Path) -> Result<BTreeMap<String, PathBuf>, HelixError> {
     let (lock, dirs) = resolve(root)?;
-    if let Some(existing) = Lockfile::load(root)?
-        && existing != lock
-    {
-        return Err(err(
-            "the project's dependencies no longer match `helix.lock`".to_string(),
-        )
-        .hint("a dependency's source changed since `helix sync`; run `helix sync` to update."));
+    if let Some(existing) = Lockfile::load(root)? {
+        let diffs = diff_lockfiles(&existing, &lock);
+        if !diffs.is_empty() {
+            let mut msg = String::from("the project's dependencies no longer match `helix.lock`:");
+            for d in &diffs {
+                msg.push_str(&format!("\n  - {d}"));
+            }
+            return Err(err(msg).hint("run `helix sync` to update the lockfile."));
+        }
     }
     Ok(dirs)
+}
+
+/// Human-readable differences from the `stored` lockfile to a freshly-`current` one,
+/// keyed by package name. An empty result means they match exactly. Used both to explain
+/// a `helix run` failure and to drive `helix verify`.
+fn diff_lockfiles(stored: &Lockfile, current: &Lockfile) -> Vec<String> {
+    let index = |lock: &Lockfile| -> BTreeMap<String, LockedPackage> {
+        lock.packages.iter().map(|p| (p.name.clone(), p.clone())).collect()
+    };
+    let (stored_by, current_by) = (index(stored), index(current));
+    let mut out = Vec::new();
+    for (name, c) in &current_by {
+        match stored_by.get(name) {
+            None => out.push(format!("`{name}` is not pinned in the lockfile")),
+            Some(s) if s.source != c.source => {
+                out.push(format!("`{name}` source changed ({} → {})", s.source, c.source))
+            }
+            Some(s) if s.sha256 != c.sha256 => {
+                out.push(format!("`{name}` content changed since `helix sync` (hash differs)"))
+            }
+            Some(_) => {}
+        }
+    }
+    for name in stored_by.keys() {
+        if !current_by.contains_key(name) {
+            out.push(format!("`{name}` is pinned in the lockfile but is no longer a dependency"));
+        }
+    }
+    out
 }
 
 /// A content hash of a package's source tree: the sha256 over every `.helix` file
@@ -681,6 +712,42 @@ pub fn cli_sync() -> Result<(), HelixError> {
     Ok(())
 }
 
+/// `helix verify` — check, without building or running anything, that the project is in
+/// a reproducible, locked state. The CI / pre-commit gate.
+pub fn cli_verify() -> Result<(), HelixError> {
+    let n = verify(&cwd()?)?;
+    println!("Verified {n} dependenc{} — all match helix.lock.", if n == 1 { "y" } else { "ies" });
+    Ok(())
+}
+
+/// The body of `helix verify`: require a `helix.toml` and a `helix.lock`, re-resolve the
+/// graph (path-dep trees re-hashed, url deps fetched/verified as needed), and confirm it
+/// matches the lock exactly. Returns the dependency count on success, or an error naming
+/// precisely which dependencies drifted. Stricter than `helix run`, which tolerates a
+/// missing lock on a first run; `verify` requires one.
+pub fn verify(root: &Path) -> Result<usize, HelixError> {
+    if Manifest::load(root)?.is_none() {
+        return Err(err("no `helix.toml` in this directory".to_string())
+            .hint("create one with `helix new <name>`."));
+    }
+    let stored = Lockfile::load(root)?.ok_or_else(|| {
+        err("no `helix.lock` to verify against".to_string())
+            .hint("run `helix sync` to create the lockfile first.")
+    })?;
+    let (current, dirs) = resolve(root)?;
+    let diffs = diff_lockfiles(&stored, &current);
+    if diffs.is_empty() {
+        Ok(dirs.len())
+    } else {
+        let mut msg = String::from("the project does not match `helix.lock`:");
+        for d in &diffs {
+            msg.push_str(&format!("\n  - {d}"));
+        }
+        Err(err(msg)
+            .hint("run `helix sync` to update the lockfile, or restore the dependency to match."))
+    }
+}
+
 fn cwd() -> Result<PathBuf, HelixError> {
     std::env::current_dir().map_err(|e| err(format!("cannot read the current directory: {e}")))
 }
@@ -974,6 +1041,62 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn verify_passes_when_locked_and_names_the_drift_otherwise() {
+        let base = std::env::temp_dir().join(format!("helix_pkgverify_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("dep")).unwrap();
+        std::fs::create_dir_all(base.join("app")).unwrap();
+        std::fs::write(base.join("dep/dep.helix"), "fn f(x) = x\n").unwrap();
+        let app = base.join("app");
+        std::fs::write(
+            app.join("helix.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n",
+        )
+        .unwrap();
+
+        // No lockfile yet → verify refuses (stricter than run).
+        let e = verify(&app).unwrap_err();
+        assert!(e.message.contains("helix.lock"), "got: {}", e.message);
+
+        // Sync, then verify passes.
+        let (lock, _) = resolve(&app).unwrap();
+        lock.write(&app).unwrap();
+        assert_eq!(verify(&app).unwrap(), 1);
+
+        // The dependency's source drifts → verify fails and names it.
+        std::fs::write(base.join("dep/dep.helix"), "fn f(x) = x + 1\n").unwrap();
+        let e = verify(&app).unwrap_err();
+        assert!(e.message.contains("`dep`"), "should name the dep: {}", e.message);
+        assert!(e.message.contains("content changed"), "got: {}", e.message);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn diff_lockfiles_reports_each_kind_of_drift() {
+        let pkg = |n: &str, src: &str, sha: &str| LockedPackage {
+            name: n.into(),
+            source: src.into(),
+            sha256: sha.into(),
+        };
+        let stored = Lockfile {
+            version: 1,
+            packages: vec![pkg("keep", "path+../keep", "aa"), pkg("gone", "path+../gone", "bb")],
+        };
+        let current = Lockfile {
+            version: 1,
+            packages: vec![pkg("keep", "path+../keep", "cc"), pkg("new", "path+../new", "dd")],
+        };
+        let diffs = diff_lockfiles(&stored, &current);
+        let joined = diffs.join("\n");
+        assert!(joined.contains("`keep` content changed"), "{joined}");
+        assert!(joined.contains("`new` is not pinned"), "{joined}");
+        assert!(joined.contains("`gone` is pinned"), "{joined}");
+        // A clean match yields no diffs.
+        assert!(diff_lockfiles(&stored, &stored).is_empty());
     }
 
     #[test]

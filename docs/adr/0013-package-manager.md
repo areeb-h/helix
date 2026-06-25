@@ -51,7 +51,8 @@ package). A single flat dependency namespace in v1.
 
 `helix new <name>` (init a manifest) · `helix add <name> --path <dir> | --url <tarball>
 [--sha256 <hash>]` (add/update a dependency and re-lock) · `helix sync` (resolve + write
-the lockfile) · `helix run` (resolves and loads dependencies). `helix verify` is next.
+the lockfile) · `helix verify` (check the project matches the lock — CI gate, no build) ·
+`helix run` (resolves and loads dependencies).
 
 ## Status
 
@@ -77,8 +78,14 @@ the lockfile) · `helix run` (resolves and loads dependencies). `helix verify` i
   download** when provided; the fetched bytes seed the cache so the follow-up lock isn't
   a second download. Dependency names are validated as Helix identifiers (they become the
   `import <name>` segment). Idempotent — re-adding a name updates in place.
-- **Next:** `git` sources (rev-pinned); `helix verify`; per-package dependency scoping;
-  and the unified Helix + managed-Python lockfile (ADR 0009 #6).
+- **`helix verify` shipped:** a no-build CI / pre-commit gate. Requires a `helix.lock`
+  (stricter than `helix run`, which tolerates none on a first run), re-resolves the graph
+  (path-dep trees re-hashed, url deps fetched/verified as needed), and confirms it matches
+  the lock exactly — reporting *precisely which* dependency drifted and how (source
+  changed / content changed / added / removed) via a shared `diff_lockfiles`, which also
+  now powers `helix run`'s mismatch error.
+- **Next:** `git` sources (rev-pinned); per-package dependency scoping; and the unified
+  Helix + managed-Python lockfile (ADR 0009 #6).
 
 ## Security model (remote sources)
 
