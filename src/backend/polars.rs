@@ -293,7 +293,12 @@ impl DataHandle for PolarsFrame {
                 )
             }
         };
-        Ok(wrap_lazy(self.lf.clone().group_by(key_exprs).agg([agg_expr])))
+        // `group_by_stable` (not `group_by`) so the result rows come out in a
+        // deterministic, first-seen group order. Plain parallel `group_by` returns
+        // groups in a hash-dependent order that varies run-to-run — a reproducibility
+        // hazard for a scientific language, and the sole cause of the VM/tree-walker
+        // parity flakiness on the grouped examples.
+        Ok(wrap_lazy(self.lf.clone().group_by_stable(key_exprs).agg([agg_expr])))
     }
 
     /// Row count via a `len()` pushdown — avoids materializing the columns.
