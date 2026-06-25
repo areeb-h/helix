@@ -24,6 +24,7 @@ mod module;
 mod namespace;
 mod net;
 mod parser;
+mod pkg;
 mod python;
 mod registry;
 mod stats;
@@ -84,6 +85,16 @@ fn run() -> ExitCode {
         },
         // `helix python <…>` — manage CPython runtimes for interop.
         Some("python") => run_python_cli(&args),
+        // `helix new <name>` — initialize a `helix.toml`.
+        Some("new") => match args.get(2) {
+            Some(name) => pkg_result(pkg::cli_new(name)),
+            None => {
+                eprintln!("error: `helix new` needs a package name, e.g. `helix new mylib`");
+                ExitCode::FAILURE
+            }
+        },
+        // `helix sync` — resolve dependencies and (re)write the hash-pinned `helix.lock`.
+        Some("sync") => pkg_result(pkg::cli_sync()),
         // Shorthand: `helix script.helix` runs a file directly.
         Some(path) => run_file(path),
     }
@@ -113,6 +124,21 @@ fn run_python_cli(args: &[String]) -> ExitCode {
 
 /// Run a one-liner passed on the command line (`helix eval "..."`). Single source
 /// (no imports); errors render against a `<eval>` filename.
+/// Turn a package-manager subcommand result into an exit code, printing the error
+/// (and its hint) to stderr on failure.
+fn pkg_result(r: Result<(), crate::error::HelixError>) -> ExitCode {
+    match r {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {}", e.message);
+            if let Some(h) = &e.hint {
+                eprintln!("  {h}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn run_eval(code: &str) -> ExitCode {
     // The whole pipeline runs on the big stack so deeply-nested source can't
     // overflow the parser/type-checker/compiler before the depth guard fires.

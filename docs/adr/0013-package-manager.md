@@ -1,0 +1,78 @@
+# ADR 0013 — Package manager (manifest, lockfile, resolution)
+
+- **Status:** In progress (v1 shipped: manifest + lockfile + path dependencies)
+- **Date:** 2026-06-26
+- **Deciders:** Areeb + Claude
+- **Builds on:** [ADR 0009](0009-distribution-and-install.md) (decision #6: tamper-evident
+  lockfile, mandatory hashes, no install-time resolver) and
+  [ADR 0010](0010-networking-privacy-security.md) (the hash is the trust boundary).
+
+## Context
+
+A language without a way to share and install libraries is a binary, not an
+ecosystem — the single largest remaining adoption gap. ADR 0009 decided the
+*lockfile philosophy*; this ADR designs the *package-manager mechanics* and the
+properties that make it, for the scientific audience, better than the incumbents.
+
+The bar is explicit: **do it better than every other language.** That is a design
+goal, achieved by learning from each incumbent's documented failure rather than
+copying any one of them ([design philosophy](../../README.md)).
+
+## Decision — the model, and how it beats each incumbent
+
+| Failure mode | Who suffers it | Helix's answer |
+|---|---|---|
+| Mutable registry — a published version can change or vanish | npm (left-pad), PyPI | **Immutable, content-addressed.** The lockfile pins each dependency by a sha256 of its source tree; a changed source is a *different* package. |
+| Non-reproducible installs — resolve at install time | pip, npm semver ranges | **No install-time resolver.** Resolution runs at `add`; `sync` only fetches and *verifies* against the lockfile → bit-identical forever. |
+| Arbitrary code on install | npm `postinstall` (the supply-chain hole) | **Pure-source packages, zero install scripts.** Nothing executes on add/sync. |
+| TLS treated as the trust boundary | most | **The hash is the trust boundary** (ADR 0010), not the transport — works through mirrors, proxies, fully offline. |
+| Split toolchain — language + package manager + env are separate tools | Python (pip + venv + pyenv) | **One binary, and (target) one `helix.lock`** pinning Helix deps *and* the managed Python interpreter + wheels (ADR 0009 #6). |
+
+**The killer property for a science language: reproducibility as an enforced,
+cryptographic fact** — "run this 2019 study's code in 2030 and get a bit-identical
+dependency tree." The hash-pinned lockfile makes that the default, not a discipline.
+
+### Formats
+
+- **`helix.toml`** — the hand-edited manifest (TOML: the Cargo/pyproject convention,
+  comments, low punctuation). `[package]` (name, version) + `[dependencies]`.
+- **`helix.lock`** — machine-generated, `@generated` header, committed to VCS. One
+  `[[package]]` per resolved dependency: `name`, `source`, `sha256` (of the source
+  tree). Deterministic; a second `sync` reports "up to date".
+
+### Resolution
+
+Walk the manifest's dependencies transitively, dedup by canonical path, detect cycles,
+hash each source tree, emit the lockfile + a `name → directory` map. The module loader
+resolves `import dep.module` within `dep`'s directory (the first segment selects the
+package). A single flat dependency namespace in v1.
+
+### CLI (one binary is the whole toolchain — ADR 0009)
+
+`helix new <name>` (init a manifest) · `helix sync` (resolve + write the lockfile) ·
+`helix run` (resolves and loads dependencies). `helix add` and `helix verify` are next.
+
+## Status
+
+- **v1 shipped:** manifest + lockfile types (serde + TOML), sha256 tree hashing,
+  transitive **path-dependency** resolution with cycle/collision detection, module-loader
+  integration (`import dep.module`), and `helix new` / `helix sync`. `sha2` is now a
+  core dependency (the integrity hash is part of the toolchain). Fully offline and
+  locally verifiable — the reproducibility property holds today for path deps.
+- **Next:** `git`/`https` sources (fetch via the ADR-0010 verified-download layer —
+  the lockfile already carries the hash for any source); a fetch cache under the XDG
+  data dir; `helix run` *verifying* the lockfile (error if a dependency's source drifted
+  since `sync`); `helix add`/`verify`; per-package dependency scoping; and the unified
+  Helix + managed-Python lockfile (ADR 0009 #6).
+
+## Rejected alternatives
+
+- **A central mutable registry (npm/PyPI model).** Rejected for its mutability and
+  install-script footguns; integrity comes from the lockfile's hashes, not a registry.
+  A registry can be added later purely as a *discovery* layer over hash-pinned content.
+- **Install-time dependency resolution (pip/npm).** Non-reproducible by construction;
+  resolution is a one-time `add`-time act, the lockfile the durable result.
+- **JSON manifest.** Workable (serde_json is already a dependency) but a worse
+  hand-editing experience than TOML for the human-facing manifest.
+- **A `git`-submodule / vendoring-only scheme.** No integrity guarantee and no
+  transitive resolution; the lockfile + hashing is strictly better.

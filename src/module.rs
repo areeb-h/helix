@@ -13,7 +13,7 @@
 //! load in dependency order, so the entry module's top level runs last — matching
 //! Helix's define-before-use semantics across files.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::ast::{Expr, InterpPart, Stmt};
@@ -68,6 +68,25 @@ fn search_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// Resolve the dependency directories for the project containing `entry`: walk up to
+/// the nearest `helix.toml`, then resolve its (path) dependencies. Empty when there is
+/// no manifest — a plain script with no package is entirely unaffected.
+fn project_deps(entry: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
+    let canon = entry
+        .canonicalize()
+        .map_err(|e| format!("error: cannot read `{}`: {}\n", entry.display(), e))?;
+    let mut dir = canon.parent();
+    while let Some(d) = dir {
+        if d.join("helix.toml").is_file() {
+            let (_lock, dirs) =
+                crate::pkg::resolve(d).map_err(|e| format!("error: {}\n", e.message))?;
+            return Ok(dirs);
+        }
+        dir = d.parent();
+    }
+    Ok(BTreeMap::new())
+}
+
 /// Build the relative file path an import resolves to: `import a.b.c` → `a/b/c.helix`.
 fn import_rel_path(segments: &[String]) -> PathBuf {
     let mut rel = PathBuf::new();
@@ -83,7 +102,8 @@ fn import_rel_path(segments: &[String]) -> PathBuf {
 /// On a lex/parse/resolve error the message is already rendered (with the
 /// *correct* module's filename and caret).
 pub fn load(entry: &Path) -> Result<Loaded, String> {
-    let mut loader = Loader { roots: search_roots(), ..Loader::default() };
+    let deps = project_deps(entry)?;
+    let mut loader = Loader { roots: search_roots(), deps, ..Loader::default() };
     loader.load_file(entry)?;
     // Single file, no imports: hand back the unmodified AST so nothing is mangled
     // and error messages stay pristine — the overwhelmingly common case.
@@ -131,6 +151,9 @@ struct Loader {
     in_progress: Vec<PathBuf>,
     /// Search roots for non-local imports (stdlib / `HELIX_PATH`).
     roots: Vec<PathBuf>,
+    /// Declared package dependencies (`name -> source directory`), resolved from the
+    /// project's `helix.toml`. An `import name.module` resolves within `name`'s dir.
+    deps: BTreeMap<String, PathBuf>,
 }
 
 impl Loader {
@@ -200,7 +223,20 @@ impl Loader {
                 // `HELIX_PATH`).
                 let rel = import_rel_path(segments);
                 let local = dir.join(&rel);
-                let dep_path = if local.is_file() {
+                // A package dependency: `import dep.module` resolves within `dep`'s
+                // source directory (the first segment selects the package); plain
+                // `import dep` loads `dep`'s same-named module. Dependencies win over
+                // ambiguous local files, matching the manifest's explicit intent.
+                let dep_file = self.deps.get(&segments[0]).map(|d| {
+                    if segments.len() == 1 {
+                        d.join(format!("{}.helix", segments[0]))
+                    } else {
+                        d.join(import_rel_path(&segments[1..]))
+                    }
+                });
+                let dep_path = if let Some(p) = dep_file.filter(|p| p.is_file()) {
+                    p
+                } else if local.is_file() {
                     local
                 } else if let Some(found) =
                     self.roots.iter().map(|r| r.join(&rel)).find(|p| p.is_file())
