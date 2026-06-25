@@ -16,7 +16,13 @@ impl super::Interp {
     ) -> Result<Value, HelixError> {
         match name {
             "print" => {
-                let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+                // Fallible render: a DataFrame argument materializes here, so a
+                // failed query is a real error (non-zero exit), never a swallowed
+                // placeholder printed as if the program succeeded.
+                let mut parts = Vec::with_capacity(args.len());
+                for v in &args {
+                    parts.push(crate::value::display_value(v, line, col)?);
+                }
                 println!("{}", parts.join(" "));
                 Ok(Value::Unit)
             }
@@ -447,7 +453,18 @@ impl super::Interp {
                         Ok(Value::Float(crate::stats::std(&xs) / (xs.len() as f64).sqrt()))
                     }
                     "stats.coefficient_of_variation" => {
-                        Ok(Value::Float(crate::stats::std(&xs) / crate::stats::mean(&xs)))
+                        // CV is a ratio to the mean, so it's undefined when the mean
+                        // is zero — a clean error, not a silent `inf`/`NaN` (matching
+                        // the zero-spread guard the z-scores path already has).
+                        let m = crate::stats::mean(&xs);
+                        if m == 0.0 {
+                            return Err(HelixError::new(
+                                "coefficient of variation is undefined: the mean is zero",
+                                line,
+                                col,
+                            ));
+                        }
+                        Ok(Value::Float(crate::stats::std(&xs) / m))
                     }
                     "stats.iqr" => Ok(Value::Float(
                         crate::stats::quantile(&xs, 0.75) - crate::stats::quantile(&xs, 0.25),
@@ -572,8 +589,9 @@ fn num_arrays(
 }
 
 /// Extract a numeric `Vec<f64>` from an array argument. Returns `Ok(None)` when any
-/// element is `missing` (so the caller can propagate `missing`), and errors if the
-/// value is not an array or holds a non-numeric element.
+/// element is `missing` *or* a `NaN` float (so the caller can propagate `missing`,
+/// per ADR-0001 — a `NaN` would otherwise silently corrupt the bivariate result),
+/// and errors if the value is not an array or holds a non-numeric element.
 fn num_array(who: &str, v: &Value, line: usize, col: usize) -> Result<Option<Vec<f64>>, HelixError> {
     let items = match v {
         Value::Array(items) => items,
@@ -583,6 +601,7 @@ fn num_array(who: &str, v: &Value, line: usize, col: usize) -> Result<Option<Vec
     for el in items.iter() {
         match el {
             Value::Missing => return Ok(None),
+            Value::Float(f) if f.is_nan() => return Ok(None),
             _ => match el.as_f64() {
                 Some(x) => out.push(x),
                 None => return Err(type_err(who, "an array of numbers", el, line, col)),

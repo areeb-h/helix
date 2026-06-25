@@ -153,6 +153,28 @@ fn validate_scalar(v: &Value, line: usize, col: usize) -> Result<(), HelixError>
     }
 }
 
+/// Validate that every named column exists in `handle`'s schema (shared by every
+/// backend), with the same friendly "no column …" diagnostic the `column` verb
+/// gives — so `select`/`sort`/`group`/aggregations report a clean error eagerly
+/// rather than leaking an engine's lazy-plan dump at collect time.
+pub fn validate_columns_exist(
+    handle: &Df,
+    names: &[String],
+    line: usize,
+    col: usize,
+) -> Result<(), HelixError> {
+    let cols = handle.column_names(line, col)?;
+    for n in names {
+        if !cols.iter().any(|c| c == n) {
+            return Err(
+                HelixError::new(format!("no column `{}` in the DataFrame", n), line, col)
+                    .hint(format!("columns: {}", cols.join(", "))),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Validate join keys against both frames' schemas (shared by every backend) so a
 /// typo reads as a clean Helix error rather than an engine's lazy-plan dump.
 pub fn validate_join_keys(

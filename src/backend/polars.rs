@@ -253,7 +253,13 @@ impl DataHandle for PolarsFrame {
             rf.lf.clone(),
             on.clone(),
             on,
-            JoinArgs::new(join_type).with_suffix(Some("_right".into())),
+            // Coalesce the key columns for *every* join type. Without this, a `full`
+            // (outer) join leaves both `key` and `key_right` with nulls split across
+            // them — a different, surprising shape from inner/left/right. Coalescing
+            // gives one key column uniformly (standard SQL FULL-OUTER semantics).
+            JoinArgs::new(join_type)
+                .with_suffix(Some("_right".into()))
+                .with_coalesce(JoinCoalesce::CoalesceColumns),
         )))
     }
 

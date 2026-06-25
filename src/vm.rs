@@ -496,7 +496,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     match part {
                         crate::ast::InterpPart::Lit(t) => s.push_str(t),
                         crate::ast::InterpPart::Expr(_) => {
-                            s.push_str(&vals[vi].to_string());
+                            s.push_str(&crate::value::display_value(&vals[vi], line, col)?);
                             vi += 1;
                         }
                     }
@@ -565,16 +565,31 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let split = stack.len() - *nargs as usize;
                 let args: Vec<Value> = stack.split_off(split);
                 let recv = stack.pop().unwrap();
-                let result = match &recv {
-                    // Dispatch by receiver type, exactly as the tree-walker does.
-                    Value::DataFrame(lf) => crate::interp::df_value_method(lf, name, args, line, col),
-                    Value::GroupBy { .. } => Err(HelixError::new(
-                        format!("a GroupBy has no value-method `{}`", name),
-                        line,
-                        col,
-                    )
-                    .hint("aggregate with a column, e.g. `g.mean(col)`.")),
-                    _ => crate::interp::call_method(&recv, name, args, line, col),
+                // `is_missing` is universal; DataFrame/GroupBy receivers bypass the
+                // universal handler in `call_method`, so intercept it here (a
+                // frame/group is never `missing` → `false`), matching the tree-walker.
+                let result = if name.as_str() == "is_missing"
+                    && matches!(recv, Value::DataFrame(_) | Value::GroupBy { .. })
+                {
+                    if args.is_empty() {
+                        Ok(Value::Bool(false))
+                    } else {
+                        Err(HelixError::new("`is_missing` takes no arguments", line, col))
+                    }
+                } else {
+                    match &recv {
+                        // Dispatch by receiver type, exactly as the tree-walker does.
+                        Value::DataFrame(lf) => {
+                            crate::interp::df_value_method(lf, name, args, line, col)
+                        }
+                        Value::GroupBy { .. } => Err(HelixError::new(
+                            format!("a GroupBy has no value-method `{}`", name),
+                            line,
+                            col,
+                        )
+                        .hint("aggregate with a column, e.g. `g.mean(col)`.")),
+                        _ => crate::interp::call_method(&recv, name, args, line, col),
+                    }
                 }?;
                 stack.push(result);
             }

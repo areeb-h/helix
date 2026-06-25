@@ -111,48 +111,54 @@ fn run_python_cli(args: &[String]) -> ExitCode {
 /// Run a one-liner passed on the command line (`helix eval "..."`). Single source
 /// (no imports); errors render against a `<eval>` filename.
 fn run_eval(code: &str) -> ExitCode {
-    let tokens = match lexer::lex(code) {
-        Ok(t) => t,
-        Err(e) => {
-            eprint!("{}", e.render(code, "<eval>"));
-            return ExitCode::FAILURE;
+    // The whole pipeline runs on the big stack so deeply-nested source can't
+    // overflow the parser/type-checker/compiler before the depth guard fires.
+    run_on_big_stack(|| {
+        let tokens = match lexer::lex(code) {
+            Ok(t) => t,
+            Err(e) => {
+                eprint!("{}", e.render(code, "<eval>"));
+                return ExitCode::FAILURE;
+            }
+        };
+        let mut program = match parser::parse(tokens) {
+            Ok(p) => p,
+            Err(e) => {
+                eprint!("{}", e.render(code, "<eval>"));
+                return ExitCode::FAILURE;
+            }
+        };
+        namespace::resolve(&mut program);
+        let spans = vec![module::Span {
+            start_line: 1,
+            source: code.to_string(),
+            filename: "<eval>".to_string(),
+        }];
+        match run_program(&program, &spans, false) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(rendered) => {
+                eprint!("{}", rendered);
+                ExitCode::FAILURE
+            }
         }
-    };
-    let mut program = match parser::parse(tokens) {
-        Ok(p) => p,
-        Err(e) => {
-            eprint!("{}", e.render(code, "<eval>"));
-            return ExitCode::FAILURE;
-        }
-    };
-    namespace::resolve(&mut program);
-    let spans = vec![module::Span {
-        start_line: 1,
-        source: code.to_string(),
-        filename: "<eval>".to_string(),
-    }];
-    match run_program(&program, &spans, false) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(rendered) => {
-            eprint!("{}", rendered);
-            ExitCode::FAILURE
-        }
-    }
+    })
 }
 
-/// Run `f` on a thread with a 2 GiB stack, for the tree-walker's native-stack
-/// recursion (a soft `MAX_CALL_DEPTH` still turns runaway recursion into a clean
-/// error first). Used only on the tree-walker paths — never for the VM.
-fn run_on_big_stack<F>(f: F) -> ExitCode
-where
-    F: FnOnce() -> ExitCode + Send + 'static,
-{
-    std::thread::Builder::new()
-        .stack_size(2 * 1024 * 1024 * 1024)
-        .spawn(f)
-        .expect("failed to spawn interpreter thread")
-        .join()
-        .unwrap_or(ExitCode::FAILURE)
+/// Run `f` on a thread with a 2 GiB stack. The **entire** front-end (parse,
+/// namespace-resolve, type-check, compile) and the tree-walker all recurse on the
+/// native stack over the AST, so they run here — and the parser's `MAX_PARSE_DEPTH`
+/// guard then turns pathological nesting/chaining into a clean error well before
+/// this stack could overflow (the totality guarantee). Scoped, so `f` can borrow
+/// caller-local data (the source text and loaded program) without cloning.
+fn run_on_big_stack<F: FnOnce() -> ExitCode + Send>(f: F) -> ExitCode {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024 * 1024)
+            .spawn_scoped(scope, f)
+            .expect("failed to spawn interpreter thread")
+            .join()
+            .unwrap_or(ExitCode::FAILURE)
+    })
 }
 
 fn print_help() {
@@ -172,28 +178,32 @@ fn print_help() {
 }
 
 fn run_file(path: &str) -> ExitCode {
-    // The module loader reads, lexes, parses, and namespaces the entry file plus
-    // everything it imports into one statement list. (A single file passes through
-    // unchanged.) Lex/parse/resolve errors come back already rendered.
-    let mut loaded = match module::load(std::path::Path::new(path)) {
-        Ok(l) => l,
-        Err(rendered) => {
-            eprint!("{}", rendered);
-            return ExitCode::FAILURE;
+    // The whole pipeline runs on the big stack (see `run_on_big_stack`) so the
+    // front-end's AST recursion can't overflow before the depth guard fires.
+    run_on_big_stack(|| {
+        // The module loader reads, lexes, parses, and namespaces the entry file plus
+        // everything it imports into one statement list. (A single file passes through
+        // unchanged.) Lex/parse/resolve errors come back already rendered.
+        let mut loaded = match module::load(std::path::Path::new(path)) {
+            Ok(l) => l,
+            Err(rendered) => {
+                eprint!("{}", rendered);
+                return ExitCode::FAILURE;
+            }
+        };
+        // Resolve `bio.read_vcf(...)`-style namespaced calls into direct builtin calls
+        // before type-checking and execution.
+        namespace::resolve(&mut loaded.stmts);
+        // Errors render against the spans the loader produced, so a cross-module error
+        // points at the dependency's own source and line (not the entry file).
+        match run_program(&loaded.stmts, &loaded.spans, loaded.multi_module) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(rendered) => {
+                eprint!("{}", rendered);
+                ExitCode::FAILURE
+            }
         }
-    };
-    // Resolve `bio.read_vcf(...)`-style namespaced calls into direct builtin calls
-    // before type-checking and execution.
-    namespace::resolve(&mut loaded.stmts);
-    // Errors render against the spans the loader produced, so a cross-module error
-    // points at the dependency's own source and line (not the entry file).
-    match run_program(&loaded.stmts, &loaded.spans, loaded.multi_module) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(rendered) => {
-            eprint!("{}", rendered);
-            ExitCode::FAILURE
-        }
-    }
+    })
 }
 
 /// Strip internal module prefixes (`m<N>$`) from a rendered error so users never
@@ -232,17 +242,11 @@ fn run_program(program: &[ast::Stmt], spans: &[module::Span], multi: bool) -> Re
     // on the native stack, so it runs on a big-stack thread (scoped, to borrow
     // `program`/`src` without cloning).
     if std::env::var_os("HELIX_NOVM").is_some() || bytecode::uses_try(program) {
-        return std::thread::scope(|scope| {
-            std::thread::Builder::new()
-                .stack_size(2 * 1024 * 1024 * 1024)
-                .spawn_scoped(scope, || {
-                    let mut interp = Interp::new();
-                    interp.run(program).map_err(|e| render_err(e, spans, multi))
-                })
-                .expect("failed to spawn interpreter thread")
-                .join()
-                .unwrap_or_else(|_| Err("the interpreter thread panicked".to_string()))
-        });
+        // Already on the 2 GiB-stack thread (every caller wraps the pipeline in
+        // `run_on_big_stack`), so the tree-walker's native-stack recursion has
+        // headroom; run it directly rather than nesting another big-stack thread.
+        let mut interp = Interp::new();
+        return interp.run(program).map_err(|e| render_err(e, spans, multi));
     }
 
     // The VM is the sole automatic engine: the compiler is *total* for any

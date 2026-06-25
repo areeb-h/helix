@@ -418,10 +418,12 @@ impl Parser {
 
     /// `a ?? b` — lowest precedence, left-associative.
     fn coalesce_expr(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
         let mut left = self.or_expr()?;
         while matches!(self.peek(), Tok::Coalesce) {
             let (l, c) = self.pos();
             self.advance();
+            self.deepen()?;
             let right = self.or_expr()?;
             left = Expr::Binary {
                 op: BinOp::Coalesce,
@@ -431,6 +433,7 @@ impl Parser {
                 col: c,
             };
         }
+        self.depth = saved;
         Ok(left)
     }
 
@@ -493,10 +496,12 @@ impl Parser {
     }
 
     fn or_expr(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
         let mut left = self.and_expr()?;
         while matches!(self.peek(), Tok::Or) {
             let (l, c) = self.pos();
             self.advance();
+            self.deepen()?;
             let right = self.and_expr()?;
             left = Expr::Binary {
                 op: BinOp::Or,
@@ -506,14 +511,17 @@ impl Parser {
                 col: c,
             };
         }
+        self.depth = saved;
         Ok(left)
     }
 
     fn and_expr(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
         let mut left = self.equality()?;
         while matches!(self.peek(), Tok::And) {
             let (l, c) = self.pos();
             self.advance();
+            self.deepen()?;
             let right = self.equality()?;
             left = Expr::Binary {
                 op: BinOp::And,
@@ -523,10 +531,12 @@ impl Parser {
                 col: c,
             };
         }
+        self.depth = saved;
         Ok(left)
     }
 
     fn equality(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
         let mut left = self.comparison()?;
         loop {
             let op = match self.peek() {
@@ -536,6 +546,7 @@ impl Parser {
             };
             let (l, c) = self.pos();
             self.advance();
+            self.deepen()?;
             let right = self.comparison()?;
             left = Expr::Binary {
                 op,
@@ -545,10 +556,12 @@ impl Parser {
                 col: c,
             };
         }
+        self.depth = saved;
         Ok(left)
     }
 
     fn comparison(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
         let mut left = self.term()?;
         loop {
             let op = match self.peek() {
@@ -560,6 +573,7 @@ impl Parser {
             };
             let (l, c) = self.pos();
             self.advance();
+            self.deepen()?;
             let right = self.term()?;
             left = Expr::Binary {
                 op,
@@ -569,10 +583,12 @@ impl Parser {
                 col: c,
             };
         }
+        self.depth = saved;
         Ok(left)
     }
 
     fn term(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
         let mut left = self.factor()?;
         loop {
             let op = match self.peek() {
@@ -582,6 +598,7 @@ impl Parser {
             };
             let (l, c) = self.pos();
             self.advance();
+            self.deepen()?;
             let right = self.factor()?;
             left = Expr::Binary {
                 op,
@@ -591,10 +608,12 @@ impl Parser {
                 col: c,
             };
         }
+        self.depth = saved;
         Ok(left)
     }
 
     fn factor(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
         let mut left = self.unary()?;
         loop {
             let op = match self.peek() {
@@ -605,6 +624,7 @@ impl Parser {
             };
             let (l, c) = self.pos();
             self.advance();
+            self.deepen()?;
             let right = self.unary()?;
             left = Expr::Binary {
                 op,
@@ -614,19 +634,33 @@ impl Parser {
                 col: c,
             };
         }
+        self.depth = saved;
         Ok(left)
     }
 
-    fn unary(&mut self) -> Result<Expr, HelixError> {
-        // Depth guard: every nesting path passes through here, so this bounds
-        // parser recursion (and the resulting AST depth) to a clean error.
+    /// Account for one more structural level — recursive *nesting* (`((…))`) or
+    /// left-spine growth from a *chain* (`a+b+c…`, `x.f().g()…`, built iteratively
+    /// in the precedence loops below). Errors past `MAX_PARSE_DEPTH` so a later
+    /// recursive pass over the AST — type-check, compile, or even `Box<Expr>`'s
+    /// `Drop` — can't overflow the native stack on pathological input. The parser
+    /// is the single place that bounds AST depth, so every depth-increasing
+    /// construct must call this.
+    fn deepen(&mut self) -> Result<(), HelixError> {
         self.depth += 1;
         if self.depth > MAX_PARSE_DEPTH {
-            self.depth -= 1;
             let (l, c) = self.pos();
-            return Err(HelixError::new("expression nested too deeply", l, c)
-                .hint("simplify or split deeply-nested expressions."));
+            return Err(
+                HelixError::new("expression nested or chained too deeply", l, c)
+                    .hint("split very large or deeply-nested expressions."),
+            );
         }
+        Ok(())
+    }
+
+    fn unary(&mut self) -> Result<Expr, HelixError> {
+        // Every nesting path passes through here, so this bounds recursive-descent
+        // depth; the precedence loops add `deepen()` to bound left-spine chains too.
+        self.deepen()?;
         let r = self.unary_inner();
         self.depth -= 1;
         r
@@ -685,10 +719,12 @@ impl Parser {
     }
 
     fn postfix(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
         let mut e = self.primary()?;
         loop {
             match self.peek() {
                 Tok::Dot => {
+                    self.deepen()?;
                     let (l, c) = self.pos();
                     self.advance();
                     let name = self.member_name("after `.`")?;
@@ -715,6 +751,7 @@ impl Parser {
                     }
                 }
                 Tok::LBracket => {
+                    self.deepen()?;
                     let (l, c) = self.pos();
                     self.advance();
                     // `start? : stop? (: step?)?` is a slice; a bare expr is an index.
@@ -773,6 +810,7 @@ impl Parser {
                 Tok::LParen => {
                     // A call is only valid directly on a bare name: `print(...)`.
                     if let Expr::Ident { name, line, col } = e {
+                        self.deepen()?;
                         self.advance();
                         let args = self.args()?;
                         self.eat(&Tok::RParen, "to close the argument list")?;
@@ -791,6 +829,7 @@ impl Parser {
                 _ => break,
             }
         }
+        self.depth = saved;
         Ok(e)
     }
 

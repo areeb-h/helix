@@ -193,8 +193,16 @@ impl super::Checker {
         // Record the receiver's type so the bytecode compiler can route this method
         // by the receiver's true type (DataFrame vs Array vs Tensor), not its name.
         self.types.insert(recv as *const Expr, rt.clone());
-        // `.is_missing()` is universal.
+        // `.is_missing()` is universal — and takes no arguments (matching the
+        // runtime), so the checker agrees rather than waving the arity through.
         if name == "is_missing" {
+            if !args.is_empty() {
+                return Err(HelixError::new(
+                    "`is_missing` takes no arguments",
+                    line,
+                    col,
+                ));
+            }
             return Ok(Type::Bool);
         }
         match &rt {

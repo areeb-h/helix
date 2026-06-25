@@ -176,6 +176,28 @@ pub enum Expr {
     },
 }
 
+impl Expr {
+    /// The source position of this expression, for error reporting. Variants that
+    /// carry an explicit `(line, col)` return it; the few that don't (literals,
+    /// `let`/lambda) return `(0, 0)` — those can't be the source of a positioned
+    /// runtime render error in practice.
+    pub fn position(&self) -> (usize, usize) {
+        match self {
+            Expr::Ident { line, col, .. }
+            | Expr::Field { line, col, .. }
+            | Expr::Unary { line, col, .. }
+            | Expr::Binary { line, col, .. }
+            | Expr::Call { line, col, .. }
+            | Expr::Method { line, col, .. }
+            | Expr::Index { line, col, .. }
+            | Expr::Slice { line, col, .. }
+            | Expr::If { line, col, .. }
+            | Expr::Try { line, col, .. } => (*line, *col),
+            _ => (0, 0),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Stmt {
     /// `x = expr` (mutable=false) or `mut x = expr` (mutable=true).

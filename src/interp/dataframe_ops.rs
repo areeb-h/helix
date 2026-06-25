@@ -85,14 +85,17 @@ pub(crate) fn df_column_verb(
         }
         "select" => {
             let names = column_name_args(args, line, col)?;
+            crate::backend::validate_columns_exist(lf, &names, line, col)?;
             Ok(Value::DataFrame(lf.select(&names, line, col)?))
         }
         "sort" => {
             let names = column_name_args(args, line, col)?;
+            crate::backend::validate_columns_exist(lf, &names, line, col)?;
             Ok(Value::DataFrame(lf.sort(&names, line, col)?))
         }
         "group" => {
             let names = column_name_args(args, line, col)?;
+            crate::backend::validate_columns_exist(lf, &names, line, col)?;
             Ok(Value::GroupBy { handle: lf.clone(), keys: Rc::new(names) })
         }
         "with" => {
@@ -134,6 +137,12 @@ pub(crate) fn groupby_agg(
                     .hint("e.g. `genes.group(species).mean(expression)`."));
             }
             let value_col = arg_as_column_name(&args[0], line, col)?;
+            crate::backend::validate_columns_exist(
+                handle,
+                std::slice::from_ref(&value_col),
+                line,
+                col,
+            )?;
             Ok(Value::DataFrame(handle.group_agg(keys, name, &value_col, line, col)?))
         }
         _ => Err(HelixError::new(

@@ -61,10 +61,15 @@ fn numeric_vec(items: &[Value], who: &str, line: usize, col: usize) -> Result<Ve
     Ok(out)
 }
 
-/// True if any element is `missing` — every numeric aggregation propagates it
-/// (ADR-0001), returning `missing` rather than a number.
-fn has_missing(items: &[Value]) -> bool {
-    items.iter().any(|v| matches!(v, Value::Missing))
+/// True if any element is `missing` *or* a `NaN` float — every numeric aggregation
+/// propagates both as `missing` (ADR-0001). `NaN` is "not a number" and, being
+/// unordered, would otherwise silently corrupt sort-based stats (a stray `NaN`
+/// lands at an arbitrary position, giving a wrong median/quantile). `inf` is left
+/// alone: it orders correctly and yields a well-defined (if extreme) result.
+fn missing_or_nan(items: &[Value]) -> bool {
+    items
+        .iter()
+        .any(|v| matches!(v, Value::Missing) || matches!(v, Value::Float(f) if f.is_nan()))
 }
 
 fn array_method(
@@ -94,7 +99,7 @@ fn array_method(
         }
         "mean" => {
             no_args(name)?;
-            if has_missing(items) {
+            if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
             let xs = numeric_vec(items, "mean", line, col)?;
@@ -103,7 +108,7 @@ fn array_method(
         }
         "std" => {
             no_args(name)?;
-            if has_missing(items) {
+            if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
             let xs = numeric_vec(items, "std", line, col)?;
@@ -112,7 +117,7 @@ fn array_method(
         }
         "median" => {
             no_args(name)?;
-            if has_missing(items) {
+            if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
             let xs = numeric_vec(items, "median", line, col)?;
@@ -121,7 +126,7 @@ fn array_method(
         }
         "var" => {
             no_args(name)?;
-            if has_missing(items) {
+            if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
             let xs = numeric_vec(items, "var", line, col)?;
@@ -150,7 +155,7 @@ fn array_method(
                 )
                 .hint("0 is the minimum, 0.5 the median, 1 the maximum."));
             }
-            if has_missing(items) {
+            if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
             let xs = numeric_vec(items, "quantile", line, col)?;
@@ -159,7 +164,7 @@ fn array_method(
         }
         "summary" => {
             no_args(name)?;
-            if has_missing(items) {
+            if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
             let mut xs = numeric_vec(items, "summary", line, col)?;
@@ -179,16 +184,29 @@ fn array_method(
         }
         "sum" => {
             no_args(name)?;
-            if has_missing(items) {
+            if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
             // Keep Int if every element is an Int; otherwise compensated float sum.
             if items.iter().all(|v| matches!(v, Value::Int(_))) {
-                let s: i64 = items
+                // Accumulate in i128 so a total that exceeds i64 neither panics
+                // (debug) nor silently wraps (release): stay exact `Int` when it
+                // fits, else promote to a compensated `Float` — mirroring `**`'s
+                // Int→Float overflow promotion, so a large sum is never wrong.
+                let wide: i128 = items
                     .iter()
-                    .map(|v| if let Value::Int(i) = v { *i } else { 0 })
+                    .map(|v| if let Value::Int(i) = v { *i as i128 } else { 0 })
                     .sum();
-                Ok(Value::Int(s))
+                match i64::try_from(wide) {
+                    Ok(n) => Ok(Value::Int(n)),
+                    Err(_) => {
+                        let xs: Vec<f64> = items
+                            .iter()
+                            .map(|v| if let Value::Int(i) = v { *i as f64 } else { 0.0 })
+                            .collect();
+                        Ok(Value::Float(neumaier_sum(&xs)))
+                    }
+                }
             } else {
                 let xs = numeric_vec(items, "sum", line, col)?;
                 Ok(Value::Float(neumaier_sum(&xs)))
@@ -196,7 +214,7 @@ fn array_method(
         }
         "min" | "max" => {
             no_args(name)?;
-            if has_missing(items) {
+            if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
             let xs = numeric_vec(items, name, line, col)?;
@@ -212,7 +230,7 @@ fn array_method(
         }
         "normalize" => {
             no_args(name)?;
-            if has_missing(items) {
+            if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
             let xs = numeric_vec(items, "normalize", line, col)?;

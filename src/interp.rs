@@ -208,7 +208,8 @@ impl Interp {
                         crate::ast::InterpPart::Lit(t) => s.push_str(t),
                         crate::ast::InterpPart::Expr(e) => {
                             let v = self.eval(e)?;
-                            s.push_str(&v.to_string());
+                            let (l, c) = e.position();
+                            s.push_str(&crate::value::display_value(&v, l, c)?);
                         }
                     }
                 }
@@ -371,6 +372,22 @@ impl Interp {
                 col,
             } => {
                 let recv_v = self.eval(recv)?;
+                // `is_missing` is universal — every value answers it. DataFrame and
+                // GroupBy receivers are routed to their verb dispatch below, which
+                // never reaches the universal handler in `call_method`, so intercept
+                // it here; a frame/group is never `missing`, so the answer is `false`.
+                if name == "is_missing"
+                    && matches!(recv_v, Value::DataFrame(_) | Value::GroupBy { .. })
+                {
+                    if !args.is_empty() {
+                        return Err(HelixError::new(
+                            "`is_missing` takes no arguments",
+                            *line,
+                            *col,
+                        ));
+                    }
+                    return Ok(Value::Bool(false));
+                }
                 // DataFrame / GroupBy verbs take their column arguments
                 // *unevaluated* (column names and predicates), so they're routed
                 // before the array comprehension path.

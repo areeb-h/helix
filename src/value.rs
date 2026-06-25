@@ -12,6 +12,7 @@ use ndarray::ArrayD;
 
 use crate::ast::Expr;
 use crate::backend::Df;
+use crate::error::HelixError;
 
 #[derive(Clone)]
 pub enum Value {
@@ -193,5 +194,69 @@ impl fmt::Display for Value {
                 write!(f, "}}")
             }
         }
+    }
+}
+
+/// Render a value for **user-facing output** (`print`, string interpolation) — a
+/// *fallible* mirror of `Display`. A `DataFrame` materializes its lazy plan here,
+/// so a failed query surfaces as a real `HelixError` (and a non-zero exit) instead
+/// of being swallowed into a placeholder string by `Display`. Recurses into
+/// collections so a frame nested in an Array/Tuple/Record propagates too; every
+/// other (leaf) value can't fail and delegates to `Display`.
+pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
+    match v {
+        Value::DataFrame(df) => df.collect_string().map_err(|e| {
+            HelixError::new(format!("could not render the DataFrame: {}", e), line, col)
+        }),
+        Value::Array(items) => {
+            let mut s = String::from("[");
+            for (i, it) in items.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&display_elem(it, line, col)?);
+            }
+            s.push(']');
+            Ok(s)
+        }
+        Value::Tuple(items) => {
+            let mut s = String::from("(");
+            for (i, it) in items.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&display_elem(it, line, col)?);
+            }
+            // a 1-tuple prints as `(x,)` to disambiguate from grouping
+            if items.len() == 1 {
+                s.push(',');
+            }
+            s.push(')');
+            Ok(s)
+        }
+        Value::Record(fields) => {
+            let mut s = String::from("{");
+            for (i, (k, val)) in fields.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(k);
+                s.push_str(": ");
+                s.push_str(&display_elem(val, line, col)?);
+            }
+            s.push('}');
+            Ok(s)
+        }
+        // Scalars and other leaf values can't fail to render.
+        other => Ok(other.to_string()),
+    }
+}
+
+/// Element rendering inside a collection: strings are quoted (matching `Display`),
+/// everything else goes through `display_value` so nested frames stay fallible.
+fn display_elem(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
+    match v {
+        Value::Str(s) => Ok(format!("\"{}\"", s)),
+        other => display_value(other, line, col),
     }
 }
