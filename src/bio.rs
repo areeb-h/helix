@@ -9,6 +9,7 @@ use std::rc::Rc;
 use needletail::{parse_fastx_file, FastxReader};
 
 use crate::error::HelixError;
+use crate::symbol::Symbol;
 use crate::value::Value;
 
 /// `read_fasta(path)` → an array of sequence records `{id, seq, length}`.
@@ -24,6 +25,9 @@ pub fn read_fasta(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
         )
     })?;
 
+    // Intern the field names once, not per record (millions of reads).
+    let (k_id, k_seq, k_length) =
+        (Symbol::intern("id"), Symbol::intern("seq"), Symbol::intern("length"));
     let mut records: Vec<Value> = Vec::new();
     while let Some(rec) = reader.next() {
         let rec = rec.map_err(|e| {
@@ -36,9 +40,9 @@ pub fn read_fasta(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
         let length = seq.len() as i64;
 
         records.push(Value::Record(Rc::new(vec![
-            ("id".into(), Value::Str(Rc::new(id))),
-            ("seq".into(), Value::Dna(Rc::new(seq))),
-            ("length".into(), Value::Int(length)),
+            (k_id, Value::Str(Rc::new(id))),
+            (k_seq, Value::Dna(Rc::new(seq))),
+            (k_length, Value::Int(length)),
         ])));
     }
     Ok(Value::array(records))
@@ -55,6 +59,13 @@ pub fn read_fastq(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
             .hint("check the path and that the file is FASTQ (optionally gzipped).")
     })?;
 
+    // Intern the field names once, not per record (millions of reads).
+    let (k_id, k_seq, k_qual, k_length) = (
+        Symbol::intern("id"),
+        Symbol::intern("seq"),
+        Symbol::intern("qual"),
+        Symbol::intern("length"),
+    );
     let mut records: Vec<Value> = Vec::new();
     while let Some(rec) = reader.next() {
         let rec = rec.map_err(|e| {
@@ -70,10 +81,10 @@ pub fn read_fastq(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
         };
 
         records.push(Value::Record(Rc::new(vec![
-            ("id".into(), Value::Str(Rc::new(id))),
-            ("seq".into(), Value::Dna(Rc::new(seq))),
-            ("qual".into(), qual),
-            ("length".into(), Value::Int(length)),
+            (k_id, Value::Str(Rc::new(id))),
+            (k_seq, Value::Dna(Rc::new(seq))),
+            (k_qual, qual),
+            (k_length, Value::Int(length)),
         ])));
     }
     Ok(Value::array(records))

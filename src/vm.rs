@@ -550,15 +550,15 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::MakeRecord(names) => {
                 let start = stack.len() - names.len();
                 let vals: Vec<Value> = stack.split_off(start);
-                // `names.iter().cloned()` clones `Rc<str>` (a refcount bump) — the
-                // field names are shared from the op, not re-allocated per record.
-                let fields: Vec<(std::rc::Rc<str>, Value)> =
-                    names.iter().cloned().zip(vals).collect();
+                // `names.iter().copied()` copies the interned `Symbol`s (a `u32`
+                // each) — no per-record key allocation.
+                let fields: Vec<(crate::symbol::Symbol, Value)> =
+                    names.iter().copied().zip(vals).collect();
                 stack.push(Value::Record(std::rc::Rc::new(fields)));
             }
             Op::GetField(name) => {
                 let recv = stack.pop().unwrap();
-                stack.push(crate::interp::eval_field(&recv, name, line, col)?);
+                stack.push(crate::interp::eval_field(&recv, *name, line, col)?);
             }
             Op::Slice(mask) => {
                 // Bounds were pushed after the receiver in start/stop/step order;

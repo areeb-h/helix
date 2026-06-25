@@ -14,6 +14,7 @@ use ndarray::ArrayD;
 use crate::ast::Expr;
 use crate::backend::Df;
 use crate::error::HelixError;
+use crate::symbol::Symbol;
 
 #[derive(Clone)]
 pub enum Value {
@@ -29,10 +30,11 @@ pub enum Value {
     /// A fixed-size, heterogeneous tuple: `(1, "a", true)`.
     Tuple(Rc<Vec<Value>>),
     /// An ordered record with identifier keys: `{name: "Ada", age: 41}`. Keys are
-    /// `Rc<str>` so a record built by the VM shares the field names from its
-    /// `MakeRecord` op (a refcount bump) instead of re-allocating a `String` per
-    /// key per record — the per-row cost in record-building pipelines.
-    Record(Rc<Vec<(Rc<str>, Value)>>),
+    /// interned [`Symbol`]s, so field lookup and dispatch compare a single `u32`
+    /// (not a heap string), the names cost no per-record allocation, and equal
+    /// field names across the whole program share one entry. The text is recovered
+    /// only on cold paths (display, errors, JSON) via [`Symbol::as_str`].
+    Record(Rc<Vec<(Symbol, Value)>>),
     /// A dense n-dimensional `f64` tensor (ndarray-backed). See ADR 0007.
     Tensor(Rc<ArrayD<f64>>),
     /// A columnar DataFrame, held behind the engine-agnostic backend seam (ADR
@@ -430,7 +432,7 @@ pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, Helix
                 if i > 0 {
                     s.push_str(", ");
                 }
-                s.push_str(k);
+                s.push_str(k.as_str());
                 s.push_str(": ");
                 s.push_str(&display_elem(val, line, col)?);
             }

@@ -7,6 +7,7 @@ use super::*;
 use std::rc::Rc;
 
 use crate::error::HelixError;
+use crate::symbol::Symbol;
 use crate::tensor;
 use crate::value::Value;
 
@@ -240,18 +241,20 @@ pub(crate) fn df_value_method(
     }
 }
 
-/// Record field access `r.name`. Shared by the tree-walker and the VM.
-pub(crate) fn eval_field(r: &Value, name: &str, line: usize, col: usize) -> Result<Value, HelixError> {
+/// Record field access `r.name`. Shared by the tree-walker and the VM; the field
+/// name arrives pre-interned (the VM from its `GetField` op, the tree-walker by
+/// interning the static AST name), so the lookup compares a single `u32` per key.
+pub(crate) fn eval_field(r: &Value, name: Symbol, line: usize, col: usize) -> Result<Value, HelixError> {
     match r {
         Value::Record(fields) => fields
             .iter()
-            .find(|(k, _)| k.as_ref() == name)
+            .find(|(k, _)| *k == name)
             .map(|(_, v)| v.clone())
             .ok_or_else(|| {
-                let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_ref()).collect();
+                let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
                 let mut err =
                     HelixError::new(format!("record has no field `{}`", name), line, col);
-                if let Some(s) = suggest(name, &keys) {
+                if let Some(s) = suggest(name.as_str(), &keys) {
                     err = err.hint(format!("did you mean `{}`?", s));
                 } else {
                     err = err.hint(format!("fields: {}", keys.join(", ")));
@@ -259,7 +262,7 @@ pub(crate) fn eval_field(r: &Value, name: &str, line: usize, col: usize) -> Resu
                 err
             }),
         Value::Missing => Ok(Value::Missing), // propagate
-        Value::PyObject(h) => crate::python::getattr(h, name, line, col),
+        Value::PyObject(h) => crate::python::getattr(h, name.as_str(), line, col),
         other => Err(HelixError::new(
             format!("a value of type {} has no field `{}`", other.type_name(), name),
             line,
@@ -284,9 +287,10 @@ pub(crate) fn eval_index(recv: &Value, idx: &Value, line: usize, col: usize) -> 
     // valid identifiers). An absent key yields `missing`: this is the safe/optional
     // accessor, while `.field` is the static one that errors on a typo.
     if let (Value::Record(fields), Value::Str(key)) = (recv, idx) {
-        return Ok(fields
-            .iter()
-            .find(|(k, _)| k.as_ref() == key.as_str())
+        // `lookup` (never inserts) so a dynamic miss-key in a loop can't grow the
+        // interner; an un-interned key matches no field → `missing`, as before.
+        return Ok(Symbol::lookup(key.as_str())
+            .and_then(|want| fields.iter().find(|(k, _)| *k == want))
             .map(|(_, v)| v.clone())
             .unwrap_or(Value::Missing));
     }

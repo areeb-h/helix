@@ -25,6 +25,7 @@ mod parser;
 mod python;
 mod registry;
 mod stats;
+mod symbol;
 mod tensor;
 mod token;
 mod types;

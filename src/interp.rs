@@ -8,6 +8,7 @@ use crate::ast::{BinOp, Expr, Stmt, UnOp};
 use crate::backend::Df;
 use crate::dataframe;
 use crate::error::{suggest, HelixError};
+use crate::symbol::Symbol;
 use crate::tensor;
 use crate::value::Value;
 
@@ -249,7 +250,7 @@ impl Interp {
             Expr::Record(fields) => {
                 let mut vals = Vec::with_capacity(fields.len());
                 for (k, v) in fields {
-                    vals.push((Rc::from(k.as_str()), self.eval(v)?));
+                    vals.push((Symbol::intern(k), self.eval(v)?));
                 }
                 Ok(Value::Record(Rc::new(vals)))
             }
@@ -260,7 +261,7 @@ impl Interp {
                 col,
             } => {
                 let r = self.eval(recv)?;
-                eval_field(&r, name, *line, *col)
+                eval_field(&r, Symbol::intern(name), *line, *col)
             }
             Expr::Unary { op, expr, line, col } => {
                 let v = self.eval(expr)?;
@@ -720,23 +721,39 @@ fn comp_arity(name: &str, example: &str, line: usize, col: usize) -> HelixError 
     .hint(format!("e.g. `xs.{}{}`.", name, example))
 }
 
+/// The interned field names of a `try` result record (`ok`/`value`/`error`),
+/// resolved once rather than per `try` — a `try` inside a `map` builds one of
+/// these per element, so the keys must not re-hit the interner each time.
+struct TryKeys {
+    ok: Symbol,
+    value: Symbol,
+    error: Symbol,
+}
+static TRY_KEYS: std::sync::LazyLock<TryKeys> = std::sync::LazyLock::new(|| TryKeys {
+    ok: Symbol::intern("ok"),
+    value: Symbol::intern("value"),
+    error: Symbol::intern("error"),
+});
+
 /// The result record of `try EXPR` on success: `{ok: true, value: v, error: missing}`.
 /// Shared by both engines so the record shape is identical.
 pub(crate) fn try_ok(v: Value) -> Value {
+    let k = &*TRY_KEYS;
     Value::Record(Rc::new(vec![
-        ("ok".into(), Value::Bool(true)),
-        ("value".into(), v),
-        ("error".into(), Value::Missing),
+        (k.ok, Value::Bool(true)),
+        (k.value, v),
+        (k.error, Value::Missing),
     ]))
 }
 
 /// The result record of `try EXPR` on a runtime error:
 /// `{ok: false, value: missing, error: <message>}`.
 pub(crate) fn try_err(message: String) -> Value {
+    let k = &*TRY_KEYS;
     Value::Record(Rc::new(vec![
-        ("ok".into(), Value::Bool(false)),
-        ("value".into(), Value::Missing),
-        ("error".into(), Value::Str(Rc::new(message))),
+        (k.ok, Value::Bool(false)),
+        (k.value, Value::Missing),
+        (k.error, Value::Str(Rc::new(message))),
     ]))
 }
 

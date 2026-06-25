@@ -717,15 +717,15 @@ impl Compiler {
                 for (_, v) in fields {
                     self.compile_expr(b, v)?;
                 }
-                // Intern the field names to `Rc<str>` once here, so every record
-                // built from this op shares them rather than allocating per record.
-                let names: Vec<std::rc::Rc<str>> =
-                    fields.iter().map(|(k, _)| std::rc::Rc::from(k.as_str())).collect();
+                // Intern the field names to `Symbol`s once here, so every record
+                // built from this op carries the shared integer keys.
+                let names: Vec<crate::symbol::Symbol> =
+                    fields.iter().map(|(k, _)| crate::symbol::Symbol::intern(k)).collect();
                 b.emit(Op::MakeRecord(std::rc::Rc::new(names)), 0, 0);
             }
             Expr::Field { recv, name, line, col } => {
                 self.compile_expr(b, recv)?;
-                b.emit(Op::GetField(std::rc::Rc::new(name.clone())), *line, *col);
+                b.emit(Op::GetField(crate::symbol::Symbol::intern(name)), *line, *col);
             }
             Expr::Method { recv, name, args, line, col } => {
                 use crate::types::Type;

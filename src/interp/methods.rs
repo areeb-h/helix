@@ -280,12 +280,12 @@ fn array_method(
             // A descriptive overview (the `describe()` analogue): count, central
             // tendency, spread, and the three order-statistic extremes/center.
             let fields = vec![
-                ("count".into(), Value::Int(xs.len() as i64)),
-                ("mean".into(), Value::Float(crate::stats::mean(&xs))),
-                ("std".into(), Value::Float(crate::stats::std(&xs))),
-                ("min".into(), Value::Float(xs[0])),
-                ("median".into(), Value::Float(crate::stats::quantile_sorted(&xs, 0.5))),
-                ("max".into(), Value::Float(xs[xs.len() - 1])),
+                (Symbol::intern("count"), Value::Int(xs.len() as i64)),
+                (Symbol::intern("mean"), Value::Float(crate::stats::mean(&xs))),
+                (Symbol::intern("std"), Value::Float(crate::stats::std(&xs))),
+                (Symbol::intern("min"), Value::Float(xs[0])),
+                (Symbol::intern("median"), Value::Float(crate::stats::quantile_sorted(&xs, 0.5))),
+                (Symbol::intern("max"), Value::Float(xs[xs.len() - 1])),
             ];
             Ok(Value::Record(Rc::new(fields)))
         }

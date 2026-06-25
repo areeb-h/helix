@@ -71,11 +71,12 @@ pub enum Op {
     /// Pop `n` values and build a tuple from them (in push order).
     MakeTuple(u32),
     /// Pop `names.len()` values and pair them with these field names → a record.
-    /// Names are `Rc<str>` (interned once at compile) so each record built from this
-    /// op shares them by refcount bump rather than allocating a `String` per field.
-    MakeRecord(std::rc::Rc<Vec<std::rc::Rc<str>>>),
-    /// Pop a receiver; push `recv.<name>` (record field access).
-    GetField(std::rc::Rc<String>),
+    /// Names are interned [`crate::symbol::Symbol`]s (resolved once at compile), so
+    /// building a record is an integer copy per field — no per-record allocation.
+    MakeRecord(std::rc::Rc<Vec<crate::symbol::Symbol>>),
+    /// Pop a receiver; push `recv.<name>` (record field access). The field name is
+    /// an interned `Symbol`, so the lookup compares a `u32` against the record keys.
+    GetField(crate::symbol::Symbol),
     /// Slice a receiver. The bitmask says which of start/stop/step were supplied
     /// (bit 0/1/2); those bound values were pushed after the receiver, in order.
     Slice(u8),
