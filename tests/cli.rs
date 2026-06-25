@@ -435,6 +435,26 @@ fn closures_capture_on_both_engines() {
 }
 
 #[test]
+fn match_works_on_both_engines() {
+    // `match` with literal arms + wildcard, a binding pattern (and recursion through
+    // arms), and the `missing` pattern — identical on the VM (compiled to test/jump
+    // ops sharing the tree-walker's matcher) and the tree-walker.
+    let src = concat!(
+        "print(match 2 { 1 => \"one\", 2 => \"two\", _ => \"other\" })\n",
+        "fn fib(n) = match n { 0 => 0, 1 => 1, _ => fib(n - 1) + fib(n - 2) }\n",
+        "print(fib(10))\n",
+        "print(match missing { missing => \"absent\", _ => \"present\" })\n",
+        "print(match 42 { x => x + 1 })\n",
+    );
+    let (vm, e1, c1) = run_source(src, &[], "match_vm");
+    assert_eq!(c1, Some(0), "stderr:\n{e1}");
+    assert_eq!(vm.trim(), "two\n55\nabsent\n43");
+    let (tw, _, c2) = run_source(src, &[("HELIX_NOVM", "1")], "match_tw");
+    assert_eq!(c2, Some(0));
+    assert_eq!(vm, tw, "VM and tree-walker disagree on `match`");
+}
+
+#[test]
 fn with_derives_columns_from_expressions() {
     // `df.with({name: expr, ...})` adds columns computed over existing ones. The
     // value expressions reference bare column names, like the other column verbs.

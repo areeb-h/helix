@@ -1,0 +1,28 @@
+# Pattern matching — `match` tries each arm in order; the first matching pattern
+# binds its variables and yields its result. It is an expression, like `if`.
+
+# Literal patterns with a `_` wildcard fallback.
+fn classify(n) = match n {
+  0 => "zero",
+  1 => "one",
+  _ => "many",
+}
+print(classify(0))
+print(classify(1))
+print(classify(7))
+
+# A binding pattern captures the value; arms can recurse.
+fn fib(n) = match n {
+  0 => 0,
+  1 => 1,
+  _ => fib(n - 1) + fib(n - 2),
+}
+print(fib(10))
+
+# `missing` is a pattern — pattern matching pairs naturally with the missing model.
+fn describe(x) = match x {
+  missing => "no value",
+  _ => "got a value",
+}
+print(describe(missing))
+print(describe(42))

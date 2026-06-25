@@ -715,6 +715,34 @@ impl Checker {
                     ("error".to_string(), Type::String),
                 ]))
             }
+            Expr::Match { scrutinee, arms, .. } => {
+                let st = self.synth(scrutinee)?;
+                let mut result: Option<Type> = None;
+                for (pat, body) in arms {
+                    // A binding pattern gives the name the scrutinee's type in the arm.
+                    let saved = if let crate::ast::Pattern::Bind(name) = pat {
+                        Some((name.clone(), self.env.insert(name.clone(), st.clone())))
+                    } else {
+                        None
+                    };
+                    let bt = self.synth(body)?;
+                    if let Some((name, prev)) = saved {
+                        match prev {
+                            Some(t) => {
+                                self.env.insert(name, t);
+                            }
+                            None => {
+                                self.env.remove(&name);
+                            }
+                        }
+                    }
+                    result = Some(match result {
+                        Some(r) => join(&r, &bt),
+                        None => bt,
+                    });
+                }
+                Ok(result.unwrap_or(Type::Unknown))
+            }
         }
     }
 

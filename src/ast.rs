@@ -74,6 +74,23 @@ pub enum InterpPart {
     Expr(Box<Expr>),
 }
 
+/// A `match`-arm pattern (v1: refutable literals, an irrefutable binding, and the
+/// wildcard). A `Bind` or `Wildcard` matches anything (so it must come last); a
+/// literal matches only an equal value.
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// `_` — matches anything, binds nothing.
+    Wildcard,
+    /// `name` — matches anything, binds the value to `name`.
+    Bind(String),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    /// `missing` — matches only an absent value.
+    Missing,
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64),
@@ -174,6 +191,15 @@ pub enum Expr {
         line: usize,
         col: usize,
     },
+    /// `match e { pat => result, ... }` — try each arm's pattern against `e` in
+    /// order; the first that matches binds its variables and yields its result. A
+    /// value-producing expression (like `if`), not a statement.
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<(Pattern, Expr)>,
+        line: usize,
+        col: usize,
+    },
 }
 
 impl Expr {
@@ -192,7 +218,8 @@ impl Expr {
             | Expr::Index { line, col, .. }
             | Expr::Slice { line, col, .. }
             | Expr::If { line, col, .. }
-            | Expr::Try { line, col, .. } => (*line, *col),
+            | Expr::Try { line, col, .. }
+            | Expr::Match { line, col, .. } => (*line, *col),
             _ => (0, 0),
         }
     }

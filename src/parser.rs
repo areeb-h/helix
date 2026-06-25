@@ -852,6 +852,66 @@ impl Parser {
         Ok(args)
     }
 
+    /// Parse one `match`-arm pattern (v1: a literal, a name to bind, or `_`).
+    fn parse_pattern(&mut self) -> Result<crate::ast::Pattern, HelixError> {
+        use crate::ast::Pattern;
+        let (l, c) = self.pos();
+        match self.peek().clone() {
+            Tok::Ident(name) => {
+                self.advance();
+                Ok(if name == "_" { Pattern::Wildcard } else { Pattern::Bind(name) })
+            }
+            Tok::Int(v) => {
+                self.advance();
+                Ok(Pattern::Int(v))
+            }
+            Tok::Float(v) => {
+                self.advance();
+                Ok(Pattern::Float(v))
+            }
+            Tok::Str(s) => {
+                self.advance();
+                Ok(Pattern::Str(s))
+            }
+            Tok::True => {
+                self.advance();
+                Ok(Pattern::Bool(true))
+            }
+            Tok::False => {
+                self.advance();
+                Ok(Pattern::Bool(false))
+            }
+            Tok::Missing => {
+                self.advance();
+                Ok(Pattern::Missing)
+            }
+            Tok::Minus => {
+                self.advance();
+                match self.peek().clone() {
+                    Tok::Int(v) => {
+                        self.advance();
+                        Ok(Pattern::Int(-v))
+                    }
+                    Tok::Float(v) => {
+                        self.advance();
+                        Ok(Pattern::Float(-v))
+                    }
+                    other => Err(HelixError::new(
+                        format!("expected a number after `-` in a pattern, found {}", other.describe()),
+                        l,
+                        c,
+                    )),
+                }
+            }
+            other => Err(HelixError::new(
+                format!("expected a pattern, found {}", other.describe()),
+                l,
+                c,
+            )
+            .hint("a pattern is a literal (`0`, `\"x\"`, `true`, `missing`), a name to bind, or `_`.")),
+        }
+    }
+
     fn primary(&mut self) -> Result<Expr, HelixError> {
         let (l, c) = self.pos();
         match self.peek().clone() {
@@ -938,6 +998,33 @@ impl Parser {
                     line: l,
                     col: c,
                 })
+            }
+            Tok::Match => {
+                self.advance();
+                let scrutinee = self.expr()?;
+                self.eat(&Tok::LBrace, "after the `match` value").map_err(|e| {
+                    e.hint("a `match` looks like `match x { 0 => \"zero\", _ => \"other\" }`.")
+                })?;
+                let mut arms = Vec::new();
+                while !matches!(self.peek(), Tok::RBrace) {
+                    let pat = self.parse_pattern()?;
+                    self.eat(&Tok::FatArrow, "after a match pattern").map_err(|e| {
+                        e.hint("each arm is `pattern => result`, e.g. `0 => \"zero\"`.")
+                    })?;
+                    let result = self.expr()?;
+                    arms.push((pat, result));
+                    if matches!(self.peek(), Tok::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.eat(&Tok::RBrace, "to close the `match`")?;
+                if arms.is_empty() {
+                    return Err(HelixError::new("a `match` needs at least one arm", l, c)
+                        .hint("e.g. `match x { 0 => \"zero\", _ => \"other\" }`."));
+                }
+                Ok(Expr::Match { scrutinee: Box::new(scrutinee), arms, line: l, col: c })
             }
             Tok::LParen => {
                 // `(e)` groups; `()` / `(a, b)` / `(x,)` build a tuple. (A lambda

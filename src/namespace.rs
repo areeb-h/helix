@@ -154,5 +154,15 @@ fn rw(e: &mut Expr, bound: &HashSet<String>) {
             rw(else_branch, bound);
         }
         Expr::Try { expr, .. } => rw(expr, bound),
+        Expr::Match { scrutinee, arms, .. } => {
+            rw(scrutinee, bound);
+            for (pat, body) in arms.iter_mut() {
+                let mut b = bound.clone();
+                if let crate::ast::Pattern::Bind(name) = pat {
+                    b.insert(name.clone());
+                }
+                rw(body, &b);
+            }
+        }
     }
 }

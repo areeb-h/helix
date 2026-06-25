@@ -472,6 +472,16 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
             rw(else_branch, ctx, bound);
         }
         Expr::Try { expr, .. } => rw(expr, ctx, bound),
+        Expr::Match { scrutinee, arms, .. } => {
+            rw(scrutinee, ctx, bound);
+            for (pat, body) in arms.iter_mut() {
+                let mut b = bound.clone();
+                if let crate::ast::Pattern::Bind(name) = pat {
+                    b.insert(name.clone());
+                }
+                rw(body, ctx, &b);
+            }
+        }
     }
 }
 

@@ -540,6 +540,32 @@ impl Interp {
                 Ok(v) => try_ok(v),
                 Err(e) => try_err(e.message),
             }),
+            Expr::Match { scrutinee, arms, line, col } => {
+                let v = self.eval(scrutinee)?;
+                for (pat, body) in arms {
+                    match pattern_match(pat, &v) {
+                        Some(Some((name, val))) => {
+                            // A binding pattern: install it (save/restore), eval body.
+                            let prev =
+                                self.env.insert(name.clone(), Binding { value: val, mutable: false });
+                            let result = self.eval(body);
+                            match prev {
+                                Some(b) => {
+                                    self.env.insert(name.clone(), b);
+                                }
+                                None => {
+                                    self.env.remove(&name);
+                                }
+                            }
+                            return result;
+                        }
+                        Some(None) => return self.eval(body), // wildcard/literal: no binding
+                        None => {}
+                    }
+                }
+                Err(HelixError::new("no `match` arm matched the value", *line, *col)
+                    .hint("add a `_ => ...` arm to handle any remaining case."))
+            }
         }
     }
 
@@ -756,6 +782,24 @@ fn comp_arity(name: &str, example: &str, line: usize, col: usize) -> HelixError 
         col,
     )
     .hint(format!("e.g. `xs.{}{}`.", name, example))
+}
+
+/// Test a `match` pattern against a value. `None` means no match; `Some(None)`
+/// matches with no binding (a literal or `_`); `Some(Some((name, val)))` matches and
+/// binds `name` to `val` (a binding pattern). Shared by the tree-walker AND the VM
+/// (whose `MatchTest` op calls this), so the two engines match identically.
+pub(crate) fn pattern_match(pat: &crate::ast::Pattern, v: &Value) -> Option<Option<(String, Value)>> {
+    use crate::ast::Pattern;
+    let lit = |matched: bool| if matched { Some(None) } else { None };
+    match pat {
+        Pattern::Wildcard => Some(None),
+        Pattern::Bind(name) => Some(Some((name.clone(), v.clone()))),
+        Pattern::Int(i) => lit(matches!(v, Value::Int(x) if x == i)),
+        Pattern::Float(f) => lit(matches!(v, Value::Float(x) if x == f)),
+        Pattern::Str(s) => lit(matches!(v, Value::Str(x) if x.as_str() == s.as_str())),
+        Pattern::Bool(b) => lit(matches!(v, Value::Bool(x) if x == b)),
+        Pattern::Missing => lit(matches!(v, Value::Missing)),
+    }
 }
 
 /// The interned field names of a `try` result record (`ok`/`value`/`error`),

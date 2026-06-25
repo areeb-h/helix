@@ -143,6 +143,9 @@ fn any_call(e: &Expr, pred: &dyn Fn(&str) -> bool) -> bool {
             any_call(cond, pred) || any_call(then_branch, pred) || any_call(else_branch, pred)
         }
         Expr::Try { expr, .. } => any_call(expr, pred),
+        Expr::Match { scrutinee, arms, .. } => {
+            any_call(scrutinee, pred) || arms.iter().any(|(_, b)| any_call(b, pred))
+        }
     }
 }
 
@@ -231,6 +234,11 @@ fn children(e: &Expr) -> Vec<&Expr> {
         }
         Expr::If { cond, then_branch, else_branch, .. } => vec![cond, then_branch, else_branch],
         Expr::Try { expr, .. } => vec![expr],
+        Expr::Match { scrutinee, arms, .. } => {
+            let mut v: Vec<&Expr> = vec![scrutinee];
+            v.extend(arms.iter().map(|(_, b)| b));
+            v
+        }
     }
 }
 
@@ -326,5 +334,17 @@ fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String
             }
         }
         Expr::Try { expr, .. } => collect_free(expr, bound, free),
+        Expr::Match { scrutinee, arms, .. } => {
+            collect_free(scrutinee, bound, free);
+            for (pat, body) in arms {
+                let n = bound.len();
+                // A binding pattern introduces a local for the arm body.
+                if let crate::ast::Pattern::Bind(name) = pat {
+                    bound.push(name.as_str());
+                }
+                collect_free(body, bound, free);
+                bound.truncate(n);
+            }
+        }
     }
 }

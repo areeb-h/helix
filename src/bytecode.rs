@@ -677,6 +677,66 @@ impl Compiler {
                 b.code[jbegin] = Op::TryBegin(catch_ip);
                 b.code[jok] = Op::TryOk(end_ip);
             }
+            Expr::Match { scrutinee, arms, line, col } => {
+                use crate::ast::Pattern;
+                // Evaluate the scrutinee once into a temp local, then test each arm in
+                // order. Each arm jumps to the end after producing its result.
+                b.scopes.push(Vec::new());
+                let saved_next = b.next_slot;
+                self.compile_expr(b, scrutinee)?;
+                let m_slot = b.declare_local("$match"); // sentinel name; only the slot is used
+                b.emit(Op::StoreLocal(m_slot), *line, *col);
+
+                let mut end_jumps: Vec<usize> = Vec::new();
+                for (pat, body) in arms {
+                    match pat {
+                        // `_` — always matches, binds nothing.
+                        Pattern::Wildcard => {
+                            self.compile_expr(b, body)?;
+                            end_jumps.push(b.emit(Op::Jump(0), *line, *col));
+                        }
+                        // `name` — always matches, binds the scrutinee in the arm.
+                        Pattern::Bind(name) => {
+                            b.scopes.push(Vec::new());
+                            let saved2 = b.next_slot;
+                            let bslot = b.declare_local(name);
+                            b.emit(Op::LoadLocal(m_slot), *line, *col);
+                            b.emit(Op::StoreLocal(bslot), *line, *col);
+                            self.compile_expr(b, body)?;
+                            b.scopes.pop();
+                            b.next_slot = saved2;
+                            end_jumps.push(b.emit(Op::Jump(0), *line, *col));
+                        }
+                        // A literal pattern: test the scrutinee; skip the arm on a miss.
+                        _ => {
+                            b.emit(Op::LoadLocal(m_slot), *line, *col);
+                            b.emit(Op::MatchTest(std::rc::Rc::new(pat.clone())), *line, *col);
+                            let jnext = b.emit(Op::JumpIfFalse(0), *line, *col);
+                            self.compile_expr(b, body)?;
+                            end_jumps.push(b.emit(Op::Jump(0), *line, *col));
+                            let next_at = b.code.len() as u32;
+                            b.code[jnext] = Op::JumpIfFalse(next_at);
+                        }
+                    }
+                }
+                // Fell through every arm: no match (the tree-walker's error).
+                b.emit(
+                    Op::raise(
+                        std::rc::Rc::new("no `match` arm matched the value".to_string()),
+                        std::rc::Rc::new(
+                            "add a `_ => ...` arm to handle any remaining case.".to_string(),
+                        ),
+                    ),
+                    *line,
+                    *col,
+                );
+                let end = b.code.len() as u32;
+                for j in end_jumps {
+                    b.code[j] = Op::Jump(end);
+                }
+                b.scopes.pop();
+                b.next_slot = saved_next;
+            }
             Expr::Let { bindings, body } => {
                 b.scopes.push(Vec::new());
                 let saved_next = b.next_slot;

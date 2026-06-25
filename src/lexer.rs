@@ -103,6 +103,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                     "in" => Tok::In,
                     "missing" => Tok::Missing,
                     "try" => Tok::Try,
+                    "match" => Tok::Match,
                     "true" => Tok::True,
                     "false" => Tok::False,
                     _ => Tok::Ident(word),
