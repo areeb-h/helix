@@ -156,12 +156,15 @@ fn rw(e: &mut Expr, bound: &HashSet<String>) {
         Expr::Try { expr, .. } => rw(expr, bound),
         Expr::Match { scrutinee, arms, .. } => {
             rw(scrutinee, bound);
-            for (pat, body) in arms.iter_mut() {
+            for arm in arms.iter_mut() {
                 let mut b = bound.clone();
-                for name in crate::interp::pattern_binding_names(pat) {
+                for name in crate::interp::pattern_binding_names(&arm.pattern) {
                     b.insert(name);
                 }
-                rw(body, &b);
+                if let Some(g) = &mut arm.guard {
+                    rw(g, &b);
+                }
+                rw(&mut arm.body, &b);
             }
         }
     }

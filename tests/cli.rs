@@ -491,6 +491,24 @@ fn match_or_patterns_on_both_engines() {
 }
 
 #[test]
+fn match_guards_on_both_engines() {
+    // `pat if cond => ...` — an arm is taken only if the guard (with the pattern's
+    // bindings in scope) holds, else the next arm is tried. Identical on both engines.
+    let src = concat!(
+        "print(match 5 { n if n > 3 => \"big\", _ => \"small\" })\n",
+        "print(match 2 { n if n > 3 => \"big\", _ => \"small\" })\n",
+        "print(match (1, 2) { (a, b) if a < b => \"asc\", _ => \"other\" })\n",
+        "print(match try (10 / 2) { {ok: true, value: v} if v > 3 => \"big\", _ => \"other\" })\n",
+    );
+    let (vm, e1, c1) = run_source(src, &[], "matchg_vm");
+    assert_eq!(c1, Some(0), "stderr:\n{e1}");
+    assert_eq!(vm.trim(), "big\nsmall\nasc\nbig"); // guard true; false; tuple-bind guard; try+guard
+    let (tw, _, c2) = run_source(src, &[("HELIX_NOVM", "1")], "matchg_tw");
+    assert_eq!(c2, Some(0));
+    assert_eq!(vm, tw, "VM and tree-walker disagree on match guards");
+}
+
+#[test]
 fn with_derives_columns_from_expressions() {
     // `df.with({name: expr, ...})` adds columns computed over existing ones. The
     // value expressions reference bare column names, like the other column verbs.

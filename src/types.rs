@@ -718,16 +718,19 @@ impl Checker {
             Expr::Match { scrutinee, arms, .. } => {
                 let _ = self.synth(scrutinee)?;
                 let mut result: Option<Type> = None;
-                for (pat, body) in arms {
-                    // A pattern's bound names are in scope for the arm body. Their
-                    // precise types depend on the (possibly nested) pattern position,
-                    // so the permissive checker gives each `Unknown`.
-                    let names = crate::interp::pattern_binding_names(pat);
+                for arm in arms {
+                    // A pattern's bound names are in scope for the guard and the body.
+                    // Their precise types depend on the (possibly nested) pattern
+                    // position, so the permissive checker gives each `Unknown`.
+                    let names = crate::interp::pattern_binding_names(&arm.pattern);
                     let saved: Vec<(String, Option<Type>)> = names
                         .iter()
                         .map(|n| (n.clone(), self.env.insert(n.clone(), Type::Unknown)))
                         .collect();
-                    let bt = self.synth(body)?;
+                    if let Some(g) = &arm.guard {
+                        let _ = self.synth(g)?; // surfaces type errors inside the guard
+                    }
+                    let bt = self.synth(&arm.body)?;
                     for (n, prev) in saved.into_iter().rev() {
                         match prev {
                             Some(t) => {

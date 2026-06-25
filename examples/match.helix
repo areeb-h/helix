@@ -11,7 +11,16 @@ print(classify(0))
 print(classify(2))
 print(classify(7))
 
-# A binding pattern captures the value; arms can recurse.
+# A binding pattern captures the value; a guard (`if ...`) refines an arm; arms recurse.
+fn polarity(n) = match n {
+  0 => "zero",
+  x if x > 0 => "positive",
+  _ => "negative",
+}
+print(polarity(0))
+print(polarity(5))
+print(polarity(-3))
+
 fn fib(n) = match n {
   0 => 0,
   1 => 1,

@@ -100,6 +100,16 @@ pub enum Pattern {
     Or(Vec<Pattern>),
 }
 
+/// One arm of a `match`: a pattern, an optional `if` guard (evaluated with the
+/// pattern's bindings in scope — the arm is taken only if the guard holds), and the
+/// result body.
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub guard: Option<Expr>,
+    pub body: Expr,
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64),
@@ -200,12 +210,13 @@ pub enum Expr {
         line: usize,
         col: usize,
     },
-    /// `match e { pat => result, ... }` — try each arm's pattern against `e` in
-    /// order; the first that matches binds its variables and yields its result. A
+    /// `match e { pat [if guard] => result, ... }` — try each arm against `e` in
+    /// order; the first whose pattern matches (and whose optional `guard` holds,
+    /// evaluated with the pattern's bindings in scope) yields its result. A
     /// value-producing expression (like `if`), not a statement.
     Match {
         scrutinee: Box<Expr>,
-        arms: Vec<(Pattern, Expr)>,
+        arms: Vec<MatchArm>,
         line: usize,
         col: usize,
     },

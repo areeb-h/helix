@@ -542,9 +542,9 @@ impl Interp {
             }),
             Expr::Match { scrutinee, arms, line, col } => {
                 let v = self.eval(scrutinee)?;
-                for (pat, body) in arms {
-                    if let Some(binds) = pattern_match(pat, &v) {
-                        // Install every binding (save/restore), evaluate the arm body.
+                for arm in arms {
+                    if let Some(binds) = pattern_match(&arm.pattern, &v) {
+                        // Install every binding (save/restore); the guard and body see them.
                         let mut saved: Vec<(String, Option<Binding>)> =
                             Vec::with_capacity(binds.len());
                         for (name, val) in binds {
@@ -553,7 +553,16 @@ impl Interp {
                                 .insert(name.clone(), Binding { value: val, mutable: false });
                             saved.push((name, prev));
                         }
-                        let result = self.eval(body);
+                        // `Some(result)` takes this arm; `None` means the guard failed,
+                        // so fall through to the next arm. A guard error propagates.
+                        let outcome: Option<Result<Value, HelixError>> = match &arm.guard {
+                            None => Some(self.eval(&arm.body)),
+                            Some(g) => match self.eval(g).and_then(|gv| as_bool(&gv, *line, *col)) {
+                                Ok(true) => Some(self.eval(&arm.body)),
+                                Ok(false) => None,
+                                Err(e) => Some(Err(e)),
+                            },
+                        };
                         for (name, prev) in saved.into_iter().rev() {
                             match prev {
                                 Some(b) => {
@@ -564,7 +573,9 @@ impl Interp {
                                 }
                             }
                         }
-                        return result;
+                        if let Some(r) = outcome {
+                            return r;
+                        }
                     }
                 }
                 Err(HelixError::new("no `match` arm matched the value", *line, *col)

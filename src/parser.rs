@@ -1074,12 +1074,19 @@ impl Parser {
                 })?;
                 let mut arms = Vec::new();
                 while !matches!(self.peek(), Tok::RBrace) {
-                    let pat = self.parse_pattern()?;
+                    let pattern = self.parse_pattern()?;
+                    // Optional guard: `pat if cond => ...`.
+                    let guard = if matches!(self.peek(), Tok::If) {
+                        self.advance();
+                        Some(self.expr()?)
+                    } else {
+                        None
+                    };
                     self.eat(&Tok::FatArrow, "after a match pattern").map_err(|e| {
-                        e.hint("each arm is `pattern => result`, e.g. `0 => \"zero\"`.")
+                        e.hint("each arm is `pattern [if guard] => result`, e.g. `0 => \"zero\"`.")
                     })?;
-                    let result = self.expr()?;
-                    arms.push((pat, result));
+                    let body = self.expr()?;
+                    arms.push(crate::ast::MatchArm { pattern, guard, body });
                     if matches!(self.peek(), Tok::Comma) {
                         self.advance();
                     } else {

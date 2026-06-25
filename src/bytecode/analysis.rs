@@ -144,7 +144,10 @@ fn any_call(e: &Expr, pred: &dyn Fn(&str) -> bool) -> bool {
         }
         Expr::Try { expr, .. } => any_call(expr, pred),
         Expr::Match { scrutinee, arms, .. } => {
-            any_call(scrutinee, pred) || arms.iter().any(|(_, b)| any_call(b, pred))
+            any_call(scrutinee, pred)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(|g| any_call(g, pred)) || any_call(&a.body, pred)
+                })
         }
     }
 }
@@ -236,7 +239,12 @@ fn children(e: &Expr) -> Vec<&Expr> {
         Expr::Try { expr, .. } => vec![expr],
         Expr::Match { scrutinee, arms, .. } => {
             let mut v: Vec<&Expr> = vec![scrutinee];
-            v.extend(arms.iter().map(|(_, b)| b));
+            for a in arms {
+                if let Some(g) = &a.guard {
+                    v.push(g);
+                }
+                v.push(&a.body);
+            }
             v
         }
     }
@@ -336,12 +344,15 @@ fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String
         Expr::Try { expr, .. } => collect_free(expr, bound, free),
         Expr::Match { scrutinee, arms, .. } => {
             collect_free(scrutinee, bound, free);
-            for (pat, body) in arms {
+            for arm in arms {
                 let n = bound.len();
                 // A pattern's bindings (possibly several, for tuple/record patterns)
-                // are locals of the arm body.
-                push_pattern_binds(pat, bound);
-                collect_free(body, bound, free);
+                // are locals of both the guard and the arm body.
+                push_pattern_binds(&arm.pattern, bound);
+                if let Some(g) = &arm.guard {
+                    collect_free(g, bound, free);
+                }
+                collect_free(&arm.body, bound, free);
                 bound.truncate(n);
             }
         }

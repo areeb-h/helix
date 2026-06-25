@@ -689,25 +689,37 @@ impl Compiler {
                 b.emit(Op::StoreLocal(m_slot), *line, *col);
 
                 let mut end_jumps: Vec<usize> = Vec::new();
-                for (pat, body) in arms {
-                    let names = crate::interp::pattern_binding_names(pat);
+                for arm in arms {
+                    let names = crate::interp::pattern_binding_names(&arm.pattern);
                     b.scopes.push(Vec::new());
                     let saved2 = b.next_slot;
                     let slots: Vec<u32> = names.iter().map(|n| b.declare_local(n)).collect();
                     b.emit(Op::LoadLocal(m_slot), *line, *col);
-                    b.emit(Op::MatchArm(std::rc::Rc::new(pat.clone())), *line, *col);
-                    let jnext = b.emit(Op::JumpIfFalse(0), *line, *col);
+                    b.emit(Op::MatchArm(std::rc::Rc::new(arm.pattern.clone())), *line, *col);
+                    let jpat = b.emit(Op::JumpIfFalse(0), *line, *col);
                     // Matched: the bound values are on the stack in order; store them
                     // into the arm's locals (top is the last, so store in reverse).
                     for slot in slots.iter().rev() {
                         b.emit(Op::StoreLocal(*slot), *line, *col);
                     }
-                    self.compile_expr(b, body)?;
+                    // A guard (with the bindings in scope) must also hold; if it's
+                    // false, fall through to the next arm.
+                    let jguard = match &arm.guard {
+                        Some(g) => {
+                            self.compile_expr(b, g)?;
+                            Some(b.emit(Op::JumpIfFalse(0), *line, *col))
+                        }
+                        None => None,
+                    };
+                    self.compile_expr(b, &arm.body)?;
                     end_jumps.push(b.emit(Op::Jump(0), *line, *col));
                     b.scopes.pop();
                     b.next_slot = saved2;
                     let next_at = b.code.len() as u32;
-                    b.code[jnext] = Op::JumpIfFalse(next_at);
+                    b.code[jpat] = Op::JumpIfFalse(next_at);
+                    if let Some(jg) = jguard {
+                        b.code[jg] = Op::JumpIfFalse(next_at);
+                    }
                 }
                 // Fell through every arm: no match (the tree-walker's error).
                 b.emit(
