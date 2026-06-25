@@ -71,9 +71,10 @@ pub(crate) fn eval_slice(
             Ok(Value::Str(Rc::new(out)))
         }
         Value::Dna(s) => {
-            let chars: Vec<char> = s.chars().collect();
-            let idxs = slice_indices(chars.len() as i64, start, stop, step);
-            let out: String = idxs.iter().map(|&i| chars[i]).collect();
+            // ASCII (uppercase ACGT): index bytes directly, no intermediate `Vec<char>`.
+            let bytes = s.as_bytes();
+            let idxs = slice_indices(bytes.len() as i64, start, stop, step);
+            let out: String = idxs.iter().map(|&i| bytes[i] as char).collect();
             Ok(Value::Dna(Rc::new(out)))
         }
         Value::Tensor(t) => {
@@ -307,9 +308,11 @@ pub(crate) fn eval_index(recv: &Value, idx: &Value, line: usize, col: usize) -> 
             }
             Ok(items[real as usize].clone())
         }
-        Value::Str(s) | Value::Dna(s) => {
-            let chars: Vec<char> = s.chars().collect();
-            let n = chars.len() as i64;
+        Value::Dna(s) => {
+            // DNA is ASCII (uppercase ACGT), so byte length is the char count and a
+            // byte index *is* the char — O(1), no per-access `Vec<char>` allocation
+            // (which made indexing in a loop O(n²)). Yields a one-char `Str`, as before.
+            let n = s.len() as i64;
             let real = if i < 0 { n + i } else { i };
             if real < 0 || real >= n {
                 return Err(HelixError::new(
@@ -318,7 +321,23 @@ pub(crate) fn eval_index(recv: &Value, idx: &Value, line: usize, col: usize) -> 
                     col,
                 ));
             }
-            Ok(Value::Str(Rc::new(chars[real as usize].to_string())))
+            Ok(Value::Str(Rc::new((s.as_bytes()[real as usize] as char).to_string())))
+        }
+        Value::Str(s) => {
+            // General UTF-8: count then fetch by char index without materializing a
+            // `Vec<char>`, so indexing in a loop is O(n) per access, not O(n) + an
+            // allocation.
+            let n = s.chars().count() as i64;
+            let real = if i < 0 { n + i } else { i };
+            if real < 0 || real >= n {
+                return Err(HelixError::new(
+                    format!("index {} is out of bounds for length {}", i, n),
+                    line,
+                    col,
+                ));
+            }
+            let ch = s.chars().nth(real as usize).expect("index bounds-checked above");
+            Ok(Value::Str(Rc::new(ch.to_string())))
         }
         Value::Tensor(t) => tensor::index_first(t, i, line, col),
         other => Err(HelixError::new(

@@ -569,7 +569,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // universal handler in `call_method`, so intercept it here (a
                 // frame/group is never `missing` → `false`), matching the tree-walker.
                 let result = if name.as_str() == "is_missing"
-                    && matches!(recv, Value::DataFrame(_) | Value::GroupBy { .. })
+                    && matches!(recv, Value::DataFrame(_) | Value::GroupBy(_))
                 {
                     if args.is_empty() {
                         Ok(Value::Bool(false))
@@ -582,7 +582,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         Value::DataFrame(lf) => {
                             crate::interp::df_value_method(lf, name, args, line, col)
                         }
-                        Value::GroupBy { .. } => Err(HelixError::new(
+                        Value::GroupBy(_) => Err(HelixError::new(
                             format!("a GroupBy has no value-method `{}`", name),
                             line,
                             col,
@@ -646,7 +646,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::GroupByAgg { name, args } => {
                 let recv = stack.pop().unwrap();
                 let (handle, keys) = match &recv {
-                    Value::GroupBy { handle, keys } => (handle.clone(), keys.clone()),
+                    Value::GroupBy(g) => (g.handle.clone(), g.keys.clone()),
                     other => {
                         return Err(HelixError::new(
                             format!("expected a GroupBy, got {}", other.type_name()),

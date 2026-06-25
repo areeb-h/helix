@@ -96,7 +96,10 @@ pub(crate) fn df_column_verb(
         "group" => {
             let names = column_name_args(args, line, col)?;
             crate::backend::validate_columns_exist(lf, &names, line, col)?;
-            Ok(Value::GroupBy { handle: lf.clone(), keys: Rc::new(names) })
+            Ok(Value::GroupBy(Rc::new(crate::value::GroupByData {
+                handle: lf.clone(),
+                keys: Rc::new(names),
+            })))
         }
         "with" => {
             // `df.with({name: expr, ...})` — add or replace columns from expressions

@@ -377,7 +377,7 @@ impl Interp {
                 // never reaches the universal handler in `call_method`, so intercept
                 // it here; a frame/group is never `missing`, so the answer is `false`.
                 if name == "is_missing"
-                    && matches!(recv_v, Value::DataFrame(_) | Value::GroupBy { .. })
+                    && matches!(recv_v, Value::DataFrame(_) | Value::GroupBy(_))
                 {
                     if !args.is_empty() {
                         return Err(HelixError::new(
@@ -395,10 +395,10 @@ impl Interp {
                     Value::DataFrame(lf) => {
                         return self.eval_df_method(lf.clone(), name, args, *line, *col);
                     }
-                    Value::GroupBy { handle, keys } => {
+                    Value::GroupBy(g) => {
                         return self.eval_groupby_method(
-                            handle.clone(),
-                            keys.clone(),
+                            g.handle.clone(),
+                            g.keys.clone(),
                             name,
                             args,
                             *line,

@@ -1,11 +1,19 @@
 //! Cranelift JIT — Track B of the performance roadmap.
 //!
 //! Compiles the numeric-recursion core of a program to **native machine code**,
-//! specialized per concrete type (the Julia recipe: monomorphization). Each
-//! eligible function is compiled twice — once over `i64`, once over `f64` — and
-//! the VM dispatches to the version matching the argument types, falling back to
-//! bytecode when no native version fits. Once execution enters native code, all
-//! internal recursion stays native, which is where the speed comes from.
+//! specialized per concrete type (the Julia recipe: monomorphization). The VM
+//! dispatches to a native version when the argument types match, falling back to
+//! bytecode otherwise. Once execution enters native code, all internal recursion
+//! stays native, which is where the speed comes from.
+//!
+//! **Currently only the `i64` specialization is emitted** (see [`build`]): with
+//! all-`Int` args every op yields `Int`, exactly matching the interpreter. The
+//! `f64` codegen below is complete but **dormant** — a float-arg function can
+//! still return an `Int` (a literal, or an Int-only subexpression), so emitting it
+//! would diverge from the interpreter on result type; float functions run on the
+//! VM instead. So the IEEE-754 NaN-comparison edge the f64 path would introduce
+//! (a NaN compare is `false`, where the interpreter raises) is **latent, not
+//! active** — there is no live JIT/interpreter divergence today.
 //!
 //! A function is eligible (for a given numeric kind) when its body uses only
 //! constructs that lower to that kind: literals, params/`let` locals, the kind's
@@ -15,8 +23,7 @@
 //! caps arity at 4.
 //!
 //! Semantics match the interpreter's *release* behaviour: integer arithmetic
-//! wraps on overflow; float comparisons follow IEEE-754 (a NaN comparison is
-//! `false`, where the interpreter would raise — a deliberate, documented edge).
+//! wraps on overflow.
 //!
 //! SAFETY: calling generated code is inherently `unsafe`. The two `unsafe` blocks
 //! are confined to [`call_i64`]/[`call_f64`], guarded by the VM's type/arity

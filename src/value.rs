@@ -33,12 +33,11 @@ pub enum Value {
     /// into one multi-threaded pass and (with the default Polars backend's
     /// streaming engine) can run over data far larger than RAM.
     DataFrame(Df),
-    /// The intermediate produced by `df.group(keys)`, consumed by an
-    /// aggregation like `.mean(col)`.
-    GroupBy {
-        handle: Df,
-        keys: Rc<Vec<String>>,
-    },
+    /// The intermediate produced by `df.group(keys)`, consumed by an aggregation
+    /// like `.mean(col)`. Boxed behind an `Rc` because it's a rare, transient value
+    /// (never stored in arrays or hot loops); inlining its two-word payload would
+    /// bloat *every* `Value` — and thus every VM stack push/pop/clone — for nothing.
+    GroupBy(Rc<GroupByData>),
     /// A function value — from `fn name(p) = expr` or an anonymous `p => expr`.
     /// Used by the tree-walker (which evaluates `body` directly).
     Function {
@@ -71,6 +70,22 @@ pub enum Value {
     PyObject(Rc<crate::python::PyHandle>),
 }
 
+/// The payload of a [`Value::GroupBy`] — the grouped frame plus its key columns,
+/// held behind an `Rc` so the `Value` variant is one word wide.
+pub struct GroupByData {
+    pub handle: Df,
+    pub keys: Rc<Vec<String>>,
+}
+
+// The interpreter copies `Value`s constantly (every VM stack op, every binding),
+// so its size is a hot-path constant. Keep it small: scalars and Rc-wrapped
+// collections fit in two words. A regression here (e.g. inlining a fat variant)
+// would silently tax every clone.
+const _: () = assert!(
+    std::mem::size_of::<Value>() <= 24,
+    "Value grew past 3 words — box the offending variant",
+);
+
 impl Value {
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -83,7 +98,7 @@ impl Value {
             Value::Record(_) => "Record",
             Value::Tensor(_) => "Tensor",
             Value::DataFrame(_) => "DataFrame",
-            Value::GroupBy { .. } => "GroupBy",
+            Value::GroupBy(_) => "GroupBy",
             Value::Function { .. } => "Function",
             Value::VmFunc { .. } => "Function",
             Value::Dna(_) => "Dna",
@@ -119,7 +134,7 @@ impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::DataFrame(_) => write!(f, "DataFrame(<lazy plan>)"),
-            Value::GroupBy { keys, .. } => write!(f, "GroupBy(keys={:?})", keys),
+            Value::GroupBy(g) => write!(f, "GroupBy(keys={:?})", g.keys),
             Value::Function { params, .. } => write!(f, "Function(params={:?})", params),
             Value::VmFunc { arity, .. } => write!(f, "Function(arity={})", arity),
             Value::Tensor(t) => write!(f, "Tensor(shape={:?})", t.shape()),
@@ -143,7 +158,7 @@ impl fmt::Display for Value {
                 Ok(s) => write!(f, "{}", s),
                 Err(e) => write!(f, "<dataframe — query failed: {}>", e),
             },
-            Value::GroupBy { keys, .. } => write!(f, "<grouped by {}>", keys.join(", ")),
+            Value::GroupBy(g) => write!(f, "<grouped by {}>", g.keys.join(", ")),
             Value::Function { params, .. } => write!(f, "<function/{}>", params.len()),
             Value::VmFunc { arity, .. } => write!(f, "<function/{}>", arity),
             Value::Missing => write!(f, "missing"),
