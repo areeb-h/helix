@@ -72,6 +72,38 @@ package). A single flat dependency namespace in v1.
   (error if a dependency's source drifted since `sync`); `helix add`/`verify`; per-package
   dependency scoping; and the unified Helix + managed-Python lockfile (ADR 0009 #6).
 
+## Security model (remote sources)
+
+Fetching and unpacking remote tarballs is the package manager's real attack surface.
+The threat model and the mitigation for each hole (all enforced in `src/pkg.rs`):
+
+- **Substituted / corrupted bytes.** The pinned `sha256` is verified *before* anything
+  is written (ADR 0010). TLS protects transport but a mirror or a TLS-intercepting proxy
+  can still serve bad bytes — so the *hash*, not TLS, is the trust boundary.
+- **Path injection through the hash.** The `sha256` string becomes a cache directory
+  name, so an unchecked value like `../../etc/cron.d/x` would escape the cache.
+  `normalize_sha256` requires exactly 64 hex characters before the value is used as a
+  path or a trust value.
+- **Decompression bomb** (a few-KB gzip that inflates to terabytes). The unpacker
+  *streams* the decompressor — it never reads the fully expanded image into memory — and
+  caps both total expanded bytes (512 MiB) and entry count (100 000). The per-entry size
+  is checked *before* the body is read, so a bomb's payload is never materialized.
+- **Tar escape.** Absolute paths and `..` that would escape the destination are refused
+  (`unpack_in`'s path check), and symlink / hardlink / device / fifo entries are rejected
+  outright — a package is plain files and directories and never needs them. Archive
+  permissions/xattrs are not preserved (no setuid surprises).
+- **Partial / raced cache.** Extraction lands in a private temp dir and is promoted with
+  an atomic `rename`, so a crash or a concurrent `sync` can never leave a half-unpacked
+  tree that the cache-hit check mistakes for a complete, verified package.
+- **No code runs on install.** Packages are pure Helix source; nothing executes on
+  add/sync (no npm-`postinstall`-style supply-chain hole).
+
+Residual / accepted: a `url` fetch issues an HTTPS request from the developer's machine
+at `sync` time (a theoretical SSRF probe vector), but the response is hash-checked so no
+attacker-chosen *content* can enter the build. A pinned-but-malicious *source* is out of
+scope for the fetcher — that is the reviewer's call, which is exactly why nothing runs on
+install and the hash makes the bytes auditable and reproducible.
+
 ## Rejected alternatives
 
 - **A central mutable registry (npm/PyPI model).** Rejected for its mutability and

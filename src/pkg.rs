@@ -172,14 +172,19 @@ pub fn resolve(root_dir: &Path) -> Result<(Lockfile, BTreeMap<String, PathBuf>),
                 (canon, format!("path+{rel}"), None)
             }
             (None, Some(url)) => {
-                let sha = dep.sha256.as_deref().ok_or_else(|| {
+                let raw = dep.sha256.as_deref().ok_or_else(|| {
                     err(format!(
                         "dependency `{name}` is a `url` source but has no `sha256`"
                     ))
                     .hint("pin the tarball's sha256 — it is the integrity check (ADR 0010).")
                 })?;
-                let dir = materialize_url_dep(&name, url, sha)?;
-                (dir, format!("url+{url}"), Some(sha.to_string()))
+                // Validate/normalize the hash *before* it is ever used as a path
+                // component or a trust value — an unchecked string like `../../x` would
+                // otherwise escape the cache directory.
+                let sha = normalize_sha256(raw)
+                    .map_err(|m| err(format!("dependency `{name}`: {m}")))?;
+                let dir = materialize_url_dep(&name, url, &sha)?;
+                (dir, format!("url+{url}"), Some(sha))
             }
             (None, None) => {
                 return Err(err(format!(
@@ -280,30 +285,76 @@ fn collect_helix_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HelixEr
 }
 
 // ---- Remote (`url`) dependency sources ----
+//
+// Threat model (these are the holes a remote-fetching package manager must close):
+// - **Wrong/substituted bytes** → the pinned `sha256` is verified before anything is
+//   written (ADR 0010); TLS is not the trust boundary, the hash is.
+// - **Path-injection via the hash** → `normalize_sha256` enforces 64 hex chars before
+//   it is ever used as a cache directory name.
+// - **Decompression bomb** (a tiny gzip that inflates to terabytes) → the unpacker
+//   *streams* (never decompresses fully into memory) and caps total bytes + entry count.
+// - **Tar escape** (absolute paths, `..`, symlink/hardlink/device entries) → unsafe
+//   paths are refused and only regular files and directories are extracted.
+// - **Partial/raced cache** → extraction goes to a private temp dir, then is promoted
+//   into place with an atomic rename, so a half-unpacked tree is never seen as cached.
+
+/// The largest a dependency tarball may expand to. A source package is small; anything
+/// approaching this is either misuse (ship data separately) or a decompression bomb.
+#[cfg(feature = "http")]
+const MAX_UNPACKED_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
+/// A sanity cap on entry count (a source package with this many files is pathological).
+#[cfg(feature = "http")]
+const MAX_ENTRIES: usize = 100_000;
+
+/// Validate and normalize a hex SHA-256: exactly 64 hex digits, lowercased. Rejects
+/// anything else — crucially, before the value is used as a filesystem path component.
+fn normalize_sha256(s: &str) -> Result<String, String> {
+    let t = s.trim();
+    if t.len() == 64 && t.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(t.to_ascii_lowercase())
+    } else {
+        Err(format!("`{s}` is not a valid sha256 (expected 64 hexadecimal characters)"))
+    }
+}
 
 /// Fetch (unless cached), verify, and unpack a remote tarball dependency; return the
-/// package's root directory inside the content-addressed cache. The `sha256` is the
-/// trust boundary (ADR 0010): the download is rejected unless its hash matches, and the
-/// cache is keyed by that hash — so a present cache entry was provably verified, and
-/// fetching is skipped forever after.
+/// package's root directory inside the content-addressed cache. `sha256` must already be
+/// normalized (64-hex). The hash is the trust boundary: the download is rejected unless
+/// it matches, and the cache is keyed by that hash — so a present entry was provably
+/// verified, and fetching is skipped forever after.
 #[cfg(feature = "http")]
 fn materialize_url_dep(name: &str, url: &str, sha256: &str) -> Result<PathBuf, HelixError> {
-    let dest = cache_root()?.join(sha256);
+    let cache = cache_root()?;
+    let dest = cache.join(sha256);
     // Cached from a previous verified extraction? (The hash in the path is the proof.)
     if let Some(root) = package_root(&dest) {
         return Ok(root);
     }
-    // A leftover partial extraction (e.g. an interrupted run) — start clean.
-    if dest.exists() {
-        let _ = std::fs::remove_dir_all(&dest);
-    }
 
     let bytes = crate::net::fetch_verified(url, sha256)
         .map_err(|e| err(format!("dependency `{name}`: {e}")))?;
-    extract_tarball(&bytes, &dest).map_err(|e| {
-        let _ = std::fs::remove_dir_all(&dest); // don't leave a half-unpacked cache entry
+
+    // Unpack into a private temp dir, then atomically promote it into place. A crash or
+    // a concurrent `sync` therefore never leaves a partial tree that looks cached.
+    let tmp = cache.join(format!(".tmp-{sha256}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    extract_tarball(&bytes, &tmp).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&tmp);
         err(format!("dependency `{name}`: could not unpack the tarball: {e}"))
     })?;
+    match std::fs::rename(&tmp, &dest) {
+        Ok(()) => {}
+        // A concurrent sync already populated the cache — discard our copy and use it.
+        Err(_) if dest.exists() => {
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(err(format!(
+                "dependency `{name}`: could not place the package in the cache: {e}"
+            )));
+        }
+    }
     package_root(&dest)
         .ok_or_else(|| err(format!("dependency `{name}`: the downloaded tarball is empty")))
 }
@@ -336,25 +387,85 @@ fn package_root(dest: &Path) -> Option<PathBuf> {
     Some(dest.to_path_buf())
 }
 
-/// Unpack a (optionally gzipped) tarball's bytes into `dest`. `tar`'s `unpack` refuses
-/// entries that would escape the destination (absolute paths, `..`), so a malicious
-/// archive cannot write outside the cache.
+/// Unpack a (optionally gzipped) tarball's bytes into `dest`, safely. The decompressor
+/// is **streamed** (never fully buffered in memory) and the unpack is bounded and
+/// validated entry-by-entry — see the threat model above. Refuses: paths escaping
+/// `dest` (absolute / `..`), symlink/hardlink/device entries, and archives that exceed
+/// the size or entry-count caps (decompression bombs).
 #[cfg(feature = "http")]
 fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<(), String> {
     use std::io::Read;
-    // gzip magic (1f 8b) → gunzip first; otherwise treat the bytes as a plain tar.
+    // gzip magic (1f 8b) → wrap the bytes in a streaming gunzip; otherwise a plain tar.
+    // Streaming (vs read-to-end) is what defuses a gzip bomb: we only ever pull as many
+    // bytes as the size cap allows, never the full expanded image.
     let is_gz = bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b;
-    let tar_bytes: Vec<u8> = if is_gz {
-        let mut dec = flate2::read::GzDecoder::new(bytes);
-        let mut out = Vec::new();
-        dec.read_to_end(&mut out).map_err(|e| format!("gunzip failed: {e}"))?;
-        out
+    let cursor = std::io::Cursor::new(bytes);
+    let reader: Box<dyn Read> = if is_gz {
+        Box::new(flate2::read::GzDecoder::new(cursor))
     } else {
-        bytes.to_vec()
+        Box::new(cursor)
     };
+
+    let mut archive = tar::Archive::new(reader);
+    // A malicious archive must not be able to set perms (e.g. setuid) or write xattrs;
+    // packages are plain source, so default permissions are correct.
+    archive.set_preserve_permissions(false);
+    archive.set_preserve_mtime(false);
+    archive.set_unpack_xattrs(false);
+
     std::fs::create_dir_all(dest).map_err(|e| format!("could not create the cache dir: {e}"))?;
-    let mut archive = tar::Archive::new(std::io::Cursor::new(tar_bytes));
-    archive.unpack(dest).map_err(|e| format!("{e}"))?;
+
+    let mut total: u64 = 0;
+    let mut count: usize = 0;
+    let entries = archive.entries().map_err(|e| format!("reading the archive failed: {e}"))?;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("reading an archive entry failed: {e}"))?;
+        count += 1;
+        if count > MAX_ENTRIES {
+            return Err(format!("tarball has more than {MAX_ENTRIES} entries — refusing"));
+        }
+
+        // A package is plain files and directories. Refuse symlinks, hardlinks, and
+        // device/fifo nodes outright — both a safety boundary (symlink-escape) and
+        // because a package never legitimately needs them.
+        let kind = entry.header().entry_type();
+        if kind.is_symlink()
+            || kind.is_hard_link()
+            || kind.is_character_special()
+            || kind.is_block_special()
+            || kind.is_fifo()
+        {
+            let path = entry.path().map(|p| p.display().to_string()).unwrap_or_default();
+            return Err(format!(
+                "tarball entry `{path}` is a {kind:?}; only regular files and directories \
+                 are allowed in a package"
+            ));
+        }
+
+        // Bound the total expansion (the header size is exact for tar; a file body is
+        // exactly its declared length). We test *before* unpacking the body, so a bomb's
+        // payload is never written or decompressed.
+        total = total.saturating_add(entry.header().size().unwrap_or(0));
+        if total > MAX_UNPACKED_BYTES {
+            return Err(format!(
+                "tarball expands to more than {} MiB — refusing (possible decompression bomb)",
+                MAX_UNPACKED_BYTES / 1024 / 1024
+            ));
+        }
+
+        // `unpack_in` performs the path-safety check, refusing absolute paths and any
+        // `..` that would escape `dest`; it returns Ok(false) when it skips such an entry.
+        let unpacked = entry
+            .unpack_in(dest)
+            .map_err(|e| format!("unpacking an entry failed: {e}"))?;
+        if !unpacked {
+            return Err(
+                "tarball contains an unsafe path (absolute, or `..` escaping the package) \
+                 — refusing"
+                    .to_string(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -588,6 +699,76 @@ mod tests {
         assert_eq!(dirs["dep"], pkg);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn sha256_validation_blocks_path_injection() {
+        // 64 hex → accepted and lowercased; everything else refused.
+        assert_eq!(normalize_sha256(&"A".repeat(64)).unwrap(), "a".repeat(64));
+        assert!(normalize_sha256("not-hex-but-the-right-length-aaaaaaaaaaaaaaaaaaaaaaaaaa!").is_err());
+        assert!(normalize_sha256(&"a".repeat(63)).is_err()); // too short
+        assert!(normalize_sha256(&"a".repeat(65)).is_err()); // too long
+        // The attack: a hash that is actually a path. Must be refused before it could
+        // ever be used as a cache directory name.
+        assert!(normalize_sha256("../../../../etc/cron.d/evil").is_err());
+
+        // End-to-end: a url dep with a path-like sha is rejected during resolve, with no
+        // fetch and no filesystem escape.
+        let base = std::env::temp_dir().join(format!("helix_pkgbadsha_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join("helix.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\n\
+             dep = { url = \"https://example.com/d.tar.gz\", sha256 = \"../../etc/x\" }\n",
+        )
+        .unwrap();
+        let e = resolve(&base).unwrap_err();
+        assert!(e.message.contains("sha256"), "got: {}", e.message);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn extraction_refuses_symlink_entries() {
+        // A symlink entry is a classic tar-escape primitive; a package never needs one.
+        let mut tar_buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_buf);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_link_name("/etc/passwd").unwrap();
+            header.set_cksum();
+            builder.append_data(&mut header, "innocent.helix", std::io::empty()).unwrap();
+            builder.finish().unwrap();
+        }
+        let dest = std::env::temp_dir().join(format!("helix_symlink_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        let e = extract_tarball(&tar_buf, &dest).unwrap_err();
+        assert!(e.contains("Symlink") || e.contains("only regular"), "got: {e}");
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn extraction_refuses_a_decompression_bomb() {
+        // A header that *declares* a body larger than the cap. The size is checked before
+        // the body is read, so a real bomb's payload is never written or decompressed —
+        // here we never even provide the body.
+        let mut tar_buf = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_buf);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(MAX_UNPACKED_BYTES + 1);
+            header.set_cksum();
+            builder.append_data(&mut header, "bomb.bin", std::io::empty()).unwrap();
+        }
+        let dest = std::env::temp_dir().join(format!("helix_bomb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        let e = extract_tarball(&tar_buf, &dest).unwrap_err();
+        assert!(e.contains("bomb") || e.contains("MiB"), "got: {e}");
+        let _ = std::fs::remove_dir_all(&dest);
     }
 
     #[test]
