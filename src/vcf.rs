@@ -36,7 +36,7 @@ pub(crate) fn read_text_maybe_gzip(path: &str) -> std::io::Result<String> {
     }
 }
 
-pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<LazyFrame, HelixError> {
+pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, HelixError> {
     let err = |msg: String| HelixError::new(msg, line, col);
     let text = read_text_maybe_gzip(path)
         .map_err(|e| err(format!("could not open VCF `{path}`: {e}")))?;
@@ -109,7 +109,7 @@ pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<LazyFrame, HelixE
 
     let df = DataFrame::new_infer_height(columns)
         .map_err(|e| err(format!("could not build the VCF table: {e}")))?;
-    Ok(df.lazy())
+    Ok(crate::backend::polars::from_polars_df(df))
 }
 
 fn dot(s: &str) -> Option<String> {

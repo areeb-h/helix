@@ -6,6 +6,24 @@ crates — including an async runtime (`tokio`) and a cloud object-store
 why it is not currently fixable without a major change — so the question is not
 re-litigated.
 
+## Update (2026-06-25) — re-measured, and the seam that changes the calculus
+
+Two refinements after the ADR 0012 backend-seam work:
+
+- **The tail is even more unconditional than the streaming path below suggests.**
+  Re-measured on the pinned 0.54.4: `cargo tree -i object_store` shows `object_store`
+  entering via **`polars-error`** — a crate every Polars build pulls — not only via the
+  `streaming`/`csv`/`parquet` chain. So no feature combination that keeps Polars at all
+  can shed it on 0.54.4. (Upstream has since made `object_store` optional and treats the
+  unconditional pull as a bug; the honest path is to track/contribute that fix, not to
+  `[patch]`-hack it.)
+- **"Replace the backend" is no longer a layer rewrite.** The DataFrame engine is now
+  decoupled behind the `DataHandle` seam (ADR 0012): `Value::DataFrame` holds an
+  engine-agnostic handle and no `polars::` type escapes `src/backend/polars.rs`. The
+  homegrown-Cranelift engine (prototyped in `experiments/dfbench/`, ~140× smaller) is
+  therefore a *backend swap behind the trait*, the real route to the size win — not the
+  multi-week rewrite the bottom of this doc describes.
+
 ## What is and isn't true
 
 - **Self-contained: yes.** The default binary links only the system C runtime

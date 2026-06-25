@@ -2,10 +2,10 @@
 
 use std::rc::Rc;
 
-use polars::prelude::LazyFrame;
 use rustc_hash::FxHashMap;
 
 use crate::ast::{BinOp, Expr, Stmt, UnOp};
+use crate::backend::Df;
 use crate::dataframe;
 use crate::error::{suggest, HelixError};
 use crate::tensor;
@@ -378,9 +378,15 @@ impl Interp {
                     Value::DataFrame(lf) => {
                         return self.eval_df_method(lf.clone(), name, args, *line, *col);
                     }
-                    Value::GroupBy { lf, keys } => {
-                        return self
-                            .eval_groupby_method(lf.clone(), keys.clone(), name, args, *line, *col);
+                    Value::GroupBy { handle, keys } => {
+                        return self.eval_groupby_method(
+                            handle.clone(),
+                            keys.clone(),
+                            name,
+                            args,
+                            *line,
+                            *col,
+                        );
                     }
                     _ => {}
                 }

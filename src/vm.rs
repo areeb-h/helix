@@ -626,13 +626,12 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let lf = as_df(&left)?;
                 let rf = as_df(&right)?;
                 let (keys, how) = crate::interp::parse_join_spec(spec.as_slice(), line, col)?;
-                let out = crate::dataframe::join(&lf, &rf, &keys, &how, line, col)?;
-                stack.push(Value::DataFrame(std::rc::Rc::new(out)));
+                stack.push(Value::DataFrame(lf.join(&rf, &keys, &how, line, col)?));
             }
             Op::GroupByAgg { name, args } => {
                 let recv = stack.pop().unwrap();
-                let (lf, keys) = match &recv {
-                    Value::GroupBy { lf, keys } => (lf.clone(), keys.clone()),
+                let (handle, keys) = match &recv {
+                    Value::GroupBy { handle, keys } => (handle.clone(), keys.clone()),
                     other => {
                         return Err(HelixError::new(
                             format!("expected a GroupBy, got {}", other.type_name()),
@@ -641,8 +640,14 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         ))
                     }
                 };
-                let result =
-                    crate::interp::groupby_agg(&lf, &keys, name.as_str(), args.as_slice(), line, col)?;
+                let result = crate::interp::groupby_agg(
+                    &handle,
+                    &keys,
+                    name.as_str(),
+                    args.as_slice(),
+                    line,
+                    col,
+                )?;
                 stack.push(result);
             }
             Op::CompInit(kind, missing_target) => {

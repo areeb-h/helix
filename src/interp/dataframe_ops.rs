@@ -66,7 +66,7 @@ pub(crate) fn parse_join_spec(
 /// `resolve_var` resolves a bare name that is *not* a column to a Helix variable's
 /// value (for predicates like `where(age > threshold)`).
 pub(crate) fn df_column_verb(
-    lf: &Rc<LazyFrame>,
+    lf: &Df,
     name: &str,
     args: &[Expr],
     resolve_var: &dyn Fn(&str) -> Option<Value>,
@@ -79,21 +79,21 @@ pub(crate) fn df_column_verb(
                 return Err(HelixError::new(format!("`{}` takes one predicate", name), line, col)
                     .hint("e.g. `patients.where(age > 40)`."));
             }
-            let columns = dataframe::column_names(lf, line, col)?;
-            let pred = dataframe::to_polars(&args[0], &columns, resolve_var)?;
-            Ok(Value::DataFrame(Rc::new(dataframe::filter(lf, pred))))
+            let columns = lf.column_names(line, col)?;
+            let pred = dataframe::ast_to_colexpr(&args[0], &columns, resolve_var)?;
+            Ok(Value::DataFrame(lf.filter(&pred, line, col)?))
         }
         "select" => {
             let names = column_name_args(args, line, col)?;
-            Ok(Value::DataFrame(Rc::new(dataframe::select(lf, &names))))
+            Ok(Value::DataFrame(lf.select(&names, line, col)?))
         }
         "sort" => {
             let names = column_name_args(args, line, col)?;
-            Ok(Value::DataFrame(Rc::new(dataframe::sort(lf, &names))))
+            Ok(Value::DataFrame(lf.sort(&names, line, col)?))
         }
         "group" => {
             let names = column_name_args(args, line, col)?;
-            Ok(Value::GroupBy { lf: lf.clone(), keys: Rc::new(names) })
+            Ok(Value::GroupBy { handle: lf.clone(), keys: Rc::new(names) })
         }
         "with" => {
             // `df.with({name: expr, ...})` — add or replace columns from expressions
@@ -105,13 +105,13 @@ pub(crate) fn df_column_verb(
                         .hint("e.g. `df.with({bmi: weight / height})`."))
                 }
             };
-            let columns = dataframe::column_names(lf, line, col)?;
-            let mut exprs = Vec::with_capacity(fields.len());
+            let columns = lf.column_names(line, col)?;
+            let mut cols = Vec::with_capacity(fields.len());
             for (cname, vexpr) in fields {
-                let e = dataframe::to_polars(vexpr, &columns, resolve_var)?;
-                exprs.push(e.alias(cname.as_str()));
+                let ce = dataframe::ast_to_colexpr(vexpr, &columns, resolve_var)?;
+                cols.push((cname.clone(), ce));
             }
-            Ok(Value::DataFrame(Rc::new(dataframe::with_columns(lf, exprs))))
+            Ok(Value::DataFrame(lf.with_columns(&cols, line, col)?))
         }
         _ => unreachable!("df_column_verb only handles where/filter/select/sort/group/with"),
     }
@@ -120,7 +120,7 @@ pub(crate) fn df_column_verb(
 /// A grouped-DataFrame aggregation over one column: `mean`/`sum`/`min`/`max`/
 /// `count`/`std`. Shared by the tree-walker and the VM (`Op::DfDispatch`).
 pub(crate) fn groupby_agg(
-    lf: &Rc<LazyFrame>,
+    handle: &Df,
     keys: &Rc<Vec<String>>,
     name: &str,
     args: &[Expr],
@@ -134,8 +134,7 @@ pub(crate) fn groupby_agg(
                     .hint("e.g. `genes.group(species).mean(expression)`."));
             }
             let value_col = arg_as_column_name(&args[0], line, col)?;
-            let out = dataframe::group_agg(lf, keys, name, &value_col, line, col)?;
-            Ok(Value::DataFrame(Rc::new(out)))
+            Ok(Value::DataFrame(handle.group_agg(keys, name, &value_col, line, col)?))
         }
         _ => Err(HelixError::new(
             format!("a grouped DataFrame has no aggregation `{}`", name),
@@ -149,7 +148,7 @@ pub(crate) fn groupby_agg(
 impl super::Interp {
     pub(super) fn eval_df_method(
         &mut self,
-        lf: Rc<LazyFrame>,
+        lf: Df,
         name: &str,
         args: &[Expr],
         line: usize,
@@ -186,8 +185,7 @@ impl super::Interp {
                     }
                 };
                 let (keys, how) = parse_join_spec(&args[1..], line, col)?;
-                let out = dataframe::join(&lf, &right, &keys, &how, line, col)?;
-                Ok(Value::DataFrame(Rc::new(out)))
+                Ok(Value::DataFrame(lf.join(&right, &keys, &how, line, col)?))
             }
             "head" => {
                 if args.len() != 1 {
@@ -196,13 +194,13 @@ impl super::Interp {
                 }
                 let v = self.eval(&args[0])?;
                 let n = as_int(&v, "head", line, col)?.max(0) as usize;
-                Ok(Value::DataFrame(Rc::new(dataframe::head(&lf, n))))
+                Ok(Value::DataFrame(lf.head(n)))
             }
             "count" => {
                 if !args.is_empty() {
                     return Err(HelixError::new("`count` takes no arguments", line, col));
                 }
-                Ok(Value::Int(dataframe::row_count(&lf, line, col)? as i64))
+                Ok(Value::Int(lf.row_count(line, col)? as i64))
             }
             "column" => {
                 // The column name is an evaluated string (unlike the column verbs,
@@ -210,20 +208,21 @@ impl super::Interp {
                 // VM path's extraction so the two engines never diverge.
                 let vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<_, _>>()?;
                 let name = column_arg(&vals, line, col)?;
-                Ok(Value::Array(Rc::new(dataframe::column_values(&lf, &name, line, col)?)))
+                Ok(Value::Array(Rc::new(lf.column_values(&name, line, col)?)))
             }
             "cache" => {
                 if !args.is_empty() {
                     return Err(HelixError::new("`cache` takes no arguments", line, col)
                         .hint("e.g. `big = read_csv(\"x.csv\").cache()` to reuse without re-scanning."));
                 }
-                Ok(Value::DataFrame(Rc::new(dataframe::cache(&lf, line, col)?)))
+                Ok(Value::DataFrame(lf.cache(line, col)?))
             }
             "columns" => {
                 if !args.is_empty() {
                     return Err(HelixError::new("`columns` takes no arguments", line, col));
                 }
-                let names: Vec<Value> = dataframe::column_names(&lf, line, col)?
+                let names: Vec<Value> = lf
+                    .column_names(line, col)?
                     .into_iter()
                     .map(|c| Value::Str(Rc::new(c)))
                     .collect();
@@ -248,13 +247,13 @@ impl super::Interp {
 
     pub(super) fn eval_groupby_method(
         &mut self,
-        lf: Rc<LazyFrame>,
+        handle: Df,
         keys: Rc<Vec<String>>,
         name: &str,
         args: &[Expr],
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
-        groupby_agg(&lf, &keys, name, args, line, col)
+        groupby_agg(&handle, &keys, name, args, line, col)
     }
 }

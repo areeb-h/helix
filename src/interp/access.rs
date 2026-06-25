@@ -6,7 +6,6 @@
 use super::*;
 use std::rc::Rc;
 
-use crate::dataframe;
 use crate::error::HelixError;
 use crate::tensor;
 use crate::value::Value;
@@ -183,7 +182,7 @@ pub(crate) fn column_arg(args: &[Value], line: usize, col: usize) -> Result<Stri
 }
 
 pub(crate) fn df_value_method(
-    lf: &Rc<LazyFrame>,
+    lf: &Df,
     name: &str,
     args: Vec<Value>,
     line: usize,
@@ -194,13 +193,14 @@ pub(crate) fn df_value_method(
             if !args.is_empty() {
                 return Err(HelixError::new("`count` takes no arguments", line, col));
             }
-            Ok(Value::Int(dataframe::row_count(lf, line, col)? as i64))
+            Ok(Value::Int(lf.row_count(line, col)? as i64))
         }
         "columns" => {
             if !args.is_empty() {
                 return Err(HelixError::new("`columns` takes no arguments", line, col));
             }
-            let names: Vec<Value> = dataframe::column_names(lf, line, col)?
+            let names: Vec<Value> = lf
+                .column_names(line, col)?
                 .into_iter()
                 .map(|c| Value::Str(Rc::new(c)))
                 .collect();
@@ -211,7 +211,7 @@ pub(crate) fn df_value_method(
                 return Err(HelixError::new("`cache` takes no arguments", line, col)
                     .hint("e.g. `big = read_csv(\"x.csv\").cache()` to reuse without re-scanning."));
             }
-            Ok(Value::DataFrame(Rc::new(dataframe::cache(lf, line, col)?)))
+            Ok(Value::DataFrame(lf.cache(line, col)?))
         }
         "head" => {
             if args.len() != 1 {
@@ -219,11 +219,11 @@ pub(crate) fn df_value_method(
                     .hint("e.g. `df.head(5)`."));
             }
             let n = as_int(&args[0], "head", line, col)?.max(0) as usize;
-            Ok(Value::DataFrame(Rc::new(dataframe::head(lf, n))))
+            Ok(Value::DataFrame(lf.head(n)))
         }
         "column" => {
             let name = column_arg(&args, line, col)?;
-            Ok(Value::Array(Rc::new(dataframe::column_values(lf, &name, line, col)?)))
+            Ok(Value::Array(Rc::new(lf.column_values(&name, line, col)?)))
         }
         _ => {
             let methods = crate::registry::methods_of(crate::registry::DF_METHODS);

@@ -7,6 +7,7 @@
 //!     helix                           start the REPL
 
 mod ast;
+mod backend;
 mod bio;
 mod bytecode;
 mod dataframe;

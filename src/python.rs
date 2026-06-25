@@ -264,14 +264,13 @@ mod imp {
     }
 
     pub fn to_dataframe(arg: Value, line: usize, col: usize) -> Result<Value, HelixError> {
-        use polars::prelude::IntoLazy;
         match arg {
             Value::DataFrame(_) => Ok(arg), // already native
             Value::PyObject(h) => match &h.kind {
                 Kind::Object(obj) => Python::attach(|py| {
                     let pydf: pyo3_polars::PyDataFrame =
                         obj.bind(py).extract().map_err(|e| py_err(py, e, line, col))?;
-                    Ok(Value::DataFrame(Rc::new(pydf.0.lazy())))
+                    Ok(Value::DataFrame(crate::backend::polars::from_polars_df(pydf.0)))
                 }),
                 Kind::Namespace => Err(HelixError::new(
                     "`to_dataframe` cannot convert the `python` namespace",
@@ -370,7 +369,8 @@ mod imp {
                 // Materialize the lazy plan, then hand the Arrow buffers to Python
                 // as a `polars.DataFrame` — zero-copy across the boundary (pyo3-polars
                 // moves the Arrow data, doesn't re-serialize the values).
-                let df = (**lf).clone().collect().map_err(|e| {
+                let lazy = crate::backend::polars::as_lazyframe(lf, line, col)?;
+                let df = lazy.collect().map_err(|e| {
                     HelixError::new(
                         format!("failed to materialize the DataFrame for Python: {e}"),
                         line,

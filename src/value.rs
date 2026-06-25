@@ -9,9 +9,9 @@ use std::fmt;
 use std::rc::Rc;
 
 use ndarray::ArrayD;
-use polars::prelude::LazyFrame;
 
 use crate::ast::Expr;
+use crate::backend::Df;
 
 #[derive(Clone)]
 pub enum Value {
@@ -26,15 +26,16 @@ pub enum Value {
     Record(Rc<Vec<(String, Value)>>),
     /// A dense n-dimensional `f64` tensor (ndarray-backed). See ADR 0007.
     Tensor(Rc<ArrayD<f64>>),
-    /// A Polars-backed, Arrow-columnar DataFrame, held as a **lazy** query plan.
-    /// Verbs (`where`/`select`/`sort`/`group`) extend the plan; it materializes
-    /// only at `print`/`count` — so a chain fuses into one multi-threaded pass
-    /// and can run over data far larger than RAM.
-    DataFrame(Rc<LazyFrame>),
+    /// A columnar DataFrame, held behind the engine-agnostic backend seam (ADR
+    /// 0012) as a **lazy** query plan. Verbs (`where`/`select`/`sort`/`group`)
+    /// extend the plan; it materializes only at `print`/`count` — so a chain fuses
+    /// into one multi-threaded pass and (with the default Polars backend's
+    /// streaming engine) can run over data far larger than RAM.
+    DataFrame(Df),
     /// The intermediate produced by `df.group(keys)`, consumed by an
     /// aggregation like `.mean(col)`.
     GroupBy {
-        lf: Rc<LazyFrame>,
+        handle: Df,
         keys: Rc<Vec<String>>,
     },
     /// A function value — from `fn name(p) = expr` or an anonymous `p => expr`.
@@ -111,8 +112,8 @@ pub fn fmt_float(x: f64) -> String {
     }
 }
 
-// Manual Debug: `LazyFrame` isn't `Debug`, and we don't want `{:?}` to execute
-// a query as a side effect. Scalars/arrays delegate to Display.
+// Manual Debug: a DataFrame handle isn't `Debug`, and we don't want `{:?}` to
+// execute a query as a side effect. Scalars/arrays delegate to Display.
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -137,8 +138,8 @@ impl fmt::Display for Value {
             Value::Dna(s) => write!(f, "{}", s),
             Value::Tensor(t) => write!(f, "{}", t),
             // Printing is the materialization point: execute the lazy plan.
-            Value::DataFrame(lf) => match (**lf).clone().collect() {
-                Ok(df) => write!(f, "{}", df),
+            Value::DataFrame(df) => match df.collect_string() {
+                Ok(s) => write!(f, "{}", s),
                 Err(e) => write!(f, "<dataframe — query failed: {}>", e),
             },
             Value::GroupBy { keys, .. } => write!(f, "<grouped by {}>", keys.join(", ")),

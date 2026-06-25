@@ -90,20 +90,14 @@ impl super::Interp {
             "io.read_csv" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
-                    Value::Str(s) => {
-                        let lf = dataframe::read_csv(s, line, col)?;
-                        Ok(Value::DataFrame(Rc::new(lf)))
-                    }
+                    Value::Str(s) => Ok(Value::DataFrame(dataframe::read_csv(s, line, col)?)),
                     other => Err(type_err("io.read_csv", "a string path", other, line, col)),
                 }
             }
             "bio.read_vcf" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
-                    Value::Str(s) => {
-                        let lf = crate::vcf::read_vcf(s, line, col)?;
-                        Ok(Value::DataFrame(Rc::new(lf)))
-                    }
+                    Value::Str(s) => Ok(Value::DataFrame(crate::vcf::read_vcf(s, line, col)?)),
                     other => Err(type_err("bio.read_vcf", "a string path", other, line, col)),
                 }
             }
@@ -127,10 +121,7 @@ impl super::Interp {
             "io.read_parquet" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
-                    Value::Str(s) => {
-                        let lf = dataframe::read_parquet(s, line, col)?;
-                        Ok(Value::DataFrame(Rc::new(lf)))
-                    }
+                    Value::Str(s) => Ok(Value::DataFrame(dataframe::read_parquet(s, line, col)?)),
                     other => Err(type_err("io.read_parquet", "a string path", other, line, col)),
                 }
             }
@@ -152,7 +143,7 @@ impl super::Interp {
                 arity(name, &args, 2, line, col)?;
                 match (&args[0], &args[1]) {
                     (Value::DataFrame(lf), Value::Str(p)) => {
-                        dataframe::write_parquet(lf, p, line, col)?;
+                        lf.write_parquet(p, line, col)?;
                         Ok(Value::Unit)
                     }
                     (Value::DataFrame(_), other) => {
