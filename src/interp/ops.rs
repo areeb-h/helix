@@ -30,6 +30,12 @@ pub(crate) fn eval_binary(
     // broadcast — `==` is whole-value, avoiding NumPy's "ambiguous truth value"
     // trap; use `.map`/`.where` for elementwise predicates.
     if matches!(op, Add | Sub | Mul | Div | Mod | Pow) {
+        // Fast path: `Add`/`Sub`/`Mul` over packed numeric arrays run as a tight
+        // loop on the `i64`/`f64` buffer (no per-element `Value` boxing or dispatch)
+        // and keep the result packed. Other ops / `Values` arrays fall through.
+        if let Some(v) = typed_broadcast(op, &l, &r) {
+            return Ok(v);
+        }
         match (&l, &r) {
             (Value::Array(a), Value::Array(b)) => {
                 if a.len() != b.len() {
@@ -49,21 +55,21 @@ pub(crate) fn eval_binary(
                 for (x, y) in a.to_values().iter().zip(b.to_values().iter()) {
                     out.push(eval_binary(op, x.clone(), y.clone(), line, col)?);
                 }
-                return Ok(Value::array(out));
+                return Ok(Value::array_sniff(out));
             }
             (Value::Array(a), scalar) => {
                 let mut out = Vec::with_capacity(a.len());
                 for x in a.to_values().iter() {
                     out.push(eval_binary(op, x.clone(), scalar.clone(), line, col)?);
                 }
-                return Ok(Value::array(out));
+                return Ok(Value::array_sniff(out));
             }
             (scalar, Value::Array(b)) => {
                 let mut out = Vec::with_capacity(b.len());
                 for y in b.to_values().iter() {
                     out.push(eval_binary(op, scalar.clone(), y.clone(), line, col)?);
                 }
-                return Ok(Value::array(out));
+                return Ok(Value::array_sniff(out));
             }
             // Tensor arithmetic: tensor⊕tensor (NumPy broadcasting), tensor⊕scalar.
             (Value::Tensor(a), Value::Tensor(b)) => {
@@ -133,6 +139,81 @@ pub(crate) fn eval_binary(
         Ne => Ok(Value::Bool(!values_equal(&l, &r))),
         Lt | Gt | Le | Ge => compare(op, &l, &r, line, col),
         And | Or | Coalesce => unreachable!("handled with short-circuit in eval"),
+    }
+}
+
+/// Vectorized `Add`/`Sub`/`Mul` over **typed** numeric arrays — a tight loop on the
+/// packed `i64`/`f64` buffer producing a packed result, with **no** per-element
+/// `Value` allocation or operator dispatch. Returns `None` (defer to the general,
+/// element-by-element path) for other operators, a `Values` array, a non-numeric
+/// scalar, or a length mismatch. Semantics match [`arith`] exactly: `Int`×`Int`
+/// wraps (two's complement); any `Float` widens both sides to `f64`.
+fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
+    use crate::value::ArrayData;
+    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
+        return None;
+    }
+    fn iop(op: &BinOp, x: i64, y: i64) -> i64 {
+        match op {
+            BinOp::Add => x.wrapping_add(y),
+            BinOp::Sub => x.wrapping_sub(y),
+            _ => x.wrapping_mul(y),
+        }
+    }
+    fn fop(op: &BinOp, x: f64, y: f64) -> f64 {
+        match op {
+            BinOp::Add => x + y,
+            BinOp::Sub => x - y,
+            _ => x * y,
+        }
+    }
+    fn f64_view(ad: &ArrayData) -> Option<std::borrow::Cow<'_, [f64]>> {
+        match ad {
+            ArrayData::Floats(v) => Some(std::borrow::Cow::Borrowed(v)),
+            ArrayData::Ints(v) => Some(std::borrow::Cow::Owned(v.iter().map(|&n| n as f64).collect())),
+            ArrayData::Values(_) => None,
+        }
+    }
+    fn scalar_f64(v: &Value) -> Option<f64> {
+        match v {
+            Value::Int(i) => Some(*i as f64),
+            Value::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+    match (l, r) {
+        // array ⊕ array (same length)
+        (Value::Array(a), Value::Array(b)) => {
+            if a.len() != b.len() {
+                return None; // length-mismatch error belongs to the general path
+            }
+            if let (ArrayData::Ints(xa), ArrayData::Ints(xb)) = (&**a, &**b) {
+                return Some(Value::int_array(
+                    xa.iter().zip(xb).map(|(&x, &y)| iop(op, x, y)).collect(),
+                ));
+            }
+            let (fa, fb) = (f64_view(a)?, f64_view(b)?);
+            Some(Value::float_array(
+                fa.iter().zip(fb.iter()).map(|(&x, &y)| fop(op, x, y)).collect(),
+            ))
+        }
+        // array ⊕ scalar  (`a[i] op s`)
+        (Value::Array(a), s) => {
+            if let (ArrayData::Ints(xa), Value::Int(k)) = (&**a, s) {
+                return Some(Value::int_array(xa.iter().map(|&x| iop(op, x, *k)).collect()));
+            }
+            let (fa, sf) = (f64_view(a)?, scalar_f64(s)?);
+            Some(Value::float_array(fa.iter().map(|&x| fop(op, x, sf)).collect()))
+        }
+        // scalar ⊕ array  (`s op a[i]`)
+        (s, Value::Array(a)) => {
+            if let (Value::Int(k), ArrayData::Ints(xa)) = (s, &**a) {
+                return Some(Value::int_array(xa.iter().map(|&x| iop(op, *k, x)).collect()));
+            }
+            let (fa, sf) = (f64_view(a)?, scalar_f64(s)?);
+            Some(Value::float_array(fa.iter().map(|&x| fop(op, sf, x)).collect()))
+        }
+        _ => None,
     }
 }
 
