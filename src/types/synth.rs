@@ -155,6 +155,13 @@ impl super::Checker {
             return Ok(*ret);
         }
         if let Some(t) = self.env.get(name) {
+            // A name bound to `Unknown` — e.g. a function-valued parameter, which the
+            // gradual checker can't assign a concrete arity/signature — is callable.
+            // Permit it and yield `Unknown` (higher-order functions: `fn apply(f, x)
+            // = f(x)`). Only a *known* non-function type is a hard error.
+            if matches!(t, Type::Unknown) {
+                return Ok(Type::Unknown);
+            }
             return Err(HelixError::new(
                 format!("`{}` is a {}, not a function", name, t),
                 line,

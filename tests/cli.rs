@@ -394,6 +394,20 @@ fn read_bed_makes_intervals_queryable() {
 }
 
 #[test]
+fn higher_order_functions_work_on_both_engines() {
+    // A function-valued parameter is callable (`f(x)`): the gradual checker permits
+    // an Unknown-typed name as a call target. Runtime already supported it — this
+    // pins the checker fix and VM/tree-walker agreement through the real CLI.
+    let src = "fn inc(n) = n + 1\nfn apply(f, x) = f(x)\nfn twice(f, x) = f(f(x))\nprint(apply(inc, 5))\nprint(apply((n => n * 2), 5))\nprint(twice(inc, 5))\n";
+    let (vm, e1, c1) = run_source(src, &[], "hof_vm");
+    assert_eq!(c1, Some(0), "stderr:\n{e1}");
+    assert_eq!(vm.trim(), "6\n10\n7"); // apply(inc,5); apply(double,5); twice(inc,5)
+    let (tw, _, c2) = run_source(src, &[("HELIX_NOVM", "1")], "hof_tw");
+    assert_eq!(c2, Some(0));
+    assert_eq!(vm, tw, "VM and tree-walker disagree on higher-order functions");
+}
+
+#[test]
 fn with_derives_columns_from_expressions() {
     // `df.with({name: expr, ...})` adds columns computed over existing ones. The
     // value expressions reference bare column names, like the other column verbs.

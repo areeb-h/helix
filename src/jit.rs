@@ -292,13 +292,19 @@ pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str) -> bool {
 }
 
 fn eligible_set<'a>(funcs: &[FnDef<'a>], kind: NumKind) -> HashSet<&'a str> {
-    // Exclude self-recursive functions: their recursion would run on the native
-    // stack with no depth guard, so an unbounded recursion (e.g. a missing base
-    // case) would crash the process instead of raising a clean error. Recursion
-    // runs on the guarded VM (or is memoized) instead.
+    // Exclude every function on a recursion *cycle* — directly self-recursive OR
+    // mutually recursive. A JIT'd function recurses on the native stack with no
+    // depth guard, so unbounded recursion (a missing base case) would overflow the
+    // native stack and crash the process instead of raising a clean, catchable
+    // error. This is a transitive call-graph check, not just a direct self-call
+    // test: the JIT's memory safety must NOT silently depend on the front-end's
+    // define-before-use rule (which makes mutual recursion unrepresentable today,
+    // but is a front-end policy that could change — see `recursive_funcs`).
+    // Recursive functions run on the depth-guarded VM (or are memoized) instead.
+    let recursive = recursive_funcs(funcs);
     let mut eligible: HashSet<&str> = funcs
         .iter()
-        .filter(|f| f.params.len() <= MAX_ARITY && !contains_self_call(f.body, f.name))
+        .filter(|f| f.params.len() <= MAX_ARITY && !recursive.contains(f.name))
         .map(|f| f.name)
         .collect();
     loop {
@@ -320,26 +326,61 @@ fn eligible_set<'a>(funcs: &[FnDef<'a>], kind: NumKind) -> HashSet<&'a str> {
     eligible
 }
 
-/// True if the body calls `name` (direct self-recursion). Only the node kinds
-/// that can appear in an eligible body need traversal; anything else means the
-/// function is ineligible for other reasons anyway.
-fn contains_self_call(e: &Expr, name: &str) -> bool {
+/// Names of functions that lie on a call-graph cycle — directly self-recursive
+/// (`f` calls `f`) or mutually recursive (`f` -> `g` -> ... -> `f`). Such a
+/// function can reach itself through call edges, so JIT-compiling it would put
+/// unguarded recursion on the native stack. The check is *transitive* by design:
+/// it keeps the JIT memory-safe regardless of whether the front-end permits the
+/// cycle to be written. Today the parser's define-before-use rule makes mutual
+/// recursion unrepresentable, so this currently coincides with the direct
+/// self-call test — but the JIT no longer *depends* on that front-end policy.
+fn recursive_funcs<'a>(funcs: &[FnDef<'a>]) -> HashSet<&'a str> {
+    let n = funcs.len();
+    // Call graph over the user functions: edge i -> j iff funcs[i]'s body calls
+    // funcs[j] (by name). `body_calls` is the per-edge primitive.
+    let adj: Vec<Vec<usize>> = funcs
+        .iter()
+        .map(|f| (0..n).filter(|&j| body_calls(f.body, funcs[j].name)).collect())
+        .collect();
+    let mut recursive = HashSet::new();
+    for i in 0..n {
+        // Reachability: can function i reach itself through call edges?
+        let mut seen = vec![false; n];
+        let mut stack = adj[i].clone();
+        while let Some(u) = stack.pop() {
+            if u == i {
+                recursive.insert(funcs[i].name);
+                break;
+            }
+            if !seen[u] {
+                seen[u] = true;
+                stack.extend_from_slice(&adj[u]);
+            }
+        }
+    }
+    recursive
+}
+
+/// True if `e` contains a call to function `name`. The per-edge primitive for the
+/// `recursive_funcs` call graph. Only the node kinds that can appear in an eligible
+/// body need traversal; anything else means the function is ineligible anyway.
+fn body_calls(e: &Expr, name: &str) -> bool {
     match e {
         Expr::Call { name: callee, args, .. } => {
-            callee == name || args.iter().any(|a| contains_self_call(a, name))
+            callee == name || args.iter().any(|a| body_calls(a, name))
         }
         Expr::Binary { left, right, .. } => {
-            contains_self_call(left, name) || contains_self_call(right, name)
+            body_calls(left, name) || body_calls(right, name)
         }
-        Expr::Unary { expr, .. } => contains_self_call(expr, name),
+        Expr::Unary { expr, .. } => body_calls(expr, name),
         Expr::If { cond, then_branch, else_branch, .. } => {
-            contains_self_call(cond, name)
-                || contains_self_call(then_branch, name)
-                || contains_self_call(else_branch, name)
+            body_calls(cond, name)
+                || body_calls(then_branch, name)
+                || body_calls(else_branch, name)
         }
         Expr::Let { bindings, body } => {
-            bindings.iter().any(|(_, v)| contains_self_call(v, name))
-                || contains_self_call(body, name)
+            bindings.iter().any(|(_, v)| body_calls(v, name))
+                || body_calls(body, name)
         }
         _ => false,
     }
@@ -672,5 +713,57 @@ pub unsafe fn call_f64(ptr: *const u8, args: &[f64]) -> f64 {
             ),
             _ => unreachable!("JIT arity is capped at {MAX_ARITY}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(name: &str) -> Expr {
+        Expr::Call { name: name.to_string(), args: vec![], line: 0, col: 0 }
+    }
+
+    // The parser's define-before-use rule means a mutual-recursion cycle can't be
+    // *written* in Helix today, so these cases are constructed as raw ASTs. They
+    // assert the JIT stays memory-safe independent of that front-end policy: a
+    // function on a call cycle must never reach the unguarded native path.
+    #[test]
+    fn recursive_funcs_catches_mutual_recursion() {
+        let p: Vec<(String, Option<TypeAnn>)> = vec![];
+        let (fb, gb) = (call("g"), call("f")); // f -> g -> f
+        let (leaf, caller) = (Expr::Int(0), call("leaf")); // caller -> leaf (acyclic)
+        let funcs = vec![
+            FnDef { name: "f", params: &p, body: &fb },
+            FnDef { name: "g", params: &p, body: &gb },
+            FnDef { name: "leaf", params: &p, body: &leaf },
+            FnDef { name: "caller", params: &p, body: &caller },
+        ];
+        let rec = recursive_funcs(&funcs);
+        assert!(rec.contains("f") && rec.contains("g"), "f->g->f cycle must be flagged");
+        assert!(!rec.contains("leaf") && !rec.contains("caller"), "acyclic fns are not recursive");
+        // ...and eligible_set must keep the cycle off the native path.
+        let elig = eligible_set(&funcs, NumKind::Int);
+        assert!(!elig.contains("f") && !elig.contains("g"));
+    }
+
+    #[test]
+    fn recursive_funcs_catches_direct_self_recursion() {
+        let p: Vec<(String, Option<TypeAnn>)> = vec![];
+        let body = call("fac"); // fac -> fac
+        let funcs = vec![FnDef { name: "fac", params: &p, body: &body }];
+        assert!(recursive_funcs(&funcs).contains("fac"));
+    }
+
+    #[test]
+    fn recursive_funcs_allows_acyclic_chain() {
+        let p: Vec<(String, Option<TypeAnn>)> = vec![];
+        let (ab, bb, cb) = (call("b"), call("c"), Expr::Int(0)); // a -> b -> c (leaf)
+        let funcs = vec![
+            FnDef { name: "a", params: &p, body: &ab },
+            FnDef { name: "b", params: &p, body: &bb },
+            FnDef { name: "c", params: &p, body: &cb },
+        ];
+        assert!(recursive_funcs(&funcs).is_empty(), "an acyclic call chain has no recursion");
     }
 }
