@@ -1,0 +1,7 @@
+##gff-version 3
+chr17	RefSeq	gene	43044295	43125483	.	+	.	ID=gene:BRCA1;Name=BRCA1;biotype=protein_coding
+chr17	RefSeq	exon	43044295	43045802	.	+	.	ID=exon:BRCA1.1;Parent=gene:BRCA1
+chr17	RefSeq	CDS	43045000	43045802	30.5	+	0	ID=cds:BRCA1;Parent=gene:BRCA1
+chr13	RefSeq	gene	32315474	32400266	.	+	.	ID=gene:BRCA2;Name=BRCA2;biotype=protein_coding
+chr13	RefSeq	exon	32315474	32316527	.	+	.	ID=exon:BRCA2.1;Parent=gene:BRCA2
+chr7	RefSeq	gene	140719327	140924928	.	-	.	ID=gene:BRAF;Name=BRAF;biotype=protein_coding

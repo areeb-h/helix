@@ -374,6 +374,26 @@ fn read_vcf_makes_variants_queryable() {
 }
 
 #[test]
+fn read_gff_makes_features_queryable() {
+    // A GFF3 file becomes a DataFrame: the standard feature columns plus one string
+    // column per attribute tag (so `Name` is queryable alongside `type`/`strand`).
+    let src = "g = bio.read_gff(\"examples/data/genes.gff3\")\nprint(g.where(type == \"gene\").count())\nprint(g.where(Name == \"BRCA1\").count())\n";
+    let (out, stderr, code) = run_source(src, &[], "gff");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "3\n1"); // 3 gene features; 1 named BRCA1
+}
+
+#[test]
+fn read_bed_makes_intervals_queryable() {
+    // A BED file becomes a DataFrame; the optional name/score/strand columns appear
+    // because the file carries them, and `score` is numeric (`score > 400`).
+    let src = "b = bio.read_bed(\"examples/data/peaks.bed\")\nprint(b.count())\nprint(b.where(score > 400).count())\n";
+    let (out, stderr, code) = run_source(src, &[], "bed");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "4\n3"); // 4 intervals; 3 with score > 400
+}
+
+#[test]
 fn with_derives_columns_from_expressions() {
     // `df.with({name: expr, ...})` adds columns computed over existing ones. The
     // value expressions reference bare column names, like the other column verbs.

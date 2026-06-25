@@ -84,7 +84,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Array(Box::new(Type::Int)))
         }
-        "io.read_csv" | "io.read_parquet" | "bio.read_vcf" => {
+        "io.read_csv" | "io.read_parquet" | "bio.read_vcf" | "bio.read_gff" | "bio.read_bed" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }

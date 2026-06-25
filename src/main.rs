@@ -8,10 +8,12 @@
 
 mod ast;
 mod backend;
+mod bed;
 mod bio;
 mod bytecode;
 mod dataframe;
 mod error;
+mod gff;
 mod http;
 mod interp;
 mod jit;

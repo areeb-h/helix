@@ -159,8 +159,8 @@ pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<crate::backend::D
 /// the binary `f32` error — `0.001_f32 as f64` is 0.00100000004…, so `af > 0.001`
 /// would spuriously match a `0.001` row. Round-tripping through the shortest decimal
 /// recovers the value the VCF author actually wrote, so comparisons behave as a
-/// scientist expects.
-fn widen_f32(f: f32) -> f64 {
+/// scientist expects. Shared with the other genomics readers (GFF score).
+pub(crate) fn widen_f32(f: f32) -> f64 {
     f.to_string().parse::<f64>().unwrap_or(f as f64)
 }
 

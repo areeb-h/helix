@@ -107,6 +107,20 @@ impl super::Interp {
                     other => Err(type_err("bio.read_vcf", "a string path", other, line, col)),
                 }
             }
+            "bio.read_gff" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => Ok(Value::dataframe(crate::gff::read_gff(s, line, col)?)),
+                    other => Err(type_err("bio.read_gff", "a string path", other, line, col)),
+                }
+            }
+            "bio.read_bed" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => Ok(Value::dataframe(crate::bed::read_bed(s, line, col)?)),
+                    other => Err(type_err("bio.read_bed", "a string path", other, line, col)),
+                }
+            }
             "range" => match args.len() {
                 1 => {
                     let n = as_int(&args[0], "range", line, col)?;

@@ -34,6 +34,7 @@ needletail = "0.7.3"
 # ecosystem the way it stands on Polars). VCF gives header-typed INFO fields and
 # BGZF; GFF/BED add feature/interval formats. Pure Rust, no system deps.
 noodles-vcf = "0.88"
+noodles-gff = "0.57"
 # Latest Polars — Arrow-columnar, lazy, multi-threaded execution engine.
 polars = { version = "0.54", features = [
     "lazy",

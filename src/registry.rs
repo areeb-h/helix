@@ -32,6 +32,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "bio.read_fasta", pure: false },
     BuiltinDef { path: "bio.read_fastq", pure: false },
     BuiltinDef { path: "bio.read_vcf", pure: false },
+    BuiltinDef { path: "bio.read_gff", pure: false },
+    BuiltinDef { path: "bio.read_bed", pure: false },
     BuiltinDef { path: "io.write_parquet", pure: false },
     BuiltinDef { path: "http.get", pure: false },
     // --- constructors / conversions ---
