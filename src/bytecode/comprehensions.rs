@@ -64,11 +64,12 @@ impl super::Compiler {
         // ineligible bodies, and no-JIT builds fall through to the bytecode loop below.
         // The guard's `after` target is patched to the convergence point once known.
         let is_map = matches!(kind, CompKind::Map);
+        let fns = self.jit_fn_set();
         let kernel_guard: Option<(usize, u32)> = if params.len() == 1
             && (if is_map {
-                crate::jit::map_kernel_eligible(body, &params[0])
+                crate::jit::map_kernel_eligible(body, &params[0], &fns)
             } else {
-                crate::jit::filter_kernel_eligible(body, &params[0])
+                crate::jit::filter_kernel_eligible(body, &params[0], &fns)
             }) {
             let kernel = ArrayKernel { binder: params[0].clone(), body: body.clone() };
             if is_map {
@@ -272,7 +273,7 @@ impl super::Compiler {
         // cap; otherwise it falls through to the identical bytecode loop — so float
         // accumulators, over-cap ranges, and non-x86/`HELIX_NOJIT` builds all run
         // the oracle-matched path.
-        let eligible = crate::jit::reduce_loop_eligible(body, pa, pb);
+        let eligible = crate::jit::reduce_loop_eligible(body, pa, pb, &self.jit_fn_set());
         let acc;
         let x;
         let guard;
@@ -444,6 +445,12 @@ fn is_idempotent(e: &Expr) -> bool {
 }
 
 impl super::Compiler {
+    /// The JIT-eligible user-function names as a borrowed set, for the kernel eligibility
+    /// checks (a kernel body may call these).
+    fn jit_fn_set(&self) -> std::collections::HashSet<&str> {
+        self.jit_fns.iter().map(String::as_str).collect()
+    }
+
     /// Build a `FusionStage` from a `map`/`filter`/`where` method, or `None` if it is not
     /// a single-binder JIT-eligible stage.
     fn fusion_stage(&self, name: &str, args: &[Expr]) -> Option<FusionStage> {
@@ -455,11 +462,12 @@ impl super::Compiler {
             return None;
         }
         let binder = params[0].clone();
+        let fns = self.jit_fn_set();
         if name == "map" {
-            crate::jit::map_kernel_eligible(body, &binder)
+            crate::jit::map_kernel_eligible(body, &binder, &fns)
                 .then(|| FusionStage::Map { binder, body: body.clone() })
         } else {
-            crate::jit::filter_kernel_eligible(body, &binder)
+            crate::jit::filter_kernel_eligible(body, &binder, &fns)
                 .then(|| FusionStage::Filter { binder, body: body.clone() })
         }
     }
@@ -487,7 +495,7 @@ impl super::Compiler {
                 }
                 _ => return None,
             };
-            if !crate::jit::reduce_loop_eligible(body, &pa, &pb) {
+            if !crate::jit::reduce_loop_eligible(body, &pa, &pb, &self.jit_fn_set()) {
                 return None;
             }
             (FusionSink::Reduce { pa, pb, body: body.clone() }, Some(&args[0]))

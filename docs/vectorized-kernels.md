@@ -9,9 +9,10 @@ made per-element `map` the slowest path in the language.
 
 A `map`/`filter` becomes a native kernel when the array is a packed `Int` array and the
 single-parameter body is a pure `i64` expression — integer `+ - *`, `%` by a positive
-constant, comparisons, `if`/`then`/`else`, and `let` (the same eligibility as a `reduce`
-loop). Anything else — float arrays, `missing`, a body that calls a function or uses `/`,
-multi-binder destructuring — transparently **falls through to the bytecode loop**. Correct
+constant, comparisons, `if`/`then`/`else`, `let`, and **calls to JIT-eligible user
+functions** (`x => normalize(x)`; the function is compiled natively and called from inside
+the loop). Anything else — float arrays, `missing`, a body using `/`, multi-binder
+destructuring — transparently **falls through to the bytecode loop**. Correct
 everywhere; accelerated where it can be. The JIT itself is x86-64 Linux only; other targets
 always run the bytecode loop.
 
@@ -74,5 +75,5 @@ runtime — and runs at the bare reduce-loop's C/Go-class speed.
 ## Roadmap
 
 - Statistical sinks (`.sum()`/`.mean()`, with an incremental Neumaier compensator);
-  inline immutable numeric globals into bodies (`x => x*k`); helper-function calls in
-  bodies; `f64` kernels; SIMD lanes; horizontal fusion (several aggregates in one pass).
+  inline immutable numeric globals into bodies (`x => x*k`); `f64` kernels; SIMD lanes;
+  horizontal fusion (several aggregates in one pass).

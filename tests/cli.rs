@@ -645,6 +645,26 @@ fn fused_pipelines_match_the_oracle() {
 }
 
 #[test]
+fn kernel_bodies_can_call_helper_functions() {
+    // A kernel/fused body may call JIT-eligible user functions — the function is compiled
+    // natively and called from inside the loop. Must match the oracle on every path.
+    let cases = [
+        "fn sq(x) = x * x\nprint([1,2,3,4,5].map(x => sq(x)))",
+        "fn g(x) = x * 3\nfn f(x) = g(x) + 1\nprint([1,2,3,4].map(x => f(x)).filter(x => x % 2 == 0))",
+        "fn sq(x) = x * x\nprint([1,2,3,4,5,6].filter(x => sq(x) > 9))",
+        "fn dbl(x) = x * 2\nprint(range(0, 50).map(x => dbl(x)).filter(x => x > 30).reduce(0, (a, x) => a + x))",
+    ];
+    for (i, src) in cases.iter().enumerate() {
+        let (vm, stderr, code) = run_source(src, &[], &format!("fnk_vm{i}"));
+        assert_eq!(code, Some(0), "case {i} stderr:\n{stderr}");
+        let (tw, _, _) = run_source(src, &[("HELIX_NOVM", "1")], &format!("fnk_tw{i}"));
+        let (nojit, _, _) = run_source(src, &[("HELIX_NOJIT", "1")], &format!("fnk_nj{i}"));
+        assert_eq!(vm, tw, "case {i}: native (fn-call) vs tree-walker:\n{src}");
+        assert_eq!(vm, nojit, "case {i}: native (fn-call) vs bytecode:\n{src}");
+    }
+}
+
+#[test]
 fn ineligible_map_bodies_fall_through_correctly() {
     // A float array (no Int kernel) and a non-arithmetic body both bypass the kernel
     // and run the bytecode loop — still correct, and identical to the tree-walker.

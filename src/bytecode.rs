@@ -218,6 +218,10 @@ pub struct Compiler {
     /// Set while emitting a fused pipeline's fall-through, so the recompiled chain takes
     /// the ordinary per-stage path instead of re-triggering fusion (which would loop).
     no_fuse: bool,
+    /// User functions the JIT can compile to pure `i64` natives — so a kernel/fused body
+    /// may *call* them. Computed once (identically to `jit::build`) so the compile-time
+    /// guard decision matches what the JIT will actually compile.
+    jit_fns: std::collections::HashSet<String>,
     /// Inferred receiver types from the type checker (see [`crate::types::TypeMap`]),
     /// used to route receiver-polymorphic methods. `None` when compiling without a
     /// prior type-check (tests/fuzzers) — then such methods fall back as before.
@@ -252,6 +256,7 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         filter_kernels: Vec::new(),
         fused_kernels: Vec::new(),
         no_fuse: false,
+        jit_fns: crate::jit::int_eligible_fns(program),
         types,
     };
 

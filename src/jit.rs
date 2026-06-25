@@ -168,19 +168,16 @@ pub fn build(
     // produce an `Int` (a literal, or an Int-only subexpression) — so f64 codegen
     // would diverge from the interpreter on result type. Float functions run on
     // the VM instead (correct, and they're not hot after recursion is excluded).
-    for kind in [NumKind::Int] {
-        let eligible = eligible_set(&funcs, kind);
-        if eligible.is_empty() {
-            continue;
-        }
-
-        // Declare every function of this kind first so intra-kind calls resolve.
-        let mut fn_ids: HashMap<&str, FuncId> = HashMap::new();
+    let kind = NumKind::Int;
+    let int_eligible = eligible_set(&funcs, kind);
+    // Eligible user functions, declared first so kernels and other functions can call
+    // them. Kept alive for the kernel-compilation blocks below.
+    let mut fn_ids: HashMap<&str, FuncId> = HashMap::new();
+    if !int_eligible.is_empty() {
         for f in &funcs {
-            if eligible.contains(f.name) {
+            if int_eligible.contains(f.name) {
                 let mut sig = module.make_signature();
-                // Force SystemV to match the `extern "C"` transmute on x86-64 Linux
-                // (rather than relying on the ISA default).
+                // Force SystemV to match the `extern "C"` transmute on x86-64 Linux.
                 sig.call_conv = CallConv::SystemV;
                 for _ in f.params {
                     sig.params.push(AbiParam::new(kind.cl_type()));
@@ -193,11 +190,10 @@ pub fn build(
             }
         }
 
-        // Define each body.
         let mut ctx = module.make_context();
         let mut bctx = FunctionBuilderContext::new();
         for f in &funcs {
-            if !eligible.contains(f.name) {
+            if !int_eligible.contains(f.name) {
                 continue;
             }
             ctx.func.signature.call_conv = CallConv::SystemV;
@@ -239,7 +235,7 @@ pub fn build(
         let mut ctx = module.make_context();
         let mut bctx = FunctionBuilderContext::new();
         for (i, rl) in reduce_loops.iter().enumerate() {
-            if !reduce_loop_eligible(&rl.body, &rl.pa, &rl.pb) {
+            if !reduce_loop_eligible(&rl.body, &rl.pa, &rl.pb, &int_eligible) {
                 reduce_ids.push(None);
                 continue;
             }
@@ -256,19 +252,20 @@ pub fn build(
                     continue;
                 }
             };
-            match define_reduce_loop(&mut module, &mut ctx, &mut bctx, id, rl) {
+            match define_reduce_loop(&mut module, &mut ctx, &mut bctx, id, rl, &fn_ids) {
                 Some(()) => reduce_ids.push(Some(id)),
                 None => reduce_ids.push(None),
             }
         }
     }
 
-    // Compile each flagged `map`/`filter` body into a native kernel over a packed
-    // `&[i64]` (the perf path that also unlocks parallelism). Same defensive
-    // re-check + per-site `None` slot as the reduce loops.
-    let map_ids = define_array_kernels(&mut module, map_kernels, "map", false);
-    let filter_ids = define_array_kernels(&mut module, filter_kernels, "filter", true);
-    let fused_ids = define_fused_kernels(&mut module, fused_kernels);
+    // Compile each flagged `map`/`filter` body and fuseable pipeline into a native
+    // kernel. Same defensive re-check + per-site `None` slot as the reduce loops; kernel
+    // bodies may call the eligible functions in `fn_ids`.
+    let map_ids = define_array_kernels(&mut module, map_kernels, "map", false, &fn_ids, &int_eligible);
+    let filter_ids =
+        define_array_kernels(&mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible);
+    let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible);
 
     if compiled.is_empty()
         && reduce_ids.iter().all(|r| r.is_none())
@@ -304,14 +301,14 @@ pub fn build(
 }
 
 /// All stages and the reduce sink of a fused pipeline must be JIT-eligible.
-fn fusion_eligible(k: &crate::bytecode::FusedKernel) -> bool {
+fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &HashSet<&str>) -> bool {
     use crate::bytecode::{FusionSink, FusionStage};
     k.stages.iter().all(|s| match s {
-        FusionStage::Map { binder, body } => map_kernel_eligible(body, binder),
-        FusionStage::Filter { binder, body } => filter_kernel_eligible(body, binder),
+        FusionStage::Map { binder, body } => map_kernel_eligible(body, binder, fns),
+        FusionStage::Filter { binder, body } => filter_kernel_eligible(body, binder, fns),
     }) && match &k.sink {
         FusionSink::Collect => true,
-        FusionSink::Reduce { pa, pb, body } => reduce_loop_eligible(body, pa, pb),
+        FusionSink::Reduce { pa, pb, body } => reduce_loop_eligible(body, pa, pb, fns),
     }
 }
 
@@ -319,12 +316,14 @@ fn fusion_eligible(k: &crate::bytecode::FusedKernel) -> bool {
 fn define_fused_kernels(
     module: &mut JITModule,
     kernels: &[crate::bytecode::FusedKernel],
+    fn_ids: &HashMap<&str, FuncId>,
+    eligible: &HashSet<&str>,
 ) -> Vec<Option<FuncId>> {
     let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
     let mut ctx = module.make_context();
     let mut bctx = FunctionBuilderContext::new();
     for (i, k) in kernels.iter().enumerate() {
-        if !fusion_eligible(k) {
+        if !fusion_eligible(k, eligible) {
             ids.push(None);
             continue;
         }
@@ -341,7 +340,7 @@ fn define_fused_kernels(
                 continue;
             }
         };
-        ids.push(define_fused_kernel(module, &mut ctx, &mut bctx, id, k).map(|()| id));
+        ids.push(define_fused_kernel(module, &mut ctx, &mut bctx, id, k, fn_ids).map(|()| id));
     }
     ids
 }
@@ -354,17 +353,19 @@ fn define_array_kernels(
     kernels: &[crate::bytecode::ArrayKernel],
     tag: &str,
     is_filter: bool,
+    fn_ids: &HashMap<&str, FuncId>,
+    eligible: &HashSet<&str>,
 ) -> Vec<Option<FuncId>> {
     let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
     let mut ctx = module.make_context();
     let mut bctx = FunctionBuilderContext::new();
     for (i, k) in kernels.iter().enumerate() {
-        let eligible = if is_filter {
-            filter_kernel_eligible(&k.body, &k.binder)
+        let ok = if is_filter {
+            filter_kernel_eligible(&k.body, &k.binder, eligible)
         } else {
-            map_kernel_eligible(&k.body, &k.binder)
+            map_kernel_eligible(&k.body, &k.binder, eligible)
         };
-        if !eligible {
+        if !ok {
             ids.push(None);
             continue;
         }
@@ -383,8 +384,8 @@ fn define_array_kernels(
                 continue;
             }
         };
-        let ok = define_array_kernel(module, &mut ctx, &mut bctx, id, k, is_filter);
-        ids.push(ok.map(|()| id));
+        let done = define_array_kernel(module, &mut ctx, &mut bctx, id, k, is_filter, fn_ids);
+        ids.push(done.map(|()| id));
     }
     ids
 }
@@ -415,32 +416,45 @@ fn make_module() -> Option<JITModule> {
 /// whether to emit a `TryJitReduce` guard, so it is the single source of truth for
 /// reduce-loop eligibility (and is platform-independent — the native code is only
 /// emitted by `build`, which is gated to x86-64 Linux).
-pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str) -> bool {
-    // An empty eligible-fn set makes any `Call` ineligible (no cross-fn calls in a
-    // native reduce loop), exactly matching the codegen below.
-    let no_fns: HashSet<&str> = HashSet::new();
+/// The names of user functions the JIT can compile as pure `i64` natives — so a kernel
+/// or reduce body may *call* them. Computed identically at bytecode-compile time (to
+/// decide whether to emit a guard) and at JIT-build time (to compile the kernel), so the
+/// two always agree. Platform-independent (only codegen is x86-64-gated).
+pub fn int_eligible_fns(program: &[Stmt]) -> std::collections::HashSet<String> {
+    let funcs: Vec<FnDef> = program
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Func { name, params, body, .. } => Some(FnDef { name, params, body }),
+            _ => None,
+        })
+        .collect();
+    eligible_set(&funcs, NumKind::Int).into_iter().map(str::to_string).collect()
+}
+
+/// True if `body` is a pure `i64` value expression over `{pa, pb}` and calls only the
+/// JIT-eligible functions in `fns` — what `define_reduce_loop`/`define_fused_kernel` can
+/// lower. `fns` is empty for a self-contained body.
+pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>) -> bool {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(pa);
     locals.insert(pb);
-    value_eligible(body, &no_fns, &locals, NumKind::Int)
+    value_eligible(body, fns, &locals, NumKind::Int)
 }
 
-/// True if a `map` body is a pure `i64` value expression over its single binder — the
-/// same shape as a reduce body, so the JIT can lower it to a per-element kernel.
-pub fn map_kernel_eligible(body: &Expr, binder: &str) -> bool {
-    let no_fns: HashSet<&str> = HashSet::new();
+/// True if a `map` body is a pure `i64` value expression over its single binder (calling
+/// only `fns`) — the same shape as a reduce body, lowered to a per-element kernel.
+pub fn map_kernel_eligible(body: &Expr, binder: &str, fns: &HashSet<&str>) -> bool {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(binder);
-    value_eligible(body, &no_fns, &locals, NumKind::Int)
+    value_eligible(body, fns, &locals, NumKind::Int)
 }
 
-/// True if a `filter`/`where` predicate is a single pure `i64` comparison over its
-/// binder (`it > 5`, `it % 2 == 0`, …) — what `gen_cond` can lower to a native test.
-pub fn filter_kernel_eligible(body: &Expr, binder: &str) -> bool {
-    let no_fns: HashSet<&str> = HashSet::new();
+/// True if a `filter`/`where` predicate is a pure `i64` comparison over its binder
+/// (`it > 5`, `it % 2 == 0`, `is_even(it)`, …), calling only `fns`.
+pub fn filter_kernel_eligible(body: &Expr, binder: &str, fns: &HashSet<&str>) -> bool {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(binder);
-    cond_eligible(body, &no_fns, &locals, NumKind::Int)
+    cond_eligible(body, fns, &locals, NumKind::Int)
 }
 
 fn eligible_set<'a>(funcs: &[FnDef<'a>], kind: NumKind) -> HashSet<&'a str> {
@@ -611,6 +625,7 @@ fn define_reduce_loop(
     bctx: &mut FunctionBuilderContext,
     fid: FuncId,
     rl: &crate::bytecode::ReduceLoop,
+    fn_ids: &HashMap<&str, FuncId>,
 ) -> Option<()> {
     ctx.func.signature.call_conv = CallConv::SystemV;
     for _ in 0..3 {
@@ -653,8 +668,7 @@ fn define_reduce_loop(
     let mut vars: HashMap<&str, Variable> = HashMap::new();
     vars.insert(rl.pa.as_str(), acc_var);
     vars.insert(rl.pb.as_str(), x_var);
-    let no_fns: HashMap<&str, FuncId> = HashMap::new(); // bodies contain no calls
-    let new_acc = gen_value(&mut b, &rl.body, &mut vars, &no_fns, module, NumKind::Int);
+    let new_acc = gen_value(&mut b, &rl.body, &mut vars, fn_ids, module, NumKind::Int);
     b.def_var(acc_var, new_acc);
     let xv2 = b.use_var(x_var);
     let one = b.ins().iconst(I64, 1);
@@ -688,6 +702,7 @@ fn define_array_kernel<'a>(
     fid: FuncId,
     k: &'a crate::bytecode::ArrayKernel,
     is_filter: bool,
+    fn_ids: &HashMap<&'a str, FuncId>,
 ) -> Option<()> {
     ctx.func.signature.call_conv = CallConv::SystemV;
     for _ in 0..3 {
@@ -743,7 +758,6 @@ fn define_array_kernel<'a>(
 
     let mut vars: HashMap<&'a str, Variable> = HashMap::new();
     vars.insert(k.binder.as_str(), elem_var);
-    let no_fns: HashMap<&str, FuncId> = HashMap::new();
 
     if is_filter {
         // dst[w] = elem; w += (pred ? 1 : 0)
@@ -752,14 +766,14 @@ fn define_array_kernel<'a>(
         let dstp = b.use_var(dst_var);
         let daddr = b.ins().iadd(dstp, woff);
         b.ins().store(MemFlags::trusted(), elem, daddr, 0);
-        let keep = gen_cond(&mut b, &k.body, &mut vars, &no_fns, module, NumKind::Int);
+        let keep = gen_cond(&mut b, &k.body, &mut vars, fn_ids, module, NumKind::Int);
         let keep64 = b.ins().uextend(I64, keep);
         let wv2 = b.use_var(w_var);
         let nw = b.ins().iadd(wv2, keep64);
         b.def_var(w_var, nw);
     } else {
         // dst[i] = body(elem)
-        let r = gen_value(&mut b, &k.body, &mut vars, &no_fns, module, NumKind::Int);
+        let r = gen_value(&mut b, &k.body, &mut vars, fn_ids, module, NumKind::Int);
         let iv3 = b.use_var(i_var);
         let doff = b.ins().imul_imm(iv3, 8);
         let dstp = b.use_var(dst_var);
@@ -801,6 +815,7 @@ fn define_fused_kernel<'a>(
     bctx: &mut FunctionBuilderContext,
     fid: FuncId,
     k: &'a crate::bytecode::FusedKernel,
+    fn_ids: &HashMap<&'a str, FuncId>,
 ) -> Option<()> {
     use crate::bytecode::{FusionSink, FusionStage};
     let is_reduce = matches!(k.sink, FusionSink::Reduce { .. });
@@ -874,7 +889,6 @@ fn define_fused_kernel<'a>(
     };
     let cur_var = b.declare_var(I64);
     b.def_var(cur_var, elem);
-    let no_fns: HashMap<&str, FuncId> = HashMap::new();
 
     // Thread the element through the stages. A Map rebinds `cur`; a Filter splits the
     // straight-line body and sends a rejected element to `cont` (skip the sink).
@@ -883,13 +897,13 @@ fn define_fused_kernel<'a>(
             FusionStage::Map { binder, body: bexpr } => {
                 let mut vars: HashMap<&'a str, Variable> = HashMap::new();
                 vars.insert(binder.as_str(), cur_var);
-                let nv = gen_value(&mut b, bexpr, &mut vars, &no_fns, module, NumKind::Int);
+                let nv = gen_value(&mut b, bexpr, &mut vars, fn_ids, module, NumKind::Int);
                 b.def_var(cur_var, nv);
             }
             FusionStage::Filter { binder, body: bexpr } => {
                 let mut vars: HashMap<&'a str, Variable> = HashMap::new();
                 vars.insert(binder.as_str(), cur_var);
-                let keep = gen_cond(&mut b, bexpr, &mut vars, &no_fns, module, NumKind::Int);
+                let keep = gen_cond(&mut b, bexpr, &mut vars, fn_ids, module, NumKind::Int);
                 let accept = b.create_block();
                 b.ins().brif(keep, accept, &[], cont, &[]);
                 b.switch_to_block(accept);
@@ -914,7 +928,7 @@ fn define_fused_kernel<'a>(
             let mut vars: HashMap<&'a str, Variable> = HashMap::new();
             vars.insert(pa.as_str(), sink_var);
             vars.insert(pb.as_str(), cur_var);
-            let nacc = gen_value(&mut b, rbody, &mut vars, &no_fns, module, NumKind::Int);
+            let nacc = gen_value(&mut b, rbody, &mut vars, fn_ids, module, NumKind::Int);
             b.def_var(sink_var, nacc);
         }
     }
