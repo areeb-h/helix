@@ -565,6 +565,40 @@ fn selective_import_binds_names_unqualified() {
 }
 
 #[test]
+fn imports_resolve_from_the_project_root() {
+    // A file in a subdirectory can import a module elsewhere in the project by its
+    // root-relative path — not just files sitting beside it. The root is the helix.toml
+    // directory (and, with no manifest, the entry file's own directory).
+    let dir = std::env::temp_dir().join("helix_rootimp");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("utils.helix"), "fn double(x) = x * 2\n").unwrap();
+    // `sub/needs.helix` imports the ROOT module `utils`, which is not beside it.
+    std::fs::write(
+        dir.join("sub/needs.helix"),
+        "import utils\nfn sext(x) = utils.double(x) * 3\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.helix"), "import sub.needs\nprint(needs.sext(2))\n").unwrap();
+    let entry = dir.join("main.helix");
+    let entry = entry.to_str().unwrap();
+
+    // With a manifest (root = the helix.toml directory).
+    std::fs::write(dir.join("helix.toml"), "[package]\nname = \"app\"\n").unwrap();
+    let (out, stderr, code) = run(&[entry], &[], "");
+    assert_eq!(code, Some(0), "with manifest; stderr:\n{stderr}");
+    assert_eq!(out.trim(), "12");
+
+    // Without a manifest (root = the entry file's directory). Still resolves.
+    std::fs::remove_file(dir.join("helix.toml")).unwrap();
+    let (out, stderr, code) = run(&[entry], &[], "");
+    assert_eq!(code, Some(0), "without manifest; stderr:\n{stderr}");
+    assert_eq!(out.trim(), "12");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn missing_module_on_search_path_is_a_clean_error() {
     // An import found neither locally nor on the search path fails with a clear message.
     let src = "import nowhere.lib as x\nprint(1)\n";

@@ -1,7 +1,9 @@
-//! Module loader. `import a.b.c [as alias]` pulls in the file `a/b/c.helix`
-//! (relative to the importing module) and exposes it as `alias` (default: the
-//! last path segment); this resolves the whole import graph (deduping shared
-//! modules by canonical path, rejecting cycles),
+//! Module loader. `import a.b.c [as alias]` pulls in the file `a/b/c.helix` —
+//! found beside the importing file, else under the **project root** (the `helix.toml`
+//! directory, or a loose script's own directory), else on the stdlib / `HELIX_PATH`
+//! search path — and exposes it as `alias` (default: the last path segment). This
+//! resolves the whole import graph (deduping shared modules by canonical path,
+//! rejecting cycles),
 //! then rewrites every module into ONE flat statement list that the existing
 //! type-check → compile → run pipeline consumes unchanged.
 //!
@@ -68,14 +70,19 @@ fn search_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// Resolve the dependency directories for the project containing `entry`: walk up to
-/// the nearest `helix.toml`, then resolve its (path) dependencies. Empty when there is
-/// no manifest — a plain script with no package is entirely unaffected.
-fn project_deps(entry: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
+/// The project context for `entry`: its package dependencies, and the **project root**
+/// that in-project imports are anchored at. Walking up from the entry file, the root is
+/// the nearest directory containing a `helix.toml`; for a loose script with no manifest
+/// it is the entry file's own directory. Anchoring every module at one root gives each a
+/// single, stable import path (`import lib.geometry` means `<root>/lib/geometry.helix`
+/// no matter which file imports it), so a file in a subdirectory can reach a module in
+/// another — which a purely relative-to-the-importer scheme cannot express.
+fn project_context(entry: &Path) -> Result<(BTreeMap<String, PathBuf>, PathBuf), String> {
     let canon = entry
         .canonicalize()
         .map_err(|e| format!("error: cannot read `{}`: {}\n", entry.display(), e))?;
-    let mut dir = canon.parent();
+    let entry_dir = canon.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    let mut dir = Some(entry_dir.as_path());
     while let Some(d) = dir {
         if d.join("helix.toml").is_file() {
             // Resolve, and (if locked) verify the sources still match `helix.lock`.
@@ -86,11 +93,12 @@ fn project_deps(entry: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
                 }
                 s
             })?;
-            return Ok(dirs);
+            return Ok((dirs, d.to_path_buf()));
         }
         dir = d.parent();
     }
-    Ok(BTreeMap::new())
+    // No manifest: the entry file's directory is the project root.
+    Ok((BTreeMap::new(), entry_dir))
 }
 
 /// Build the relative file path an import resolves to: `import a.b.c` → `a/b/c.helix`.
@@ -108,8 +116,12 @@ fn import_rel_path(segments: &[String]) -> PathBuf {
 /// On a lex/parse/resolve error the message is already rendered (with the
 /// *correct* module's filename and caret).
 pub fn load(entry: &Path) -> Result<Loaded, String> {
-    let deps = project_deps(entry)?;
-    let mut loader = Loader { roots: search_roots(), deps, ..Loader::default() };
+    let (deps, project_root) = project_context(entry)?;
+    // Resolution order for an import: the importing file's own directory (local siblings),
+    // then the project root, then the stdlib / `HELIX_PATH` search roots.
+    let mut roots = vec![project_root];
+    roots.extend(search_roots());
+    let mut loader = Loader { roots, deps, ..Loader::default() };
     loader.load_file(entry)?;
     // Single file, no imports: hand back the unmodified AST so nothing is mangled
     // and error messages stay pristine — the overwhelmingly common case.
@@ -250,12 +262,12 @@ impl Loader {
                     found
                 } else {
                     let shown = segments.join(".");
-                    let mut err =
+                    let err =
                         HelixError::new(format!("cannot find module `{shown}`"), *line, *col)
-                            .hint(format!("expected `{}` beside this file", rel.display()));
-                    if !self.roots.is_empty() {
-                        err = err.hint("or on the search path (`HELIX_PATH` / the stdlib)");
-                    }
+                            .hint(format!(
+                                "expected `{}` beside this file or under the project root",
+                                rel.display()
+                            ));
                     return Err(err.render(&src, &fname));
                 };
                 let dep_idx = self.load_file(&dep_path)?;
