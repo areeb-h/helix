@@ -36,9 +36,9 @@ pub fn read_fasta(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
         let length = seq.len() as i64;
 
         records.push(Value::Record(Rc::new(vec![
-            ("id".to_string(), Value::Str(Rc::new(id))),
-            ("seq".to_string(), Value::Dna(Rc::new(seq))),
-            ("length".to_string(), Value::Int(length)),
+            ("id".into(), Value::Str(Rc::new(id))),
+            ("seq".into(), Value::Dna(Rc::new(seq))),
+            ("length".into(), Value::Int(length)),
         ])));
     }
     Ok(Value::array(records))
@@ -70,10 +70,10 @@ pub fn read_fastq(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
         };
 
         records.push(Value::Record(Rc::new(vec![
-            ("id".to_string(), Value::Str(Rc::new(id))),
-            ("seq".to_string(), Value::Dna(Rc::new(seq))),
-            ("qual".to_string(), qual),
-            ("length".to_string(), Value::Int(length)),
+            ("id".into(), Value::Str(Rc::new(id))),
+            ("seq".into(), Value::Dna(Rc::new(seq))),
+            ("qual".into(), qual),
+            ("length".into(), Value::Int(length)),
         ])));
     }
     Ok(Value::array(records))

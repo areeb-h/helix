@@ -716,7 +716,10 @@ impl Compiler {
                 for (_, v) in fields {
                     self.compile_expr(b, v)?;
                 }
-                let names: Vec<String> = fields.iter().map(|(k, _)| k.clone()).collect();
+                // Intern the field names to `Rc<str>` once here, so every record
+                // built from this op shares them rather than allocating per record.
+                let names: Vec<std::rc::Rc<str>> =
+                    fields.iter().map(|(k, _)| std::rc::Rc::from(k.as_str())).collect();
                 b.emit(Op::MakeRecord(std::rc::Rc::new(names)), 0, 0);
             }
             Expr::Field { recv, name, line, col } => {

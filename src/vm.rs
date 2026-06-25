@@ -529,7 +529,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::MakeRecord(names) => {
                 let start = stack.len() - names.len();
                 let vals: Vec<Value> = stack.split_off(start);
-                let fields: Vec<(String, Value)> =
+                // `names.iter().cloned()` clones `Rc<str>` (a refcount bump) — the
+                // field names are shared from the op, not re-allocated per record.
+                let fields: Vec<(std::rc::Rc<str>, Value)> =
                     names.iter().cloned().zip(vals).collect();
                 stack.push(Value::Record(std::rc::Rc::new(fields)));
             }

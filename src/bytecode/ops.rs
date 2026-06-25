@@ -71,7 +71,9 @@ pub enum Op {
     /// Pop `n` values and build a tuple from them (in push order).
     MakeTuple(u32),
     /// Pop `names.len()` values and pair them with these field names → a record.
-    MakeRecord(std::rc::Rc<Vec<String>>),
+    /// Names are `Rc<str>` (interned once at compile) so each record built from this
+    /// op shares them by refcount bump rather than allocating a `String` per field.
+    MakeRecord(std::rc::Rc<Vec<std::rc::Rc<str>>>),
     /// Pop a receiver; push `recv.<name>` (record field access).
     GetField(std::rc::Rc<String>),
     /// Slice a receiver. The bitmask says which of start/stop/step were supplied

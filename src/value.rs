@@ -28,8 +28,11 @@ pub enum Value {
     Array(Rc<ArrayData>),
     /// A fixed-size, heterogeneous tuple: `(1, "a", true)`.
     Tuple(Rc<Vec<Value>>),
-    /// An ordered record with identifier keys: `{name: "Ada", age: 41}`.
-    Record(Rc<Vec<(String, Value)>>),
+    /// An ordered record with identifier keys: `{name: "Ada", age: 41}`. Keys are
+    /// `Rc<str>` so a record built by the VM shares the field names from its
+    /// `MakeRecord` op (a refcount bump) instead of re-allocating a `String` per
+    /// key per record — the per-row cost in record-building pipelines.
+    Record(Rc<Vec<(Rc<str>, Value)>>),
     /// A dense n-dimensional `f64` tensor (ndarray-backed). See ADR 0007.
     Tensor(Rc<ArrayD<f64>>),
     /// A columnar DataFrame, held behind the engine-agnostic backend seam (ADR

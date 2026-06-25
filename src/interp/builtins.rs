@@ -75,8 +75,8 @@ impl super::Interp {
                                 crate::http::get(url).map_err(|e| HelixError::new(e, line, col))?;
                             // `{status, body}` — body is usually fed to `parse_json`.
                             Ok(Value::Record(Rc::new(vec![
-                                ("status".to_string(), Value::Int(status)),
-                                ("body".to_string(), Value::Str(Rc::new(body))),
+                                ("status".into(), Value::Int(status)),
+                                ("body".into(), Value::Str(Rc::new(body))),
                             ])))
                         }
                         #[cfg(not(feature = "http"))]
@@ -342,9 +342,9 @@ impl super::Interp {
                 match crate::stats::welch_t_test(&xs, &ys) {
                     Some((t, df, p)) => {
                         let fields = vec![
-                            ("statistic".to_string(), Value::Float(t)),
-                            ("df".to_string(), Value::Float(df)),
-                            ("p_value".to_string(), Value::Float(p)),
+                            ("statistic".into(), Value::Float(t)),
+                            ("df".into(), Value::Float(df)),
+                            ("p_value".into(), Value::Float(p)),
                         ];
                         Ok(Value::Record(Rc::new(fields)))
                     }
@@ -380,11 +380,11 @@ impl super::Interp {
                 match crate::stats::linear_regression(&xs, &ys) {
                     Some(f) => {
                         let fields = vec![
-                            ("slope".to_string(), Value::Float(f.slope)),
-                            ("intercept".to_string(), Value::Float(f.intercept)),
-                            ("r_squared".to_string(), Value::Float(f.r_squared)),
-                            ("slope_std_error".to_string(), Value::Float(f.slope_std_error)),
-                            ("slope_p_value".to_string(), Value::Float(f.slope_p_value)),
+                            ("slope".into(), Value::Float(f.slope)),
+                            ("intercept".into(), Value::Float(f.intercept)),
+                            ("r_squared".into(), Value::Float(f.r_squared)),
+                            ("slope_std_error".into(), Value::Float(f.slope_std_error)),
+                            ("slope_p_value".into(), Value::Float(f.slope_p_value)),
                         ];
                         Ok(Value::Record(Rc::new(fields)))
                     }
@@ -414,11 +414,11 @@ impl super::Interp {
                 match crate::stats::multiple_regression(&preds, &y) {
                     Some(f) => {
                         let fields = vec![
-                            ("coefficients".to_string(), floats(f.coefficients)),
-                            ("std_errors".to_string(), floats(f.std_errors)),
-                            ("p_values".to_string(), floats(f.p_values)),
-                            ("r_squared".to_string(), Value::Float(f.r_squared)),
-                            ("adj_r_squared".to_string(), Value::Float(f.adj_r_squared)),
+                            ("coefficients".into(), floats(f.coefficients)),
+                            ("std_errors".into(), floats(f.std_errors)),
+                            ("p_values".into(), floats(f.p_values)),
+                            ("r_squared".into(), Value::Float(f.r_squared)),
+                            ("adj_r_squared".into(), Value::Float(f.adj_r_squared)),
                         ];
                         Ok(Value::Record(Rc::new(fields)))
                     }

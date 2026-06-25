@@ -249,7 +249,7 @@ impl Interp {
             Expr::Record(fields) => {
                 let mut vals = Vec::with_capacity(fields.len());
                 for (k, v) in fields {
-                    vals.push((k.clone(), self.eval(v)?));
+                    vals.push((Rc::from(k.as_str()), self.eval(v)?));
                 }
                 Ok(Value::Record(Rc::new(vals)))
             }
@@ -724,9 +724,9 @@ fn comp_arity(name: &str, example: &str, line: usize, col: usize) -> HelixError 
 /// Shared by both engines so the record shape is identical.
 pub(crate) fn try_ok(v: Value) -> Value {
     Value::Record(Rc::new(vec![
-        ("ok".to_string(), Value::Bool(true)),
-        ("value".to_string(), v),
-        ("error".to_string(), Value::Missing),
+        ("ok".into(), Value::Bool(true)),
+        ("value".into(), v),
+        ("error".into(), Value::Missing),
     ]))
 }
 
@@ -734,9 +734,9 @@ pub(crate) fn try_ok(v: Value) -> Value {
 /// `{ok: false, value: missing, error: <message>}`.
 pub(crate) fn try_err(message: String) -> Value {
     Value::Record(Rc::new(vec![
-        ("ok".to_string(), Value::Bool(false)),
-        ("value".to_string(), Value::Missing),
-        ("error".to_string(), Value::Str(Rc::new(message))),
+        ("ok".into(), Value::Bool(false)),
+        ("value".into(), Value::Missing),
+        ("error".into(), Value::Str(Rc::new(message))),
     ]))
 }
 

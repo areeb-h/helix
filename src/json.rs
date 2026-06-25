@@ -29,7 +29,9 @@ fn from_serde(v: serde_json::Value) -> Value {
         // JSON objects become records; keys are arbitrary strings (identifier keys
         // are reachable as `r.field`).
         J::Object(map) => {
-            Value::Record(Rc::new(map.into_iter().map(|(k, v)| (k, from_serde(v))).collect()))
+            Value::Record(Rc::new(
+                map.into_iter().map(|(k, v)| (k.into(), from_serde(v))).collect(),
+            ))
         }
     }
 }
@@ -59,7 +61,7 @@ fn to_serde(v: &Value) -> Result<serde_json::Value, String> {
         Value::Record(fields) => {
             let mut m = serde_json::Map::new();
             for (k, val) in fields.iter() {
-                m.insert(k.clone(), to_serde(val)?);
+                m.insert(k.to_string(), to_serde(val)?);
             }
             J::Object(m)
         }
@@ -77,7 +79,7 @@ mod tests {
         let Value::Record(fields) = &v else { panic!("expected a record") };
         assert_eq!(fields.len(), 5);
         // Spot-check the field types.
-        let get = |k: &str| fields.iter().find(|(n, _)| n == k).map(|(_, v)| v).unwrap();
+        let get = |k: &str| fields.iter().find(|(n, _)| n.as_ref() == k).map(|(_, v)| v).unwrap();
         assert!(matches!(get("name"), Value::Str(s) if s.as_str() == "Ada"));
         assert!(matches!(get("age"), Value::Int(41)));
         assert!(matches!(get("ok"), Value::Bool(true)));

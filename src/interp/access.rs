@@ -245,10 +245,10 @@ pub(crate) fn eval_field(r: &Value, name: &str, line: usize, col: usize) -> Resu
     match r {
         Value::Record(fields) => fields
             .iter()
-            .find(|(k, _)| k == name)
+            .find(|(k, _)| k.as_ref() == name)
             .map(|(_, v)| v.clone())
             .ok_or_else(|| {
-                let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+                let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_ref()).collect();
                 let mut err =
                     HelixError::new(format!("record has no field `{}`", name), line, col);
                 if let Some(s) = suggest(name, &keys) {
@@ -286,7 +286,7 @@ pub(crate) fn eval_index(recv: &Value, idx: &Value, line: usize, col: usize) -> 
     if let (Value::Record(fields), Value::Str(key)) = (recv, idx) {
         return Ok(fields
             .iter()
-            .find(|(k, _)| k.as_str() == key.as_str())
+            .find(|(k, _)| k.as_ref() == key.as_str())
             .map(|(_, v)| v.clone())
             .unwrap_or(Value::Missing));
     }
