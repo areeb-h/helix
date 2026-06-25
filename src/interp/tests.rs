@@ -121,6 +121,25 @@
     }
 
     #[test]
+    fn min_max_sort_are_exact_above_2_to_53() {
+        // Two distinct i64 just above 2^53 share one f64. The boxed reduction path
+        // must compare them exactly (not via f64), or it picks the wrong element and
+        // disagrees with the packed-Int path. `drop_missing` yields a boxed all-Int
+        // array — the path that used to be wrong.
+        let a = "[9007199254740992, 9007199254740993, missing].drop_missing()";
+        assert!(matches!(last(&format!("{a}.max()")).unwrap(), Value::Int(9007199254740993)));
+        assert!(matches!(last(&format!("{a}.min()")).unwrap(), Value::Int(9007199254740992)));
+        // Sort keeps the two distinct and correctly ordered.
+        let Value::Array(arr) = last("[9007199254740993, 9007199254740992].sort()").unwrap()
+        else {
+            panic!("expected an array");
+        };
+        let vs = arr.to_values();
+        assert!(matches!(vs[0], Value::Int(9007199254740992)));
+        assert!(matches!(vs[1], Value::Int(9007199254740993)));
+    }
+
+    #[test]
     fn normalize_is_zero_mean() {
         let mean = float("[1, 2, 3, 4].normalize().mean()");
         assert!(mean.abs() < 1e-12);

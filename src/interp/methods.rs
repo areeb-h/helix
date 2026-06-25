@@ -77,6 +77,22 @@ fn missing_or_nan(items: &[Value]) -> bool {
         .any(|v| matches!(v, Value::Missing) || matches!(v, Value::Float(f) if f.is_nan()))
 }
 
+/// Order two numeric `Value`s, comparing two `Int`s **exactly** rather than via
+/// their `f64` widening. Widening collapses distinct `i64`s above 2^53 to one
+/// value, which made the boxed `min`/`max`/`sort` path pick the wrong element and
+/// disagree with the exact packed-`Int` path; an `i64`-direct compare keeps them in
+/// lock-step. Callers guarantee both values are numeric (`Int`/`Float`).
+fn numeric_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        _ => a
+            .as_f64()
+            .unwrap_or(f64::NAN)
+            .partial_cmp(&b.as_f64().unwrap_or(f64::NAN))
+            .unwrap_or(std::cmp::Ordering::Equal),
+    }
+}
+
 /// Numeric-reduction fast path for **typed** arrays (`Ints`/`Floats`): read the
 /// packed buffer directly, never materializing a `Vec<Value>`. Returns `Ok(None)`
 /// for a `Values` array, a non-reduction method, an argument-bearing call, or a
@@ -324,11 +340,20 @@ fn array_method(
             if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
+            // `numeric_vec` validates (all-numeric) and powers `empty_guard`, but the
+            // selection compares the original `Value`s EXACTLY via `numeric_cmp` — not
+            // their f64 widening, which would collapse two i64 above 2^53 to the same
+            // value and pick the wrong element (and disagree with the packed Int path).
             let xs = numeric_vec(items, name, line, col)?;
             empty_guard(&xs, name, line, col)?;
             let mut best_idx = 0;
-            for (i, &x) in xs.iter().enumerate() {
-                let better = if name == "min" { x < xs[best_idx] } else { x > xs[best_idx] };
+            for i in 1..items.len() {
+                let ord = numeric_cmp(&items[i], &items[best_idx]);
+                let better = if name == "min" {
+                    ord == std::cmp::Ordering::Less
+                } else {
+                    ord == std::cmp::Ordering::Greater
+                };
                 if better {
                     best_idx = i;
                 }
@@ -374,12 +399,9 @@ fn array_method(
             let mut sorted: Vec<Value> = items.to_vec();
             // numeric sort if all numeric, else lexical if all strings
             if items.iter().all(|v| v.as_f64().is_some()) {
-                sorted.sort_by(|a, b| {
-                    a.as_f64()
-                        .unwrap()
-                        .partial_cmp(&b.as_f64().unwrap())
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                // Exact compare (see `numeric_cmp`) so two i64 above 2^53 keep their
+                // distinct order instead of collapsing through f64.
+                sorted.sort_by(numeric_cmp);
             } else if items.iter().all(|v| matches!(v, Value::Str(_))) {
                 sorted.sort_by(|a, b| match (a, b) {
                     (Value::Str(x), Value::Str(y)) => x.cmp(y),
