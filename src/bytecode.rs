@@ -263,7 +263,7 @@ impl Compiler {
         col: usize,
     ) -> R<()> {
         self.compile_expr(b, recv)?;
-        b.emit(Op::Raise(std::rc::Rc::new(msg), std::rc::Rc::new(hint)), line, col);
+        b.emit(Op::raise(std::rc::Rc::new(msg), std::rc::Rc::new(hint)), line, col);
         Ok(())
     }
 
@@ -306,7 +306,7 @@ impl Compiler {
                         b.emit(Op::StoreGlobal(i as u32), *line, *col);
                     } else {
                         b.emit(
-                            Op::Raise(
+                            Op::raise(
                                 std::rc::Rc::new(format!(
                                     "`{}` is immutable and cannot be reassigned",
                                     name
@@ -349,7 +349,7 @@ impl Compiler {
                         if let Some(i) = self.globals.iter().position(|g| g == name)
                             && !self.global_mut[i] {
                                 b.emit(
-                                    Op::Raise(
+                                    Op::raise(
                                         std::rc::Rc::new(format!(
                                             "`{}` is immutable and cannot be reassigned",
                                             name
@@ -485,7 +485,7 @@ impl Compiler {
                 // (rather than `Unsupported`) so `compile` is total.
                 None => {
                     b.emit(
-                        Op::Raise(
+                        Op::raise(
                             std::rc::Rc::new(format!("`{}` is not defined", name)),
                             std::rc::Rc::new(format!("assign it first, e.g. `{} = ...`.", name)),
                         ),
@@ -600,7 +600,7 @@ impl Compiler {
             // completeness and is not reached in practice.
             Expr::Try { line, col, .. } => {
                 b.emit(
-                    Op::Raise(
+                    Op::raise(
                         std::rc::Rc::new("`try` is not supported by the bytecode VM".to_string()),
                         std::rc::Rc::new("internal routing error; please report it".to_string()),
                     ),
@@ -644,10 +644,10 @@ impl Compiler {
                                 self.compile_expr(b, a)?;
                             }
                             b.emit(
-                                Op::CallValue {
+                                Op::CallValue(std::rc::Rc::new(CallValueData {
                                     nargs: args.len() as u32,
                                     name: std::rc::Rc::new(name.clone()),
-                                },
+                                })),
                                 *line,
                                 *col,
                             );
@@ -658,10 +658,10 @@ impl Compiler {
                                 self.compile_expr(b, a)?;
                             }
                             b.emit(
-                                Op::CallValue {
+                                Op::CallValue(std::rc::Rc::new(CallValueData {
                                     nargs: args.len() as u32,
                                     name: std::rc::Rc::new(name.clone()),
-                                },
+                                })),
                                 *line,
                                 *col,
                             );
@@ -674,7 +674,7 @@ impl Compiler {
                                 self.compile_expr(b, a)?;
                             }
                             b.emit(
-                                Op::Raise(
+                                Op::raise(
                                     std::rc::Rc::new(format!("`{}` is not a known function", name)),
                                     std::rc::Rc::new(
                                         "only functions and the built-ins `print`/`dna`/`range` can be called.".to_string(),
@@ -772,7 +772,7 @@ impl Compiler {
                         // `Unsupported` for a type-checked program).
                         None => {
                             b.emit(
-                                Op::Raise(
+                                Op::raise(
                                     std::rc::Rc::new(
                                         "`join` needs a DataFrame to join with".to_string(),
                                     ),
@@ -792,10 +792,10 @@ impl Compiler {
                 {
                     self.compile_expr(b, recv)?;
                     b.emit(
-                        Op::GroupByAgg {
+                        Op::GroupByAgg(std::rc::Rc::new(GroupByAggData {
                             name: std::rc::Rc::new(name.clone()),
                             args: std::rc::Rc::new(args.to_vec()),
-                        },
+                        })),
                         *line,
                         *col,
                     );
@@ -845,7 +845,14 @@ impl Compiler {
                 for a in args {
                     self.compile_expr(b, a)?;
                 }
-                b.emit(Op::Method(std::rc::Rc::new(name.clone()), args.len() as u32), *line, *col);
+                b.emit(
+                    Op::Method(std::rc::Rc::new(MethodData {
+                        name: std::rc::Rc::new(name.clone()),
+                        nargs: args.len() as u32,
+                    })),
+                    *line,
+                    *col,
+                );
             }
             Expr::Slice { recv, start, stop, step, line, col } => {
                 self.compile_expr(b, recv)?;

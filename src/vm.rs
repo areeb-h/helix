@@ -435,8 +435,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::MakeFunc { idx, arity } => {
                 stack.push(Value::VmFunc { idx: *idx, arity: *arity });
             }
-            Op::CallValue { nargs, name } => {
-                let nargs = *nargs as usize;
+            Op::CallValue(d) => {
+                let name = &d.name;
+                let nargs = d.nargs as usize;
                 let start = stack.len() - nargs;
                 // The function value sits just below the args (loaded first).
                 let idx = match &stack[start - 1] {
@@ -578,7 +579,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     locals[base + *slot as usize] = val;
                 }
             }
-            Op::Method(name, nargs) => {
+            Op::Method(d) => {
+                let (name, nargs) = (&d.name, &d.nargs);
                 let split = stack.len() - *nargs as usize;
                 let args: Vec<Value> = stack.split_off(split);
                 let recv = stack.pop().unwrap();
@@ -661,7 +663,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let (keys, how) = crate::interp::parse_join_spec(spec.as_slice(), line, col)?;
                 stack.push(Value::dataframe(lf.join(&rf, &keys, &how, line, col)?));
             }
-            Op::GroupByAgg { name, args } => {
+            Op::GroupByAgg(d) => {
+                let (name, args) = (&d.name, &d.args);
                 let recv = stack.pop().unwrap();
                 let (handle, keys) = match &recv {
                     Value::GroupBy(g) => (g.handle.clone(), g.keys.clone()),
@@ -859,8 +862,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     }
                 }
             }
-            Op::Raise(msg, hint) => {
-                return Err(HelixError::new((**msg).clone(), line, col).hint((**hint).clone()));
+            Op::Raise(d) => {
+                return Err(HelixError::new((*d.msg).clone(), line, col).hint((*d.hint).clone()));
             }
             Op::Pop => {
                 stack.pop();

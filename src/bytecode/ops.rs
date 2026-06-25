@@ -58,7 +58,7 @@ pub enum Op {
     /// Call a function *value*: the stack holds `[func, arg0..argN-1]` (the value
     /// was loaded before the args). Reads the callee chunk from the value; errors
     /// (using the call-site `name`) if it isn't a function or the arity is wrong.
-    CallValue { nargs: u32, name: std::rc::Rc<String> },
+    CallValue(std::rc::Rc<CallValueData>),
     /// Call builtin `builtins[idx]` with `nargs` args from the stack top.
     CallBuiltin { idx: u32, nargs: u32 },
     /// Pop `n` values and build an array from them (in push order).
@@ -88,7 +88,7 @@ pub enum Op {
     DestructureBind(std::rc::Rc<Vec<u32>>),
     /// Pop `nargs` evaluated args and a receiver; dispatch the value-method
     /// `name` at runtime by receiver type.
-    Method(std::rc::Rc<String>, u32),
+    Method(std::rc::Rc<MethodData>),
     /// Pop a DataFrame receiver and apply a column-verb (`where`/`filter`/`select`/
     /// `sort`/`group`) whose `args` are *unevaluated* column/predicate ASTs. Bare
     /// names resolve against the frame's columns first, then `locals` (by slot),
@@ -106,10 +106,7 @@ pub enum Op {
     /// Pop a GroupBy receiver and apply an aggregation over one *unevaluated*
     /// column (`mean`/`sum`/`min`/`max`/`count`/`std`). Emitted only when the type
     /// checker proved the receiver is a GroupBy.
-    GroupByAgg {
-        name: std::rc::Rc<String>,
-        args: std::rc::Rc<Vec<Expr>>,
-    },
+    GroupByAgg(std::rc::Rc<GroupByAggData>),
     /// Begin a comprehension over the popped receiver. If it's an array, push an
     /// iterator; if `missing`, jump to the given target (the result is `missing`);
     /// otherwise raise "no such method".
@@ -149,7 +146,7 @@ pub enum Op {
     /// program is statically known to be an error but the error should still fire
     /// at the point of execution (e.g. reassigning an immutable global, after its
     /// value expression — and any side effects — have run).
-    Raise(std::rc::Rc<String>, std::rc::Rc<String>),
+    Raise(std::rc::Rc<RaiseData>),
     /// Discard the top of the stack (an expression-statement's value).
     Pop,
     /// Return the top of the stack from the current function frame.
@@ -167,12 +164,51 @@ pub struct DfColumnVerbData {
     pub locals: std::rc::Rc<Vec<(String, u32)>>,
 }
 
+/// Payload of [`Op::Method`] — a value-method call's name and argument count, boxed
+/// so `Op` stays small (the method name is shared across call sites of the same name).
+#[derive(Debug, Clone)]
+pub struct MethodData {
+    pub name: std::rc::Rc<String>,
+    pub nargs: u32,
+}
+
+/// Payload of [`Op::CallValue`] — a function-value call's argument count and the
+/// call-site name (for error messages), boxed to keep `Op` small.
+#[derive(Debug, Clone)]
+pub struct CallValueData {
+    pub nargs: u32,
+    pub name: std::rc::Rc<String>,
+}
+
+/// Payload of [`Op::GroupByAgg`] — a grouped-aggregation's name and unevaluated
+/// column argument, boxed to keep `Op` small.
+#[derive(Debug, Clone)]
+pub struct GroupByAggData {
+    pub name: std::rc::Rc<String>,
+    pub args: std::rc::Rc<Vec<Expr>>,
+}
+
+/// Payload of [`Op::Raise`] — a deferred error's message and hint, boxed to keep
+/// `Op` small (this is a cold error-raising op, never in a hot loop).
+#[derive(Debug, Clone)]
+pub struct RaiseData {
+    pub msg: std::rc::Rc<String>,
+    pub hint: std::rc::Rc<String>,
+}
+
+impl Op {
+    /// Construct a boxed [`Op::Raise`]; keeps the seven emit sites a plain call.
+    pub fn raise(msg: std::rc::Rc<String>, hint: std::rc::Rc<String>) -> Op {
+        Op::Raise(std::rc::Rc::new(RaiseData { msg, hint }))
+    }
+}
+
 // The bytecode dispatch loop reads one `Op` per executed instruction (millions of
 // times in a hot recursion), and a program's `code` is `Vec<Op>` — so `Op`'s width
 // is both a hot-path and a memory constant. Keep the fat/rare variants boxed.
 const _: () = assert!(
-    std::mem::size_of::<Op>() <= 24,
-    "Op grew — box the offending variant (see DfColumnVerbData)",
+    std::mem::size_of::<Op>() <= 16,
+    "Op grew past 2 words — box the offending variant (see DfColumnVerbData)",
 );
 
 /// A JIT-eligible `reduce` loop body the compiler asked the JIT to compile. The
