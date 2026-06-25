@@ -207,6 +207,12 @@ pub struct GroupByData {
 pub struct FuncVal {
     pub params: Rc<Vec<String>>,
     pub body: Rc<Expr>,
+    /// Variables captured from the enclosing scope when this was created — a
+    /// closure's lexical environment, snapshotted by value (Helix locals are
+    /// immutable, so by-value capture is exact). Empty for a top-level `fn`, whose
+    /// free names are globals resolved at call time. Installed under the parameters
+    /// when the function is applied, so a returned/stored closure still sees them.
+    pub captured: Rc<Vec<(String, Value)>>,
 }
 
 // The interpreter copies `Value`s constantly (every VM stack op, every binding),

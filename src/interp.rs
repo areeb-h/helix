@@ -26,6 +26,11 @@ const MAX_CALL_DEPTH: usize = 20_000;
 pub struct Interp {
     env: FxHashMap<String, Binding>,
     depth: usize,
+    /// Names bound at the top level (plus the seeded constants). A lambda captures
+    /// only its *non-global* free variables — globals persist in `env` and resolve
+    /// at call time, so capturing them would be wasteful and (for `mut` globals)
+    /// wrong. Populated by `bind` while `depth == 0`.
+    globals: std::collections::HashSet<String>,
 }
 
 /// Result of running a statement: the value (for REPL auto-printing) and
@@ -67,7 +72,8 @@ impl Interp {
                 mutable: false,
             },
         );
-        Interp { env, depth: 0 }
+        let globals = env.keys().cloned().collect();
+        Interp { env, depth: 0, globals }
     }
 
     pub fn run(&mut self, program: &[Stmt]) -> Result<(), HelixError> {
@@ -123,6 +129,7 @@ impl Interp {
                 let f = Value::Function(Rc::new(crate::value::FuncVal {
                     params: Rc::new(param_names),
                     body: Rc::new(body.clone()),
+                    captured: Rc::new(Vec::new()), // top-level fn: free names are globals
                 }));
                 self.bind(name, f, false, *line, *col)?;
                 Ok(StmtOutcome {
@@ -157,6 +164,10 @@ impl Interp {
         line: usize,
         col: usize,
     ) -> Result<(), HelixError> {
+        // Top-level bindings are globals (a lambda never captures these).
+        if self.depth == 0 {
+            self.globals.insert(name.to_string());
+        }
         match self.env.get(name) {
             None => {
                 self.env.insert(
@@ -334,11 +345,11 @@ impl Interp {
                 }
                 // A user-defined (or anonymous, stored-in-a-variable) function?
                 let func = self.env.get(name).and_then(|b| match &b.value {
-                    Value::Function(g) => Some((g.params.clone(), g.body.clone())),
+                    Value::Function(g) => Some(g.clone()),
                     _ => None,
                 });
-                if let Some((params, body)) = func {
-                    return self.call_function(name, &params, &body, vals, *line, *col);
+                if let Some(g) = func {
+                    return self.call_function(name, &g, vals, *line, *col);
                 }
                 // The name exists but isn't callable.
                 if let Some(b) = self.env.get(name) {
@@ -460,10 +471,21 @@ impl Interp {
                 }
                 eval_slice(&recv_v, s, e, st, *line, *col)
             }
-            Expr::Lambda { params, body, .. } => Ok(Value::Function(Rc::new(crate::value::FuncVal {
-                params: Rc::new(params.clone()),
-                body: Rc::new((**body).clone()),
-            }))),
+            Expr::Lambda { params, body, .. } => {
+                // Capture the lambda's free, non-global variables by value — its
+                // lexical environment — so a returned or stored closure still sees
+                // them after the defining call has returned.
+                let captured: Vec<(String, Value)> = crate::bytecode::free_names(params, body)
+                    .into_iter()
+                    .filter(|n| !self.globals.contains(n))
+                    .filter_map(|n| self.env.get(&n).map(|b| (n.clone(), b.value.clone())))
+                    .collect();
+                Ok(Value::Function(Rc::new(crate::value::FuncVal {
+                    params: Rc::new(params.clone()),
+                    body: Rc::new((**body).clone()),
+                    captured: Rc::new(captured),
+                })))
+            }
             Expr::Let { bindings, body } => {
                 // Bind sequentially (later bindings see earlier ones), evaluate
                 // the body, then restore the outer scope.
@@ -527,12 +549,14 @@ impl Interp {
     fn call_function(
         &mut self,
         name: &str,
-        params: &[String],
-        body: &Expr,
+        f: &crate::value::FuncVal,
         args: Vec<Value>,
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
+        let params = &f.params;
+        let body = &f.body;
+        let captured = &f.captured;
         if params.len() != args.len() {
             return Err(HelixError::new(
                 format!(
@@ -556,19 +580,32 @@ impl Interp {
             )
             .hint("is the recursion missing a base case, or should this be a loop/comprehension?"));
         }
-        let saved: Vec<(String, Option<Binding>)> = params
-            .iter()
-            .map(|p| (p.clone(), self.env.remove(p)))
-            .collect();
+        let mut saved: Vec<(String, Option<Binding>)> =
+            Vec::with_capacity(captured.len() + params.len());
+        // Install the captured lexical environment (a closure's free variables)
+        // first, then the parameters on top so they shadow on any name clash.
+        for (n, v) in captured.iter() {
+            let prev = self
+                .env
+                .insert(n.clone(), Binding { value: v.clone(), mutable: false });
+            saved.push((n.clone(), prev));
+        }
         for (p, a) in params.iter().zip(args) {
-            self.env
+            let prev = self
+                .env
                 .insert(p.clone(), Binding { value: a, mutable: false });
+            saved.push((p.clone(), prev));
         }
         let result = self.eval(body);
-        for (p, old) in saved {
-            self.env.remove(&p);
-            if let Some(b) = old {
-                self.env.insert(p, b);
+        // Restore in reverse so shadowed names come back correctly.
+        for (n, prev) in saved.into_iter().rev() {
+            match prev {
+                Some(b) => {
+                    self.env.insert(n, b);
+                }
+                None => {
+                    self.env.remove(&n);
+                }
             }
         }
         self.depth -= 1;

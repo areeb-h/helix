@@ -233,3 +233,98 @@ fn children(e: &Expr) -> Vec<&Expr> {
         Expr::Try { expr, .. } => vec![expr],
     }
 }
+
+/// The **free variables** of a lambda: identifier names referenced in `body` —
+/// whether as a value (`Expr::Ident`) or as a call target (`Expr::Call` name) —
+/// that are *not* bound by the lambda's `params` or by a `let`/nested-lambda
+/// binding inside `body`. Each name appears once, in first-seen order.
+///
+/// This is the raw lexical analysis; the engines decide which of these to *capture*
+/// (an enclosing local) versus resolve normally (a global, builtin, or top-level
+/// function). Call targets are included so a captured **function**-valued local
+/// (`fn compose(f, g) = (x => f(g(x)))`) is captured too.
+pub(crate) fn free_names(params: &[String], body: &Expr) -> Vec<String> {
+    let mut bound: Vec<&str> = params.iter().map(|s| s.as_str()).collect();
+    let mut free: Vec<String> = Vec::new();
+    collect_free(body, &mut bound, &mut free);
+    free
+}
+
+fn note_free(name: &str, bound: &[&str], free: &mut Vec<String>) {
+    if !bound.contains(&name) && !free.iter().any(|f| f == name) {
+        free.push(name.to_string());
+    }
+}
+
+fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String>) {
+    match e {
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing => {}
+        Expr::Ident { name, .. } => note_free(name, bound, free),
+        Expr::Call { name, args, .. } => {
+            note_free(name, bound, free);
+            for a in args {
+                collect_free(a, bound, free);
+            }
+        }
+        Expr::Lambda { params, body } => {
+            let n = bound.len();
+            bound.extend(params.iter().map(|s| s.as_str()));
+            collect_free(body, bound, free);
+            bound.truncate(n);
+        }
+        Expr::Let { bindings, body } => {
+            let n = bound.len();
+            for (name, v) in bindings {
+                collect_free(v, bound, free); // a binding's value sees earlier bindings
+                bound.push(name.as_str());
+            }
+            collect_free(body, bound, free);
+            bound.truncate(n);
+        }
+        Expr::Method { recv, args, .. } => {
+            collect_free(recv, bound, free);
+            for a in args {
+                collect_free(a, bound, free);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_free(left, bound, free);
+            collect_free(right, bound, free);
+        }
+        Expr::Unary { expr, .. } => collect_free(expr, bound, free),
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            collect_free(cond, bound, free);
+            collect_free(then_branch, bound, free);
+            collect_free(else_branch, bound, free);
+        }
+        Expr::Array(xs) | Expr::Tuple(xs) => {
+            for x in xs {
+                collect_free(x, bound, free);
+            }
+        }
+        Expr::Record(fs) => {
+            for (_, v) in fs {
+                collect_free(v, bound, free);
+            }
+        }
+        Expr::Field { recv, .. } => collect_free(recv, bound, free),
+        Expr::Index { recv, index, .. } => {
+            collect_free(recv, bound, free);
+            collect_free(index, bound, free);
+        }
+        Expr::Slice { recv, start, stop, step, .. } => {
+            collect_free(recv, bound, free);
+            for o in [start, stop, step].into_iter().flatten() {
+                collect_free(o, bound, free);
+            }
+        }
+        Expr::Interp(parts) => {
+            for p in parts {
+                if let InterpPart::Expr(e) = p {
+                    collect_free(e, bound, free);
+                }
+            }
+        }
+        Expr::Try { expr, .. } => collect_free(expr, bound, free),
+    }
+}

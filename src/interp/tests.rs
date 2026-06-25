@@ -140,6 +140,25 @@
     }
 
     #[test]
+    fn closures_capture_lexical_environment() {
+        // A returned/stored lambda still sees the enclosing function's local `k`.
+        assert!(matches!(
+            last("fn make(k) = (p => p + k)\ng = make(10)\ng(5)").unwrap(),
+            Value::Int(15)
+        ));
+        // Capturing function-valued parameters: compose(inc, dbl)(10) = inc(dbl(10)).
+        assert!(matches!(
+            last("fn inc(n) = n + 1\nfn dbl(n) = n * 2\nfn compose(f, g) = (x => f(g(x)))\nh = compose(inc, dbl)\nh(10)").unwrap(),
+            Value::Int(21)
+        ));
+        // Two-level nested capture: outer(1) -> (b => (c => 1 + b + c)).
+        assert!(matches!(
+            last("fn outer(a) = (b => (c => a + b + c))\nf = outer(1)\ng = f(2)\ng(3)").unwrap(),
+            Value::Int(6)
+        ));
+    }
+
+    #[test]
     fn normalize_is_zero_mean() {
         let mean = float("[1, 2, 3, 4].normalize().mean()");
         assert!(mean.abs() < 1e-12);
