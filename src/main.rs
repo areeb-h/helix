@@ -93,6 +93,8 @@ fn run() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        // `helix add <name> --path <dir> | --url <tarball> [--sha256 <hash>]`.
+        Some("add") => pkg_result(parse_add(&args)),
         // `helix sync` — resolve dependencies and (re)write the hash-pinned `helix.lock`.
         Some("sync") => pkg_result(pkg::cli_sync()),
         // Shorthand: `helix script.helix` runs a file directly.
@@ -126,6 +128,44 @@ fn run_python_cli(args: &[String]) -> ExitCode {
 /// (no imports); errors render against a `<eval>` filename.
 /// Turn a package-manager subcommand result into an exit code, printing the error
 /// (and its hint) to stderr on failure.
+/// Parse `helix add <name> [--path P | --url U [--sha256 H]]` into a `cli_add` call.
+fn parse_add(args: &[String]) -> Result<(), crate::error::HelixError> {
+    use crate::error::HelixError;
+    let mkerr = |m: String| HelixError::new(m, 0, 0);
+    let name = args.get(2).ok_or_else(|| {
+        mkerr("`helix add` needs a name, e.g. `helix add stats --path ../stats`".to_string())
+    })?;
+
+    let (mut path, mut url, mut sha256) = (None, None, None);
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--path" => path = Some(arg_value(args, i)?),
+            "--url" => url = Some(arg_value(args, i)?),
+            "--sha256" => sha256 = Some(arg_value(args, i)?),
+            other => return Err(mkerr(format!("unknown option `{other}` for `helix add`"))),
+        }
+        i += 2;
+    }
+
+    let source = match (path, url) {
+        (Some(p), None) => pkg::AddSource::Path(p),
+        (None, Some(u)) => pkg::AddSource::Url { url: u, sha256 },
+        (Some(_), Some(_)) => return Err(mkerr("pass either --path or --url, not both".to_string())),
+        (None, None) => {
+            return Err(mkerr("`helix add` needs --path <dir> or --url <tarball>".to_string()));
+        }
+    };
+    pkg::cli_add(name, source)
+}
+
+/// The value following a flag at index `i` (`--flag value`), or a clean error.
+fn arg_value(args: &[String], i: usize) -> Result<String, crate::error::HelixError> {
+    args.get(i + 1)
+        .cloned()
+        .ok_or_else(|| crate::error::HelixError::new(format!("`{}` needs a value", args[i]), 0, 0))
+}
+
 fn pkg_result(r: Result<(), crate::error::HelixError>) -> ExitCode {
     match r {
         Ok(()) => ExitCode::SUCCESS,
@@ -198,6 +238,9 @@ fn print_help() {
          helix run <script>       run a script\n    \
          helix eval \"<code>\"       run a one-liner\n    \
          helix repl               start an interactive session\n    \
+         helix new <name>         create a helix.toml in the current directory\n    \
+         helix add <name> ...     add a dependency (--path <dir> | --url <tarball>)\n    \
+         helix sync               resolve dependencies and write helix.lock\n    \
          helix version            show the version\n    \
          helix help               show this help\n\n\
          The default `helix` is a self-contained binary. A build with the `python`\n\

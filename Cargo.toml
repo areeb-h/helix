@@ -60,6 +60,11 @@ serde_json = "1"
 # lockfile is machine-generated. Core: the package manager is part of the toolchain.
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# Format- and comment-preserving TOML editing for `helix add` — mutating the
+# hand-edited manifest must not destroy the user's comments/layout (a plain
+# `toml` re-serialize would). This is the crate Cargo's own `cargo add` uses, and
+# `toml` 0.8 is already built on it, so the marginal cost is near-zero.
+toml_edit = "0.22"
 # CPython interop (Helix -> Python), behind the off-by-default `python` feature so
 # the core binary stays self-contained (no libpython dependency unless enabled).
 # `abi3-py38` builds against the stable ABI (one build spans Python 3.8+);

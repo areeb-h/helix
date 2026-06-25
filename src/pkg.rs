@@ -325,22 +325,30 @@ fn normalize_sha256(s: &str) -> Result<String, String> {
 #[cfg(feature = "http")]
 fn materialize_url_dep(name: &str, url: &str, sha256: &str) -> Result<PathBuf, HelixError> {
     let cache = cache_root()?;
-    let dest = cache.join(sha256);
     // Cached from a previous verified extraction? (The hash in the path is the proof.)
-    if let Some(root) = package_root(&dest) {
+    if let Some(root) = package_root(&cache.join(sha256)) {
         return Ok(root);
     }
-
     let bytes = crate::net::fetch_verified(url, sha256)
         .map_err(|e| err(format!("dependency `{name}`: {e}")))?;
+    install_into_cache(&cache, sha256, &bytes)
+        .map_err(|e| err(format!("dependency `{name}`: {}", e.message)))
+}
 
-    // Unpack into a private temp dir, then atomically promote it into place. A crash or
-    // a concurrent `sync` therefore never leaves a partial tree that looks cached.
+/// Extract already-verified tarball `bytes` into the content-addressed cache under
+/// `sha256` and return the package root. Unpacks into a private temp dir, then promotes
+/// it with an atomic rename — so a crash or a concurrent `sync` never leaves a partial
+/// tree that the cache-hit check would mistake for a complete package. Shared by the
+/// resolve path (`materialize_url_dep`) and `helix add` (which seeds the cache from the
+/// bytes it already downloaded to compute the hash).
+#[cfg(feature = "http")]
+fn install_into_cache(cache: &Path, sha256: &str, bytes: &[u8]) -> Result<PathBuf, HelixError> {
+    let dest = cache.join(sha256);
     let tmp = cache.join(format!(".tmp-{sha256}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    extract_tarball(&bytes, &tmp).map_err(|e| {
+    extract_tarball(bytes, &tmp).map_err(|e| {
         let _ = std::fs::remove_dir_all(&tmp);
-        err(format!("dependency `{name}`: could not unpack the tarball: {e}"))
+        err(format!("could not unpack the tarball: {e}"))
     })?;
     match std::fs::rename(&tmp, &dest) {
         Ok(()) => {}
@@ -350,13 +358,18 @@ fn materialize_url_dep(name: &str, url: &str, sha256: &str) -> Result<PathBuf, H
         }
         Err(e) => {
             let _ = std::fs::remove_dir_all(&tmp);
-            return Err(err(format!(
-                "dependency `{name}`: could not place the package in the cache: {e}"
-            )));
+            return Err(err(format!("could not place the package in the cache: {e}")));
         }
     }
-    package_root(&dest)
-        .ok_or_else(|| err(format!("dependency `{name}`: the downloaded tarball is empty")))
+    package_root(&dest).ok_or_else(|| err("the downloaded tarball is empty".to_string()))
+}
+
+/// Hex SHA-256 of `bytes` — used by `helix add` to compute a `url` dependency's pin.
+#[cfg(feature = "http")]
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(bytes);
+    format!("{:x}", h.finalize())
 }
 
 /// Without networking (`--no-default-features`) a `url` dependency cannot be fetched —
@@ -493,7 +506,7 @@ fn err(msg: String) -> HelixError {
     HelixError::new(msg, 0, 0)
 }
 
-// ---- CLI subcommands (`helix new`, `helix sync`) ----
+// ---- CLI subcommands (`helix new`, `helix add`, `helix sync`) ----
 
 /// `helix new <name>` — initialize a `helix.toml` in the current directory.
 pub fn cli_new(name: &str) -> Result<(), HelixError> {
@@ -503,12 +516,146 @@ pub fn cli_new(name: &str) -> Result<(), HelixError> {
         return Err(err("`helix.toml` already exists in this directory".to_string()));
     }
     let body = format!(
-        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n# Dependencies are local \
-         packages for now: `name = {{ path = \"../somelib\" }}`.\n[dependencies]\n"
+        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n# Add dependencies with \
+         `helix add <name> --path ../lib` or `--url <tarball>`.\n[dependencies]\n"
     );
     std::fs::write(&path, body).map_err(|e| err(format!("could not write helix.toml: {e}")))?;
     println!("Created helix.toml for package `{name}`.");
     Ok(())
+}
+
+/// Where a `helix add`ed dependency comes from (parsed from the CLI flags).
+pub enum AddSource {
+    /// `--path <dir>` — a local package, relative to the manifest.
+    Path(String),
+    /// `--url <tarball>` with an optional `--sha256`. When the hash is omitted it is
+    /// computed by fetching the tarball (you never hand-compute it); when given, it is
+    /// verified against the real download.
+    Url { url: String, sha256: Option<String> },
+}
+
+/// `helix add <name> --path <dir>` / `--url <tarball> [--sha256 <hash>]` — add (or
+/// update) a dependency in `helix.toml` and re-lock.
+pub fn cli_add(name: &str, source: AddSource) -> Result<(), HelixError> {
+    let cwd = cwd()?;
+    let (updated, n) = add_dependency(&cwd, name, source)?;
+    println!(
+        "{} `{name}` ({n} dependenc{} locked).",
+        if updated { "Updated" } else { "Added" },
+        if n == 1 { "y" } else { "ies" }
+    );
+    Ok(())
+}
+
+/// Add (or update) dependency `name` in `<root>/helix.toml` and re-lock. The manifest is
+/// edited with a format-preserving TOML editor, so existing comments and layout survive
+/// (a plain re-serialize would lose them). Resolution happens now (at add time), not at
+/// install time — a url's hash is pinned immediately. Returns `(was_update, dep_count)`.
+pub fn add_dependency(
+    root: &Path,
+    name: &str,
+    source: AddSource,
+) -> Result<(bool, usize), HelixError> {
+    validate_dep_name(name)?;
+    let manifest_path = root.join("helix.toml");
+    let text = match std::fs::read_to_string(&manifest_path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(err("no `helix.toml` in this directory".to_string())
+                .hint("create one with `helix new <name>`."));
+        }
+        Err(e) => return Err(err(format!("could not read `helix.toml`: {e}"))),
+    };
+
+    // Build the dependency's inline table, resolving a url's hash *before* touching the
+    // manifest (so a failed fetch never leaves the manifest half-edited).
+    let mut item = toml_edit::InlineTable::new();
+    match source {
+        AddSource::Path(p) => {
+            root.join(&p)
+                .canonicalize()
+                .map_err(|e| err(format!("path `{p}` not found: {e}")))?;
+            item.insert("path", p.into());
+        }
+        AddSource::Url { url, sha256 } => {
+            if !url.starts_with("https://") {
+                return Err(err(format!("a url dependency must be https://, got `{url}`")));
+            }
+            let sha = prepare_url_dep(&url, sha256.as_deref())?;
+            item.insert("url", url.into());
+            item.insert("sha256", sha.into());
+        }
+    }
+
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| err(format!("invalid `helix.toml`: {e}")))?;
+    let deps = doc
+        .entry("dependencies")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let table = deps
+        .as_table_mut()
+        .ok_or_else(|| err("`[dependencies]` in helix.toml is not a table".to_string()))?;
+    let updated = table.contains_key(name);
+    table.insert(name, toml_edit::Item::Value(toml_edit::Value::InlineTable(item)));
+    std::fs::write(&manifest_path, doc.to_string())
+        .map_err(|e| err(format!("could not write helix.toml: {e}")))?;
+
+    // Re-lock so helix.lock reflects the new graph (and fetches/verifies the new dep).
+    let (lock, dirs) = resolve(root)?;
+    lock.write(root)?;
+    Ok((updated, dirs.len()))
+}
+
+/// Fetch a url dependency to determine its pinned hash for `helix add`: compute the
+/// sha256 (or verify a user-provided one against reality), and seed the cache from the
+/// bytes we already have so the follow-up `resolve` is a cache hit, not a second
+/// download. Without networking this is a clean, actionable error.
+#[cfg(feature = "http")]
+fn prepare_url_dep(url: &str, expected: Option<&str>) -> Result<String, HelixError> {
+    let bytes = crate::net::fetch(url).map_err(|e| err(format!("fetching `{url}` failed: {e}")))?;
+    let sha = sha256_hex(&bytes);
+    if let Some(exp) = expected {
+        let exp = normalize_sha256(exp).map_err(err)?;
+        if exp != sha {
+            return Err(err(format!(
+                "the downloaded tarball's sha256 is {sha}, not the --sha256 you gave ({exp})"
+            )));
+        }
+    }
+    let cache = cache_root()?;
+    if package_root(&cache.join(&sha)).is_none() {
+        install_into_cache(&cache, &sha, &bytes)?;
+    }
+    Ok(sha)
+}
+
+#[cfg(not(feature = "http"))]
+fn prepare_url_dep(_url: &str, _expected: Option<&str>) -> Result<String, HelixError> {
+    Err(err(
+        "cannot add a `url` dependency: this Helix binary was built without networking \
+         (`--no-default-features`)"
+            .to_string(),
+    )
+    .hint("rebuild with the default features, or vendor the package and use `--path`."))
+}
+
+/// A dependency name must be a Helix identifier — it becomes the `import <name>` segment.
+fn validate_dep_name(name: &str) -> Result<(), HelixError> {
+    let mut chars = name.chars();
+    let valid = match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(err(format!("`{name}` is not a valid dependency name")).hint(
+            "use a Helix identifier: letters, digits, and underscores, not starting with a digit.",
+        ))
+    }
 }
 
 /// `helix sync` — resolve the manifest's dependencies and (re)write `helix.lock`,
@@ -784,6 +931,86 @@ mod tests {
         .unwrap();
         let e = resolve(&base).unwrap_err();
         assert!(e.message.contains("sha256"), "got: {}", e.message);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn add_path_dependency_preserves_comments_and_locks() {
+        let base = std::env::temp_dir().join(format!("helix_pkgadd_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("dep")).unwrap();
+        std::fs::create_dir_all(base.join("app")).unwrap();
+        std::fs::write(base.join("dep/lib.helix"), "fn f(x) = x\n").unwrap();
+        let app = base.join("app");
+        // A manifest with a comment we must not destroy.
+        std::fs::write(
+            app.join("helix.toml"),
+            "[package]\nname = \"app\"\n\n# keep this comment\n[dependencies]\n",
+        )
+        .unwrap();
+
+        let (updated, n) =
+            add_dependency(&app, "dep", AddSource::Path("../dep".to_string())).unwrap();
+        assert!(!updated);
+        assert_eq!(n, 1);
+
+        let text = std::fs::read_to_string(app.join("helix.toml")).unwrap();
+        assert!(text.contains("# keep this comment"), "comment was dropped:\n{text}");
+        // It parses, and the dependency is now present and resolvable.
+        let m = Manifest::load(&app).unwrap().unwrap();
+        assert_eq!(m.dependencies["dep"].path.as_deref(), Some("../dep"));
+        // And the lockfile was written.
+        assert!(Lockfile::load(&app).unwrap().is_some());
+
+        // Adding the same name again is an *update*, not a duplicate.
+        let (updated2, n2) =
+            add_dependency(&app, "dep", AddSource::Path("../dep".to_string())).unwrap();
+        assert!(updated2);
+        assert_eq!(n2, 1);
+        assert_eq!(
+            std::fs::read_to_string(app.join("helix.toml")).unwrap().matches("dep = {").count(),
+            1,
+            "update must not duplicate the entry"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn add_rejects_invalid_dependency_names() {
+        let base = std::env::temp_dir().join(format!("helix_pkgaddbad_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("helix.toml"), "[package]\nname = \"app\"\n").unwrap();
+        for bad in ["1bad", "has space", "a-b", "", "../x"] {
+            assert!(
+                add_dependency(&base, bad, AddSource::Path(".".to_string())).is_err(),
+                "name `{bad}` should be rejected"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // Live `helix add --url` (no --sha256): fetch a real tarball, compute + pin its hash,
+    // seed the cache, and lock. Ignored by default (network). `cargo test -- --ignored`.
+    #[cfg(feature = "http")]
+    #[test]
+    #[ignore]
+    fn add_url_dependency_computes_the_hash() {
+        let base = std::env::temp_dir().join(format!("helix_pkgaddurl_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // SAFETY: lone env writer in an ignored, serially-run test.
+        unsafe { std::env::set_var("HELIX_CACHE", base.join("cache")) };
+        std::fs::write(base.join("helix.toml"), "[package]\nname = \"app\"\n").unwrap();
+
+        let url = "https://static.crates.io/crates/cfg-if/cfg-if-1.0.0.crate".to_string();
+        let (_, n) =
+            add_dependency(&base, "cfgif", AddSource::Url { url, sha256: None }).unwrap();
+        assert_eq!(n, 1);
+        let m = Manifest::load(&base).unwrap().unwrap();
+        assert_eq!(m.dependencies["cfgif"].sha256.as_deref().unwrap().len(), 64);
+        unsafe { std::env::remove_var("HELIX_CACHE") };
         let _ = std::fs::remove_dir_all(&base);
     }
 

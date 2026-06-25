@@ -49,8 +49,9 @@ package). A single flat dependency namespace in v1.
 
 ### CLI (one binary is the whole toolchain — ADR 0009)
 
-`helix new <name>` (init a manifest) · `helix sync` (resolve + write the lockfile) ·
-`helix run` (resolves and loads dependencies). `helix add` and `helix verify` are next.
+`helix new <name>` (init a manifest) · `helix add <name> --path <dir> | --url <tarball>
+[--sha256 <hash>]` (add/update a dependency and re-lock) · `helix sync` (resolve + write
+the lockfile) · `helix run` (resolves and loads dependencies). `helix verify` is next.
 
 ## Status
 
@@ -68,9 +69,16 @@ package). A single flat dependency namespace in v1.
   (GitHub/npm) is unwrapped automatically. The networking primitive (`src/net.rs`) is now
   gated on `http` (default-on), not `managed`; an air-gapped build (`--no-default-features`)
   rejects `url` deps with a clean, actionable error and stays path-only.
-- **Next:** `git` sources (rev-pinned); `helix run` already *verifies* the lockfile
-  (error if a dependency's source drifted since `sync`); `helix add`/`verify`; per-package
-  dependency scoping; and the unified Helix + managed-Python lockfile (ADR 0009 #6).
+- **`helix add` shipped:** `helix add <name> --path <dir>` or `--url <tarball>
+  [--sha256 <hash>]` edits `helix.toml` with a **format-preserving** TOML editor
+  (`toml_edit` — comments and layout survive) and re-locks. Resolution happens at
+  *add* time, not install time: a url's hash is computed by fetching the tarball when
+  `--sha256` is omitted (you never hand-compute it), or **verified against the real
+  download** when provided; the fetched bytes seed the cache so the follow-up lock isn't
+  a second download. Dependency names are validated as Helix identifiers (they become the
+  `import <name>` segment). Idempotent — re-adding a name updates in place.
+- **Next:** `git` sources (rev-pinned); `helix verify`; per-package dependency scoping;
+  and the unified Helix + managed-Python lockfile (ADR 0009 #6).
 
 ## Security model (remote sources)
 
