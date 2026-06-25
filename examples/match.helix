@@ -1,14 +1,14 @@
 # Pattern matching — `match` tries each arm in order; the first matching pattern
 # binds its variables and yields its result. It is an expression, like `if`.
 
-# Literal patterns with a `_` wildcard fallback.
+# Literal patterns, an or-pattern (`a | b | c`), and a `_` wildcard fallback.
 fn classify(n) = match n {
   0 => "zero",
-  1 => "one",
+  1 | 2 | 3 => "a few",
   _ => "many",
 }
 print(classify(0))
-print(classify(1))
+print(classify(2))
 print(classify(7))
 
 # A binding pattern captures the value; arms can recurse.

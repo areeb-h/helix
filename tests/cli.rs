@@ -474,6 +474,23 @@ fn match_nested_patterns_on_both_engines() {
 }
 
 #[test]
+fn match_or_patterns_on_both_engines() {
+    // `a | b | c` matches if any alternative does; composes inside a tuple pattern
+    // (with a sibling binding). Identical on both engines.
+    let src = concat!(
+        "print(match 2 { 1 | 2 | 3 => \"low\", _ => \"high\" })\n",
+        "print(match 9 { 1 | 2 | 3 => \"low\", _ => \"high\" })\n",
+        "print(match (1, 5) { (1 | 2, x) => x, _ => 0 })\n",
+    );
+    let (vm, e1, c1) = run_source(src, &[], "matchor_vm");
+    assert_eq!(c1, Some(0), "stderr:\n{e1}");
+    assert_eq!(vm.trim(), "low\nhigh\n5"); // in-set; not-in-set; or inside a tuple
+    let (tw, _, c2) = run_source(src, &[("HELIX_NOVM", "1")], "matchor_tw");
+    assert_eq!(c2, Some(0));
+    assert_eq!(vm, tw, "VM and tree-walker disagree on or-patterns");
+}
+
+#[test]
 fn with_derives_columns_from_expressions() {
     // `df.with({name: expr, ...})` adds columns computed over existing ones. The
     // value expressions reference bare column names, like the other column verbs.

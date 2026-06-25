@@ -830,6 +830,15 @@ pub(crate) fn pattern_match(pat: &crate::ast::Pattern, v: &Value) -> Option<Vec<
             }
             Some(binds)
         }
+        // Alternatives are bindingless (enforced at parse time), so any match yields
+        // no bindings — keeping the two engines' stack/slot layout consistent.
+        Pattern::Or(pats) => {
+            if pats.iter().any(|alt| pattern_match(alt, v).is_some()) {
+                Some(Vec::new())
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -843,6 +852,9 @@ pub(crate) fn pattern_binding_names(pat: &crate::ast::Pattern) -> Vec<String> {
             Pattern::Bind(name) => out.push(name.clone()),
             Pattern::Tuple(pats) => pats.iter().for_each(|p| go(p, out)),
             Pattern::Record(fields) => fields.iter().for_each(|(_, p)| go(p, out)),
+            // Recurse alternatives so the "or-patterns can't bind" check sees any
+            // (even nested) binding; a valid bindingless `Or` contributes nothing.
+            Pattern::Or(alts) => alts.iter().for_each(|p| go(p, out)),
             _ => {}
         }
     }

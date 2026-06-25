@@ -95,6 +95,9 @@ pub enum Pattern {
     /// field's sub-pattern matching. Only the listed fields are checked (a partial
     /// match); the killer case is destructuring a `try` result: `{ok: true, value: v}`.
     Record(Vec<(String, Pattern)>),
+    /// `a | b | c` — matches if any alternative matches. Alternatives must not bind
+    /// variables (v1), so the arm's bindings are unambiguous.
+    Or(Vec<Pattern>),
 }
 
 #[derive(Debug, Clone)]

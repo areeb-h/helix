@@ -174,6 +174,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
             ',' => single(Tok::Comma, &mut raw, line, start_col, &mut i, &mut col),
             '.' => single(Tok::Dot, &mut raw, line, start_col, &mut i, &mut col),
             ':' => single(Tok::Colon, &mut raw, line, start_col, &mut i, &mut col),
+            '|' => single(Tok::Pipe, &mut raw, line, start_col, &mut i, &mut col),
             '?' => {
                 if i + 1 < n && chars[i + 1] == '?' {
                     push!(Tok::Coalesce, start_col);

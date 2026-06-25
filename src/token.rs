@@ -62,6 +62,7 @@ pub enum Tok {
     Colon,    // :
     Arrow,    // ->
     FatArrow, // =>
+    Pipe,     // | (match-pattern alternatives)
 
     Newline,
     Eof,
@@ -117,6 +118,7 @@ impl Tok {
             Tok::Colon => "`:`".into(),
             Tok::Arrow => "`->`".into(),
             Tok::FatArrow => "`=>`".into(),
+            Tok::Pipe => "`|`".into(),
             Tok::Newline => "end of line".into(),
             Tok::Eof => "end of file".into(),
         }

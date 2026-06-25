@@ -852,8 +852,31 @@ impl Parser {
         Ok(args)
     }
 
-    /// Parse one `match`-arm pattern (v1: a literal, a name to bind, or `_`).
+    /// Parse a pattern, collecting `a | b | c` alternatives into an `Or`.
     fn parse_pattern(&mut self) -> Result<crate::ast::Pattern, HelixError> {
+        let (l, c) = self.pos();
+        let first = self.parse_single_pattern()?;
+        if !matches!(self.peek(), Tok::Pipe) {
+            return Ok(first);
+        }
+        let mut alts = vec![first];
+        while matches!(self.peek(), Tok::Pipe) {
+            self.advance();
+            alts.push(self.parse_single_pattern()?);
+        }
+        // v1: or-pattern alternatives must not bind variables, so the arm's bindings
+        // are unambiguous regardless of which alternative matched.
+        if alts.iter().any(|a| !crate::interp::pattern_binding_names(a).is_empty()) {
+            return Err(HelixError::new("or-patterns (`a | b`) cannot bind variables yet", l, c)
+                .hint("use literal alternatives, e.g. `1 | 2 | 3 => ...`."));
+        }
+        Ok(crate::ast::Pattern::Or(alts))
+    }
+
+    /// Parse one pattern alternative: a literal, `_`, a name to bind, a tuple, or a
+    /// record. Tuple elements and record field values recurse through `parse_pattern`,
+    /// so `|` nests inside them.
+    fn parse_single_pattern(&mut self) -> Result<crate::ast::Pattern, HelixError> {
         use crate::ast::Pattern;
         let (l, c) = self.pos();
         match self.peek().clone() {
