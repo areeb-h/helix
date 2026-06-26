@@ -167,11 +167,31 @@ impl super::Interp {
                 }
             }
             "bio.read_vcf" => {
-                arity(name, &args, 1, line, col)?;
-                match &args[0] {
-                    Value::Str(s) => Ok(Value::dataframe(crate::vcf::read_vcf(s, line, col)?)),
-                    other => Err(type_err("bio.read_vcf", "a string path", other, line, col)),
+                // `read_vcf(path)` scans; `read_vcf(path, "chr:start-end")` does an
+                // indexed region query against the file's `.tbi`.
+                if args.is_empty() || args.len() > 2 {
+                    return Err(HelixError::new(
+                        format!("`bio.read_vcf` takes 1 or 2 arguments, got {}", args.len()),
+                        line,
+                        col,
+                    ));
                 }
+                let path = match &args[0] {
+                    Value::Str(s) => s,
+                    other => {
+                        return Err(type_err("bio.read_vcf", "a string path", other, line, col));
+                    }
+                };
+                let df = match args.get(1) {
+                    Some(Value::Str(region)) => {
+                        crate::vcf::read_vcf_region(path, region, line, col)?
+                    }
+                    Some(other) => {
+                        return Err(type_err("bio.read_vcf", "a string region", other, line, col));
+                    }
+                    None => crate::vcf::read_vcf(path, line, col)?,
+                };
+                Ok(Value::dataframe(df))
             }
             "bio.read_bcf" => {
                 arity(name, &args, 1, line, col)?;

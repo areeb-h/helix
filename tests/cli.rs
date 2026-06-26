@@ -387,6 +387,30 @@ fn read_bcf_queries_identically_to_read_vcf() {
 }
 
 #[test]
+fn read_vcf_region_query_uses_the_index() {
+    // The local-first capability: `read_vcf(path, region)` seeks via the `.tbi` index
+    // and returns only the variants intersecting the region, identical to a full read
+    // filtered to that window (INFO columns preserved). The bgzipped+indexed fixture is
+    // generated from variants.vcf by the ignored `generate_vcf_index_fixture` test.
+    let src = "p = \"examples/data/variants.vcf.gz\"\nprint(bio.read_vcf(p, \"chr17:43044000-43046000\").count())\nprint(bio.read_vcf(p, \"chr13\").count())\nprint(bio.read_vcf(p, \"chr17:43090000-43100000\").select(pos, gene).column(\"pos\").first())\nprint(bio.read_vcf(p).count())\n";
+    let (out, stderr, code) = run_source(src, &[], "vcfregion");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    // 2 in the chr17 window; 2 on chr13; the tail window's single variant is at 43091983;
+    // a plain read of the same (now BGZF) file still scans all 6.
+    assert_eq!(out.trim(), "2\n2\n43091983\n6");
+}
+
+#[test]
+fn read_vcf_region_without_index_is_a_clean_error() {
+    // A region query against a file with no `.tbi` (here the plain, unindexed .vcf)
+    // fails with a clear message rather than a panic.
+    let src = "print(bio.read_vcf(\"examples/data/variants.vcf\", \"chr17:1-9999999\").count())\n";
+    let (_out, stderr, code) = run_source(src, &[], "vcfnoidx");
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("indexed") || stderr.contains(".tbi"), "stderr:\n{stderr}");
+}
+
+#[test]
 fn read_sam_makes_alignments_queryable() {
     // The alignment flagship: a SAM file becomes a DataFrame with the eleven mandatory
     // fields as columns. `ref` is resolved from the header (null for an unmapped read),

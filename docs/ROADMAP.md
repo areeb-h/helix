@@ -40,8 +40,13 @@ fast, memory-safe surface.
       from the header, CIGAR rendered to its SAM string). BAM is the binary, BGZF-framed
       form; both share one record model and column-building core via `noodles-sam`/
       `noodles-bam`. Demo: [examples/alignments.helix](../examples/alignments.helix).
-- [ ] CRAM via `noodles-cram` (reference-based compression); tabix/CSI-indexed region
-      queries (read `chr17:43k-44k` without a full scan); FASTQ quality decoding.
+- [x] **Indexed region queries** — `read_vcf(path, "chr17:43k-44k")` seeks via the
+      `.tbi` tabix index of a bgzipped `.vcf.gz` and reads only the variants in the
+      region, never scanning the whole file (the local-first capability). The result is
+      identical to a full read filtered to the region. Demo:
+      [examples/variants.helix](../examples/variants.helix).
+- [ ] Region queries for BCF/BAM (their `.csi` index); CRAM via `noodles-cram`
+      (reference-based compression); FASTQ quality decoding.
 - [ ] RNA (`fold`, `translate`), protein sequences; an ADR for the bio type model.
 - [~] Python interop for adoption (calling into Biopython and existing pipelines).
       **v1 complete** (`import python.pysam`, etc.); see

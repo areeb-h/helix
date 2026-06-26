@@ -125,13 +125,29 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Array(Box::new(Type::Int)))
         }
-        "io.read_csv" | "io.read_parquet" | "bio.read_vcf" | "bio.read_bcf" | "bio.read_sam"
-        | "bio.read_bam" | "bio.read_gff" | "bio.read_bed" => {
+        "io.read_csv" | "io.read_parquet" | "bio.read_bcf" | "bio.read_sam" | "bio.read_bam"
+        | "bio.read_gff" | "bio.read_bed" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 return Err(type_err(name, "a string path", &args[0], line, col));
+            }
+            Ok(Type::DataFrame)
+        }
+        // `read_vcf(path)` scans; the optional `read_vcf(path, region)` runs an indexed
+        // region query, so this reader accepts one or two string arguments.
+        "bio.read_vcf" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            if !compatible(&args[0], &Type::String) {
+                return Err(type_err(name, "a string path", &args[0], line, col));
+            }
+            if let Some(region) = args.get(1)
+                && !compatible(region, &Type::String)
+            {
+                return Err(type_err(name, "a string region", region, line, col));
             }
             Ok(Type::DataFrame)
         }

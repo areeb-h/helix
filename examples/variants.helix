@@ -23,3 +23,8 @@ print(variants.where(@qual > 50).select(@chrom, @pos, @gene))
 # same DataFrame — identical columns and verbs, just a compressed binary on disk.
 binary = bio.read_bcf("examples/data/variants.bcf")
 print("BCF variant count (same data):", binary.count())
+
+# Local-first: with a bgzipped, tabix-indexed `.vcf.gz`, a second argument reads
+# ONLY the variants in a region via the `.tbi` index, never scanning the whole file.
+print("--- variants in chr17:43044000-43046000 (indexed) ---")
+print(bio.read_vcf("examples/data/variants.vcf.gz", "chr17:43044000-43046000").select(@pos, @gene))

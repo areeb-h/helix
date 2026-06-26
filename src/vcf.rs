@@ -29,6 +29,7 @@ use std::io::{BufRead, BufReader};
 
 use flate2::read::MultiGzDecoder;
 use noodles_bcf as bcf;
+use noodles_core::Region;
 use noodles_vcf::{self as vcf, header::record::value::map::info::{Number, Type as InfoType}};
 
 use crate::backend::ColData;
@@ -98,6 +99,45 @@ pub fn read_bcf(path: &str, line: usize, col: usize) -> Result<crate::backend::D
         .map_err(|e| err(format!("could not read BCF header in `{path}`: {e}")))?;
     let records = reader.record_bufs(&header);
     build_variant_frame(&header, records, "BCF", path, line, col)
+}
+
+/// `read_vcf(path, region)` — read only the variants intersecting `region` (e.g.
+/// `"chr17:43044000-43046000"`) from a bgzipped, tabix-indexed VCF, seeking via the
+/// `.tbi` index instead of scanning the whole file (the local-first capability).
+/// Requires a BGZF `.vcf.gz` with a sibling `.tbi`. The indexed reader yields lazy
+/// records, materialized into the same `RecordBuf`s the scan path uses, so the
+/// resulting DataFrame is identical to a full read filtered to the region — only the
+/// untouched variants are never decoded.
+pub fn read_vcf_region(
+    path: &str,
+    region: &str,
+    line: usize,
+    col: usize,
+) -> Result<crate::backend::Df, HelixError> {
+    let err = |msg: String| HelixError::new(msg, line, col);
+
+    let mut reader = vcf::io::indexed_reader::Builder::default()
+        .build_from_path(path)
+        .map_err(|e| {
+            err(format!(
+                "could not open indexed VCF `{path}`: {e} (an indexed region query \
+                 needs a bgzipped `.vcf.gz` with a `.tbi` index alongside it)"
+            ))
+        })?;
+    let header = reader
+        .read_header()
+        .map_err(|e| err(format!("could not read VCF header in `{path}`: {e}")))?;
+    let region: Region =
+        region.parse().map_err(|e| err(format!("invalid region `{region}`: {e}")))?;
+    let query = reader
+        .query(&header, &region)
+        .map_err(|e| err(format!("could not query region in `{path}`: {e}")))?;
+    // The indexed reader yields lazy records; materialize each into the `RecordBuf`
+    // the shared column-building core expects (the same type the scan path produces).
+    let records = query.records().map(|r| {
+        r.and_then(|rec| vcf::variant::RecordBuf::try_from_variant_record(&header, &rec))
+    });
+    build_variant_frame(&header, records, "VCF", path, line, col)
 }
 
 /// Build a variant DataFrame from a parsed header and a stream of records, shared
@@ -337,5 +377,64 @@ mod tests {
             writer.write_variant_record(&header, &record).unwrap();
         }
         writer.try_finish().unwrap();
+    }
+
+    /// Regenerate the bgzipped + tabix-indexed fixture (`examples/data/variants.vcf.gz`
+    /// and its `.tbi`) from the text `variants.vcf`, using noodles' BGZF writer and
+    /// tabix indexer (no external `bgzip`/`tabix`). Ignored by default; run on demand
+    /// with `cargo test --bin helix generate_vcf_index_fixture -- --ignored` whenever
+    /// the VCF fixture changes. The `.vcf.gz` is BGZF (still valid gzip, so the plain
+    /// scan path reads it too) and the `.tbi` is what `read_vcf(path, region)` seeks
+    /// with. Records are written one per BGZF write so each gets an index chunk; the
+    /// fixture is coordinate-sorted within each reference (a tabix requirement).
+    #[test]
+    #[ignore]
+    fn generate_vcf_index_fixture() {
+        use std::io::Write as _;
+
+        use noodles_bgzf as bgzf;
+        use noodles_core::Position;
+        use noodles_csi::binning_index::index::{
+            header::Builder as TabixHeaderBuilder, reference_sequence::bin::Chunk,
+        };
+        use noodles_tabix as tabix;
+
+        let text = std::fs::read_to_string("examples/data/variants.vcf").unwrap();
+        let header_lines: Vec<&str> = text.lines().filter(|l| l.starts_with('#')).collect();
+        let data_lines: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+
+        let out = std::fs::File::create("examples/data/variants.vcf.gz").unwrap();
+        let mut writer = bgzf::io::Writer::new(out);
+
+        let mut indexer = tabix::index::Indexer::default();
+        indexer.set_header(TabixHeaderBuilder::vcf().build());
+
+        for h in &header_lines {
+            writeln!(writer, "{h}").unwrap();
+        }
+
+        let mut start_position = writer.virtual_position();
+        for line in &data_lines {
+            writeln!(writer, "{line}").unwrap();
+            let end_position = writer.virtual_position();
+            let chunk = Chunk::new(start_position, end_position);
+
+            let mut cols = line.split('\t');
+            let chrom = cols.next().unwrap();
+            let pos: usize = cols.next().unwrap().parse().unwrap();
+            let _id = cols.next();
+            let ref_bases = cols.next().unwrap();
+            let start = Position::try_from(pos).unwrap();
+            let end = Position::try_from(pos + ref_bases.len() - 1).unwrap();
+            indexer.add_record(chrom, start, end, chunk).unwrap();
+
+            start_position = end_position;
+        }
+        writer.try_finish().unwrap();
+
+        let index = indexer.build();
+        let idx_out = std::fs::File::create("examples/data/variants.vcf.gz.tbi").unwrap();
+        let mut idx_writer = tabix::io::Writer::new(idx_out);
+        idx_writer.write_index(&index).unwrap();
     }
 }

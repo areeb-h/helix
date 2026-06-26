@@ -44,6 +44,11 @@ noodles-gff = "0.57"
 # set that depends on the noodles-core/bgzf/csi already in the tree (single copy).
 noodles-sam = "0.85"
 noodles-bam = "0.90"
+# Genomic region/interval types (`Region` = "chr17:43k-44k") for indexed region
+# queries — read just the variants in a region from a bgzipped+tabix-indexed VCF
+# without scanning the whole file (the local-first capability). Pinned to the copy
+# already in the tree. The .tbi index reader lives in noodles-vcf.
+noodles-core = "0.20"
 # Latest Polars — Arrow-columnar, lazy, multi-threaded execution engine.
 polars = { version = "0.54", features = [
     "lazy",
@@ -114,3 +119,11 @@ http = ["dep:ureq"]
 python = ["dep:pyo3", "dep:pyo3-polars", "dep:numpy"]
 # Managed runtimes: verified downloads + extraction (managed Python, etc.).
 managed = ["http"]
+
+[dev-dependencies]
+# Used only by the ignored `generate_*_index_fixture` tests to build the
+# bgzipped + tabix-indexed genomics fixtures from their text sources (no external
+# bgzip/tabix needed). Pinned to the copies already in the tree (single version).
+noodles-bgzf = "0.47"
+noodles-csi = "0.56"
+noodles-tabix = "0.62"
