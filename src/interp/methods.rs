@@ -722,31 +722,33 @@ fn dna_method(
             }
         }
         "kmers" => {
-            arity("kmers", args, 1, line, col)?;
-            let k = as_int(&args[0], "kmers", line, col)?;
-            if k <= 0 {
-                return Err(HelixError::new(
-                    format!("`kmers` needs a positive length, got {}", k),
-                    line,
-                    col,
-                ));
-            }
-            let k = k as usize;
+            // The countable k-mer *spectrum*: only windows of unambiguous ACGT —
+            // any window containing `N`/IUPAC is skipped (the Jellyfish/KMC/KmerGo
+            // convention), so every emitted k-mer round-trips through `dna()` and is
+            // canonicalizable. A sequence shorter than `k` (or empty) yields `[]`.
+            let k = kmer_k("kmers", args, line, col)?;
             let chars: Vec<char> = s.chars().collect();
-            if k > chars.len() {
-                return Err(HelixError::new(
-                    format!(
-                        "k-mer length {} is longer than the sequence (length {})",
-                        k,
-                        chars.len()
-                    ),
-                    line,
-                    col,
-                ));
+            let mut out = Vec::new();
+            if k <= chars.len() {
+                for w in chars.windows(k) {
+                    if w.iter().all(|c| is_acgt(*c)) {
+                        out.push(Value::Str(Rc::new(w.iter().collect())));
+                    }
+                }
             }
-            let mut out = Vec::with_capacity(chars.len() - k + 1);
-            for w in chars.windows(k) {
-                out.push(Value::Str(Rc::new(w.iter().collect())));
+            Ok(Value::array(out))
+        }
+        "windows" => {
+            // Every length-`k` substring, faithfully (ambiguity included) — the
+            // sequence is reconstructable from its windows. Shorter than `k` → `[]`.
+            let k = kmer_k("windows", args, line, col)?;
+            let chars: Vec<char> = s.chars().collect();
+            let mut out = Vec::new();
+            if k <= chars.len() {
+                out.reserve(chars.len() - k + 1);
+                for w in chars.windows(k) {
+                    out.push(Value::Str(Rc::new(w.iter().collect())));
+                }
             }
             Ok(Value::array(out))
         }
@@ -758,6 +760,25 @@ fn dna_method(
             col,
         )),
     }
+}
+
+/// The 4 unambiguous DNA bases (the `kmers` spectrum alphabet).
+fn is_acgt(c: char) -> bool {
+    matches!(c, 'A' | 'C' | 'G' | 'T')
+}
+
+/// Parse the single positive-length argument shared by `kmers`/`windows`.
+fn kmer_k(name: &str, args: &[Value], line: usize, col: usize) -> Result<usize, HelixError> {
+    arity(name, args, 1, line, col)?;
+    let k = as_int(&args[0], name, line, col)?;
+    if k <= 0 {
+        return Err(HelixError::new(
+            format!("`{}` needs a positive length, got {}", name, k),
+            line,
+            col,
+        ));
+    }
+    Ok(k as usize)
 }
 
 /// A valid (uppercase) IUPAC nucleotide code: the 4 bases, the 10 two/three-fold

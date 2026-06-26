@@ -223,6 +223,30 @@
     }
 
     #[test]
+    fn kmers_vs_windows() {
+        let strs = |src: &str| match last(src).unwrap() {
+            Value::Array(a) => a
+                .to_values()
+                .iter()
+                .map(|v| match v {
+                    Value::Str(s) => (**s).clone(),
+                    o => panic!("expected Str, got {o:?}"),
+                })
+                .collect::<Vec<_>>(),
+            o => panic!("expected array, got {o:?}"),
+        };
+        // `kmers` is the ACGT-only spectrum: windows spanning `N` are skipped.
+        assert_eq!(strs("dna(\"ATGNCC\").kmers(2)"), ["AT", "TG", "CC"]);
+        // `windows` is faithful: every length-k substring, ambiguity included.
+        assert_eq!(strs("dna(\"ATGNCC\").windows(2)"), ["AT", "TG", "GN", "NC", "CC"]);
+        // A sequence shorter than k (or empty) yields `[]`, not an error.
+        assert!(strs("dna(\"AT\").kmers(5)").is_empty());
+        assert!(strs("dna(\"AT\").windows(5)").is_empty());
+        // Pure ACGT: `kmers` keeps every window (spectrum == faithful here).
+        assert_eq!(strs("dna(\"ATGC\").kmers(2)"), ["AT", "TG", "GC"]);
+    }
+
+    #[test]
     fn dna_find_motif() {
         assert_eq!(int("dna(\"ATGCGT\").find(\"GCG\")"), 2);
         // absent motif → missing (so it composes with `??`)

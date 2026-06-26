@@ -649,6 +649,10 @@
             "dna(\"ATGCGC\").gc_content()",
             "dna(\"ATGATG\").find(\"GAT\")",
             "dna(\"ATGC\").kmers(2)",
+            // kmers (ACGT-only spectrum) vs windows (faithful) must agree across engines
+            "dna(\"ATGNCC\").kmers(2)",
+            "dna(\"ATGNCC\").windows(2)",
+            "dna(\"AT\").kmers(5)",
             // DNA ordering (`<`/sort) must agree across engines
             "dna(\"ATG\") < dna(\"CAT\")",
             "[dna(\"CAT\"), dna(\"ATG\")].sort().first()",

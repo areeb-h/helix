@@ -23,4 +23,7 @@ print("  ATGCGT at:      {first.seq.find("ATGCGT")}")
 print("  GGGGGGGG at:    {first.seq.find("GGGGGGGG") ?? -1}")
 
 # k-mer analysis: the 5 most frequent 4-mers across the first sequence.
+# `kmers(k)` is the countable spectrum — windows spanning an `N`/ambiguous base
+# are skipped, so every k-mer is canonicalizable. Use `windows(k)` instead if you
+# need every length-k substring faithfully (ambiguity included).
 print("  top 4-mers:     {first.seq.kmers(4).top(5)}")

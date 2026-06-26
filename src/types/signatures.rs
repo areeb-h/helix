@@ -433,7 +433,7 @@ pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Typ
         "length" => Type::Int,
         "gc_content" => Type::Float,
         "complement" | "reverse_complement" => Type::Dna,
-        "kmers" => Type::Array(Box::new(Type::String)),
+        "kmers" | "windows" => Type::Array(Box::new(Type::String)),
         // 0-based index of the motif, or `missing` when absent.
         "find" => Type::Int,
         _ => {

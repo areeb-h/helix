@@ -199,8 +199,10 @@ seq.kmers(3)
   `hypot`, `atan2`, `degrees`/`radians`, `min`/`max`; constants `pi`, `e`, `inf`.
 - **`**` power operator** — right-associative, binds tighter than unary minus
   (`-2 ** 2 == -4`, `2 ** 3 ** 2 == 512`); stays `Int` when it can.
-- DNA methods: `gc_content`, `complement`, `reverse_complement`, `kmers`,
-  `length`.
+- DNA methods: `gc_content` (excludes `N`), `complement`/`reverse_complement`
+  (IUPAC-aware), `kmers(k)` (the ACGT-only k-mer **spectrum** — windows spanning
+  `N`/IUPAC are skipped), `windows(k)` (every length-k substring, faithfully),
+  `length`. `dna()` accepts `N` and IUPAC ambiguity codes; DNA is orderable (`<`).
 - Errors that point a caret at the source and suggest a fix (including
   "did you mean ...?" via edit distance).
 
