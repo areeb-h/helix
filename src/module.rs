@@ -460,7 +460,7 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
         }
         Expr::Interp(parts) => {
             for p in parts {
-                if let InterpPart::Expr(e) = p {
+                if let InterpPart::Expr(e, _) = p {
                     rw(e, ctx, bound);
                 }
             }

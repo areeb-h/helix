@@ -57,7 +57,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
             '"' => {
                 let (segs, used, newlines, end_col) = lex_string(&chars, i, line, col)?;
                 // Plain string if there are no `{expr}` interpolations.
-                let tok = if segs.iter().any(|s| matches!(s, StrSeg::Expr(_))) {
+                let tok = if segs.iter().any(|s| matches!(s, StrSeg::Expr(..))) {
                     Tok::InterpStr(segs)
                 } else {
                     let mut s = String::new();
@@ -396,8 +396,20 @@ fn lex_string(
                 j += 1;
                 end_col += 1;
                 let mut expr = String::new();
+                // The optional format spec after a *top-level* `:` (e.g. `.2f` in
+                // `{x:.2f}`). `None` until/unless such a `:` is seen.
+                let mut spec: Option<String> = None;
                 let mut depth = 0i32;
                 let mut in_str = false;
+                // Push a char into the spec buffer if we're past the `:`, else the expr.
+                macro_rules! push_char {
+                    ($ch:expr) => {
+                        match &mut spec {
+                            Some(sp) => sp.push($ch),
+                            None => expr.push($ch),
+                        }
+                    };
+                }
                 loop {
                     if j >= n {
                         return Err(HelixError::new("unterminated `{` interpolation", line, col)
@@ -422,7 +434,7 @@ fn lex_string(
                         if nx == '"' {
                             in_str = !in_str;
                         }
-                        expr.push(un);
+                        push_char!(un);
                         j += 2;
                         end_col += 2;
                         continue;
@@ -434,12 +446,22 @@ fn lex_string(
                             ')' | ']' => depth -= 1,
                             '}' if depth == 0 => break,
                             '}' => depth -= 1,
+                            // A top-level `:` separates the expression from its format
+                            // spec. Nested `:` (record literal `{a: 1}`, slice `xs[1:3]`)
+                            // sit at depth > 0, and a `:` inside a string is `in_str`, so
+                            // neither is mistaken for a spec.
+                            ':' if depth == 0 && spec.is_none() => {
+                                spec = Some(String::new());
+                                j += 1;
+                                end_col += 1;
+                                continue;
+                            }
                             _ => {}
                         }
                     } else if e == '"' {
                         in_str = false;
                     }
-                    expr.push(e);
+                    push_char!(e);
                     if e == '\n' {
                         newlines += 1;
                         end_col = 1;
@@ -452,7 +474,7 @@ fn lex_string(
                     return Err(HelixError::new("empty `{}` interpolation", line, col)
                         .hint("put an expression inside, e.g. `\"hi {name}\"`."));
                 }
-                segs.push(StrSeg::Expr(expr));
+                segs.push(StrSeg::Expr(expr, spec));
                 j += 1; // skip closing `}`
                 end_col += 1;
             }

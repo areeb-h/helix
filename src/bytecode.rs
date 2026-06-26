@@ -884,7 +884,7 @@ impl Compiler {
             }
             Expr::Interp(parts) => {
                 for part in parts {
-                    if let InterpPart::Expr(e) = part {
+                    if let InterpPart::Expr(e, _) = part {
                         self.compile_expr(b, e)?;
                     }
                 }

@@ -119,7 +119,7 @@ fn any_call(e: &Expr, pred: &dyn Fn(&str) -> bool) -> bool {
         | Expr::Ident { .. } | Expr::Column { .. } => false,
         Expr::Interp(parts) => parts
             .iter()
-            .any(|p| matches!(p, InterpPart::Expr(e) if any_call(e, pred))),
+            .any(|p| matches!(p, InterpPart::Expr(e, _) if any_call(e, pred))),
         Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().any(|x| any_call(x, pred)),
         Expr::Record(fs) => fs.iter().any(|(_, v)| any_call(v, pred)),
         Expr::Field { recv, .. } => any_call(recv, pred),
@@ -206,7 +206,7 @@ fn children(e: &Expr) -> Vec<&Expr> {
         Expr::Interp(parts) => parts
             .iter()
             .filter_map(|p| match p {
-                InterpPart::Expr(e) => Some(&**e),
+                InterpPart::Expr(e, _) => Some(&**e),
                 _ => None,
             })
             .collect(),
@@ -339,7 +339,7 @@ fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String
         }
         Expr::Interp(parts) => {
             for p in parts {
-                if let InterpPart::Expr(e) = p {
+                if let InterpPart::Expr(e, _) = p {
                     collect_free(e, bound, free);
                 }
             }

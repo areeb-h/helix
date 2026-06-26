@@ -583,7 +583,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::Interp(parts) => {
                 let holes = parts
                     .iter()
-                    .filter(|p| matches!(p, crate::ast::InterpPart::Expr(_)))
+                    .filter(|p| matches!(p, crate::ast::InterpPart::Expr(..)))
                     .count();
                 let vals: Vec<Value> = stack.split_off(stack.len() - holes);
                 let mut s = String::new();
@@ -591,8 +591,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 for part in parts.iter() {
                     match part {
                         crate::ast::InterpPart::Lit(t) => s.push_str(t),
-                        crate::ast::InterpPart::Expr(_) => {
-                            s.push_str(&crate::value::display_value(&vals[vi], line, col)?);
+                        crate::ast::InterpPart::Expr(_, spec) => {
+                            match spec {
+                                Some(fs) => s.push_str(
+                                    &fs.apply(&vals[vi]).map_err(|m| HelixError::new(m, line, col))?,
+                                ),
+                                None => s.push_str(&crate::value::display_value(&vals[vi], line, col)?),
+                            }
                             vi += 1;
                         }
                     }

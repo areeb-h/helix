@@ -182,6 +182,29 @@
     }
 
     #[test]
+    fn interpolation_format_specs() {
+        let s = |src: &str| -> String {
+            match last(src).unwrap() {
+                Value::Str(s) => s.to_string(),
+                v => panic!("expected a string, got {:?}", v),
+            }
+        };
+        assert_eq!(s("x = 3.14159\n\"v={x:.2f}\""), "v=3.14");
+        assert_eq!(s("p = 0.5\n\"{p:.0%}\""), "50%");
+        assert_eq!(s("n = 5\n\"{n:b}\""), "101");
+        assert_eq!(s("n = 42\n\"{n:x}\""), "2a");
+        assert_eq!(s("n = 7\n\"[{n:04}]\""), "[0007]");
+        assert_eq!(s("n = 42\n\"[{n:<6}]\""), "[42    ]"); // left-align
+        assert_eq!(s("w = \"hi\"\n\"[{w:>5}]\""), "[   hi]"); // strings right-align on request
+        assert_eq!(s("x = 0.0 - 3.1\n\"{x:07.2f}\""), "-003.10"); // sign before zero-pad
+        // a `:` inside a slice or record literal in the hole is NOT a format spec
+        assert_eq!(s("xs = [10, 20, 30]\n\"{xs[1:3]}\""), "[20, 30]");
+        // a malformed spec is a parse-time error; a numeric spec on a string errors
+        assert!(last("x = 1\n\"{x:.2q}\"").is_err());
+        assert!(last("w = \"a\"\n\"{w:.2f}\"").is_err());
+    }
+
+    #[test]
     fn bitwise_operators() {
         assert!(matches!(last("12 & 10").unwrap(), Value::Int(8)));
         assert!(matches!(last("12 | 10").unwrap(), Value::Int(14)));

@@ -229,10 +229,15 @@ impl Interp {
                 for part in parts {
                     match part {
                         crate::ast::InterpPart::Lit(t) => s.push_str(t),
-                        crate::ast::InterpPart::Expr(e) => {
+                        crate::ast::InterpPart::Expr(e, spec) => {
                             let v = self.eval(e)?;
                             let (l, c) = e.position();
-                            s.push_str(&crate::value::display_value(&v, l, c)?);
+                            match spec {
+                                Some(fs) => s.push_str(
+                                    &fs.apply(&v).map_err(|m| HelixError::new(m, l, c))?,
+                                ),
+                                None => s.push_str(&crate::value::display_value(&v, l, c)?),
+                            }
                         }
                     }
                     // Interpolation can nest (a value's display may itself be an

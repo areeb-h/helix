@@ -5,7 +5,9 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrSeg {
     Lit(String),
-    Expr(String),
+    /// An interpolation hole: the embedded expression source and an optional format
+    /// spec (the text after a top-level `:`, e.g. the `.2f` in `{x:.2f}`).
+    Expr(String, Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

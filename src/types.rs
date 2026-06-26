@@ -453,7 +453,7 @@ impl Checker {
                 // Type-check every embedded expression (so `"{undefined}"` errors),
                 // then the whole thing is a String.
                 for part in parts {
-                    if let crate::ast::InterpPart::Expr(e) = part {
+                    if let crate::ast::InterpPart::Expr(e, _) = part {
                         self.synth(e)?;
                     }
                 }

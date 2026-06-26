@@ -33,6 +33,7 @@ mod render;
 mod rng;
 mod sam;
 mod stats;
+mod strfmt;
 mod symbol;
 mod tensor;
 mod token;

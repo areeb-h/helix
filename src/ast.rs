@@ -84,7 +84,10 @@ impl BinOp {
 #[derive(Debug, Clone)]
 pub enum InterpPart {
     Lit(String),
-    Expr(Box<Expr>),
+    /// An interpolation hole: the expression, plus an optional format spec parsed
+    /// from the `:spec` suffix (`{x:.2f}`). With `None`, the value uses its default
+    /// display; with `Some`, it is rendered through [`crate::strfmt::FormatSpec`].
+    Expr(Box<Expr>, Option<crate::strfmt::FormatSpec>),
 }
 
 /// A `match`-arm pattern (v1: refutable literals, an irrefutable binding, and the

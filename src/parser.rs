@@ -1430,14 +1430,23 @@ impl Parser {
                 for seg in segs {
                     match seg {
                         StrSeg::Lit(t) => parts.push(InterpPart::Lit(t)),
-                        StrSeg::Expr(src) => {
+                        StrSeg::Expr(src, spec_src) => {
                             // The fragment is lexed+parsed as its own snippet, so any
                             // error inside it carries snippet-relative positions (line 1).
                             // Relocate it to the interpolated string's real position so
                             // the caret points at the user's actual source, not line 1.
                             let e = parse_expression(&src)
                                 .map_err(|err| HelixError { line: l, col: c, ..err })?;
-                            parts.push(InterpPart::Expr(Box::new(e)));
+                            // Parse the format spec now, so a malformed spec is a parse
+                            // error pointing at the string (never a runtime surprise).
+                            let spec = match spec_src {
+                                Some(sp) => Some(
+                                    crate::strfmt::parse_spec(&sp)
+                                        .map_err(|m| HelixError::new(m, l, c))?,
+                                ),
+                                None => None,
+                            };
+                            parts.push(InterpPart::Expr(Box::new(e), spec));
                         }
                     }
                 }
