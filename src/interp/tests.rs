@@ -223,6 +223,28 @@
     }
 
     #[test]
+    fn kmer_counts_packed() {
+        let s = |src: &str| last(src).unwrap().to_string();
+        // The packed counter is byte-identical to the string spectrum…
+        assert_eq!(
+            s("dna(\"ATGCATGC\").kmer_counts(3)"),
+            s("dna(\"ATGCATGC\").kmers(3).frequencies()")
+        );
+        // …including N breaking the window (same spectrum as `kmers`)…
+        assert_eq!(
+            s("dna(\"ATGNCC\").kmer_counts(2)"),
+            s("dna(\"ATGNCC\").kmers(2).frequencies()")
+        );
+        // …and the empty case.
+        assert_eq!(s("dna(\"AT\").kmer_counts(5)"), "[]");
+        // k beyond the 2-bit u64 budget errors clearly.
+        assert!(last("dna(\"ACGT\").kmer_counts(33)")
+            .unwrap_err()
+            .message
+            .contains("up to 32"));
+    }
+
+    #[test]
     fn array_unique_and_frequencies() {
         // `unique` keeps first-seen order.
         assert_eq!(last("[3, 1, 3, 2, 1].unique()").unwrap().to_string(), "[3, 1, 2]");

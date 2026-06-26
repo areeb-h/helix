@@ -656,6 +656,7 @@
             "dna(\"ATGNCC\").kmers(2)",
             "dna(\"ATGNCC\").windows(2)",
             "dna(\"AT\").kmers(5)",
+            "dna(\"ATGCATGC\").kmer_counts(3)",
             // DNA ordering (`<`/sort) must agree across engines
             "dna(\"ATG\") < dna(\"CAT\")",
             "[dna(\"CAT\"), dna(\"ATG\")].sort().first()",

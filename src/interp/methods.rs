@@ -802,6 +802,24 @@ fn dna_method(
             }
             Ok(Value::array(out))
         }
+        "kmer_counts" => {
+            // Native 2-bit-packed k-mer spectrum (k ≤ 32): each ACGT window packs
+            // into a u64 — no per-window string allocation — counted in a hash map;
+            // only the *distinct* k-mers are decoded to strings at the end. Windows
+            // spanning N/IUPAC are skipped (same spectrum as `kmers`). Returns
+            // (kmer, count) tuples, count desc then k-mer asc. The fast path for
+            // `kmers(k).frequencies()`.
+            let k = kmer_k("kmer_counts", args, line, col)?;
+            if k > 32 {
+                return Err(HelixError::new(
+                    format!("`kmer_counts` supports k up to 32 (2-bit packed), got {}", k),
+                    line,
+                    col,
+                )
+                .hint("for larger k use `kmers(k).frequencies()`."));
+            }
+            Ok(Value::array(packed_kmer_counts(s, k)))
+        }
         _ => Err(unknown_method(
             "Dna",
             name,
@@ -815,6 +833,52 @@ fn dna_method(
 /// The 4 unambiguous DNA bases (the `kmers` spectrum alphabet).
 fn is_acgt(c: char) -> bool {
     matches!(c, 'A' | 'C' | 'G' | 'T')
+}
+
+/// 2-bit-packed forward-strand k-mer counts (k ≤ 32), as `(kmer, count)` tuples
+/// sorted by count desc then k-mer asc. Each ACGT window rolls into a `u64` (A=0
+/// C=1 G=2 T=3) with no allocation; a non-ACGT base breaks the window (the `kmers`
+/// spectrum). A string is built only per *distinct* k-mer (decoded at the end),
+/// and u64 keys hash far faster than strings — the native fast path for
+/// `kmers(k).frequencies()`. Same fixed width means u64 order == lexicographic
+/// k-mer order, so sorting by the packed code matches a string sort.
+fn packed_kmer_counts(s: &str, k: usize) -> Vec<Value> {
+    let mask: u64 = if k >= 32 { u64::MAX } else { (1u64 << (2 * k)) - 1 };
+    let mut code: u64 = 0;
+    let mut valid: usize = 0;
+    // FxHashMap (fast non-cryptographic hash) — u64 keys hash in a couple of ops,
+    // the point of packing vs hashing 4.6M strings.
+    let mut counts: rustc_hash::FxHashMap<u64, u64> = rustc_hash::FxHashMap::default();
+    for byte in s.bytes() {
+        let bits = match byte {
+            b'A' => 0u64,
+            b'C' => 1,
+            b'G' => 2,
+            b'T' => 3,
+            _ => {
+                valid = 0; // ambiguous base — break the window
+                continue;
+            }
+        };
+        code = ((code << 2) | bits) & mask;
+        valid += 1;
+        if valid >= k {
+            *counts.entry(code).or_insert(0) += 1;
+        }
+    }
+    let mut pairs: Vec<(u64, u64)> = counts.into_iter().collect();
+    pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    pairs
+        .into_iter()
+        .map(|(c, n)| {
+            let mut km = String::with_capacity(k);
+            for i in 0..k {
+                let b = (c >> (2 * (k - 1 - i))) & 3;
+                km.push([b'A', b'C', b'G', b'T'][b as usize] as char);
+            }
+            Value::Tuple(Rc::new(vec![Value::Str(Rc::new(km)), Value::Int(n as i64)]))
+        })
+        .collect()
 }
 
 /// Parse the single positive-length argument shared by `kmers`/`windows`.
