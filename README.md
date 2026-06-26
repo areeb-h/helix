@@ -48,7 +48,8 @@ Node and Python on scalar recursion), lazy Polars/Arrow **DataFrames**, ndarray
 **tensors** with linear algebra, a static type checker, a **module system**, **data
 access** (`http_get` plus `parse_json`/`to_json` for REST APIs), **error handling**
 (`try EXPR` yielding `{ok, value, error}`), **genomics** (`read_fasta`/`read_fastq`
-sequences, and `read_vcf`/`read_bcf` variants into a queryable DataFrame), and a feature-gated
+sequences, `read_vcf`/`read_bcf` variants, and `read_sam`/`read_bam` alignments into a
+queryable DataFrame), and a feature-gated
 **CPython interop** layer (calling NumPy, polars, and similar
 libraries; see [docs/python-interop.md](docs/python-interop.md)). The test suite
 contains 130 or more tests and compiles with zero warnings. The remaining roadmap

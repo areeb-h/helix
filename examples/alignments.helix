@@ -1,0 +1,22 @@
+# Sequence alignments (SAM/BAM) become a queryable DataFrame, so aligned reads
+# flow through the SAME verbs as any other table (the unified model).
+#   helix run examples/alignments.helix
+#
+# read_sam / read_bam expose the eleven mandatory SAM fields as columns:
+# name, flag, ref, pos, mapq, cigar, rnext, pnext, tlen, seq, qual.
+
+reads = bio.read_sam("examples/data/alignments.sam")
+
+print("total reads:", reads.count())
+print("columns:", reads.columns())
+
+# Mapped reads have a reference; an unmapped read (flag bit 4) has a null `ref`.
+print("mapped reads:", reads.where(@mapq > 0).count())
+
+# Filter by mapping quality, then look at the alignment fields that matter.
+print("--- confident alignments (mapq > 50) ---")
+print(reads.where(@mapq > 50).select(@name, @ref, @pos, @cigar))
+
+# BAM (the binary, BGZF-framed form) reads into the very same DataFrame.
+binary = bio.read_bam("examples/data/alignments.bam")
+print("BAM read count (same data):", binary.count())

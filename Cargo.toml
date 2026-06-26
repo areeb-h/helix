@@ -38,6 +38,12 @@ needletail = "0.7.3"
 noodles-vcf = "0.88"
 noodles-bcf = "0.86"
 noodles-gff = "0.57"
+# SAM/BAM sequence alignments (the most common post-FASTQ format). BAM is the
+# binary, BGZF-framed form of SAM; noodles yields the same alignment RecordBuf for
+# both, so read_sam/read_bam share one column-building core. Versions pinned to the
+# set that depends on the noodles-core/bgzf/csi already in the tree (single copy).
+noodles-sam = "0.85"
+noodles-bam = "0.90"
 # Latest Polars — Arrow-columnar, lazy, multi-threaded execution engine.
 polars = { version = "0.54", features = [
     "lazy",

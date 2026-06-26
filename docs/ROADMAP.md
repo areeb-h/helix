@@ -34,8 +34,14 @@ fast, memory-safe surface.
       [examples/sequencing.helix](../examples/sequencing.helix).
 - [x] **`read_gff` / `read_bed`** — feature/interval tables as DataFrames (GFF3 via
       `noodles-gff` with one column per attribute tag; BED hand-rolled for BED3/6/12).
-- [ ] BAM/SAM/CRAM via `noodles` (memory-mapped, streaming; the local-first capability);
-      tabix/CSI-indexed region queries; FASTQ quality decoding.
+- [x] **`read_sam` / `read_bam`** — sequence alignments as a DataFrame: the eleven
+      mandatory SAM fields (`name`, `flag`, `ref`, `pos`, `mapq`, `cigar`, `rnext`,
+      `pnext`, `tlen`, `seq`, `qual`) become columns (`ref`/`rnext` resolved to names
+      from the header, CIGAR rendered to its SAM string). BAM is the binary, BGZF-framed
+      form; both share one record model and column-building core via `noodles-sam`/
+      `noodles-bam`. Demo: [examples/alignments.helix](../examples/alignments.helix).
+- [ ] CRAM via `noodles-cram` (reference-based compression); tabix/CSI-indexed region
+      queries (read `chr17:43k-44k` without a full scan); FASTQ quality decoding.
 - [ ] RNA (`fold`, `translate`), protein sequences; an ADR for the bio type model.
 - [~] Python interop for adoption (calling into Biopython and existing pipelines).
       **v1 complete** (`import python.pysam`, etc.); see

@@ -180,6 +180,20 @@ impl super::Interp {
                     other => Err(type_err("bio.read_bcf", "a string path", other, line, col)),
                 }
             }
+            "bio.read_sam" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => Ok(Value::dataframe(crate::sam::read_sam(s, line, col)?)),
+                    other => Err(type_err("bio.read_sam", "a string path", other, line, col)),
+                }
+            }
+            "bio.read_bam" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => Ok(Value::dataframe(crate::sam::read_bam(s, line, col)?)),
+                    other => Err(type_err("bio.read_bam", "a string path", other, line, col)),
+                }
+            }
             "bio.read_gff" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {

@@ -387,6 +387,29 @@ fn read_bcf_queries_identically_to_read_vcf() {
 }
 
 #[test]
+fn read_sam_makes_alignments_queryable() {
+    // The alignment flagship: a SAM file becomes a DataFrame with the eleven mandatory
+    // fields as columns. `ref` is resolved from the header (null for an unmapped read),
+    // `mapq` is a numeric column, and the CIGAR is rendered to its SAM string.
+    let src = "a = bio.read_sam(\"examples/data/alignments.sam\")\nprint(a.count())\nprint(a.where(ref == \"chr1\").count())\nprint(a.where(mapq > 50).count())\nprint(a.where(name == \"read2\").column(\"cigar\").first())\n";
+    let (out, stderr, code) = run_source(src, &[], "sam");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "4\n2\n2\n5M2I1M"); // 4 reads; 2 on chr1; 2 mapq>50; read2 CIGAR
+}
+
+#[test]
+fn read_bam_queries_identically_to_read_sam() {
+    // BAM is the binary, BGZF-framed form of SAM. read_bam shares read_sam's record
+    // model and column-building, so the same queries over the binary fixture give the
+    // SAME answers. The fixture is generated from alignments.sam by the ignored
+    // `generate_bam_fixture` test in src/sam.rs.
+    let src = "b = bio.read_bam(\"examples/data/alignments.bam\")\nprint(b.count())\nprint(b.where(ref == \"chr1\").count())\nprint(b.where(mapq > 50).count())\nprint(b.where(name == \"read2\").column(\"cigar\").first())\n";
+    let (out, stderr, code) = run_source(src, &[], "bam");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "4\n2\n2\n5M2I1M"); // identical to the plain-SAM result above
+}
+
+#[test]
 fn read_gff_makes_features_queryable() {
     // A GFF3 file becomes a DataFrame: the standard feature columns plus one string
     // column per attribute tag (so `Name` is queryable alongside `type`/`strand`).

@@ -33,6 +33,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "bio.read_fastq", pure: false },
     BuiltinDef { path: "bio.read_vcf", pure: false },
     BuiltinDef { path: "bio.read_bcf", pure: false },
+    BuiltinDef { path: "bio.read_sam", pure: false },
+    BuiltinDef { path: "bio.read_bam", pure: false },
     BuiltinDef { path: "bio.read_gff", pure: false },
     BuiltinDef { path: "bio.read_bed", pure: false },
     BuiltinDef { path: "io.write_parquet", pure: false },
