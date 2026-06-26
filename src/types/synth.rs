@@ -70,7 +70,8 @@ impl super::Checker {
                     return Ok(Type::Bool);
                 }
                 let both_str = matches!(lt, Type::String) && matches!(rt, Type::String);
-                if both_str || (is_numeric(lt) && is_numeric(rt)) {
+                let both_dna = matches!(lt, Type::Dna) && matches!(rt, Type::Dna);
+                if both_str || both_dna || (is_numeric(lt) && is_numeric(rt)) {
                     Ok(Type::Bool)
                 } else {
                     Err(HelixError::new(

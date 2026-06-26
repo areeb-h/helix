@@ -332,6 +332,24 @@
     }
 
     #[test]
+    fn dna_is_orderable() {
+        // `<`/`>` order DNA lexicographically (like strings) — enables canonical
+        // k-mer / sort-by-sequence code.
+        let b = |src: &str| match last(src).unwrap() {
+            Value::Bool(b) => b,
+            other => panic!("expected Bool, got {other:?}"),
+        };
+        assert!(b("dna(\"ATG\") < dna(\"CAT\")"));
+        assert!(!b("dna(\"CAT\") < dna(\"ATG\")"));
+        assert!(b("dna(\"ATG\") <= dna(\"ATG\")"));
+        // sorting an array of DNA orders it lexicographically.
+        match last("[dna(\"CAT\"), dna(\"ATG\"), dna(\"GGG\")].sort().first()").unwrap() {
+            Value::Dna(s) => assert_eq!(&*s, "ATG"),
+            other => panic!("expected Dna, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn division_by_zero() {
         assert!(last("1 / 0").unwrap_err().message.contains("division by zero"));
     }

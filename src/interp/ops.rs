@@ -277,6 +277,9 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
 fn compare(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
     let ord = match (l, r) {
         (Value::Str(a), Value::Str(b)) => a.cmp(b),
+        // DNA orders lexicographically like a string — enables canonical-k-mer /
+        // sorting-by-sequence code (`dna(a) < dna(b)`).
+        (Value::Dna(a), Value::Dna(b)) => a.cmp(b),
         // Compare integers exactly as i64 — a prior `as f64` cast lost precision
         // above 2^53 and disagreed with the JIT. Now all engines agree.
         (Value::Int(a), Value::Int(b)) => a.cmp(b),

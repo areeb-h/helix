@@ -649,6 +649,9 @@
             "dna(\"ATGCGC\").gc_content()",
             "dna(\"ATGATG\").find(\"GAT\")",
             "dna(\"ATGC\").kmers(2)",
+            // DNA ordering (`<`/sort) must agree across engines
+            "dna(\"ATG\") < dna(\"CAT\")",
+            "[dna(\"CAT\"), dna(\"ATG\")].sort().first()",
             // destructuring + field/index, all on the VM
             "a, b = (3, 4)\na * b",
             "p, q, r = [1, 2, 3]\np + q + r",

@@ -407,9 +407,14 @@ fn array_method(
                     (Value::Str(x), Value::Str(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 });
+            } else if items.iter().all(|v| matches!(v, Value::Dna(_))) {
+                sorted.sort_by(|a, b| match (a, b) {
+                    (Value::Dna(x), Value::Dna(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
+                });
             } else {
                 return Err(HelixError::new(
-                    "`sort` needs an array of all numbers or all strings",
+                    "`sort` needs an array of all numbers, all strings, or all DNA",
                     line,
                     col,
                 ));
