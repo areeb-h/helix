@@ -91,6 +91,12 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "r2_score", pure: true },
     BuiltinDef { path: "aic", pure: true },
     BuiltinDef { path: "bic", pure: true },
+    // --- classification metrics (mirror the regression metrics; (y_true, y_pred)) ---
+    BuiltinDef { path: "accuracy", pure: true },
+    BuiltinDef { path: "precision", pure: true },
+    BuiltinDef { path: "recall", pure: true },
+    BuiltinDef { path: "f1_score", pure: true },
+    BuiltinDef { path: "confusion_matrix", pure: true },
     // --- statistics: symmetric tests/fits + distributions (no privileged receiver) ---
     BuiltinDef { path: "normal_cdf", pure: true },
     BuiltinDef { path: "normal_pdf", pure: true },

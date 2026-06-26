@@ -182,6 +182,25 @@
     }
 
     #[test]
+    fn classification_metrics() {
+        let setup = "yt = [1, 0, 1, 1, 0, 1, 0, 0]\nyp = [1, 0, 1, 0, 0, 1, 1, 0]\n";
+        // tp=3 fp=1 fn=1 tn=3 → accuracy/precision/recall/f1 all 0.75
+        assert!((float(&format!("{setup}accuracy(yt, yp)")) - 0.75).abs() < 1e-9);
+        assert!((float(&format!("{setup}precision(yt, yp)")) - 0.75).abs() < 1e-9);
+        assert!((float(&format!("{setup}recall(yt, yp)")) - 0.75).abs() < 1e-9);
+        assert!((float(&format!("{setup}f1_score(yt, yp)")) - 0.75).abs() < 1e-9);
+        assert!(matches!(last(&format!("{setup}confusion_matrix(yt, yp).tp")).unwrap(), Value::Int(3)));
+        assert!(matches!(last(&format!("{setup}confusion_matrix(yt, yp).fn")).unwrap(), Value::Int(1)));
+        // string labels with an explicit positive class
+        let s = "t = [\"cat\", \"dog\", \"cat\", \"dog\"]\np = [\"cat\", \"cat\", \"cat\", \"dog\"]\n";
+        assert!((float(&format!("{s}accuracy(t, p)")) - 0.75).abs() < 1e-9);
+        assert!((float(&format!("{s}precision(t, p, \"cat\")")) - 2.0 / 3.0).abs() < 1e-9);
+        // undefined ratios report 0.0, never panic; mismatched lengths error
+        assert!((float("precision([0, 0], [0, 0])") - 0.0).abs() < 1e-9);
+        assert!(last("accuracy([1, 0], [1])").is_err());
+    }
+
+    #[test]
     fn ml_helpers_and_scientific_literals() {
         // scientific float literals
         assert_eq!(float("1.0e9"), 1.0e9);

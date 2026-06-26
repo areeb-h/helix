@@ -373,6 +373,15 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         "mse" | "rmse" | "mae" | "r2_score" => Ok(Type::Float),
         // information criteria for model selection → a scalar Float
         "aic" | "bic" => Ok(Type::Float),
+        // classification metrics over two label arrays → a scalar Float
+        "accuracy" | "precision" | "recall" | "f1_score" => Ok(Type::Float),
+        // a binary confusion matrix → a `{tp, fp, fn, tn}` integer record
+        "confusion_matrix" => Ok(Type::Record(vec![
+            ("tp".to_string(), Type::Int),
+            ("fp".to_string(), Type::Int),
+            ("fn".to_string(), Type::Int),
+            ("tn".to_string(), Type::Int),
+        ])),
         "least_squares" => {
             if args.len() < 2 || args.len() > 3 {
                 return Err(arity_err(name, 2, args.len(), line, col));

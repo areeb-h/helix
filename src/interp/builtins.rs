@@ -755,6 +755,55 @@ impl super::Interp {
                     log_like + kf * nf.ln()
                 }))
             }
+            // Classification metrics — free functions taking (y_true, y_pred), mirroring
+            // the regression metrics above. `accuracy` is multiclass-safe; the rest are
+            // binary against a positive class (3rd arg `pos_label`, default `1`).
+            "accuracy" => {
+                arity(name, &args, 2, line, col)?;
+                let (a, b) = label_pair(name, &args[0], &args[1], line, col)?;
+                let correct = a.iter().zip(&b).filter(|(x, y)| values_equal(x, y)).count();
+                Ok(Value::Float(correct as f64 / a.len() as f64))
+            }
+            "precision" | "recall" | "f1_score" => {
+                if args.len() != 2 && args.len() != 3 {
+                    return Err(HelixError::new(
+                        format!("`{name}` takes (y_true, y_pred) or (y_true, y_pred, pos_label), got {} arguments", args.len()),
+                        line,
+                        col,
+                    ));
+                }
+                let (a, b) = label_pair(name, &args[0], &args[1], line, col)?;
+                let pos = if args.len() == 3 { args[2].clone() } else { Value::Int(1) };
+                let (tp, fp, fa_neg, _) = binary_counts(&a, &b, &pos);
+                // sklearn convention: an undefined ratio (no predicted/actual positives)
+                // is reported as 0.0 rather than raising.
+                let precision = if tp + fp == 0 { 0.0 } else { tp as f64 / (tp + fp) as f64 };
+                let recall = if tp + fa_neg == 0 { 0.0 } else { tp as f64 / (tp + fa_neg) as f64 };
+                Ok(Value::Float(match name {
+                    "precision" => precision,
+                    "recall" => recall,
+                    _ if precision + recall == 0.0 => 0.0,
+                    _ => 2.0 * precision * recall / (precision + recall),
+                }))
+            }
+            "confusion_matrix" => {
+                if args.len() != 2 && args.len() != 3 {
+                    return Err(HelixError::new(
+                        format!("`confusion_matrix` takes (y_true, y_pred) or (y_true, y_pred, pos_label), got {} arguments", args.len()),
+                        line,
+                        col,
+                    ));
+                }
+                let (a, b) = label_pair(name, &args[0], &args[1], line, col)?;
+                let pos = if args.len() == 3 { args[2].clone() } else { Value::Int(1) };
+                let (tp, fp, fa_neg, tn) = binary_counts(&a, &b, &pos);
+                Ok(Value::Record(Rc::new(vec![
+                    (Symbol::intern("tp"), Value::Int(tp)),
+                    (Symbol::intern("fp"), Value::Int(fp)),
+                    (Symbol::intern("fn"), Value::Int(fa_neg)),
+                    (Symbol::intern("tn"), Value::Int(tn)),
+                ])))
+            }
             _ => {
                 let mut err =
                     HelixError::new(format!("`{}` is not a known function", name), line, col);
@@ -923,6 +972,50 @@ fn num_arrays(
         }
     }
     Ok(Some(cols))
+}
+
+/// Extract two equal-length, non-empty label arrays as raw `Value`s for the
+/// classification metrics. Labels are compared by value equality — never coerced to
+/// f64 — so integer (0/1), boolean, and string class labels all work uniformly.
+fn label_pair(
+    who: &str,
+    yt: &Value,
+    yp: &Value,
+    line: usize,
+    col: usize,
+) -> Result<(Vec<Value>, Vec<Value>), HelixError> {
+    let take = |v: &Value| -> Result<Vec<Value>, HelixError> {
+        match v {
+            Value::Array(items) => Ok(items.to_values().into_owned()),
+            other => Err(type_err(who, "an array of labels", other, line, col)),
+        }
+    };
+    let (a, b) = (take(yt)?, take(yp)?);
+    if a.len() != b.len() {
+        return Err(HelixError::new(
+            format!("`{who}` needs two equal-length arrays, got {} and {}", a.len(), b.len()),
+            line,
+            col,
+        ));
+    }
+    if a.is_empty() {
+        return Err(HelixError::new(format!("cannot compute `{who}` of empty arrays"), line, col));
+    }
+    Ok((a, b))
+}
+
+/// Tally (tp, fp, fn, tn) of `pred` against `truth` for one positive class `pos`.
+fn binary_counts(truth: &[Value], pred: &[Value], pos: &Value) -> (i64, i64, i64, i64) {
+    let (mut tp, mut fp, mut fa_neg, mut tn) = (0i64, 0i64, 0i64, 0i64);
+    for (yt, yp) in truth.iter().zip(pred) {
+        match (values_equal(yt, pos), values_equal(yp, pos)) {
+            (true, true) => tp += 1,
+            (false, true) => fp += 1,
+            (true, false) => fa_neg += 1,
+            (false, false) => tn += 1,
+        }
+    }
+    (tp, fp, fa_neg, tn)
 }
 
 /// Extract a numeric `Vec<f64>` from an array argument. Returns `Ok(None)` when any

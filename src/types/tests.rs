@@ -76,7 +76,7 @@
         assert!(emsg("velociti(3)").contains("not a known function"));
         assert!(emsg("[1, 2].maen()").contains("no method"));
         assert!(emsg("5 and true").contains("boolean"));
-        assert!(emsg("range(1, 2, 3)").contains("1 or 2"));
+        assert!(emsg("range(1, 2, 3, 4)").contains("1 to 3"));
         assert!(emsg("fn f(x: Int) -> String = x + 1").contains("declared to return"));
         assert!(emsg("xs = [1, 2]\nxs[\"a\"]").contains("cannot be indexed by a string"));
         assert!(emsg("undefinedvar").contains("not defined"));
