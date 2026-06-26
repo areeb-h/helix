@@ -350,6 +350,25 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         "linspace" => Ok(Type::Array(Box::new(Type::Float))),
         // model-eval metrics over two arrays → a scalar Float
         "mse" | "rmse" | "mae" | "r2_score" => Ok(Type::Float),
+        "least_squares" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(arity_err(name, 2, args.len(), line, col));
+            }
+            if any(&args[..2], |t| matches!(t, Type::Unknown)) {
+                return Ok(Type::Unknown);
+            }
+            if any(&args[..2], |t| matches!(t, Type::Missing)) {
+                return Ok(Type::Missing);
+            }
+            let nums = || Type::Array(Box::new(Type::Float));
+            Ok(Type::Record(vec![
+                ("coefficients".to_string(), nums()),
+                ("rss".to_string(), Type::Float),
+                ("r_squared".to_string(), Type::Float),
+                ("predictions".to_string(), nums()),
+                ("residuals".to_string(), nums()),
+            ]))
+        }
         _ => Ok(Type::Unknown), // unreachable (BUILTIN_FNS gated), but stay permissive
     }
 }

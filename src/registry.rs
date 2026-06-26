@@ -96,6 +96,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "t_test", pure: true },
     BuiltinDef { path: "linear_regression", pure: true },
     BuiltinDef { path: "multiple_regression", pure: true },
+    // Lightweight OLS (no inference) — the fast fit for model-selection loops.
+    BuiltinDef { path: "least_squares", pure: true },
     // (descriptive stats `iqr`/`zscores`/… are now array methods; `mean_gc`/
     // `at_content`/`total_length` are sequence-array/Dna methods.)
     // --- testing / assertions (guards that raise a catchable error on failure) ---

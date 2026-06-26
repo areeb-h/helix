@@ -453,6 +453,56 @@ pub fn multiple_regression(
     })
 }
 
+/// A lightweight OLS fit: coefficients + fit quality, **without** the inferential
+/// statistics (standard errors / p-values). The expensive part of
+/// [`multiple_regression`] for a search loop is the per-coefficient `betai`
+/// continued-fraction in the p-values — pure waste when you only score models by
+/// RSS. `least_squares` skips it, so structure-search / model-selection loops that
+/// call it thousands of times run substantially faster. `intercept` behaves as in
+/// `multiple_regression`. Allows `n == k` (an exact fit), unlike the inferential
+/// version which needs residual degrees of freedom.
+pub struct LsqFit {
+    pub coefficients: Vec<f64>,
+    pub rss: f64,
+    pub r_squared: f64,
+    pub predictions: Vec<f64>,
+    pub residuals: Vec<f64>,
+}
+
+pub fn least_squares(predictors: &[Vec<f64>], y: &[f64], intercept: bool) -> Option<LsqFit> {
+    let n = y.len();
+    let p = predictors.len();
+    let k = if intercept { p + 1 } else { p };
+    if p == 0 || k == 0 || n < k || predictors.iter().any(|c| c.len() != n) {
+        return None;
+    }
+    let xij = |i: usize, j: usize| {
+        if intercept {
+            if j == 0 { 1.0 } else { predictors[j - 1][i] }
+        } else {
+            predictors[j][i]
+        }
+    };
+    let mut xtx = vec![vec![0.0; k]; k];
+    let mut xty = vec![0.0; k];
+    for a in 0..k {
+        for (b, slot) in xtx[a].iter_mut().enumerate() {
+            *slot = (0..n).map(|i| xij(i, a) * xij(i, b)).sum();
+        }
+        xty[a] = (0..n).map(|i| xij(i, a) * y[i]).sum();
+    }
+    let inv = invert(&xtx)?;
+    let beta: Vec<f64> = (0..k).map(|a| (0..k).map(|b| inv[a][b] * xty[b]).sum()).collect();
+    let predictions: Vec<f64> =
+        (0..n).map(|i| (0..k).map(|j| beta[j] * xij(i, j)).sum()).collect();
+    let residuals: Vec<f64> = (0..n).map(|i| y[i] - predictions[i]).collect();
+    let rss: f64 = residuals.iter().map(|r| r * r).sum();
+    let ybar = mean(y);
+    let tss: f64 = y.iter().map(|v| (v - ybar).powi(2)).sum();
+    let r_squared = if tss == 0.0 { 0.0 } else { 1.0 - rss / tss };
+    Some(LsqFit { coefficients: beta, rss, r_squared, predictions, residuals })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

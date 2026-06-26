@@ -602,6 +602,45 @@ impl super::Interp {
                     .hint("e.g. `multiple_regression([x1, x2], y)` with enough rows.")),
                 }
             }
+            "least_squares" => {
+                // OLS without inference (no std_errors/p_values) — the fast fit for
+                // model selection. args: (predictors, y[, intercept]).
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(HelixError::new(
+                        format!("`least_squares` takes (predictors, y[, intercept]), got {}", args.len()),
+                        line,
+                        col,
+                    ));
+                }
+                let with_intercept = match args.get(2) {
+                    None => true,
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return Err(type_err("least_squares", "a boolean `intercept` flag", other, line, col));
+                    }
+                };
+                let preds = num_arrays(name, &args[0], line, col)?;
+                let y = num_array(name, &args[1], line, col)?;
+                let (preds, y) = match (preds, y) {
+                    (Some(preds), Some(y)) => (preds, y),
+                    _ => return Ok(Value::Missing),
+                };
+                match crate::stats::least_squares(&preds, &y, with_intercept) {
+                    Some(f) => Ok(Value::Record(Rc::new(vec![
+                        (Symbol::intern("coefficients"), Value::float_array(f.coefficients)),
+                        (Symbol::intern("rss"), Value::Float(f.rss)),
+                        (Symbol::intern("r_squared"), Value::Float(f.r_squared)),
+                        (Symbol::intern("predictions"), Value::float_array(f.predictions)),
+                        (Symbol::intern("residuals"), Value::float_array(f.residuals)),
+                    ]))),
+                    None => Err(HelixError::new(
+                        "least squares is undefined: need at least as many rows as parameters, equal-length non-collinear predictors",
+                        line,
+                        col,
+                    )
+                    .hint("e.g. `least_squares([x1, x2], y)`.")),
+                }
+            }
             "linspace" => {
                 // `linspace(start, stop, n)` → n evenly-spaced floats, endpoints
                 // inclusive (the float analogue of `range`, for sampling a domain).
