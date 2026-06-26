@@ -16,14 +16,38 @@
 //!   primary    := int | float | str | "true" | "false" | ident
 //!               | "(" expr ")" | "[" [ expr { "," expr } ] "]"
 
+use std::collections::HashMap;
+
 use crate::ast::{BinOp, Expr, InterpPart, Stmt, TypeAnn, UnOp};
 use crate::error::{suggest, HelixError};
 use crate::token::{StrSeg, Tok, Token};
 
+/// A user function's signature, captured at its definition so calls to it can be
+/// desugared: named arguments reordered into position and omitted parameters filled
+/// with their (literal) defaults. `defaults` is parallel to `params`.
+struct FnSig {
+    params: Vec<String>,
+    defaults: Vec<Option<Expr>>,
+}
+
+/// A parsed call's arguments: positional expressions and `name: value` named pairs.
+type CallArgs = (Vec<Expr>, Vec<(String, Expr)>);
+
+/// True for the literal-constant expressions allowed as a parameter default. The
+/// default is inserted at each call site, so it must not reference anything (no
+/// params, no globals) — a literal (optionally negated/notted) guarantees that.
+fn is_const_default(e: &Expr) -> bool {
+    match e {
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing => true,
+        Expr::Unary { expr, .. } => is_const_default(expr),
+        _ => false,
+    }
+}
+
 /// Lex + parse a single expression (used for `{expr}` interpolation fragments).
 pub fn parse_expression(src: &str) -> Result<Expr, HelixError> {
     let tokens = crate::lexer::lex(src)?;
-    let mut p = Parser { toks: tokens, pos: 0, depth: 0 };
+    let mut p = Parser { toks: tokens, pos: 0, depth: 0, fn_sigs: HashMap::new() };
     p.skip_newlines();
     let e = p.expr()?;
     p.skip_newlines();
@@ -43,7 +67,7 @@ const TYPE_NAMES: &[&str] = &[
 ];
 
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
-    let mut p = Parser { toks: tokens, pos: 0, depth: 0 };
+    let mut p = Parser { toks: tokens, pos: 0, depth: 0, fn_sigs: HashMap::new() };
     p.program()
 }
 
@@ -59,6 +83,10 @@ struct Parser {
     toks: Vec<Token>,
     pos: usize,
     depth: usize,
+    /// Signatures of user functions seen so far, keyed by name — for resolving
+    /// named arguments and defaults at call sites (a function is defined before it
+    /// is called, so its signature is known by the time its calls are parsed).
+    fn_sigs: HashMap<String, FnSig>,
 }
 
 impl Parser {
@@ -196,8 +224,10 @@ impl Parser {
             self.eat(&Tok::LParen, "to start the parameter list")
                 .map_err(|e| e.hint("functions look like `fn area(w, h) = w * h`."))?;
             let mut params: Vec<(String, Option<TypeAnn>)> = Vec::new();
+            let mut defaults: Vec<Option<Expr>> = Vec::new();
             if !matches!(self.peek(), Tok::RParen) {
                 loop {
+                    let (pl, pc) = self.pos();
                     let pname = self.ident_name("as a parameter")?;
                     // optional `: Type` annotation
                     let ann = if matches!(self.peek(), Tok::Colon) {
@@ -206,7 +236,34 @@ impl Parser {
                     } else {
                         None
                     };
+                    // optional `= literal` default value
+                    let default = if matches!(self.peek(), Tok::Eq) {
+                        self.advance();
+                        let d = self.expr()?;
+                        if !is_const_default(&d) {
+                            return Err(HelixError::new(
+                                format!("the default for parameter `{pname}` must be a literal constant"),
+                                pl,
+                                pc,
+                            )
+                            .hint("defaults like `= 0`, `= -5`, `= \"\"`, `= true`, or `= missing` are allowed."));
+                        }
+                        Some(d)
+                    } else {
+                        None
+                    };
+                    // Parameters with defaults must come last, so positional binding is
+                    // unambiguous.
+                    if default.is_none() && defaults.iter().any(|d| d.is_some()) {
+                        return Err(HelixError::new(
+                            format!("parameter `{pname}` has no default but follows one that does"),
+                            pl,
+                            pc,
+                        )
+                        .hint("put parameters with defaults after those without."));
+                    }
                     params.push((pname, ann));
+                    defaults.push(default);
                     if matches!(self.peek(), Tok::Comma) {
                         self.advance();
                     } else {
@@ -215,6 +272,12 @@ impl Parser {
                 }
             }
             self.eat(&Tok::RParen, "to close the parameter list")?;
+            // Record the signature BEFORE parsing the body, so a recursive call inside
+            // it resolves named arguments and defaults against this function.
+            self.fn_sigs.insert(
+                name.clone(),
+                FnSig { params: params.iter().map(|(n, _)| n.clone()).collect(), defaults },
+            );
             // optional `-> Type` return annotation
             let ret = if matches!(self.peek(), Tok::Arrow) {
                 self.advance();
@@ -758,7 +821,15 @@ impl Parser {
                     // field access — one obvious way: parens mean a call.
                     if matches!(self.peek(), Tok::LParen) {
                         self.advance();
-                        let args = self.args()?;
+                        let (args, named) = self.call_args()?;
+                        if !named.is_empty() {
+                            return Err(HelixError::new(
+                                "named arguments are not supported on method calls",
+                                l,
+                                c,
+                            )
+                            .hint("pass method arguments positionally."));
+                        }
                         self.eat(&Tok::RParen, "to close the argument list")?;
                         e = Expr::Method {
                             recv: Box::new(e),
@@ -838,8 +909,9 @@ impl Parser {
                     if let Expr::Ident { name, line, col } = e {
                         self.deepen()?;
                         self.advance();
-                        let args = self.args()?;
+                        let (pos, named) = self.call_args()?;
                         self.eat(&Tok::RParen, "to close the argument list")?;
+                        let args = self.resolve_call_args(&name, pos, named, line, col)?;
                         e = Expr::Call {
                             name,
                             args,
@@ -859,13 +931,32 @@ impl Parser {
         Ok(e)
     }
 
-    fn args(&mut self) -> Result<Vec<Expr>, HelixError> {
-        let mut args = Vec::new();
+    /// Parse a call's argument list into positional args and named args
+    /// (`name: value`). Positional arguments must precede named ones.
+    fn call_args(&mut self) -> Result<CallArgs, HelixError> {
+        let mut pos = Vec::new();
+        let mut named: Vec<(String, Expr)> = Vec::new();
         if matches!(self.peek(), Tok::RParen) {
-            return Ok(args);
+            return Ok((pos, named));
         }
         loop {
-            args.push(self.expr()?);
+            // `ident:` introduces a named argument (distinct from a bare expression).
+            if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Colon) {
+                let name = self.ident_name("as an argument name")?;
+                self.advance(); // the `:`
+                named.push((name, self.expr()?));
+            } else {
+                if !named.is_empty() {
+                    let (l, c) = self.pos();
+                    return Err(HelixError::new(
+                        "a positional argument cannot follow a named one",
+                        l,
+                        c,
+                    )
+                    .hint("put positional arguments first, then named ones."));
+                }
+                pos.push(self.expr()?);
+            }
             if matches!(self.peek(), Tok::Comma) {
                 self.advance();
                 if matches!(self.peek(), Tok::RParen) {
@@ -875,7 +966,89 @@ impl Parser {
                 break;
             }
         }
-        Ok(args)
+        Ok((pos, named))
+    }
+
+    /// Desugar a call's positional + named arguments into a single positional vector,
+    /// using the called function's recorded signature: named arguments are placed by
+    /// name and omitted parameters filled with their (literal) defaults. Calls to
+    /// non-user functions (builtins) accept only positional arguments; their arity is
+    /// checked later by the type checker, so positional args pass through unchanged.
+    fn resolve_call_args(
+        &self,
+        name: &str,
+        pos: Vec<Expr>,
+        named: Vec<(String, Expr)>,
+        line: usize,
+        col: usize,
+    ) -> Result<Vec<Expr>, HelixError> {
+        let Some(sig) = self.fn_sigs.get(name) else {
+            if !named.is_empty() {
+                return Err(HelixError::new(
+                    format!("named arguments are only supported for user-defined functions, not `{name}`"),
+                    line,
+                    col,
+                )
+                .hint("pass arguments to builtins positionally."));
+            }
+            return Ok(pos);
+        };
+        let n = sig.params.len();
+        // Fast path: plain positional call that the arity check can handle directly.
+        if named.is_empty() && (pos.len() == n || sig.defaults.iter().all(|d| d.is_none())) {
+            return Ok(pos);
+        }
+        if pos.len() > n {
+            return Err(HelixError::new(
+                format!(
+                    "`{name}` takes {n} parameter{}, but {} positional arguments were given",
+                    if n == 1 { "" } else { "s" },
+                    pos.len()
+                ),
+                line,
+                col,
+            ));
+        }
+        let mut slots: Vec<Option<Expr>> = (0..n).map(|_| None).collect();
+        for (i, p) in pos.into_iter().enumerate() {
+            slots[i] = Some(p);
+        }
+        for (pname, value) in named {
+            let Some(idx) = sig.params.iter().position(|p| *p == pname) else {
+                return Err(HelixError::new(
+                    format!("`{name}` has no parameter named `{pname}`"),
+                    line,
+                    col,
+                )
+                .hint(format!("its parameters are: {}", sig.params.join(", "))));
+            };
+            if slots[idx].is_some() {
+                return Err(HelixError::new(
+                    format!("parameter `{pname}` of `{name}` was given more than once"),
+                    line,
+                    col,
+                ));
+            }
+            slots[idx] = Some(value);
+        }
+        let mut out = Vec::with_capacity(n);
+        for (i, slot) in slots.into_iter().enumerate() {
+            match slot {
+                Some(e) => out.push(e),
+                None => match &sig.defaults[i] {
+                    Some(d) => out.push(d.clone()),
+                    None => {
+                        return Err(HelixError::new(
+                            format!("`{name}` is missing an argument for parameter `{}`", sig.params[i]),
+                            line,
+                            col,
+                        )
+                        .hint("pass it positionally or by name, or give the parameter a default."))
+                    }
+                },
+            }
+        }
+        Ok(out)
     }
 
     /// Parse a pattern, collecting `a | b | c` alternatives into an `Or`.

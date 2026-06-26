@@ -57,7 +57,8 @@ fast, memory-safe surface.
       [examples/alignment.helix](../examples/alignment.helix).
 - [ ] Region queries for BCF (its `.csi` index); CRAM via `noodles-cram`
       (reference-based compression); an RNA/protein sequence type model; custom
-      alignment scoring (substitution matrices) once named arguments land.
+      alignment scoring (substitution matrices) — likely via a scoring-record
+      argument, since `align` is a method and named arguments are user-function-only.
 - [ ] RNA (`fold`, `translate`), protein sequences; an ADR for the bio type model.
 - [~] Python interop for adoption (calling into Biopython and existing pipelines).
       **v1 complete** (`import python.pysam`, etc.); see
@@ -118,6 +119,11 @@ Lexer → parser → AST → tree-walking interpreter.
 - [x] Surface conventions finalized: `then` retained, `count` over `len`, parens always.
 - [x] User-defined functions (`fn name(a, b) = expr`, recursion, first-class
       `=>` values). See [ADR 0004](adr/0004-functions-errors-mutability.md).
+- [x] **Named arguments and default parameters** for user functions:
+      `fn greet(name, greeting = "Hi") = …`, called `greet("Ada", greeting: "Hey")`.
+      Resolved to positional form at parse time (zero run-time cost). Defaults are
+      literal constants; builtins/methods stay positional (a follow-up). Demo:
+      [examples/named-arguments.helix](../examples/named-arguments.helix).
 - [x] `missing` value (scalar part of [ADR 0001](adr/0001-missing-data.md)):
       Option-style absence, Julia-style propagation and three-valued logic,
       `.is_missing()`, `.drop_missing()`, propagating aggregations.

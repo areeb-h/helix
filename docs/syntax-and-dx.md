@@ -101,22 +101,30 @@ sees the role. It stays terse and chainable, so it's *more* readable than pandas
 
 ---
 
-## Proposal 2 — Named arguments
+## Proposal 2 — Named arguments ✅ *shipped (v1: user functions)*
 
-**Today** multi-arg calls are positional; the reader must remember the order:
+**Before** multi-arg calls were positional; the reader had to remember the order. **After**,
+a user function may declare literal **default** values, and calls may pass arguments **by
+name** (in any order after the positionals) and omit defaulted parameters:
 ```helix
-io.read_csv("f.csv", ";", false)      # what are ";" and false?
-```
-**After:**
-```helix
-io.read_csv("f.csv", delimiter: ";", header: false)
+fn greet(name, greeting = "Hello", excited = false) = ...
+greet("Ada", excited: true)               # name positional; the rest defaulted/named
+fn gap(length, open = -5, extend = -1) = open + length * extend
+gap(3, open: -10)                          # override one parameter by name
 ```
 - **Why:** role-expressiveness + working-memory (Miller) — past ~3 args, positional calls
   overflow short-term memory and invite silent wrong-order bugs. Python, R, and Swift all
-  have this for the same reason; it's table-stakes DX. *(Currently unsupported — `f(a: 1)`
-  is a parse error.)*
-- **Cost:** parser/checker work; a rule for mixing positional + named (Swift/Python model:
-  positional first, then named).
+  have this for the same reason; it's table-stakes DX.
+- **How:** resolved entirely at parse time. Each call's named arguments are placed by name
+  and omitted parameters filled with their defaults against the function's recorded
+  signature, producing an ordinary positional call — so the type checker and both engines
+  are unchanged, and there is zero run-time cost. Mixing rule: positional first, then named
+  (Swift/Python). Defaults are restricted to literal constants (so they can be inserted at
+  the call site).
+- **v1 scope / follow-ups:** named arguments apply to **user-defined functions**. Builtins
+  and methods (e.g. `io.read_csv(..., delimiter: ";")`, `seq.align(..., open: -10)`) still
+  take positional arguments — supporting them needs per-builtin parameter-name metadata, a
+  follow-up. Non-literal defaults (evaluated in function scope) are also deferred.
 
 ---
 
@@ -194,9 +202,9 @@ chain is the current weakest readability spot for non-trivial functions — wort
 
 ## Recommended sequencing
 
-1. **Named arguments** (Proposal 2) — highest DX/effort ratio, table-stakes, no churn to
-   existing code.
-2. **Range literal `a..b`** (Proposal 3) — tiny, high-legibility win.
+1. **Named arguments** (Proposal 2) ✅ *shipped* — highest DX/effort ratio, table-stakes, no
+   churn to existing code (v1: user functions + literal defaults).
+2. **Range literal `a..b`** (Proposal 3) ✅ *shipped* — tiny, high-legibility win.
 3. **Column sigil `@col`** (Proposal 1) — the strategic call; do it before an ecosystem of
    code locks in bare names (migration cost compounds — see R's painful NSE retrofits). Pair
    with the column-aware LSP.

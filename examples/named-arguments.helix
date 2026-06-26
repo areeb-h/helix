@@ -1,0 +1,24 @@
+# Named arguments and default parameter values.
+#   helix run examples/named-arguments.helix
+#
+# A function parameter may declare a literal default with `= value`. At a call site,
+# arguments can be passed by name (`greeting: "Hi"`) in any order after the positional
+# ones, and any parameter with a default may be omitted. These are resolved to ordinary
+# positional calls when parsing, so they cost nothing at run time.
+
+fn greet(name, greeting = "Hello", excited = false) =
+  if excited then "{greeting}, {name}!" else "{greeting}, {name}"
+
+# Defaults fill in for omitted parameters.
+print(greet("Ada"))
+
+# Pass one argument by name and leave the rest defaulted.
+print(greet("Ada", excited: true))
+
+# Named arguments may appear in any order.
+print(greet("Ada", excited: true, greeting: "Welcome"))
+
+# A practical shape: alignment-style scoring with sensible defaults, overridden by name.
+fn gap_penalty(length, open = -5, extend = -1) = open + length * extend
+print("default gap penalty:", gap_penalty(3))
+print("custom gap penalty:", gap_penalty(3, open: -10))

@@ -350,6 +350,32 @@ fn read_fastq_parses_reads_with_quality() {
 }
 
 #[test]
+fn named_arguments_and_defaults() {
+    // A user function can declare literal-constant defaults; calls may pass arguments
+    // by name (in any order) and omit defaulted parameters. Resolved to positional
+    // form at parse time, so both engines behave identically.
+    let src = "fn greet(name, greeting = \"Hi\") = \"{greeting}, {name}\"\nprint(greet(\"Ada\"))\nprint(greet(\"Ada\", greeting: \"Hey\"))\nfn vol(w, h, d = 1) = w * h * d\nprint(vol(2, 3))\nprint(vol(2, d: 5, h: 3))\n";
+    let (out, stderr, code) = run_source(src, &[], "named");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "Hi, Ada\nHey, Ada\n6\n30"); // default, named, default-fill, mixed
+}
+
+#[test]
+fn named_argument_errors_are_clear() {
+    for (src, want) in [
+        ("fn f(a, b) = a\nf(1, c: 2)\n", "no parameter named `c`"),
+        ("fn f(a, b) = a\nf(1, a: 2)\n", "given more than once"),
+        ("fn f(a, b) = a\nf(a: 1)\n", "missing an argument for parameter `b`"),
+        ("fn f(a, b = a) = a\nf(1)\n", "must be a literal constant"),
+        ("print(range(start: 0))\n", "only supported for user-defined functions"),
+    ] {
+        let (_o, stderr, code) = run_source(src, &[], "namederr");
+        assert_eq!(code, Some(1), "expected failure for `{src}`");
+        assert!(stderr.contains(want), "src `{src}`\nwant `{want}`\nstderr:\n{stderr}");
+    }
+}
+
+#[test]
 fn align_pairwise_global_local_semiglobal() {
     // ADR 0015 hand-rolled affine-gap aligner. Global scores a single mismatch
     // (3=1X4=); local extracts a conserved core at +7; semiglobal fits a whole read

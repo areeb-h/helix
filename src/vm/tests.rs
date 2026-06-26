@@ -707,6 +707,10 @@
         assert_parity("fn fact(n) = if n <= 1 then 1 else n * fact(n - 1)\nfact(10)");
         assert_parity("fn add(a, b) = a + b\nadd(40, 2)");
         assert_parity("mut acc = 0\nacc = acc + 100\nacc * 2");
+        // Named arguments + defaults desugar at parse time, so both engines see the
+        // same positional call — agreement by construction, pinned here.
+        assert_parity("fn box(w, h, d = 1) = w * h * d\nbox(2, d: 5, h: 3)");
+        assert_parity("fn cd(n, acc = 0) = if n <= 0 then acc else cd(n - 1, acc + n)\ncd(5)");
     }
 
     /// The tree-walker recurses on the native stack (the 20k `MAX_CALL_DEPTH` guard)
