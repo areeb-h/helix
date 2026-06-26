@@ -296,6 +296,24 @@
         Ok(format!("{}", last))
     }
 
+    /// True iff the tree-walker rejects `src` specifically by exhausting its native
+    /// call stack (the 20k `MAX_CALL_DEPTH` guard). The VM keeps call frames on the
+    /// heap and accepts far deeper recursion, so a program recursing in (20k, 1M]
+    /// succeeds on the VM and is rejected here — a by-design engine difference (B2),
+    /// not a parity violation.
+    fn tw_hit_recursion_limit(src: &str) -> bool {
+        let Ok(toks) = lexer::lex(src) else { return false };
+        let Ok(mut ast) = parser::parse(toks) else { return false };
+        crate::namespace::resolve(&mut ast);
+        let mut interp = Interp::new();
+        for stmt in &ast {
+            if let Err(e) = interp.exec(stmt) {
+                return e.message.contains("maximum recursion depth");
+            }
+        }
+        false
+    }
+
     /// Full pipeline (type-check → *type-directed* compile → VM), so
     /// receiver-polymorphic methods (DataFrame/Tensor column-verbs) route by the
     /// receiver's inferred type rather than falling back to the tree-walker.
@@ -431,6 +449,12 @@
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "VALUE divergence on `{src}`"),
                 // both reject → fine (we don't require identical messages)
                 (Err(()), Err(())) => {}
+                // The one accepted asymmetry (B2): the VM keeps frames on the heap
+                // (1M-deep) while the tree-walker recurses on the native stack (20k),
+                // so recursion in (20k, 1M] is VM-ok / tree-walker-rejected — by design.
+                // gen_expr bounds depth well under 20k, so this is a defensive guard;
+                // see `recursion_depth_is_a_by_design_engine_difference`.
+                (Ok(_), Err(())) if tw_hit_recursion_limit(&src) => {}
                 // one accepts, the other rejects → a real divergence
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vm={v:?} tw={t:?}"),
             }
@@ -683,6 +707,37 @@
         assert_parity("fn fact(n) = if n <= 1 then 1 else n * fact(n - 1)\nfact(10)");
         assert_parity("fn add(a, b) = a + b\nadd(40, 2)");
         assert_parity("mut acc = 0\nacc = acc + 100\nacc * 2");
+    }
+
+    /// The tree-walker recurses on the native stack (the 20k `MAX_CALL_DEPTH` guard)
+    /// while the VM keeps frames on the heap (1M-deep), so a function recursing in that
+    /// gap succeeds on the VM and is rejected by the tree-walker. This is a documented,
+    /// by-design engine difference — NOT a parity violation — and the differential
+    /// oracle treats it as agreement (B2). Pinned here in both shapes.
+    #[test]
+    fn recursion_depth_is_a_by_design_engine_difference() {
+        let deep = "fn deep(n) = if n <= 0 then 0 else deep(n - 1)\n";
+        let plain = format!("{deep}deep(50000)");
+        let caught = format!("{deep}r = try deep(50000)\nr.ok");
+
+        // The VM keeps frames on the heap, so 50k deep is fine on this small test stack.
+        // Uncaught it returns a value; caught by `try` it caught nothing (ok: true).
+        assert!(run_vm(&plain).is_ok(), "VM should recurse 50k deep on the heap");
+        assert_eq!(run_vm(&caught), Ok("true".to_string()));
+
+        // The tree-walker recurses on the NATIVE stack, so reaching its 20k guard needs
+        // the 2 GiB stack the real binary gives it (a test thread is only ~2 MiB).
+        // Uncaught it rejects on recursion depth; caught by `try` the record is ok: false.
+        std::thread::Builder::new()
+            .stack_size(2 << 30)
+            .spawn(move || {
+                assert!(run_tw(&plain).is_err(), "tree-walker should hit its native-stack limit");
+                assert!(tw_hit_recursion_limit(&plain), "rejected specifically on recursion depth");
+                assert_eq!(run_tw(&caught), Ok("false".to_string()));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// The VM keeps its call stack on the heap, so recursion far deeper than the

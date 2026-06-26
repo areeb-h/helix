@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # Every example must produce byte-identical output on the VM and the tree-walker.
+#
+# One by-design difference is NOT exercised here (no example triggers it): the VM
+# keeps call frames on the heap (1M-deep) while the tree-walker recurses on the
+# native stack (20k-deep `MAX_CALL_DEPTH`), so a function recursing in (20k, 1M]
+# succeeds on the VM and is rejected by the tree-walker. The differential fuzzer and
+# the `recursion_depth_is_a_by_design_engine_difference` unit test pin this as
+# accepted agreement (B2); keep example programs' recursion well under 20k.
 cd "$(dirname "$0")/.."
 BIN=./target/debug/helix
 fail=0
