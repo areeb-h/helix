@@ -1,0 +1,29 @@
+# A tiny ML-style experiment, end to end — sampling, noise, fitting, evaluation,
+# and model selection — using Helix's built-in primitives (all seeded, reproducible).
+#   helix run examples/experiment.helix
+
+fn r3(x) = round(x * 1000.0) / 1000.0
+
+# 1. Sample a domain and build a noisy linear relationship  y = 2x + 1 + noise.
+xs = linspace(0.0, 10.0, 40)
+noise = randn(40, 7)
+ys = xs.enumerate().map((i, x) => 2.0 * x + 1.0 + noise[i])
+
+# 2. Fit, and read the diagnostics straight off the result.
+fit = linear_regression(xs, ys)
+print("slope:", r3(fit.slope), " intercept:", r3(fit.intercept))
+print("R^2:", r3(fit.r_squared), " RSS:", r3(fit.rss))
+print("train RMSE:", r3(rmse(fit.predictions, ys)))
+
+# 3. Model selection by RSS over a small dictionary of candidate feature sets,
+#    scored with an MDL-style penalty  (rss-based code length + k*log(n)).
+feats = [xs, xs.map(x => x * x), xs.map(x => sin(x))]
+fn mdl(active) =
+    let cols = active.map(j => feats[j]),
+        f = multiple_regression(cols, ys, true)
+    in ln(f.rss) * 20.0 + (active.count() + 1.0) * ln(40.0)
+
+candidates = [[0], [0, 1], [0, 2], [0, 1, 2]]
+best = candidates.min_by(c => mdl(c))
+print("candidate scores:", candidates.map(c => r3(mdl(c))))
+print("MDL picks feature set:", best, " (0=x, 1=x^2, 2=sin x)")

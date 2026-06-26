@@ -377,15 +377,11 @@ fn invert(m: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
 /// parameter count), and the R² / adjusted-R². Returns `None` when there is no
 /// predictor, fewer observations than parameters plus one, a length mismatch, a
 /// constant response, or collinear predictors (a singular `XᵀX`).
-pub fn multiple_regression(predictors: &[Vec<f64>], y: &[f64]) -> Option<MultiFit> {
-    multiple_regression_opt(predictors, y, true)
-}
-
-/// As [`multiple_regression`], but `intercept` controls whether a constant term is
-/// added. With `intercept = false` the fit passes through the origin and the
-/// coefficients map one-to-one to the supplied predictors (so a user-supplied
-/// constant column won't collide with an auto-intercept).
-pub fn multiple_regression_opt(
+/// `intercept` controls whether a constant term is auto-added. With
+/// `intercept = false` the fit passes through the origin and the coefficients map
+/// one-to-one to the supplied predictors (so a user-supplied constant column won't
+/// collide with an auto-intercept).
+pub fn multiple_regression(
     predictors: &[Vec<f64>],
     y: &[f64],
     intercept: bool,
@@ -573,7 +569,7 @@ mod tests {
         let x1 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let x2 = vec![2.0, 1.0, 4.0, 3.0, 5.0];
         let y: Vec<f64> = (0..5).map(|i| 1.0 + 2.0 * x1[i] + 3.0 * x2[i]).collect();
-        let f = multiple_regression(&[x1, x2], &y).unwrap();
+        let f = multiple_regression(&[x1, x2], &y, true).unwrap();
         assert!(close(f.coefficients[0], 1.0, 1e-6), "b0 = {}", f.coefficients[0]);
         assert!(close(f.coefficients[1], 2.0, 1e-6), "b1 = {}", f.coefficients[1]);
         assert!(close(f.coefficients[2], 3.0, 1e-6), "b2 = {}", f.coefficients[2]);
@@ -585,7 +581,7 @@ mod tests {
         // A single-predictor multiple regression must match `linear_regression`.
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let y = vec![2.0, 4.0, 5.0, 4.0, 5.0];
-        let m = multiple_regression(std::slice::from_ref(&x), &y).unwrap();
+        let m = multiple_regression(std::slice::from_ref(&x), &y, true).unwrap();
         let s = linear_regression(&x, &y).unwrap();
         assert!(close(m.coefficients[0], s.intercept, 1e-9));
         assert!(close(m.coefficients[1], s.slope, 1e-9));
@@ -598,10 +594,10 @@ mod tests {
         // Collinear predictors (x2 = 2*x1) → singular XᵀX.
         let x2: Vec<f64> = x.iter().map(|v| 2.0 * v).collect();
         let y = vec![1.0, 3.0, 2.0, 5.0];
-        assert!(multiple_regression(&[x.clone(), x2], &y).is_none());
+        assert!(multiple_regression(&[x.clone(), x2], &y, true).is_none());
         // Fewer observations than parameters + 1.
-        assert!(multiple_regression(&[vec![1.0, 2.0], vec![3.0, 1.0]], &[1.0, 2.0]).is_none());
+        assert!(multiple_regression(&[vec![1.0, 2.0], vec![3.0, 1.0]], &[1.0, 2.0], true).is_none());
         // No predictors at all.
-        assert!(multiple_regression(&[], &y).is_none());
+        assert!(multiple_regression(&[], &y, true).is_none());
     }
 }

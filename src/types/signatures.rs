@@ -347,6 +347,9 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // (argument values are validated at runtime).
         "random" | "randn" => Ok(Type::Array(Box::new(Type::Float))),
         "random_int" => Ok(Type::Array(Box::new(Type::Int))),
+        "linspace" => Ok(Type::Array(Box::new(Type::Float))),
+        // model-eval metrics over two arrays → a scalar Float
+        "mse" | "rmse" | "mae" | "r2_score" => Ok(Type::Float),
         _ => Ok(Type::Unknown), // unreachable (BUILTIN_FNS gated), but stay permissive
     }
 }
@@ -386,6 +389,10 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         // descriptive stats over a numeric array
         "zscores" => Type::Array(Box::new(Type::Float)),
         "iqr" | "spread" | "standard_error" | "coefficient_of_variation" | "mean_gc" => Type::Float,
+        // vector math
+        "dot" | "norm" => Type::Float,
+        "cumsum" => Type::Array(Box::new(Type::Float)),
+        "product" => Type::Num,
         "total_length" => Type::Int,
         // charts + text exports render to a String
         "bar_chart" | "histogram" | "line_chart" | "sparkline" | "scatter" | "svg_bar"

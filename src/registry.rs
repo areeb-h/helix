@@ -83,6 +83,12 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "random", pure: true },
     BuiltinDef { path: "randn", pure: true },
     BuiltinDef { path: "random_int", pure: true },
+    // --- experimentation: domain grids + model-eval metrics ---
+    BuiltinDef { path: "linspace", pure: true },
+    BuiltinDef { path: "mse", pure: true },
+    BuiltinDef { path: "rmse", pure: true },
+    BuiltinDef { path: "mae", pure: true },
+    BuiltinDef { path: "r2_score", pure: true },
     // --- statistics: symmetric tests/fits + distributions (no privileged receiver) ---
     BuiltinDef { path: "normal_cdf", pure: true },
     BuiltinDef { path: "normal_pdf", pure: true },
@@ -112,7 +118,8 @@ pub static ARRAY_METHODS: &[&str] = &[
     "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
     "all", "take", "drop", "zip", "enumerate", "top", "frequencies", "unique", "drop_missing",
     "join", "concat", "flatten", "min_by", "max_by", "argmin", "argmax", "zscores", "iqr",
-    "spread", "standard_error", "coefficient_of_variation", "mean_gc",
+    "spread", "standard_error", "coefficient_of_variation", "dot", "norm", "cumsum", "product",
+    "mean_gc",
     "total_length", "bar_chart", "histogram", "line_chart", "sparkline", "scatter", "svg_bar",
     "svg_line", "write_csv", "write_tsv", "write_json", "to_html", "to_markdown", "write_fasta",
     "write_fastq", "shuffle", "sample", "choice",

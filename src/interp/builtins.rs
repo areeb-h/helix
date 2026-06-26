@@ -580,7 +580,7 @@ impl super::Interp {
                     _ => return Ok(Value::Missing),
                 };
                 let floats = |xs: Vec<f64>| Value::float_array(xs);
-                match crate::stats::multiple_regression_opt(&preds, &y, with_intercept) {
+                match crate::stats::multiple_regression(&preds, &y, with_intercept) {
                     Some(f) => {
                         let fields = vec![
                             (Symbol::intern("coefficients"), floats(f.coefficients)),
@@ -600,6 +600,73 @@ impl super::Interp {
                         col,
                     )
                     .hint("e.g. `multiple_regression([x1, x2], y)` with enough rows.")),
+                }
+            }
+            "linspace" => {
+                // `linspace(start, stop, n)` → n evenly-spaced floats, endpoints
+                // inclusive (the float analogue of `range`, for sampling a domain).
+                arity(name, &args, 3, line, col)?;
+                let f = |v: &Value| -> Result<f64, HelixError> {
+                    v.as_f64().ok_or_else(|| type_err("linspace", "a number", v, line, col))
+                };
+                let (start, stop) = (f(&args[0])?, f(&args[1])?);
+                let n = as_int(&args[2], "linspace", line, col)?;
+                if n < 0 {
+                    return Err(HelixError::new("`linspace` needs a non-negative count", line, col));
+                }
+                if n as usize > 100_000_000 {
+                    return Err(HelixError::new("`linspace` count is too large (limit 100M)", line, col));
+                }
+                let n = n as usize;
+                let out: Vec<f64> = match n {
+                    0 => Vec::new(),
+                    1 => vec![start],
+                    _ => (0..n)
+                        .map(|i| start + (i as f64) * (stop - start) / ((n - 1) as f64))
+                        .collect(),
+                };
+                Ok(Value::float_array(out))
+            }
+            // Model-evaluation metrics over two equal-length numeric arrays. `missing`
+            // in either propagates (ADR 0001).
+            "mse" | "rmse" | "mae" | "r2_score" => {
+                arity(name, &args, 2, line, col)?;
+                let a = num_array(name, &args[0], line, col)?;
+                let b = num_array(name, &args[1], line, col)?;
+                let (a, b) = match (a, b) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => return Ok(Value::Missing),
+                };
+                if a.len() != b.len() {
+                    return Err(HelixError::new(
+                        format!("`{name}` needs two equal-length arrays, got {} and {}", a.len(), b.len()),
+                        line,
+                        col,
+                    ));
+                }
+                if a.is_empty() {
+                    return Err(HelixError::new(format!("cannot compute `{name}` of empty arrays"), line, col));
+                }
+                let nf = a.len() as f64;
+                match name {
+                    "mse" => Ok(Value::Float(a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / nf)),
+                    "rmse" => Ok(Value::Float((a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / nf).sqrt())),
+                    "mae" => Ok(Value::Float(a.iter().zip(&b).map(|(x, y)| (x - y).abs()).sum::<f64>() / nf)),
+                    // r2_score(pred, actual) = 1 - SS_res/SS_tot.
+                    _ => {
+                        let (pred, actual) = (&a, &b);
+                        let mean = actual.iter().sum::<f64>() / nf;
+                        let ss_tot: f64 = actual.iter().map(|v| (v - mean).powi(2)).sum();
+                        if ss_tot == 0.0 {
+                            return Err(HelixError::new(
+                                "`r2_score` is undefined: the actual values have zero variance",
+                                line,
+                                col,
+                            ));
+                        }
+                        let ss_res: f64 = actual.iter().zip(pred).map(|(y, p)| (y - p).powi(2)).sum();
+                        Ok(Value::Float(1.0 - ss_res / ss_tot))
+                    }
                 }
             }
             _ => {

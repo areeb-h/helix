@@ -145,6 +145,36 @@
     }
 
     #[test]
+    fn experimentation_toolkit() {
+        // linspace endpoints inclusive
+        assert_eq!(float("linspace(0.0, 1.0, 5)[2]"), 0.5);
+        assert!(matches!(last("linspace(0.0, 1.0, 5).count()").unwrap(), Value::Int(5)));
+        // vector math
+        assert!(matches!(last("[1, 2, 3].dot([4, 5, 6])").unwrap(), Value::Float(f) if (f - 32.0).abs() < 1e-9));
+        assert_eq!(float("[3.0, 4.0].norm()"), 5.0);
+        assert!(matches!(last("[1, 2, 3, 4].cumsum()[3]").unwrap(), Value::Int(10)));
+        assert!(matches!(last("[1, 2, 3, 4].product()").unwrap(), Value::Int(24)));
+        // metrics
+        assert!((float("mae([1.0, 2.0, 3.0], [1.0, 2.0, 4.0])") - (1.0 / 3.0)).abs() < 1e-9);
+        assert_eq!(float("r2_score([1.0, 2.0, 3.0], [1.0, 2.0, 3.0])"), 1.0); // perfect
+    }
+
+    #[test]
+    fn regression_exposes_rss_and_intercept_option() {
+        // rss/predictions/residuals are on the fit record
+        assert!(float("linear_regression([1.0, 2.0, 3.0], [2.0, 4.0, 6.0]).rss") < 1e-9);
+        assert!(matches!(
+            last("linear_regression([1.0, 2.0, 3.0], [2.0, 4.0, 6.0]).predictions.count()").unwrap(),
+            Value::Int(3)
+        ));
+        // a no-intercept fit with a manual ones column matches the intercept fit's slope
+        let slope = float(
+            "m = multiple_regression([[1.0,1.0,1.0,1.0], [1.0,2.0,3.0,4.0]], [3.0,5.0,7.0,9.0], false)\nm.coefficients[1]",
+        );
+        assert!((slope - 2.0).abs() < 1e-6, "no-intercept slope = {slope}");
+    }
+
+    #[test]
     fn interpolation_error_points_at_the_real_line() {
         // A bad interpolation fragment used to report line 1 (the snippet); it must
         // now point at the line of the string in the original source.

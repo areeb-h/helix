@@ -722,6 +722,86 @@ fn array_method(
                 Ok(Value::Float(total / seqs.len() as f64))
             }
         }
+        // --- vector math over a numeric array (missing propagates) ---
+        "dot" => {
+            if args.len() != 1 {
+                return Err(HelixError::new("`dot` takes one array argument", line, col));
+            }
+            let other = match &args[0] {
+                Value::Array(a) => a.to_values(),
+                Value::Missing => return Ok(Value::Missing),
+                o => return Err(HelixError::new(
+                    format!("`dot` expects an array, but got a {}", o.type_name()),
+                    line,
+                    col,
+                )),
+            };
+            if items.iter().chain(other.iter()).any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            let (xs, ys) = (numeric_vec(items, "dot", line, col)?, numeric_vec(&other, "dot", line, col)?);
+            if xs.len() != ys.len() {
+                return Err(HelixError::new(
+                    format!("`dot` needs equal-length arrays, got {} and {}", xs.len(), ys.len()),
+                    line,
+                    col,
+                ));
+            }
+            Ok(Value::Float(xs.iter().zip(&ys).map(|(a, b)| a * b).sum()))
+        }
+        "norm" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`norm` takes no arguments", line, col));
+            }
+            if items.iter().any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            let xs = numeric_vec(items, "norm", line, col)?;
+            Ok(Value::Float(xs.iter().map(|x| x * x).sum::<f64>().sqrt()))
+        }
+        "cumsum" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`cumsum` takes no arguments", line, col));
+            }
+            if items.iter().any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            // Preserve int-ness: an all-Int array cumsums to ints.
+            if items.iter().all(|v| matches!(v, Value::Int(_))) {
+                let mut acc = 0i64;
+                let out: Vec<i64> = items
+                    .iter()
+                    .map(|v| {
+                        if let Value::Int(i) = v {
+                            acc = acc.wrapping_add(*i);
+                        }
+                        acc
+                    })
+                    .collect();
+                Ok(Value::int_array(out))
+            } else {
+                let xs = numeric_vec(items, "cumsum", line, col)?;
+                let mut acc = 0.0;
+                Ok(Value::float_array(xs.iter().map(|x| { acc += x; acc }).collect()))
+            }
+        }
+        "product" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`product` takes no arguments", line, col));
+            }
+            if items.iter().any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            if items.iter().all(|v| matches!(v, Value::Int(_))) {
+                let p = items.iter().fold(1i64, |acc, v| {
+                    if let Value::Int(i) = v { acc.wrapping_mul(*i) } else { acc }
+                });
+                Ok(Value::Int(p))
+            } else {
+                let xs = numeric_vec(items, "product", line, col)?;
+                Ok(Value::Float(xs.iter().product()))
+            }
+        }
         // --- charts + tabular export/write → shared dispatch (rebuild the receiver) ---
         "bar_chart" | "histogram" | "line_chart" | "sparkline" | "scatter" | "svg_bar"
         | "svg_line" | "write_csv" | "write_tsv" | "write_json" | "to_html" | "to_markdown"
