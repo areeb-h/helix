@@ -90,7 +90,8 @@ fn rw(e: &mut Expr, bound: &HashSet<String>) {
 
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing => {}
-        Expr::Ident { .. } => {}
+        // A `@column` names a frame column, never a module/namespace path — leave it.
+        Expr::Ident { .. } | Expr::Column { .. } => {}
         Expr::Interp(parts) => {
             for p in parts {
                 if let InterpPart::Expr(e) = p {

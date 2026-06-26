@@ -16,7 +16,7 @@ phases**, not a controlled benchmark; the caveats below apply.
 - **Phases isolated** (the earlier smoke test conflated them):
   - *interpreter startup* — a script that just prints, no data;
   - *count-only* — `read_*(path).count()`;
-  - *query-only* — `read_*(path).where(x > 500).group(grp).mean(y).sort(grp).head(5)`.
+  - *query-only* — `read_*(path).where(@x > 500).group(@grp).mean(@y).sort(@grp).head(5)`.
 - **Data:** 5 columns (`id` i64, `grp` i64 ×50, `category` string ×8, `x` i64,
   `y` f64), at 5M / 10M / 50M rows, as CSV and Parquet.
 - Reproduce: `scripts/bench.sh` (after generating `/tmp/d{5,10,50}.{csv,parquet}`).

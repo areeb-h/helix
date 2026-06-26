@@ -125,6 +125,17 @@ pub enum Expr {
         line: usize,
         col: usize,
     },
+    /// A DataFrame column reference written with the `@` sigil: `@age`. Unlike a
+    /// bare `Ident`, this is *unambiguously* a column (never a variable), so it
+    /// kills the column/variable shadowing class of bugs and lets tooling resolve
+    /// columns directly. Only meaningful inside a DataFrame verb argument
+    /// (`where`/`select`/`group`/`sort`/`with`/aggregations); evaluating it as an
+    /// ordinary expression is an error.
+    Column {
+        name: String,
+        line: usize,
+        col: usize,
+    },
     Array(Vec<Expr>),
     /// A tuple literal: `(a, b)`, `(x,)`. Fixed-size, heterogeneous.
     Tuple(Vec<Expr>),
@@ -230,6 +241,7 @@ impl Expr {
     pub fn position(&self) -> (usize, usize) {
         match self {
             Expr::Ident { line, col, .. }
+            | Expr::Column { line, col, .. }
             | Expr::Field { line, col, .. }
             | Expr::Unary { line, col, .. }
             | Expr::Binary { line, col, .. }

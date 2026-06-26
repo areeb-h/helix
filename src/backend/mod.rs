@@ -132,6 +132,20 @@ pub fn ast_to_colexpr(
         Ast::Str(s) => Ok(ColExpr::Lit(Value::Str(Rc::new(s.clone())))),
         Ast::Bool(b) => Ok(ColExpr::Lit(Value::Bool(*b))),
         Ast::Missing => Ok(ColExpr::Lit(Value::Missing)),
+        // `@name` is *always* a column — never falls back to a variable, so a column
+        // and a same-named local can never be confused (the point of the sigil).
+        Ast::Column { name, line, col } => {
+            if columns.iter().any(|c| c == name) {
+                Ok(ColExpr::Col(name.clone()))
+            } else {
+                Err(HelixError::new(
+                    format!("no column named `{}`", name),
+                    *line,
+                    *col,
+                )
+                .hint(format!("available columns: {}", columns.join(", "))))
+            }
+        }
         Ast::Ident { name, line, col } => {
             if columns.iter().any(|c| c == name) {
                 Ok(ColExpr::Col(name.clone()))

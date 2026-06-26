@@ -42,9 +42,13 @@ Per the evidence above, several current choices are *good* and should be protect
 
 ---
 
-## Proposal 1 — Column references: the big one *(you flagged this)*
+## Proposal 1 — Column references: the big one ✅ *shipped (`@col` chosen)*
 
-**Today** Helix uses bare column names (dplyr-style non-standard evaluation):
+> **Decision:** the `@col` sigil below was adopted and implemented. `@age` is now the
+> idiomatic way to name a column; bare names still parse (a deprecation window) so no
+> existing code breaks. The analysis that led here is kept below.
+
+**Before** Helix used bare column names (dplyr-style non-standard evaluation):
 ```helix
 io.read_csv("big.csv").group(species).mean(expression)
 patients.where(age > 40).select(name, age, diagnosis)

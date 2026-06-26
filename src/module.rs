@@ -447,6 +447,8 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) {
 
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing => {}
+        // A `@column` names a frame column, never an imported binding — leave it.
+        Expr::Column { .. } => {}
         Expr::Ident { name, .. } => {
             if !bound.contains(name) {
                 if ctx.top_level.contains(name) {

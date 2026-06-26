@@ -553,6 +553,23 @@ impl Compiler {
                 let k = b.add_const(Value::Missing);
                 b.emit(Op::Const(k), 0, 0);
             }
+            // A `@column` outside a DataFrame verb. The type checker rejects this
+            // before compile, so it is unreachable in the normal pipeline; emit a
+            // runtime error (rather than `Unsupported`) so `compile` is total.
+            Expr::Column { name, line, col } => {
+                b.emit(
+                    Op::raise(
+                        std::rc::Rc::new(format!(
+                            "`@{name}` is a column reference, only valid inside a DataFrame operation"
+                        )),
+                        std::rc::Rc::new(
+                            "use `@column` inside a verb like `df.where(...)`, `df.select(...)`, or `df.group(...)`.".to_string(),
+                        ),
+                    ),
+                    *line,
+                    *col,
+                );
+            }
             Expr::Ident { name, line, col } => match self.resolve(b, name) {
                 Some(NameRef::Local(slot)) => {
                     b.emit(Op::LoadLocal(slot), *line, *col);

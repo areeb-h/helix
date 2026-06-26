@@ -5,10 +5,10 @@
 # plus one column per attribute tag (ID, Name, biotype, ...).
 genes = bio.read_gff("examples/data/genes.gff3")
 print("gene features:")
-print(genes.where(type == "gene").select(seqid, start, end, strand, Name))
+print(genes.where(@type == "gene").select(@seqid, @start, @end, @strand, @Name))
 
 # BED: chrom/start/end, with name/score/strand surfaced because the file carries
 # them. `score` is numeric, so it filters as a number.
 peaks = bio.read_bed("examples/data/peaks.bed")
 print("strong peaks (score > 400):")
-print(peaks.where(score > 400).select(chrom, start, end, name, score))
+print(peaks.where(@score > 400).select(@chrom, @start, @end, @name, @score))

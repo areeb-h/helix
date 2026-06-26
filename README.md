@@ -83,13 +83,15 @@ scores
 grade = if score > 90 then "A" else "B"
 
 # DataFrames (Polars/Arrow-backed) use the same `where`/`sort` verbs as arrays.
-# `where(age > 40)` lowers to a native Polars filter rather than an interpreter loop.
+# Columns are written with `@`: `@age` is *always* the age column, never a variable —
+# so a column and a local can never collide, and editors autocomplete after `@`.
+# `where(@age > 40)` lowers to a native Polars filter rather than an interpreter loop.
 patients = io.read_csv("patients.csv")
 patients
-    .where(age > 40 and resting_hr < 75)
-    .select(name, diagnosis)
-    .sort(age)
-genes.group(species).mean(expression)
+    .where(@age > 40 and @resting_hr < 75)
+    .select(@name, @diagnosis)
+    .sort(@age)
+genes.group(@species).mean(@expression)
 
 # DNA sequences as a first-class type
 seq = dna("ATGCGTAC")
@@ -179,13 +181,14 @@ seq.kmers(3)
 - String methods: `upper`, `lower`, `count`, `reverse`.
 - **DataFrames** backed by **Polars (latest), held as a lazy `LazyFrame`**:
   `io.read_csv(path)` / `io.read_parquet(path)`, then `where(predicate)`,
-  `select(cols…)`, `sort(cols…)`, `group(keys…)` + a grouped
+  `select(@cols…)`, `sort(@cols…)`, `group(@keys…)` + a grouped
   `mean`/`sum`/`min`/`max`/`count`/`std`, plus `head(n)`, `count()`, `columns()`,
-  and `io.write_parquet(df, path)` (streaming sink).
+  and `io.write_parquet(df, path)` (streaming sink). Columns use the `@name` sigil —
+  unambiguously a column, never a variable, so the two can never collide.
   Verbs only *extend the query plan*; it materializes once, at `print`/`count`,
   so a single chain is **delegated to Polars' lazy execution** (columnar,
   multi-threaded, with projection and predicate pushdown). Predicates such as
-  `age > 40 and resting_hr < 75` are **translated to Polars expressions** using the
+  `@age > 40 and @resting_hr < 75` are **translated to Polars expressions** using the
   same `where` verb as arrays. Measured: a **50M-row filter+group+sort+head runs
   in ~0.2s from Parquet** (~2.3s from CSV), warm cache. See
   [docs/benchmarks.md](docs/benchmarks.md), including caveats (warm-cache only;

@@ -1050,6 +1050,15 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Ident { name, line: l, col: c })
             }
+            Tok::At => {
+                // `@name` — a DataFrame column reference. The name that follows must
+                // be a plain identifier (`@age`), not a keyword or expression.
+                self.advance();
+                let name = self.ident_name("after `@` (a column name)").map_err(|e| {
+                    e.hint("`@` marks a DataFrame column, e.g. `df.where(@age > 40)`.")
+                })?;
+                Ok(Expr::Column { name, line: l, col: c })
+            }
             Tok::Let => {
                 self.advance();
                 let mut bindings = Vec::new();

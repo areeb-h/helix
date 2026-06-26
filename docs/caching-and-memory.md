@@ -29,7 +29,7 @@ mutable systems; there is no case in which the data changes underneath the cache
    ```helix
    big = io.read_csv("huge.csv").cache()
    big.count()                  # reads the file once (here)
-   big.where(age > 40).count()  # no re-scan — operates on memory
+   big.where(@age > 40).count() # no re-scan — operates on memory
    ```
 
    It is **eager by design**: the cost is paid, visibly, at the `.cache()` call,

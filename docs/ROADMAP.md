@@ -22,7 +22,7 @@ fast, memory-safe surface.
       (frequency histogram) so `seq.kmers(9).top(20)` works.
 - [x] **`bio.read_vcf(path)` → DataFrame**: variant tables flow directly into the existing
       `where`/`group`/`count` verbs, demonstrating the unified model
-      (`bio.read_vcf(...).where(gene == "BRCA1").group(consequence).count(pos)`). The eight
+      (`bio.read_vcf(...).where(@gene == "BRCA1").group(@consequence).count(@pos)`). The eight
       fixed columns plus every INFO field (`gene`, `consequence`, …) become columns.
       Demo: [examples/variants.helix](../examples/variants.helix). A hand-rolled parser
       reads both plain `.vcf` and gzipped/BGZF `.vcf.gz` (magic-byte sniffing, multi-member
@@ -127,9 +127,10 @@ Lexer → parser → AST → tree-walking interpreter.
 - [x] **Lazy `LazyFrame` threading**: verbs extend the plan; it materializes
       once at `print`/`count`. A chain fuses into one multi-threaded pass and
       scales beyond RAM (5M-row filter+group+sort+head in ~1s, debug build).
-- [x] SQL-style verbs: `patients.where(age > 40).select(name).sort(age)`.
-- [x] `group(keys).mean(col)` grouped aggregations (also sum/min/max/count/std).
-- [x] Column references inside `where`/`select`: predicate AST → Polars expression
+- [x] SQL-style verbs: `patients.where(@age > 40).select(@name).sort(@age)`.
+- [x] `group(@keys).mean(@col)` grouped aggregations (also sum/min/max/count/std).
+- [x] Column references via the `@name` sigil (unambiguously a column, never a
+      variable) inside `where`/`select`: predicate AST → Polars expression
       (`dataframe::to_polars`), so `where` is one verb across Array and DataFrame.
 - [x] `read_csv` + **`read_parquet`** (memory-mapped scan), `head`/`count`
       (`len()` pushdown) / `columns` (schema only, no scan).
@@ -154,8 +155,8 @@ Lexer → parser → AST → tree-walking interpreter.
 - [ ] **Cross-statement caching** — reusing a DataFrame binding re-scans the file.
 - [ ] Additional IO: Arrow IPC, JSON, FASTA; `write_csv`.
 - [ ] DataFrame `missing` as the Arrow validity bitmap (unified with ADR 0001).
-- [x] Derived columns (`df.with({bmi: weight / height})`) and joins
-      (`df.join(other, key)`, inner/left/right/outer; keys validated eagerly).
+- [x] Derived columns (`df.with({bmi: @weight / @height})`) and joins
+      (`df.join(other, @key)`, inner/left/right/outer; keys validated eagerly).
 - [ ] Formal benchmarks: variance/CI, against pandas/DuckDB; 100M+ rows.
 
 ## Phase 3.5 — Math & numerics core (shipped)

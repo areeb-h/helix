@@ -5,13 +5,14 @@
 
 use super::*;
 
-/// A DataFrame column argument is a bare identifier (`select(name, age)`).
+/// A DataFrame column argument is the `@name` sigil (`select(@name, @age)`) or a
+/// bare identifier (`select(name, age)` — the legacy spelling, still accepted).
 fn arg_as_column_name(e: &Expr, line: usize, col: usize) -> Result<String, HelixError> {
     match e {
-        Expr::Ident { name, .. } => Ok(name.clone()),
+        Expr::Column { name, .. } | Expr::Ident { name, .. } => Ok(name.clone()),
         _ => Err(
             HelixError::new("expected a column name", line, col)
-                .hint("write a bare column name, e.g. `df.select(name, age)`."),
+                .hint("write a column with the `@` sigil, e.g. `df.select(@name, @age)`."),
         ),
     }
 }
@@ -41,7 +42,7 @@ pub(crate) fn parse_join_spec(
     let mut how = String::from("inner");
     for (i, a) in args.iter().enumerate() {
         match a {
-            Expr::Ident { name, .. } => keys.push(name.clone()),
+            Expr::Column { name, .. } | Expr::Ident { name, .. } => keys.push(name.clone()),
             Expr::Str(s) if i == args.len() - 1 => how = s.clone(),
             _ => {
                 return Err(HelixError::new(

@@ -109,7 +109,7 @@ print(python.import("builtins").len(df))         # 8  (rows, counted in Python)
 # round-trip through Python's polars and back:
 pl = python.import("polars")
 back = to_dataframe(pl.concat([df]))             # back is a Helix DataFrame again
-print(back.where(age > 40).select(name))         # native verbs work on it
+print(back.where(@age > 40).select(@name))       # native verbs work on it
 ```
 
 The missing-data models align directly: Helix's `missing` is Arrow's validity

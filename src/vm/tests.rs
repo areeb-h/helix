@@ -329,12 +329,28 @@
             format!("t = 40\n{csv}.where(age > t).count()"),
             // grouped aggregation over an unevaluated column
             "io.read_csv(\"examples/data/genes.csv\").group(species).mean(expression).count()".to_string(),
+            // the same queries with the `@column` sigil — must behave identically
+            format!("{csv}.where(@age > 40).count()"),
+            format!("{csv}.where(@age > 40 and @resting_hr < 75).count()"),
+            format!("{csv}.where(@age > 40).select(@name, @age).sort(@age).count()"),
+            format!("{csv}.with({{adult: @age >= 18}}).count()"),
+            "io.read_csv(\"examples/data/genes.csv\").group(@species).mean(@expression).count()".to_string(),
+            // `@age` is ALWAYS the column even when a local `age` shadows it — the
+            // sigil's whole point. Bare `age` here would resolve the column too, but
+            // `@age` *guarantees* it, with no ambiguity.
+            format!("age = 999\n{csv}.where(@age > 40).count()"),
         ];
         for src in &cases {
             assert_eq!(run_vm_typed(src), run_tw(src), "VM ≠ tree-walker on `{src}`");
         }
         // Concrete expected values (mirrors the interpreter's own test).
         assert_eq!(run_vm_typed(&format!("{csv}.where(age > 40).count()")), Ok("5".into()));
+        assert_eq!(run_vm_typed(&format!("{csv}.where(@age > 40).count()")), Ok("5".into()));
+        // A local that shadows a column name does not affect `@age`.
+        assert_eq!(
+            run_vm_typed(&format!("age = 999\n{csv}.where(@age > 40).count()")),
+            Ok("5".into())
+        );
     }
 
     /// Reassignment/mutability now run on the VM (not via tree-walker fallback):

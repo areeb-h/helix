@@ -51,6 +51,7 @@ pub enum Tok {
     Slash,    // /
     Percent,  // %
     Coalesce, // ??
+    At,       // @ (DataFrame column sigil: `@age`)
     LParen,
     RParen,
     LBracket,
@@ -108,6 +109,7 @@ impl Tok {
             Tok::Slash => "`/`".into(),
             Tok::Percent => "`%`".into(),
             Tok::Coalesce => "`??`".into(),
+            Tok::At => "`@`".into(),
             Tok::LParen => "`(`".into(),
             Tok::RParen => "`)`".into(),
             Tok::LBracket => "`[`".into(),

@@ -116,7 +116,7 @@ fn any_call(e: &Expr, pred: &dyn Fn(&str) -> bool) -> bool {
             pred(name) || args.iter().any(|a| any_call(a, pred))
         }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing
-        | Expr::Ident { .. } => false,
+        | Expr::Ident { .. } | Expr::Column { .. } => false,
         Expr::Interp(parts) => parts
             .iter()
             .any(|p| matches!(p, InterpPart::Expr(e) if any_call(e, pred))),
@@ -202,7 +202,7 @@ fn reads_mutable(e: &Expr, bound: &HashSet<&str>, mutable: &HashSet<&str>) -> bo
 fn children(e: &Expr) -> Vec<&Expr> {
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing
-        | Expr::Ident { .. } => vec![],
+        | Expr::Ident { .. } | Expr::Column { .. } => vec![],
         Expr::Interp(parts) => parts
             .iter()
             .filter_map(|p| match p {
@@ -275,6 +275,9 @@ fn note_free(name: &str, bound: &[&str], free: &mut Vec<String>) {
 fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String>) {
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing => {}
+        // A `@column` reference names a frame column, not a variable — it never
+        // captures a free variable, so it contributes nothing here.
+        Expr::Column { .. } => {}
         Expr::Ident { name, .. } => note_free(name, bound, free),
         Expr::Call { name, args, .. } => {
             note_free(name, bound, free);

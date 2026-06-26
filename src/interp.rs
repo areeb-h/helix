@@ -213,6 +213,12 @@ impl Interp {
             Expr::Str(s) => Ok(Value::Str(Rc::new(s.clone()))),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Missing => Ok(Value::Missing),
+            Expr::Column { name, line, col } => Err(HelixError::new(
+                format!("`@{name}` is a column reference, only valid inside a DataFrame operation"),
+                *line,
+                *col,
+            )
+            .hint("use `@column` inside a verb like `df.where(...)`, `df.select(...)`, or `df.group(...)`.")),
             Expr::Interp(parts) => {
                 let mut s = String::new();
                 for part in parts {

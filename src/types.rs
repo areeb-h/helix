@@ -443,6 +443,12 @@ impl Checker {
             Expr::Str(_) => Ok(Type::String),
             Expr::Bool(_) => Ok(Type::Bool),
             Expr::Missing => Ok(Type::Missing),
+            Expr::Column { name, line, col } => Err(HelixError::new(
+                format!("`@{name}` is a column reference, only valid inside a DataFrame operation"),
+                *line,
+                *col,
+            )
+            .hint("use `@column` inside a verb like `df.where(...)`, `df.select(...)`, or `df.group(...)`.")),
             Expr::Interp(parts) => {
                 // Type-check every embedded expression (so `"{undefined}"` errors),
                 // then the whole thing is a String.

@@ -13,8 +13,8 @@ print("columns:", variants.columns())
 # The killer demo: filter by gene, group by consequence, count — pure tabular verbs.
 # (`count(pos)` counts variants per group; `pos` is always present.)
 print("--- BRCA1 variants by consequence ---")
-print(variants.where(gene == "BRCA1").group(consequence).count(pos))
+print(variants.where(@gene == "BRCA1").group(@consequence).count(@pos))
 
 # Fixed and INFO columns mix freely.
 print("--- high-quality variants (qual > 50) ---")
-print(variants.where(qual > 50).select(chrom, pos, gene))
+print(variants.where(@qual > 50).select(@chrom, @pos, @gene))

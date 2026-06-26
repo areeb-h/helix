@@ -19,4 +19,4 @@ back = to_dataframe(pl.concat([df]))
 
 # `back` is a real Helix DataFrame — the existing lazy verbs work on it.
 print("over-40 patients:")
-print(back.where(age > 40).sort(age).select(name))
+print(back.where(@age > 40).sort(@age).select(@name))
