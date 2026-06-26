@@ -250,6 +250,12 @@ pub struct LinFit {
     pub r_squared: f64,
     pub slope_std_error: f64,
     pub slope_p_value: f64,
+    /// Residual sum of squares — exposed for model selection (MDL/AIC/BIC).
+    pub rss: f64,
+    /// Fitted values `ŷ = intercept + slope·x`, aligned with the inputs.
+    pub predictions: Vec<f64>,
+    /// `y − ŷ`, aligned with the inputs.
+    pub residuals: Vec<f64>,
 }
 
 /// Ordinary least-squares fit of `y = intercept + slope * x`, with the slope's
@@ -292,7 +298,18 @@ pub fn linear_regression(xs: &[f64], ys: &[f64]) -> Option<LinFit> {
         let df = n as f64 - 2.0;
         betai(df / 2.0, 0.5, df / (df + t * t))
     };
-    Some(LinFit { slope, intercept, r_squared, slope_std_error, slope_p_value })
+    let predictions: Vec<f64> = xs.iter().map(|&x| intercept + slope * x).collect();
+    let residuals: Vec<f64> = ys.iter().zip(&predictions).map(|(&y, &p)| y - p).collect();
+    Some(LinFit {
+        slope,
+        intercept,
+        r_squared,
+        slope_std_error,
+        slope_p_value,
+        rss,
+        predictions,
+        residuals,
+    })
 }
 
 /// The result of an ordinary least-squares multiple regression `y ~ x1 + x2 + ...`.
@@ -304,6 +321,12 @@ pub struct MultiFit {
     pub p_values: Vec<f64>,
     pub r_squared: f64,
     pub adj_r_squared: f64,
+    /// Residual sum of squares — exposed for model selection (MDL/AIC/BIC).
+    pub rss: f64,
+    /// Fitted values `ŷ = X·β`, aligned with the inputs.
+    pub predictions: Vec<f64>,
+    /// `y − ŷ`, aligned with the inputs.
+    pub residuals: Vec<f64>,
 }
 
 /// Invert a square matrix by Gauss-Jordan elimination with partial pivoting. Returns
@@ -355,14 +378,33 @@ fn invert(m: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
 /// predictor, fewer observations than parameters plus one, a length mismatch, a
 /// constant response, or collinear predictors (a singular `XᵀX`).
 pub fn multiple_regression(predictors: &[Vec<f64>], y: &[f64]) -> Option<MultiFit> {
+    multiple_regression_opt(predictors, y, true)
+}
+
+/// As [`multiple_regression`], but `intercept` controls whether a constant term is
+/// added. With `intercept = false` the fit passes through the origin and the
+/// coefficients map one-to-one to the supplied predictors (so a user-supplied
+/// constant column won't collide with an auto-intercept).
+pub fn multiple_regression_opt(
+    predictors: &[Vec<f64>],
+    y: &[f64],
+    intercept: bool,
+) -> Option<MultiFit> {
     let n = y.len();
     let p = predictors.len();
-    let k = p + 1; // parameters, including the intercept
-    if p == 0 || n <= k || predictors.iter().any(|c| c.len() != n) {
+    let k = if intercept { p + 1 } else { p }; // parameters fit
+    if p == 0 || k == 0 || n <= k || predictors.iter().any(|c| c.len() != n) {
         return None;
     }
-    // X[i][j]: column 0 is the intercept (all ones), columns 1..=p are the predictors.
-    let xij = |i: usize, j: usize| if j == 0 { 1.0 } else { predictors[j - 1][i] };
+    // X[i][j]: with an intercept, column 0 is all-ones and 1..=p are predictors;
+    // without, columns 0..p are the predictors directly.
+    let xij = |i: usize, j: usize| {
+        if intercept {
+            if j == 0 { 1.0 } else { predictors[j - 1][i] }
+        } else {
+            predictors[j][i]
+        }
+    };
     // Normal equations: XᵀX (k×k) and Xᵀy (k).
     let mut xtx = vec![vec![0.0; k]; k];
     let mut xty = vec![0.0; k];
@@ -376,13 +418,11 @@ pub fn multiple_regression(predictors: &[Vec<f64>], y: &[f64]) -> Option<MultiFi
     let beta: Vec<f64> = (0..k)
         .map(|a| (0..k).map(|b| inv[a][b] * xty[b]).sum())
         .collect();
-    // Residual and total sums of squares.
-    let rss: f64 = (0..n)
-        .map(|i| {
-            let yhat: f64 = (0..k).map(|j| beta[j] * xij(i, j)).sum();
-            (y[i] - yhat).powi(2)
-        })
-        .sum();
+    // Fitted values, residuals, and the residual sum of squares.
+    let predictions: Vec<f64> =
+        (0..n).map(|i| (0..k).map(|j| beta[j] * xij(i, j)).sum()).collect();
+    let residuals: Vec<f64> = (0..n).map(|i| y[i] - predictions[i]).collect();
+    let rss: f64 = residuals.iter().map(|r| r * r).sum();
     let ybar = mean(y);
     let tss: f64 = y.iter().map(|v| (v - ybar).powi(2)).sum();
     if tss == 0.0 {
@@ -405,7 +445,16 @@ pub fn multiple_regression(predictors: &[Vec<f64>], y: &[f64]) -> Option<MultiFi
         std_errors.push(se);
         p_values.push(pv);
     }
-    Some(MultiFit { coefficients: beta, std_errors, p_values, r_squared, adj_r_squared })
+    Some(MultiFit {
+        coefficients: beta,
+        std_errors,
+        p_values,
+        r_squared,
+        adj_r_squared,
+        rss,
+        predictions,
+        residuals,
+    })
 }
 
 #[cfg(test)]

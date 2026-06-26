@@ -268,26 +268,31 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                     return Err(type_err(name, "an array of numbers", a, line, col));
                 }
             }
+            let nums = || Type::Array(Box::new(Type::Float));
             Ok(Type::Record(vec![
                 ("slope".to_string(), Type::Float),
                 ("intercept".to_string(), Type::Float),
                 ("r_squared".to_string(), Type::Float),
                 ("slope_std_error".to_string(), Type::Float),
                 ("slope_p_value".to_string(), Type::Float),
+                ("rss".to_string(), Type::Float),
+                ("predictions".to_string(), nums()),
+                ("residuals".to_string(), nums()),
             ]))
         }
         "multiple_regression" => {
-            if args.len() != 2 {
+            if args.len() < 2 || args.len() > 3 {
                 return Err(arity_err(name, 2, args.len(), line, col));
             }
-            if any(args, |t| matches!(t, Type::Unknown)) {
+            // The first two args (predictors, y) drive the result; an optional 3rd is
+            // the boolean `intercept` flag (validated at runtime).
+            if any(&args[..2], |t| matches!(t, Type::Unknown)) {
                 return Ok(Type::Unknown);
             }
-            if any(args, |t| matches!(t, Type::Missing)) {
+            if any(&args[..2], |t| matches!(t, Type::Missing)) {
                 return Ok(Type::Missing);
             }
-            // First arg: an array of predictor arrays. Second: the response array.
-            for a in args {
+            for a in &args[..2] {
                 if !matches!(a, Type::Array(_)) {
                     return Err(type_err(name, "an array", a, line, col));
                 }
@@ -299,6 +304,9 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 ("p_values".to_string(), nums()),
                 ("r_squared".to_string(), Type::Float),
                 ("adj_r_squared".to_string(), Type::Float),
+                ("rss".to_string(), Type::Float),
+                ("predictions".to_string(), nums()),
+                ("residuals".to_string(), nums()),
             ]))
         }
         "to_array" => {

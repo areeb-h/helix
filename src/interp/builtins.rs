@@ -531,6 +531,7 @@ impl super::Interp {
                         col,
                     ));
                 }
+                let floats = |xs: Vec<f64>| Value::float_array(xs);
                 match crate::stats::linear_regression(&xs, &ys) {
                     Some(f) => {
                         let fields = vec![
@@ -539,6 +540,9 @@ impl super::Interp {
                             (Symbol::intern("r_squared"), Value::Float(f.r_squared)),
                             (Symbol::intern("slope_std_error"), Value::Float(f.slope_std_error)),
                             (Symbol::intern("slope_p_value"), Value::Float(f.slope_p_value)),
+                            (Symbol::intern("rss"), Value::Float(f.rss)),
+                            (Symbol::intern("predictions"), floats(f.predictions)),
+                            (Symbol::intern("residuals"), floats(f.residuals)),
                         ];
                         Ok(Value::Record(Rc::new(fields)))
                     }
@@ -551,21 +555,32 @@ impl super::Interp {
                 }
             }
             "multiple_regression" => {
-                arity(name, &args, 2, line, col)?;
-                // OLS fit of `y` on several predictor columns. The first argument is an
-                // array of predictor arrays; the second is the response. `missing`
-                // anywhere propagates. The result's coefficients/std_errors/p_values are
-                // parameter-indexed arrays (index 0 is the intercept).
+                // OLS fit of `y` on several predictor columns. args: (predictors, y)
+                // with an optional 3rd boolean `intercept` (default true). `missing`
+                // anywhere propagates. coefficients/std_errors/p_values are
+                // parameter-indexed arrays (with an intercept, index 0 is it).
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(HelixError::new(
+                        format!("`multiple_regression` takes (predictors, y[, intercept]), got {}", args.len()),
+                        line,
+                        col,
+                    ));
+                }
+                let with_intercept = match args.get(2) {
+                    None => true,
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return Err(type_err("multiple_regression", "a boolean `intercept` flag", other, line, col));
+                    }
+                };
                 let preds = num_arrays(name, &args[0], line, col)?;
                 let y = num_array(name, &args[1], line, col)?;
                 let (preds, y) = match (preds, y) {
                     (Some(preds), Some(y)) => (preds, y),
                     _ => return Ok(Value::Missing),
                 };
-                let floats = |xs: Vec<f64>| {
-                    Value::array(xs.into_iter().map(Value::Float).collect())
-                };
-                match crate::stats::multiple_regression(&preds, &y) {
+                let floats = |xs: Vec<f64>| Value::float_array(xs);
+                match crate::stats::multiple_regression_opt(&preds, &y, with_intercept) {
                     Some(f) => {
                         let fields = vec![
                             (Symbol::intern("coefficients"), floats(f.coefficients)),
@@ -573,6 +588,9 @@ impl super::Interp {
                             (Symbol::intern("p_values"), floats(f.p_values)),
                             (Symbol::intern("r_squared"), Value::Float(f.r_squared)),
                             (Symbol::intern("adj_r_squared"), Value::Float(f.adj_r_squared)),
+                            (Symbol::intern("rss"), Value::Float(f.rss)),
+                            (Symbol::intern("predictions"), floats(f.predictions)),
+                            (Symbol::intern("residuals"), floats(f.residuals)),
                         ];
                         Ok(Value::Record(Rc::new(fields)))
                     }
