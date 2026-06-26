@@ -1016,6 +1016,37 @@ impl Parser {
                             "min_by" | "max_by" | "argmin" | "argmax" => {
                                 desugar_order_by(e, &name, args, l, c)?
                             }
+                            // `a.zipmap(b, f)` == `a.zip(b).map(f)` — a paired
+                            // elementwise map, desugared so both engines reuse the
+                            // tested zip+map (parity by construction). For plain
+                            // arithmetic, prefer broadcast (`a * b`, `sin(a) + b`).
+                            "zipmap" => {
+                                if args.len() != 2 {
+                                    return Err(HelixError::new(
+                                        format!("`zipmap` takes (other, fn), got {} arguments", args.len()),
+                                        l,
+                                        c,
+                                    )
+                                    .hint("e.g. `xs.zipmap(ys, (x, y) => x + y)`."));
+                                }
+                                let mut it = args.into_iter();
+                                let other = it.next().unwrap();
+                                let f = it.next().unwrap();
+                                let zipped = Expr::Method {
+                                    recv: Box::new(e),
+                                    name: "zip".into(),
+                                    args: vec![other],
+                                    line: l,
+                                    col: c,
+                                };
+                                Expr::Method {
+                                    recv: Box::new(zipped),
+                                    name: "map".into(),
+                                    args: vec![f],
+                                    line: l,
+                                    col: c,
+                                }
+                            }
                             _ => Expr::Method {
                                 recv: Box::new(e),
                                 name,

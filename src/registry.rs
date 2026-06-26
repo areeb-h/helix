@@ -127,7 +127,7 @@ pub static ARRAY_METHODS: &[&str] = &[
     "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count",
     "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
     "all", "take", "drop", "zip", "enumerate", "top", "frequencies", "unique", "drop_missing",
-    "join", "concat", "flatten", "min_by", "max_by", "argmin", "argmax", "zscores", "iqr",
+    "join", "concat", "flatten", "min_by", "max_by", "argmin", "argmax", "zipmap", "zscores", "iqr",
     "spread", "standard_error", "coefficient_of_variation", "dot", "norm", "cumsum", "product",
     "argsort", "clamp", "softmax", "bootstrap", "contains", "mean_gc",
     "total_length", "bar_chart", "histogram", "line_chart", "sparkline", "scatter", "svg_bar",

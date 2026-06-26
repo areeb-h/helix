@@ -182,6 +182,15 @@
     }
 
     #[test]
+    fn zipmap_pairs_two_arrays() {
+        // a.zipmap(b, f) == a.zip(b).map(f) — paired elementwise map
+        assert!(matches!(last("[1, 2, 3].zipmap([10, 20, 30], (x, y) => x * y)[1]").unwrap(), Value::Int(40)));
+        assert!(matches!(last("[1, 2, 3].zipmap([10, 20, 30], (x, y) => x + y).sum()").unwrap(), Value::Int(66)));
+        // wrong arity is a clear parse-time error
+        assert!(last("[1].zipmap([2])").is_err());
+    }
+
+    #[test]
     fn interpolation_format_specs() {
         let s = |src: &str| -> String {
             match last(src).unwrap() {
