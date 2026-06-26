@@ -62,6 +62,117 @@ pub fn parse_expression(src: &str) -> Result<Expr, HelixError> {
     Ok(e)
 }
 
+/// Desugar `recv.min_by(key)` / `max_by(key)` / `argmin()` / `argmax()` into
+/// existing constructs so both engines handle them with no new ops:
+///
+///   recv.min_by(p => K)  →  let $o = recv.map(p => (K, p))
+///                           in $o.reduce($o[0], ($a, $b) => if $b[0] < $a[0] then $b else $a)[1]
+///   recv.argmin()        →  let $o = recv.enumerate()
+///                           in $o.reduce($o[0], ($a, $b) => if $b[1] < $a[1] then $b else $a)[0]
+///
+/// `min_by`/`max_by` reduce over `(key, element)` pairs and return the element;
+/// `argmin`/`argmax` reduce over `(index, value)` pairs and return the index.
+fn desugar_order_by(
+    recv: Expr,
+    name: &str,
+    mut args: Vec<Expr>,
+    line: usize,
+    col: usize,
+) -> Result<Expr, HelixError> {
+    use crate::ast::BinOp;
+    let by = name == "min_by" || name == "max_by";
+    let op = if name == "min_by" || name == "argmin" { BinOp::Lt } else { BinOp::Gt };
+
+    let ident = |n: &str| Expr::Ident { name: n.to_string(), line, col };
+    let index = |e: Expr, i: i64| Expr::Index {
+        recv: Box::new(e),
+        index: Box::new(Expr::Int(i)),
+        line,
+        col,
+    };
+
+    // The source array of comparison pairs, and which slot is the key vs. the result.
+    let (src, key_idx, ret_idx) = if by {
+        // `min_by`/`max_by(key)` — extract the key body (`p => K` or implicit `it`).
+        let (param, key) = match args.len() {
+            1 => match args.pop().unwrap() {
+                Expr::Lambda { params, body } if params.len() == 1 => {
+                    (params[0].clone(), *body)
+                }
+                Expr::Lambda { .. } => {
+                    return Err(HelixError::new(
+                        format!("`{name}` takes a one-argument key function"),
+                        line,
+                        col,
+                    )
+                    .hint("e.g. `rows.min_by(r => r.score)` or `xs.min_by(it * it)`."))
+                }
+                other => ("it".to_string(), other),
+            },
+            _ => {
+                return Err(HelixError::new(
+                    format!("`{name}` takes exactly one key function"),
+                    line,
+                    col,
+                )
+                .hint("e.g. `rows.min_by(r => r.score)`."))
+            }
+        };
+        let pair = Expr::Tuple(vec![key, ident(&param)]);
+        let map = Expr::Method {
+            recv: Box::new(recv),
+            name: "map".to_string(),
+            args: vec![Expr::Lambda { params: vec![param], body: Box::new(pair) }],
+            line,
+            col,
+        };
+        (map, 0, 1)
+    } else {
+        // `argmin`/`argmax()` — pairs are `(index, value)` from `enumerate`.
+        if !args.is_empty() {
+            return Err(HelixError::new(format!("`{name}` takes no arguments"), line, col)
+                .hint("use `min_by`/`max_by` to order by a key."));
+        }
+        let enumd = Expr::Method {
+            recv: Box::new(recv),
+            name: "enumerate".to_string(),
+            args: vec![],
+            line,
+            col,
+        };
+        (enumd, 1, 0)
+    };
+
+    // ($a, $b) => if $b[key] OP $a[key] then $b else $a
+    let cmp = Expr::Lambda {
+        params: vec!["$ob_a".to_string(), "$ob_b".to_string()],
+        body: Box::new(Expr::If {
+            cond: Box::new(Expr::Binary {
+                op,
+                left: Box::new(index(ident("$ob_b"), key_idx)),
+                right: Box::new(index(ident("$ob_a"), key_idx)),
+                line,
+                col,
+            }),
+            then_branch: Box::new(ident("$ob_b")),
+            else_branch: Box::new(ident("$ob_a")),
+            line,
+            col,
+        }),
+    };
+    let reduced = Expr::Method {
+        recv: Box::new(ident("$ob")),
+        name: "reduce".to_string(),
+        args: vec![index(ident("$ob"), 0), cmp],
+        line,
+        col,
+    };
+    Ok(Expr::Let {
+        bindings: vec![("$ob".to_string(), src)],
+        body: Box::new(index(reduced, ret_idx)),
+    })
+}
+
 const TYPE_NAMES: &[&str] = &[
     "Int", "Float", "Num", "String", "Bool", "Array", "Tensor", "DataFrame", "Dna",
 ];
@@ -831,12 +942,20 @@ impl Parser {
                             .hint("pass method arguments positionally."));
                         }
                         self.eat(&Tok::RParen, "to close the argument list")?;
-                        e = Expr::Method {
-                            recv: Box::new(e),
-                            name,
-                            args,
-                            line: l,
-                            col: c,
+                        // `min_by`/`max_by`/`argmin`/`argmax` are sugar — desugared here
+                        // into `map`/`enumerate` + `reduce` + index, so both engines get
+                        // them for free (no new ops, parity by construction).
+                        e = match name.as_str() {
+                            "min_by" | "max_by" | "argmin" | "argmax" => {
+                                desugar_order_by(e, &name, args, l, c)?
+                            }
+                            _ => Expr::Method {
+                                recv: Box::new(e),
+                                name,
+                                args,
+                                line: l,
+                                col: c,
+                            },
                         };
                     } else {
                         e = Expr::Field {
@@ -1200,7 +1319,12 @@ impl Parser {
                     match seg {
                         StrSeg::Lit(t) => parts.push(InterpPart::Lit(t)),
                         StrSeg::Expr(src) => {
-                            let e = parse_expression(&src)?;
+                            // The fragment is lexed+parsed as its own snippet, so any
+                            // error inside it carries snippet-relative positions (line 1).
+                            // Relocate it to the interpolated string's real position so
+                            // the caret points at the user's actual source, not line 1.
+                            let e = parse_expression(&src)
+                                .map_err(|err| HelixError { line: l, col: c, ..err })?;
                             parts.push(InterpPart::Expr(Box::new(e)));
                         }
                     }

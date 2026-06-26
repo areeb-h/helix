@@ -120,6 +120,39 @@
     }
 
     #[test]
+    fn array_concat_and_flatten() {
+        assert!(matches!(last("[1, 2].concat([3, 4], [5]).sum()").unwrap(), Value::Int(15)));
+        assert!(matches!(last("[[1, 2], [3, 4]].flatten().sum()").unwrap(), Value::Int(10)));
+        // flatten keeps inner arrays when used as grouping (one level only)
+        assert!(matches!(last("[[[1]], [[2], [3]]].flatten().count()").unwrap(), Value::Int(3)));
+    }
+
+    #[test]
+    fn order_by_methods_desugar() {
+        // min_by/max_by over records by a key (the common "best row" pattern)
+        assert!(matches!(
+            last("[{k: 3}, {k: 1}, {k: 2}].min_by(r => r.k).k").unwrap(),
+            Value::Int(1)
+        ));
+        assert!(matches!(
+            last("[{k: 3}, {k: 1}, {k: 2}].max_by(r => r.k).k").unwrap(),
+            Value::Int(3)
+        ));
+        // implicit `it`, and argmin/argmax return indices
+        assert!(matches!(last("[5, 2, 8, 1].min_by(it)").unwrap(), Value::Int(1)));
+        assert!(matches!(last("[5, 2, 8, 1].argmin()").unwrap(), Value::Int(3)));
+        assert!(matches!(last("[5, 2, 8, 1].argmax()").unwrap(), Value::Int(2)));
+    }
+
+    #[test]
+    fn interpolation_error_points_at_the_real_line() {
+        // A bad interpolation fragment used to report line 1 (the snippet); it must
+        // now point at the line of the string in the original source.
+        let err = last("x = 1\ny = 2\nprint(\"bad {a : b}\")").unwrap_err();
+        assert_eq!(err.line, 3, "interpolation error should be on line 3, got {}", err.line);
+    }
+
+    #[test]
     fn min_max_sort_are_exact_above_2_to_53() {
         // Two distinct i64 just above 2^53 share one f64. The boxed reduction path
         // must compare them exactly (not via f64), or it picks the wrong element and
