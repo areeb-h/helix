@@ -17,7 +17,7 @@
 use std::io::BufRead;
 
 use crate::backend::ColData;
-use crate::error::HelixError;
+use crate::error::{reserve_rows, HelixError};
 use crate::vcf::open_maybe_gzip;
 
 pub fn read_bed(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, HelixError> {
@@ -64,6 +64,11 @@ pub fn read_bed(path: &str, line: usize, col: usize) -> Result<crate::backend::D
                 i + 1
             )));
         }
+        reserve_rows!(
+            "BED records", line, col,
+            chrom, start, end, name, score, strand,
+            thick_start, thick_end, item_rgb, block_count, block_sizes, block_starts,
+        );
         chrom.push(f[0].to_string());
         start.push(
             f[1].parse::<i64>().map_err(|_| err(format!("invalid BED start: `{}`", f[1])))?,

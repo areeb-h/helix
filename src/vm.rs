@@ -588,6 +588,19 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             vi += 1;
                         }
                     }
+                    // Mirror the tree-walker's cap so a doubling loop errors cleanly
+                    // and identically on both engines (parity) instead of aborting.
+                    if s.len() > crate::interp::MAX_STRING_LEN {
+                        return Err(HelixError::new(
+                            format!(
+                                "interpolated string exceeds {} bytes",
+                                crate::interp::MAX_STRING_LEN
+                            ),
+                            line,
+                            col,
+                        )
+                        .hint("build large text incrementally or write it to a file instead."));
+                    }
                 }
                 stack.push(Value::Str(std::rc::Rc::new(s)));
             }

@@ -39,11 +39,17 @@ pub fn read_fasta(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
         let seq: String = rec.seq().iter().map(|b| b.to_ascii_uppercase() as char).collect();
         let length = seq.len() as i64;
 
-        records.push(Value::Record(Rc::new(vec![
-            (k_id, Value::Str(Rc::new(id))),
-            (k_seq, Value::Dna(Rc::new(seq))),
-            (k_length, Value::Int(length)),
-        ])));
+        crate::error::try_push(
+            &mut records,
+            Value::Record(Rc::new(vec![
+                (k_id, Value::Str(Rc::new(id))),
+                (k_seq, Value::Dna(Rc::new(seq))),
+                (k_length, Value::Int(length)),
+            ])),
+            "FASTA records",
+            line,
+            col,
+        )?;
     }
     Ok(Value::array(records))
 }
@@ -80,12 +86,18 @@ pub fn read_fastq(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
             None => Value::Missing,
         };
 
-        records.push(Value::Record(Rc::new(vec![
-            (k_id, Value::Str(Rc::new(id))),
-            (k_seq, Value::Dna(Rc::new(seq))),
-            (k_qual, qual),
-            (k_length, Value::Int(length)),
-        ])));
+        crate::error::try_push(
+            &mut records,
+            Value::Record(Rc::new(vec![
+                (k_id, Value::Str(Rc::new(id))),
+                (k_seq, Value::Dna(Rc::new(seq))),
+                (k_qual, qual),
+                (k_length, Value::Int(length)),
+            ])),
+            "FASTQ records",
+            line,
+            col,
+        )?;
     }
     Ok(Value::array(records))
 }

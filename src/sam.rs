@@ -29,7 +29,7 @@ use noodles_sam::{
 };
 
 use crate::backend::ColData;
-use crate::error::HelixError;
+use crate::error::{reserve_rows, HelixError};
 
 /// `read_sam(path)` — parse a (optionally gzip-compressed) text SAM file.
 pub fn read_sam(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, HelixError> {
@@ -133,6 +133,10 @@ where
         let rec =
             result.map_err(|e| err(format!("malformed {format} record in `{path}`: {e}")))?;
 
+        reserve_rows!(
+            "SAM/BAM records", line, col,
+            name, flag, ref_, pos, mapq, cigar, rnext, pnext, tlen, seq, qual,
+        );
         name.push(rec.name().map(|n| n.to_string()));
         flag.push(u16::from(rec.flags()) as i64);
         ref_.push(ref_name(header, rec.reference_sequence_id()));

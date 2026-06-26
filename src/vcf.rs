@@ -33,7 +33,7 @@ use noodles_core::Region;
 use noodles_vcf::{self as vcf, header::record::value::map::info::{Number, Type as InfoType}};
 
 use crate::backend::ColData;
-use crate::error::HelixError;
+use crate::error::{reserve_rows, HelixError};
 
 /// Open `path` as a buffered byte stream, transparently decompressing gzip/BGZF.
 /// BGZF (what `bgzip` produces for `.vcf.gz`) is a concatenation of gzip members,
@@ -186,6 +186,10 @@ where
         let rec =
             result.map_err(|e| err(format!("malformed {format} record in `{path}`: {e}")))?;
 
+        reserve_rows!(
+            "VCF records", line, col,
+            chrom, pos, id, ref_, alt, qual, filter, info_rows,
+        );
         chrom.push(rec.reference_sequence_name().to_string());
         pos.push(rec.variant_start().map(|p| usize::from(p) as i64));
         id.push(join_opt(rec.ids().as_ref().iter().map(|s| s.to_string()), ';'));

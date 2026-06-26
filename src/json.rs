@@ -10,15 +10,29 @@ use std::rc::Rc;
 use crate::symbol::Symbol;
 use crate::value::Value;
 
+/// Upper bound on the number of Helix values a single `parse_json` may
+/// materialize — matches the interpreter's other collection caps (range, tensor).
+/// serde already bounds nesting depth (128 levels), so this guards total width:
+/// a multi-GB array/object can't silently turn into an out-of-memory abort.
+const MAX_ELEMENTS: usize = 100_000_000;
+
 /// Parse a JSON string into a Helix value.
 pub fn parse(s: &str) -> Result<Value, String> {
     let v: serde_json::Value = serde_json::from_str(s).map_err(|e| format!("invalid JSON: {e}"))?;
-    Ok(from_serde(v))
+    let mut budget = MAX_ELEMENTS;
+    from_serde(v, &mut budget)
 }
 
-fn from_serde(v: serde_json::Value) -> Value {
+/// Convert one serde node, decrementing `budget` per Helix value produced and
+/// failing cleanly once the document would exceed [`MAX_ELEMENTS`] (instead of
+/// allocating until the allocator aborts).
+fn from_serde(v: serde_json::Value, budget: &mut usize) -> Result<Value, String> {
     use serde_json::Value as J;
-    match v {
+    if *budget == 0 {
+        return Err(format!("JSON has too many elements (limit {MAX_ELEMENTS})"));
+    }
+    *budget -= 1;
+    Ok(match v {
         J::Null => Value::Missing,
         J::Bool(b) => Value::Bool(b),
         J::Number(n) => match n.as_i64() {
@@ -26,15 +40,27 @@ fn from_serde(v: serde_json::Value) -> Value {
             None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
         },
         J::String(s) => Value::Str(Rc::new(s)),
-        J::Array(xs) => Value::array(xs.into_iter().map(from_serde).collect()),
-        // JSON objects become records; keys are arbitrary strings (identifier keys
-        // are reachable as `r.field`).
-        J::Object(map) => {
-            Value::Record(Rc::new(
-                map.into_iter().map(|(k, v)| (Symbol::intern(&k), from_serde(v))).collect(),
-            ))
+        J::Array(xs) => {
+            let mut out = Vec::with_capacity(xs.len().min(*budget));
+            for x in xs {
+                out.push(from_serde(x, budget)?);
+            }
+            Value::array(out)
         }
-    }
+        // JSON objects become records; keys are arbitrary strings (identifier keys
+        // are reachable as `r.field`). Keys are interned, so cap distinct keys too —
+        // a file of millions of unique keys would otherwise leak the interner.
+        J::Object(map) => {
+            let mut fields = Vec::with_capacity(map.len().min(*budget));
+            for (k, v) in map {
+                let key = Symbol::try_intern(&k).ok_or_else(|| {
+                    "JSON has too many distinct field names to intern".to_string()
+                })?;
+                fields.push((key, from_serde(v, budget)?));
+            }
+            Value::Record(Rc::new(fields))
+        }
+    })
 }
 
 /// Serialize a Helix value to a JSON string.

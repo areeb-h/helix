@@ -18,15 +18,24 @@
 //! are deterministic within a single program run; because every user-visible path
 //! resolves back to text, the particular integers never leak into output.
 
-use std::sync::{LazyLock, RwLock};
+use std::sync::{LazyLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use rustc_hash::FxHashMap;
 
+/// Hard ceiling on the number of distinct interned names. The interner is
+/// append-only and leaked, so without a cap a stream of distinct runtime-dynamic
+/// keys (e.g. `parse_json` over a file with millions of unique object keys) would
+/// grow process memory without bound. 50M is far above any real program — source
+/// identifiers and method names number in the thousands — so the cap is invisible
+/// in practice and only ever trips on adversarial input.
+const MAX_SYMBOLS: usize = 50_000_000;
+
 /// An interned name. Two `Symbol`s are equal iff they were interned from equal
 /// text, so equality and hashing are a single `u32` op. Recover the text with
-/// [`Symbol::as_str`].
+/// [`Symbol::as_str`]. The field is private so a `Symbol` can only come from the
+/// interner — an out-of-range value can never be forged.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Symbol(pub u32);
+pub struct Symbol(u32);
 
 struct Interner {
     /// Text -> symbol, for deduplication. Keys are the leaked `&'static str`s,
@@ -39,40 +48,75 @@ struct Interner {
 static INTERNER: LazyLock<RwLock<Interner>> =
     LazyLock::new(|| RwLock::new(Interner { map: FxHashMap::default(), names: Vec::new() }));
 
+/// Read the interner, recovering from a poisoned lock. The table is append-only —
+/// a panic mid-insert can leave at most one half-written entry, never an invariant
+/// a reader depends on — so recovering the guard is safe and avoids a poison
+/// cascade taking down the whole process.
+fn read_interner() -> RwLockReadGuard<'static, Interner> {
+    INTERNER.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write_interner() -> RwLockWriteGuard<'static, Interner> {
+    INTERNER.write().unwrap_or_else(|e| e.into_inner())
+}
+
 impl Symbol {
+    /// The symbol handed back when the interner is full ([`MAX_SYMBOLS`]). It has
+    /// no backing text, so [`Symbol::as_str`] resolves it to `"<overflow>"`.
+    const OVERFLOW: Symbol = Symbol(u32::MAX);
+
     /// Intern `text`, returning its `Symbol` — the same one for equal text. Cold
     /// path: call it at parse/compile time or when a dynamic key first appears,
-    /// never inside a hot loop.
+    /// never inside a hot loop. Past the [`MAX_SYMBOLS`] cap a *new* name collapses
+    /// to [`Symbol::OVERFLOW`] rather than growing memory; callers that must reject
+    /// over-cap input cleanly (e.g. `parse_json`) use [`Symbol::try_intern`].
     pub fn intern(text: &str) -> Symbol {
+        Symbol::try_intern(text).unwrap_or(Symbol::OVERFLOW)
+    }
+
+    /// Like [`Symbol::intern`], but returns `None` instead of an overflow sentinel
+    /// when the interner is at the [`MAX_SYMBOLS`] cap and `text` is new — letting
+    /// a runtime-dynamic ingest path (JSON keys) surface a clean error.
+    pub fn try_intern(text: &str) -> Option<Symbol> {
         // Fast path: already interned (a read lock, no allocation).
-        if let Some(&sym) = INTERNER.read().unwrap().map.get(text) {
-            return sym;
+        if let Some(&sym) = read_interner().map.get(text) {
+            return Some(sym);
         }
         // Slow path: insert under the write lock, re-checking in case another
         // thread interned it between the two locks.
-        let mut g = INTERNER.write().unwrap();
+        let mut g = write_interner();
         if let Some(&sym) = g.map.get(text) {
-            return sym;
+            return Some(sym);
+        }
+        if g.names.len() >= MAX_SYMBOLS {
+            return None;
         }
         // Leak the text so its lifetime is the process — a `Symbol` then never
-        // dangles and `as_str` needs no guard. Names are bounded by program size.
+        // dangles and `as_str` needs no guard. Names are bounded by the cap.
         let leaked: &'static str = Box::leak(text.to_owned().into_boxed_str());
         let sym = Symbol(g.names.len() as u32);
         g.names.push(leaked);
         g.map.insert(leaked, sym);
-        sym
+        Some(sym)
     }
 
     /// The `Symbol` for `text` **only if it has already been interned** — never
     /// inserts. Used for `r["key"]` lookups so a missing/typo key (which yields
     /// `missing`) doesn't pollute the interner with junk in a loop.
     pub fn lookup(text: &str) -> Option<Symbol> {
-        INTERNER.read().unwrap().map.get(text).copied()
+        read_interner().map.get(text).copied()
     }
 
     /// The text this symbol was interned from. Cold path (display, errors, JSON).
+    /// A `Symbol` is always in range (the field is private and only the interner
+    /// mints one), but resolve defensively — `get().unwrap_or(...)` — so a stray or
+    /// overflow symbol yields a placeholder string instead of panicking *inside the
+    /// read guard* and poisoning the lock.
     pub fn as_str(self) -> &'static str {
-        INTERNER.read().unwrap().names[self.0 as usize]
+        if self == Symbol::OVERFLOW {
+            return "<overflow>";
+        }
+        read_interner().names.get(self.0 as usize).copied().unwrap_or("<unknown-symbol>")
     }
 }
 
@@ -112,6 +156,16 @@ mod tests {
         let s = Symbol::intern("BRCA1");
         assert_eq!(s.as_str(), "BRCA1");
         assert_eq!(s.to_string(), "BRCA1");
+    }
+
+    #[test]
+    fn overflow_symbol_resolves_without_panicking() {
+        // The overflow sentinel has no backing entry; `as_str` must still resolve
+        // it (to a placeholder) rather than index out of range inside the guard.
+        assert_eq!(Symbol::OVERFLOW.as_str(), "<overflow>");
+        assert_eq!(Symbol::OVERFLOW.to_string(), "<overflow>");
+        // `intern` is total — it never returns an unresolvable symbol.
+        assert_eq!(Symbol::intern("anything").as_str(), "anything");
     }
 
     #[test]

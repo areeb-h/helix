@@ -665,6 +665,7 @@ fn string_method(
                 return Err(HelixError::new("`split` separator cannot be empty", line, col)
                     .hint("split on a non-empty string, e.g. `s.split(\",\")`."));
             }
+            window_count_guard("split", s.matches(sep).count() + 1, line, col)?;
             let parts: Vec<Value> =
                 s.split(sep).map(|p| Value::Str(Rc::new(p.to_string()))).collect();
             Ok(Value::array(parts))
@@ -809,6 +810,7 @@ fn dna_method(
             let chars: Vec<char> = s.chars().collect();
             let mut out = Vec::new();
             if k <= chars.len() {
+                window_count_guard("kmers", chars.len() - k + 1, line, col)?;
                 for w in chars.windows(k) {
                     if w.iter().all(|c| is_acgt(*c)) {
                         out.push(Value::Str(Rc::new(w.iter().collect())));
@@ -824,7 +826,9 @@ fn dna_method(
             let chars: Vec<char> = s.chars().collect();
             let mut out = Vec::new();
             if k <= chars.len() {
-                out.reserve(chars.len() - k + 1);
+                let count = chars.len() - k + 1;
+                window_count_guard("windows", count, line, col)?;
+                out.reserve(count);
                 for w in chars.windows(k) {
                     out.push(Value::Str(Rc::new(w.iter().collect())));
                 }
@@ -1011,6 +1015,24 @@ fn revcomp_code(mut code: u64, k: usize) -> u64 {
 }
 
 /// Parse the single positive-length argument shared by `kmers`/`windows`.
+/// The shared upper bound on a user-controllable output element count (matches the
+/// `range` cap). Past this, an op errors cleanly rather than OOM-aborting.
+pub(crate) const MAX_ELEMENTS: usize = 100_000_000;
+
+/// Guard the number of substrings a `kmers`/`windows`/`split` call would emit, so a
+/// huge input errors cleanly instead of allocating tens of GB of `Value::Str`.
+fn window_count_guard(name: &str, count: usize, line: usize, col: usize) -> Result<(), HelixError> {
+    if count > MAX_ELEMENTS {
+        return Err(HelixError::new(
+            format!("`{name}` would produce {count} substrings, too many to hold in memory"),
+            line,
+            col,
+        )
+        .hint("use a longer k, a shorter input, or `kmer_counts(k)` for the spectrum."));
+    }
+    Ok(())
+}
+
 fn kmer_k(name: &str, args: &[Value], line: usize, col: usize) -> Result<usize, HelixError> {
     arity(name, args, 1, line, col)?;
     let k = as_int(&args[0], name, line, col)?;

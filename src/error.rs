@@ -49,6 +49,69 @@ impl HelixError {
     }
 }
 
+/// Push onto a `Vec` with **fallible** allocation. The bio/tabular readers load a
+/// whole file into a `Vec<record>` (no streaming yet), so a multi-GB input would
+/// otherwise grow the vector until the allocator aborts the process. Reserving room
+/// for one more element first turns "out of memory" into a clean, catchable Helix
+/// error. `try_reserve(1)` is amortized O(1) — when capacity already exists it does
+/// nothing, and when it grows it still grows geometrically — so this is as cheap as
+/// a plain `push` on the happy path.
+pub fn try_push<T>(
+    v: &mut Vec<T>,
+    item: T,
+    what: &str,
+    line: usize,
+    col: usize,
+) -> Result<(), HelixError> {
+    v.try_reserve(1).map_err(|_| {
+        HelixError::new(format!("ran out of memory loading {what}"), line, col)
+            .hint("the file is too large to hold in memory; filter or subsample it first.")
+    })?;
+    v.push(item);
+    Ok(())
+}
+
+/// Allocate a `Vec` with capacity for `n` elements using **fallible** allocation,
+/// turning an out-of-memory abort into a clean Helix error. Use where `n` comes
+/// from runtime data (e.g. a DataFrame column sized to an input array) rather than
+/// a small constant.
+pub fn try_with_capacity<T>(
+    n: usize,
+    what: &str,
+    line: usize,
+    col: usize,
+) -> Result<Vec<T>, HelixError> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n).map_err(|_| {
+        HelixError::new(format!("ran out of memory building {what}"), line, col)
+            .hint("the column is too large to materialize; filter or subsample first.")
+    })?;
+    Ok(v)
+}
+
+/// Reserve one slot in each listed column `Vec`, failing cleanly on OOM. The
+/// tabular readers (VCF/SAM/GFF/BED) store columns as parallel vectors that grow
+/// in lockstep, one push each per record. Reserving a slot in *every* column
+/// before any of them pushes means a huge file surfaces as a catchable Helix error
+/// rather than an allocator abort, and leaves all columns the same length on
+/// failure (no half-written row). Cheap on the happy path — `try_reserve(1)` is a
+/// no-op when capacity already exists.
+macro_rules! reserve_rows {
+    ($what:expr, $line:expr, $col:expr, $($v:expr),+ $(,)?) => {{
+        $(
+            $v.try_reserve(1).map_err(|_| {
+                $crate::error::HelixError::new(
+                    format!("ran out of memory loading {}", $what),
+                    $line,
+                    $col,
+                )
+                .hint("the file is too large to hold in memory; filter or subsample it first.")
+            })?;
+        )+
+    }};
+}
+pub(crate) use reserve_rows;
+
 /// Levenshtein edit distance — used to suggest "did you mean ...?".
 pub fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();

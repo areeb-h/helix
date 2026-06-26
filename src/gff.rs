@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use noodles_gff as gff;
 
 use crate::backend::ColData;
-use crate::error::HelixError;
+use crate::error::{reserve_rows, HelixError};
 use crate::vcf::{open_maybe_gzip, widen_f32};
 
 pub fn read_gff(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, HelixError> {
@@ -42,6 +42,10 @@ pub fn read_gff(path: &str, line: usize, col: usize) -> Result<crate::backend::D
     for result in reader.record_bufs() {
         let rec = result.map_err(|e| err(format!("malformed GFF record in `{path}`: {e}")))?;
 
+        reserve_rows!(
+            "GFF records", line, col,
+            seqid, source, ty, start, end, score, strand, phase, attr_rows,
+        );
         seqid.push(rec.reference_sequence_name().to_string());
         source.push(rec.source().to_string());
         ty.push(rec.ty().to_string());

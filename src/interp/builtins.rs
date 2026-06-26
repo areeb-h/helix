@@ -355,7 +355,18 @@ impl super::Interp {
                 if n < 0 {
                     return Err(HelixError::new("`eye` needs a non-negative size", line, col));
                 }
-                Ok(Value::Tensor(Rc::new(tensor::eye(n as usize))))
+                // Guard the n*n element count (an `eye(40000)` is ~12.8 GB and would
+                // OOM-abort), matching the `zeros`/`ones` cap.
+                let n = n as usize;
+                if !matches!(n.checked_mul(n), Some(c) if c <= 1_000_000_000) {
+                    return Err(HelixError::new(
+                        format!("`eye({n})` is too large to allocate"),
+                        line,
+                        col,
+                    )
+                    .hint("the total element count (n*n) must stay under 1 billion."));
+                }
+                Ok(Value::Tensor(Rc::new(tensor::eye(n))))
             }
             // ---- math standard library (broadcasts over arrays, propagates missing) ----
             "sqrt" | "cbrt" | "exp" | "ln" | "log10" | "log2" | "sin" | "cos" | "tan" | "asin"
@@ -764,7 +775,7 @@ fn array_to_coldata(
         Value::Int(_) | Value::Float(_) => {
             let any_float = vals.iter().any(|x| matches!(x, Value::Float(_)));
             if any_float {
-                let mut out = Vec::with_capacity(vals.len());
+                let mut out = crate::error::try_with_capacity(vals.len(), "DataFrame column", line, col)?;
                 for x in vals.iter() {
                     match x {
                         Value::Int(i) => out.push(Some(*i as f64)),
@@ -775,7 +786,7 @@ fn array_to_coldata(
                 }
                 Ok(ColData::Float(out))
             } else if has_missing {
-                let mut out = Vec::with_capacity(vals.len());
+                let mut out = crate::error::try_with_capacity(vals.len(), "DataFrame column", line, col)?;
                 for x in vals.iter() {
                     match x {
                         Value::Int(i) => out.push(Some(*i)),
@@ -785,7 +796,7 @@ fn array_to_coldata(
                 }
                 Ok(ColData::IntOpt(out))
             } else {
-                let mut out = Vec::with_capacity(vals.len());
+                let mut out = crate::error::try_with_capacity(vals.len(), "DataFrame column", line, col)?;
                 for x in vals.iter() {
                     match x {
                         Value::Int(i) => out.push(*i),
@@ -802,7 +813,7 @@ fn array_to_coldata(
                 _ => None,
             };
             if has_missing {
-                let mut out = Vec::with_capacity(vals.len());
+                let mut out = crate::error::try_with_capacity(vals.len(), "DataFrame column", line, col)?;
                 for x in vals.iter() {
                     match x {
                         Value::Missing => out.push(None),
@@ -814,7 +825,7 @@ fn array_to_coldata(
                 }
                 Ok(ColData::StrOpt(out))
             } else {
-                let mut out = Vec::with_capacity(vals.len());
+                let mut out = crate::error::try_with_capacity(vals.len(), "DataFrame column", line, col)?;
                 for x in vals.iter() {
                     match pull(x) {
                         Some(s) => out.push(s),
@@ -832,7 +843,7 @@ fn array_to_coldata(
                     col,
                 ));
             }
-            let mut out = Vec::with_capacity(vals.len());
+            let mut out = crate::error::try_with_capacity(vals.len(), "DataFrame column", line, col)?;
             for x in vals.iter() {
                 match x {
                     Value::Bool(b) => out.push(*b),

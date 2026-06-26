@@ -23,6 +23,11 @@ struct Binding {
 /// function body stays comfortably inside the stack at this depth. See `main.rs`.
 const MAX_CALL_DEPTH: usize = 20_000;
 
+/// Ceiling on a single interpolated string's byte length. Interpolation nests, so
+/// a doubling loop could otherwise grow a string until the allocator aborts; 1 GiB
+/// is far past any legitimate message and leaves headroom under typical limits.
+pub(crate) const MAX_STRING_LEN: usize = 1 << 30;
+
 pub struct Interp {
     env: FxHashMap<String, Binding>,
     depth: usize,
@@ -229,6 +234,20 @@ impl Interp {
                             let (l, c) = e.position();
                             s.push_str(&crate::value::display_value(&v, l, c)?);
                         }
+                    }
+                    // Interpolation can nest (a value's display may itself be an
+                    // interpolated string), so a `s = "{s}{s}"` loop doubles the
+                    // string each frame — bounded only by recursion depth. Cap the
+                    // accumulated length so runaway growth errors cleanly instead of
+                    // aborting the allocator.
+                    if s.len() > MAX_STRING_LEN {
+                        let (l, c) = e.position();
+                        return Err(HelixError::new(
+                            format!("interpolated string exceeds {MAX_STRING_LEN} bytes"),
+                            l,
+                            c,
+                        )
+                        .hint("build large text incrementally or write it to a file instead."));
                     }
                 }
                 Ok(Value::Str(Rc::new(s)))

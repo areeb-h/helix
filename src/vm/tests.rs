@@ -64,7 +64,53 @@
                 _ => format!("{}", (next(rng) % 4001) as i64 - 2000),
             };
         }
-        match pick(rng, 15) {
+        match pick(rng, 19) {
+            15 => {
+                // `??` coalescing: `missing ?? E` is `E`; `E ?? _` is `E` when `E`
+                // isn't missing. Bias the left toward `missing` so both the take-left
+                // and take-right paths are exercised (exercises Coalesce/CoalesceCheck).
+                let left = if pick(rng, 2) == 0 {
+                    "missing".to_string()
+                } else {
+                    gen_expr(rng, depth - 1, vars)
+                };
+                format!("({} ?? {})", left, gen_expr(rng, depth - 1, vars))
+            }
+            16 => {
+                // `try EXPR` yields `{ok, value}` (value is `missing` on the error
+                // path), so `(try E).value ?? F` pulls a scalar back out — exercising
+                // TryBegin/TryOk/TryErr + field access, including caught runtime errors
+                // (e.g. division by zero from a nested arm). Both engines must catch
+                // and recover identically.
+                format!(
+                    "((try ({})).value ?? ({}))",
+                    gen_expr(rng, depth - 1, vars),
+                    gen_expr(rng, 0, vars)
+                )
+            }
+            17 => {
+                // `match` over a scalar with an int-literal arm + wildcard → scalar
+                // (exercises MatchArm and the first-match-wins ordering). A non-int or
+                // non-matching scrutinee falls to `_` identically on both engines.
+                let pat = (next(rng) % 5) as i64;
+                format!(
+                    "(match ({}) {{ {} => ({}), _ => ({}) }})",
+                    gen_expr(rng, depth - 1, vars),
+                    pat,
+                    gen_expr(rng, depth - 1, vars),
+                    gen_expr(rng, depth - 1, vars)
+                )
+            }
+            18 => {
+                // An immediately-applied closure → MakeFunc + CallValue end-to-end.
+                let op = ["+", "-", "*"][pick(rng, 3) as usize];
+                format!(
+                    "((z => (z {} ({})))({}))",
+                    op,
+                    gen_expr(rng, 0, vars),
+                    gen_expr(rng, depth - 1, vars)
+                )
+            }
             14 => {
                 // Multi-binder comprehension (pattern binder `(p, q)`) over an array
                 // → scalar/Bool. Exercises `DestructureBind` vs the tree-walker's
@@ -511,6 +557,98 @@
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "reduce JIT ≠ tree-walker on `{src}`"),
                 (Err(()), Err(())) => {}
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+    }
+
+    /// Run `src` on the VM with the JIT *disabled* (no native kernels) — the pure
+    /// bytecode-loop oracle that `run_vm_jit` is diffed against for the array/fused
+    /// kernels (which only engage when a `Jit` is supplied).
+    fn run_vm_no_jit(src: &str) -> Result<String, ()> {
+        run_vm(src)
+    }
+
+    /// A random JIT-eligible `Int`-array pipeline: an `Int` source (`range(s,e)` or a
+    /// small int-array literal) followed by 0–3 `.map(it OP k)` / `.filter(it CMP k)`
+    /// stages and a scalar terminal (`.reduce` / `.sum()` / `.count()`). The body ops
+    /// stay in `{+,-,*}` and comparisons so the map/filter/fused kernels are genuinely
+    /// JIT-compiled (the native path), not falling back.
+    fn gen_int_pipeline(rng: &mut u64) -> String {
+        let lit = |rng: &mut u64| -> i64 { (next(rng) % 21) as i64 - 10 };
+        let src = if pick(rng, 2) == 0 {
+            let s = (next(rng) % 40) as i64 - 10;
+            let e = s + (next(rng) % 60) as i64; // non-negative length, within cap
+            format!("range({}, {})", s, e)
+        } else {
+            let n = 1 + pick(rng, 6);
+            let elems: Vec<String> = (0..n).map(|_| format!("{}", lit(rng))).collect();
+            format!("[{}]", elems.join(", "))
+        };
+        let mut chain = src;
+        let stages = pick(rng, 4); // 0..3 transform stages
+        for _ in 0..stages {
+            if pick(rng, 2) == 0 {
+                let op = ["+", "-", "*"][pick(rng, 3) as usize];
+                chain = format!("({}).map(it {} {})", chain, op, lit(rng));
+            } else {
+                let cmp = ["<", ">", "<=", ">=", "==", "!="][pick(rng, 6) as usize];
+                chain = format!("({}).filter(it {} {})", chain, cmp, lit(rng));
+            }
+        }
+        match pick(rng, 3) {
+            0 => format!("({}).reduce({}, (acc, x) => acc + x)", chain, lit(rng)),
+            1 => format!("({}).sum()", chain),
+            _ => format!("({}).count()", chain),
+        }
+    }
+
+    /// Triple oracle for the JIT array/fused kernels: every random `Int`-array
+    /// pipeline must produce the *same* result on the JIT-native path, the pure
+    /// bytecode loop, and the tree-walker. This closes the one confirmed fuzzing gap
+    /// — the map/filter/fused kernels were previously only exercised by hand. Any
+    /// divergence (a mis-compiled kernel, an off-by-one, a wrap mismatch) fails here.
+    #[test]
+    fn differential_array_kernels_triple_oracle() {
+        let mut rng = 0xA11C_E0FF_EE00_1234u64;
+        for _ in 0..15_000 {
+            let src = gen_int_pipeline(&mut rng);
+            let jit = run_vm_jit(&src);
+            let no_jit = run_vm_no_jit(&src);
+            let tw = run_tw(&src);
+            match (jit, no_jit, tw) {
+                (Ok(a), Ok(b), Ok(c)) => {
+                    assert_eq!(a, b, "JIT ≠ bytecode VM on `{src}`");
+                    assert_eq!(b, c, "bytecode VM ≠ tree-walker on `{src}`");
+                }
+                (Err(()), Err(()), Err(())) => {}
+                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
+            }
+        }
+    }
+
+    /// Run the random `gen_expr` programs through the *full* typed pipeline
+    /// (`parse → typecheck → type-directed compile → VM`) and diff against the
+    /// tree-walker. This exercises the type checker and typed compiler end-to-end
+    /// (the other fuzzers bypass them via `compile_with_types(ast, None)`). The type
+    /// checker is conservative, so it may reject a program the dynamic tree-walker
+    /// would run — that asymmetry is allowed; what must hold is that whenever the
+    /// typed VM *does* run, its value matches, and it never panics.
+    #[test]
+    fn differential_typed_pipeline_vs_tree_walker() {
+        let mut rng = 0x7401_DEAD_C0DE_5A5Au64;
+        for _ in 0..40_000 {
+            let src = gen_expr(&mut rng, 5, &[]);
+            match (run_vm_typed(&src), run_tw(&src)) {
+                // both run → values must agree
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "typed VM ≠ tree-walker on `{src}`"),
+                // both reject → fine
+                (Err(()), Err(())) => {}
+                // checker stricter than the dynamic tree-walker → allowed
+                (Err(()), Ok(_)) => {}
+                // typed VM ran but tree-walker rejected: only legitimate via the B2
+                // recursion-depth difference; anything else is a real divergence.
+                (Ok(_), Err(())) if tw_hit_recursion_limit(&src) => {}
+                (v, t) => panic!("OUTCOME divergence on `{src}`: typed={v:?} tw={t:?}"),
             }
         }
     }

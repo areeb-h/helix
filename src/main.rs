@@ -359,11 +359,20 @@ fn run_file_capture(path: &std::path::Path) -> Result<(), String> {
 /// to install, no config — name a file `*_test.helix` and it runs.
 fn cli_test(args: &[String]) -> ExitCode {
     use std::path::PathBuf;
-    let root = args
-        .get(2)
+    // Whether the root was named explicitly on the command line (vs. defaulting to
+    // the current directory) — an explicit path that doesn't exist is a user error.
+    let explicit = args.get(2).cloned();
+    let root = explicit
+        .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     run_on_big_stack(move || {
+        // A path the user named explicitly but which doesn't exist is an error, not
+        // an empty (successful) run — otherwise a typo'd path silently "passes".
+        if explicit.is_some() && !root.exists() {
+            eprintln!("error: no such file or directory: {}", root.display());
+            return ExitCode::FAILURE;
+        }
         let mut files = Vec::new();
         if root.is_file() {
             files.push(root.clone());
