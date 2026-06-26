@@ -633,6 +633,10 @@ fn fused_pipelines_match_the_oracle() {
         "print([1,2,3,4,5].map(x => x * 2).reduce(0, (a, x) => a + x))",
         // range→filter→map→reduce
         "print(range(1, 500).filter(x => x % 7 == 0).map(x => x - 1).reduce(0, (a, x) => a + x))",
+        // filter→count (the zero-allocation counting sink)
+        "print([1,2,3,4,5,6,7,8,9,10].filter(x => x % 2 == 0).count())",
+        // range→map→filter→count
+        "print(range(0, 100).map(x => x * x).filter(x => x % 3 == 0).count())",
     ];
     for (i, src) in cases.iter().enumerate() {
         let (vm, stderr, code) = run_source(src, &[], &format!("fuse_vm{i}"));

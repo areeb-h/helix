@@ -57,9 +57,10 @@ straight to the next iteration (stream fusion's *Skip*). Where other eager langu
 opt into laziness (Haskell, Polars' lazy frames), Helix fuses **eager method-chain syntax
 transparently** — and the fused result is held to the tree-walker oracle byte-for-byte.
 
-Fusion triggers for `≥2` map/filter stages, or `≥1` stage feeding a `reduce`, over an
-idempotent `Int` array or a `range`; anything else (float, a non-eligible body, a
-side-effecting source) falls through to the per-stage path. It is sound precisely because
+Fusion triggers for `≥2` map/filter stages, a stage feeding a `reduce`, or a filter
+feeding a `count` (`xs.filter(g).count()` — counts with **zero allocation**, never
+building the filtered array), over an idempotent `Int` array or a `range`; anything else
+(float, a non-eligible body, a side-effecting source) falls through to the per-stage path. It is sound precisely because
 eligible bodies are **pure** — eliminating intermediates is unobservable.
 
 `map`/`filter`/`reduce` chains over 10M integers (debug build):
@@ -67,6 +68,7 @@ eligible bodies are **pure** — eliminating intermediates is unobservable.
 | Pipeline | fused | bytecode | speedup | peak RSS (fused vs bytecode) |
 | --- | --- | --- | --- | --- |
 | `range(N).map(f).filter(g).reduce(+)` | 0.08 s | 5.6 s | ~70× | **17 MB** vs 170 MB |
+| `range(N).filter(g).count()` | 0.01 s | 2.7 s | ~270× | **17 MB** vs 131 MB |
 | `xs.filter(g).map(f).count()` | 0.11 s | 2.8 s | ~25× | 134 MB vs 170 MB |
 
 The scalar pipeline (`range → … → reduce`) **allocates nothing** — its 17 MB is just the

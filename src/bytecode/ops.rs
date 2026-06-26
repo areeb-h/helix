@@ -319,6 +319,8 @@ pub enum FusionStage {
 pub enum FusionSink {
     /// Build one output `Int` array from the surviving elements.
     Collect,
+    /// Count the surviving elements (`.count()` after a filter) — allocates nothing.
+    Count,
     /// Fold the surviving elements to a scalar with wrapping `i64` arithmetic (the
     /// explicit-accumulator `reduce`, matching the existing reduce-loop semantics).
     Reduce { pa: String, pb: String, body: Expr },

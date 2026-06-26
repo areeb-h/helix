@@ -976,15 +976,15 @@ impl Compiler {
                 // For an Array receiver, `where`/`filter` are comprehensions (the
                 // DataFrame case was handled above).
                 //
-                // Fusion: a chain of ≥2 eligible map/filter stages (or ≥1 stage feeding a
-                // `reduce`) over an idempotent Int source compiles to ONE native loop with
-                // no intermediate arrays. Detected at the outermost method; falls back to
-                // the per-stage path for anything ineligible.
+                // Fusion: a chain of eligible map/filter stages feeding a `reduce`,
+                // `count`, or another stage over an idempotent Int source compiles to ONE
+                // native loop with no intermediate arrays. Detected at the outermost
+                // method; falls back to the per-stage path for anything ineligible.
                 if !self.no_fuse
-                    && matches!(n, "map" | "filter" | "where" | "reduce")
+                    && matches!(n, "map" | "filter" | "where" | "reduce" | "count")
                     && let Some(plan) = self.collect_fusion_chain(recv, n, args)
                 {
-                    return self.compile_fused(b, recv, name, args, plan, *line, *col);
+                    return self.compile_fused(b, e, plan, *line, *col);
                 }
                 if matches!(n, "map" | "filter" | "where" | "reduce") {
                     return self.compile_comprehension(b, recv, name, args, *line, *col);

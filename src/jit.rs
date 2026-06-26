@@ -307,7 +307,7 @@ fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &HashSet<&str>) -> boo
         FusionStage::Map { binder, body } => map_kernel_eligible(body, binder, fns),
         FusionStage::Filter { binder, body } => filter_kernel_eligible(body, binder, fns),
     }) && match &k.sink {
-        FusionSink::Collect => true,
+        FusionSink::Collect | FusionSink::Count => true,
         FusionSink::Reduce { pa, pb, body } => reduce_loop_eligible(body, pa, pb, fns),
     }
 }
@@ -840,26 +840,36 @@ fn define_fused_kernel<'a>(
     let dst_var = b.declare_var(I64);
     let z = b.ins().iconst(I64, 0);
 
-    // Wire the three params to roles by shape: range → (start,end,init); array+reduce →
-    // (src,len,init); array+collect → (src,dst,len).
+    // Wire the three params to roles by shape: range → (start,end,init?); array+reduce →
+    // (src,len,init); array+count → (src,len,_); array+collect → (src,dst,len). The
+    // accumulator (`sink_var`) starts at the reduce `init`, else 0 (a counter / write
+    // cursor).
     if k.source_is_range {
         b.def_var(idx_var, p0); // x starts at `start`
         b.def_var(limit_var, p1); // `end`
-        b.def_var(sink_var, p2); // acc init
+        b.def_var(sink_var, if is_reduce { p2 } else { z });
         b.def_var(src_var, z);
-        b.def_var(dst_var, z);
-    } else if is_reduce {
-        b.def_var(idx_var, z);
-        b.def_var(limit_var, p1); // len
-        b.def_var(sink_var, p2); // acc init
-        b.def_var(src_var, p0);
         b.def_var(dst_var, z);
     } else {
         b.def_var(idx_var, z);
-        b.def_var(limit_var, p2); // len
-        b.def_var(sink_var, z); // w = 0
         b.def_var(src_var, p0);
-        b.def_var(dst_var, p1);
+        match &k.sink {
+            FusionSink::Collect => {
+                b.def_var(limit_var, p2); // len
+                b.def_var(sink_var, z); // w = 0
+                b.def_var(dst_var, p1);
+            }
+            FusionSink::Reduce { .. } => {
+                b.def_var(limit_var, p1); // len
+                b.def_var(sink_var, p2); // acc init
+                b.def_var(dst_var, z);
+            }
+            FusionSink::Count => {
+                b.def_var(limit_var, p1); // len
+                b.def_var(sink_var, z); // counter = 0
+                b.def_var(dst_var, z);
+            }
+        }
     }
 
     let header = b.create_block();
@@ -930,6 +940,12 @@ fn define_fused_kernel<'a>(
             vars.insert(pb.as_str(), cur_var);
             let nacc = gen_value(&mut b, rbody, &mut vars, fn_ids, module, NumKind::Int);
             b.def_var(sink_var, nacc);
+        }
+        FusionSink::Count => {
+            // A surviving element bumps the counter; nothing is stored.
+            let w = b.use_var(sink_var);
+            let nw = b.ins().iadd_imm(w, 1);
+            b.def_var(sink_var, nw);
         }
     }
     b.ins().jump(cont, &[]);
@@ -1174,6 +1190,13 @@ pub unsafe fn run_fused_collect(ptr: *const u8, src: &[i64]) -> Vec<i64> {
 pub unsafe fn run_fused_reduce(ptr: *const u8, src: &[i64], init: i64) -> i64 {
     let f: extern "C" fn(*const i64, i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, init)
+}
+
+/// Run a fused array→`Count` pipeline over `src` (`fn(src,len,_)->count`). SAFETY: as
+/// [`run_fused_collect`].
+pub unsafe fn run_fused_count(ptr: *const u8, src: &[i64]) -> i64 {
+    let f: extern "C" fn(*const i64, i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    f(src.as_ptr(), src.len() as i64, 0)
 }
 
 /// Call an `f64`-specialized JIT function. SAFETY: as [`call_i64`], with an

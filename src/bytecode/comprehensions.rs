@@ -499,6 +499,11 @@ impl super::Compiler {
                 return None;
             }
             (FusionSink::Reduce { pa, pb, body: body.clone() }, Some(&args[0]))
+        } else if name == "count" {
+            if !args.is_empty() {
+                return None;
+            }
+            (FusionSink::Count, None)
         } else {
             outer_first.push(self.fusion_stage(name, args)?);
             (FusionSink::Collect, None)
@@ -530,7 +535,7 @@ impl super::Compiler {
         } else {
             return None;
         };
-        // A range source has no array to collect into; only a Reduce sink fuses with it.
+        // A range source has no array to collect into; `Reduce`/`Count` still fuse.
         if source_is_range && matches!(sink, FusionSink::Collect) {
             return None;
         }
@@ -542,6 +547,9 @@ impl super::Compiler {
         let enough = match &sink {
             FusionSink::Reduce { .. } => !stages.is_empty(),
             FusionSink::Collect => stages.len() >= 2,
+            // `count` only benefits when a filter actually drops elements (a map-only
+            // chain's count is just the length).
+            FusionSink::Count => stages.iter().any(|s| matches!(s, FusionStage::Filter { .. })),
         };
         if !enough {
             return None;
@@ -553,14 +561,13 @@ impl super::Compiler {
     /// Emit a fused pipeline: push the source (and `reduce` init) operands, a
     /// `TryJitFused` guard, then the ordinary per-stage chain as the fall-through (the
     /// guard discards the operands and the chain recompiles the idempotent source). The
-    /// native path produces the result and jumps past the fall-through.
-    #[allow(clippy::too_many_arguments)]
+    /// native path produces the result and jumps past the fall-through. `orig` is the
+    /// whole outer method expression, recompiled (with fusion suppressed) as the
+    /// fall-through.
     pub(super) fn compile_fused(
         &mut self,
         b: &mut Builder,
-        recv: &Expr,
-        name: &str,
-        args: &[Expr],
+        orig: &Expr,
         plan: FusionPlan,
         line: usize,
         col: usize,
@@ -587,10 +594,10 @@ impl super::Compiler {
         }
         let at = b.emit(Op::TryJitFused { kernel_idx, after: 0 }, line, col);
 
-        // Fall-through: recompile the chain per-stage, with fusion suppressed so it does
-        // not re-detect itself. (The single-stage kernels still apply within it.)
+        // Fall-through: recompile the whole chain (any sink), with fusion suppressed so it
+        // does not re-detect itself. (The single-stage kernels still apply within it.)
         self.no_fuse = true;
-        let r = self.compile_comprehension(b, recv, name, args, line, col);
+        let r = self.compile_expr(b, orig);
         self.no_fuse = false;
         r?;
 

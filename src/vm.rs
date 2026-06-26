@@ -876,15 +876,25 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     .and_then(|ptr| {
                         let ops = &stack[len - n..];
                         if kern.source_is_range {
-                            match (&ops[0], &ops[1], &ops[2]) {
-                                (Value::Int(s), Value::Int(e), Value::Int(init))
-                                    if (*e as i128 - *s as i128) <= 100_000_000 =>
-                                {
-                                    Some(Value::Int(unsafe {
+                            // ops = [start, end] (+ init for Reduce). Cap-check the span.
+                            let (Value::Int(s), Value::Int(e)) = (&ops[0], &ops[1]) else {
+                                return None;
+                            };
+                            if (*e as i128 - *s as i128) > 100_000_000 {
+                                return None;
+                            }
+                            match &kern.sink {
+                                FusionSink::Reduce { .. } => match &ops[2] {
+                                    Value::Int(init) => Some(Value::Int(unsafe {
                                         crate::jit::call_reduce(ptr, *s, *e, *init)
-                                    }))
-                                }
-                                _ => None,
+                                    })),
+                                    _ => None,
+                                },
+                                // count: the kernel ignores the third arg.
+                                FusionSink::Count => Some(Value::Int(unsafe {
+                                    crate::jit::call_reduce(ptr, *s, *e, 0)
+                                })),
+                                FusionSink::Collect => None,
                             }
                         } else if let Value::Array(a) = &ops[0]
                             && let crate::value::ArrayData::Ints(v) = &**a
@@ -892,6 +902,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             match &kern.sink {
                                 FusionSink::Collect => Some(Value::int_array(unsafe {
                                     crate::jit::run_fused_collect(ptr, v)
+                                })),
+                                FusionSink::Count => Some(Value::Int(unsafe {
+                                    crate::jit::run_fused_count(ptr, v)
                                 })),
                                 FusionSink::Reduce { .. } => match &ops[1] {
                                     Value::Int(init) => Some(Value::Int(unsafe {
