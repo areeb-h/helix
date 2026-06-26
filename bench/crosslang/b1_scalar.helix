@@ -1,3 +1,5 @@
-# B1 — scalar loop: Σ (x² mod 1000) over 0..10M. Stresses the fused-native loop
-# (no intermediate arrays). Correctness anchor: 4615000000.
-print((0..10000000).map((it * it) % 1000).sum())
+# B1 — scalar loop: Σ (x² mod 1000) over 0..10M. The `reduce` sink lets the whole
+# map→reduce chain fuse into one native loop with zero allocation (a `.sum()` sink
+# would instead materialize the 10M array — it uses a separate high-precision
+# accumulator, deferred from fusion). Correctness anchor: 4615000000.
+print((0..10000000).map((it * it) % 1000).reduce(0, (a, x) => a + x))
