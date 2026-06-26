@@ -802,6 +802,66 @@ fn array_method(
                 Ok(Value::Float(xs.iter().product()))
             }
         }
+        // --- ML helpers (missing propagates) ---
+        "argsort" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`argsort` takes no arguments", line, col));
+            }
+            if items.iter().any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            let xs = numeric_vec(items, "argsort", line, col)?;
+            let mut idx: Vec<i64> = (0..xs.len() as i64).collect();
+            // stable ascending sort by value (NaN sinks to the end, deterministically)
+            idx.sort_by(|&a, &b| {
+                xs[a as usize].partial_cmp(&xs[b as usize]).unwrap_or(std::cmp::Ordering::Greater)
+            });
+            Ok(Value::int_array(idx))
+        }
+        "clamp" => {
+            if args.len() != 2 {
+                return Err(HelixError::new("`clamp` takes (lo, hi)", line, col));
+            }
+            let lo = args[0].as_f64().ok_or_else(|| {
+                HelixError::new("`clamp` lo must be a number", line, col)
+            })?;
+            let hi = args[1].as_f64().ok_or_else(|| {
+                HelixError::new("`clamp` hi must be a number", line, col)
+            })?;
+            if items.iter().any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            // Preserve int-ness when all elements (and bounds) are integral.
+            if items.iter().all(|v| matches!(v, Value::Int(_))) {
+                let (loi, hii) = (lo as i64, hi as i64);
+                let out: Vec<i64> = items
+                    .iter()
+                    .map(|v| if let Value::Int(i) = v { (*i).clamp(loi, hii) } else { 0 })
+                    .collect();
+                Ok(Value::int_array(out))
+            } else {
+                let xs = numeric_vec(items, "clamp", line, col)?;
+                Ok(Value::float_array(xs.iter().map(|x| x.clamp(lo, hi)).collect()))
+            }
+        }
+        "softmax" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`softmax` takes no arguments", line, col));
+            }
+            if items.iter().any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            let xs = numeric_vec(items, "softmax", line, col)?;
+            if xs.is_empty() {
+                return Ok(Value::float_array(Vec::new()));
+            }
+            // Subtract the max for numerical stability.
+            let m = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let exps: Vec<f64> = xs.iter().map(|x| (x - m).exp()).collect();
+            let total: f64 = exps.iter().sum();
+            Ok(Value::float_array(exps.iter().map(|e| e / total).collect()))
+        }
+        "bootstrap" => crate::rng::bootstrap(items, args, line, col),
         // --- charts + tabular export/write → shared dispatch (rebuild the receiver) ---
         "bar_chart" | "histogram" | "line_chart" | "sparkline" | "scatter" | "svg_bar"
         | "svg_line" | "write_csv" | "write_tsv" | "write_json" | "to_html" | "to_markdown"

@@ -160,6 +160,21 @@
     }
 
     #[test]
+    fn ml_helpers_and_scientific_literals() {
+        // scientific float literals
+        assert_eq!(float("1.0e9"), 1.0e9);
+        assert_eq!(float("2.5e-3"), 0.0025);
+        assert_eq!(float("4E3"), 4000.0);
+        // argsort / clamp / softmax / bootstrap
+        assert!(matches!(last("[3, 1, 2].argsort()[0]").unwrap(), Value::Int(1)));
+        assert!(matches!(last("[-1, 5, 2, 9].clamp(0, 4)[1]").unwrap(), Value::Int(4)));
+        assert!((float("[1.0, 2.0, 3.0].softmax().sum()") - 1.0).abs() < 1e-9);
+        assert!(matches!(last("[10, 20, 30].bootstrap(5, 1).count()").unwrap(), Value::Int(5)));
+        // AIC/BIC reward a smaller RSS / fewer params
+        assert!(float("aic(1.0, 40, 2)") < float("aic(1.0, 40, 5)")); // fewer params → lower
+    }
+
+    #[test]
     fn regression_exposes_rss_and_intercept_option() {
         // rss/predictions/residuals are on the fit record
         assert!(float("linear_regression([1.0, 2.0, 3.0], [2.0, 4.0, 6.0]).rss") < 1e-9);

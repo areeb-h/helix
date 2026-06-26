@@ -89,6 +89,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "rmse", pure: true },
     BuiltinDef { path: "mae", pure: true },
     BuiltinDef { path: "r2_score", pure: true },
+    BuiltinDef { path: "aic", pure: true },
+    BuiltinDef { path: "bic", pure: true },
     // --- statistics: symmetric tests/fits + distributions (no privileged receiver) ---
     BuiltinDef { path: "normal_cdf", pure: true },
     BuiltinDef { path: "normal_pdf", pure: true },
@@ -121,7 +123,7 @@ pub static ARRAY_METHODS: &[&str] = &[
     "all", "take", "drop", "zip", "enumerate", "top", "frequencies", "unique", "drop_missing",
     "join", "concat", "flatten", "min_by", "max_by", "argmin", "argmax", "zscores", "iqr",
     "spread", "standard_error", "coefficient_of_variation", "dot", "norm", "cumsum", "product",
-    "mean_gc",
+    "argsort", "clamp", "softmax", "bootstrap", "mean_gc",
     "total_length", "bar_chart", "histogram", "line_chart", "sparkline", "scatter", "svg_bar",
     "svg_line", "write_csv", "write_tsv", "write_json", "to_html", "to_markdown", "write_fasta",
     "write_fastq", "shuffle", "sample", "choice",

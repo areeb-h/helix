@@ -708,6 +708,27 @@ impl super::Interp {
                     }
                 }
             }
+            // Information criteria for model selection (Gaussian-likelihood form):
+            // aic(rss, n, k) = n*ln(rss/n) + 2k ; bic(rss, n, k) = n*ln(rss/n) + k*ln(n).
+            "aic" | "bic" => {
+                arity(name, &args, 3, line, col)?;
+                let rss = args[0].as_f64().ok_or_else(|| type_err(name, "a number (rss)", &args[0], line, col))?;
+                let nn = as_int(&args[1], name, line, col)?;
+                let kk = as_int(&args[2], name, line, col)?;
+                if nn <= 0 {
+                    return Err(HelixError::new(format!("`{name}` needs n > 0"), line, col));
+                }
+                if rss < 0.0 {
+                    return Err(HelixError::new(format!("`{name}` needs rss >= 0"), line, col));
+                }
+                let (nf, kf) = (nn as f64, kk as f64);
+                let log_like = nf * (rss / nf).ln(); // ∝ -2·logL up to a constant
+                Ok(Value::Float(if name == "aic" {
+                    log_like + 2.0 * kf
+                } else {
+                    log_like + kf * nf.ln()
+                }))
+            }
             _ => {
                 let mut err =
                     HelixError::new(format!("`{}` is not a known function", name), line, col);

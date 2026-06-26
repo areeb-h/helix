@@ -350,6 +350,8 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         "linspace" => Ok(Type::Array(Box::new(Type::Float))),
         // model-eval metrics over two arrays → a scalar Float
         "mse" | "rmse" | "mae" | "r2_score" => Ok(Type::Float),
+        // information criteria for model selection → a scalar Float
+        "aic" | "bic" => Ok(Type::Float),
         "least_squares" => {
             if args.len() < 2 || args.len() > 3 {
                 return Err(arity_err(name, 2, args.len(), line, col));
@@ -412,6 +414,10 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         "dot" | "norm" => Type::Float,
         "cumsum" => Type::Array(Box::new(Type::Float)),
         "product" => Type::Num,
+        // ML helpers
+        "argsort" => Type::Array(Box::new(Type::Int)),
+        "softmax" => Type::Array(Box::new(Type::Float)),
+        "clamp" | "bootstrap" => Type::Array(Box::new(el.clone())),
         "total_length" => Type::Int,
         // charts + text exports render to a String
         "bar_chart" | "histogram" | "line_chart" | "sparkline" | "scatter" | "svg_bar"

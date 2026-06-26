@@ -273,6 +273,22 @@ fn lex_number(chars: &[char], start: usize) -> (Tok, usize) {
             j += 1;
         }
     }
+    // Optional scientific exponent: `e`/`E` with an optional sign and digits
+    // (`1e9`, `2.5e-3`, `4E10`) — makes it a float. Requires a digit after, so a
+    // bare `e` stays a separate identifier (e.g. `3.e` is `3` `.` `e`).
+    if j < n && (chars[j] == 'e' || chars[j] == 'E') {
+        let mut t = j + 1;
+        if t < n && (chars[t] == '+' || chars[t] == '-') {
+            t += 1;
+        }
+        if t < n && chars[t].is_ascii_digit() {
+            is_float = true;
+            j = t + 1;
+            while j < n && chars[j].is_ascii_digit() {
+                j += 1;
+            }
+        }
+    }
     let text: String = chars[start..j].iter().collect();
     let tok = if is_float {
         Tok::Float(text.parse().unwrap_or(0.0))

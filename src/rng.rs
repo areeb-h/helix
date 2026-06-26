@@ -19,6 +19,7 @@ const S_INT: u64 = 0x5571_1B7A_0003;
 const S_SHUFFLE: u64 = 0x5571_1B7A_0004;
 const S_SAMPLE: u64 = 0x5571_1B7A_0005;
 const S_CHOICE: u64 = 0x5571_1B7A_0006;
+const S_BOOTSTRAP: u64 = 0x5571_1B7A_0007;
 
 /// Match the other collection caps so a stray huge `n` errors instead of OOM-ing.
 const MAX_DRAW: usize = 100_000_000;
@@ -167,6 +168,20 @@ pub fn sample(items: &[Value], args: &[Value], line: usize, col: usize) -> Resul
     }
     v.truncate(k);
     Ok(Value::array_sniff(v))
+}
+
+/// `xs.bootstrap(k, seed)` → `k` elements drawn **with** replacement (resampling).
+pub fn bootstrap(items: &[Value], args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    arity("bootstrap", args, 2, line, col)?;
+    let k = count(&args[0], "bootstrap", line, col)?;
+    let seed = as_i64(&args[1], "bootstrap", line, col)?;
+    if items.is_empty() {
+        return Err(HelixError::new("cannot bootstrap from an empty array", line, col));
+    }
+    let n = items.len();
+    let out: Vec<Value> =
+        (0..k as u64).map(|i| items[below(seed, S_BOOTSTRAP, i, n)].clone()).collect();
+    Ok(Value::array_sniff(out))
 }
 
 /// `xs.choice(seed)` → one uniformly random element.
