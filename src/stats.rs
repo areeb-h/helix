@@ -42,6 +42,11 @@ pub fn quantile(xs: &[f64], p: f64) -> f64 {
 /// As [`quantile`], but for an already-ascending slice (lets a caller sort once and
 /// take several quantiles, e.g. `summary`). Precondition: `s` is sorted and non-empty.
 pub fn quantile_sorted(s: &[f64], p: f64) -> f64 {
+    // Defensive: Helix callers already guard emptiness (`empty_guard`), but an empty
+    // slice here would underflow `s.len() - 1` below — never panic on it.
+    if s.is_empty() {
+        return f64::NAN;
+    }
     let p = p.clamp(0.0, 1.0);
     if s.len() == 1 {
         return s[0];

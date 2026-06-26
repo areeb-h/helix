@@ -395,6 +395,39 @@ fn align_rejects_an_unknown_mode() {
 }
 
 #[test]
+fn huge_alignment_is_capped_not_oom() {
+    // A 20000x20000 DP matrix (400M cells) would exhaust memory; the cap turns it into
+    // a clean error instead of an OOM/abort. Runs on the big stack as a subprocess, so
+    // the sequence-building recursion is fine.
+    let src = "fn rep(n) = if n <= 0 then \"\" else \"ACGTACGTAC{rep(n - 1)}\"\nbig = dna(rep(2000))\nprint(big.align(big).score)\n";
+    let (_out, stderr, code) = run_source(src, &[], "aligncap");
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("too large"), "stderr:\n{stderr}");
+}
+
+#[test]
+fn broken_pipe_does_not_panic() {
+    // `helix … | head` closes stdout early. With SIGPIPE reset to its default the
+    // process is terminated cleanly by the signal — it must NOT emit a Rust panic /
+    // "Broken pipe" backtrace.
+    use std::io::Read;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["eval", "print((0..1000000).map(it))"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Read a few bytes, then drop the read end (closing the pipe), like `head`.
+    let mut buf = [0u8; 8];
+    let _ = child.stdout.take().unwrap().read(&mut buf);
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "broken pipe panicked:\n{stderr}");
+    assert!(!stderr.contains("Broken pipe"), "broken pipe surfaced:\n{stderr}");
+}
+
+#[test]
 fn phred_decodes_quality_and_filters_reads() {
     // `qual.phred()` decodes a Phred+33 quality string to integer scores, which
     // compose with the array verbs (mean/min) for QC. The first read's quality is

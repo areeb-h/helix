@@ -58,6 +58,7 @@ use interp::Interp;
 use value::Value;
 
 fn main() -> ExitCode {
+    install_robustness_hooks();
     // Return freed memory to the OS promptly (mimalloc `purge_delay = 0`) instead of
     // its default ~10 ms hold. Helix processes are typically short-lived (CLI,
     // serverless), so they exit before that delay ever fires — leaving freed pages
@@ -77,6 +78,36 @@ fn main() -> ExitCode {
     // big-stack thread on demand (see `run_on_big_stack`). So the process no longer
     // reserves 2 GiB up front for every invocation.
     run()
+}
+
+/// Process-wide robustness: never crash on a broken pipe, and present any unexpected
+/// internal panic as a clean message instead of a raw Rust backtrace.
+fn install_robustness_hooks() {
+    // Rust ignores SIGPIPE, so writing to a closed stdout (`helix … | head`) returns
+    // EPIPE and the stdlib panics. Restoring the default action terminates the process
+    // cleanly via the signal instead — the normal behaviour of any Unix tool.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+    // A panic is always a bug — no user input should reach one. But if one ever slips
+    // through, print a concise, friendly line rather than a backtrace. (The build uses
+    // panic=abort, so this runs just before the abort: a clean message and a defined
+    // non-zero exit, not recovery.)
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info
+            .location()
+            .map(|l| format!(" ({}:{})", l.file(), l.line()))
+            .unwrap_or_default();
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unexpected internal error".to_string());
+        eprintln!("error: internal error{loc}: {msg}");
+        eprintln!("help: this is a bug in Helix; please report it with the program that triggered it.");
+    }));
 }
 
 fn run() -> ExitCode {
@@ -250,13 +281,24 @@ fn run_eval(code: &str) -> ExitCode {
 /// this stack could overflow (the totality guarantee). Scoped, so `f` can borrow
 /// caller-local data (the source text and loaded program) without cloning.
 fn run_on_big_stack<F: FnOnce() -> ExitCode + Send>(f: F) -> ExitCode {
+    // A 1 GiB stack gives the tree-walker's native recursion (capped at
+    // MAX_CALL_DEPTH = 20_000) ample headroom while reserving less address space than a
+    // 2 GiB stack, so the spawn is far less likely to be refused under a tight
+    // memory/ulimit. If the OS still refuses the thread, fail with a clean error rather
+    // than aborting the process (the previous `.expect` turned constrained memory into
+    // a crash for every program).
     std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .stack_size(2 * 1024 * 1024 * 1024)
+        match std::thread::Builder::new()
+            .stack_size(1024 * 1024 * 1024)
             .spawn_scoped(scope, f)
-            .expect("failed to spawn interpreter thread")
-            .join()
-            .unwrap_or(ExitCode::FAILURE)
+        {
+            Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
+            Err(e) => {
+                eprintln!("error: could not allocate the interpreter stack: {e}");
+                eprintln!("help: free some memory or raise the address-space/stack ulimit.");
+                ExitCode::FAILURE
+            }
+        }
     })
 }
 

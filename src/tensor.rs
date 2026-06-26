@@ -177,8 +177,13 @@ pub fn elementwise(
         )
         .hint("shapes must match, or a dimension of 1 stretches to fit (NumPy rules).")
     })?;
-    let av = a.broadcast(IxDyn(&shape)).expect("broadcast verified");
-    let bv = b.broadcast(IxDyn(&shape)).expect("broadcast verified");
+    // `broadcast_shape` above already proved these shapes broadcast; fall back to a
+    // clean error rather than `expect` so a missed edge case can never panic.
+    let bcast_err = || {
+        HelixError::new(format!("cannot broadcast tensors of shape {:?} and {:?}", a.shape(), b.shape()), line, col)
+    };
+    let av = a.broadcast(IxDyn(&shape)).ok_or_else(bcast_err)?;
+    let bv = b.broadcast(IxDyn(&shape)).ok_or_else(bcast_err)?;
     let mut out = ArrayD::zeros(IxDyn(&shape));
     Zip::from(&mut out)
         .and(&av)
@@ -371,7 +376,19 @@ pub fn method(
                     .hint("e.g. `t.reshape([3, 2])`."));
             }
             let shape = as_usize_shape(&args[0], line, col)?;
-            let prod: usize = shape.iter().product();
+            // Checked product: a shape with absurd dimensions would otherwise overflow
+            // `usize` (a debug-build panic / wrong validation) before the count check.
+            let prod: usize = match shape.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d)) {
+                Some(p) => p,
+                None => {
+                    return Err(HelixError::new(
+                        format!("cannot reshape into {shape:?}: the element count overflows"),
+                        line,
+                        col,
+                    )
+                    .hint("the requested shape is far too large."))
+                }
+            };
             if prod != t.len() {
                 return Err(HelixError::new(
                     format!(

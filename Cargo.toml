@@ -120,6 +120,10 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 # so no extra version in the tree; v3 is the default build (do NOT enable its `v2`
 # feature, which would shift the option enum).
 libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"], optional = true }
+# Unix signal handling — reset SIGPIPE to its default so `helix … | head` terminates
+# cleanly instead of panicking on a broken stdout pipe (usage is `#[cfg(unix)]`).
+# Already in the tree transitively, so this adds no new crate.
+libc = "0.2"
 
 [features]
 # HTTP data-fetching and the fast allocator are on by default; build with

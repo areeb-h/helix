@@ -265,6 +265,20 @@
     }
 
     #[test]
+    fn robustness_arithmetic_and_reshape_never_panic() {
+        // `abs` of an Int i64::MIN must wrap, not panic in debug. The literal
+        // `-9223372036854775808` overflows i64 and lexes as a float, so build the Int
+        // value with wrapping arithmetic (0 - i64::MAX - 1 == i64::MIN).
+        assert!(last("abs(0 - 9223372036854775807 - 1)").is_ok());
+        // A reshape whose shape's element count overflows usize errors cleanly rather
+        // than panicking on `attempt to multiply with overflow`.
+        assert!(last("tensor([1, 2, 3, 4]).reshape([99999999999, 99999999999])")
+            .unwrap_err()
+            .message
+            .contains("overflow"));
+    }
+
+    #[test]
     fn dataframe_constructor() {
         // build a frame from in-memory columns, then count rows
         assert_eq!(int("dataframe({a: [1, 2, 3], b: [4.0, 5.0, 6.0]}).count()"), 3);

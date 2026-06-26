@@ -899,6 +899,25 @@ fn dna_method(
                 },
                 Some(other) => return Err(type_err("align", "a mode string", other, line, col)),
             };
+            // Cap the dynamic-programming matrix: it is O(n*m) in both time and memory
+            // (six matrices over the (n+1)x(m+1) grid), so a pair of very long sequences
+            // would exhaust memory. Reads-vs-genes stay far under this; whole-genome
+            // alignment is out of scope (ADR 0015).
+            const MAX_ALIGN_CELLS: usize = 100_000_000;
+            let cells = s.len().saturating_mul(target.len());
+            if cells > MAX_ALIGN_CELLS {
+                return Err(HelixError::new(
+                    format!(
+                        "`align` would build a {}x{} matrix, too large (keep the product under {})",
+                        s.len(),
+                        target.len(),
+                        MAX_ALIGN_CELLS
+                    ),
+                    line,
+                    col,
+                )
+                .hint("align shorter sequences, or a region of each."));
+            }
             let a = crate::align::align(
                 s.as_bytes(),
                 target.as_bytes(),

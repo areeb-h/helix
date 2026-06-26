@@ -401,7 +401,9 @@ impl super::Interp {
             "abs" => {
                 arity(name, &args, 1, line, col)?;
                 broadcast_unary(&args[0], &|s| match s {
-                    Value::Int(i) => Ok(Value::Int(i.abs())),
+                    // `wrapping_abs` matches the wrapping-on-overflow convention used by
+                    // the arithmetic ops; `i64::MIN.abs()` would otherwise panic in debug.
+                    Value::Int(i) => Ok(Value::Int(i.wrapping_abs())),
                     Value::Float(x) => Ok(Value::Float(x.abs())),
                     other => Err(type_err("abs", "a number or array of numbers", other, line, col)),
                 })
