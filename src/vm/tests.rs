@@ -644,6 +644,9 @@
             "[5, 1, 9, 2].max()",
             "[1, 2, 3, 4, 5].take(2)",
             "[1, 2, 3].reverse()",
+            "[3, 1, 3, 2, 1, 3].unique()",
+            "[3, 1, 3, 2, 1, 3].frequencies()",
+            "[\"AT\", \"TG\", \"AT\"].frequencies()",
             // string + dna value-methods
             "\"helix\".upper()",
             "dna(\"ATGCGC\").gc_content()",

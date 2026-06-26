@@ -390,13 +390,15 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         "min" | "max" | "first" | "last" => el.clone(),
         "count" => Type::Int,
         "normalize" => Type::Array(Box::new(Type::Float)),
-        "sort" | "reverse" | "drop_missing" | "take" | "drop" => Type::Array(Box::new(el.clone())),
+        "sort" | "reverse" | "drop_missing" | "take" | "drop" | "unique" => {
+            Type::Array(Box::new(el.clone()))
+        }
         // `enumerate` -> Array of (Int, element) tuples; `zip` -> Array of pairs
         // (the other side's element type isn't threaded, so its 2nd slot is Unknown).
         "enumerate" => Type::Array(Box::new(Type::Tuple(vec![Type::Int, el.clone()]))),
         "zip" => Type::Array(Box::new(Type::Tuple(vec![el.clone(), Type::Unknown]))),
-        // `(value, count)` tuples for the n most frequent elements.
-        "top" => Type::Array(Box::new(Type::Tuple(vec![el.clone(), Type::Int]))),
+        // `(value, count)` tuples — `top` for the n most frequent, `frequencies` for all.
+        "top" | "frequencies" => Type::Array(Box::new(Type::Tuple(vec![el.clone(), Type::Int]))),
         "join" => Type::String,
         _ => {
             return Err(unknown_method(

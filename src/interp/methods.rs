@@ -490,23 +490,41 @@ fn array_method(
         "top" => {
             arity("top", args, 1, line, col)?;
             let n = as_int(&args[0], "top", line, col)?.max(0) as usize;
-            // Frequency count by value equality, ordered by count desc then value asc.
-            let mut counts: Vec<(Value, i64)> = Vec::new();
-            for v in items.iter() {
-                if let Some(e) = counts.iter_mut().find(|(k, _)| values_equal(k, v)) {
-                    e.1 += 1;
-                } else {
-                    counts.push((v.clone(), 1));
-                }
-            }
-            counts.sort_by(|a, b| {
-                b.1.cmp(&a.1).then_with(|| a.0.to_string().cmp(&b.0.to_string()))
-            });
-            let out: Vec<Value> = counts
+            let out: Vec<Value> = value_histogram(items)
                 .into_iter()
                 .take(n)
                 .map(|(v, c)| Value::Tuple(Rc::new(vec![v, Value::Int(c)])))
                 .collect();
+            Ok(Value::array(out))
+        }
+        "frequencies" => {
+            // The full value-count histogram as `(value, count)` pairs (count desc,
+            // value asc) — `top` without the limit. For k-mer spectra etc.
+            no_args(name)?;
+            let out: Vec<Value> = value_histogram(items)
+                .into_iter()
+                .map(|(v, c)| Value::Tuple(Rc::new(vec![v, Value::Int(c)])))
+                .collect();
+            Ok(Value::array(out))
+        }
+        "unique" => {
+            // Distinct values in first-seen order. O(n) for string/DNA arrays.
+            no_args(name)?;
+            let mut out: Vec<Value> = Vec::new();
+            if items.iter().all(|v| matches!(v, Value::Str(_) | Value::Dna(_))) {
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for v in items.iter() {
+                    if seen.insert(v.to_string()) {
+                        out.push(v.clone());
+                    }
+                }
+            } else {
+                for v in items.iter() {
+                    if !out.iter().any(|u| values_equal(u, v)) {
+                        out.push(v.clone());
+                    }
+                }
+            }
             Ok(Value::array(out))
         }
         _ => Err(unknown_method(
@@ -517,6 +535,38 @@ fn array_method(
             col,
         )),
     }
+}
+
+/// Value-count histogram, sorted by count desc then value asc — the shared core
+/// of `top`/`frequencies`. String/DNA arrays (k-mer spectra) take a fast ~O(n)
+/// hash path; everything else falls back to the value-equality scan (which honors
+/// cross-type numeric equality, e.g. `1 == 1.0`), preserving exact semantics.
+/// Insertion order is preserved before the sort, matching the old `top`.
+fn value_histogram(items: &[Value]) -> Vec<(Value, i64)> {
+    let mut counts: Vec<(Value, i64)> = Vec::new();
+    if items.iter().all(|v| matches!(v, Value::Str(_) | Value::Dna(_))) {
+        let mut idx: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::with_capacity(items.len());
+        for v in items.iter() {
+            match idx.get(&v.to_string()) {
+                Some(&i) => counts[i].1 += 1,
+                None => {
+                    idx.insert(v.to_string(), counts.len());
+                    counts.push((v.clone(), 1));
+                }
+            }
+        }
+    } else {
+        for v in items.iter() {
+            if let Some(e) = counts.iter_mut().find(|(k, _)| values_equal(k, v)) {
+                e.1 += 1;
+            } else {
+                counts.push((v.clone(), 1));
+            }
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_string().cmp(&b.0.to_string())));
+    counts
 }
 
 fn empty_guard(xs: &[f64], who: &str, line: usize, col: usize) -> Result<(), HelixError> {

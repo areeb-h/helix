@@ -223,6 +223,26 @@
     }
 
     #[test]
+    fn array_unique_and_frequencies() {
+        // `unique` keeps first-seen order.
+        assert_eq!(last("[3, 1, 3, 2, 1].unique()").unwrap().to_string(), "[3, 1, 2]");
+        assert_eq!(
+            last("[\"AT\", \"TG\", \"AT\", \"CC\"].unique()").unwrap().to_string(),
+            "[\"AT\", \"TG\", \"CC\"]"
+        );
+        // `frequencies` is the full (value, count) histogram, count desc then value asc.
+        assert_eq!(
+            last("[\"AT\", \"TG\", \"AT\"].frequencies()").unwrap().to_string(),
+            "[(\"AT\", 2), (\"TG\", 1)]"
+        );
+        // `top` is unchanged by the shared-histogram refactor.
+        assert_eq!(
+            last("[3, 1, 3, 2, 1, 3].top(2)").unwrap().to_string(),
+            "[(3, 3), (1, 2)]"
+        );
+    }
+
+    #[test]
     fn kmers_vs_windows() {
         let strs = |src: &str| match last(src).unwrap() {
             Value::Array(a) => a

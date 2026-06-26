@@ -110,7 +110,8 @@ pub static UNIVERSAL_METHODS: &[&str] = &["is_missing"];
 pub static ARRAY_METHODS: &[&str] = &[
     "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count",
     "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
-    "all", "take", "drop", "zip", "enumerate", "top", "drop_missing", "join",
+    "all", "take", "drop", "zip", "enumerate", "top", "frequencies", "unique", "drop_missing",
+    "join",
 ];
 
 /// String methods.
