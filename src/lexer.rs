@@ -465,6 +465,9 @@ fn cook_newlines(raw: Vec<Token>) -> Vec<Token> {
                 | Tok::And | Tok::Or | Tok::Not | Tok::Comma | Tok::Dot
                 | Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::Mut | Tok::FatArrow
                 | Tok::Colon | Tok::Arrow | Tok::Coalesce
+                // A line ending in `in` (the `let … in` separator) or a branch keyword
+                // is unfinished — let its body/branch start on the next line.
+                | Tok::In | Tok::Then | Tok::Else
         )
     }
     fn continues_after(t: &Tok) -> bool {

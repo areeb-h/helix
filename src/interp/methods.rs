@@ -862,6 +862,12 @@ fn array_method(
             Ok(Value::float_array(exps.iter().map(|e| e / total).collect()))
         }
         "bootstrap" => crate::rng::bootstrap(items, args, line, col),
+        "contains" => {
+            if args.len() != 1 {
+                return Err(HelixError::new("`contains` takes one value to look for", line, col));
+            }
+            Ok(Value::Bool(items.iter().any(|v| values_equal(v, &args[0]))))
+        }
         // --- charts + tabular export/write → shared dispatch (rebuild the receiver) ---
         "bar_chart" | "histogram" | "line_chart" | "sparkline" | "scatter" | "svg_bar"
         | "svg_line" | "write_csv" | "write_tsv" | "write_json" | "to_html" | "to_markdown"

@@ -375,16 +375,36 @@ impl super::Interp {
                 };
                 apply_float_fn(name, f, &args[0], line, col)
             }
-            "floor" | "ceil" | "round" | "trunc" => {
+            "floor" | "ceil" | "trunc" => {
                 arity(name, &args, 1, line, col)?;
                 let f: fn(f64) -> f64 = match name {
                     "floor" => f64::floor,
                     "ceil" => f64::ceil,
-                    "round" => f64::round,
                     "trunc" => f64::trunc,
                     _ => unreachable!(),
                 };
                 apply_round_fn(name, f, &args[0], line, col)
+            }
+            "round" => {
+                // `round(x)` → nearest integer (Int); `round(x, d)` → round to `d`
+                // decimal places (Float). Both broadcast over arrays and pass `missing`.
+                if args.is_empty() || args.len() > 2 {
+                    return Err(HelixError::new(
+                        format!("`round` takes a number and an optional digit count, got {} arguments", args.len()),
+                        line,
+                        col,
+                    ));
+                }
+                if args.len() == 1 {
+                    return apply_round_fn("round", f64::round, &args[0], line, col);
+                }
+                let d = as_int(&args[1], "round", line, col)?;
+                let scale = 10f64.powi(d as i32);
+                broadcast_unary(&args[0], &|s| match s {
+                    Value::Int(i) => Ok(Value::Float(*i as f64)),
+                    Value::Float(x) => Ok(Value::Float((x * scale).round() / scale)),
+                    other => Err(type_err("round", "a number or array of numbers", other, line, col)),
+                })
             }
             "abs" => {
                 arity(name, &args, 1, line, col)?;

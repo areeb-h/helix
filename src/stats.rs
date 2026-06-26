@@ -381,101 +381,31 @@ fn invert(m: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
 /// `intercept = false` the fit passes through the origin and the coefficients map
 /// one-to-one to the supplied predictors (so a user-supplied constant column won't
 /// collide with an auto-intercept).
-pub fn multiple_regression(
-    predictors: &[Vec<f64>],
-    y: &[f64],
-    intercept: bool,
-) -> Option<MultiFit> {
-    let n = y.len();
-    let p = predictors.len();
-    let k = if intercept { p + 1 } else { p }; // parameters fit
-    if p == 0 || k == 0 || n <= k || predictors.iter().any(|c| c.len() != n) {
-        return None;
-    }
-    // X[i][j]: with an intercept, column 0 is all-ones and 1..=p are predictors;
-    // without, columns 0..p are the predictors directly.
-    let xij = |i: usize, j: usize| {
-        if intercept {
-            if j == 0 { 1.0 } else { predictors[j - 1][i] }
-        } else {
-            predictors[j][i]
-        }
-    };
-    // Normal equations: XᵀX (k×k) and Xᵀy (k).
-    let mut xtx = vec![vec![0.0; k]; k];
-    let mut xty = vec![0.0; k];
-    for a in 0..k {
-        for (b, slot) in xtx[a].iter_mut().enumerate() {
-            *slot = (0..n).map(|i| xij(i, a) * xij(i, b)).sum();
-        }
-        xty[a] = (0..n).map(|i| xij(i, a) * y[i]).sum();
-    }
-    let inv = invert(&xtx)?;
-    let beta: Vec<f64> = (0..k)
-        .map(|a| (0..k).map(|b| inv[a][b] * xty[b]).sum())
-        .collect();
-    // Fitted values, residuals, and the residual sum of squares.
-    let predictions: Vec<f64> =
-        (0..n).map(|i| (0..k).map(|j| beta[j] * xij(i, j)).sum()).collect();
-    let residuals: Vec<f64> = (0..n).map(|i| y[i] - predictions[i]).collect();
-    let rss: f64 = residuals.iter().map(|r| r * r).sum();
-    let ybar = mean(y);
-    let tss: f64 = y.iter().map(|v| (v - ybar).powi(2)).sum();
-    if tss == 0.0 {
-        return None; // constant response: nothing to explain
-    }
-    let r_squared = 1.0 - rss / tss;
-    let df = (n - k) as f64;
-    let adj_r_squared = 1.0 - (1.0 - r_squared) * (n - 1) as f64 / df;
-    let resid_var = rss / df;
-    let mut std_errors = Vec::with_capacity(k);
-    let mut p_values = Vec::with_capacity(k);
-    for j in 0..k {
-        let se = (resid_var * inv[j][j]).sqrt();
-        let pv = if se == 0.0 {
-            0.0 // a perfect fit determines every coefficient exactly
-        } else {
-            let t = beta[j] / se;
-            betai(df / 2.0, 0.5, df / (df + t * t))
-        };
-        std_errors.push(se);
-        p_values.push(pv);
-    }
-    Some(MultiFit {
-        coefficients: beta,
-        std_errors,
-        p_values,
-        r_squared,
-        adj_r_squared,
-        rss,
-        predictions,
-        residuals,
-    })
+/// The shared core of every OLS fit: validate, build and solve the normal
+/// equations `(XᵀX)β = Xᵀy`, and compute fitted values / residuals / RSS / TSS.
+/// Returns `None` on no predictors, a length mismatch, fewer rows than parameters,
+/// or a singular `XᵀX` (collinear predictors). `intercept` prepends an all-ones
+/// column. Both [`least_squares`] and [`multiple_regression`] build on this.
+struct OlsCore {
+    beta: Vec<f64>,
+    inv: Vec<Vec<f64>>,
+    predictions: Vec<f64>,
+    residuals: Vec<f64>,
+    rss: f64,
+    tss: f64,
+    k: usize,
+    n: usize,
 }
 
-/// A lightweight OLS fit: coefficients + fit quality, **without** the inferential
-/// statistics (standard errors / p-values). The expensive part of
-/// [`multiple_regression`] for a search loop is the per-coefficient `betai`
-/// continued-fraction in the p-values — pure waste when you only score models by
-/// RSS. `least_squares` skips it, so structure-search / model-selection loops that
-/// call it thousands of times run substantially faster. `intercept` behaves as in
-/// `multiple_regression`. Allows `n == k` (an exact fit), unlike the inferential
-/// version which needs residual degrees of freedom.
-pub struct LsqFit {
-    pub coefficients: Vec<f64>,
-    pub rss: f64,
-    pub r_squared: f64,
-    pub predictions: Vec<f64>,
-    pub residuals: Vec<f64>,
-}
-
-pub fn least_squares(predictors: &[Vec<f64>], y: &[f64], intercept: bool) -> Option<LsqFit> {
+fn ols_core(predictors: &[Vec<f64>], y: &[f64], intercept: bool) -> Option<OlsCore> {
     let n = y.len();
     let p = predictors.len();
     let k = if intercept { p + 1 } else { p };
     if p == 0 || k == 0 || n < k || predictors.iter().any(|c| c.len() != n) {
         return None;
     }
+    // X[i][j]: with an intercept, column 0 is all-ones and 1..=p are predictors;
+    // without, columns 0..p are the predictors directly.
     let xij = |i: usize, j: usize| {
         if intercept {
             if j == 0 { 1.0 } else { predictors[j - 1][i] }
@@ -499,8 +429,75 @@ pub fn least_squares(predictors: &[Vec<f64>], y: &[f64], intercept: bool) -> Opt
     let rss: f64 = residuals.iter().map(|r| r * r).sum();
     let ybar = mean(y);
     let tss: f64 = y.iter().map(|v| (v - ybar).powi(2)).sum();
-    let r_squared = if tss == 0.0 { 0.0 } else { 1.0 - rss / tss };
-    Some(LsqFit { coefficients: beta, rss, r_squared, predictions, residuals })
+    Some(OlsCore { beta, inv, predictions, residuals, rss, tss, k, n })
+}
+
+pub fn multiple_regression(
+    predictors: &[Vec<f64>],
+    y: &[f64],
+    intercept: bool,
+) -> Option<MultiFit> {
+    let c = ols_core(predictors, y, intercept)?;
+    // Inference needs residual degrees of freedom and a non-constant response.
+    if c.n <= c.k || c.tss == 0.0 {
+        return None;
+    }
+    let (beta, inv, rss, n, k) = (c.beta, c.inv, c.rss, c.n, c.k);
+    let r_squared = 1.0 - rss / c.tss;
+    let df = (n - k) as f64;
+    let adj_r_squared = 1.0 - (1.0 - r_squared) * (n - 1) as f64 / df;
+    let resid_var = rss / df;
+    let mut std_errors = Vec::with_capacity(k);
+    let mut p_values = Vec::with_capacity(k);
+    for j in 0..k {
+        let se = (resid_var * inv[j][j]).sqrt();
+        let pv = if se == 0.0 {
+            0.0 // a perfect fit determines every coefficient exactly
+        } else {
+            let t = beta[j] / se;
+            betai(df / 2.0, 0.5, df / (df + t * t))
+        };
+        std_errors.push(se);
+        p_values.push(pv);
+    }
+    Some(MultiFit {
+        coefficients: beta,
+        std_errors,
+        p_values,
+        r_squared,
+        adj_r_squared,
+        rss,
+        predictions: c.predictions,
+        residuals: c.residuals,
+    })
+}
+
+/// A lightweight OLS fit: coefficients + fit quality, **without** the inferential
+/// statistics (standard errors / p-values). The expensive part of
+/// [`multiple_regression`] for a search loop is the per-coefficient `betai`
+/// continued-fraction in the p-values — pure waste when you only score models by
+/// RSS. `least_squares` skips it, so structure-search / model-selection loops that
+/// call it thousands of times run substantially faster. `intercept` behaves as in
+/// `multiple_regression`. Allows `n == k` (an exact fit), unlike the inferential
+/// version which needs residual degrees of freedom.
+pub struct LsqFit {
+    pub coefficients: Vec<f64>,
+    pub rss: f64,
+    pub r_squared: f64,
+    pub predictions: Vec<f64>,
+    pub residuals: Vec<f64>,
+}
+
+pub fn least_squares(predictors: &[Vec<f64>], y: &[f64], intercept: bool) -> Option<LsqFit> {
+    let c = ols_core(predictors, y, intercept)?;
+    let r_squared = if c.tss == 0.0 { 0.0 } else { 1.0 - c.rss / c.tss };
+    Some(LsqFit {
+        coefficients: c.beta,
+        rss: c.rss,
+        r_squared,
+        predictions: c.predictions,
+        residuals: c.residuals,
+    })
 }
 
 #[cfg(test)]

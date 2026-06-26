@@ -523,6 +523,8 @@ impl Parser {
             Tok::Else => Some("else".to_string()),
             Tok::Let => Some("let".to_string()),
             Tok::In => Some("in".to_string()),
+            Tok::Match => Some("match".to_string()),
+            Tok::Try => Some("try".to_string()),
             Tok::Missing => Some("missing".to_string()),
             Tok::True => Some("true".to_string()),
             Tok::False => Some("false".to_string()),
@@ -1482,7 +1484,9 @@ impl Parser {
                 let mut fields: Vec<(String, Expr)> = Vec::new();
                 if !matches!(self.peek(), Tok::RBrace) {
                     loop {
-                        let key = self.ident_name("as a record field name")?;
+                        // Field names may be keywords (`match`, `in`, `if`, …) — they
+                        // are contextual here, never ambiguous before a `:`.
+                        let key = self.member_name("as a record field name")?;
                         self.eat(&Tok::Colon, &format!("after field `{}`", key))
                             .map_err(|e| {
                                 e.hint("records look like `{name: \"Ada\", age: 41}`.")

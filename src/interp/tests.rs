@@ -160,6 +160,22 @@
     }
 
     #[test]
+    fn keyword_field_names_and_papercut_fixes() {
+        // keywords are valid record field names + field access (contextual)
+        assert!(matches!(last("{match: 1, in: 2, if: 3}.match").unwrap(), Value::Int(1)));
+        assert!(matches!(last("r = {in: 7}\nr.in").unwrap(), Value::Int(7)));
+        // `let … in` with the body on the next line
+        assert!(matches!(last("let a = 1, b = 2 in\n  a + b").unwrap(), Value::Int(3)));
+        // round(x) → Int (nearest); round(x, d) → Float to d decimals (broadcasts)
+        assert!(matches!(last("round(3.7)").unwrap(), Value::Int(4)));
+        assert!((float("round(3.14159, 2)") - 3.14).abs() < 1e-9);
+        assert!(matches!(last("round([1.234, 5.678], 1)[0]").unwrap(), Value::Float(f) if (f - 1.2).abs() < 1e-9));
+        // array membership
+        assert!(matches!(last("[1, 2, 3].contains(2)").unwrap(), Value::Bool(true)));
+        assert!(matches!(last("[1, 2, 3].contains(9)").unwrap(), Value::Bool(false)));
+    }
+
+    #[test]
     fn ml_helpers_and_scientific_literals() {
         // scientific float literals
         assert_eq!(float("1.0e9"), 1.0e9);

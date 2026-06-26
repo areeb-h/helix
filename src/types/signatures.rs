@@ -35,9 +35,30 @@ pub(super) fn require_boolish(t: &Type, name: &str, line: usize, col: usize) -> 
 
 pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -> Result<Type, HelixError> {
     let any = |ts: &[Type], f: fn(&Type) -> bool| ts.iter().any(f);
+    // `round` is special: `round(x)` → Int (nearest), `round(x, digits)` → Float.
+    if name == "round" {
+        if args.is_empty() || args.len() > 2 {
+            return Err(HelixError::new(
+                format!("`round` takes a number and an optional digit count, got {}", args.len()),
+                line,
+                col,
+            ));
+        }
+        let a = &args[0];
+        if matches!(a, Type::Array(_) | Type::Tensor | Type::Unknown) {
+            return Ok(Type::Unknown);
+        }
+        if matches!(a, Type::Missing) {
+            return Ok(Type::Missing);
+        }
+        if !is_numeric(a) {
+            return Err(type_err("round", "a number or array of numbers", a, line, col));
+        }
+        return Ok(if args.len() == 1 { Type::Int } else { Type::Float });
+    }
     // math: container/Unknown ⇒ Unknown; Missing ⇒ Missing (the false-positive guard)
     if MATH_UNARY_FLOAT.contains(&name)
-        || matches!(name, "floor" | "ceil" | "round" | "trunc" | "abs" | "sign")
+        || matches!(name, "floor" | "ceil" | "trunc" | "abs" | "sign")
     {
         if args.len() != 1 {
             return Err(arity_err(name, 1, args.len(), line, col));
@@ -53,7 +74,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             return Err(type_err(name, "a number or array of numbers", a, line, col));
         }
         return Ok(match name {
-            "floor" | "ceil" | "round" | "trunc" | "sign" => Type::Int,
+            "floor" | "ceil" | "trunc" | "sign" => Type::Int,
             "abs" => a.clone(),
             _ => Type::Float,
         });
@@ -418,6 +439,7 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         "argsort" => Type::Array(Box::new(Type::Int)),
         "softmax" => Type::Array(Box::new(Type::Float)),
         "clamp" | "bootstrap" => Type::Array(Box::new(el.clone())),
+        "contains" => Type::Bool,
         "total_length" => Type::Int,
         // charts + text exports render to a String
         "bar_chart" | "histogram" | "line_chart" | "sparkline" | "scatter" | "svg_bar"
