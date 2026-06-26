@@ -20,19 +20,22 @@ fast, memory-safe surface.
 - [x] **Sequence ops**: `gc_content`, `complement`, `reverse_complement`,
       `kmers(k)`, `find(motif)` (→ index or `missing`), slicing; plus `Array.top(n)`
       (frequency histogram) so `seq.kmers(9).top(20)` works.
-- [x] **`bio.read_vcf(path)` → DataFrame**: variant tables flow directly into the existing
-      `where`/`group`/`count` verbs, demonstrating the unified model
+- [x] **`bio.read_vcf(path)` / `bio.read_bcf(path)` → DataFrame**: variant tables flow
+      directly into the existing `where`/`group`/`count` verbs, demonstrating the unified model
       (`bio.read_vcf(...).where(@gene == "BRCA1").group(@consequence).count(@pos)`). The eight
-      fixed columns plus every INFO field (`gene`, `consequence`, …) become columns.
-      Demo: [examples/variants.helix](../examples/variants.helix). A hand-rolled parser
-      reads both plain `.vcf` and gzipped/BGZF `.vcf.gz` (magic-byte sniffing, multi-member
-      decode). Binary BCF and full INFO typing via `noodles` are the next step. (No-arg
+      fixed columns plus every INFO field (`gene`, `consequence`, …) become columns, each
+      **header-typed** (an `Integer`/`Float`/`Flag` INFO field becomes a numeric/bool column,
+      so `where(@af > 0.001)` is a numeric comparison). Parsing delegates to `noodles`; plain
+      `.vcf`, gzipped/BGZF `.vcf.gz`, and binary **BCF** all share one record model and
+      column-building core. Demo: [examples/variants.helix](../examples/variants.helix). (No-arg
       grouped `count()` for rows-per-group is a small follow-up.)
 - [x] **`read_fastq`** — FASTQ reads as records `{id, seq, qual, length}` (via
       `needletail`); `seq` is a DNA value and `qual` the Phred string. Demo:
       [examples/sequencing.helix](../examples/sequencing.helix).
-- [ ] `read_gff` / `read_bed`.
-- [ ] BAM/CRAM via `noodles` (memory-mapped, streaming; the local-first capability).
+- [x] **`read_gff` / `read_bed`** — feature/interval tables as DataFrames (GFF3 via
+      `noodles-gff` with one column per attribute tag; BED hand-rolled for BED3/6/12).
+- [ ] BAM/SAM/CRAM via `noodles` (memory-mapped, streaming; the local-first capability);
+      tabix/CSI-indexed region queries; FASTQ quality decoding.
 - [ ] RNA (`fold`, `translate`), protein sequences; an ADR for the bio type model.
 - [~] Python interop for adoption (calling into Biopython and existing pipelines).
       **v1 complete** (`import python.pysam`, etc.); see

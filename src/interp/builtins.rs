@@ -173,6 +173,13 @@ impl super::Interp {
                     other => Err(type_err("bio.read_vcf", "a string path", other, line, col)),
                 }
             }
+            "bio.read_bcf" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => Ok(Value::dataframe(crate::vcf::read_bcf(s, line, col)?)),
+                    other => Err(type_err("bio.read_bcf", "a string path", other, line, col)),
+                }
+            }
             "bio.read_gff" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {

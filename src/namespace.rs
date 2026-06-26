@@ -35,6 +35,7 @@ pub fn retired_path(name: &str) -> Option<&'static str> {
         "read_fasta" => "bio.read_fasta",
         "read_fastq" => "bio.read_fastq",
         "read_vcf" => "bio.read_vcf",
+        "read_bcf" => "bio.read_bcf",
         "write_parquet" => "io.write_parquet",
         "http_get" => "http.get",
         "correlation" => "stats.correlation",

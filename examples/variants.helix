@@ -18,3 +18,8 @@ print(variants.where(@gene == "BRCA1").group(@consequence).count(@pos))
 # Fixed and INFO columns mix freely.
 print("--- high-quality variants (qual > 50) ---")
 print(variants.where(@qual > 50).select(@chrom, @pos, @gene))
+
+# Binary BCF (the BGZF-framed form of VCF) reads through `read_bcf` into the very
+# same DataFrame — identical columns and verbs, just a compressed binary on disk.
+binary = bio.read_bcf("examples/data/variants.bcf")
+print("BCF variant count (same data):", binary.count())

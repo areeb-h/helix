@@ -374,6 +374,19 @@ fn read_vcf_makes_variants_queryable() {
 }
 
 #[test]
+fn read_bcf_queries_identically_to_read_vcf() {
+    // BCF is the binary, BGZF-framed form of VCF. read_bcf shares read_vcf's record
+    // model and column-building, so the same queries over the binary fixture must
+    // give the SAME answers as the text VCF (including the header-typed Float `af`
+    // column, so `af > 0.001` stays a numeric comparison). The fixture is generated
+    // from variants.vcf by the ignored `generate_bcf_fixture` test in src/vcf.rs.
+    let src = "b = bio.read_bcf(\"examples/data/variants.bcf\")\nprint(b.count())\nprint(b.where(gene == \"BRCA1\").count())\nprint(b.where(qual > 50).count())\nprint(b.where(af > 0.001).count())\n";
+    let (out, stderr, code) = run_source(src, &[], "bcf");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "6\n3\n3\n3"); // identical to the plain-VCF result above
+}
+
+#[test]
 fn read_gff_makes_features_queryable() {
     // A GFF3 file becomes a DataFrame: the standard feature columns plus one string
     // column per attribute tag (so `Name` is queryable alongside `type`/`strand`).

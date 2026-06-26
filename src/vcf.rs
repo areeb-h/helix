@@ -21,12 +21,14 @@
 //!
 //! Plain `.vcf` and gzipped/BGZF `.vcf.gz` are both accepted (the magic bytes are
 //! sniffed; BGZF is a concatenation of gzip members, which the multi-member decoder
-//! reads transparently).
+//! reads transparently). `read_bcf` parses the binary BCF form through the same
+//! record model and column-building core — only the reader construction differs.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 
 use flate2::read::MultiGzDecoder;
+use noodles_bcf as bcf;
 use noodles_vcf::{self as vcf, header::record::value::map::info::{Number, Type as InfoType}};
 
 use crate::backend::ColData;
@@ -66,6 +68,7 @@ enum Cell {
     Str(String),
 }
 
+/// `read_vcf(path)` — parse a (optionally gzip/BGZF-compressed) text VCF.
 pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, HelixError> {
     let err = |msg: String| HelixError::new(msg, line, col);
 
@@ -75,6 +78,44 @@ pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<crate::backend::D
     let header = reader
         .read_header()
         .map_err(|e| err(format!("could not read VCF header in `{path}`: {e}")))?;
+    let records = reader.record_bufs(&header);
+    build_variant_frame(&header, records, "VCF", path, line, col)
+}
+
+/// `read_bcf(path)` — parse a BCF file (the binary, BGZF-framed form of VCF). BCF
+/// carries the same header and the same noodles `RecordBuf` records as VCF, so the
+/// schema derivation and column building below are shared verbatim with `read_vcf`;
+/// only the reader construction differs. `bcf::io::Reader::new` decodes the BGZF
+/// framing internally, so a plain `File` is handed to it.
+pub fn read_bcf(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, HelixError> {
+    let err = |msg: String| HelixError::new(msg, line, col);
+
+    let file =
+        std::fs::File::open(path).map_err(|e| err(format!("could not open BCF `{path}`: {e}")))?;
+    let mut reader = bcf::io::Reader::new(file);
+    let header = reader
+        .read_header()
+        .map_err(|e| err(format!("could not read BCF header in `{path}`: {e}")))?;
+    let records = reader.record_bufs(&header);
+    build_variant_frame(&header, records, "BCF", path, line, col)
+}
+
+/// Build a variant DataFrame from a parsed header and a stream of records, shared
+/// by [`read_vcf`] and [`read_bcf`]. `format` (e.g. `"VCF"`/`"BCF"`) only labels
+/// the malformed-record error. The eight fixed columns plus one header-typed column
+/// per INFO field are emitted through the backend seam (ADR 0012).
+fn build_variant_frame<I>(
+    header: &vcf::Header,
+    records: I,
+    format: &str,
+    path: &str,
+    line: usize,
+    col: usize,
+) -> Result<crate::backend::Df, HelixError>
+where
+    I: Iterator<Item = std::io::Result<vcf::variant::RecordBuf>>,
+{
+    let err = |msg: String| HelixError::new(msg, line, col);
 
     // The INFO schema comes from the header: a stable, declared-order key list and
     // the column kind each maps to. A scalar (`Number=1`) Integer/Float/String gets
@@ -101,8 +142,9 @@ pub fn read_vcf(path: &str, line: usize, col: usize) -> Result<crate::backend::D
     let mut filter: Vec<Option<String>> = Vec::new();
     let mut info_rows: Vec<HashMap<String, Cell>> = Vec::new();
 
-    for result in reader.record_bufs(&header) {
-        let rec = result.map_err(|e| err(format!("malformed VCF record in `{path}`: {e}")))?;
+    for result in records {
+        let rec =
+            result.map_err(|e| err(format!("malformed {format} record in `{path}`: {e}")))?;
 
         chrom.push(rec.reference_sequence_name().to_string());
         pos.push(rec.variant_start().map(|p| usize::from(p) as i64));
@@ -267,5 +309,33 @@ fn build_info_column(key: &str, kind: ColKind, rows: &[HashMap<String, Cell>]) -
                 })
                 .collect(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regenerate `examples/data/variants.bcf` from the text `variants.vcf` using
+    /// noodles' BCF writer (no external `bcftools` needed). Ignored by default; run
+    /// on demand with `cargo test -- --ignored generate_bcf_fixture` whenever the
+    /// VCF fixture changes. Documents how the committed binary fixture was produced.
+    #[test]
+    #[ignore]
+    fn generate_bcf_fixture() {
+        use vcf::variant::io::Write as _;
+
+        let inner = open_maybe_gzip("examples/data/variants.vcf").unwrap();
+        let mut reader = vcf::io::Reader::new(inner);
+        let header = reader.read_header().unwrap();
+
+        let out = std::fs::File::create("examples/data/variants.bcf").unwrap();
+        let mut writer = bcf::io::Writer::new(out);
+        writer.write_variant_header(&header).unwrap();
+        for result in reader.record_bufs(&header) {
+            let record = result.unwrap();
+            writer.write_variant_record(&header, &record).unwrap();
+        }
+        writer.try_finish().unwrap();
     }
 }

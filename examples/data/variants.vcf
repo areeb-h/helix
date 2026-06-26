@@ -1,4 +1,8 @@
 ##fileformat=VCFv4.2
+##contig=<ID=chr7>
+##contig=<ID=chr13>
+##contig=<ID=chr17>
+##FILTER=<ID=q10,Description="Quality below 10">
 ##INFO=<ID=gene,Number=1,Type=String,Description="Gene symbol">
 ##INFO=<ID=consequence,Number=1,Type=String,Description="Variant consequence">
 ##INFO=<ID=af,Number=1,Type=Float,Description="Allele frequency">
