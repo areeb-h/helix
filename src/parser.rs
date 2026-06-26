@@ -562,7 +562,7 @@ impl Parser {
 
     fn comparison(&mut self) -> Result<Expr, HelixError> {
         let saved = self.depth;
-        let mut left = self.term()?;
+        let mut left = self.range_expr()?;
         loop {
             let op = match self.peek() {
                 Tok::Lt => BinOp::Lt,
@@ -574,7 +574,7 @@ impl Parser {
             let (l, c) = self.pos();
             self.advance();
             self.deepen()?;
-            let right = self.term()?;
+            let right = self.range_expr()?;
             left = Expr::Binary {
                 op,
                 left: Box::new(left),
@@ -584,6 +584,32 @@ impl Parser {
             };
         }
         self.depth = saved;
+        Ok(left)
+    }
+
+    /// A range literal `a..b` desugars to the existing `range(a, b)` builtin call,
+    /// so every back-end (tree-walker, VM, JIT fusion via `as_range_call`) handles it
+    /// with no further changes. `..` binds looser than `+`/`-` (so `0..n+1` is
+    /// `0..(n+1)`) but tighter than comparisons; it does not chain (`a..b..c` is a
+    /// parse error). Exclusive of the upper bound, matching `range`.
+    fn range_expr(&mut self) -> Result<Expr, HelixError> {
+        let left = self.term()?;
+        if matches!(self.peek(), Tok::DotDot) {
+            let (l, c) = self.pos();
+            self.advance();
+            self.deepen()?;
+            let right = self.term()?;
+            if matches!(self.peek(), Tok::DotDot) {
+                return Err(HelixError::new("a range `a..b` cannot be chained", l, c)
+                    .hint("write a single `start..end`, e.g. `0..n`."));
+            }
+            return Ok(Expr::Call {
+                name: "range".into(),
+                args: vec![left, right],
+                line: l,
+                col: c,
+            });
+        }
         Ok(left)
     }
 

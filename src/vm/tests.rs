@@ -579,6 +579,13 @@
             "[1, 2, 3, 4].reduce(0, (acc, x) => acc + x)",
             "[1, 2, 3, 4].reduce(1, (acc, x) => acc * x)",
             "range(10).map(it * it)",
+            // `a..b` range literals desugar to `range(a, b)` — must match exactly
+            "(0..5).map(it * 2)",
+            "(1..4).reduce(0, (acc, x) => acc + x)",
+            "(0..10).filter(it % 3 == 0).reduce(0, (acc, x) => acc + x)",
+            "let n = 50 in (0..n).reduce(0, (acc, x) => acc + x)",
+            "(0..3 + 1).count()",
+            "(2..2).count()",
             "range(20).filter(it % 3 == 0).reduce(0, (acc, x) => acc + x)",
             // fused range reductions (no array materialized)
             "range(100).reduce(0, (acc, x) => acc + x)",

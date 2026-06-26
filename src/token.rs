@@ -59,6 +59,7 @@ pub enum Tok {
     RBrace, // }
     Comma,
     Dot,
+    DotDot,   // .. (range literal: `0..n`)
     Colon,    // :
     Arrow,    // ->
     FatArrow, // =>
@@ -115,6 +116,7 @@ impl Tok {
             Tok::RBrace => "`}`".into(),
             Tok::Comma => "`,`".into(),
             Tok::Dot => "`.`".into(),
+            Tok::DotDot => "`..`".into(),
             Tok::Colon => "`:`".into(),
             Tok::Arrow => "`->`".into(),
             Tok::FatArrow => "`=>`".into(),

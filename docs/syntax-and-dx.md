@@ -116,19 +116,20 @@ io.read_csv("f.csv", delimiter: ";", header: false)
 
 ---
 
-## Proposal 3 — Range literal `a..b`
+## Proposal 3 — Range literal `a..b` ✅ *shipped*
 
-**Today:** `range(0, n)`. **After:** `0..n`
+**Before:** `range(0, n)`. **After:** `0..n`
 ```helix
 (0..1000000).map(it * it).sum()        # vs range(0, 1000000)
-for x in 0..n: ...
+(0..n).filter(it % 2 == 0).count()
 ```
 - **Why:** closeness of mapping (math interval notation) + terseness; `0..n` is instantly
-  legible and matches Rust/Kotlin/Swift and Python-slice intuition. *(Currently `0..5` is a
-  parse error — only `range(...)` works.)* Keep `range(...)` as the explicit form for a
-  computed step.
-- **Cost:** small parser addition; decide inclusive vs exclusive (recommend **exclusive**
-  `0..n` to match `range`, with `0..=n` inclusive if needed).
+  legible and matches Rust/Kotlin/Swift and Python-slice intuition. Keep `range(...)` as the
+  explicit form for a computed step.
+- **Status:** implemented as pure front-end sugar — `a..b` desugars to `range(a, b)` at parse
+  time, so all three engines *and* the JIT range-fusion path handle it unchanged. Exclusive of
+  the upper bound (matches `range`); binds looser than `+`/`-` (so `0..n+1` is `0..(n+1)`) and
+  does not chain. (`0..=n` inclusive form left for later if a need appears.)
 
 ---
 
