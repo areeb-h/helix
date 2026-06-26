@@ -108,11 +108,25 @@ flate2 = "1"
 # managed-runtime extraction reuses it. Pure Rust, no system dep.
 tar = "0.4"
 faer = "0.24.4"
+# Fast cross-platform global allocator (ADR 0016). Default-on so every shipped binary
+# benefits; the static-musl build needs it because musl's default malloc is a
+# documented performance regression (ADR 0009 §8). `default-features = false` selects
+# the performance config (no `secure` hardening); the crate is `GlobalAlloc`-only and
+# never interposes libc malloc, so it is safe alongside the embedded-CPython `python`
+# feature. Disable with `--no-default-features` for allocator debugging.
+mimalloc = { version = "0.1", default-features = false, optional = true }
+# The raw mimalloc bindings — used only to set `purge_delay = 0` at startup (the
+# `mimalloc` crate doesn't expose that option). Same crate `mimalloc` already pulls,
+# so no extra version in the tree; v3 is the default build (do NOT enable its `v2`
+# feature, which would shift the option enum).
+libmimalloc-sys = { version = "0.1", default-features = false, features = ["extended"], optional = true }
 
 [features]
-# HTTP data-fetching is on by default (a core scientific capability); build with
-# `--no-default-features` for a network-free binary on locked-down machines.
-default = ["http"]
+# HTTP data-fetching and the fast allocator are on by default; build with
+# `--no-default-features` for a network-free / system-allocator binary.
+default = ["http", "mimalloc"]
+# Swap in the mimalloc global allocator (a pure runtime win; see src/main.rs).
+mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 # `http_get` — fetch data over HTTP(S) from a Helix program.
 http = ["dep:ureq"]
 # Enable the embedded-CPython bridge: `cargo build --features python`.

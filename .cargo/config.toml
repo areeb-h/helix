@@ -1,0 +1,10 @@
+# Cargo configuration.
+#
+# musl static builds (the maximum-portability / air-gapped / distroless artifact,
+# ADR 0009 §8 + ADR 0016): force a fully-static C runtime so the binary has no shared
+# library dependencies at all. Scoped to the musl target ONLY — never put crt-static
+# in a global `[build]` rustflags, where it would leak into the glibc/macOS/Windows
+# builds and could break them. The mimalloc global allocator (default-on) replaces
+# musl's slow default malloc, so the static build stays glibc-fast.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]

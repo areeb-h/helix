@@ -12,6 +12,8 @@
 #   HELIX_INSTALL_DIR   where to put the binary (default: $HOME/.local/bin)
 #   HELIX_VERSION       release tag to fetch (default: latest)
 #   HELIX_FROM_SOURCE   set to 1 to force a source build
+#   HELIX_MUSL          set to 1 to fetch the fully-static musl binary on x86_64 Linux
+#                       (maximum portability / air-gapped; the default gnu build is PGO)
 #   HELIX_REPO          owner/name on GitHub (default: areeb/helix)
 
 set -eu
@@ -53,6 +55,11 @@ install_binary_from() {
 
 from_release() {
   target="$(detect_target)"
+  # Opt into the fully-static musl artifact on x86_64 Linux (air-gapped / maximum
+  # portability). The default x86_64 Linux build is the glibc PGO binary.
+  if [ "${HELIX_MUSL:-0}" = "1" ] && [ "$target" = "x86_64-unknown-linux-gnu" ]; then
+    target="x86_64-unknown-linux-musl"
+  fi
   ver="${HELIX_VERSION:-latest}"
   if [ "$ver" = "latest" ]; then
     base="https://github.com/$REPO/releases/latest/download"

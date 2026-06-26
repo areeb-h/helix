@@ -3,6 +3,11 @@ name: release
 # Cross-compiles the self-contained `helix` core (default features — no Python, no
 # libpython dependency) for every platform and attaches the binaries to the GitHub
 # Release. The `install.sh` one-liner downloads these. Push a tag like `v0.1.0`.
+#
+# x86_64-linux-gnu is built profile-guided (PGO) in its own `build-pgo` job — the only
+# target where the Cranelift JIT exists and cargo-pgo is fully supported — and that job
+# is the SOLE publisher of the gnu asset (a regression gate guarantees PGO >= plain).
+# A static musl artifact (`build-musl`) is the maximum-portability / distroless build.
 on:
   push:
     tags: ["v*"]
@@ -19,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu }
+          # NB: x86_64-unknown-linux-gnu is published by `build-pgo` below, not here.
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, cross: true }
           - { os: macos-latest,   target: x86_64-apple-darwin }
           - { os: macos-latest,   target: aarch64-apple-darwin }
@@ -52,3 +57,65 @@ jobs:
           files: |
             helix-${{ matrix.target }}.tar.gz
             helix-${{ matrix.target }}.zip
+
+  # Profile-guided x86_64-linux-gnu build — the primary Linux artifact. Instrument with
+  # thin LTO (throwaway), train on the representative bench/crosslang workloads, then
+  # optimize keeping the project's fat-LTO release profile + the merged profile. A
+  # regression gate ensures the PGO binary is never slower than a plain release.
+  build-pgo:
+    name: build x86_64-unknown-linux-gnu (PGO)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+          components: llvm-tools-preview
+      - name: Install cargo-pgo and GNU time (for the gate)
+        run: |
+          cargo install cargo-pgo
+          sudo apt-get update && sudo apt-get install -y time
+      - name: Instrument build (thin LTO)
+        run: cargo pgo build -- --target x86_64-unknown-linux-gnu
+      - name: Train (representative workload)
+        run: |
+          HELIX="$PWD/target/x86_64-unknown-linux-gnu/release/helix" \
+            bench/crosslang/train.sh --scale 0.25
+      - name: Optimize build (PGO + fat LTO)
+        run: cargo pgo optimize build -- --target x86_64-unknown-linux-gnu
+      - name: Plain-release baseline (for the gate)
+        run: cargo build --release --target x86_64-unknown-linux-gnu --target-dir target/baseline
+      - name: Regression gate (PGO must not regress vs plain release)
+        run: |
+          scripts/perf-verify.sh \
+            target/baseline/x86_64-unknown-linux-gnu/release/helix \
+            target/x86_64-unknown-linux-gnu/release/helix --scale 0.25
+      - name: Package
+        run: tar -czf "helix-x86_64-unknown-linux-gnu.tar.gz" -C "target/x86_64-unknown-linux-gnu/release" helix
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: helix-x86_64-unknown-linux-gnu.tar.gz
+
+  # Static musl artifact — maximum portability / air-gapped / the distroless image base.
+  # mimalloc (default-on) replaces musl's slow default allocator so it stays glibc-fast.
+  build-musl:
+    name: build x86_64-unknown-linux-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build (musl static, mimalloc)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: Package
+        run: tar -czf "helix-x86_64-unknown-linux-musl.tar.gz" -C "target/x86_64-unknown-linux-musl/release" helix
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: helix-x86_64-unknown-linux-musl.tar.gz

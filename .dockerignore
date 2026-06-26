@@ -1,0 +1,15 @@
+# Keep the Docker build context tiny and the build cache-friendly. The 2 GB+
+# build artifacts and generated data must never enter the context.
+target/
+**/target/
+.git/
+bench/crosslang/data/
+bench/crosslang/.venv/
+**/*.bcf
+**/*.bam
+**/*.bai
+**/*.tbi
+*.swp
+*~
+.DS_Store
+.claude/

@@ -38,6 +38,18 @@ mod value;
 mod vcf;
 mod vm;
 
+// Process-wide allocator. mimalloc replaces the system allocator (glibc/musl/system
+// malloc) for every Rust allocation — a pure runtime win on Helix's allocation-heavy
+// paths (Polars/Arrow buffers, AST nodes, `Value` clones, parsing) and the documented
+// fix for musl's slow default allocator, so the static musl build stays glibc-fast
+// (ADR 0009 §8, ADR 0016). It is `GlobalAlloc`-only — it does NOT interpose libc
+// `malloc` or CPython's allocators, so it composes safely with the embedded-CPython
+// `python` feature. Gated on the default-on `mimalloc` feature so an allocator-
+// debugging build (`--no-default-features`) falls back to the system allocator.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::io::{self, Write};
 use std::process::ExitCode;
 
@@ -46,6 +58,18 @@ use interp::Interp;
 use value::Value;
 
 fn main() -> ExitCode {
+    // Return freed memory to the OS promptly (mimalloc `purge_delay = 0`) instead of
+    // its default ~10 ms hold. Helix processes are typically short-lived (CLI,
+    // serverless), so they exit before that delay ever fires — leaving freed pages
+    // resident and inflating peak RSS by tens of MB. Immediate purging keeps the
+    // allocator's wall-time win while cutting peak RSS to ~system-allocator levels on
+    // the data workloads (measured: VCF read 1.48x->1.08x, group-by 1.77x->1.46x).
+    // `15` is `mi_option_purge_delay` in mimalloc v3 (the version the crate builds);
+    // the enum's `deprecated_*` placeholders keep that index stable across v3 releases.
+    #[cfg(feature = "mimalloc")]
+    unsafe {
+        libmimalloc_sys::mi_option_set(15, 0);
+    }
     // The bytecode VM — the default engine — recurses on the *heap* (frames in a
     // `Vec`), so it runs on the ordinary main-thread stack. Only the tree-walker
     // recurses on the native stack, and it is now reached just as a rare
