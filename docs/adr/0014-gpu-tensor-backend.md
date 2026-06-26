@@ -9,8 +9,11 @@
 
 `Value::Tensor` is `Rc<ArrayD<f64>>` — a dense CPU `ndarray`. Every op lives in
 `src/tensor.rs` (elementwise/broadcast, reductions, `matmul`/`dot`, `norm`, and hand-rolled
-`det`/`inv`/`solve`). `matmul` uses ndarray's naive `.dot()` (no BLAS, by design — no system
-dep). `tensor.rs`'s own doc already states the intent: *"the Helix surface is
+`det`/`inv`/`solve`). `matmul` uses ndarray's `.dot()`, which delegates to the
+`matrixmultiply` crate — a pure-Rust SIMD cache-blocked GEMM, ~30 GFLOP/s single-threaded
+at 1024³, no BLAS/system dep (already fast, *not* naive); `det`/`inv`/`solve` are hand-rolled
+Gaussian elimination (genuinely unoptimized, but fine at the typical small/medium sizes).
+`tensor.rs`'s own doc already states the intent: *"the Helix surface is
 backend-independent, so a GPU/autodiff backend can slot in behind it later."* But there is
 no actual seam yet — ndarray is called directly.
 
