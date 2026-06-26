@@ -1068,6 +1068,47 @@ fn int_range(a: i64, b: i64, line: usize, col: usize) -> Result<Value, HelixErro
     Ok(Value::int_array(v))
 }
 
+/// `range(start, stop, step)` — half-open, step may be negative for a descending
+/// range. A zero step is an error (it would never terminate).
+fn int_range_step(a: i64, b: i64, step: i64, line: usize, col: usize) -> Result<Value, HelixError> {
+    if step == 0 {
+        return Err(HelixError::new("`range` step must not be zero".to_string(), line, col)
+            .hint("use a positive step to count up or a negative step to count down."));
+    }
+    const MAX_RANGE: i128 = 100_000_000;
+    // Number of elements: ceil(|stop - start| / |step|), clamped at 0 when the
+    // direction of `step` points away from `stop`.
+    let span = (b as i128) - (a as i128);
+    let stride = step as i128;
+    let len = if (span > 0) == (stride > 0) && span != 0 {
+        (span.abs() + stride.abs() - 1) / stride.abs()
+    } else {
+        0
+    };
+    if len > MAX_RANGE {
+        return Err(HelixError::new(
+            format!("`range` would build {} elements, which is too large", len),
+            line,
+            col,
+        )
+        .hint("ranges are materialized eagerly — keep them under 100 million elements."));
+    }
+    let mut v: Vec<i64> = Vec::with_capacity(len.max(0) as usize);
+    let mut x = a;
+    if step > 0 {
+        while x < b {
+            v.push(x);
+            x += step;
+        }
+    } else {
+        while x > b {
+            v.push(x);
+            x += step;
+        }
+    }
+    Ok(Value::int_array(v))
+}
+
 fn make_dna(s: &str, line: usize, col: usize) -> Result<Value, HelixError> {
     let mut out = String::with_capacity(s.len());
     for (i, ch) in s.chars().enumerate() {

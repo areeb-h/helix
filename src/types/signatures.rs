@@ -132,9 +132,9 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             Ok(Type::Dna)
         }
         "range" => {
-            if args.is_empty() || args.len() > 2 {
+            if args.is_empty() || args.len() > 3 {
                 return Err(HelixError::new(
-                    format!("`range` takes 1 or 2 arguments, got {}", args.len()),
+                    format!("`range` takes 1 to 3 arguments, got {}", args.len()),
                     line,
                     col,
                 ));

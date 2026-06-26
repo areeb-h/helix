@@ -248,12 +248,18 @@ impl super::Interp {
                     let b = as_int(&args[1], "range", line, col)?;
                     int_range(a, b, line, col)
                 }
+                3 => {
+                    let a = as_int(&args[0], "range", line, col)?;
+                    let b = as_int(&args[1], "range", line, col)?;
+                    let step = as_int(&args[2], "range", line, col)?;
+                    int_range_step(a, b, step, line, col)
+                }
                 _ => Err(HelixError::new(
-                    format!("`range` takes 1 or 2 arguments, got {}", args.len()),
+                    format!("`range` takes 1 to 3 arguments, got {}", args.len()),
                     line,
                     col,
                 )
-                .hint("use `range(n)` or `range(start, stop)`.")),
+                .hint("use `range(n)`, `range(start, stop)`, or `range(start, stop, step)`.")),
             },
             "read_parquet" => {
                 arity(name, &args, 1, line, col)?;

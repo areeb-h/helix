@@ -168,11 +168,17 @@
         assert!(matches!(last("let a = 1, b = 2 in\n  a + b").unwrap(), Value::Int(3)));
         // round(x) → Int (nearest); round(x, d) → Float to d decimals (broadcasts)
         assert!(matches!(last("round(3.7)").unwrap(), Value::Int(4)));
-        assert!((float("round(3.14159, 2)") - 3.14).abs() < 1e-9);
+        assert!((float("round(1.23456, 2)") - 1.23).abs() < 1e-9);
         assert!(matches!(last("round([1.234, 5.678], 1)[0]").unwrap(), Value::Float(f) if (f - 1.2).abs() < 1e-9));
         // array membership
         assert!(matches!(last("[1, 2, 3].contains(2)").unwrap(), Value::Bool(true)));
         assert!(matches!(last("[1, 2, 3].contains(9)").unwrap(), Value::Bool(false)));
+        // range(start, stop, step) — ascending, descending, empty, zero-step error
+        assert!(matches!(last("range(0, 10, 2).sum()").unwrap(), Value::Int(20)));
+        assert!(matches!(last("range(10, 0, -2).sum()").unwrap(), Value::Int(30)));
+        assert!(matches!(last("range(5, 5, 1).count()").unwrap(), Value::Int(0)));
+        assert!(matches!(last("range(0, 10, -1).count()").unwrap(), Value::Int(0)));
+        assert!(last("range(0, 10, 0)").is_err());
     }
 
     #[test]
