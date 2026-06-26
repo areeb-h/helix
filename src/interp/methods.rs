@@ -602,6 +602,43 @@ fn array_method(
             }
             Ok(Value::array(out))
         }
+        // `xs.concat(a, b, …)` — append the elements of each array argument. The
+        // result is re-sniffed so a numeric concat stays a packed (fast) array.
+        "concat" => {
+            let mut out = items.to_vec();
+            for (k, a) in args.iter().enumerate() {
+                match a {
+                    Value::Array(arr) => out.extend(arr.to_values().iter().cloned()),
+                    other => {
+                        return Err(HelixError::new(
+                            format!(
+                                "`concat` expects arrays, but argument {} is a {}",
+                                k + 1,
+                                other.type_name()
+                            ),
+                            line,
+                            col,
+                        ))
+                    }
+                }
+            }
+            Ok(Value::array_sniff(out))
+        }
+        // `xss.flatten()` — one level: spread each array element, keep scalars. Turns
+        // an array of arrays (e.g. dictionary column-groups) into one array.
+        "flatten" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`flatten` takes no arguments", line, col));
+            }
+            let mut out: Vec<Value> = Vec::with_capacity(items.len());
+            for v in items {
+                match v {
+                    Value::Array(a) => out.extend(a.to_values().iter().cloned()),
+                    other => out.push(other.clone()),
+                }
+            }
+            Ok(Value::array_sniff(out))
+        }
         // --- descriptive statistics over one numeric array (missing propagates) ---
         "standard_error" | "coefficient_of_variation" | "iqr" | "spread" | "zscores" => {
             if items.iter().any(|v| matches!(v, Value::Missing)) {

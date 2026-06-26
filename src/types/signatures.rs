@@ -369,6 +369,12 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         // `(value, count)` tuples — `top` for the n most frequent, `frequencies` for all.
         "top" | "frequencies" => Type::Array(Box::new(Type::Tuple(vec![el.clone(), Type::Int]))),
         "join" => Type::String,
+        // `concat` keeps the element type; `flatten` removes one level of nesting.
+        "concat" => Type::Array(Box::new(el.clone())),
+        "flatten" => match el {
+            Type::Array(inner) => Type::Array(inner.clone()),
+            _ => Type::Array(Box::new(Type::Unknown)),
+        },
         // descriptive stats over a numeric array
         "zscores" => Type::Array(Box::new(Type::Float)),
         "iqr" | "spread" | "standard_error" | "coefficient_of_variation" | "mean_gc" => Type::Float,

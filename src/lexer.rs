@@ -197,11 +197,17 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                 }
             }
             other => {
-                return Err(HelixError::new(
-                    format!("unexpected character `{}`", other),
-                    line,
-                    col,
-                ));
+                let mut err =
+                    HelixError::new(format!("unexpected character `{}`", other), line, col);
+                if !other.is_ascii() {
+                    // Non-ASCII is fine inside strings and comments — only identifiers
+                    // and operators are ASCII. (A common cause is an editor/shell
+                    // turning `-`/`+-` into a fancy `—`/`±`.)
+                    err = err.hint(
+                        "Helix identifiers and operators are ASCII; put non-ASCII text inside a string or comment.",
+                    );
+                }
+                return Err(err);
             }
         }
     }
