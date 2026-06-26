@@ -21,7 +21,7 @@ they are made deliberately and in the open.
 | [0012](0012-dataframe-backend-seam.md) | DataFrame backend seam | Accepted — Phase 1 implemented |
 | [0013](0013-package-manager.md) | Package manager & lockfile | Implemented (v1) — path + url deps, hash-pinned lock |
 | [0014](0014-gpu-tensor-backend.md) | GPU tensor backend (wgpu, seam-first) | Proposed — design only |
-| [0015](0015-sequence-alignment.md) | Sequence alignment | Proposed — hand-rolled affine-gap aligner |
+| [0015](0015-sequence-alignment.md) | Sequence alignment | Accepted — v1 implemented (hand-rolled affine-gap aligner) |
 
 ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
 (23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a

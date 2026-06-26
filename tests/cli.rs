@@ -350,6 +350,25 @@ fn read_fastq_parses_reads_with_quality() {
 }
 
 #[test]
+fn align_pairwise_global_local_semiglobal() {
+    // ADR 0015 hand-rolled affine-gap aligner. Global scores a single mismatch
+    // (3=1X4=); local extracts a conserved core at +7; semiglobal fits a whole read
+    // into a target window, reporting the [start, end) placement.
+    let src = "g = dna(\"ACGTACGT\").align(dna(\"ACGAACGT\"))\nprint(g.score)\nprint(g.cigar)\nl = dna(\"TTGATTACATT\").align(dna(\"CCGATTACAGG\"), \"local\")\nprint(l.score)\nprint(l.cigar)\nprint(l.start)\nprint(l.end)\ns = dna(\"GATTACA\").align(dna(\"CCCGATTACAGGG\"), \"semiglobal\")\nprint(s.score)\nprint(s.start)\nprint(s.end)\n";
+    let (out, stderr, code) = run_source(src, &[], "align");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "6\n3=1X4=\n7\n7=\n2\n9\n7\n3\n10");
+}
+
+#[test]
+fn align_rejects_an_unknown_mode() {
+    let src = "print(dna(\"AC\").align(dna(\"AC\"), \"fuzzy\").score)\n";
+    let (_out, stderr, code) = run_source(src, &[], "alignmode");
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("unknown alignment mode"), "stderr:\n{stderr}");
+}
+
+#[test]
 fn phred_decodes_quality_and_filters_reads() {
     // `qual.phred()` decodes a Phred+33 quality string to integer scores, which
     // compose with the array verbs (mean/min) for QC. The first read's quality is

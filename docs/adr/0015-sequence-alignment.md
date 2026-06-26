@@ -1,6 +1,6 @@
 # ADR 0015 — Sequence alignment
 
-- **Status:** Proposed
+- **Status:** Accepted — v1 implemented (`src/align.rs`, `Dna.align`)
 - **Date:** 2026-06-26
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0003 — Collection API](0003-collection-api.md),

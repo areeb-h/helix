@@ -6,6 +6,7 @@
 //!     helix path/to/script.helix      run a file
 //!     helix                           start the REPL
 
+mod align;
 mod ast;
 mod backend;
 mod bed;

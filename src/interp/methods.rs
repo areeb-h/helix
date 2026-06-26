@@ -860,6 +860,54 @@ fn dna_method(
             }
             Ok(Value::array(packed_kmer_counts(s, k, true)))
         }
+        "align" => {
+            // `seq.align(target[, mode])` — pairwise alignment (ADR 0015). The result
+            // is a plain record so it composes with field access and prints normally.
+            if args.is_empty() || args.len() > 2 {
+                return Err(HelixError::new(
+                    format!("`align` takes 1 or 2 arguments, got {}", args.len()),
+                    line,
+                    col,
+                )
+                .hint("call `seq.align(target)` or `seq.align(target, \"local\")`."));
+            }
+            let target = match &args[0] {
+                Value::Dna(t) => t,
+                other => return Err(type_err("align", "a DNA sequence", other, line, col)),
+            };
+            let mode = match args.get(1) {
+                None => crate::align::Mode::Global,
+                Some(Value::Str(m)) => match m.as_str() {
+                    "global" => crate::align::Mode::Global,
+                    "local" => crate::align::Mode::Local,
+                    "semiglobal" => crate::align::Mode::Semiglobal,
+                    other => {
+                        return Err(HelixError::new(
+                            format!("unknown alignment mode `{other}`", ),
+                            line,
+                            col,
+                        )
+                        .hint("the modes are \"global\" (default), \"local\", and \"semiglobal\"."))
+                    }
+                },
+                Some(other) => return Err(type_err("align", "a mode string", other, line, col)),
+            };
+            let a = crate::align::align(
+                s.as_bytes(),
+                target.as_bytes(),
+                mode,
+                crate::align::Scoring::nucleotide(),
+            );
+            use crate::symbol::Symbol;
+            Ok(Value::Record(Rc::new(vec![
+                (Symbol::intern("score"), Value::Int(a.score as i64)),
+                (Symbol::intern("cigar"), Value::Str(Rc::new(a.cigar))),
+                (Symbol::intern("query"), Value::Str(Rc::new(a.x_aligned))),
+                (Symbol::intern("target"), Value::Str(Rc::new(a.y_aligned))),
+                (Symbol::intern("start"), Value::Int(a.y_start as i64)),
+                (Symbol::intern("end"), Value::Int(a.y_end as i64)),
+            ])))
+        }
         _ => Err(unknown_method(
             "Dna",
             name,

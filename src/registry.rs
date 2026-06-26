@@ -127,7 +127,7 @@ pub static STRING_METHODS: &[&str] = &[
 /// DNA-sequence methods.
 pub static DNA_METHODS: &[&str] = &[
     "gc_content", "reverse_complement", "complement", "kmers", "windows", "kmer_counts",
-    "canonical_kmer_counts", "find", "length",
+    "canonical_kmer_counts", "align", "find", "length",
 ];
 
 /// Tensor methods (shape, aggregations, linear algebra).

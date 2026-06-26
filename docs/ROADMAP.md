@@ -51,9 +51,13 @@ fast, memory-safe surface.
       file (the local-first capability). The result is identical to a full read filtered
       to the region. Demos: [variants.helix](../examples/variants.helix),
       [alignments.helix](../examples/alignments.helix).
+- [x] **Pairwise alignment** — `seq.align(target[, mode])` (global / local /
+      semiglobal) via a hand-rolled Gotoh affine-gap aligner (ADR 0015), returning a
+      record `{score, cigar, query, target, start, end}`. Demo:
+      [examples/alignment.helix](../examples/alignment.helix).
 - [ ] Region queries for BCF (its `.csi` index); CRAM via `noodles-cram`
-      (reference-based compression); sequence alignment (Smith-Waterman /
-      Needleman-Wunsch via `rust-bio`); an RNA/protein sequence type model.
+      (reference-based compression); an RNA/protein sequence type model; custom
+      alignment scoring (substitution matrices) once named arguments land.
 - [ ] RNA (`fold`, `translate`), protein sequences; an ADR for the bio type model.
 - [~] Python interop for adoption (calling into Biopython and existing pipelines).
       **v1 complete** (`import python.pysam`, etc.); see

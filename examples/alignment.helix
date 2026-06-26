@@ -1,0 +1,24 @@
+# Pairwise sequence alignment (ADR 0015): `seq.align(target)` scores how two
+# sequences best correspond under substitutions and affine gaps, returning a record
+# {score, cigar, query, target, start, end}. The CIGAR uses the same op characters
+# (=/X/I/D) as the SAM/BAM reader.
+#   helix run examples/alignment.helix
+
+query = dna("ACGTACGT")
+ref = dna("ACGAACGT")
+
+# Global (Needleman-Wunsch) is the default: align both sequences end to end.
+g = query.align(ref)
+print("global:", g.score, g.cigar)
+print(g.query)
+print(g.target)
+
+# Local (Smith-Waterman) extracts the best-scoring conserved core, ignoring flanks.
+core = dna("TTTTGATTACATTTT").align(dna("CCGATTACAGG"), "local")
+print("local core:", core.query, "score", core.score, "at target", core.start, "..", core.end)
+
+# Semiglobal fits a whole read into a reference window with free flanking gaps —
+# the read-to-reference placement that underlies mapping.
+read = dna("GATTACA")
+placed = read.align(dna("CCCGATTACAGGG"), "semiglobal")
+print("read placed at target", placed.start, "..", placed.end, "score", placed.score)

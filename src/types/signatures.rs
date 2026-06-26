@@ -469,6 +469,15 @@ pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Typ
         }
         // 0-based index of the motif, or `missing` when absent.
         "find" => Type::Int,
+        // Pairwise alignment result record (ADR 0015).
+        "align" => Type::Record(vec![
+            ("score".to_string(), Type::Int),
+            ("cigar".to_string(), Type::String),
+            ("query".to_string(), Type::String),
+            ("target".to_string(), Type::String),
+            ("start".to_string(), Type::Int),
+            ("end".to_string(), Type::Int),
+        ]),
         _ => {
             return Err(unknown_method(
                 "Dna",
