@@ -208,11 +208,31 @@ impl super::Interp {
                 }
             }
             "bio.read_bam" => {
-                arity(name, &args, 1, line, col)?;
-                match &args[0] {
-                    Value::Str(s) => Ok(Value::dataframe(crate::sam::read_bam(s, line, col)?)),
-                    other => Err(type_err("bio.read_bam", "a string path", other, line, col)),
+                // `read_bam(path)` scans; `read_bam(path, "chr:start-end")` does an
+                // indexed region query against the file's `.bai`.
+                if args.is_empty() || args.len() > 2 {
+                    return Err(HelixError::new(
+                        format!("`bio.read_bam` takes 1 or 2 arguments, got {}", args.len()),
+                        line,
+                        col,
+                    ));
                 }
+                let path = match &args[0] {
+                    Value::Str(s) => s,
+                    other => {
+                        return Err(type_err("bio.read_bam", "a string path", other, line, col));
+                    }
+                };
+                let df = match args.get(1) {
+                    Some(Value::Str(region)) => {
+                        crate::sam::read_bam_region(path, region, line, col)?
+                    }
+                    Some(other) => {
+                        return Err(type_err("bio.read_bam", "a string region", other, line, col));
+                    }
+                    None => crate::sam::read_bam(path, line, col)?,
+                };
+                Ok(Value::dataframe(df))
             }
             "bio.read_gff" => {
                 arity(name, &args, 1, line, col)?;

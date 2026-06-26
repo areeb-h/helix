@@ -22,6 +22,7 @@
 use std::io;
 
 use noodles_bam as bam;
+use noodles_core::Region;
 use noodles_sam::{
     self as sam,
     alignment::{record::cigar::op::Kind, record_buf::Cigar, RecordBuf},
@@ -57,6 +58,45 @@ pub fn read_bam(path: &str, line: usize, col: usize) -> Result<crate::backend::D
         .read_header()
         .map_err(|e| err(format!("could not read BAM header in `{path}`: {e}")))?;
     let records = reader.record_bufs(&header);
+    build_alignment_frame(&header, records, "BAM", path, line, col)
+}
+
+/// `read_bam(path, region)` — read only the alignments intersecting `region` (e.g.
+/// `"chr1:1000-2000"`) from a coordinate-sorted, BAI-indexed BAM, seeking via the
+/// `.bai` index instead of scanning the whole file (the local-first capability).
+/// Requires a `.bai` sibling. The indexed reader yields lazy records, materialized
+/// into the same `RecordBuf`s the scan path uses, so the resulting DataFrame is
+/// identical to a full read filtered to the region — only the untouched alignments
+/// are never decoded.
+pub fn read_bam_region(
+    path: &str,
+    region: &str,
+    line: usize,
+    col: usize,
+) -> Result<crate::backend::Df, HelixError> {
+    let err = |msg: String| HelixError::new(msg, line, col);
+
+    let mut reader = bam::io::indexed_reader::Builder::default()
+        .build_from_path(path)
+        .map_err(|e| {
+            err(format!(
+                "could not open indexed BAM `{path}`: {e} (an indexed region query \
+                 needs a coordinate-sorted BAM with a `.bai` index alongside it)"
+            ))
+        })?;
+    let header = reader
+        .read_header()
+        .map_err(|e| err(format!("could not read BAM header in `{path}`: {e}")))?;
+    let region: Region =
+        region.parse().map_err(|e| err(format!("invalid region `{region}`: {e}")))?;
+    let query = reader
+        .query(&header, &region)
+        .map_err(|e| err(format!("could not query region in `{path}`: {e}")))?;
+    // The indexed reader yields lazy records; materialize each into the `RecordBuf`
+    // the shared column-building core expects (the same type the scan path produces).
+    let records = query.records().map(|r| {
+        r.and_then(|rec| RecordBuf::try_from_alignment_record(&header, &rec))
+    });
     build_alignment_frame(&header, records, "BAM", path, line, col)
 }
 
@@ -180,26 +220,37 @@ fn render_quality(quality: &sam::alignment::record_buf::QualityScores) -> Option
 mod tests {
     use super::*;
 
-    /// Regenerate `examples/data/alignments.bam` from the text `alignments.sam` using
-    /// noodles' BAM writer (no external `samtools`). Ignored by default; run on demand
-    /// with `cargo test --bin helix generate_bam_fixture -- --ignored` whenever the SAM
-    /// fixture changes. Documents how the committed binary fixture was produced.
+    /// Regenerate `examples/data/alignments.bam` (and its `.bai` index) from the text
+    /// `alignments.sam` using noodles' BAM writer and the `bam::fs::index` helper (no
+    /// external `samtools`). Ignored by default; run on demand with
+    /// `cargo test --bin helix generate_bam_fixture -- --ignored` whenever the SAM
+    /// fixture changes. The `.bai` is what `read_bam(path, region)` seeks with; it
+    /// requires the BAM be coordinate-sorted (mapped reads by position, unmapped last).
     #[test]
     #[ignore]
     fn generate_bam_fixture() {
         use sam::alignment::io::Write as _;
 
-        let inner = crate::vcf::open_maybe_gzip("examples/data/alignments.sam").unwrap();
-        let mut reader = sam::io::Reader::new(inner);
-        let header = reader.read_header().unwrap();
+        // Write the BAM in a scope so the writer flushes and the file closes before
+        // `bam::fs::index` reopens it to build the index.
+        {
+            let inner = crate::vcf::open_maybe_gzip("examples/data/alignments.sam").unwrap();
+            let mut reader = sam::io::Reader::new(inner);
+            let header = reader.read_header().unwrap();
 
-        let out = std::fs::File::create("examples/data/alignments.bam").unwrap();
-        let mut writer = bam::io::Writer::new(out);
-        writer.write_header(&header).unwrap();
-        for result in reader.record_bufs(&header) {
-            let record = result.unwrap();
-            writer.write_alignment_record(&header, &record).unwrap();
+            let out = std::fs::File::create("examples/data/alignments.bam").unwrap();
+            let mut writer = bam::io::Writer::new(out);
+            writer.write_header(&header).unwrap();
+            for result in reader.record_bufs(&header) {
+                let record = result.unwrap();
+                writer.write_alignment_record(&header, &record).unwrap();
+            }
+            writer.try_finish().unwrap();
         }
-        writer.try_finish().unwrap();
+
+        let index = bam::fs::index("examples/data/alignments.bam").unwrap();
+        let bai_out = std::fs::File::create("examples/data/alignments.bam.bai").unwrap();
+        let mut bai_writer = bam::bai::io::Writer::new(bai_out);
+        bai_writer.write_index(&index).unwrap();
     }
 }

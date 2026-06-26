@@ -20,3 +20,8 @@ print(reads.where(@mapq > 50).select(@name, @ref, @pos, @cigar))
 # BAM (the binary, BGZF-framed form) reads into the very same DataFrame.
 binary = bio.read_bam("examples/data/alignments.bam")
 print("BAM read count (same data):", binary.count())
+
+# Local-first: with a coordinate-sorted, BAI-indexed BAM, a second argument reads
+# ONLY the reads overlapping a region via the `.bai` index, never scanning the file.
+print("--- reads overlapping chr1 (indexed) ---")
+print(bio.read_bam("examples/data/alignments.bam", "chr1").select(@name, @pos, @cigar))
