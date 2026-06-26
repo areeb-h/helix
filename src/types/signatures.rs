@@ -162,18 +162,6 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             // field/sequence-method access stays permissive.
             Ok(Type::Array(Box::new(Type::Unknown)))
         }
-        "io.write_parquet" => {
-            if args.len() != 2 {
-                return Err(arity_err(name, 2, args.len(), line, col));
-            }
-            if !compatible(&args[0], &Type::DataFrame) {
-                return Err(type_err("io.write_parquet", "a DataFrame", &args[0], line, col));
-            }
-            if !compatible(&args[1], &Type::String) {
-                return Err(type_err("io.write_parquet", "a string path", &args[1], line, col));
-            }
-            Ok(Type::Unit)
-        }
         "tensor" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
@@ -313,41 +301,6 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 ("adj_r_squared".to_string(), Type::Float),
             ]))
         }
-        // Descriptive-statistics helpers: one array of numbers in, a scalar (or, for
-        // `zscores`, an array) out. `bio.mean_gc`/`bio.total_length` take an array too.
-        "stats.standard_error"
-        | "stats.coefficient_of_variation"
-        | "stats.iqr"
-        | "stats.spread"
-        | "stats.zscores"
-        | "bio.mean_gc"
-        | "bio.total_length" => {
-            if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
-            }
-            match &args[0] {
-                Type::Unknown => Ok(Type::Unknown),
-                Type::Missing => Ok(Type::Missing),
-                Type::Array(_) => Ok(match name {
-                    "stats.zscores" => Type::Array(Box::new(Type::Float)),
-                    "bio.total_length" => Type::Int,
-                    _ => Type::Float,
-                }),
-                other => Err(type_err(name, "an array", other, line, col)),
-            }
-        }
-        // `bio.at_content` takes a single DNA sequence.
-        "bio.at_content" => {
-            if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
-            }
-            match &args[0] {
-                Type::Unknown => Ok(Type::Unknown),
-                Type::Missing => Ok(Type::Missing),
-                Type::Dna => Ok(Type::Float),
-                other => Err(type_err(name, "a DNA sequence", other, line, col)),
-            }
-        }
         "to_array" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
@@ -375,19 +328,6 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Tensor)
         }
-        "json.parse" => {
-            if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
-            }
-            // The JSON shape isn't known statically — Unknown (the permissive top).
-            Ok(Type::Unknown)
-        }
-        "json.stringify" => {
-            if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
-            }
-            Ok(Type::String)
-        }
         "http_get" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
@@ -395,16 +335,6 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             // Returns a `{status, body}` record; Unknown keeps field access permissive.
             Ok(Type::Unknown)
         }
-        // Charts render to a string (arity/argument types are validated at runtime).
-        "chart.bar" | "chart.hist" | "chart.line" | "chart.scatter" | "chart.sparkline" => {
-            Ok(Type::String)
-        }
-        // Exporters serialize to a string; writers perform I/O and return Unit.
-        "export.markdown" | "export.html" | "export.svg_bar" | "export.svg_line" => {
-            Ok(Type::String)
-        }
-        "io.write" | "io.append" | "io.write_csv" | "io.write_tsv" | "io.write_json"
-        | "bio.write_fasta" | "bio.write_fastq" => Ok(Type::Unit),
         _ => Ok(Type::Unknown), // unreachable (BUILTIN_FNS gated), but stay permissive
     }
 }
@@ -435,6 +365,15 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         // `(value, count)` tuples — `top` for the n most frequent, `frequencies` for all.
         "top" | "frequencies" => Type::Array(Box::new(Type::Tuple(vec![el.clone(), Type::Int]))),
         "join" => Type::String,
+        // descriptive stats over a numeric array
+        "zscores" => Type::Array(Box::new(Type::Float)),
+        "iqr" | "spread" | "standard_error" | "coefficient_of_variation" | "mean_gc" => Type::Float,
+        "total_length" => Type::Int,
+        // charts + text exports render to a String
+        "bar_chart" | "histogram" | "line_chart" | "sparkline" | "scatter" | "svg_bar"
+        | "svg_line" | "to_html" | "to_markdown" => Type::String,
+        // writers perform I/O and return Unit
+        "write_csv" | "write_tsv" | "write_json" | "write_fasta" | "write_fastq" => Type::Unit,
         _ => {
             return Err(unknown_method(
                 "Array",
@@ -455,6 +394,9 @@ pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<
         "contains" | "starts_with" | "ends_with" => Type::Bool,
         // FASTQ Phred+33 quality string → per-base integer quality scores.
         "phred" => Type::Array(Box::new(Type::Int)),
+        // parse a JSON string (shape unknown statically); write the text to a file.
+        "parse_json" => Type::Unknown,
+        "write_to" | "append_to" => Type::Unit,
         _ => {
             return Err(unknown_method(
                 "String",
@@ -470,7 +412,7 @@ pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<
 pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
         "length" => Type::Int,
-        "gc_content" => Type::Float,
+        "gc_content" | "at_content" => Type::Float,
         "complement" | "reverse_complement" => Type::Dna,
         "kmers" | "windows" => Type::Array(Box::new(Type::String)),
         // (kmer, count) tuples — the native packed spectrum (forward or strand-canonical).
@@ -537,6 +479,9 @@ pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type
         "columns" => Type::Array(Box::new(Type::String)),
         // One column's values as an array; element type is the runtime schema boundary.
         "column" => array_of_unknown(),
+        // serialize/write the frame
+        "write_csv" | "write_tsv" | "write_json" | "write_parquet" => Type::Unit,
+        "to_html" | "to_markdown" => Type::String,
         _ => {
             return Err(unknown_method(
                 "DataFrame",

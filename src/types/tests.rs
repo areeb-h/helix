@@ -2,8 +2,7 @@
 
     fn tc(src: &str) -> Result<(), HelixError> {
         let toks = crate::lexer::lex(src)?;
-        let mut prog = crate::parser::parse(toks)?;
-        crate::namespace::resolve(&mut prog);
+        let prog = crate::parser::parse(toks)?;
         check(&prog).map(|_| ())
     }
     fn ok(src: &str) {
@@ -86,8 +85,11 @@
         assert!(emsg("correlation(1, 2)").contains("array"));
         assert!(emsg("read_vcf(5)").contains("string"));
         assert!(emsg("sqrt(1, 2)").contains("argument"));
-        // a bare namespace is not a value (migration error lands in a later stage)
+        // a bare removed-namespace name is not a value
         assert!(emsg("x = stats").contains("namespace"));
+        // an old namespaced call points at the new spelling (function or method)
+        assert!(emsg("stats.t_test([1.0], [2.0])").contains("no longer available"));
+        assert!(emsg("json.parse(\"[]\")").contains("no longer available"));
         // method typos suggest the right method; a wrong receiver type is rejected
         assert!(emsg("\"abc\".gc_content()").contains("no method"));
         assert!(emsg("xs = [1, 2]\nxs.summary().nope").contains("field"));
@@ -199,8 +201,7 @@
             let src = std::fs::read_to_string(format!("examples/{}.helix", name))
                 .unwrap_or_else(|_| panic!("read examples/{}.helix", name));
             let toks = crate::lexer::lex(&src).expect("lex");
-            let mut prog = crate::parser::parse(toks).expect("parse");
-            crate::namespace::resolve(&mut prog);
+            let prog = crate::parser::parse(toks).expect("parse");
             let r = check(&prog);
             assert!(
                 r.is_ok(),

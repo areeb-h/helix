@@ -5,8 +5,7 @@
     /// expression (the trailing `Pop` is stripped so the value survives).
     fn vm_val(src: &str) -> Value {
         let toks = lexer::lex(src).unwrap();
-        let mut ast = parser::parse(toks).unwrap();
-        crate::namespace::resolve(&mut ast);
+        let ast = parser::parse(toks).unwrap();
         let mut prog = bytecode::compile_with_types(&ast, None).expect("expected this program to compile to bytecode");
         if matches!(prog.funcs[0].code.last(), Some(Op::Pop)) {
             prog.funcs[0].code.pop();
@@ -18,8 +17,7 @@
     /// The same source through the reference tree-walker.
     fn tw_val(src: &str) -> Value {
         let toks = lexer::lex(src).unwrap();
-        let mut ast = parser::parse(toks).unwrap();
-        crate::namespace::resolve(&mut ast);
+        let ast = parser::parse(toks).unwrap();
         let mut interp = Interp::new();
         let mut last = Value::Unit;
         for stmt in &ast {
@@ -329,8 +327,7 @@
 
     fn run_tw(src: &str) -> Result<String, ()> {
         let toks = lexer::lex(src).map_err(|_| ())?;
-        let mut ast = parser::parse(toks).map_err(|_| ())?;
-        crate::namespace::resolve(&mut ast);
+        let ast = parser::parse(toks).map_err(|_| ())?;
         let mut interp = Interp::new();
         let mut last = Value::Unit;
         for stmt in &ast {
@@ -349,8 +346,7 @@
     /// not a parity violation.
     fn tw_hit_recursion_limit(src: &str) -> bool {
         let Ok(toks) = lexer::lex(src) else { return false };
-        let Ok(mut ast) = parser::parse(toks) else { return false };
-        crate::namespace::resolve(&mut ast);
+        let Ok(ast) = parser::parse(toks) else { return false };
         let mut interp = Interp::new();
         for stmt in &ast {
             if let Err(e) = interp.exec(stmt) {
@@ -365,8 +361,7 @@
     /// receiver's inferred type rather than falling back to the tree-walker.
     fn run_vm_typed(src: &str) -> Result<String, ()> {
         let toks = lexer::lex(src).map_err(|_| ())?;
-        let mut ast = parser::parse(toks).map_err(|_| ())?;
-        crate::namespace::resolve(&mut ast);
+        let ast = parser::parse(toks).map_err(|_| ())?;
         let types = crate::types::check(&ast).map_err(|_| ())?;
         let mut prog = bytecode::compile_with_types(&ast, Some(types)).map_err(|_| ())?;
         if matches!(prog.funcs[0].code.last(), Some(Op::Pop)) {
@@ -473,8 +468,7 @@
             }
             let src = std::fs::read_to_string(&path).unwrap();
             let toks = lexer::lex(&src).unwrap_or_else(|_| panic!("lex failed: {path:?}"));
-            let mut ast = parser::parse(toks).unwrap_or_else(|_| panic!("parse failed: {path:?}"));
-            crate::namespace::resolve(&mut ast);
+            let ast = parser::parse(toks).unwrap_or_else(|_| panic!("parse failed: {path:?}"));
             let types =
                 crate::types::check(&ast).unwrap_or_else(|_| panic!("type-check failed: {path:?}"));
             bytecode::compile_with_types(&ast, Some(types)).unwrap_or_else(|_| {

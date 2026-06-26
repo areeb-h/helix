@@ -1,11 +1,11 @@
 //! Output & export — writing files and serializing results to formats.
 //!
 //! Two families:
-//!   * **writers** (`io.write`, `io.append`, `io.write_csv`, `io.write_json`,
-//!     `bio.write_fasta`, `bio.write_fastq`) — effectful, return `Unit`, write to
+//!   * **writers** (`write_to`, `append_to`, `write_csv`, `write_json`,
+//!     `write_fasta`, `write_fastq`) — effectful, return `Unit`, write to
 //!     disk with buffered/streaming I/O.
-//!   * **serializers** (`export.markdown`, `export.html`, `export.svg_bar`,
-//!     `export.svg_line`) — pure, return a `Str` you can `print` or `io.write`.
+//!   * **serializers** (`to_markdown`, `to_html`, `svg_bar`,
+//!     `svg_line`) — pure, return a `Str` you can `print` or `write_to`.
 //!
 //! All of this is purely additive — no existing (hot) path is touched, so the
 //! runtime benchmarks are unaffected. The writers themselves stay efficient:
@@ -23,16 +23,16 @@ use crate::value::{fmt_float, Value};
 // writers (effectful)
 // ---------------------------------------------------------------------------
 
-/// `io.write(path, text)` — write text to a file, truncating it.
+/// `text.write_to(path)` — write text to a file, truncating it.
 pub fn write_text(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
-    let (path, text) = path_and_text("io.write", args, line, col)?;
+    let (path, text) = path_and_text("write_to", args, line, col)?;
     std::fs::write(path, text).map_err(|e| io_err("write", path, e, line, col))?;
     Ok(Value::Unit)
 }
 
-/// `io.append(path, text)` — append text to a file (creating it if absent).
+/// `text.append_to(path)` — append text to a file (creating it if absent).
 pub fn append_text(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
-    let (path, text) = path_and_text("io.append", args, line, col)?;
+    let (path, text) = path_and_text("append_to", args, line, col)?;
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -42,15 +42,15 @@ pub fn append_text(args: &[Value], line: usize, col: usize) -> Result<Value, Hel
     Ok(Value::Unit)
 }
 
-/// `io.write_csv(data, path)` — a DataFrame (streamed via the backend) or an array
+/// `data.write_csv(path)` — a DataFrame (streamed via the backend) or an array
 /// of records (serialized here) to comma-separated values.
 pub fn write_csv(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
-    write_delimited("io.write_csv", b',', ',', args, line, col)
+    write_delimited("write_csv", b',', ',', args, line, col)
 }
 
-/// `io.write_tsv(data, path)` — tab-separated variant of [`write_csv`].
+/// `data.write_tsv(path)` — tab-separated variant of [`write_csv`].
 pub fn write_tsv(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
-    write_delimited("io.write_tsv", b'\t', '\t', args, line, col)
+    write_delimited("write_tsv", b'\t', '\t', args, line, col)
 }
 
 fn write_delimited(
@@ -78,26 +78,26 @@ fn write_delimited(
     Ok(Value::Unit)
 }
 
-/// `io.write_json(value, path)` — serialize any value as JSON to a file.
+/// `value.write_json(path)` — serialize any value as JSON to a file.
 pub fn write_json(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     if args.len() != 2 {
-        return Err(HelixError::new("`io.write_json` takes (value, path)", line, col));
+        return Err(HelixError::new("`write_json` takes (value, path)", line, col));
     }
-    let path = as_path("io.write_json", &args[1], line, col)?;
+    let path = as_path("write_json", &args[1], line, col)?;
     let json = crate::json::stringify(&args[0]).map_err(|e| HelixError::new(e, line, col))?;
     std::fs::write(path, json).map_err(|e| io_err("write", path, e, line, col))?;
     Ok(Value::Unit)
 }
 
-/// `bio.write_fasta(records, path)` — `{id|name, seq}` records to FASTA (70-col wrap).
+/// `records.write_fasta(path)` — `{id|name, seq}` records to FASTA (70-col wrap).
 pub fn write_fasta(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
-    let (arr, path) = records_arg("bio.write_fasta", args, line, col)?;
+    let (arr, path) = records_arg("write_fasta", args, line, col)?;
     let mut out = String::new();
     for v in arr.to_values().iter() {
-        let rec = as_record("bio.write_fasta", v, line, col)?;
+        let rec = as_record("write_fasta", v, line, col)?;
         let id = field_str(rec, &["id", "name"]).unwrap_or_default();
         let seq = field_str(rec, &["seq", "sequence"]).ok_or_else(|| {
-            HelixError::new("`bio.write_fasta` needs a `seq` field on each record", line, col)
+            HelixError::new("`write_fasta` needs a `seq` field on each record", line, col)
         })?;
         out.push('>');
         out.push_str(&id);
@@ -108,18 +108,18 @@ pub fn write_fasta(args: &[Value], line: usize, col: usize) -> Result<Value, Hel
     Ok(Value::Unit)
 }
 
-/// `bio.write_fastq(records, path)` — `{id|name, seq, qual}` records to FASTQ.
+/// `records.write_fastq(path)` — `{id|name, seq, qual}` records to FASTQ.
 pub fn write_fastq(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
-    let (arr, path) = records_arg("bio.write_fastq", args, line, col)?;
+    let (arr, path) = records_arg("write_fastq", args, line, col)?;
     let mut out = String::new();
     for v in arr.to_values().iter() {
-        let rec = as_record("bio.write_fastq", v, line, col)?;
+        let rec = as_record("write_fastq", v, line, col)?;
         let id = field_str(rec, &["id", "name"]).unwrap_or_default();
         let seq = field_str(rec, &["seq", "sequence"]).ok_or_else(|| {
-            HelixError::new("`bio.write_fastq` needs a `seq` field on each record", line, col)
+            HelixError::new("`write_fastq` needs a `seq` field on each record", line, col)
         })?;
         let qual = field_str(rec, &["qual", "quality"]).ok_or_else(|| {
-            HelixError::new("`bio.write_fastq` needs a `qual` field on each record", line, col)
+            HelixError::new("`write_fastq` needs a `qual` field on each record", line, col)
         })?;
         if qual.len() != seq.len() {
             return Err(HelixError::new(
@@ -144,10 +144,10 @@ pub fn write_fastq(args: &[Value], line: usize, col: usize) -> Result<Value, Hel
 // serializers (pure → Str)
 // ---------------------------------------------------------------------------
 
-/// `export.markdown(data)` — a GitHub-flavored Markdown table.
+/// `data.to_markdown()` — a GitHub-flavored Markdown table.
 pub fn to_markdown(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
-    let v = one_arg("export.markdown", args, line, col)?;
-    let (headers, rows) = tabular("export.markdown", v, line, col)?;
+    let v = one_arg("to_markdown", args, line, col)?;
+    let (headers, rows) = tabular("to_markdown", v, line, col)?;
     let numeric: Vec<bool> = (0..headers.len()).map(|c| numeric_col(&rows, c)).collect();
 
     let mut s = String::new();
@@ -166,10 +166,10 @@ pub fn to_markdown(args: &[Value], line: usize, col: usize) -> Result<Value, Hel
     Ok(string(s))
 }
 
-/// `export.html(data)` — a self-contained, styled HTML document with a table.
+/// `data.to_html()` — a self-contained, styled HTML document with a table.
 pub fn to_html(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
-    let v = one_arg("export.html", args, line, col)?;
-    let (headers, rows) = tabular("export.html", v, line, col)?;
+    let v = one_arg("to_html", args, line, col)?;
+    let (headers, rows) = tabular("to_html", v, line, col)?;
     let numeric: Vec<bool> = (0..headers.len()).map(|c| numeric_col(&rows, c)).collect();
 
     let mut s = String::from(HTML_HEAD);
@@ -202,20 +202,47 @@ pub fn to_html(args: &[Value], line: usize, col: usize) -> Result<Value, HelixEr
     Ok(string(s))
 }
 
-/// `export.svg_bar(values [, labels])` — a clean horizontal-bar SVG chart.
+/// `value.to_json()` — serialize any value to a JSON string. A DataFrame is
+/// materialized to an array of row records first (so `df.to_json()` round-trips
+/// through `read_json`-style consumers); every other value goes straight through
+/// `json::stringify`.
+pub fn to_json(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    let v = one_arg("to_json", args, line, col)?;
+    let json = match v {
+        Value::DataFrame(_) => {
+            let (headers, rows) = tabular("to_json", v, line, col)?;
+            let recs: Vec<Value> = rows
+                .iter()
+                .map(|r| {
+                    let fields: Vec<(Symbol, Value)> = headers
+                        .iter()
+                        .zip(r)
+                        .map(|(h, val)| (Symbol::intern(h), val.clone()))
+                        .collect();
+                    Value::Record(Rc::new(fields))
+                })
+                .collect();
+            crate::json::stringify(&Value::array(recs)).map_err(|e| HelixError::new(e, line, col))?
+        }
+        other => crate::json::stringify(other).map_err(|e| HelixError::new(e, line, col))?,
+    };
+    Ok(string(json))
+}
+
+/// `values.svg_bar(labels?)` — a clean horizontal-bar SVG chart.
 pub fn svg_bar(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     if args.is_empty() || args.len() > 2 {
-        return Err(HelixError::new("`export.svg_bar` takes (values [, labels])", line, col));
+        return Err(HelixError::new("`svg_bar` takes (values [, labels])", line, col));
     }
-    let values = nums("export.svg_bar", &args[0], line, col)?;
+    let values = nums("svg_bar", &args[0], line, col)?;
     let labels = args.get(1).map(label_strs);
     Ok(string(render_svg_bar(&values, labels.as_deref())))
 }
 
-/// `export.svg_line(values)` — a clean line-plot SVG chart.
+/// `values.svg_line()` — a clean line-plot SVG chart.
 pub fn svg_line(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
-    let v = one_arg("export.svg_line", args, line, col)?;
-    let values = nums("export.svg_line", v, line, col)?;
+    let v = one_arg("svg_line", args, line, col)?;
+    let values = nums("svg_line", v, line, col)?;
     Ok(string(render_svg_line(&values)))
 }
 

@@ -254,14 +254,13 @@ fn run_eval(code: &str) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let mut program = match parser::parse(tokens) {
+        let program = match parser::parse(tokens) {
             Ok(p) => p,
             Err(e) => {
                 eprint!("{}", e.render(code, "<eval>"));
                 return ExitCode::FAILURE;
             }
         };
-        namespace::resolve(&mut program);
         let spans = vec![module::Span {
             start_line: 1,
             source: code.to_string(),
@@ -345,10 +344,7 @@ fn run_file_capture(path: &std::path::Path) -> Result<(), String> {
     // The module loader reads, lexes, parses, and namespaces the entry file plus
     // everything it imports into one statement list. (A single file passes through
     // unchanged.) Lex/parse/resolve errors come back already rendered.
-    let mut loaded = module::load(path)?;
-    // Resolve `bio.read_vcf(...)`-style namespaced calls into direct builtin calls
-    // before type-checking and execution.
-    namespace::resolve(&mut loaded.stmts);
+    let loaded = module::load(path)?;
     // Errors render against the spans the loader produced, so a cross-module error
     // points at the dependency's own source and line (not the entry file).
     run_program(&loaded.stmts, &loaded.spans, loaded.multi_module)
@@ -567,14 +563,13 @@ fn eval_repl_line(interp: &mut Interp, checker: &mut types::Checker, src: &str) 
             return;
         }
     };
-    let mut program = match parser::parse(tokens) {
+    let program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
             eprint!("{}", e.render(src, "<repl>"));
             return;
         }
     };
-    namespace::resolve(&mut program);
     for stmt in &program {
         // Type-check each statement before executing it; on a type error, print
         // and skip execution (mirrors the parse-error early return).

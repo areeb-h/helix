@@ -1,5 +1,5 @@
-//! Terminal charts — `chart.bar`, `chart.hist`, `chart.line`, `chart.scatter`,
-//! `chart.sparkline`. Each returns a `Str` value (so it composes with `print`,
+//! Terminal charts — `bar_chart`, `histogram`, `line_chart`, `scatter`,
+//! `sparkline`. Each returns a `Str` value (so it composes with `print`,
 //! interpolation, records), rendered with block/braille glyphs and colored through
 //! the shared [`crate::render`] theme when stdout is a terminal (plain when piped,
 //! so charts in tests/scripts are deterministic ASCII-ish text).
@@ -16,21 +16,21 @@ use crate::render::{
 };
 use crate::value::Value;
 
-/// `chart.bar(values [, labels])` — a horizontal bar chart.
+/// `values.bar_chart(labels?)` — a horizontal bar chart.
 pub fn bar(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     if args.is_empty() || args.len() > 2 {
-        return Err(arity("chart.bar", "values and optional labels", line, col));
+        return Err(arity("bar_chart", "values and optional labels", line, col));
     }
-    let values = nums(&args[0], "chart.bar", line, col)?;
+    let values = nums(&args[0], "bar_chart", line, col)?;
     let labels = match args.get(1) {
-        Some(v) => Some(strs(v, "chart.bar", line, col)?),
+        Some(v) => Some(strs(v, "bar_chart", line, col)?),
         None => None,
     };
     if let Some(ls) = &labels
         && ls.len() != values.len()
     {
         return Err(HelixError::new(
-            format!("`chart.bar` got {} values but {} labels", values.len(), ls.len()),
+            format!("`bar_chart` got {} values but {} labels", values.len(), ls.len()),
             line,
             col,
         ));
@@ -39,19 +39,19 @@ pub fn bar(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError>
     Ok(string(bar_chart(&values, labels.as_deref(), None, &opts)))
 }
 
-/// `chart.hist(values [, bins])` — a histogram of a numeric array.
+/// `values.histogram(bins?)` — a histogram of a numeric array.
 pub fn hist(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     if args.is_empty() || args.len() > 2 {
-        return Err(arity("chart.hist", "values and an optional bin count", line, col));
+        return Err(arity("histogram", "values and an optional bin count", line, col));
     }
-    let values = nums(&args[0], "chart.hist", line, col)?;
+    let values = nums(&args[0], "histogram", line, col)?;
     if values.is_empty() {
         return Ok(string("(no data)".to_string()));
     }
     let bins = match args.get(1) {
         Some(Value::Int(b)) if *b >= 1 && *b <= 200 => *b as usize,
-        Some(Value::Int(_)) => return Err(HelixError::new("`chart.hist` bins must be 1..=200", line, col)),
-        Some(other) => return Err(type_err("chart.hist", "an integer bin count", other, line, col)),
+        Some(Value::Int(_)) => return Err(HelixError::new("`histogram` bins must be 1..=200", line, col)),
+        Some(other) => return Err(type_err("histogram", "an integer bin count", other, line, col)),
         None => default_bins(values.len()),
     };
     let (counts, labels) = histogram_bins(&values, bins);
@@ -60,37 +60,37 @@ pub fn hist(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError
     Ok(string(bar_chart(&counts_f, Some(&labels), Some("count"), &opts)))
 }
 
-/// `chart.sparkline(values)` — a one-line inline sparkline.
+/// `values.sparkline()` — a one-line inline sparkline.
 pub fn sparkline(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     if args.len() != 1 {
-        return Err(arity("chart.sparkline", "a single numeric array", line, col));
+        return Err(arity("sparkline", "a single numeric array", line, col));
     }
-    let values = nums(&args[0], "chart.sparkline", line, col)?;
+    let values = nums(&args[0], "sparkline", line, col)?;
     let opts = RenderOpts::auto();
     Ok(string(spark(&values, &opts)))
 }
 
-/// `chart.line(values)` — a braille line plot of a single series (index on x).
+/// `values.line_chart()` — a braille line plot of a single series (index on x).
 pub fn line(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     if args.len() != 1 {
-        return Err(arity("chart.line", "a single numeric array", line, col));
+        return Err(arity("line_chart", "a single numeric array", line, col));
     }
-    let ys = nums(&args[0], "chart.line", line, col)?;
+    let ys = nums(&args[0], "line_chart", line, col)?;
     let xs: Vec<f64> = (0..ys.len()).map(|i| i as f64).collect();
     let opts = RenderOpts::auto();
     Ok(string(plot(&xs, &ys, true, &opts)))
 }
 
-/// `chart.scatter(xs, ys)` — a braille scatter plot of paired coordinates.
+/// `xs.scatter(ys)` — a braille scatter plot of paired coordinates.
 pub fn scatter(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     if args.len() != 2 {
-        return Err(arity("chart.scatter", "x and y numeric arrays", line, col));
+        return Err(arity("scatter", "x and y numeric arrays", line, col));
     }
-    let xs = nums(&args[0], "chart.scatter", line, col)?;
-    let ys = nums(&args[1], "chart.scatter", line, col)?;
+    let xs = nums(&args[0], "scatter", line, col)?;
+    let ys = nums(&args[1], "scatter", line, col)?;
     if xs.len() != ys.len() {
         return Err(HelixError::new(
-            format!("`chart.scatter` got {} x-values but {} y-values", xs.len(), ys.len()),
+            format!("`scatter` got {} x-values but {} y-values", xs.len(), ys.len()),
             line,
             col,
         ));

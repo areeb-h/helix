@@ -37,15 +37,6 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "read_bam", pure: false },
     BuiltinDef { path: "read_gff", pure: false },
     BuiltinDef { path: "read_bed", pure: false },
-    BuiltinDef { path: "io.write_parquet", pure: false },
-    // --- writers: serialize results to disk (effectful) ---
-    BuiltinDef { path: "io.write", pure: false },
-    BuiltinDef { path: "io.append", pure: false },
-    BuiltinDef { path: "io.write_csv", pure: false },
-    BuiltinDef { path: "io.write_tsv", pure: false },
-    BuiltinDef { path: "io.write_json", pure: false },
-    BuiltinDef { path: "bio.write_fasta", pure: false },
-    BuiltinDef { path: "bio.write_fastq", pure: false },
     BuiltinDef { path: "http_get", pure: false },
     // --- constructors / conversions ---
     BuiltinDef { path: "dna", pure: true },
@@ -95,58 +86,43 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "t_test", pure: true },
     BuiltinDef { path: "linear_regression", pure: true },
     BuiltinDef { path: "multiple_regression", pure: true },
-    // --- statistics: descriptive helpers (formerly the std.stats Helix module) ---
-    BuiltinDef { path: "stats.standard_error", pure: true },
-    BuiltinDef { path: "stats.coefficient_of_variation", pure: true },
-    BuiltinDef { path: "stats.iqr", pure: true },
-    BuiltinDef { path: "stats.spread", pure: true },
-    BuiltinDef { path: "stats.zscores", pure: true },
-    // --- sequence helpers (formerly the std.seq Helix module) ---
-    BuiltinDef { path: "bio.at_content", pure: true },
-    BuiltinDef { path: "bio.mean_gc", pure: true },
-    BuiltinDef { path: "bio.total_length", pure: true },
+    // (descriptive stats `iqr`/`zscores`/… are now array methods; `mean_gc`/
+    // `at_content`/`total_length` are sequence-array/Dna methods.)
     // --- testing / assertions (guards that raise a catchable error on failure) ---
     // Impure so they always run (never memoized away) — the check is the point.
     BuiltinDef { path: "assert", pure: false },
     BuiltinDef { path: "assert_eq", pure: false },
     BuiltinDef { path: "assert_close", pure: false },
-    // --- data formats ---
-    BuiltinDef { path: "json.parse", pure: true },
-    BuiltinDef { path: "json.stringify", pure: true },
-    // --- terminal charts (return a rendered string; deterministic given inputs) ---
-    BuiltinDef { path: "chart.bar", pure: true },
-    BuiltinDef { path: "chart.hist", pure: true },
-    BuiltinDef { path: "chart.line", pure: true },
-    BuiltinDef { path: "chart.scatter", pure: true },
-    BuiltinDef { path: "chart.sparkline", pure: true },
-    // --- export: serialize to a string in another format (pure) ---
-    BuiltinDef { path: "export.markdown", pure: true },
-    BuiltinDef { path: "export.html", pure: true },
-    BuiltinDef { path: "export.svg_bar", pure: true },
-    BuiltinDef { path: "export.svg_line", pure: true },
+    // (JSON, charts, and format export are now methods: `value.to_json()`,
+    // `str.parse_json()`, `xs.bar_chart()`, `data.to_html()`, `df.write_csv(p)`, …)
 ];
 
 /// Methods universal to every receiver type (handled before the per-type dispatch).
-pub static UNIVERSAL_METHODS: &[&str] = &["is_missing"];
+/// `to_json` serializes any value (so it lives here, never in a per-type table).
+pub static UNIVERSAL_METHODS: &[&str] = &["is_missing", "to_json"];
 
-/// Array methods (comprehension verbs, aggregations, statistics, transforms).
+/// Array methods (comprehension verbs, aggregations, statistics, transforms,
+/// descriptive stats, charts, and tabular export/write).
 pub static ARRAY_METHODS: &[&str] = &[
     "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count",
     "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
     "all", "take", "drop", "zip", "enumerate", "top", "frequencies", "unique", "drop_missing",
-    "join",
+    "join", "zscores", "iqr", "spread", "standard_error", "coefficient_of_variation", "mean_gc",
+    "total_length", "bar_chart", "histogram", "line_chart", "sparkline", "scatter", "svg_bar",
+    "svg_line", "write_csv", "write_tsv", "write_json", "to_html", "to_markdown", "write_fasta",
+    "write_fastq",
 ];
 
 /// String methods.
 pub static STRING_METHODS: &[&str] = &[
     "upper", "lower", "count", "reverse", "trim", "split", "replace", "contains", "starts_with",
-    "ends_with", "phred",
+    "ends_with", "phred", "parse_json", "write_to", "append_to",
 ];
 
 /// DNA-sequence methods.
 pub static DNA_METHODS: &[&str] = &[
     "gc_content", "reverse_complement", "complement", "kmers", "windows", "kmer_counts",
-    "canonical_kmer_counts", "align", "find", "length",
+    "canonical_kmer_counts", "align", "find", "length", "at_content",
 ];
 
 /// Tensor methods (shape, aggregations, linear algebra).
@@ -155,10 +131,11 @@ pub static TENSOR_METHODS: &[&str] = &[
     "matmul", "dot", "norm", "det", "inv", "solve",
 ];
 
-/// DataFrame methods (column verbs + value methods).
+/// DataFrame methods (column verbs + value methods + serialize/write).
 pub static DF_METHODS: &[&str] = &[
     "where", "filter", "select", "sort", "group", "with", "join", "column", "head", "count",
-    "columns", "cache",
+    "columns", "cache", "write_csv", "write_tsv", "write_json", "write_parquet", "to_html",
+    "to_markdown",
 ];
 
 /// Grouped-DataFrame aggregations.

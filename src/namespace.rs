@@ -1,175 +1,93 @@
-//! Compile-time resolution of the native namespaces (`bio`, `stats`, `io`, `json`,
-//! `http`). Domain builtins are registered under dotted paths (`bio.read_vcf`,
-//! `stats.t_test`); a call `bio.read_vcf(path)` parses as a method on a bare `bio`
-//! identifier, and this pass rewrites it into a direct `Call("bio.read_vcf", args)`
-//! that rides the ordinary builtin path — the same compile-time strategy the module
-//! loader uses to turn `alias.member(...)` into a direct call (`module::rw`).
+//! Migration helper for the **removed** stdlib namespaces.
 //!
-//! Namespaces are predefined and need no import, but they are **shadowable**: a local
-//! binding named `stats` wins, exactly as a module alias does, so the names are only
-//! reserved as receivers, never as values. A bare namespace (or a namespace field
-//! without a call) is reported by the type checker, which recognizes these names.
+//! Helix once exposed domain builtins under compile-time prefixes (`bio.read_vcf`,
+//! `stats.t_test`, `io.write_csv`, `json.parse`, `chart.bar`, …). Those prefixes
+//! were never real modules — just a naming convention rewritten into flat calls —
+//! so they were dropped (ADR 0017): readers and symmetric operations became plain
+//! free functions (`read_vcf`, `t_test`), and everything that acts on data became a
+//! method (`value.to_json()`, `xs.bar_chart()`, `df.write_csv(p)`).
 //!
-//! Dotted paths can never be user identifiers, so the rewritten name cannot collide
-//! with anything the user wrote — the same guarantee the module loader's `$`-mangling
-//! relies on.
+//! Nothing rewrites anymore. This module survives only to turn an *old* `ns.member`
+//! call into a precise migration error, so anyone with pre-ADR-0017 code gets a
+//! pointer to the new spelling instead of a bare "not defined".
 
-use std::collections::HashSet;
+/// The removed namespace names — recognized only to produce the migration hint.
+const REMOVED_NAMESPACES: &[&str] = &["bio", "stats", "io", "json", "http", "chart", "export"];
 
-use crate::ast::{Expr, InterpPart, Stmt};
-
-/// The native namespace names, resolved at compile time.
-pub const NAMESPACES: &[&str] = &["bio", "stats", "io", "json", "http", "chart", "export"];
-
-/// Whether `name` is a native namespace.
+/// Whether `name` was one of the removed namespace prefixes. Used by the checker to
+/// flag a bare `stats` (used as a value) and an old `stats.member(...)` call.
 pub fn is_namespace(name: &str) -> bool {
-    NAMESPACES.contains(&name)
+    REMOVED_NAMESPACES.contains(&name)
 }
 
-/// The dotted path a now-retired flat builtin name moved to, for a "did you mean?"
-/// hint that eases the rename (e.g. `read_vcf` -> `bio.read_vcf`).
-pub fn retired_path(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "read_csv" => "io.read_csv",
-        "read_parquet" => "io.read_parquet",
-        "read_fasta" => "bio.read_fasta",
-        "read_fastq" => "bio.read_fastq",
-        "read_vcf" => "bio.read_vcf",
-        "read_bcf" => "bio.read_bcf",
-        "read_sam" => "bio.read_sam",
-        "read_bam" => "bio.read_bam",
-        "write_parquet" => "io.write_parquet",
-        "http_get" => "http.get",
-        "correlation" => "stats.correlation",
-        "t_test" => "stats.t_test",
-        "linear_regression" => "stats.linear_regression",
-        "multiple_regression" => "stats.multiple_regression",
-        "normal_cdf" => "stats.normal_cdf",
-        "normal_pdf" => "stats.normal_pdf",
-        "parse_json" => "json.parse",
-        "to_json" => "json.stringify",
-        _ => return None,
-    })
-}
-
-/// Rewrite namespaced calls (`bio.read_vcf(args)`) into direct builtin calls across the
-/// whole program. Runs after module loading, on the flattened statement list.
-pub fn resolve(stmts: &mut [Stmt]) {
-    let bound = HashSet::new();
-    for s in stmts.iter_mut() {
-        rw_stmt(s, &bound);
+/// If `ns.member` names an old namespaced builtin, return the hint describing its
+/// new spelling (a free function, or a method on the data). `None` for anything
+/// that wasn't a removed namespace.
+pub fn migration_hint(ns: &str, member: &str) -> Option<String> {
+    if !is_namespace(ns) {
+        return None;
     }
-}
-
-fn rw_stmt(s: &mut Stmt, bound: &HashSet<String>) {
-    match s {
-        Stmt::Func { params, body, .. } => {
-            let mut b = bound.clone();
-            b.extend(params.iter().map(|(p, _)| p.clone()));
-            rw(body, &b);
-        }
-        Stmt::Assign { value, .. } | Stmt::Destructure { value, .. } => rw(value, bound),
-        Stmt::Expr(e) => rw(e, bound),
-        Stmt::Import { .. } => {}
+    // Free functions (just drop the prefix): readers, http, symmetric stats/dists.
+    let free = matches!(
+        (ns, member),
+        ("io", "read_csv")
+            | ("io", "read_parquet")
+            | ("bio", "read_fasta")
+            | ("bio", "read_fastq")
+            | ("bio", "read_vcf")
+            | ("bio", "read_bcf")
+            | ("bio", "read_sam")
+            | ("bio", "read_bam")
+            | ("bio", "read_gff")
+            | ("bio", "read_bed")
+            | ("http", "get")
+            | ("stats", "t_test")
+            | ("stats", "correlation")
+            | ("stats", "linear_regression")
+            | ("stats", "multiple_regression")
+            | ("stats", "normal_cdf")
+            | ("stats", "normal_pdf")
+    );
+    if free {
+        let f = if ns == "http" && member == "get" { "http_get" } else { member };
+        return Some(format!(
+            "`{ns}.{member}` is now the free function `{f}(...)` — drop the `{ns}.` prefix."
+        ));
     }
-}
-
-/// Rewrite an expression in place. `bound` is the set of local names in scope; a
-/// namespace shadowed by a local is left alone.
-fn rw(e: &mut Expr, bound: &HashSet<String>) {
-    // `ns.member(args)` where `ns` is an unshadowed namespace → `Call("ns.member", args)`.
-    if let Expr::Method { recv, name, args, line, col } = e
-        && let Expr::Ident { name: ns, .. } = recv.as_ref()
-        && is_namespace(ns)
-        && !bound.contains(ns)
-    {
-        let path = format!("{ns}.{name}");
-        for a in args.iter_mut() {
-            rw(a, bound);
+    // Everything that acts on data is now a method; map old member → new method.
+    let method = match (ns, member) {
+        ("json", "parse") => "parse_json",
+        ("json", "stringify") => "to_json",
+        ("io", "write") => "write_to",
+        ("io", "append") => "append_to",
+        ("io", "write_csv") => "write_csv",
+        ("io", "write_tsv") => "write_tsv",
+        ("io", "write_json") => "write_json",
+        ("io", "write_parquet") => "write_parquet",
+        ("bio", "write_fasta") => "write_fasta",
+        ("bio", "write_fastq") => "write_fastq",
+        ("bio", "mean_gc") => "mean_gc",
+        ("bio", "total_length") => "total_length",
+        ("bio", "at_content") => "at_content",
+        ("stats", "iqr") => "iqr",
+        ("stats", "spread") => "spread",
+        ("stats", "zscores") => "zscores",
+        ("stats", "standard_error") => "standard_error",
+        ("stats", "coefficient_of_variation") => "coefficient_of_variation",
+        ("chart", "bar") => "bar_chart",
+        ("chart", "hist") => "histogram",
+        ("chart", "line") => "line_chart",
+        ("chart", "scatter") => "scatter",
+        ("chart", "sparkline") => "sparkline",
+        ("export", "markdown") => "to_markdown",
+        ("export", "html") => "to_html",
+        ("export", "svg_bar") => "svg_bar",
+        ("export", "svg_line") => "svg_line",
+        _ => {
+            return Some(format!(
+                "the `{ns}.` namespace was removed — call `{member}` directly, or as a method."
+            ))
         }
-        *e = Expr::Call { name: path, args: std::mem::take(args), line: *line, col: *col };
-        return;
-    }
-
-    match e {
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing => {}
-        // A `@column` names a frame column, never a module/namespace path — leave it.
-        Expr::Ident { .. } | Expr::Column { .. } => {}
-        Expr::Interp(parts) => {
-            for p in parts {
-                if let InterpPart::Expr(e) = p {
-                    rw(e, bound);
-                }
-            }
-        }
-        Expr::Array(xs) | Expr::Tuple(xs) => {
-            for x in xs {
-                rw(x, bound);
-            }
-        }
-        Expr::Record(fields) => {
-            for (_, v) in fields {
-                rw(v, bound);
-            }
-        }
-        Expr::Field { recv, .. } => rw(recv, bound),
-        Expr::Unary { expr, .. } => rw(expr, bound),
-        Expr::Binary { left, right, .. } => {
-            rw(left, bound);
-            rw(right, bound);
-        }
-        Expr::Call { args, .. } => {
-            for a in args.iter_mut() {
-                rw(a, bound);
-            }
-        }
-        Expr::Method { recv, args, .. } => {
-            rw(recv, bound);
-            for a in args.iter_mut() {
-                rw(a, bound);
-            }
-        }
-        Expr::Index { recv, index, .. } => {
-            rw(recv, bound);
-            rw(index, bound);
-        }
-        Expr::Slice { recv, start, stop, step, .. } => {
-            rw(recv, bound);
-            for x in [start, stop, step].into_iter().flatten() {
-                rw(x, bound);
-            }
-        }
-        Expr::Lambda { params, body } => {
-            let mut b = bound.clone();
-            b.extend(params.iter().cloned());
-            rw(body, &b);
-        }
-        Expr::Let { bindings, body } => {
-            let mut b = bound.clone();
-            for (n, v) in bindings.iter_mut() {
-                rw(v, &b);
-                b.insert(n.clone());
-            }
-            rw(body, &b);
-        }
-        Expr::If { cond, then_branch, else_branch, .. } => {
-            rw(cond, bound);
-            rw(then_branch, bound);
-            rw(else_branch, bound);
-        }
-        Expr::Try { expr, .. } => rw(expr, bound),
-        Expr::Match { scrutinee, arms, .. } => {
-            rw(scrutinee, bound);
-            for arm in arms.iter_mut() {
-                let mut b = bound.clone();
-                for name in crate::interp::pattern_binding_names(&arm.pattern) {
-                    b.insert(name);
-                }
-                if let Some(g) = &mut arm.guard {
-                    rw(g, &b);
-                }
-                rw(&mut arm.body, &b);
-            }
-        }
-    }
+    };
+    Some(format!("`{ns}.{member}` is now the method `data.{method}(...)` — call it on the data."))
 }

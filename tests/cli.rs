@@ -302,7 +302,7 @@ fn python_dir_prints_the_managed_runtime_path() {
 fn json_round_trips_through_the_cli() {
     // Build a record (no string braces → no interpolation snag), serialize, re-parse,
     // and access fields — exercises to_json + parse_json + record access end to end.
-    let src = "r = {a: 1, b: [2, 3]}\ns = json.stringify(r)\nprint(s)\nd = json.parse(s)\nprint(d.a)\nprint(d.b.sum())\n";
+    let src = "r = {a: 1, b: [2, 3]}\ns = r.to_json()\nprint(s)\nd = s.parse_json()\nprint(d.a)\nprint(d.b.sum())\n";
     let (out, stderr, code) = run_source(src, &[], "json");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     let lines: Vec<&str> = out.lines().collect();
@@ -321,7 +321,7 @@ fn try_catches_runtime_errors() {
         "print(ok.value)\n",                                // 20
         "bad = try [1, 2, 3][99]\n",
         "print(bad.ok)\n",                                  // false (out-of-bounds caught)
-        "v = (try json.parse(\"[1,\")).value ?? \"fallback\"\n",
+        "v = (try \"[1,\".parse_json()).value ?? \"fallback\"\n",
         "print(v)\n",                                       // fallback
         "print(\"continues\")\n",                           // program did not abort
     );
@@ -710,8 +710,8 @@ fn import_resolves_on_the_search_path() {
 
 #[test]
 fn bio_sequence_helpers_over_fastq() {
-    // The native `bio.*` sequence helpers over the reads of a FASTQ file.
-    let src = "r = read_fastq(\"examples/data/reads.fastq\")\nseqs = r.map(x => x.seq)\nprint(bio.total_length(seqs))\nprint(bio.mean_gc(seqs) > 0.4)\n";
+    // The native sequence-array helpers over the reads of a FASTQ file.
+    let src = "r = read_fastq(\"examples/data/reads.fastq\")\nseqs = r.map(x => x.seq)\nprint(seqs.total_length())\nprint(seqs.mean_gc() > 0.4)\n";
     let (out, stderr, code) = run_source(src, &[], "bioseq");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "36\ntrue"); // 3 reads x 12 bp; mean GC ~0.44

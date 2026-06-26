@@ -461,14 +461,14 @@ impl Checker {
             }
             Expr::Ident { name, line, col } => match self.env.get(name) {
                 Some(t) => Ok(t.clone()),
-                // A native namespace used as a bare value (or as the receiver of a field
-                // access, `bio.read_vcf` without a call) — point the user at calling it.
+                // A removed namespace (`stats`, `io`, …) used as a bare value — these
+                // are no longer namespaces; their members are now functions or methods.
                 None if crate::namespace::is_namespace(name) => Err(HelixError::new(
-                    format!("`{}` is a namespace, not a value", name),
+                    format!("`{}` is not a value — the `{}` namespace was removed", name, name),
                     *line,
                     *col,
                 )
-                .hint(format!("call one of its functions, e.g. `{}.<name>(...)`.", name))),
+                .hint("its members are now free functions (e.g. `read_csv`) or methods (e.g. `value.to_json()`).")),
                 None => {
                     let names: Vec<&str> = self.env.keys().map(|s| s.as_str()).collect();
                     let mut err =

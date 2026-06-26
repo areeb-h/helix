@@ -11,6 +11,65 @@ use crate::error::{suggest, HelixError};
 use crate::value::Value;
 
 
+/// GC fraction of a DNA string (`N` excluded from the denominator), erroring on an
+/// empty sequence — shared by the `at_content` and `mean_gc` methods.
+fn dna_gc(s: &str, who: &str, line: usize, col: usize) -> Result<f64, HelixError> {
+    if s.is_empty() {
+        return Err(HelixError::new(
+            format!("cannot compute `{who}` of an empty sequence"),
+            line,
+            col,
+        ));
+    }
+    let gc = s.chars().filter(|c| *c == 'G' || *c == 'C').count();
+    let called = s.chars().filter(|c| *c != 'N').count();
+    Ok(if called == 0 { 0.0 } else { gc as f64 / called as f64 })
+}
+
+/// Prepend the receiver and call the matching chart/writer/export free function.
+/// Shared by the Array and DataFrame method handlers so the two engines and both
+/// receiver types stay byte-for-byte in lockstep (the differential oracle's only
+/// risk here). The underlying `writers::*`/`chart::*` already accept the data as
+/// the first positional argument.
+pub(crate) fn export_method(
+    recv: Value,
+    name: &str,
+    args: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    // `write_parquet` is DataFrame-only and goes straight to the backend.
+    if name == "write_parquet" {
+        return match (&recv, args.first()) {
+            (Value::DataFrame(df), Some(Value::Str(p))) => {
+                df.write_parquet(p, line, col)?;
+                Ok(Value::Unit)
+            }
+            _ => Err(HelixError::new("`write_parquet` needs a string path", line, col)),
+        };
+    }
+    let mut a = Vec::with_capacity(args.len() + 1);
+    a.push(recv);
+    a.extend_from_slice(args);
+    match name {
+        "bar_chart" => crate::chart::bar(&a, line, col),
+        "histogram" => crate::chart::hist(&a, line, col),
+        "line_chart" => crate::chart::line(&a, line, col),
+        "sparkline" => crate::chart::sparkline(&a, line, col),
+        "scatter" => crate::chart::scatter(&a, line, col),
+        "svg_bar" => crate::writers::svg_bar(&a, line, col),
+        "svg_line" => crate::writers::svg_line(&a, line, col),
+        "write_csv" => crate::writers::write_csv(&a, line, col),
+        "write_tsv" => crate::writers::write_tsv(&a, line, col),
+        "write_json" => crate::writers::write_json(&a, line, col),
+        "to_html" => crate::writers::to_html(&a, line, col),
+        "to_markdown" => crate::writers::to_markdown(&a, line, col),
+        "write_fasta" => crate::writers::write_fasta(&a, line, col),
+        "write_fastq" => crate::writers::write_fastq(&a, line, col),
+        other => Err(HelixError::new(format!("no export method `{other}`"), line, col)),
+    }
+}
+
 pub(crate) fn call_method(
     recv: &Value,
     name: &str,
@@ -24,6 +83,15 @@ pub(crate) fn call_method(
             return Err(HelixError::new("`is_missing` takes no arguments", line, col));
         }
         return Ok(Value::Bool(matches!(recv, Value::Missing)));
+    }
+    // `to_json` is universal too — it serializes any value (and `missing` → `null`,
+    // the JSON convention), so it runs before the missing-propagation rule below.
+    // (DataFrame/GroupBy receivers are intercepted earlier and never reach here.)
+    if name == "to_json" {
+        if !args.is_empty() {
+            return Err(HelixError::new("`to_json` takes no arguments", line, col));
+        }
+        return crate::writers::to_json(std::slice::from_ref(recv), line, col);
     }
     // `missing` propagates through method calls just as it does through field/index
     // access (ADR 0001's three-valued model): any method on `missing` yields `missing`
@@ -534,6 +602,95 @@ fn array_method(
             }
             Ok(Value::array(out))
         }
+        // --- descriptive statistics over one numeric array (missing propagates) ---
+        "standard_error" | "coefficient_of_variation" | "iqr" | "spread" | "zscores" => {
+            if items.iter().any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            let xs = numeric_vec(items, name, line, col)?;
+            if xs.is_empty() {
+                return Err(HelixError::new(
+                    format!("cannot compute `{name}` of an empty array"),
+                    line,
+                    col,
+                ));
+            }
+            match name {
+                "standard_error" => {
+                    Ok(Value::Float(crate::stats::std(&xs) / (xs.len() as f64).sqrt()))
+                }
+                "coefficient_of_variation" => {
+                    let m = crate::stats::mean(&xs);
+                    if m == 0.0 {
+                        return Err(HelixError::new(
+                            "coefficient of variation is undefined: the mean is zero",
+                            line,
+                            col,
+                        ));
+                    }
+                    Ok(Value::Float(crate::stats::std(&xs) / m))
+                }
+                "iqr" => Ok(Value::Float(
+                    crate::stats::quantile(&xs, 0.75) - crate::stats::quantile(&xs, 0.25),
+                )),
+                "spread" => {
+                    let (mut lo, mut hi) = (xs[0], xs[0]);
+                    for &x in &xs {
+                        lo = lo.min(x);
+                        hi = hi.max(x);
+                    }
+                    Ok(Value::Float(hi - lo))
+                }
+                _ => {
+                    let (m, sd) = (crate::stats::mean(&xs), crate::stats::std(&xs));
+                    if sd == 0.0 {
+                        return Err(HelixError::new(
+                            "cannot compute z-scores: the values have zero spread",
+                            line,
+                            col,
+                        )
+                        .hint("a constant series has no standard deviation to scale by."));
+                    }
+                    Ok(Value::array(xs.iter().map(|x| Value::Float((x - m) / sd)).collect()))
+                }
+            }
+        }
+        // --- sequence helpers over an array of DNA values (missing propagates) ---
+        "mean_gc" | "total_length" => {
+            if items.iter().any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            let seqs: Vec<&Rc<String>> = items
+                .iter()
+                .map(|v| match v {
+                    Value::Dna(s) => Ok(s),
+                    other => Err(HelixError::new(
+                        format!(
+                            "`{name}` needs an array of DNA sequences, found a {}",
+                            other.type_name()
+                        ),
+                        line,
+                        col,
+                    )),
+                })
+                .collect::<Result<_, _>>()?;
+            if name == "total_length" {
+                Ok(Value::Int(seqs.iter().map(|s| s.len() as i64).sum()))
+            } else {
+                if seqs.is_empty() {
+                    return Err(HelixError::new("cannot compute `mean_gc` of no sequences", line, col));
+                }
+                let total: f64 =
+                    seqs.iter().map(|s| dna_gc(s, name, line, col)).sum::<Result<f64, _>>()?;
+                Ok(Value::Float(total / seqs.len() as f64))
+            }
+        }
+        // --- charts + tabular export/write → shared dispatch (rebuild the receiver) ---
+        "bar_chart" | "histogram" | "line_chart" | "sparkline" | "scatter" | "svg_bar"
+        | "svg_line" | "write_csv" | "write_tsv" | "write_json" | "to_html" | "to_markdown"
+        | "write_fasta" | "write_fastq" => {
+            export_method(Value::array(items.to_vec()), name, args, line, col)
+        }
         _ => Err(unknown_method(
             "Array",
             name,
@@ -709,6 +866,22 @@ fn string_method(
                 scores.push((b - 33) as i64);
             }
             Ok(Value::int_array(scores))
+        }
+        "parse_json" => {
+            arity(0)?;
+            crate::json::parse(s).map_err(|e| HelixError::new(e, line, col))
+        }
+        // `text.write_to(path)` / `append_to(path)`: the receiver is the text and the
+        // argument is the path (the reverse of the underlying `writers` arg order).
+        "write_to" | "append_to" => {
+            arity(1)?;
+            let path = args[0].clone();
+            let a = vec![path, Value::Str(s.clone())];
+            if name == "write_to" {
+                crate::writers::write_text(&a, line, col)
+            } else {
+                crate::writers::append_text(&a, line, col)
+            }
         }
         _ => Err(unknown_method(
             "String",
@@ -937,6 +1110,13 @@ fn dna_method(
                 (Symbol::intern("start"), Value::Int(a.y_start as i64)),
                 (Symbol::intern("end"), Value::Int(a.y_end as i64)),
             ])))
+        }
+        "at_content" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`at_content` takes no arguments", line, col));
+            }
+            // AT fraction = 1 − GC fraction (over called bases; `N` excluded).
+            Ok(Value::Float(1.0 - dna_gc(s, "at_content", line, col)?))
         }
         _ => Err(unknown_method(
             "Dna",

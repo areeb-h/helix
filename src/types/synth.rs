@@ -180,10 +180,7 @@ impl super::Checker {
         );
         let cand_refs: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
         let mut err = HelixError::new(format!("`{}` is not a known function", name), line, col);
-        // A builtin that moved under a namespace gets a precise hint over fuzzy matching.
-        if let Some(path) = crate::namespace::retired_path(name) {
-            err = err.hint(format!("it is now `{}` — call it under its namespace.", path));
-        } else if let Some(s) = suggest(name, &cand_refs) {
+        if let Some(s) = suggest(name, &cand_refs) {
             err = err.hint(format!("did you mean `{}`?", s));
         }
         Err(err)
@@ -197,6 +194,19 @@ impl super::Checker {
         line: usize,
         col: usize,
     ) -> Result<Type, HelixError> {
+        // Pre-ADR-0017 namespaced call (`stats.t_test(a, b)`) parses as a method on a
+        // bare identifier. If that identifier is an unbound *removed namespace* (not a
+        // local that shadows it), point the user at the new spelling before the receiver
+        // resolves to a bare "not defined".
+        if let Expr::Ident { name: ns, .. } = recv
+            && !self.env.contains_key(ns.as_str())
+            && let Some(hint) = crate::namespace::migration_hint(ns, name)
+        {
+            return Err(
+                HelixError::new(format!("`{ns}.{name}` is no longer available"), line, col)
+                    .hint(hint),
+            );
+        }
         let rt = self.synth(recv)?;
         // Record the receiver's type so the bytecode compiler can route this method
         // by the receiver's true type (DataFrame vs Array vs Tensor), not its name.
@@ -212,6 +222,13 @@ impl super::Checker {
                 ));
             }
             return Ok(Type::Bool);
+        }
+        // `.to_json()` is universal too — serializes any receiver to a String.
+        if name == "to_json" {
+            if !args.is_empty() {
+                return Err(HelixError::new("`to_json` takes no arguments", line, col));
+            }
+            return Ok(Type::String);
         }
         match &rt {
             // Permissive: any method on Unknown/Missing receiver is Unknown.

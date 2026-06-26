@@ -241,6 +241,21 @@ impl super::Interp {
                     .collect();
                 Ok(Value::array(names))
             }
+            // Serialize/write methods take *evaluated* args (a path string); share the
+            // VM path's dispatch so the two engines never diverge.
+            "to_json" | "write_csv" | "write_tsv" | "write_json" | "write_parquet" | "to_html"
+            | "to_markdown" => {
+                let vals: Vec<Value> =
+                    args.iter().map(|a| self.eval(a)).collect::<Result<_, _>>()?;
+                if name == "to_json" {
+                    if !vals.is_empty() {
+                        return Err(HelixError::new("`to_json` takes no arguments", line, col));
+                    }
+                    crate::writers::to_json(&[Value::dataframe(lf.clone())], line, col)
+                } else {
+                    crate::interp::export_method(Value::dataframe(lf.clone()), name, &vals, line, col)
+                }
+            }
             _ => {
                 let methods = crate::registry::methods_of(crate::registry::DF_METHODS);
                 let mut err = HelixError::new(

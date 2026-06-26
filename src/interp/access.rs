@@ -227,6 +227,15 @@ pub(crate) fn df_value_method(
             let name = column_arg(&args, line, col)?;
             Ok(Value::array_sniff(lf.column_values(&name, line, col)?))
         }
+        "to_json" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`to_json` takes no arguments", line, col));
+            }
+            crate::writers::to_json(&[Value::dataframe(lf.clone())], line, col)
+        }
+        "write_csv" | "write_tsv" | "write_json" | "write_parquet" | "to_html" | "to_markdown" => {
+            crate::interp::export_method(Value::dataframe(lf.clone()), name, &args, line, col)
+        }
         _ => {
             let methods = crate::registry::methods_of(crate::registry::DF_METHODS);
             let mut err =

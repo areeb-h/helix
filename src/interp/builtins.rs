@@ -114,40 +114,9 @@ impl super::Interp {
                 // Bring a Python NumPy f64 array into Helix as a native Tensor.
                 crate::python::to_tensor(args.into_iter().next().unwrap(), line, col)
             }
-            "json.parse" => {
-                arity(name, &args, 1, line, col)?;
-                match &args[0] {
-                    Value::Str(s) => {
-                        crate::json::parse(s).map_err(|e| HelixError::new(e, line, col))
-                    }
-                    other => Err(type_err("json.parse", "a JSON string", other, line, col)),
-                }
-            }
-            "json.stringify" => {
-                arity(name, &args, 1, line, col)?;
-                crate::json::stringify(&args[0])
-                    .map(|s| Value::Str(Rc::new(s)))
-                    .map_err(|e| HelixError::new(e, line, col))
-            }
-            // Terminal charts → a rendered string (theme/color from `render::auto`).
-            "chart.bar" => crate::chart::bar(&args, line, col),
-            "chart.hist" => crate::chart::hist(&args, line, col),
-            "chart.line" => crate::chart::line(&args, line, col),
-            "chart.scatter" => crate::chart::scatter(&args, line, col),
-            "chart.sparkline" => crate::chart::sparkline(&args, line, col),
-            // Writers (effectful) → write a file, return Unit.
-            "io.write" => crate::writers::write_text(&args, line, col),
-            "io.append" => crate::writers::append_text(&args, line, col),
-            "io.write_csv" => crate::writers::write_csv(&args, line, col),
-            "io.write_tsv" => crate::writers::write_tsv(&args, line, col),
-            "io.write_json" => crate::writers::write_json(&args, line, col),
-            "bio.write_fasta" => crate::writers::write_fasta(&args, line, col),
-            "bio.write_fastq" => crate::writers::write_fastq(&args, line, col),
-            // Exporters (pure) → serialize to a string in another format.
-            "export.markdown" => crate::writers::to_markdown(&args, line, col),
-            "export.html" => crate::writers::to_html(&args, line, col),
-            "export.svg_bar" => crate::writers::svg_bar(&args, line, col),
-            "export.svg_line" => crate::writers::svg_line(&args, line, col),
+            // JSON, charts, writers, and format export are now methods (see
+            // `interp::methods` / `interp::export_method`): `str.parse_json()`,
+            // `value.to_json()`, `xs.bar_chart()`, `data.to_html()`, `df.write_csv(p)`.
             "http_get" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
@@ -301,19 +270,6 @@ impl super::Interp {
                 match &args[0] {
                     Value::Str(s) => crate::bio::read_fastq(s, line, col),
                     other => Err(type_err("read_fastq", "a string path", other, line, col)),
-                }
-            }
-            "io.write_parquet" => {
-                arity(name, &args, 2, line, col)?;
-                match (&args[0], &args[1]) {
-                    (Value::DataFrame(lf), Value::Str(p)) => {
-                        lf.write_parquet(p, line, col)?;
-                        Ok(Value::Unit)
-                    }
-                    (Value::DataFrame(_), other) => {
-                        Err(type_err("io.write_parquet", "a string path", other, line, col))
-                    }
-                    (other, _) => Err(type_err("io.write_parquet", "a DataFrame", other, line, col)),
                 }
             }
             // ---- tensor constructors ----
@@ -624,114 +580,6 @@ impl super::Interp {
                     .hint("e.g. `multiple_regression([x1, x2], y)` with enough rows.")),
                 }
             }
-            // --- descriptive statistics helpers (one numeric array; missing propagates) ---
-            "stats.standard_error"
-            | "stats.coefficient_of_variation"
-            | "stats.iqr"
-            | "stats.spread"
-            | "stats.zscores" => {
-                arity(name, &args, 1, line, col)?;
-                let xs = match num_array(name, &args[0], line, col)? {
-                    Some(xs) => xs,
-                    None => return Ok(Value::Missing),
-                };
-                if xs.is_empty() {
-                    return Err(HelixError::new(
-                        format!("cannot compute `{}` of an empty array", name),
-                        line,
-                        col,
-                    ));
-                }
-                match name {
-                    "stats.standard_error" => {
-                        Ok(Value::Float(crate::stats::std(&xs) / (xs.len() as f64).sqrt()))
-                    }
-                    "stats.coefficient_of_variation" => {
-                        // CV is a ratio to the mean, so it's undefined when the mean
-                        // is zero — a clean error, not a silent `inf`/`NaN` (matching
-                        // the zero-spread guard the z-scores path already has).
-                        let m = crate::stats::mean(&xs);
-                        if m == 0.0 {
-                            return Err(HelixError::new(
-                                "coefficient of variation is undefined: the mean is zero",
-                                line,
-                                col,
-                            ));
-                        }
-                        Ok(Value::Float(crate::stats::std(&xs) / m))
-                    }
-                    "stats.iqr" => Ok(Value::Float(
-                        crate::stats::quantile(&xs, 0.75) - crate::stats::quantile(&xs, 0.25),
-                    )),
-                    "stats.spread" => {
-                        let (mut lo, mut hi) = (xs[0], xs[0]);
-                        for &x in &xs {
-                            lo = lo.min(x);
-                            hi = hi.max(x);
-                        }
-                        Ok(Value::Float(hi - lo))
-                    }
-                    // z-scores: each value's distance from the mean in standard deviations.
-                    _ => {
-                        let (m, sd) = (crate::stats::mean(&xs), crate::stats::std(&xs));
-                        if sd == 0.0 {
-                            return Err(HelixError::new(
-                                "cannot compute z-scores: the values have zero spread",
-                                line,
-                                col,
-                            )
-                            .hint("a constant series has no standard deviation to scale by."));
-                        }
-                        let out: Vec<Value> =
-                            xs.iter().map(|x| Value::Float((x - m) / sd)).collect();
-                        Ok(Value::array(out))
-                    }
-                }
-            }
-            // --- sequence helpers over DNA values (missing propagates) ---
-            "bio.at_content" => {
-                arity(name, &args, 1, line, col)?;
-                match &args[0] {
-                    Value::Missing => Ok(Value::Missing),
-                    Value::Dna(s) => Ok(Value::Float(1.0 - dna_gc_content(s, name, line, col)?)),
-                    other => Err(type_err(name, "a DNA sequence", other, line, col)),
-                }
-            }
-            "bio.mean_gc" | "bio.total_length" => {
-                arity(name, &args, 1, line, col)?;
-                let items = match &args[0] {
-                    Value::Array(items) => items,
-                    Value::Missing => return Ok(Value::Missing),
-                    other => return Err(type_err(name, "an array of DNA sequences", other, line, col)),
-                };
-                let vals = items.to_values();
-                if vals.iter().any(|v| matches!(v, Value::Missing)) {
-                    return Ok(Value::Missing);
-                }
-                let seqs: Vec<&Rc<String>> = vals
-                    .iter()
-                    .map(|v| match v {
-                        Value::Dna(s) => Ok(s),
-                        other => Err(type_err(name, "an array of DNA sequences", other, line, col)),
-                    })
-                    .collect::<Result<_, _>>()?;
-                if name == "bio.total_length" {
-                    Ok(Value::Int(seqs.iter().map(|s| s.len() as i64).sum()))
-                } else {
-                    if seqs.is_empty() {
-                        return Err(HelixError::new(
-                            "cannot compute `bio.mean_gc` of no sequences",
-                            line,
-                            col,
-                        ));
-                    }
-                    let total: f64 = seqs
-                        .iter()
-                        .map(|s| dna_gc_content(s, name, line, col))
-                        .sum::<Result<f64, _>>()?;
-                    Ok(Value::Float(total / seqs.len() as f64))
-                }
-            }
             _ => {
                 let mut err =
                     HelixError::new(format!("`{}` is not a known function", name), line, col);
@@ -876,23 +724,6 @@ fn array_to_coldata(
         )
         .hint("DataFrame columns must be numbers, strings, DNA, or booleans.")),
     }
-}
-
-/// The GC fraction of a DNA sequence (`who` names the calling builtin for errors).
-/// Errors on an empty sequence, which has no composition to measure.
-fn dna_gc_content(s: &str, who: &str, line: usize, col: usize) -> Result<f64, HelixError> {
-    if s.is_empty() {
-        return Err(HelixError::new(
-            format!("cannot compute `{}` of an empty sequence", who),
-            line,
-            col,
-        ));
-    }
-    // GC fraction over *called* bases: `N` (unknown) is excluded from the
-    // denominator, so `gc_content("GCN") == 1.0`, not 2/3.
-    let gc = s.chars().filter(|c| *c == 'G' || *c == 'C').count();
-    let called = s.chars().filter(|c| *c != 'N').count();
-    Ok(if called == 0 { 0.0 } else { gc as f64 / called as f64 })
 }
 
 /// Extract a slice of numeric columns from an array-of-arrays argument (the predictor

@@ -24,8 +24,7 @@
     /// Run a program and return the value of its final statement.
     fn last(src: &str) -> Result<Value, HelixError> {
         let tokens = crate::lexer::lex(src)?;
-        let mut program = crate::parser::parse(tokens)?;
-        crate::namespace::resolve(&mut program);
+        let program = crate::parser::parse(tokens)?;
         let mut interp = Interp::new();
         let mut out = Value::Unit;
         for s in &program {
@@ -1150,7 +1149,7 @@
     fn dataframe_parquet_roundtrip() {
         // write the patients CSV out as Parquet, read it back, query it
         last(
-            "io.write_parquet(read_csv(\"examples/data/patients.csv\"), \"/tmp/helix_test_rt.parquet\")",
+            "read_csv(\"examples/data/patients.csv\").write_parquet(\"/tmp/helix_test_rt.parquet\")",
         )
         .unwrap();
         assert!(matches!(
