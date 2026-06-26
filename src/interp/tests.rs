@@ -245,6 +245,26 @@
     }
 
     #[test]
+    fn canonical_kmer_counts_collapses_strands() {
+        let s = |src: &str| last(src).unwrap().to_string();
+        // A k-mer and its reverse complement count together under the smaller
+        // (canonical) form: AAA+TTT -> AAA, AAT+ATT -> AAT.
+        assert_eq!(s("dna(\"AAATTT\").canonical_kmer_counts(3)"), "[(\"AAA\", 2), (\"AAT\", 2)]");
+        // Total windows are unchanged — only the grouping differs from the forward spectrum.
+        assert_eq!(
+            s("dna(\"ATGCATGC\").canonical_kmer_counts(3).map(it[1]).sum()"),
+            s("dna(\"ATGCATGC\").kmer_counts(3).map(it[1]).sum()")
+        );
+        // A palindromic k-mer (its own reverse complement) stays itself.
+        assert_eq!(s("dna(\"ACGT\").canonical_kmer_counts(4)"), "[(\"ACGT\", 1)]");
+        // Same k>32 guard as the forward counter.
+        assert!(last("dna(\"ACGT\").canonical_kmer_counts(33)")
+            .unwrap_err()
+            .message
+            .contains("up to 32"));
+    }
+
+    #[test]
     fn dataframe_constructor() {
         // build a frame from in-memory columns, then count rows
         assert_eq!(int("dataframe({a: [1, 2, 3], b: [4.0, 5.0, 6.0]}).count()"), 3);

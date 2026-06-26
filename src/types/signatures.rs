@@ -463,8 +463,10 @@ pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Typ
         "gc_content" => Type::Float,
         "complement" | "reverse_complement" => Type::Dna,
         "kmers" | "windows" => Type::Array(Box::new(Type::String)),
-        // (kmer, count) tuples — the native packed spectrum.
-        "kmer_counts" => Type::Array(Box::new(Type::Tuple(vec![Type::String, Type::Int]))),
+        // (kmer, count) tuples — the native packed spectrum (forward or strand-canonical).
+        "kmer_counts" | "canonical_kmer_counts" => {
+            Type::Array(Box::new(Type::Tuple(vec![Type::String, Type::Int])))
+        }
         // 0-based index of the motif, or `missing` when absent.
         "find" => Type::Int,
         _ => {

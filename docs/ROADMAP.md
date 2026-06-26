@@ -19,7 +19,9 @@ fast, memory-safe surface.
       like `N` preserved). Demo: [examples/genomics.helix](../examples/genomics.helix).
 - [x] **Sequence ops**: `gc_content`, `complement`, `reverse_complement`,
       `kmers(k)`, `find(motif)` (→ index or `missing`), slicing; plus `Array.top(n)`
-      (frequency histogram) so `seq.kmers(9).top(20)` works.
+      (frequency histogram) so `seq.kmers(9).top(20)` works. Native 2-bit-packed
+      `kmer_counts(k)` (forward) and `canonical_kmer_counts(k)` (strand-agnostic, a
+      k-mer and its reverse complement counted together — the Jellyfish/KMC convention).
 - [x] **`bio.read_vcf(path)` / `bio.read_bcf(path)` → DataFrame**: variant tables flow
       directly into the existing `where`/`group`/`count` verbs, demonstrating the unified model
       (`bio.read_vcf(...).where(@gene == "BRCA1").group(@consequence).count(@pos)`). The eight

@@ -840,7 +840,25 @@ fn dna_method(
                 )
                 .hint("for larger k use `kmers(k).frequencies()`."));
             }
-            Ok(Value::array(packed_kmer_counts(s, k)))
+            Ok(Value::array(packed_kmer_counts(s, k, false)))
+        }
+        "canonical_kmer_counts" => {
+            // Strand-agnostic k-mer spectrum: a k-mer and its reverse complement are
+            // counted together under their *canonical* form (the lexicographically
+            // smaller of the two), so coverage from either strand collapses to one
+            // entry — the Jellyfish/KMC `--canonical` convention. Same 2-bit-packed
+            // counting as `kmer_counts`; the reverse complement is computed directly
+            // on the packed code (complement = `bits ^ 3`, then the bases reversed).
+            let k = kmer_k("canonical_kmer_counts", args, line, col)?;
+            if k > 32 {
+                return Err(HelixError::new(
+                    format!("`canonical_kmer_counts` supports k up to 32 (2-bit packed), got {}", k),
+                    line,
+                    col,
+                )
+                .hint("for larger k, canonicalize `kmers(k)` yourself before `frequencies()`."));
+            }
+            Ok(Value::array(packed_kmer_counts(s, k, true)))
         }
         _ => Err(unknown_method(
             "Dna",
@@ -857,14 +875,15 @@ fn is_acgt(c: char) -> bool {
     matches!(c, 'A' | 'C' | 'G' | 'T')
 }
 
-/// 2-bit-packed forward-strand k-mer counts (k ≤ 32), as `(kmer, count)` tuples
-/// sorted by count desc then k-mer asc. Each ACGT window rolls into a `u64` (A=0
-/// C=1 G=2 T=3) with no allocation; a non-ACGT base breaks the window (the `kmers`
-/// spectrum). A string is built only per *distinct* k-mer (decoded at the end),
-/// and u64 keys hash far faster than strings — the native fast path for
-/// `kmers(k).frequencies()`. Same fixed width means u64 order == lexicographic
-/// k-mer order, so sorting by the packed code matches a string sort.
-fn packed_kmer_counts(s: &str, k: usize) -> Vec<Value> {
+/// 2-bit-packed k-mer counts (k ≤ 32), as `(kmer, count)` tuples sorted by count
+/// desc then k-mer asc. Each ACGT window rolls into a `u64` (A=0 C=1 G=2 T=3) with
+/// no allocation; a non-ACGT base breaks the window (the `kmers` spectrum). A string
+/// is built only per *distinct* k-mer (decoded at the end), and u64 keys hash far
+/// faster than strings — the native fast path for `kmers(k).frequencies()`. Same
+/// fixed width means u64 order == lexicographic k-mer order, so sorting by the packed
+/// code matches a string sort. When `canonical`, each window is counted under
+/// `min(code, reverse_complement(code))`, collapsing the two strands into one entry.
+fn packed_kmer_counts(s: &str, k: usize, canonical: bool) -> Vec<Value> {
     let mask: u64 = if k >= 32 { u64::MAX } else { (1u64 << (2 * k)) - 1 };
     let mut code: u64 = 0;
     let mut valid: usize = 0;
@@ -885,7 +904,8 @@ fn packed_kmer_counts(s: &str, k: usize) -> Vec<Value> {
         code = ((code << 2) | bits) & mask;
         valid += 1;
         if valid >= k {
-            *counts.entry(code).or_insert(0) += 1;
+            let key = if canonical { code.min(revcomp_code(code, k)) } else { code };
+            *counts.entry(key).or_insert(0) += 1;
         }
     }
     let mut pairs: Vec<(u64, u64)> = counts.into_iter().collect();
@@ -901,6 +921,19 @@ fn packed_kmer_counts(s: &str, k: usize) -> Vec<Value> {
             Value::Tuple(Rc::new(vec![Value::Str(Rc::new(km)), Value::Int(n as i64)]))
         })
         .collect()
+}
+
+/// The reverse complement of a 2-bit-packed `k`-mer code (A=0 C=1 G=2 T=3). Each
+/// base is complemented by `bits ^ 3` (A↔T, C↔G) and the bases are emitted in
+/// reverse order, so the result is itself a valid `k`-base packed code.
+fn revcomp_code(mut code: u64, k: usize) -> u64 {
+    let mut rc: u64 = 0;
+    for _ in 0..k {
+        let base = code & 3;
+        rc = (rc << 2) | (base ^ 3);
+        code >>= 2;
+    }
+    rc
 }
 
 /// Parse the single positive-length argument shared by `kmers`/`windows`.
