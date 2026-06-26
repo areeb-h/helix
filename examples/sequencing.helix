@@ -11,3 +11,9 @@ print("mean GC content:", reads.map(it.seq.gc_content()).mean())
 first = reads.first()
 print("first read:", first.id, first.seq)
 print("quality:", first.qual)
+
+# `qual.phred()` decodes the Phred+33 quality string to per-base integer scores,
+# which compose with the array verbs — so a read's mean quality is just
+# `qual.phred().mean()`, and quality-filtering reads is one `where`.
+print("first read mean Q:", first.qual.phred().mean())
+print("reads with mean Q >= 38:", reads.where(it.qual.phred().mean() >= 38).count())

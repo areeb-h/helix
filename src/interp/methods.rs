@@ -680,6 +680,28 @@ fn string_method(
             arity(1)?;
             Ok(Value::Bool(s.ends_with(str_arg(args, 0, name, line, col)?)))
         }
+        "phred" => {
+            // Decode a FASTQ Phred+33 quality string to per-base integer quality
+            // scores (each character's ASCII value minus 33, the Sanger/Illumina-1.8+
+            // encoding). Composes with the array verbs — `read.qual.phred().mean()`
+            // is a read's mean quality; `read.qual` is `missing` propagates here too.
+            arity(0)?;
+            let mut scores: Vec<i64> = Vec::with_capacity(s.len());
+            for (i, b) in s.bytes().enumerate() {
+                if !(33..=126).contains(&b) {
+                    return Err(HelixError::new(
+                        format!(
+                            "`phred` found a non-quality byte {b} at position {i}; a Phred+33 \
+                             quality string uses the printable characters '!' (0) through '~' (93)"
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+                scores.push((b - 33) as i64);
+            }
+            Ok(Value::int_array(scores))
+        }
         _ => Err(unknown_method(
             "String",
             name,

@@ -443,6 +443,8 @@ pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<
         "count" => Type::Int,
         "split" => Type::Array(Box::new(Type::String)),
         "contains" | "starts_with" | "ends_with" => Type::Bool,
+        // FASTQ Phred+33 quality string → per-base integer quality scores.
+        "phred" => Type::Array(Box::new(Type::Int)),
         _ => {
             return Err(unknown_method(
                 "String",

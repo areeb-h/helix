@@ -30,7 +30,10 @@ fast, memory-safe surface.
       column-building core. Demo: [examples/variants.helix](../examples/variants.helix). (No-arg
       grouped `count()` for rows-per-group is a small follow-up.)
 - [x] **`read_fastq`** — FASTQ reads as records `{id, seq, qual, length}` (via
-      `needletail`); `seq` is a DNA value and `qual` the Phred string. Demo:
+      `needletail`); `seq` is a DNA value and `qual` the Phred string. `qual.phred()`
+      decodes the Phred+33 string to per-base integer quality scores, which compose
+      with the array verbs — a read's mean quality is `qual.phred().mean()` and a
+      quality filter is one `where`. Demo:
       [examples/sequencing.helix](../examples/sequencing.helix).
 - [x] **`read_gff` / `read_bed`** — feature/interval tables as DataFrames (GFF3 via
       `noodles-gff` with one column per attribute tag; BED hand-rolled for BED3/6/12).
@@ -47,7 +50,8 @@ fast, memory-safe surface.
       to the region. Demos: [variants.helix](../examples/variants.helix),
       [alignments.helix](../examples/alignments.helix).
 - [ ] Region queries for BCF (its `.csi` index); CRAM via `noodles-cram`
-      (reference-based compression); FASTQ quality decoding.
+      (reference-based compression); sequence alignment (Smith-Waterman /
+      Needleman-Wunsch via `rust-bio`); an RNA/protein sequence type model.
 - [ ] RNA (`fold`, `translate`), protein sequences; an ADR for the bio type model.
 - [~] Python interop for adoption (calling into Biopython and existing pipelines).
       **v1 complete** (`import python.pysam`, etc.); see

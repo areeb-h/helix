@@ -350,6 +350,19 @@ fn read_fastq_parses_reads_with_quality() {
 }
 
 #[test]
+fn phred_decodes_quality_and_filters_reads() {
+    // `qual.phred()` decodes a Phred+33 quality string to integer scores, which
+    // compose with the array verbs (mean/min) for QC. The first read's quality is
+    // all `I` (ASCII 73 -> Q40), so a quality-filter is one `where`. A read with no
+    // quality line (a FASTA read through read_fastq) has `qual = missing`.
+    let src = "r = bio.read_fastq(\"examples/data/reads.fastq\")\nprint(r.first().qual.phred().mean())\nprint(\"IIH\".phred())\nprint(r.where(it.qual.phred().mean() >= 38).count())\nf = bio.read_fastq(\"examples/data/sample.fa\").first()\nprint(f.qual.is_missing())\n";
+    let (out, stderr, code) = run_source(src, &[], "phred");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    // Q40 mean; [40,40,39]; all 3 reads pass mean>=38; FASTA-sourced qual is missing.
+    assert_eq!(out.trim(), "40.0\n[40, 40, 39]\n3\ntrue");
+}
+
+#[test]
 fn read_vcf_accepts_gzipped_files() {
     // Real-world VCFs are bgzipped `.vcf.gz`; the reader sniffs the gzip magic bytes
     // and decompresses transparently, so a `.vcf.gz` queries identically to its plain

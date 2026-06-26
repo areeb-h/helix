@@ -121,7 +121,7 @@ pub static ARRAY_METHODS: &[&str] = &[
 /// String methods.
 pub static STRING_METHODS: &[&str] = &[
     "upper", "lower", "count", "reverse", "trim", "split", "replace", "contains", "starts_with",
-    "ends_with",
+    "ends_with", "phred",
 ];
 
 /// DNA-sequence methods.
