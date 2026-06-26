@@ -105,6 +105,12 @@ pub static BUILTINS: &[BuiltinDef] = &[
     // --- data formats ---
     BuiltinDef { path: "json.parse", pure: true },
     BuiltinDef { path: "json.stringify", pure: true },
+    // --- terminal charts (return a rendered string; deterministic given inputs) ---
+    BuiltinDef { path: "chart.bar", pure: true },
+    BuiltinDef { path: "chart.hist", pure: true },
+    BuiltinDef { path: "chart.line", pure: true },
+    BuiltinDef { path: "chart.scatter", pure: true },
+    BuiltinDef { path: "chart.sparkline", pure: true },
 ];
 
 /// Methods universal to every receiver type (handled before the per-type dispatch).

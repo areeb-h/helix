@@ -19,7 +19,7 @@ use std::collections::HashSet;
 use crate::ast::{Expr, InterpPart, Stmt};
 
 /// The native namespace names, resolved at compile time.
-pub const NAMESPACES: &[&str] = &["bio", "stats", "io", "json", "http"];
+pub const NAMESPACES: &[&str] = &["bio", "stats", "io", "json", "http", "chart"];
 
 /// Whether `name` is a native namespace.
 pub fn is_namespace(name: &str) -> bool {

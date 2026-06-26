@@ -129,6 +129,12 @@ impl super::Interp {
                     .map(|s| Value::Str(Rc::new(s)))
                     .map_err(|e| HelixError::new(e, line, col))
             }
+            // Terminal charts → a rendered string (theme/color from `render::auto`).
+            "chart.bar" => crate::chart::bar(&args, line, col),
+            "chart.hist" => crate::chart::hist(&args, line, col),
+            "chart.line" => crate::chart::line(&args, line, col),
+            "chart.scatter" => crate::chart::scatter(&args, line, col),
+            "chart.sparkline" => crate::chart::sparkline(&args, line, col),
             "http.get" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {

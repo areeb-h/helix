@@ -395,6 +395,10 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             // Returns a `{status, body}` record; Unknown keeps field access permissive.
             Ok(Type::Unknown)
         }
+        // Charts render to a string (arity/argument types are validated at runtime).
+        "chart.bar" | "chart.hist" | "chart.line" | "chart.scatter" | "chart.sparkline" => {
+            Ok(Type::String)
+        }
         _ => Ok(Type::Unknown), // unreachable (BUILTIN_FNS gated), but stay permissive
     }
 }

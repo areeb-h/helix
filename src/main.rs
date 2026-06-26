@@ -12,6 +12,7 @@ mod backend;
 mod bed;
 mod bio;
 mod bytecode;
+mod chart;
 mod dataframe;
 mod error;
 mod gff;
