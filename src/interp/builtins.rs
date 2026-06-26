@@ -243,6 +243,29 @@ impl super::Interp {
                 arity(name, &args, 1, line, col)?;
                 Ok(Value::Tensor(Rc::new(tensor::from_value(&args[0], line, col)?)))
             }
+            "dataframe" => {
+                // Build a DataFrame from in-memory columns: `dataframe({age: [30, 41],
+                // name: ["a", "b"]})`. Each record field is a column (its array); the
+                // backend seam (`build_frame`) checks equal lengths / duplicate names.
+                arity(name, &args, 1, line, col)?;
+                let fields = match &args[0] {
+                    Value::Record(f) => f,
+                    other => {
+                        return Err(type_err("dataframe", "a record of columns", other, line, col)
+                            .hint("e.g. `dataframe({age: [30, 41], name: [\"a\", \"b\"]})`."))
+                    }
+                };
+                if fields.is_empty() {
+                    return Err(HelixError::new("`dataframe` needs at least one column", line, col)
+                        .hint("e.g. `dataframe({age: [30, 41], name: [\"a\", \"b\"]})`."));
+                }
+                let mut columns = Vec::with_capacity(fields.len());
+                for (sym, val) in fields.iter() {
+                    let cname = sym.as_str();
+                    columns.push((cname.to_string(), array_to_coldata(cname, val, line, col)?));
+                }
+                Ok(Value::dataframe(crate::backend::build_frame(columns, line, col)?))
+            }
             "zeros" | "ones" => {
                 arity(name, &args, 1, line, col)?;
                 let shape = tensor_shape_arg(&args[0], line, col)?;
@@ -628,6 +651,139 @@ impl super::Interp {
                 Err(err)
             }
         }
+    }
+}
+
+/// Convert a Helix array (one column of a `dataframe({…})` call) into a
+/// backend-agnostic [`ColData`]. The column type is inferred from the first
+/// non-`missing` element; `missing` becomes a null (selecting the nullable
+/// variant). Ints + Floats in one column promote to Float; a column may not mix
+/// otherwise-incompatible types.
+fn array_to_coldata(
+    name: &str,
+    v: &Value,
+    line: usize,
+    col: usize,
+) -> Result<crate::backend::ColData, HelixError> {
+    use crate::backend::ColData;
+    let arr = match v {
+        Value::Array(a) => a,
+        other => {
+            return Err(HelixError::new(
+                format!("column `{}` must be an array, but got a {}", name, other.type_name()),
+                line,
+                col,
+            )
+            .hint("each DataFrame column is an array, e.g. `dataframe({age: [30, 41]})`."))
+        }
+    };
+    let vals = arr.to_values();
+    let mixed = |got: &Value| {
+        HelixError::new(
+            format!("column `{}` mixes types (found a {})", name, got.type_name()),
+            line,
+            col,
+        )
+        .hint("each DataFrame column must be all one type.")
+    };
+    let has_missing = vals.iter().any(|x| matches!(x, Value::Missing));
+    let kind = match vals.iter().find(|x| !matches!(x, Value::Missing)) {
+        Some(k) => k,
+        None => {
+            return Err(HelixError::new(
+                format!("cannot infer the type of column `{}` (empty or all `missing`)", name),
+                line,
+                col,
+            ))
+        }
+    };
+    match kind {
+        Value::Int(_) | Value::Float(_) => {
+            let any_float = vals.iter().any(|x| matches!(x, Value::Float(_)));
+            if any_float {
+                let mut out = Vec::with_capacity(vals.len());
+                for x in vals.iter() {
+                    match x {
+                        Value::Int(i) => out.push(Some(*i as f64)),
+                        Value::Float(f) => out.push(Some(*f)),
+                        Value::Missing => out.push(None),
+                        o => return Err(mixed(o)),
+                    }
+                }
+                Ok(ColData::Float(out))
+            } else if has_missing {
+                let mut out = Vec::with_capacity(vals.len());
+                for x in vals.iter() {
+                    match x {
+                        Value::Int(i) => out.push(Some(*i)),
+                        Value::Missing => out.push(None),
+                        o => return Err(mixed(o)),
+                    }
+                }
+                Ok(ColData::IntOpt(out))
+            } else {
+                let mut out = Vec::with_capacity(vals.len());
+                for x in vals.iter() {
+                    match x {
+                        Value::Int(i) => out.push(*i),
+                        o => return Err(mixed(o)),
+                    }
+                }
+                Ok(ColData::Int(out))
+            }
+        }
+        Value::Str(_) | Value::Dna(_) => {
+            let pull = |x: &Value| match x {
+                Value::Str(s) => Some((**s).clone()),
+                Value::Dna(s) => Some((**s).clone()),
+                _ => None,
+            };
+            if has_missing {
+                let mut out = Vec::with_capacity(vals.len());
+                for x in vals.iter() {
+                    match x {
+                        Value::Missing => out.push(None),
+                        _ => match pull(x) {
+                            Some(s) => out.push(Some(s)),
+                            None => return Err(mixed(x)),
+                        },
+                    }
+                }
+                Ok(ColData::StrOpt(out))
+            } else {
+                let mut out = Vec::with_capacity(vals.len());
+                for x in vals.iter() {
+                    match pull(x) {
+                        Some(s) => out.push(s),
+                        None => return Err(mixed(x)),
+                    }
+                }
+                Ok(ColData::Str(out))
+            }
+        }
+        Value::Bool(_) => {
+            if has_missing {
+                return Err(HelixError::new(
+                    format!("boolean column `{}` cannot contain `missing`", name),
+                    line,
+                    col,
+                ));
+            }
+            let mut out = Vec::with_capacity(vals.len());
+            for x in vals.iter() {
+                match x {
+                    Value::Bool(b) => out.push(*b),
+                    o => return Err(mixed(o)),
+                }
+            }
+            Ok(ColData::Bool(out))
+        }
+        other => Err(HelixError::new(
+            format!("column `{}` has an unsupported element type ({})", name, other.type_name()),
+            line,
+            col,
+        )
+        .hint("DataFrame columns must be numbers, strings, DNA, or booleans.")),
     }
 }
 

@@ -46,6 +46,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "to_array", pure: true },
     BuiltinDef { path: "to_dataframe", pure: true },
     BuiltinDef { path: "to_tensor", pure: true },
+    BuiltinDef { path: "dataframe", pure: true },
     // --- math standard library (broadcast + propagate missing) ---
     BuiltinDef { path: "sqrt", pure: true },
     BuiltinDef { path: "cbrt", pure: true },

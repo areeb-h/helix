@@ -245,6 +245,25 @@
     }
 
     #[test]
+    fn dataframe_constructor() {
+        // build a frame from in-memory columns, then count rows
+        assert_eq!(int("dataframe({a: [1, 2, 3], b: [4.0, 5.0, 6.0]}).count()"), 3);
+        // `missing` becomes a null — still a row
+        assert_eq!(int("dataframe({a: [1, missing, 3]}).count()"), 3);
+        // the normal verbs operate on the constructed frame
+        assert_eq!(
+            int("dataframe({g: [\"x\", \"x\", \"y\"], v: [1, 3, 10]}).group(@g).mean(@v).count()"),
+            2
+        );
+        // clear errors for misuse
+        assert!(last("dataframe([1, 2, 3])")
+            .unwrap_err()
+            .message
+            .contains("record of columns"));
+        assert!(last("dataframe({a: [1, \"x\"]})").unwrap_err().message.contains("mixes types"));
+    }
+
+    #[test]
     fn array_unique_and_frequencies() {
         // `unique` keeps first-seen order.
         assert_eq!(last("[3, 1, 3, 2, 1].unique()").unwrap().to_string(), "[3, 1, 2]");

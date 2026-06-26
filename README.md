@@ -180,7 +180,8 @@ seq.kmers(3)
   `map`, `filter`, `where`, `reduce`, `any`, `all`, `drop_missing`, `is_missing`.
 - String methods: `upper`, `lower`, `count`, `reverse`.
 - **DataFrames** backed by **Polars (latest), held as a lazy `LazyFrame`**:
-  `io.read_csv(path)` / `io.read_parquet(path)`, then `where(predicate)`,
+  `io.read_csv(path)` / `io.read_parquet(path)` or build one in memory from computed
+  columns with `dataframe({col: array, …})`, then `where(predicate)`,
   `select(@cols…)`, `sort(@cols…)`, `group(@keys…)` + a grouped
   `mean`/`sum`/`min`/`max`/`count`/`std`, plus `head(n)`, `count()`, `columns()`,
   and `io.write_parquet(df, path)` (streaming sink). Columns use the `@name` sigil —

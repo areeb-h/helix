@@ -344,6 +344,14 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::DataFrame)
         }
+        // `dataframe({col: array, …})` — build a frame from in-memory columns. The
+        // record's shape is validated at runtime (each field must be an array).
+        "dataframe" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            Ok(Type::DataFrame)
+        }
         "to_tensor" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
