@@ -555,7 +555,7 @@ pub(super) fn tensor_method_type(name: &str, nargs: usize, line: usize, col: usi
 
 pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "where" | "filter" | "select" | "sort" | "head" | "cache" | "with" | "join" => {
+        "where" | "filter" | "select" | "sort" | "head" | "cache" | "with" | "join" | "vstack" => {
             Type::DataFrame
         }
         "group" => Type::GroupBy,

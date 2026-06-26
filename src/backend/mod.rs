@@ -98,6 +98,10 @@ pub trait DataHandle {
         col: usize,
     ) -> Result<Df, HelixError>;
     fn head(&self, n: usize) -> Df;
+    /// Vertically concatenate `bottom`'s rows under `self` (row append). Both frames
+    /// must have the same columns (names and order); a schema mismatch is a clean
+    /// error, never a silent null-fill.
+    fn vstack(&self, bottom: &Df, line: usize, col: usize) -> Result<Df, HelixError>;
     fn group_agg(
         &self,
         keys: &[String],

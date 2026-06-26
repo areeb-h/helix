@@ -209,6 +209,20 @@ impl super::Interp {
                 let n = as_int(&v, "head", line, col)?.max(0) as usize;
                 Ok(Value::dataframe(lf.head(n)))
             }
+            "vstack" => {
+                if args.len() != 1 {
+                    return Err(HelixError::new("`vstack` takes one DataFrame to append", line, col)
+                        .hint("e.g. `kb.vstack(new_rows)` to append rows."));
+                }
+                match self.eval(&args[0])? {
+                    Value::DataFrame(bottom) => Ok(Value::dataframe(lf.vstack(&bottom, line, col)?)),
+                    v => Err(HelixError::new(
+                        format!("`vstack` expects a DataFrame, found {}", v.type_name()),
+                        line,
+                        col,
+                    )),
+                }
+            }
             "count" => {
                 if !args.is_empty() {
                     return Err(HelixError::new("`count` takes no arguments", line, col));

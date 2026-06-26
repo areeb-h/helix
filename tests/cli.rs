@@ -93,6 +93,26 @@ fn vm_matches_tree_walker_via_cli() {
 }
 
 #[test]
+fn dataframe_vstack_appends_rows() {
+    // Same columns → rows append (3 = 2 + 1); both engines agree.
+    let src = "a = dataframe({id: [1, 2], v: [10.0, 20.0]})\n\
+               b = dataframe({id: [3], v: [30.0]})\n\
+               print(a.vstack(b).count())\n";
+    for env in [&[][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "vstack_ok");
+        assert_eq!(code, Some(0), "stderr: {err}");
+        assert_eq!(out.trim(), "3");
+    }
+    // Mismatched columns are a clean error (caught by `try`), not a silent null-fill.
+    let bad = "a = dataframe({id: [1]})\n\
+               c = dataframe({other: [9]})\n\
+               print((try a.vstack(c)).ok)\n";
+    let (out, _, code) = run_source(bad, &[], "vstack_bad");
+    assert_eq!(code, Some(0));
+    assert_eq!(out.trim(), "false");
+}
+
+#[test]
 fn version_and_help_flags() {
     for flag in ["--version", "-V"] {
         let (stdout, _, code) = run(&[flag], &[], "");

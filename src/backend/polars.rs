@@ -308,6 +308,42 @@ impl DataHandle for PolarsFrame {
         wrap_lazy(self.lf.clone().limit(n.min(u32::MAX as usize) as u32))
     }
 
+    fn vstack(&self, bottom: &Df, line: usize, col: usize) -> Result<Df, HelixError> {
+        let bf = match bottom.as_any().downcast_ref::<PolarsFrame>() {
+            Some(pf) => pf,
+            None => {
+                return Err(HelixError::new(
+                    "cannot stack DataFrames from different backends",
+                    line,
+                    col,
+                ))
+            }
+        };
+        // Require identical columns (names + order) for a predictable row-append —
+        // a mismatch is a clean error rather than a surprising null-filled diagonal.
+        let top_cols = schema_names(&self.lf, line, col)?;
+        let bot_cols = schema_names(&bf.lf, line, col)?;
+        if top_cols != bot_cols {
+            return Err(HelixError::new(
+                "cannot stack DataFrames with different columns",
+                line,
+                col,
+            )
+            .hint(format!(
+                "top has [{}], bottom has [{}]",
+                top_cols.join(", "),
+                bot_cols.join(", ")
+            )));
+        }
+        let stacked = pl(
+            concat([self.lf.clone(), bf.lf.clone()], UnionArgs::default()),
+            "could not stack DataFrames",
+            line,
+            col,
+        )?;
+        Ok(wrap_lazy(stacked))
+    }
+
     /// One grouped aggregation: `group(keys).<agg>(value_col)`. Lazy.
     fn group_agg(
         &self,

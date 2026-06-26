@@ -223,6 +223,20 @@ pub(crate) fn df_value_method(
             let n = as_int(&args[0], "head", line, col)?.max(0) as usize;
             Ok(Value::dataframe(lf.head(n)))
         }
+        "vstack" => {
+            if args.len() != 1 {
+                return Err(HelixError::new("`vstack` takes one DataFrame to append", line, col)
+                    .hint("e.g. `kb.vstack(new_rows)` to append rows."));
+            }
+            match &args[0] {
+                Value::DataFrame(bottom) => Ok(Value::dataframe(lf.vstack(bottom, line, col)?)),
+                v => Err(HelixError::new(
+                    format!("`vstack` expects a DataFrame, found {}", v.type_name()),
+                    line,
+                    col,
+                )),
+            }
+        }
         "column" => {
             let name = column_arg(&args, line, col)?;
             Ok(Value::array_sniff(lf.column_values(&name, line, col)?))
