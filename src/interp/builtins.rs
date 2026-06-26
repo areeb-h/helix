@@ -16,14 +16,12 @@ impl super::Interp {
     ) -> Result<Value, HelixError> {
         match name {
             "print" => {
-                // Fallible render: a DataFrame argument materializes here, so a
-                // failed query is a real error (non-zero exit), never a swallowed
+                // Rich rendering on a terminal (tables, color, elision, grouped
+                // numbers); byte-identical to the plain `display_value` join when
+                // piped/redirected. A DataFrame argument still materializes here, so
+                // a failed query is a real error (non-zero exit), never a swallowed
                 // placeholder printed as if the program succeeded.
-                let mut parts = Vec::with_capacity(args.len());
-                for v in &args {
-                    parts.push(crate::value::display_value(v, line, col)?);
-                }
-                println!("{}", parts.join(" "));
+                println!("{}", crate::render::render_print(&args, line, col)?);
                 Ok(Value::Unit)
             }
             "assert" => {

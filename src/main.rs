@@ -28,6 +28,7 @@ mod parser;
 mod pkg;
 mod python;
 mod registry;
+mod render;
 mod sam;
 mod stats;
 mod symbol;
@@ -581,9 +582,10 @@ fn eval_repl_line(interp: &mut Interp, checker: &mut types::Checker, src: &str) 
         }
         match interp.exec(stmt) {
             Ok(outcome) => {
-                // Auto-echo the value of bare expressions, like a scientist's notebook.
+                // Auto-echo the value of bare expressions, like a scientist's
+                // notebook — rich (table/color) on a terminal, plain when piped.
                 if outcome.is_expr && !matches!(outcome.value, Value::Unit) {
-                    println!("{}", outcome.value);
+                    println!("{}", render::render_echo(&outcome.value));
                 }
             }
             Err(e) => {
