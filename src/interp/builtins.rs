@@ -135,6 +135,19 @@ impl super::Interp {
             "chart.line" => crate::chart::line(&args, line, col),
             "chart.scatter" => crate::chart::scatter(&args, line, col),
             "chart.sparkline" => crate::chart::sparkline(&args, line, col),
+            // Writers (effectful) → write a file, return Unit.
+            "io.write" => crate::writers::write_text(&args, line, col),
+            "io.append" => crate::writers::append_text(&args, line, col),
+            "io.write_csv" => crate::writers::write_csv(&args, line, col),
+            "io.write_tsv" => crate::writers::write_tsv(&args, line, col),
+            "io.write_json" => crate::writers::write_json(&args, line, col),
+            "bio.write_fasta" => crate::writers::write_fasta(&args, line, col),
+            "bio.write_fastq" => crate::writers::write_fastq(&args, line, col),
+            // Exporters (pure) → serialize to a string in another format.
+            "export.markdown" => crate::writers::to_markdown(&args, line, col),
+            "export.html" => crate::writers::to_html(&args, line, col),
+            "export.svg_bar" => crate::writers::svg_bar(&args, line, col),
+            "export.svg_line" => crate::writers::svg_line(&args, line, col),
             "http.get" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {

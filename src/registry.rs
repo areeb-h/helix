@@ -38,6 +38,14 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "bio.read_gff", pure: false },
     BuiltinDef { path: "bio.read_bed", pure: false },
     BuiltinDef { path: "io.write_parquet", pure: false },
+    // --- writers: serialize results to disk (effectful) ---
+    BuiltinDef { path: "io.write", pure: false },
+    BuiltinDef { path: "io.append", pure: false },
+    BuiltinDef { path: "io.write_csv", pure: false },
+    BuiltinDef { path: "io.write_tsv", pure: false },
+    BuiltinDef { path: "io.write_json", pure: false },
+    BuiltinDef { path: "bio.write_fasta", pure: false },
+    BuiltinDef { path: "bio.write_fastq", pure: false },
     BuiltinDef { path: "http.get", pure: false },
     // --- constructors / conversions ---
     BuiltinDef { path: "dna", pure: true },
@@ -111,6 +119,11 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "chart.line", pure: true },
     BuiltinDef { path: "chart.scatter", pure: true },
     BuiltinDef { path: "chart.sparkline", pure: true },
+    // --- export: serialize to a string in another format (pure) ---
+    BuiltinDef { path: "export.markdown", pure: true },
+    BuiltinDef { path: "export.html", pure: true },
+    BuiltinDef { path: "export.svg_bar", pure: true },
+    BuiltinDef { path: "export.svg_line", pure: true },
 ];
 
 /// Methods universal to every receiver type (handled before the per-type dispatch).

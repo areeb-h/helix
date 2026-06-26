@@ -39,6 +39,7 @@ mod types;
 mod value;
 mod vcf;
 mod vm;
+mod writers;
 
 // Process-wide allocator. mimalloc replaces the system allocator (glibc/musl/system
 // malloc) for every Rust allocation — a pure runtime win on Helix's allocation-heavy

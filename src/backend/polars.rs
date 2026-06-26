@@ -402,6 +402,25 @@ impl DataHandle for PolarsFrame {
         .map(|_| ())
     }
 
+    /// Materialize the lazy plan and serialize it as delimited text via Polars'
+    /// `CsvWriter` (the stable write API; the streaming sink's CSV format is more
+    /// volatile). CSV writing itself is fast — the cost is the one `collect`.
+    fn write_csv(&self, path: &str, sep: u8, line: usize, col: usize) -> Result<(), HelixError> {
+        let mut df = pl(
+            self.lf.clone().collect(),
+            &format!("could not materialize for CSV `{}`", path),
+            line,
+            col,
+        )?;
+        let mut file = std::fs::File::create(path).map_err(|e| {
+            HelixError::new(format!("could not create `{}`: {}", path, e), line, col)
+        })?;
+        CsvWriter::new(&mut file)
+            .with_separator(sep)
+            .finish(&mut df)
+            .map_err(|e| HelixError::new(format!("could not write CSV `{}`: {}", path, e), line, col))
+    }
+
     fn collect_string(&self) -> Result<String, String> {
         match self.lf.clone().collect() {
             Ok(df) => Ok(format!("{}", df)),

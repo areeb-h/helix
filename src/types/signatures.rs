@@ -399,6 +399,12 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         "chart.bar" | "chart.hist" | "chart.line" | "chart.scatter" | "chart.sparkline" => {
             Ok(Type::String)
         }
+        // Exporters serialize to a string; writers perform I/O and return Unit.
+        "export.markdown" | "export.html" | "export.svg_bar" | "export.svg_line" => {
+            Ok(Type::String)
+        }
+        "io.write" | "io.append" | "io.write_csv" | "io.write_tsv" | "io.write_json"
+        | "bio.write_fasta" | "bio.write_fastq" => Ok(Type::Unit),
         _ => Ok(Type::Unknown), // unreachable (BUILTIN_FNS gated), but stay permissive
     }
 }
