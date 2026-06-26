@@ -343,7 +343,7 @@ fn record_string_indexing() {
 #[test]
 fn read_fastq_parses_reads_with_quality() {
     // FASTQ -> records {id, seq, qual, length}; sequence methods apply to `seq`.
-    let src = "r = bio.read_fastq(\"examples/data/reads.fastq\")\nprint(r.count())\nprint(r.first().length)\nprint(r.first().seq.gc_content())\n";
+    let src = "r = read_fastq(\"examples/data/reads.fastq\")\nprint(r.count())\nprint(r.first().length)\nprint(r.first().seq.gc_content())\n";
     let (out, stderr, code) = run_source(src, &[], "fastq");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "3\n12\n0.5"); // 3 reads; first is 12 bp; GC = 0.5
@@ -433,7 +433,7 @@ fn phred_decodes_quality_and_filters_reads() {
     // compose with the array verbs (mean/min) for QC. The first read's quality is
     // all `I` (ASCII 73 -> Q40), so a quality-filter is one `where`. A read with no
     // quality line (a FASTA read through read_fastq) has `qual = missing`.
-    let src = "r = bio.read_fastq(\"examples/data/reads.fastq\")\nprint(r.first().qual.phred().mean())\nprint(\"IIH\".phred())\nprint(r.where(it.qual.phred().mean() >= 38).count())\nf = bio.read_fastq(\"examples/data/sample.fa\").first()\nprint(f.qual.is_missing())\n";
+    let src = "r = read_fastq(\"examples/data/reads.fastq\")\nprint(r.first().qual.phred().mean())\nprint(\"IIH\".phred())\nprint(r.where(it.qual.phred().mean() >= 38).count())\nf = read_fastq(\"examples/data/sample.fa\").first()\nprint(f.qual.is_missing())\n";
     let (out, stderr, code) = run_source(src, &[], "phred");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     // Q40 mean; [40,40,39]; all 3 reads pass mean>=38; FASTA-sourced qual is missing.
@@ -445,7 +445,7 @@ fn read_vcf_accepts_gzipped_files() {
     // Real-world VCFs are bgzipped `.vcf.gz`; the reader sniffs the gzip magic bytes
     // and decompresses transparently, so a `.vcf.gz` queries identically to its plain
     // form (the fixture is the gzip of examples/data/variants.vcf).
-    let src = "v = bio.read_vcf(\"examples/data/variants.vcf.gz\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\n";
+    let src = "v = read_vcf(\"examples/data/variants.vcf.gz\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\n";
     let (out, stderr, code) = run_source(src, &[], "vcfgz");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "6\n3"); // identical to the plain-VCF result
@@ -458,7 +458,7 @@ fn read_vcf_makes_variants_queryable() {
     // counts are deterministic.
     // `af` is a header-typed Float INFO column, so `af > 0.001` is a NUMERIC
     // comparison (3 rows) — a plain string column would mis-compare and give 5.
-    let src = "v = bio.read_vcf(\"examples/data/variants.vcf\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\nprint(v.where(qual > 50).count())\nprint(v.where(af > 0.001).count())\n";
+    let src = "v = read_vcf(\"examples/data/variants.vcf\")\nprint(v.count())\nprint(v.where(gene == \"BRCA1\").count())\nprint(v.where(qual > 50).count())\nprint(v.where(af > 0.001).count())\n";
     let (out, stderr, code) = run_source(src, &[], "vcf");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "6\n3\n3\n3"); // 6 variants; 3 BRCA1; 3 qual>50; 3 af>0.001
@@ -471,7 +471,7 @@ fn read_bcf_queries_identically_to_read_vcf() {
     // give the SAME answers as the text VCF (including the header-typed Float `af`
     // column, so `af > 0.001` stays a numeric comparison). The fixture is generated
     // from variants.vcf by the ignored `generate_bcf_fixture` test in src/vcf.rs.
-    let src = "b = bio.read_bcf(\"examples/data/variants.bcf\")\nprint(b.count())\nprint(b.where(gene == \"BRCA1\").count())\nprint(b.where(qual > 50).count())\nprint(b.where(af > 0.001).count())\n";
+    let src = "b = read_bcf(\"examples/data/variants.bcf\")\nprint(b.count())\nprint(b.where(gene == \"BRCA1\").count())\nprint(b.where(qual > 50).count())\nprint(b.where(af > 0.001).count())\n";
     let (out, stderr, code) = run_source(src, &[], "bcf");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "6\n3\n3\n3"); // identical to the plain-VCF result above
@@ -483,7 +483,7 @@ fn read_vcf_region_query_uses_the_index() {
     // and returns only the variants intersecting the region, identical to a full read
     // filtered to that window (INFO columns preserved). The bgzipped+indexed fixture is
     // generated from variants.vcf by the ignored `generate_vcf_index_fixture` test.
-    let src = "p = \"examples/data/variants.vcf.gz\"\nprint(bio.read_vcf(p, \"chr17:43044000-43046000\").count())\nprint(bio.read_vcf(p, \"chr13\").count())\nprint(bio.read_vcf(p, \"chr17:43090000-43100000\").select(pos, gene).column(\"pos\").first())\nprint(bio.read_vcf(p).count())\n";
+    let src = "p = \"examples/data/variants.vcf.gz\"\nprint(read_vcf(p, \"chr17:43044000-43046000\").count())\nprint(read_vcf(p, \"chr13\").count())\nprint(read_vcf(p, \"chr17:43090000-43100000\").select(pos, gene).column(\"pos\").first())\nprint(read_vcf(p).count())\n";
     let (out, stderr, code) = run_source(src, &[], "vcfregion");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     // 2 in the chr17 window; 2 on chr13; the tail window's single variant is at 43091983;
@@ -495,7 +495,7 @@ fn read_vcf_region_query_uses_the_index() {
 fn read_vcf_region_without_index_is_a_clean_error() {
     // A region query against a file with no `.tbi` (here the plain, unindexed .vcf)
     // fails with a clear message rather than a panic.
-    let src = "print(bio.read_vcf(\"examples/data/variants.vcf\", \"chr17:1-9999999\").count())\n";
+    let src = "print(read_vcf(\"examples/data/variants.vcf\", \"chr17:1-9999999\").count())\n";
     let (_out, stderr, code) = run_source(src, &[], "vcfnoidx");
     assert_eq!(code, Some(1));
     assert!(stderr.contains("indexed") || stderr.contains(".tbi"), "stderr:\n{stderr}");
@@ -506,7 +506,7 @@ fn read_sam_makes_alignments_queryable() {
     // The alignment flagship: a SAM file becomes a DataFrame with the eleven mandatory
     // fields as columns. `ref` is resolved from the header (null for an unmapped read),
     // `mapq` is a numeric column, and the CIGAR is rendered to its SAM string.
-    let src = "a = bio.read_sam(\"examples/data/alignments.sam\")\nprint(a.count())\nprint(a.where(ref == \"chr1\").count())\nprint(a.where(mapq > 50).count())\nprint(a.where(name == \"read2\").column(\"cigar\").first())\n";
+    let src = "a = read_sam(\"examples/data/alignments.sam\")\nprint(a.count())\nprint(a.where(ref == \"chr1\").count())\nprint(a.where(mapq > 50).count())\nprint(a.where(name == \"read2\").column(\"cigar\").first())\n";
     let (out, stderr, code) = run_source(src, &[], "sam");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "4\n2\n2\n5M2I1M"); // 4 reads; 2 on chr1; 2 mapq>50; read2 CIGAR
@@ -518,7 +518,7 @@ fn read_bam_queries_identically_to_read_sam() {
     // model and column-building, so the same queries over the binary fixture give the
     // SAME answers. The fixture is generated from alignments.sam by the ignored
     // `generate_bam_fixture` test in src/sam.rs.
-    let src = "b = bio.read_bam(\"examples/data/alignments.bam\")\nprint(b.count())\nprint(b.where(ref == \"chr1\").count())\nprint(b.where(mapq > 50).count())\nprint(b.where(name == \"read2\").column(\"cigar\").first())\n";
+    let src = "b = read_bam(\"examples/data/alignments.bam\")\nprint(b.count())\nprint(b.where(ref == \"chr1\").count())\nprint(b.where(mapq > 50).count())\nprint(b.where(name == \"read2\").column(\"cigar\").first())\n";
     let (out, stderr, code) = run_source(src, &[], "bam");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "4\n2\n2\n5M2I1M"); // identical to the plain-SAM result above
@@ -530,7 +530,7 @@ fn read_bam_region_query_uses_the_index() {
     // `.bai` index and returns only the reads intersecting the region (by CIGAR-spanned
     // reference coordinates), identical to a full read filtered to the window. The
     // indexed BAM+`.bai` fixture is generated by the ignored `generate_bam_fixture` test.
-    let src = "p = \"examples/data/alignments.bam\"\nprint(bio.read_bam(p, \"chr1\").count())\nprint(bio.read_bam(p, \"chr2\").count())\nprint(bio.read_bam(p, \"chr1:140-160\").count())\nprint(bio.read_bam(p).count())\n";
+    let src = "p = \"examples/data/alignments.bam\"\nprint(read_bam(p, \"chr1\").count())\nprint(read_bam(p, \"chr2\").count())\nprint(read_bam(p, \"chr1:140-160\").count())\nprint(read_bam(p).count())\n";
     let (out, stderr, code) = run_source(src, &[], "bamregion");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     // 2 reads on chr1; 1 on chr2; 1 read (read2 @150) spans chr1:140-160; scan reads all 4.
@@ -541,7 +541,7 @@ fn read_bam_region_query_uses_the_index() {
 fn read_gff_makes_features_queryable() {
     // A GFF3 file becomes a DataFrame: the standard feature columns plus one string
     // column per attribute tag (so `Name` is queryable alongside `type`/`strand`).
-    let src = "g = bio.read_gff(\"examples/data/genes.gff3\")\nprint(g.where(type == \"gene\").count())\nprint(g.where(Name == \"BRCA1\").count())\n";
+    let src = "g = read_gff(\"examples/data/genes.gff3\")\nprint(g.where(type == \"gene\").count())\nprint(g.where(Name == \"BRCA1\").count())\n";
     let (out, stderr, code) = run_source(src, &[], "gff");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "3\n1"); // 3 gene features; 1 named BRCA1
@@ -551,7 +551,7 @@ fn read_gff_makes_features_queryable() {
 fn read_bed_makes_intervals_queryable() {
     // A BED file becomes a DataFrame; the optional name/score/strand columns appear
     // because the file carries them, and `score` is numeric (`score > 400`).
-    let src = "b = bio.read_bed(\"examples/data/peaks.bed\")\nprint(b.count())\nprint(b.where(score > 400).count())\n";
+    let src = "b = read_bed(\"examples/data/peaks.bed\")\nprint(b.count())\nprint(b.where(score > 400).count())\n";
     let (out, stderr, code) = run_source(src, &[], "bed");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "4\n3"); // 4 intervals; 3 with score > 400
@@ -676,7 +676,7 @@ fn match_guards_on_both_engines() {
 fn with_derives_columns_from_expressions() {
     // `df.with({name: expr, ...})` adds columns computed over existing ones. The
     // value expressions reference bare column names, like the other column verbs.
-    let src = "v = bio.read_vcf(\"examples/data/variants.vcf\")\nd = v.with({strong: qual > 50})\nprint(d.where(strong).count())\n";
+    let src = "v = read_vcf(\"examples/data/variants.vcf\")\nd = v.with({strong: qual > 50})\nprint(d.where(strong).count())\n";
     let (out, stderr, code) = run_source(src, &[], "with");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "3"); // 3 of 6 variants have qual > 50
@@ -686,7 +686,7 @@ fn with_derives_columns_from_expressions() {
 fn join_combines_frames_on_a_key() {
     // `a.join(b, key)` defaults to an inner join; a trailing string picks the type.
     // samples has S1..S4; sample_meta has S1..S3, S5 — so inner keeps 3, left keeps 4.
-    let src = "s = io.read_csv(\"examples/data/samples.csv\")\nm = io.read_csv(\"examples/data/sample_meta.csv\")\nprint(s.join(m, sample_id).count())\nprint(s.join(m, sample_id, \"left\").count())\n";
+    let src = "s = read_csv(\"examples/data/samples.csv\")\nm = read_csv(\"examples/data/sample_meta.csv\")\nprint(s.join(m, sample_id).count())\nprint(s.join(m, sample_id, \"left\").count())\n";
     let (out, stderr, code) = run_source(src, &[], "join");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "3\n4");
@@ -711,7 +711,7 @@ fn import_resolves_on_the_search_path() {
 #[test]
 fn bio_sequence_helpers_over_fastq() {
     // The native `bio.*` sequence helpers over the reads of a FASTQ file.
-    let src = "r = bio.read_fastq(\"examples/data/reads.fastq\")\nseqs = r.map(x => x.seq)\nprint(bio.total_length(seqs))\nprint(bio.mean_gc(seqs) > 0.4)\n";
+    let src = "r = read_fastq(\"examples/data/reads.fastq\")\nseqs = r.map(x => x.seq)\nprint(bio.total_length(seqs))\nprint(bio.mean_gc(seqs) > 0.4)\n";
     let (out, stderr, code) = run_source(src, &[], "bioseq");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "36\ntrue"); // 3 reads x 12 bp; mean GC ~0.44
@@ -920,7 +920,7 @@ fn missing_module_on_search_path_is_a_clean_error() {
 fn descriptive_statistics_and_correlation() {
     // Population statistics (so var == std^2) plus Pearson correlation, with the
     // missing-propagation rule: a `missing` in either series yields `missing`.
-    let src = "xs = [2, 4, 4, 4, 5, 5, 7, 9]\nprint(xs.median())\nprint(xs.var())\nprint(xs.std())\nprint(stats.correlation([1, 2, 3, 4], [2, 4, 6, 8]))\nprint(stats.correlation([1, 2, 3], [1, missing, 3]))\n";
+    let src = "xs = [2, 4, 4, 4, 5, 5, 7, 9]\nprint(xs.median())\nprint(xs.var())\nprint(xs.std())\nprint(correlation([1, 2, 3, 4], [2, 4, 6, 8]))\nprint(correlation([1, 2, 3], [1, missing, 3]))\n";
     let (out, stderr, code) = run_source(src, &[], "stats");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "4.5\n4.0\n2.0\n1.0\nmissing");
@@ -930,7 +930,7 @@ fn descriptive_statistics_and_correlation() {
 fn inferential_statistics_t_test_and_normal() {
     // The normal CDF (broadcasting math) and Welch's two-sample t-test. The t-test
     // returns a {statistic, df, p_value} record whose fields are reachable.
-    let src = "print(stats.normal_cdf(0.0))\ncontrol = [5.1, 4.9, 5.0, 5.2, 4.8, 5.0]\ntreated = [5.6, 5.8, 5.5, 5.9, 5.7, 5.4]\nr = stats.t_test(control, treated)\nprint(r.p_value < 0.01)\nprint(r.statistic < 0.0)\n";
+    let src = "print(normal_cdf(0.0))\ncontrol = [5.1, 4.9, 5.0, 5.2, 4.8, 5.0]\ntreated = [5.6, 5.8, 5.5, 5.9, 5.7, 5.4]\nr = t_test(control, treated)\nprint(r.p_value < 0.01)\nprint(r.statistic < 0.0)\n";
     let (out, stderr, code) = run_source(src, &[], "ttest");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "0.5\ntrue\ntrue"); // strong, significant difference
@@ -938,7 +938,7 @@ fn inferential_statistics_t_test_and_normal() {
 
 #[test]
 fn t_test_on_constant_samples_is_a_clean_error() {
-    let src = "print(stats.t_test([2, 2, 2], [2, 2, 2]))\n";
+    let src = "print(t_test([2, 2, 2], [2, 2, 2]))\n";
     let (_out, stderr, code) = run_source(src, &[], "ttesterr");
     assert_ne!(code, Some(0));
     assert!(stderr.contains("t-test is undefined"), "stderr:\n{stderr}");
@@ -948,7 +948,7 @@ fn t_test_on_constant_samples_is_a_clean_error() {
 fn linear_regression_fits_and_predicts() {
     // OLS fit of a textbook dataset (R: intercept 2.2, slope 0.6, R^2 0.6), with
     // predictions recovered by broadcasting `slope * x + intercept`.
-    let src = "x = [1.0, 2.0, 3.0, 4.0, 5.0]\ny = [2.0, 4.0, 5.0, 4.0, 5.0]\nf = stats.linear_regression(x, y)\nprint(f.slope)\nprint(f.intercept)\nprint(f.r_squared)\nprint(f.slope * 6.0 + f.intercept)\n";
+    let src = "x = [1.0, 2.0, 3.0, 4.0, 5.0]\ny = [2.0, 4.0, 5.0, 4.0, 5.0]\nf = linear_regression(x, y)\nprint(f.slope)\nprint(f.intercept)\nprint(f.r_squared)\nprint(f.slope * 6.0 + f.intercept)\n";
     let (out, stderr, code) = run_source(src, &[], "lm");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "0.6\n2.2\n0.6\n5.8"); // predicted y at x = 6
@@ -956,7 +956,7 @@ fn linear_regression_fits_and_predicts() {
 
 #[test]
 fn linear_regression_without_variance_is_a_clean_error() {
-    let src = "print(stats.linear_regression([1, 1, 1], [1, 2, 3]))\n";
+    let src = "print(linear_regression([1, 1, 1], [1, 2, 3]))\n";
     let (_out, stderr, code) = run_source(src, &[], "lmerr");
     assert_ne!(code, Some(0));
     assert!(stderr.contains("linear regression is undefined"), "stderr:\n{stderr}");
@@ -966,7 +966,7 @@ fn linear_regression_without_variance_is_a_clean_error() {
 fn multiple_regression_recovers_coefficients() {
     // y = 1 + 2*x1 + 3*x2 exactly → coefficients [1, 2, 3], R^2 = 1. The result's
     // coefficients/p_values are parameter-indexed arrays (index 0 is the intercept).
-    let src = "x1 = [1.0, 2.0, 3.0, 4.0, 5.0]\nx2 = [2.0, 1.0, 4.0, 3.0, 5.0]\ny = [9.0, 8.0, 19.0, 18.0, 26.0]\nf = stats.multiple_regression([x1, x2], y)\nc = f.coefficients\nprint(c.count())\nprint(f.r_squared)\nprint(round(c[0]) == 1 and round(c[1]) == 2 and round(c[2]) == 3)\n";
+    let src = "x1 = [1.0, 2.0, 3.0, 4.0, 5.0]\nx2 = [2.0, 1.0, 4.0, 3.0, 5.0]\ny = [9.0, 8.0, 19.0, 18.0, 26.0]\nf = multiple_regression([x1, x2], y)\nc = f.coefficients\nprint(c.count())\nprint(f.r_squared)\nprint(round(c[0]) == 1 and round(c[1]) == 2 and round(c[2]) == 3)\n";
     let (out, stderr, code) = run_source(src, &[], "mlr");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "3\n1.0\ntrue"); // 3 coefficients; perfect fit; b = [1, 2, 3]
@@ -974,7 +974,7 @@ fn multiple_regression_recovers_coefficients() {
 
 #[test]
 fn multiple_regression_on_collinear_predictors_is_a_clean_error() {
-    let src = "print(stats.multiple_regression([[1, 2, 3, 4], [2, 4, 6, 8]], [1, 3, 2, 5]))\n";
+    let src = "print(multiple_regression([[1, 2, 3, 4], [2, 4, 6, 8]], [1, 3, 2, 5]))\n";
     let (_out, stderr, code) = run_source(src, &[], "mlrerr");
     assert_ne!(code, Some(0));
     assert!(stderr.contains("multiple regression is undefined"), "stderr:\n{stderr}");
@@ -985,7 +985,7 @@ fn column_extracts_values_for_statistics() {
     // `df.column(name)` materializes a column as an array, so the array statistics
     // apply directly to loaded data. Polars nulls become `missing`, so `drop_missing`
     // composes before an aggregation.
-    let src = "p = io.read_csv(\"examples/data/patients.csv\")\nprint(p.column(\"age\").median())\nv = bio.read_vcf(\"examples/data/variants.vcf\")\nprint(v.column(\"qual\").drop_missing().count())\n";
+    let src = "p = read_csv(\"examples/data/patients.csv\")\nprint(p.column(\"age\").median())\nv = read_vcf(\"examples/data/variants.vcf\")\nprint(v.column(\"qual\").drop_missing().count())\n";
     let (out, stderr, code) = run_source(src, &[], "dfcolumn");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "43.0\n6"); // median of 8 ages; 6 non-null quals
@@ -993,7 +993,7 @@ fn column_extracts_values_for_statistics() {
 
 #[test]
 fn column_with_unknown_name_is_a_clean_error() {
-    let src = "print(io.read_csv(\"examples/data/patients.csv\").column(\"nope\"))\n";
+    let src = "print(read_csv(\"examples/data/patients.csv\").column(\"nope\"))\n";
     let (_out, stderr, code) = run_source(src, &[], "dfcolerr");
     assert_ne!(code, Some(0));
     assert!(stderr.contains("no column `nope`"), "stderr:\n{stderr}");
@@ -1001,7 +1001,7 @@ fn column_with_unknown_name_is_a_clean_error() {
 
 #[test]
 fn correlation_on_mismatched_lengths_is_a_clean_error() {
-    let src = "print(stats.correlation([1, 2], [1, 2, 3]))\n";
+    let src = "print(correlation([1, 2], [1, 2, 3]))\n";
     let (_out, stderr, code) = run_source(src, &[], "corrlen");
     assert_ne!(code, Some(0));
     assert!(
@@ -1015,7 +1015,7 @@ fn join_without_an_operand_is_a_clean_error() {
     // A no-argument `join` type-checks (DataFrame args are the unchecked runtime
     // boundary), so the compiler must stay total and emit the friendly diagnostic
     // rather than the "internal error ... please report" totality breach.
-    let src = "s = io.read_csv(\"examples/data/samples.csv\")\nprint(s.join())\n";
+    let src = "s = read_csv(\"examples/data/samples.csv\")\nprint(s.join())\n";
     let (out, stderr, code) = run_source(src, &[], "joinerr");
     assert_ne!(code, Some(0), "stdout:\n{out}");
     assert!(
@@ -1029,7 +1029,7 @@ fn join_without_an_operand_is_a_clean_error() {
 fn join_on_an_unknown_key_is_a_clean_error() {
     // Keys are validated against both schemas up front, so a typo reads as a Helix
     // error naming the frame and listing valid columns — not Polars' lazy-plan dump.
-    let src = "s = io.read_csv(\"examples/data/samples.csv\")\nm = io.read_csv(\"examples/data/sample_meta.csv\")\nprint(s.join(m, no_such_key).count())\n";
+    let src = "s = read_csv(\"examples/data/samples.csv\")\nm = read_csv(\"examples/data/sample_meta.csv\")\nprint(s.join(m, no_such_key).count())\n";
     let (out, stderr, code) = run_source(src, &[], "joinkey");
     assert_ne!(code, Some(0), "stdout:\n{out}");
     assert!(
@@ -1044,7 +1044,7 @@ fn join_on_an_unknown_key_is_a_clean_error() {
 #[test]
 #[ignore]
 fn http_get_returns_a_status() {
-    let src = "r = http.get(\"https://example.com\")\nprint(r.status)\n";
+    let src = "r = http_get(\"https://example.com\")\nprint(r.status)\n";
     let (out, stderr, code) = run_source(src, &[], "http");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "200");
@@ -1110,7 +1110,7 @@ fn python_dataframe_round_trips_zero_copy() {
     // `polars` package; skip cleanly if it isn't installed so the suite stays portable.
     // The relative CSV path resolves because `run` sets cwd to the manifest dir.
     let src = concat!(
-        "df = io.read_csv(\"examples/data/patients.csv\")\n",
+        "df = read_csv(\"examples/data/patients.csv\")\n",
         "print(python.import(\"builtins\").len(df))\n",
         "back = to_dataframe(python.import(\"polars\").concat([df]))\n",
         "print(back.count())\n",

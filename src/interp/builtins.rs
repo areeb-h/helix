@@ -148,7 +148,7 @@ impl super::Interp {
             "export.html" => crate::writers::to_html(&args, line, col),
             "export.svg_bar" => crate::writers::svg_bar(&args, line, col),
             "export.svg_line" => crate::writers::svg_line(&args, line, col),
-            "http.get" => {
+            "http_get" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(url) => {
@@ -173,17 +173,17 @@ impl super::Interp {
                             .hint("build without `--no-default-features`, or with `--features http`."))
                         }
                     }
-                    other => Err(type_err("http.get", "a URL string", other, line, col)),
+                    other => Err(type_err("http_get", "a URL string", other, line, col)),
                 }
             }
-            "io.read_csv" => {
+            "read_csv" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => Ok(Value::dataframe(dataframe::read_csv(s, line, col)?)),
-                    other => Err(type_err("io.read_csv", "a string path", other, line, col)),
+                    other => Err(type_err("read_csv", "a string path", other, line, col)),
                 }
             }
-            "bio.read_vcf" => {
+            "read_vcf" => {
                 // `read_vcf(path)` scans; `read_vcf(path, "chr:start-end")` does an
                 // indexed region query against the file's `.tbi`.
                 if args.is_empty() || args.len() > 2 {
@@ -196,7 +196,7 @@ impl super::Interp {
                 let path = match &args[0] {
                     Value::Str(s) => s,
                     other => {
-                        return Err(type_err("bio.read_vcf", "a string path", other, line, col));
+                        return Err(type_err("read_vcf", "a string path", other, line, col));
                     }
                 };
                 let df = match args.get(1) {
@@ -204,27 +204,27 @@ impl super::Interp {
                         crate::vcf::read_vcf_region(path, region, line, col)?
                     }
                     Some(other) => {
-                        return Err(type_err("bio.read_vcf", "a string region", other, line, col));
+                        return Err(type_err("read_vcf", "a string region", other, line, col));
                     }
                     None => crate::vcf::read_vcf(path, line, col)?,
                 };
                 Ok(Value::dataframe(df))
             }
-            "bio.read_bcf" => {
+            "read_bcf" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => Ok(Value::dataframe(crate::vcf::read_bcf(s, line, col)?)),
-                    other => Err(type_err("bio.read_bcf", "a string path", other, line, col)),
+                    other => Err(type_err("read_bcf", "a string path", other, line, col)),
                 }
             }
-            "bio.read_sam" => {
+            "read_sam" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => Ok(Value::dataframe(crate::sam::read_sam(s, line, col)?)),
-                    other => Err(type_err("bio.read_sam", "a string path", other, line, col)),
+                    other => Err(type_err("read_sam", "a string path", other, line, col)),
                 }
             }
-            "bio.read_bam" => {
+            "read_bam" => {
                 // `read_bam(path)` scans; `read_bam(path, "chr:start-end")` does an
                 // indexed region query against the file's `.bai`.
                 if args.is_empty() || args.len() > 2 {
@@ -237,7 +237,7 @@ impl super::Interp {
                 let path = match &args[0] {
                     Value::Str(s) => s,
                     other => {
-                        return Err(type_err("bio.read_bam", "a string path", other, line, col));
+                        return Err(type_err("read_bam", "a string path", other, line, col));
                     }
                 };
                 let df = match args.get(1) {
@@ -245,24 +245,24 @@ impl super::Interp {
                         crate::sam::read_bam_region(path, region, line, col)?
                     }
                     Some(other) => {
-                        return Err(type_err("bio.read_bam", "a string region", other, line, col));
+                        return Err(type_err("read_bam", "a string region", other, line, col));
                     }
                     None => crate::sam::read_bam(path, line, col)?,
                 };
                 Ok(Value::dataframe(df))
             }
-            "bio.read_gff" => {
+            "read_gff" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => Ok(Value::dataframe(crate::gff::read_gff(s, line, col)?)),
-                    other => Err(type_err("bio.read_gff", "a string path", other, line, col)),
+                    other => Err(type_err("read_gff", "a string path", other, line, col)),
                 }
             }
-            "bio.read_bed" => {
+            "read_bed" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => Ok(Value::dataframe(crate::bed::read_bed(s, line, col)?)),
-                    other => Err(type_err("bio.read_bed", "a string path", other, line, col)),
+                    other => Err(type_err("read_bed", "a string path", other, line, col)),
                 }
             }
             "range" => match args.len() {
@@ -282,25 +282,25 @@ impl super::Interp {
                 )
                 .hint("use `range(n)` or `range(start, stop)`.")),
             },
-            "io.read_parquet" => {
+            "read_parquet" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => Ok(Value::dataframe(dataframe::read_parquet(s, line, col)?)),
-                    other => Err(type_err("io.read_parquet", "a string path", other, line, col)),
+                    other => Err(type_err("read_parquet", "a string path", other, line, col)),
                 }
             }
-            "bio.read_fasta" => {
+            "read_fasta" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => crate::bio::read_fasta(s, line, col),
-                    other => Err(type_err("bio.read_fasta", "a string path", other, line, col)),
+                    other => Err(type_err("read_fasta", "a string path", other, line, col)),
                 }
             }
-            "bio.read_fastq" => {
+            "read_fastq" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => crate::bio::read_fastq(s, line, col),
-                    other => Err(type_err("bio.read_fastq", "a string path", other, line, col)),
+                    other => Err(type_err("read_fastq", "a string path", other, line, col)),
                 }
             }
             "io.write_parquet" => {
@@ -388,12 +388,12 @@ impl super::Interp {
             // ---- math standard library (broadcasts over arrays, propagates missing) ----
             "sqrt" | "cbrt" | "exp" | "ln" | "log10" | "log2" | "sin" | "cos" | "tan" | "asin"
             | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "degrees" | "radians" | "erf"
-            | "stats.normal_cdf" | "stats.normal_pdf" => {
+            | "normal_cdf" | "normal_pdf" => {
                 arity(name, &args, 1, line, col)?;
                 let f: fn(f64) -> f64 = match name {
                     "erf" => crate::stats::erf,
-                    "stats.normal_cdf" => crate::stats::normal_cdf,
-                    "stats.normal_pdf" => crate::stats::normal_pdf,
+                    "normal_cdf" => crate::stats::normal_cdf,
+                    "normal_pdf" => crate::stats::normal_pdf,
                     "sqrt" => f64::sqrt,
                     "cbrt" => f64::cbrt,
                     "exp" => f64::exp,
@@ -485,7 +485,7 @@ impl super::Interp {
                 let pick_first = if name == "min" { a <= b } else { a >= b };
                 Ok(if pick_first { args[0].clone() } else { args[1].clone() })
             }
-            "stats.correlation" => {
+            "correlation" => {
                 arity(name, &args, 2, line, col)?;
                 // `missing` in either series propagates (ADR-0001); a non-array, a
                 // length mismatch, or a non-numeric element is a clean error.
@@ -523,7 +523,7 @@ impl super::Interp {
                     .hint("a constant series has no spread to correlate.")),
                 }
             }
-            "stats.t_test" => {
+            "t_test" => {
                 arity(name, &args, 2, line, col)?;
                 // Welch's two-sample t-test → {statistic, df, p_value}. `missing` in
                 // either sample propagates; each needs at least two values.
@@ -550,7 +550,7 @@ impl super::Interp {
                     .hint("two constant samples have no variance to compare.")),
                 }
             }
-            "stats.linear_regression" => {
+            "linear_regression" => {
                 arity(name, &args, 2, line, col)?;
                 // OLS fit of `y ~ x` → {slope, intercept, r_squared, slope_std_error,
                 // slope_p_value}. `missing` in either series propagates.
@@ -590,7 +590,7 @@ impl super::Interp {
                     .hint("a constant predictor or response has no line to fit.")),
                 }
             }
-            "stats.multiple_regression" => {
+            "multiple_regression" => {
                 arity(name, &args, 2, line, col)?;
                 // OLS fit of `y` on several predictor columns. The first argument is an
                 // array of predictor arrays; the second is the response. `missing`

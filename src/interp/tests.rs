@@ -374,12 +374,12 @@
     fn read_fasta_records() {
         // The shipped sample has 3 sequences; check shape + a sequence method
         // chains through the record field.
-        let prog = "g = bio.read_fasta(\"examples/data/sample.fa\")\ng.count()";
+        let prog = "g = read_fasta(\"examples/data/sample.fa\")\ng.count()";
         assert_eq!(int(prog), 3);
-        let first = "bio.read_fasta(\"examples/data/sample.fa\")[0].length";
+        let first = "read_fasta(\"examples/data/sample.fa\")[0].length";
         assert_eq!(int(first), 120);
         // gc_content of the AT-rich third sequence is low
-        let gc = "bio.read_fasta(\"examples/data/sample.fa\")[2].seq.gc_content()";
+        let gc = "read_fasta(\"examples/data/sample.fa\")[2].seq.gc_content()";
         assert!(float(gc) < 0.1);
     }
 
@@ -387,10 +387,10 @@
     fn dataframe_cache_is_transparent() {
         // `.cache()` must be a pure performance hint — identical results to the
         // uncached frame (it only avoids re-scanning the source).
-        let uncached = int("io.read_csv(\"examples/data/patients.csv\").count()");
-        let cached = int("io.read_csv(\"examples/data/patients.csv\").cache().count()");
+        let uncached = int("read_csv(\"examples/data/patients.csv\").count()");
+        let cached = int("read_csv(\"examples/data/patients.csv\").cache().count()");
         assert_eq!(uncached, cached);
-        let filtered = int("io.read_csv(\"examples/data/patients.csv\").cache().where(age > 40).count()");
+        let filtered = int("read_csv(\"examples/data/patients.csv\").cache().where(age > 40).count()");
         assert!(filtered <= cached);
     }
 
@@ -1107,7 +1107,7 @@
     #[test]
     fn dataframe_read_and_count() {
         assert!(matches!(
-            last("io.read_csv(\"examples/data/patients.csv\").count()").unwrap(),
+            last("read_csv(\"examples/data/patients.csv\").count()").unwrap(),
             Value::Int(8)
         ));
     }
@@ -1116,12 +1116,12 @@
     fn dataframe_where_lowers_to_polars() {
         // `age > 40` is translated to a Polars filter, not an interpreter loop
         assert!(matches!(
-            last("io.read_csv(\"examples/data/patients.csv\").where(age > 40).count()").unwrap(),
+            last("read_csv(\"examples/data/patients.csv\").where(age > 40).count()").unwrap(),
             Value::Int(5)
         ));
         // compound predicate with `and` + a second column
         assert!(matches!(
-            last("io.read_csv(\"examples/data/patients.csv\").where(age > 40 and resting_hr < 75).count()")
+            last("read_csv(\"examples/data/patients.csv\").where(age > 40 and resting_hr < 75).count()")
                 .unwrap(),
             Value::Int(3)
         ));
@@ -1130,7 +1130,7 @@
     #[test]
     fn dataframe_select_sort_chain() {
         let v = last(
-            "io.read_csv(\"examples/data/patients.csv\").where(age > 40).select(name, age).sort(age).count()",
+            "read_csv(\"examples/data/patients.csv\").where(age > 40).select(name, age).sort(age).count()",
         )
         .unwrap();
         assert!(matches!(v, Value::Int(5)));
@@ -1140,7 +1140,7 @@
     fn dataframe_group_agg() {
         // 3 species -> 3 grouped rows
         assert!(matches!(
-            last("io.read_csv(\"examples/data/genes.csv\").group(species).mean(expression).count()")
+            last("read_csv(\"examples/data/genes.csv\").group(species).mean(expression).count()")
                 .unwrap(),
             Value::Int(3)
         ));
@@ -1150,18 +1150,18 @@
     fn dataframe_parquet_roundtrip() {
         // write the patients CSV out as Parquet, read it back, query it
         last(
-            "io.write_parquet(io.read_csv(\"examples/data/patients.csv\"), \"/tmp/helix_test_rt.parquet\")",
+            "io.write_parquet(read_csv(\"examples/data/patients.csv\"), \"/tmp/helix_test_rt.parquet\")",
         )
         .unwrap();
         assert!(matches!(
-            last("io.read_parquet(\"/tmp/helix_test_rt.parquet\").where(age > 40).count()").unwrap(),
+            last("read_parquet(\"/tmp/helix_test_rt.parquet\").where(age > 40).count()").unwrap(),
             Value::Int(5)
         ));
     }
 
     #[test]
     fn dataframe_unknown_column_errors() {
-        let err = last("io.read_csv(\"examples/data/patients.csv\").where(agee > 40)").unwrap_err();
+        let err = last("read_csv(\"examples/data/patients.csv\").where(agee > 40)").unwrap_err();
         assert!(err.message.contains("no column or variable named `agee`"));
     }
 
@@ -1177,13 +1177,13 @@
     fn dataframe_column_extracts_typed_values_and_nulls() {
         // A string column comes back as `Str` values.
         assert!(matches!(
-            last("bio.read_vcf(\"examples/data/variants.vcf\").column(\"chrom\").first()").unwrap(),
+            last("read_vcf(\"examples/data/variants.vcf\").column(\"chrom\").first()").unwrap(),
             Value::Str(s) if &*s == "chr17"
         ));
         // The VCF `id` column has `.` entries → Polars nulls → `missing`; `drop_missing`
         // leaves the 4 named variants of 6 (rows 3 and 5 are `.`).
         assert!(matches!(
-            last("bio.read_vcf(\"examples/data/variants.vcf\").column(\"id\").drop_missing().count()")
+            last("read_vcf(\"examples/data/variants.vcf\").column(\"id\").drop_missing().count()")
                 .unwrap(),
             Value::Int(4)
         ));
@@ -1194,7 +1194,7 @@
         // A self-join shares the non-key columns (gene, expression), which take a
         // `_right` suffix; the key (sample_id) coalesces. 3 cols → 5 after the join.
         let v = last(
-            "s = io.read_csv(\"examples/data/samples.csv\")\ns.join(s, sample_id).columns()",
+            "s = read_csv(\"examples/data/samples.csv\")\ns.join(s, sample_id).columns()",
         )
         .unwrap();
         match v {
@@ -1212,7 +1212,7 @@
         // `with` can replace an existing column and resolve a bare name to a Helix
         // variable (the resolve_var path) rather than a column. ages * 10 > 400 for 5/8.
         assert!(matches!(
-            last("factor = 10\np = io.read_csv(\"examples/data/patients.csv\")\np.with({age: age * factor}).where(age > 400).count()")
+            last("factor = 10\np = read_csv(\"examples/data/patients.csv\")\np.with({age: age * factor}).where(age > 400).count()")
                 .unwrap(),
             Value::Int(5)
         ));
@@ -1222,13 +1222,13 @@
     fn dataframe_group_std_and_fully_filtered() {
         // A grouped `std` aggregation runs (3 species → 3 rows).
         assert!(matches!(
-            last("io.read_csv(\"examples/data/genes.csv\").group(species).std(expression).count()")
+            last("read_csv(\"examples/data/genes.csv\").group(species).std(expression).count()")
                 .unwrap(),
             Value::Int(3)
         ));
         // A predicate excluding every row yields an empty frame, not an error.
         assert!(matches!(
-            last("io.read_csv(\"examples/data/patients.csv\").where(age > 1000).count()").unwrap(),
+            last("read_csv(\"examples/data/patients.csv\").where(age > 1000).count()").unwrap(),
             Value::Int(0)
         ));
     }

@@ -5,7 +5,7 @@
 # read_vcf exposes the fixed columns (chrom, pos, id, ref, alt, qual, filter) plus
 # every INFO field (here: gene, consequence, af) as columns.
 
-variants = bio.read_vcf("examples/data/variants.vcf")
+variants = read_vcf("examples/data/variants.vcf")
 
 print("total variants:", variants.count())
 print("columns:", variants.columns())
@@ -21,10 +21,10 @@ print(variants.where(@qual > 50).select(@chrom, @pos, @gene))
 
 # Binary BCF (the BGZF-framed form of VCF) reads through `read_bcf` into the very
 # same DataFrame — identical columns and verbs, just a compressed binary on disk.
-binary = bio.read_bcf("examples/data/variants.bcf")
+binary = read_bcf("examples/data/variants.bcf")
 print("BCF variant count (same data):", binary.count())
 
 # Local-first: with a bgzipped, tabix-indexed `.vcf.gz`, a second argument reads
 # ONLY the variants in a region via the `.tbi` index, never scanning the whole file.
 print("--- variants in chr17:43044000-43046000 (indexed) ---")
-print(bio.read_vcf("examples/data/variants.vcf.gz", "chr17:43044000-43046000").select(@pos, @gene))
+print(read_vcf("examples/data/variants.vcf.gz", "chr17:43044000-43046000").select(@pos, @gene))

@@ -384,7 +384,7 @@
     /// oracle. Locks in Phase 4 of the one-engine collapse.
     #[test]
     fn dataframe_column_verbs_run_on_vm() {
-        let csv = "io.read_csv(\"examples/data/patients.csv\")";
+        let csv = "read_csv(\"examples/data/patients.csv\")";
         let cases = [
             format!("{csv}.where(age > 40).count()"),
             format!("{csv}.where(age > 40 and resting_hr < 75).count()"),
@@ -392,7 +392,7 @@
             // predicate referencing a global variable → the resolve_var path
             format!("t = 40\n{csv}.where(age > t).count()"),
             // grouped aggregation over an unevaluated column
-            "io.read_csv(\"examples/data/genes.csv\").group(species).mean(expression).count()".to_string(),
+            "read_csv(\"examples/data/genes.csv\").group(species).mean(expression).count()".to_string(),
             // in-memory dataframe() constructor + a verb on it
             "dataframe({g: [\"x\", \"x\", \"y\"], v: [1, 3, 10]}).group(@g).mean(@v).count()".to_string(),
             // the same queries with the `@column` sigil — must behave identically
@@ -400,7 +400,7 @@
             format!("{csv}.where(@age > 40 and @resting_hr < 75).count()"),
             format!("{csv}.where(@age > 40).select(@name, @age).sort(@age).count()"),
             format!("{csv}.with({{adult: @age >= 18}}).count()"),
-            "io.read_csv(\"examples/data/genes.csv\").group(@species).mean(@expression).count()".to_string(),
+            "read_csv(\"examples/data/genes.csv\").group(@species).mean(@expression).count()".to_string(),
             // `@age` is ALWAYS the column even when a local `age` shadows it — the
             // sigil's whole point. Bare `age` here would resolve the column too, but
             // `@age` *guarantees* it, with no ambiguity.

@@ -125,8 +125,8 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Array(Box::new(Type::Int)))
         }
-        "io.read_csv" | "io.read_parquet" | "bio.read_bcf" | "bio.read_sam" | "bio.read_gff"
-        | "bio.read_bed" => {
+        "read_csv" | "read_parquet" | "read_bcf" | "read_sam" | "read_gff"
+        | "read_bed" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
@@ -137,7 +137,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         // `read_vcf`/`read_bam` scan with one argument; the optional region second
         // argument runs an indexed query, so these readers accept one or two strings.
-        "bio.read_vcf" | "bio.read_bam" => {
+        "read_vcf" | "read_bam" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
@@ -151,7 +151,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::DataFrame)
         }
-        "bio.read_fasta" | "bio.read_fastq" => {
+        "read_fasta" | "read_fastq" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
@@ -227,7 +227,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 Type::Float
             })
         }
-        "stats.correlation" => {
+        "correlation" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));
             }
@@ -244,7 +244,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Float)
         }
-        "stats.t_test" => {
+        "t_test" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));
             }
@@ -265,7 +265,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 ("p_value".to_string(), Type::Float),
             ]))
         }
-        "stats.linear_regression" => {
+        "linear_regression" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));
             }
@@ -288,7 +288,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 ("slope_p_value".to_string(), Type::Float),
             ]))
         }
-        "stats.multiple_regression" => {
+        "multiple_regression" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));
             }
@@ -388,7 +388,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::String)
         }
-        "http.get" => {
+        "http_get" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }

@@ -42,15 +42,15 @@
     #[test]
     fn dataframe_columns_unchecked() {
         // column names are the runtime schema boundary — never type-checked
-        ok("io.read_csv(\"x.csv\").where(age > 40 and hr < 75).select(name, age).sort(age).count()");
-        ok("io.read_csv(\"g.csv\").group(species).mean(expression).columns()");
+        ok("read_csv(\"x.csv\").where(age > 40 and hr < 75).select(name, age).sort(age).count()");
+        ok("read_csv(\"g.csv\").group(species).mean(expression).columns()");
         // `with` derives columns; `join` combines frames — both keep their args (column
         // names, the other frame, the join type) at the unchecked runtime boundary.
-        ok("io.read_csv(\"p.csv\").with({adult: age >= 18}).select(name, adult).count()");
-        ok("io.read_csv(\"a.csv\").join(io.read_csv(\"b.csv\"), id, \"left\").sort(id).count()");
+        ok("read_csv(\"p.csv\").with({adult: age >= 18}).select(name, adult).count()");
+        ok("read_csv(\"a.csv\").join(read_csv(\"b.csv\"), id, \"left\").sort(id).count()");
         // `column` bridges a frame to an array, so the array statistics chain off it.
-        ok("io.read_csv(\"p.csv\").column(\"age\").median()");
-        ok("stats.correlation(io.read_csv(\"p.csv\").column(\"a\"), io.read_csv(\"p.csv\").column(\"b\"))");
+        ok("read_csv(\"p.csv\").column(\"age\").median()");
+        ok("correlation(read_csv(\"p.csv\").column(\"a\"), read_csv(\"p.csv\").column(\"b\"))");
     }
 
     #[test]
@@ -60,14 +60,14 @@
         // `summary` is a record; its fields are reachable and numeric.
         ok("s = [1, 2, 3].summary()\ns.mean + s.std + s.median");
         // `correlation` is a Float-valued function of two arrays.
-        ok("sqrt(stats.correlation([1, 2, 3], [3, 2, 1]) * 1.0)");
+        ok("sqrt(correlation([1, 2, 3], [3, 2, 1]) * 1.0)");
         // Inferential: `t_test` is a record; the normal functions broadcast like math.
-        ok("r = stats.t_test([1.0, 2.0, 3.0], [2.0, 3.0, 4.0])\nr.statistic + r.df + r.p_value");
-        ok("stats.normal_cdf(1.96) + erf(1.0) + stats.normal_pdf(0.0)");
+        ok("r = t_test([1.0, 2.0, 3.0], [2.0, 3.0, 4.0])\nr.statistic + r.df + r.p_value");
+        ok("normal_cdf(1.96) + erf(1.0) + normal_pdf(0.0)");
         // `linear_regression` is a record; predictions broadcast the fitted line.
-        ok("f = stats.linear_regression([1.0, 2.0, 3.0], [2.0, 4.0, 5.0])\nf.slope * 6.0 + f.intercept");
+        ok("f = linear_regression([1.0, 2.0, 3.0], [2.0, 4.0, 5.0])\nf.slope * 6.0 + f.intercept");
         // `multiple_regression` returns a record whose coefficients are an array.
-        ok("m = stats.multiple_regression([[1.0, 2.0, 3.0]], [2.0, 4.0, 5.0])\nm.coefficients[0] + m.r_squared");
+        ok("m = multiple_regression([[1.0, 2.0, 3.0]], [2.0, 4.0, 5.0])\nm.coefficients[0] + m.r_squared");
     }
 
     #[test]
@@ -83,12 +83,11 @@
         assert!(emsg("undefinedvar").contains("not defined"));
         assert!(emsg("dna(5)").contains("expected a string"));
         // namespaced builtins are type-checked: wrong argument types and arities are caught
-        assert!(emsg("stats.correlation(1, 2)").contains("array"));
-        assert!(emsg("bio.read_vcf(5)").contains("string"));
+        assert!(emsg("correlation(1, 2)").contains("array"));
+        assert!(emsg("read_vcf(5)").contains("string"));
         assert!(emsg("sqrt(1, 2)").contains("argument"));
-        // a bare namespace is not a value; a retired flat name points at its new path
+        // a bare namespace is not a value (migration error lands in a later stage)
         assert!(emsg("x = stats").contains("namespace"));
-        assert!(emsg("read_vcf(\"x\")").contains("not a known function")); // retired flat name
         // method typos suggest the right method; a wrong receiver type is rejected
         assert!(emsg("\"abc\".gc_content()").contains("no method"));
         assert!(emsg("xs = [1, 2]\nxs.summary().nope").contains("field"));
