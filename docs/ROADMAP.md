@@ -14,7 +14,7 @@ differentiated focus area. See positioning notes in memory and below.
 Parsing is delegated to the Rust bio ecosystem (`needletail`, `noodles`, `rust-bio`)
 in the same manner that DataFrames rely on Polars; Helix provides the consistent,
 fast, memory-safe surface.
-- [x] **`bio.read_fasta(path)`** → array of `{id, seq, length}` records via
+- [x] **`read_fasta(path)`** → array of `{id, seq, length}` records via
       `needletail` (FASTA/FASTQ, gzip-aware). `seq` is a `Dna` (ambiguous bases
       like `N` preserved). Demo: [examples/genomics.helix](../examples/genomics.helix).
 - [x] **Sequence ops**: `gc_content`, `complement`, `reverse_complement`,
@@ -22,9 +22,9 @@ fast, memory-safe surface.
       (frequency histogram) so `seq.kmers(9).top(20)` works. Native 2-bit-packed
       `kmer_counts(k)` (forward) and `canonical_kmer_counts(k)` (strand-agnostic, a
       k-mer and its reverse complement counted together — the Jellyfish/KMC convention).
-- [x] **`bio.read_vcf(path)` / `bio.read_bcf(path)` → DataFrame**: variant tables flow
+- [x] **`read_vcf(path)` / `read_bcf(path)` → DataFrame**: variant tables flow
       directly into the existing `where`/`group`/`count` verbs, demonstrating the unified model
-      (`bio.read_vcf(...).where(@gene == "BRCA1").group(@consequence).count(@pos)`). The eight
+      (`read_vcf(...).where(@gene == "BRCA1").group(@consequence).count(@pos)`). The eight
       fixed columns plus every INFO field (`gene`, `consequence`, …) become columns, each
       **header-typed** (an `Integer`/`Float`/`Flag` INFO field becomes a numeric/bool column,
       so `where(@af > 0.001)` is a numeric comparison). Parsing delegates to `noodles`; plain
@@ -206,32 +206,32 @@ estimators they require.
 - [x] Descriptive array methods: `median`, `var`, `quantile(p)` (type-7 linear
       interpolation), and `summary()` → a `{count, mean, std, min, median, max}`
       record (the `describe()` analogue), alongside the existing `mean`/`std`.
-- [x] Bivariate: `stats.correlation(xs, ys)` (Pearson r; symmetric, undefined on a
+- [x] Bivariate: `correlation(xs, ys)` (Pearson r; symmetric, undefined on a
       constant series).
 - [x] DataFrame-column statistics: `df.column(name)` materializes a column as an
       array (Polars nulls → `missing`), so the array statistics and verbs apply to
       loaded data — e.g. `df.column("age").median()`, or `drop_missing()` first.
 - [x] Special-functions layer: `erf`, log-gamma, and the regularized incomplete beta
       (Abramowitz & Stegun / Numerical Recipes), accurate to better than 1e-7.
-- [x] Inferential: `stats.t_test(a, b)` — Welch's two-sample t-test → `{statistic, df,
+- [x] Inferential: `t_test(a, b)` — Welch's two-sample t-test → `{statistic, df,
       p_value}` — and the normal distribution functions `normal_cdf`/`normal_pdf`/`erf`
       (broadcasting math). Verified against R's reference values.
-- [x] `stats.linear_regression(x, y)` — ordinary least-squares fit → `{slope, intercept,
+- [x] `linear_regression(x, y)` — ordinary least-squares fit → `{slope, intercept,
       r_squared, slope_std_error, slope_p_value}` (slope inference on `n - 2` df).
       Predictions need no special method: broadcast `fit.slope * x + fit.intercept`.
-- [x] `stats.multiple_regression(predictors, y)` — OLS on several predictors via the normal
+- [x] `multiple_regression(predictors, y)` — OLS on several predictors via the normal
       equations → `{coefficients, std_errors, p_values, r_squared, adj_r_squared}`
       (parameter-indexed arrays, intercept first). Rejects collinear predictors.
 - [ ] More distributions: Student's-t / binomial / chi-squared pdf/cdf/quantile, and
       one-sample / paired t-tests, on the same special-functions layer.
-- [ ] Whole-frame aggregation shorthands (`df.median(col)`, `df.stats.correlation(c1, c2)`)
+- [ ] Whole-frame aggregation shorthands (`df.median(col)`, `df.correlation(c1, c2)`)
       over the `column` accessor, if the explicit form proves verbose in practice.
 
 ## Phase 3.7 — Data access & APIs (shipped)
-- [x] **JSON** — `json.parse(str)` (object→record, array→array, scalars, `null`→
-      `missing`) and `json.stringify(value)`. Pure compute, always available. See
+- [x] **JSON** — `str.parse_json()` (object→record, array→array, scalars, `null`→
+      `missing`) and `value.to_json()`. Pure compute, always available. See
       [ADR 0010](adr/0010-networking-privacy-security.md).
-- [x] **HTTP client** — `http.get(url)` → `{status, body}` for fetching REST APIs;
+- [x] **HTTP client** — `http_get(url)` → `{status, body}` for fetching REST APIs;
       body is typically fed to `parse_json`. Default-on (`http` feature;
       `--no-default-features` for a network-free binary). Demo:
       [examples/api/fetch.helix](../examples/api/fetch.helix).

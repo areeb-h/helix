@@ -101,7 +101,7 @@ needs the Python `polars` package (`pip install polars`).
   `group`/`count`) then operate on it.
 
 ```helix
-df = io.read_csv("examples/data/patients.csv")     # a Helix DataFrame
+df = read_csv("examples/data/patients.csv")     # a Helix DataFrame
 
 # hand it to Python — it's a polars.DataFrame there:
 print(python.import("builtins").len(df))         # 8  (rows, counted in Python)

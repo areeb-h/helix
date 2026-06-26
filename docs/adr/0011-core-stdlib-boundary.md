@@ -1,6 +1,9 @@
 # ADR 0011 — Core/stdlib boundary: builtin registry & native namespaces
 
-- **Status:** Accepted (implemented)
+- **Status:** Partially superseded by [ADR 0017](0017-methods-and-functions.md)
+  (the *native-namespace* decision is reversed — domain builtins are now methods on
+  data or plain free functions; the **registry** as single source of truth and the
+  **small-core** boundary remain in force).
 - **Date:** 2026-06-24
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0003 — Collection API](0003-collection-api.md),

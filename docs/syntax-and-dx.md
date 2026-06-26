@@ -50,7 +50,7 @@ Per the evidence above, several current choices are *good* and should be protect
 
 **Before** Helix used bare column names (dplyr-style non-standard evaluation):
 ```helix
-io.read_csv("big.csv").group(species).mean(expression)
+read_csv("big.csv").group(species).mean(expression)
 patients.where(age > 40).select(name, age, diagnosis)
 ```
 This reads beautifully — but it has exactly the two problems the research names:
@@ -64,14 +64,14 @@ This reads beautifully — but it has exactly the two problems the research name
 Your suggestion — **quoted strings** — fixes safety/tooling but only *matches* pandas, and
 adds noise:
 ```helix
-io.read_csv("big.csv").group("species").mean("expression")   # safe, but "just pandas"
+read_csv("big.csv").group("species").mean("expression")   # safe, but "just pandas"
 ```
 
 **Recommended: a lightweight column sigil — `@column`.** It keeps the dplyr readability
 *and* makes the role explicit:
 ```helix
 # After
-io.read_csv("big.csv").group(@species).mean(@expression)
+read_csv("big.csv").group(@species).mean(@expression)
 patients.where(@age > 40).select(@name, @age, @diagnosis)
 patients.with({adult: @age >= 18, hr_per_decade: @resting_hr / (@age / 10)})
 ```
@@ -122,7 +122,7 @@ gap(3, open: -10)                          # override one parameter by name
   (Swift/Python). Defaults are restricted to literal constants (so they can be inserted at
   the call site).
 - **v1 scope / follow-ups:** named arguments apply to **user-defined functions**. Builtins
-  and methods (e.g. `io.read_csv(..., delimiter: ";")`, `seq.align(..., open: -10)`) still
+  and methods (e.g. `read_csv(..., delimiter: ";")`, `seq.align(..., open: -10)`) still
   take positional arguments — supporting them needs per-builtin parameter-name metadata, a
   follow-up. Non-literal defaults (evaluated in function scope) are also deferred.
 

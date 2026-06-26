@@ -17,12 +17,13 @@ they are made deliberately and in the open.
 | [0008](0008-cpython-interop.md) | CPython interop (Helix → Python) | Implemented (v1) — feature-gated |
 | [0009](0009-distribution-and-install.md) | Distribution & installation | Implementing — CLI + source install; releases wired |
 | [0010](0010-networking-privacy-security.md) | Networking, privacy & security | Proposed — governs the first network code |
-| [0011](0011-core-stdlib-boundary.md) | Core / stdlib boundary | Accepted |
+| [0011](0011-core-stdlib-boundary.md) | Core / stdlib boundary | Accepted — namespaces superseded by 0017 (registry + small-core stand) |
 | [0012](0012-dataframe-backend-seam.md) | DataFrame backend seam | Accepted — Phase 1 implemented |
 | [0013](0013-package-manager.md) | Package manager & lockfile | Implemented (v1) — path + url deps, hash-pinned lock |
 | [0014](0014-gpu-tensor-backend.md) | GPU tensor backend (wgpu, seam-first) | Proposed — design only |
 | [0015](0015-sequence-alignment.md) | Sequence alignment | Accepted — v1 implemented (hand-rolled affine-gap aligner) |
 | [0016](0016-build-and-packaging.md) | Build perf, allocator & containerization | Accepted — mimalloc + musl + Docker implemented; PGO wired in CI |
+| [0017](0017-methods-and-functions.md) | Methods on data + free functions (no namespaces) | Accepted — implemented; supersedes 0011's namespaces |
 
 ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
 (23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a

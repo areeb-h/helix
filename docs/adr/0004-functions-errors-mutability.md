@@ -71,7 +71,7 @@ A `Result`-style tagged union with a single lightweight propagation operator
 (Rust `?`-style). What can fail is visible; the primary path stays clean.
 
 ```text
-fn load(path) = io.read_csv(path)?      # propagates a read failure to the caller
+fn load(path) = read_csv(path)?      # propagates a read failure to the caller
 ```
 
 Crucially, **`missing` (absent data, [ADR 0001](0001-missing-data.md)) and error

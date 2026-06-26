@@ -64,7 +64,7 @@ territory. No fine-grained sound-gradual boundary contracts.**
   performance regression.
 - Treating `DataFrame` as statically typed while its columns are
   dynamic-but-validated is the accurate model: the schema genuinely *is* a
-  runtime fact for `io.read_csv("unknown.csv")`.
+  runtime fact for `read_csv("unknown.csv")`.
 
 ## Rejected alternatives
 

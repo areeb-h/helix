@@ -87,7 +87,7 @@ grade = if score > 90 then "A" else "B"
 # Columns are written with `@`: `@age` is *always* the age column, never a variable —
 # so a column and a local can never collide, and editors autocomplete after `@`.
 # `where(@age > 40)` lowers to a native Polars filter rather than an interpreter loop.
-patients = io.read_csv("patients.csv")
+patients = read_csv("patients.csv")
 patients
     .where(@age > 40 and @resting_hr < 75)
     .select(@name, @diagnosis)
@@ -181,11 +181,11 @@ seq.kmers(3)
   `map`, `filter`, `where`, `reduce`, `any`, `all`, `drop_missing`, `is_missing`.
 - String methods: `upper`, `lower`, `count`, `reverse`.
 - **DataFrames** backed by **Polars (latest), held as a lazy `LazyFrame`**:
-  `io.read_csv(path)` / `io.read_parquet(path)` or build one in memory from computed
+  `read_csv(path)` / `read_parquet(path)` or build one in memory from computed
   columns with `dataframe({col: array, …})`, then `where(predicate)`,
   `select(@cols…)`, `sort(@cols…)`, `group(@keys…)` + a grouped
   `mean`/`sum`/`min`/`max`/`count`/`std`, plus `head(n)`, `count()`, `columns()`,
-  and `io.write_parquet(df, path)` (streaming sink). Columns use the `@name` sigil —
+  and `df.write_parquet(path)` (streaming sink). Columns use the `@name` sigil —
   unambiguously a column, never a variable, so the two can never collide.
   Verbs only *extend the query plan*; it materializes once, at `print`/`count`,
   so a single chain is **delegated to Polars' lazy execution** (columnar,
