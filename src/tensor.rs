@@ -6,6 +6,8 @@ use std::rc::Rc;
 
 use ndarray::{Array2, ArrayD, Axis, Ix1, Ix2, IxDyn, Zip};
 
+use faer::linalg::solvers::Solve;
+
 use crate::ast::BinOp;
 use crate::error::{suggest, HelixError};
 use crate::value::Value;
@@ -196,91 +198,44 @@ pub fn scalar_op(op: &BinOp, t: &Tensor, s: f64, tensor_left: bool) -> Tensor {
 // ---------- methods ----------
 
 
-// ---------- pure-Rust linear algebra (Gaussian elimination, no BLAS dep) ----------
+// ---------- linear algebra (faer: SIMD blocked LU, pure-Rust, no BLAS dep) ----------
 
-/// Determinant via LU with partial pivoting. Returns 0.0 for singular matrices.
-fn determinant(mut a: Array2<f64>) -> f64 {
-    let n = a.nrows();
-    let mut det = 1.0;
-    for i in 0..n {
-        let mut p = i;
-        for r in (i + 1)..n {
-            if a[[r, i]].abs() > a[[p, i]].abs() {
-                p = r;
-            }
-        }
-        if a[[p, i]] == 0.0 {
-            return 0.0;
-        }
-        if p != i {
-            for c in 0..n {
-                a.swap([i, c], [p, c]);
-            }
-            det = -det;
-        }
-        det *= a[[i, i]];
-        for r in (i + 1)..n {
-            let f = a[[r, i]] / a[[i, i]];
-            for c in i..n {
-                let v = a[[i, c]];
-                a[[r, c]] -= f * v;
-            }
-        }
-    }
-    det
+/// ndarray (row-major) → faer `Mat` (column-major). The element closure makes the
+/// layout difference irrelevant.
+fn nd_to_faer(a: &Array2<f64>) -> faer::Mat<f64> {
+    faer::Mat::from_fn(a.nrows(), a.ncols(), |i, j| a[[i, j]])
 }
 
-/// Solve `A x = b` (b may have multiple columns) via Gauss–Jordan with partial
-/// pivoting on the augmented matrix. Returns None if A is singular.
+/// faer matrix → ndarray `Array2`.
+fn faer_to_nd(m: faer::MatRef<'_, f64>) -> Array2<f64> {
+    Array2::from_shape_fn((m.nrows(), m.ncols()), |(i, j)| *m.get(i, j))
+}
+
+/// Determinant via faer's partial-pivoting LU (SIMD, blocked). Returns 0.0 for a
+/// singular matrix (faer's LU yields a zero pivot product there).
+fn determinant(a: Array2<f64>) -> f64 {
+    if a.nrows() == 0 {
+        return 1.0;
+    }
+    nd_to_faer(&a).as_ref().determinant()
+}
+
+/// Solve `A x = b` (b may have multiple columns) via faer's partial-pivoting LU.
+/// Returns None if A is singular — detected by a near-zero pivot on the LU's `U`
+/// diagonal, preserving the old `< 1e-12` threshold (faer's LU is not itself
+/// rank-revealing, so we guard explicitly rather than return inf/NaN).
 fn solve_system(a: &Array2<f64>, b: &Array2<f64>) -> Option<Array2<f64>> {
     let n = a.nrows();
-    let m = b.ncols();
-    // augmented [A | b]
-    let mut aug = Array2::<f64>::zeros((n, n + m));
+    let lu = nd_to_faer(a).partial_piv_lu();
+    let u = lu.U();
     for i in 0..n {
-        for j in 0..n {
-            aug[[i, j]] = a[[i, j]];
-        }
-        for j in 0..m {
-            aug[[i, n + j]] = b[[i, j]];
-        }
-    }
-    for i in 0..n {
-        let mut p = i;
-        for r in (i + 1)..n {
-            if aug[[r, i]].abs() > aug[[p, i]].abs() {
-                p = r;
-            }
-        }
-        if aug[[p, i]].abs() < 1e-12 {
+        if u.get(i, i).abs() < 1e-12 {
             return None; // singular
         }
-        if p != i {
-            for c in 0..(n + m) {
-                aug.swap([i, c], [p, c]);
-            }
-        }
-        let piv = aug[[i, i]];
-        for c in 0..(n + m) {
-            aug[[i, c]] /= piv;
-        }
-        for r in 0..n {
-            if r != i {
-                let f = aug[[r, i]];
-                for c in 0..(n + m) {
-                    let v = aug[[i, c]];
-                    aug[[r, c]] -= f * v;
-                }
-            }
-        }
     }
-    let mut x = Array2::<f64>::zeros((n, m));
-    for i in 0..n {
-        for j in 0..m {
-            x[[i, j]] = aug[[i, n + j]];
-        }
-    }
-    Some(x)
+    let fb = nd_to_faer(b);
+    let x = lu.solve(fb.as_ref());
+    Some(faer_to_nd(x.as_ref()))
 }
 
 fn as_2d_square(t: &Tensor, name: &str, line: usize, col: usize) -> Result<Array2<f64>, HelixError> {

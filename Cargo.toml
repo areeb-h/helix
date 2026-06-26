@@ -93,6 +93,7 @@ flate2 = "1"
 # dependency tarballs (https sources) into the content-addressed cache, and the
 # managed-runtime extraction reuses it. Pure Rust, no system dep.
 tar = "0.4"
+faer = "0.24.4"
 
 [features]
 # HTTP data-fetching is on by default (a core scientific capability); build with
