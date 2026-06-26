@@ -641,8 +641,11 @@ fn dna_gc_content(s: &str, who: &str, line: usize, col: usize) -> Result<f64, He
             col,
         ));
     }
+    // GC fraction over *called* bases: `N` (unknown) is excluded from the
+    // denominator, so `gc_content("GCN") == 1.0`, not 2/3.
     let gc = s.chars().filter(|c| *c == 'G' || *c == 'C').count();
-    Ok(gc as f64 / s.len() as f64)
+    let called = s.chars().filter(|c| *c != 'N').count();
+    Ok(if called == 0 { 0.0 } else { gc as f64 / called as f64 })
 }
 
 /// Extract a slice of numeric columns from an array-of-arrays argument (the predictor

@@ -332,6 +332,26 @@
     }
 
     #[test]
+    fn iupac_dna_and_complement() {
+        // N + IUPAC ambiguity codes are accepted, matching `read_fasta` (was rejected).
+        match last("dna(\"ATGN\")").unwrap() {
+            Value::Dna(s) => assert_eq!(&*s, "ATGN"),
+            o => panic!("expected Dna, got {o:?}"),
+        }
+        // IUPAC-correct complementation: R↔Y, N→N.
+        match last("dna(\"ATGR\").complement()").unwrap() {
+            Value::Dna(s) => assert_eq!(&*s, "TACY"),
+            o => panic!("expected Dna, got {o:?}"),
+        }
+        match last("dna(\"ATGN\").reverse_complement()").unwrap() {
+            Value::Dna(s) => assert_eq!(&*s, "NCAT"),
+            o => panic!("expected Dna, got {o:?}"),
+        }
+        // gc_content excludes N from the denominator: "GCN" → 2/2 = 1.0, not 2/3.
+        assert!((float("dna(\"GCN\").gc_content()") - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
     fn dna_is_orderable() {
         // `<`/`>` order DNA lexicographically (like strings) — enables canonical
         // k-mer / sort-by-sequence code.

@@ -679,8 +679,11 @@ fn dna_method(
                     col,
                 ));
             }
+            // GC fraction over *called* bases: `N` (unknown) is excluded from the
+            // denominator, so `gc_content("GCN") == 1.0`, not 2/3.
             let gc = s.chars().filter(|c| *c == 'G' || *c == 'C').count();
-            Ok(Value::Float(gc as f64 / s.len() as f64))
+            let called = s.chars().filter(|c| *c != 'N').count();
+            Ok(Value::Float(if called == 0 { 0.0 } else { gc as f64 / called as f64 }))
         }
         "complement" => {
             if !args.is_empty() {
@@ -757,16 +760,42 @@ fn dna_method(
     }
 }
 
+/// A valid (uppercase) IUPAC nucleotide code: the 4 bases, the 10 two/three-fold
+/// ambiguity codes, and `N` (any base). This is the alphabet `dna()` accepts and
+/// `read_fasta`/`read_fastq` already produce, so the two paths agree.
+pub(crate) fn is_iupac_dna(c: char) -> bool {
+    matches!(
+        c,
+        'A' | 'C' | 'G' | 'T' | 'R' | 'Y' | 'S' | 'W' | 'K' | 'M' | 'B' | 'D' | 'H' | 'V' | 'N'
+    )
+}
+
+/// IUPAC complement of one (uppercase) base. Ambiguity codes complement to the
+/// code for the complementary base set (`R`=A/G → `Y`=C/T, etc.); `S`/`W`/`N` are
+/// self-complementary. Unknown chars pass through unchanged (defensive).
+fn iupac_complement(c: char) -> char {
+    match c {
+        'A' => 'T',
+        'T' => 'A',
+        'C' => 'G',
+        'G' => 'C',
+        'R' => 'Y',
+        'Y' => 'R',
+        'K' => 'M',
+        'M' => 'K',
+        'B' => 'V',
+        'V' => 'B',
+        'D' => 'H',
+        'H' => 'D',
+        'S' => 'S',
+        'W' => 'W',
+        'N' => 'N',
+        other => other,
+    }
+}
+
 fn complement(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A' => 'T',
-            'T' => 'A',
-            'C' => 'G',
-            'G' => 'C',
-            other => other,
-        })
-        .collect()
+    s.chars().map(iupac_complement).collect()
 }
 
 fn unknown_method(

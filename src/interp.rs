@@ -1053,16 +1053,15 @@ fn make_dna(s: &str, line: usize, col: usize) -> Result<Value, HelixError> {
     let mut out = String::with_capacity(s.len());
     for (i, ch) in s.chars().enumerate() {
         let up = ch.to_ascii_uppercase();
-        match up {
-            'A' | 'C' | 'G' | 'T' => out.push(up),
-            _ => {
-                return Err(HelixError::new(
-                    format!("`{}` is not a valid DNA base (at position {})", ch, i),
-                    line,
-                    col,
-                )
-                .hint("DNA sequences may only contain A, C, G, and T."));
-            }
+        if crate::interp::methods::is_iupac_dna(up) {
+            out.push(up);
+        } else {
+            return Err(HelixError::new(
+                format!("`{}` is not a valid DNA base (at position {})", ch, i),
+                line,
+                col,
+            )
+            .hint("DNA may contain A, C, G, T, N, or an IUPAC ambiguity code (R Y S W K M B D H V)."));
         }
     }
     Ok(Value::Dna(Rc::new(out)))
