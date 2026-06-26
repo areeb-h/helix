@@ -35,6 +35,7 @@ pub enum Tok {
     Missing,
     Try,
     Match,
+    Do,
 
     // Symbols
     Eq,      // =
@@ -51,6 +52,10 @@ pub enum Tok {
     Slash,    // /
     Percent,  // %
     Coalesce, // ??
+    Amp,      // & (bitwise and)
+    Caret,    // ^ (bitwise xor)
+    Shl,      // << (shift left)
+    Shr,      // >> (shift right)
     At,       // @ (DataFrame column sigil: `@age`)
     LParen,
     RParen,
@@ -95,6 +100,7 @@ impl Tok {
             Tok::Missing => "`missing`".into(),
             Tok::Try => "`try`".into(),
             Tok::Match => "`match`".into(),
+            Tok::Do => "`do`".into(),
             Tok::Eq => "`=`".into(),
             Tok::EqEq => "`==`".into(),
             Tok::Ne => "`!=`".into(),
@@ -109,6 +115,10 @@ impl Tok {
             Tok::Slash => "`/`".into(),
             Tok::Percent => "`%`".into(),
             Tok::Coalesce => "`??`".into(),
+            Tok::Amp => "`&`".into(),
+            Tok::Caret => "`^`".into(),
+            Tok::Shl => "`<<`".into(),
+            Tok::Shr => "`>>`".into(),
             Tok::At => "`@`".into(),
             Tok::LParen => "`(`".into(),
             Tok::RParen => "`)`".into(),

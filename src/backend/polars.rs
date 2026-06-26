@@ -142,6 +142,17 @@ fn lower(e: &ColExpr) -> Result<Expr, HelixError> {
                 BinOp::Or => l.or(r),
                 // `col ?? default` — replace nulls with the default.
                 BinOp::Coalesce => l.fill_null(r),
+                // Bitwise operators have no faithful column lowering (shifts in
+                // particular — Polars `.shift` is a row operation, not a bit shift),
+                // so reject them in a DataFrame query rather than do the wrong thing.
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                    return Err(HelixError::new(
+                        format!("bitwise operator `{}` isn't supported inside a DataFrame query", op.symbol()),
+                        0,
+                        0,
+                    )
+                    .hint("compute bitwise expressions on arrays or scalars, then build the DataFrame."));
+                }
             }
         }
     })

@@ -62,7 +62,20 @@
                 _ => format!("{}", (next(rng) % 4001) as i64 - 2000),
             };
         }
-        match pick(rng, 19) {
+        match pick(rng, 20) {
+            19 => {
+                // Integer bitwise ops. Float/huge operands error identically on both
+                // engines; int operands exercise the success path. Shift amounts are
+                // reduced `% 64` (Helix int `%` is rem_euclid → always 0..=63) so
+                // `<<`/`>>` stay in range; a float amount errors on both engines.
+                match pick(rng, 5) {
+                    0 => format!("(({}) & ({}))", gen_expr(rng, depth - 1, vars), gen_expr(rng, depth - 1, vars)),
+                    1 => format!("(({}) | ({}))", gen_expr(rng, depth - 1, vars), gen_expr(rng, depth - 1, vars)),
+                    2 => format!("(({}) ^ ({}))", gen_expr(rng, depth - 1, vars), gen_expr(rng, depth - 1, vars)),
+                    3 => format!("(({}) << (({}) % 64))", gen_expr(rng, depth - 1, vars), gen_expr(rng, 0, vars)),
+                    _ => format!("(({}) >> (({}) % 64))", gen_expr(rng, depth - 1, vars), gen_expr(rng, 0, vars)),
+                }
+            }
             15 => {
                 // `??` coalescing: `missing ?? E` is `E`; `E ?? _` is `E` when `E`
                 // isn't missing. Bias the left toward `missing` so both the take-left

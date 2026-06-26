@@ -52,7 +52,15 @@ fn binary(op: &BinOp, a: Value, b: Value, line: usize, col: usize) -> Result<Val
                 // a zero divisor falls through to the error-raising full path.
                 Mod if y != 0 => return Ok(Value::Int(x.rem_euclid(y))),
                 Div if y != 0 => return Ok(Value::Float(x as f64 / y as f64)),
-                _ => {} // Div/Mod by zero, Pow → full path
+                // Integer bitwise — identical to `bitwise()` in ops.rs. Shifts only
+                // shortcut for an in-range amount; an out-of-range shift falls to the
+                // full path, which raises (never a panic/UB).
+                BitAnd => return Ok(Value::Int(x & y)),
+                BitOr => return Ok(Value::Int(x | y)),
+                BitXor => return Ok(Value::Int(x ^ y)),
+                Shl if (0..=63).contains(&y) => return Ok(Value::Int(x << y)),
+                Shr if (0..=63).contains(&y) => return Ok(Value::Int(x >> y)),
+                _ => {} // Div/Mod by zero, Pow, out-of-range shift → full path
             }
         }
         (Value::Float(x), Value::Float(y)) => {

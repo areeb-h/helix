@@ -104,6 +104,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                     "missing" => Tok::Missing,
                     "try" => Tok::Try,
                     "match" => Tok::Match,
+                    "do" => Tok::Do,
                     "true" => Tok::True,
                     "false" => Tok::False,
                     _ => Tok::Ident(word),
@@ -138,8 +139,24 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                         .hint("Helix uses the word `not` for negation, e.g. `not done`."));
                 }
             }
-            '<' => two_or_one(&chars, i, '=', Tok::Le, Tok::Lt, &mut raw, line, start_col, &mut i, &mut col),
-            '>' => two_or_one(&chars, i, '=', Tok::Ge, Tok::Gt, &mut raw, line, start_col, &mut i, &mut col),
+            '<' => {
+                if i + 1 < n && chars[i + 1] == '<' {
+                    push!(Tok::Shl, start_col);
+                    i += 2;
+                    col += 2;
+                } else {
+                    two_or_one(&chars, i, '=', Tok::Le, Tok::Lt, &mut raw, line, start_col, &mut i, &mut col);
+                }
+            }
+            '>' => {
+                if i + 1 < n && chars[i + 1] == '>' {
+                    push!(Tok::Shr, start_col);
+                    i += 2;
+                    col += 2;
+                } else {
+                    two_or_one(&chars, i, '=', Tok::Ge, Tok::Gt, &mut raw, line, start_col, &mut i, &mut col);
+                }
+            }
             '+' => single(Tok::Plus, &mut raw, line, start_col, &mut i, &mut col),
             '-' => {
                 if i + 1 < n && chars[i + 1] == '>' {
@@ -185,6 +202,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
             }
             ':' => single(Tok::Colon, &mut raw, line, start_col, &mut i, &mut col),
             '|' => single(Tok::Pipe, &mut raw, line, start_col, &mut i, &mut col),
+            '&' => single(Tok::Amp, &mut raw, line, start_col, &mut i, &mut col),
+            '^' => single(Tok::Caret, &mut raw, line, start_col, &mut i, &mut col),
             '@' => single(Tok::At, &mut raw, line, start_col, &mut i, &mut col),
             '?' => {
                 if i + 1 < n && chars[i + 1] == '?' {
@@ -465,6 +484,7 @@ fn cook_newlines(raw: Vec<Token>) -> Vec<Token> {
                 | Tok::And | Tok::Or | Tok::Not | Tok::Comma | Tok::Dot
                 | Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::Mut | Tok::FatArrow
                 | Tok::Colon | Tok::Arrow | Tok::Coalesce
+                | Tok::Amp | Tok::Caret | Tok::Shl | Tok::Shr | Tok::Pipe
                 // A line ending in `in` (the `let … in` separator) or a branch keyword
                 // is unfinished — let its body/branch start on the next line.
                 | Tok::In | Tok::Then | Tok::Else

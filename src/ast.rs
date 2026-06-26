@@ -43,6 +43,14 @@ pub enum BinOp {
     Or,
     /// `a ?? b` — `b` when `a` is `missing`, else `a`.
     Coalesce,
+    /// Integer bitwise operators (both operands must be `Int`). They bind tighter
+    /// than comparison and looser than `+`/`-` (Rust's ordering), so `a & 1 == 0`
+    /// is `(a & 1) == 0` — no Python-style footgun.
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 impl BinOp {
@@ -63,6 +71,11 @@ impl BinOp {
             BinOp::And => "and",
             BinOp::Or => "or",
             BinOp::Coalesce => "??",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
         }
     }
 }

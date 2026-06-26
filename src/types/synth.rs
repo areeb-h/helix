@@ -85,6 +85,30 @@ impl super::Checker {
                     ))
                 }
             }
+            // Integer bitwise — both operands must be integers; the result is `Int`.
+            BitAnd | BitOr | BitXor | Shl | Shr => {
+                if matches!(lt, Type::Unknown) || matches!(rt, Type::Unknown) {
+                    return Ok(Type::Unknown);
+                }
+                if matches!(lt, Type::Missing) || matches!(rt, Type::Missing) {
+                    return Ok(Type::Missing);
+                }
+                let ok = |t: &Type| matches!(t, Type::Int | Type::Num);
+                if ok(lt) && ok(rt) {
+                    Ok(Type::Int)
+                } else {
+                    Err(HelixError::new(
+                        format!(
+                            "bitwise operator `{}` needs integers, but got a {}",
+                            op.symbol(),
+                            if ok(lt) { rt } else { lt }
+                        ),
+                        line,
+                        col,
+                    )
+                    .hint("`&` `|` `^` `<<` `>>` work on integers only."))
+                }
+            }
             // Arithmetic
             _ => {
                 if matches!(lt, Type::Unknown) || matches!(rt, Type::Unknown) {

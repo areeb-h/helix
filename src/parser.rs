@@ -525,6 +525,7 @@ impl Parser {
             Tok::In => Some("in".to_string()),
             Tok::Match => Some("match".to_string()),
             Tok::Try => Some("try".to_string()),
+            Tok::Do => Some("do".to_string()),
             Tok::Missing => Some("missing".to_string()),
             Tok::True => Some("true".to_string()),
             Tok::False => Some("false".to_string()),
@@ -738,7 +739,7 @@ impl Parser {
 
     fn comparison(&mut self) -> Result<Expr, HelixError> {
         let saved = self.depth;
-        let mut left = self.range_expr()?;
+        let mut left = self.bit_or()?;
         loop {
             let op = match self.peek() {
                 Tok::Lt => BinOp::Lt,
@@ -750,7 +751,7 @@ impl Parser {
             let (l, c) = self.pos();
             self.advance();
             self.deepen()?;
-            let right = self.range_expr()?;
+            let right = self.bit_or()?;
             left = Expr::Binary {
                 op,
                 left: Box::new(left),
@@ -758,6 +759,70 @@ impl Parser {
                 line: l,
                 col: c,
             };
+        }
+        self.depth = saved;
+        Ok(left)
+    }
+
+    // Bitwise operators (int-only), all left-associative. Mirroring Rust's ordering,
+    // they bind tighter than comparison and looser than `+`/`-`, with precedence
+    // `|` < `^` < `&` < `<<`/`>>`. So `mask >> j & 1 == 1` is `((mask>>j)&1)==1`.
+    fn bit_or(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
+        let mut left = self.bit_xor()?;
+        while matches!(self.peek(), Tok::Pipe) {
+            let (l, c) = self.pos();
+            self.advance();
+            self.deepen()?;
+            let right = self.bit_xor()?;
+            left = Expr::Binary { op: BinOp::BitOr, left: Box::new(left), right: Box::new(right), line: l, col: c };
+        }
+        self.depth = saved;
+        Ok(left)
+    }
+
+    fn bit_xor(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
+        let mut left = self.bit_and()?;
+        while matches!(self.peek(), Tok::Caret) {
+            let (l, c) = self.pos();
+            self.advance();
+            self.deepen()?;
+            let right = self.bit_and()?;
+            left = Expr::Binary { op: BinOp::BitXor, left: Box::new(left), right: Box::new(right), line: l, col: c };
+        }
+        self.depth = saved;
+        Ok(left)
+    }
+
+    fn bit_and(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
+        let mut left = self.shift()?;
+        while matches!(self.peek(), Tok::Amp) {
+            let (l, c) = self.pos();
+            self.advance();
+            self.deepen()?;
+            let right = self.shift()?;
+            left = Expr::Binary { op: BinOp::BitAnd, left: Box::new(left), right: Box::new(right), line: l, col: c };
+        }
+        self.depth = saved;
+        Ok(left)
+    }
+
+    fn shift(&mut self) -> Result<Expr, HelixError> {
+        let saved = self.depth;
+        let mut left = self.range_expr()?;
+        loop {
+            let op = match self.peek() {
+                Tok::Shl => BinOp::Shl,
+                Tok::Shr => BinOp::Shr,
+                _ => break,
+            };
+            let (l, c) = self.pos();
+            self.advance();
+            self.deepen()?;
+            let right = self.range_expr()?;
+            left = Expr::Binary { op, left: Box::new(left), right: Box::new(right), line: l, col: c };
         }
         self.depth = saved;
         Ok(left)
@@ -1299,6 +1364,51 @@ impl Parser {
         }
     }
 
+    /// `do { name = expr  <newline>  ...  final_expr }` — a block of sequential
+    /// bindings ending in a result expression. Desugars to `let name = expr, … in
+    /// final_expr`, so every back-end and the checker handle it with no changes;
+    /// with no bindings it is just the body. Bindings are newline-separated (Helix
+    /// has no `;`), and the last non-binding line is the block's value. The bindings
+    /// are immutable `let`s, like `let … in`, so the language model is unchanged —
+    /// `do` only flattens deep `let … in` chains so they read top-to-bottom.
+    fn do_block(&mut self) -> Result<Expr, HelixError> {
+        let (l, c) = self.pos();
+        self.advance(); // `do`
+        self.eat(&Tok::LBrace, "after `do`")
+            .map_err(|e| e.hint("a `do` block looks like `do { x = 1\\n  y = 2\\n  x + y }`."))?;
+        self.skip_newlines();
+        let mut bindings = Vec::new();
+        loop {
+            // A binding is `IDENT = expr` — a single `=`, never `==`. Anything else
+            // is the block's final result expression.
+            let binding_name = match self.peek().clone() {
+                Tok::Ident(name) if matches!(self.peek_at(1), Tok::Eq) => Some(name),
+                _ => None,
+            };
+            if let Some(name) = binding_name {
+                self.advance(); // IDENT
+                self.advance(); // =
+                let value = self.expr()?;
+                bindings.push((name, value));
+                self.skip_newlines();
+                continue;
+            }
+            if matches!(self.peek(), Tok::RBrace) {
+                return Err(HelixError::new("a `do` block must end with a result expression", l, c)
+                    .hint("add a final line that produces the block's value, e.g. `do { x = 1\\n  x + 1 }`."));
+            }
+            let body = self.expr()?;
+            self.skip_newlines();
+            self.eat(&Tok::RBrace, "to close the `do` block")
+                .map_err(|e| e.hint("a `do` block ends with `}` after its result expression."))?;
+            return Ok(if bindings.is_empty() {
+                body
+            } else {
+                Expr::Let { bindings, body: Box::new(body) }
+            });
+        }
+    }
+
     fn primary(&mut self) -> Result<Expr, HelixError> {
         let (l, c) = self.pos();
         match self.peek().clone() {
@@ -1381,6 +1491,7 @@ impl Parser {
                     body: Box::new(body),
                 })
             }
+            Tok::Do => self.do_block(),
             Tok::If => {
                 self.advance();
                 let cond = self.expr()?;

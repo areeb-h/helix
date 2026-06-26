@@ -81,6 +81,9 @@
         assert!(emsg("xs = [1, 2]\nxs[\"a\"]").contains("cannot be indexed by a string"));
         assert!(emsg("undefinedvar").contains("not defined"));
         assert!(emsg("dna(5)").contains("expected a string"));
+        // bitwise operators are int-only and statically checked
+        assert!(emsg("\"a\" & 1").contains("bitwise"));
+        ok("x = 6\n(x >> 1) & 1");
         // namespaced builtins are type-checked: wrong argument types and arities are caught
         assert!(emsg("correlation(1, 2)").contains("array"));
         assert!(emsg("read_vcf(5)").contains("string"));

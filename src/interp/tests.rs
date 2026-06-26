@@ -182,6 +182,32 @@
     }
 
     #[test]
+    fn bitwise_operators() {
+        assert!(matches!(last("12 & 10").unwrap(), Value::Int(8)));
+        assert!(matches!(last("12 | 10").unwrap(), Value::Int(14)));
+        assert!(matches!(last("12 ^ 10").unwrap(), Value::Int(6)));
+        assert!(matches!(last("1 << 4").unwrap(), Value::Int(16)));
+        assert!(matches!(last("255 >> 4").unwrap(), Value::Int(15)));
+        // precedence: bitwise binds ABOVE comparison, so `5 & 1 == 1` is `(5 & 1) == 1`
+        assert!(matches!(last("5 & 1 == 1").unwrap(), Value::Bool(true)));
+        // and BELOW additive, so `1 << 2 + 1` is `1 << (2 + 1)` == 8 (Rust ordering)
+        assert!(matches!(last("1 << 2 + 1").unwrap(), Value::Int(8)));
+        // `|` < `^` < `&`: `1 | 2 ^ 3 & 1` == `1 | (2 ^ (3 & 1))` == 1 | (2 ^ 1) == 1 | 3 == 3
+        assert!(matches!(last("1 | 2 ^ 3 & 1").unwrap(), Value::Int(3)));
+        // the bitmask-toggle idiom (subset-as-int) the ai-research code leans on
+        assert!(matches!(last("0 ^ (1 << 2) ^ (1 << 0)").unwrap(), Value::Int(5)));
+        assert!(matches!(last("(5 >> 2) & 1 == 1").unwrap(), Value::Bool(true)));
+        // a line ending in a bitwise operator continues onto the next
+        assert!(matches!(last("3 &\n  1").unwrap(), Value::Int(1)));
+        // out-of-range / negative shifts and non-integer operands error, never panic
+        assert!(last("1 << 64").is_err());
+        assert!(last("1 >> -1").is_err());
+        assert!(last("1.5 & 2").is_err());
+        // missing propagates
+        assert!(matches!(last("missing & 1").unwrap(), Value::Missing));
+    }
+
+    #[test]
     fn classification_metrics() {
         let setup = "yt = [1, 0, 1, 1, 0, 1, 0, 0]\nyp = [1, 0, 1, 0, 0, 1, 1, 0]\n";
         // tp=3 fp=1 fn=1 tn=3 → accuracy/precision/recall/f1 all 0.75

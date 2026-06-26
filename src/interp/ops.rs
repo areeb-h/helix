@@ -138,7 +138,49 @@ pub(crate) fn eval_binary(
         Eq => Ok(Value::Bool(values_equal(&l, &r))),
         Ne => Ok(Value::Bool(!values_equal(&l, &r))),
         Lt | Gt | Le | Ge => compare(op, &l, &r, line, col),
+        BitAnd | BitOr | BitXor | Shl | Shr => bitwise(op, &l, &r, line, col),
         And | Or | Coalesce => unreachable!("handled with short-circuit in eval"),
+    }
+}
+
+/// Integer bitwise operators. Both operands must be `Int`. Shift amounts are
+/// restricted to `0..=63` (a wider or negative shift is undefined for `i64`, so it
+/// is a clean error rather than a panic or silent wrap) — keeping the operator
+/// total and the three engines in agreement.
+pub(crate) fn bitwise(
+    op: &BinOp,
+    l: &Value,
+    r: &Value,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    let (a, b) = match (l, r) {
+        (Value::Int(a), Value::Int(b)) => (*a, *b),
+        _ => {
+            return Err(HelixError::new(
+                format!("`{}` needs two integers", op.symbol()),
+                line,
+                col,
+            )
+            .hint("bitwise operators (`&` `|` `^` `<<` `>>`) work on integers only."));
+        }
+    };
+    match op {
+        BinOp::BitAnd => Ok(Value::Int(a & b)),
+        BinOp::BitOr => Ok(Value::Int(a | b)),
+        BinOp::BitXor => Ok(Value::Int(a ^ b)),
+        BinOp::Shl | BinOp::Shr => {
+            if !(0..=63).contains(&b) {
+                return Err(HelixError::new(
+                    format!("shift amount {b} is out of range"),
+                    line,
+                    col,
+                )
+                .hint("shift by 0..=63 bits (an i64 has 64 bits)."));
+            }
+            Ok(Value::Int(if matches!(op, BinOp::Shl) { a << b } else { a >> b }))
+        }
+        _ => unreachable!("non-bitwise op in bitwise()"),
     }
 }
 
