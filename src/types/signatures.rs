@@ -335,6 +335,10 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             // Returns a `{status, body}` record; Unknown keeps field access permissive.
             Ok(Type::Unknown)
         }
+        // Reproducible RNG: `random`/`randn` → Float array; `random_int` → Int array.
+        // (argument values are validated at runtime).
+        "random" | "randn" => Ok(Type::Array(Box::new(Type::Float))),
+        "random_int" => Ok(Type::Array(Box::new(Type::Int))),
         _ => Ok(Type::Unknown), // unreachable (BUILTIN_FNS gated), but stay permissive
     }
 }
@@ -374,6 +378,9 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         | "svg_line" | "to_html" | "to_markdown" => Type::String,
         // writers perform I/O and return Unit
         "write_csv" | "write_tsv" | "write_json" | "write_fasta" | "write_fastq" => Type::Unit,
+        // reproducible sampling: shuffle/sample keep the element type; choice yields one
+        "shuffle" | "sample" => Type::Array(Box::new(el.clone())),
+        "choice" => el.clone(),
         _ => {
             return Err(unknown_method(
                 "Array",

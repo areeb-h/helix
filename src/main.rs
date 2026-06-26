@@ -30,6 +30,7 @@ mod pkg;
 mod python;
 mod registry;
 mod render;
+mod rng;
 mod sam;
 mod stats;
 mod symbol;

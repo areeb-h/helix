@@ -79,6 +79,10 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "min", pure: true },
     BuiltinDef { path: "max", pure: true },
     BuiltinDef { path: "erf", pure: true },
+    // --- random (reproducible: seeded + pure, so safely memoizable) ---
+    BuiltinDef { path: "random", pure: true },
+    BuiltinDef { path: "randn", pure: true },
+    BuiltinDef { path: "random_int", pure: true },
     // --- statistics: symmetric tests/fits + distributions (no privileged receiver) ---
     BuiltinDef { path: "normal_cdf", pure: true },
     BuiltinDef { path: "normal_pdf", pure: true },
@@ -110,7 +114,7 @@ pub static ARRAY_METHODS: &[&str] = &[
     "join", "zscores", "iqr", "spread", "standard_error", "coefficient_of_variation", "mean_gc",
     "total_length", "bar_chart", "histogram", "line_chart", "sparkline", "scatter", "svg_bar",
     "svg_line", "write_csv", "write_tsv", "write_json", "to_html", "to_markdown", "write_fasta",
-    "write_fastq",
+    "write_fastq", "shuffle", "sample", "choice",
 ];
 
 /// String methods.

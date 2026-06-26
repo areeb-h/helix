@@ -24,6 +24,7 @@ they are made deliberately and in the open.
 | [0015](0015-sequence-alignment.md) | Sequence alignment | Accepted — v1 implemented (hand-rolled affine-gap aligner) |
 | [0016](0016-build-and-packaging.md) | Build perf, allocator & containerization | Accepted — mimalloc + musl + Docker implemented; PGO wired in CI |
 | [0017](0017-methods-and-functions.md) | Methods on data + free functions (no namespaces) | Accepted — implemented; supersedes 0011's namespaces |
+| [0018](0018-random.md) | Reproducible random numbers (seeded, pure, SplitMix64) | Accepted — implemented (`random`/`randn`/`random_int` + shuffle/sample/choice) |
 
 ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
 (23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a

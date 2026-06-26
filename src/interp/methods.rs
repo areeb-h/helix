@@ -691,6 +691,10 @@ fn array_method(
         | "write_fasta" | "write_fastq" => {
             export_method(Value::array(items.to_vec()), name, args, line, col)
         }
+        // --- reproducible sampling (seeded) ---
+        "shuffle" => crate::rng::shuffle(items, args, line, col),
+        "sample" => crate::rng::sample(items, args, line, col),
+        "choice" => crate::rng::choice(items, args, line, col),
         _ => Err(unknown_method(
             "Array",
             name,

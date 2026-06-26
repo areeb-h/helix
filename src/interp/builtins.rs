@@ -117,6 +117,10 @@ impl super::Interp {
             // JSON, charts, writers, and format export are now methods (see
             // `interp::methods` / `interp::export_method`): `str.parse_json()`,
             // `value.to_json()`, `xs.bar_chart()`, `data.to_html()`, `df.write_csv(p)`.
+            // Reproducible RNG — seeded + pure (same seed → same draws).
+            "random" => crate::rng::random(&args, line, col),
+            "randn" => crate::rng::randn(&args, line, col),
+            "random_int" => crate::rng::random_int(&args, line, col),
             "http_get" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
