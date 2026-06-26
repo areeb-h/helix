@@ -54,6 +54,9 @@ missing + 1           # -> missing    (math propagates)
 true or missing       # -> true       (3-valued logic, short-circuits)
 false or missing      # -> missing
 
+missing.field         # -> missing    (field/index access propagates)
+missing.phred().mean()# -> missing    (method calls propagate; `is_missing` excepted)
+
 # Aggregations make the missing policy EXPLICIT — no silent dropping:
 column.mean()                 # -> missing if any value is missing (safe default)
 column.drop_missing().mean()  # opt out, visibly
@@ -63,6 +66,10 @@ column.drop_missing().mean()  # opt out, visibly
 - Math propagates: any op touching `missing` yields `missing`.
 - Equality propagates: `missing == missing` → `missing`. Test with
   `.is_missing()`.
+- Access propagates: field access, indexing, and **method calls** on `missing`
+  all yield `missing` (so `read.qual.phred().mean()` on a quality-less read is
+  `missing`, not an error). `.is_missing()` is the sole exception — it always
+  answers truthfully.
 - Booleans: short-circuiting three-valued logic, composing with Helix's existing
   word-booleans and no-truthiness rule.
 - Aggregations: **propagate by default** (a hole makes the result `missing`);

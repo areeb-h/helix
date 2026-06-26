@@ -25,6 +25,13 @@ pub(crate) fn call_method(
         }
         return Ok(Value::Bool(matches!(recv, Value::Missing)));
     }
+    // `missing` propagates through method calls just as it does through field/index
+    // access (ADR 0001's three-valued model): any method on `missing` yields `missing`
+    // — so `read.qual.phred().mean()` on a quality-less read is `missing`, not an error.
+    // `is_missing` (above) is the sole exception.
+    if matches!(recv, Value::Missing) {
+        return Ok(Value::Missing);
+    }
     match recv {
         Value::Array(items) => match array_numeric_fast(items, name, &args, line, col)? {
             // A typed array's numeric reduction reads the packed buffer directly.

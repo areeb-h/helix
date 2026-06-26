@@ -1,26 +1,25 @@
 # S6 — CPython interop: Helix CALLING CPython, in-process. Showcases the bridges
-# that no compiled language gives you for free.
+# that no compiled language gives you for free. Helix values auto-convert when
+# passed INTO a Python call; `to_tensor`/`to_dataframe`/`to_array` bring results back.
 #   Build/run:  cargo run --features python -- run bench/stress/s6_interop.helix
 #   (the default binary has no libpython linked — this needs --features python)
 
-# (1) Zero-copy DataFrame bridge (Arrow): read a CSV natively, hand the frame to
-#     Python polars, get it back, keep working in native Helix verbs.
-np = python.import("numpy")
-pl = python.import("polars")
+np       = python.import("numpy")
+builtins = python.import("builtins")
+pystat   = python.import("statistics")
 
+# (1) DataFrame bridge (Arrow, zero-copy): read a VCF natively, hand the frame
+#     straight to a Python call — it arrives as a Python polars.DataFrame.
 df = bio.read_vcf("data/variants.vcf")
-print("native rows: {df.count()}")
+print("native rows:        {df.count()}")
+print("seen by python len: {builtins.len(df)}")
 
-pydf = to_py(df)                       # Helix DataFrame -> Python polars (zero-copy)
-print("seen by python polars: {pl.DataFrame(pydf).height} rows")
-
-# (2) Tensor <-> NumPy: build a matrix, invert it in NumPy, feed it back, verify
-#     the round-trip composes with native linear algebra.
+# (2) Tensor <-> NumPy: invert a matrix in NumPy, bring it back, and verify the
+#     round-trip composes with native linear algebra (trace of m·inv ≈ n).
 m = tensor((0..4).map(i => (0..4).map(j => if i == j then 2.0 else 0.5)))
-inv = to_tensor(np.linalg.inv(to_py(m)))
-print("m . inv ~= I, trace = {m.matmul(inv).sum()}")   # expect ~4.0 (4x4 identity)
+inv = to_tensor(np.linalg.inv(m))
+print("trace(m . inv):     {m.matmul(inv).sum()}")   # ~4.0 (4x4 identity)
 
-# (3) Call an arbitrary Python library function on Helix data.
-stats = python.import("statistics")
+# (3) Call an arbitrary Python-stdlib function on a Helix array.
 xs = (0..100).map(it * it)
-print("python stdev of squares: {stats.pstdev(to_py(xs))}")
+print("python pstdev:      {pystat.pstdev(xs)}")

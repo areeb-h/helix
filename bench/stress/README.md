@@ -50,9 +50,40 @@ A benchmark that doesn't compute the same answer everywhere is measuring nothing
 
 ## Results
 
-Run `bash run.sh` to populate. (Numbers are machine-specific; the repo ships the code, not a
-results snapshot — re-run locally.) Correctness was verified across all five languages with
-`verify.sh`; representative anchors at `--scale 0.02`:
+Best of 3, wall-seconds, **release** build, WSL2 on an AMD Ryzen 7700X. Numbers are
+machine-specific — re-run locally. Correctness was verified across all five languages with
+`verify.sh` first (a benchmark that doesn't agree on the answer is measuring nothing).
+
+| Workload | helix | helix-nojit | cpython | numpy/pandas | rust | go |
+|----------|------:|------------:|--------:|-------------:|-----:|---:|
+| S1  k-mers k=10 (10 Mbp)        | **0.66** | — | 4.22 | — | 0.51 | 0.41 |
+| S2  FASTQ GC + Phred (200k)     | **0.47** | — | 1.45 | — | 0.07 | 0.19 |
+| S3  VCF filter+group (200k)     | **0.40** | — | 0.11 | 0.37 (pandas) | 0.02 | 0.03 |
+| S4  pattern match (20M)         | 4.58 | 5.39 | 1.17 | 0.19 (numpy) | 0.01 | 0.02 |
+| S5  fused pipeline (50M)        | **0.15** | 10.25 | 6.00 | 0.89 (numpy) | 0.09 | 0.09 |
+
+### What the stress test found
+
+- **S5 — fusion is the headline win.** The map→filter→reduce chain (with a user `poly`
+  function called *inside* the loop) JIT-compiles to one native, zero-allocation loop:
+  **68× over Helix's own VM**, **40× over CPython**, **6× over NumPy**, and within **1.7×
+  of hand-written Rust/Go**. A dynamically-typed scientific language landing at ~60% of a
+  compiled tight loop is the whole thesis.
+- **S1 — the bio flagship holds up.** `kmer_counts(10)` as a single method beats CPython
+  **6×** and lands within **~1.3–1.6×** of hand-rolled 2-bit Rust/Go — code a Helix user
+  never has to write.
+- **S2 — competitive, not dominant.** Beats CPython 3×; the compiled languages are 2–7×
+  faster (reader + per-read method dispatch overhead). Honest mid-table.
+- **S3 — neck-and-neck with pandas** (0.40 vs 0.37) — the right comparison, both being full
+  DataFrame engines. The hand-split baselines win because they parse only the two fields the
+  query needs; Helix/pandas do a full typed parse.
+- **S4 — the real weakness this suite surfaced.** `match` inside a per-element `map` runs on
+  the tree-walking/VM path (it is **not** JIT-eligible — note `helix` ≈ `helix-nojit`), so it
+  is **~4× slower than CPython** and far behind compiled `switch`. Concrete optimization
+  target: make match-arm dispatch JIT-eligible, or specialize the common literal/or-pattern
+  arms. Until then, pattern matching is for clarity on cool paths, not megaloop hot paths.
+
+Verified anchors (every language identical), at `--scale 0.02`:
 
 ```
 S1  distinct=182128 total=199991 max=5

@@ -662,6 +662,11 @@
             // DNA ordering (`<`/sort) must agree across engines
             "dna(\"ATG\") < dna(\"CAT\")",
             "[dna(\"CAT\"), dna(\"ATG\")].sort().first()",
+            // `missing` propagates through method calls (except is_missing) on both engines
+            "missing.upper()",
+            "missing.no_such_method()",
+            "missing.phred().mean()",
+            "missing.is_missing()",
             // destructuring + field/index, all on the VM
             "a, b = (3, 4)\na * b",
             "p, q, r = [1, 2, 3]\np + q + r",
