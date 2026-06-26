@@ -1,0 +1,7 @@
+# S5 — fused pipeline: map a polynomial through a helper fn, keep evens, sum, over
+# 0..50M. The whole map→filter→reduce chain JIT-compiles to ONE native loop that
+# CALLS `poly` inline — zero intermediate arrays, zero allocation. Compare the
+# default engine against HELIX_NOJIT=1 (bytecode VM) to see the fusion speedup.
+fn poly(x) = ((x % 97) * 31 + (x % 13) * 7 + 3) % 1000
+n = 50000000
+print((0..n).map(x => poly(x)).filter(it % 2 == 0).reduce(0, (a, x) => a + x))

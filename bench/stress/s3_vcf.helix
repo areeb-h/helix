@@ -1,0 +1,12 @@
+# S3 — VCF analysis: read 200k variants, keep QUAL > 50, count per gene.
+# `read_vcf` lifts every INFO key to its own column; `@qual`/`@GENE` are the
+# unambiguous column sigil — predicates and grouping read straight off the schema.
+v = bio.read_vcf("data/variants.vcf")
+pass = v.where(@qual > 50.0)
+print("total={v.count()}")
+print("pass={pass.count()}")
+print("BRCA1={pass.where(@GENE == "BRCA1").count()}")
+print("BRCA2={pass.where(@GENE == "BRCA2").count()}")
+print("EGFR={pass.where(@GENE == "EGFR").count()}")
+print("KRAS={pass.where(@GENE == "KRAS").count()}")
+print("TP53={pass.where(@GENE == "TP53").count()}")

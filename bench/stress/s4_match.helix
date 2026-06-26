@@ -1,0 +1,12 @@
+# S4 — pattern matching at scale: classify n%12 through a `match` with a literal,
+# an or-pattern, a guard, and a wildcard, then sum the weights over 0..20M.
+# Exercises match-arm dispatch + a user fn called per element on the VM.
+fn weight(m) = match m {
+  0 => 7,
+  1 | 2 | 3 => 2,
+  11 => 5,
+  x if x > 7 => 3,
+  _ => 1,
+}
+n = 20000000
+print((0..n).map(k => weight(k % 12)).reduce(0, (a, x) => a + x))

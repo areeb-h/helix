@@ -1,0 +1,26 @@
+# S6 — CPython interop: Helix CALLING CPython, in-process. Showcases the bridges
+# that no compiled language gives you for free.
+#   Build/run:  cargo run --features python -- run bench/stress/s6_interop.helix
+#   (the default binary has no libpython linked — this needs --features python)
+
+# (1) Zero-copy DataFrame bridge (Arrow): read a CSV natively, hand the frame to
+#     Python polars, get it back, keep working in native Helix verbs.
+np = python.import("numpy")
+pl = python.import("polars")
+
+df = bio.read_vcf("data/variants.vcf")
+print("native rows: {df.count()}")
+
+pydf = to_py(df)                       # Helix DataFrame -> Python polars (zero-copy)
+print("seen by python polars: {pl.DataFrame(pydf).height} rows")
+
+# (2) Tensor <-> NumPy: build a matrix, invert it in NumPy, feed it back, verify
+#     the round-trip composes with native linear algebra.
+m = tensor((0..4).map(i => (0..4).map(j => if i == j then 2.0 else 0.5)))
+inv = to_tensor(np.linalg.inv(to_py(m)))
+print("m . inv ~= I, trace = {m.matmul(inv).sum()}")   # expect ~4.0 (4x4 identity)
+
+# (3) Call an arbitrary Python library function on Helix data.
+stats = python.import("statistics")
+xs = (0..100).map(it * it)
+print("python stdev of squares: {stats.pstdev(to_py(xs))}")

@@ -1,0 +1,9 @@
+# S1 — k-mer spectrum (k=10) over a 10 Mbp genome. THE flagship: one Dna method,
+# `kmer_counts(k)`, does native 2-bit-packed counting (A=0 C=1 G=2 T=3, rolling,
+# zero per-window allocation). Every other language hand-rolls the loop below.
+seq = bio.read_fasta("data/genome.fa")[0].seq
+counts = seq.kmer_counts(10)
+vals = counts.map((kmer, c) => c)
+print("distinct={counts.count()}")
+print("total={vals.sum()}")
+print("max={vals.reduce(0, (a, x) => if x > a then x else a)}")
