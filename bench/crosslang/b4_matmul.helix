@@ -1,0 +1,5 @@
+# B4 — dense 1024×1024 matmul (ndarray → matrixmultiply, pure-Rust SIMD GEMM).
+# The full O(n³) work runs regardless of values; sum() forces materialization.
+n = 1024
+a = ones([n, n])
+print(a.matmul(a).sum())

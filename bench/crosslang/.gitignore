@@ -1,0 +1,4 @@
+# Generated inputs (recreated by gen_data.py) and the python venv — not committed.
+data/
+.venv/
+.t

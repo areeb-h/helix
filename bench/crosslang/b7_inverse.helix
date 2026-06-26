@@ -1,0 +1,5 @@
+# B7 — invert a 256×256 matrix (faer partial-pivot LU). The one path that used to
+# be the weak spot (hand-rolled Gaussian, ~20× slower than NumPy); now ~NumPy.
+n = 256
+a = tensor((0..n).map(i => (0..n).map(j => if i == j then 100.0 else 1.0)))
+print(a.inv().sum())

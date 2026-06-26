@@ -1,0 +1,3 @@
+# B1 — scalar loop: Σ (x² mod 1000) over 0..10M. Stresses the fused-native loop
+# (no intermediate arrays). Correctness anchor: 4615000000.
+print((0..10000000).map((it * it) % 1000).sum())
