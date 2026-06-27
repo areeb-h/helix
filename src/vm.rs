@@ -596,7 +596,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 Some(fs) => s.push_str(
                                     &fs.apply(&vals[vi]).map_err(|m| HelixError::new(m, line, col))?,
                                 ),
-                                None => s.push_str(&crate::value::display_value(&vals[vi], line, col)?),
+                                // Hot path: format scalars straight into `s`, no throwaway String.
+                                None => crate::value::write_value(&mut s, &vals[vi], line, col)?,
                             }
                             vi += 1;
                         }

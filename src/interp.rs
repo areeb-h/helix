@@ -236,7 +236,8 @@ impl Interp {
                                 Some(fs) => s.push_str(
                                     &fs.apply(&v).map_err(|m| HelixError::new(m, l, c))?,
                                 ),
-                                None => s.push_str(&crate::value::display_value(&v, l, c)?),
+                                // Hot path: format scalars straight into `s`, no throwaway String.
+                                None => crate::value::write_value(&mut s, &v, l, c)?,
                             }
                         }
                     }

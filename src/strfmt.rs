@@ -35,6 +35,13 @@ pub struct FormatSpec {
 
 /// Parse a format spec (the text after the `:` in `{expr:spec}`). Returns a
 /// human-readable message on a malformed spec.
+/// Caps on the numeric spec fields. A field bounds the size of a *single*
+/// formatted value, so these keep an absurd spec (`{x:99999999}`) from allocating
+/// gigabytes / aborting the allocator — while staying far above any real layout
+/// (no field is wider than 64 KiB, no float carries more than ~17 real digits).
+const MAX_WIDTH: usize = 1 << 16;
+const MAX_PRECISION: usize = 512;
+
 pub fn parse_spec(s: &str) -> Result<FormatSpec, String> {
     let chars: Vec<char> = s.chars().collect();
     let n = chars.len();
@@ -65,13 +72,15 @@ pub fn parse_spec(s: &str) -> Result<FormatSpec, String> {
         i += 1;
     }
     if i > ws {
-        width = Some(
-            chars[ws..i]
-                .iter()
-                .collect::<String>()
-                .parse()
-                .map_err(|_| "format width is too large".to_string())?,
-        );
+        let w: usize = chars[ws..i]
+            .iter()
+            .collect::<String>()
+            .parse()
+            .map_err(|_| "format width is too large".to_string())?;
+        if w > MAX_WIDTH {
+            return Err(format!("format width {w} is too large (max {MAX_WIDTH})"));
+        }
+        width = Some(w);
     }
 
     let mut precision = None;
@@ -84,13 +93,15 @@ pub fn parse_spec(s: &str) -> Result<FormatSpec, String> {
         if i == ps {
             return Err("expected digits after `.` in a format spec".to_string());
         }
-        precision = Some(
-            chars[ps..i]
-                .iter()
-                .collect::<String>()
-                .parse()
-                .map_err(|_| "format precision is too large".to_string())?,
-        );
+        let p: usize = chars[ps..i]
+            .iter()
+            .collect::<String>()
+            .parse()
+            .map_err(|_| "format precision is too large".to_string())?;
+        if p > MAX_PRECISION {
+            return Err(format!("format precision {p} is too large (max {MAX_PRECISION})"));
+        }
+        precision = Some(p);
     }
 
     let mut ty = None;

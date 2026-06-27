@@ -469,6 +469,26 @@ pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, Helix
     }
 }
 
+/// Append `v`'s display form straight into `buf` — the allocation-free counterpart
+/// to [`display_value`] for the string-interpolation hot path (building many rows
+/// like `"{id},{name},{score}\n"`). A scalar's `Display` writes directly into the
+/// buffer with no throwaway `String`; collections and frames defer to
+/// `display_value` (their rendering is itself fallible and less hot). The bytes are
+/// identical to `buf.push_str(&display_value(v, …)?)`.
+pub fn write_value(buf: &mut String, v: &Value, line: usize, col: usize) -> Result<(), HelixError> {
+    use std::fmt::Write as _;
+    match v {
+        Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::DataFrame(_) => {
+            buf.push_str(&display_value(v, line, col)?);
+        }
+        // Writing a scalar's `Display` into a `String` is infallible.
+        other => {
+            let _ = write!(buf, "{}", other);
+        }
+    }
+    Ok(())
+}
+
 /// Element rendering inside a collection: strings are quoted (matching `Display`),
 /// everything else goes through `display_value` so nested frames stay fallible.
 fn display_elem(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {

@@ -244,6 +244,9 @@
         // a malformed spec is a parse-time error; a numeric spec on a string errors
         assert!(last("x = 1\n\"{x:.2q}\"").is_err());
         assert!(last("w = \"a\"\n\"{w:.2f}\"").is_err());
+        // an absurd width/precision is rejected at parse time — no giant allocation
+        assert!(last("x = 1\n\"{x:99999999}\"").is_err());
+        assert!(last("x = 1.0\n\"{x:.999999f}\"").is_err());
     }
 
     #[test]
