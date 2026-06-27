@@ -366,6 +366,28 @@
     }
 
     #[test]
+    fn hardening_overflow_and_resource_caps() {
+        // align scores are i64: a 2200-long identical alignment at a near-max weight
+        // is 2200 * 1_000_000 = 2.2e9, which would overflow (wrap negative) in i32 but
+        // is exact in i64.
+        assert!(matches!(
+            last("let xs = range(0, 2200) in align(xs, xs, {match: 1000000}).score").unwrap(),
+            Value::Int(2_200_000_000)
+        ));
+        // rational `**` caps the exponent magnitude — no arbitrary-precision blow-up.
+        assert!(last("rational(2, 1) ** 100000").is_err());
+        assert!(last("rational(1, 2) ** (0 - 100000)").is_err());
+        // dividing by a zero rational is a clean error, not a panic.
+        assert!(last("rational(1, 2) / rational(0, 1)").is_err());
+        // out-of-range align weights are rejected (keeps the i64 accumulator safe).
+        assert!(last("align([1], [1], {match: 100000000})").is_err());
+        // the align cell cap rejects an oversized pair instead of trying to OOM.
+        assert!(last("align(range(0, 8000), range(0, 8000))").is_err()); // 64M > 50M cells
+        // exact LLL is integer-only: a fractional entry is rejected, not silently floored.
+        assert!(last("lll_exact([[1, 0], [0.5, 1]])").is_err());
+    }
+
+    #[test]
     fn bitwise_operators() {
         assert!(matches!(last("12 & 10").unwrap(), Value::Int(8)));
         assert!(matches!(last("12 | 10").unwrap(), Value::Int(14)));

@@ -1278,7 +1278,10 @@ fn dna_method(
             // (six matrices over the (n+1)x(m+1) grid), so a pair of very long sequences
             // would exhaust memory. Reads-vs-genes stay far under this; whole-genome
             // alignment is out of scope (ADR 0015).
-            const MAX_ALIGN_CELLS: usize = 100_000_000;
+            // 50M cells: at i64 scores the six DP matrices are ~27 bytes/cell, so this
+            // bounds the table near ~1.3 GB (halved from the old i32 cap to match the
+            // wider, overflow-proof score type).
+            const MAX_ALIGN_CELLS: usize = 50_000_000;
             let cells = s.len().saturating_mul(target.len());
             if cells > MAX_ALIGN_CELLS {
                 return Err(HelixError::new(
@@ -1301,7 +1304,7 @@ fn dna_method(
             );
             use crate::symbol::Symbol;
             Ok(Value::Record(Rc::new(vec![
-                (Symbol::intern("score"), Value::Int(a.score as i64)),
+                (Symbol::intern("score"), Value::Int(a.score)),
                 (Symbol::intern("cigar"), Value::Str(Rc::new(a.cigar))),
                 (Symbol::intern("query"), Value::Str(Rc::new(a.x_aligned))),
                 (Symbol::intern("target"), Value::Str(Rc::new(a.y_aligned))),

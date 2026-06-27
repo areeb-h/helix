@@ -11,7 +11,9 @@
 //! `O(n·m)`; fine for reads-vs-genes, not whole chromosomes (ADR 0015).
 
 /// A sentinel "unreachable" score with headroom so repeated additions never wrap.
-const NEG_INF: i32 = i32::MIN / 4;
+/// `i64` (not `i32`): with custom weights up to ±10⁶ and an alignment path up to the
+/// cell cap, an `i32` accumulator could overflow and silently corrupt the score.
+const NEG_INF: i64 = i64::MIN / 4;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -27,10 +29,10 @@ pub enum Mode {
 /// length `L` costs `gap_open + L * gap_extend`.
 #[derive(Clone, Copy)]
 pub struct Scoring {
-    pub match_: i32,
-    pub mismatch: i32,
-    pub gap_open: i32,
-    pub gap_extend: i32,
+    pub match_: i64,
+    pub mismatch: i64,
+    pub gap_open: i64,
+    pub gap_extend: i64,
 }
 
 impl Scoring {
@@ -45,7 +47,7 @@ impl Scoring {
 /// (`=`/`X`/`I`/`D`, the same op characters the SAM reader renders), the two
 /// gap-padded sequences, and the `[start, end)` span covered in the target.
 pub struct Alignment {
-    pub score: i32,
+    pub score: i64,
     pub cigar: String,
     pub x_aligned: String,
     pub y_aligned: String,
@@ -55,7 +57,7 @@ pub struct Alignment {
 
 /// Pick the maximum of three scores, returning it and which state won (0=M,1=X,2=Y).
 /// Ties prefer M, then X — keeping diagonal (aligned) moves over gaps.
-fn max3(a: i32, b: i32, c: i32) -> (i32, u8) {
+fn max3(a: i64, b: i64, c: i64) -> (i64, u8) {
     if a >= b && a >= c {
         (a, 0)
     } else if b >= c {
@@ -159,7 +161,7 @@ pub fn align(x: &[u8], y: &[u8], mode: Mode, sc: Scoring) -> Alignment {
         }
         Mode::Local => {
             // The highest M cell anywhere.
-            let (mut bi, mut bj, mut best) = (0usize, 0usize, 0i32);
+            let (mut bi, mut bj, mut best) = (0usize, 0usize, 0i64);
             for ii in 0..=n {
                 for jj in 0..=m {
                     if mm[ii * w + jj] > best {
@@ -292,7 +294,7 @@ pub fn align_path(
     mode: Mode,
     sc: Scoring,
     eq: impl Fn(usize, usize) -> bool,
-) -> (i32, Vec<Step>) {
+) -> (i64, Vec<Step>) {
     let w = m + 1;
     let size = (n + 1) * w;
     let mut mm = vec![NEG_INF; size];
@@ -367,7 +369,7 @@ pub fn align_path(
             (n, m, st, sc2)
         }
         Mode::Local => {
-            let (mut bi, mut bj, mut best) = (0usize, 0usize, 0i32);
+            let (mut bi, mut bj, mut best) = (0usize, 0usize, 0i64);
             for ii in 0..=n {
                 for jj in 0..=m {
                     if mm[ii * w + jj] > best {

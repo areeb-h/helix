@@ -715,12 +715,13 @@ impl super::Interp {
                 };
                 let a = seq(&args[0])?;
                 let b = seq(&args[1])?;
-                // The Gotoh DP fills an O(n·m) table; cap the cell count so a huge
-                // pair fails cleanly instead of trying to allocate gigabytes.
-                const MAX_ALIGN_CELLS: u128 = 100_000_000;
+                // The Gotoh DP fills six O(n·m) tables (~27 bytes/cell at i64 scores);
+                // cap the cell count so a huge pair fails cleanly instead of trying to
+                // allocate gigabytes.
+                const MAX_ALIGN_CELLS: u128 = 50_000_000;
                 if (a.len() as u128 + 1) * (b.len() as u128 + 1) > MAX_ALIGN_CELLS {
                     return Err(HelixError::new(
-                        "`align` sequences are too large (the alignment matrix would exceed 100M cells)",
+                        "`align` sequences are too large (the alignment matrix would exceed 50M cells)",
                         line,
                         col,
                     ));
@@ -770,7 +771,6 @@ impl super::Interp {
                                         col,
                                     ));
                                 }
-                                let iv = iv as i32;
                                 match k.as_str() {
                                     "match" => sc.match_ = iv,
                                     "mismatch" => sc.mismatch = iv,
@@ -824,7 +824,7 @@ impl super::Interp {
                     }
                 }
                 Ok(Value::Record(Rc::new(vec![
-                    (Symbol::intern("score"), Value::Int(score as i64)),
+                    (Symbol::intern("score"), Value::Int(score)),
                     (Symbol::intern("matches"), Value::Int(matches)),
                     (Symbol::intern("length"), Value::Int(steps.len() as i64)),
                     (Symbol::intern("a_aligned"), Value::array(a_al)),

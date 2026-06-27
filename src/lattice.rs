@@ -242,8 +242,15 @@ pub fn lll_exact(mut b: Vec<Vec<BigInt>>, delta: f64) -> Result<Vec<Vec<BigInt>>
             "`lll_exact` needs at most as many vectors as their dimension (got {n} vectors in dimension {m})"
         ));
     }
-    if n > MAX_DIM || m > MAX_DIM {
-        return Err(format!("`lll_exact` basis is too large (max {MAX_DIM} in each dimension)"));
+    // Tighter than the f64 `MAX_DIM`: exact Gram–Schmidt numerators grow with the
+    // dimension (Hadamard bound), so a high-dimensional integer lattice can blow up
+    // memory/time far worse than the float path. Integer-relation detection needs
+    // only a handful of dimensions, so 256 is generous while bounding the worst case.
+    const MAX_EXACT_DIM: usize = 256;
+    if n > MAX_EXACT_DIM || m > MAX_EXACT_DIM {
+        return Err(format!(
+            "`lll_exact` basis is too large (max {MAX_EXACT_DIM} in each dimension)"
+        ));
     }
     if !(0.25 < delta && delta <= 1.0) {
         return Err("`lll_exact` delta must be in (0.25, 1.0] (0.75 is standard)".to_string());
