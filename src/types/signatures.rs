@@ -231,7 +231,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             Ok(Type::Tensor)
         }
         // two-arg math
-        "log" | "atan2" | "hypot" | "min" | "max" => {
+        "atan2" | "hypot" | "min" | "max" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));
             }
@@ -251,6 +251,45 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             } else {
                 Type::Float
             })
+        }
+        "log" => {
+            // log(x) = natural log (1 arg) or log(x, base) (2 args). Broadcasts.
+            if args.is_empty() || args.len() > 2 {
+                return Err(HelixError::new(
+                    format!("`log` takes 1 or 2 arguments, got {}", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            if any(args, |t| matches!(t, Type::Array(_) | Type::Tensor | Type::Unknown)) {
+                return Ok(Type::Unknown);
+            }
+            if any(args, |t| matches!(t, Type::Missing)) {
+                return Ok(Type::Missing);
+            }
+            for a in args {
+                if !is_numeric(a) {
+                    return Err(type_err("log", "a number", a, line, col));
+                }
+            }
+            Ok(Type::Float)
+        }
+        "gcd" => {
+            if args.len() != 2 {
+                return Err(arity_err("gcd", 2, args.len(), line, col));
+            }
+            if any(args, |t| matches!(t, Type::Unknown)) {
+                return Ok(Type::Unknown);
+            }
+            if any(args, |t| matches!(t, Type::Missing)) {
+                return Ok(Type::Missing);
+            }
+            for a in args {
+                if !matches!(a, Type::Int | Type::Num) {
+                    return Err(type_err("gcd", "an integer", a, line, col));
+                }
+            }
+            Ok(Type::Int)
         }
         "correlation" => {
             if args.len() != 2 {

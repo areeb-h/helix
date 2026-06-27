@@ -51,6 +51,7 @@ fn binary(op: &BinOp, a: Value, b: Value, line: usize, col: usize) -> Result<Val
                 // exactly (Int `%` stays Int via rem_euclid; `/` is always Float);
                 // a zero divisor falls through to the error-raising full path.
                 Mod if y != 0 => return Ok(Value::Int(x.rem_euclid(y))),
+                FloorDiv if y != 0 => return Ok(Value::Int(x.div_euclid(y))),
                 Div if y != 0 => return Ok(Value::Float(x as f64 / y as f64)),
                 // Integer bitwise — identical to `bitwise()` in ops.rs. Shifts only
                 // shortcut for an in-range amount; an out-of-range shift falls to the
@@ -73,6 +74,7 @@ fn binary(op: &BinOp, a: Value, b: Value, line: usize, col: usize) -> Result<Val
                 Ne => return Ok(Value::Bool(x != y)),
                 // Float `%` never errors on zero (yields NaN), matching `eval_binary`.
                 Mod => return Ok(Value::Float(x.rem_euclid(y))),
+                FloorDiv if y != 0.0 => return Ok(Value::Float(x.div_euclid(y))),
                 Div if y != 0.0 => return Ok(Value::Float(x / y)),
                 // Float ordering can hit NaN, which the full path turns into an
                 // error — so don't shortcut comparisons here.

@@ -509,12 +509,19 @@ impl super::Interp {
                     other => Err(type_err("sign", "a number or array of numbers", other, line, col)),
                 })
             }
-            "log" => {
-                arity(name, &args, 2, line, col)?;
-                match two_nums(name, &args[0], &args[1], line, col)? {
+            "log" => match args.len() {
+                // single-arg log(x) = natural log (numpy parity); broadcasts + missing
+                1 => apply_float_fn("log", f64::ln, &args[0], line, col),
+                2 => match two_nums(name, &args[0], &args[1], line, col)? {
                     None => Ok(Value::Missing),
                     Some((x, base)) => Ok(Value::Float(x.log(base))),
-                }
+                },
+                _ => Err(HelixError::new(
+                    format!("`log` takes 1 or 2 arguments, got {}", args.len()),
+                    line,
+                    col,
+                )
+                .hint("`log(x)` is the natural log; `log(x, base)` is log to a base.")),
             }
             "atan2" => {
                 arity(name, &args, 2, line, col)?;
@@ -528,6 +535,17 @@ impl super::Interp {
                 match two_nums(name, &args[0], &args[1], line, col)? {
                     None => Ok(Value::Missing),
                     Some((a, b)) => Ok(Value::Float(a.hypot(b))),
+                }
+            }
+            "gcd" => {
+                arity(name, &args, 2, line, col)?;
+                match (&args[0], &args[1]) {
+                    (Value::Missing, _) | (_, Value::Missing) => Ok(Value::Missing),
+                    _ => {
+                        let a = as_int(&args[0], "gcd", line, col)?;
+                        let b = as_int(&args[1], "gcd", line, col)?;
+                        Ok(Value::Int(gcd_i64(a, b)))
+                    }
                 }
             }
             "min" | "max" => {
@@ -1047,6 +1065,18 @@ fn num_arrays(
         }
     }
     Ok(Some(cols))
+}
+
+/// Greatest common divisor of two i64 (Euclid). Sign-agnostic; gcd(n,0)=|n|.
+/// Computed in i128 so `abs(i64::MIN)` doesn't overflow.
+fn gcd_i64(a: i64, b: i64) -> i64 {
+    let (mut a, mut b) = ((a as i128).unsigned_abs(), (b as i128).unsigned_abs());
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a as i64
 }
 
 /// Read a whole file to a `String`, capping at `MAX_STRING_LEN` so a huge file is a

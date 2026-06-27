@@ -49,10 +49,11 @@ pub enum Tok {
     Ge,      // >=
     Plus,     // +
     Minus,    // -
-    Star,     // *
-    StarStar, // **
-    Slash,    // /
-    Percent,  // %
+    Star,       // *
+    StarStar,   // **
+    Slash,      // /
+    SlashSlash, // // (integer/floor division)
+    Percent,    // %
     Coalesce, // ??
     Amp,      // & (bitwise and)
     Caret,    // ^ (bitwise xor)
@@ -115,6 +116,7 @@ impl Tok {
             Tok::Star => "`*`".into(),
             Tok::StarStar => "`**`".into(),
             Tok::Slash => "`/`".into(),
+            Tok::SlashSlash => "`//`".into(),
             Tok::Percent => "`%`".into(),
             Tok::Coalesce => "`??`".into(),
             Tok::Amp => "`&`".into(),

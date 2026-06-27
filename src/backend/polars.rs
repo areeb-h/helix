@@ -131,6 +131,16 @@ fn lower(e: &ColExpr) -> Result<Expr, HelixError> {
                 BinOp::Mul => l * r,
                 BinOp::Div => l / r,
                 BinOp::Mod => l % r,
+                // `//` has no faithful column lowering (Polars `/` on ints is
+                // float division); compute it on arrays/scalars, then build the frame.
+                BinOp::FloorDiv => {
+                    return Err(HelixError::new(
+                        "integer division `//` isn't supported inside a DataFrame query",
+                        0,
+                        0,
+                    )
+                    .hint("compute `//` on arrays or scalars, then build the DataFrame."));
+                }
                 BinOp::Pow => l.pow(r),
                 BinOp::Eq => l.eq(r),
                 BinOp::Ne => l.neq(r),

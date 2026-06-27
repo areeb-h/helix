@@ -180,7 +180,15 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                     col += 1;
                 }
             }
-            '/' => single(Tok::Slash, &mut raw, line, start_col, &mut i, &mut col),
+            '/' => {
+                if i + 1 < n && chars[i + 1] == '/' {
+                    push!(Tok::SlashSlash, start_col);
+                    i += 2;
+                    col += 2;
+                } else {
+                    single(Tok::Slash, &mut raw, line, start_col, &mut i, &mut col);
+                }
+            }
             '%' => single(Tok::Percent, &mut raw, line, start_col, &mut i, &mut col),
             '(' => single(Tok::LParen, &mut raw, line, start_col, &mut i, &mut col),
             ')' => single(Tok::RParen, &mut raw, line, start_col, &mut i, &mut col),
@@ -502,7 +510,7 @@ fn cook_newlines(raw: Vec<Token>) -> Vec<Token> {
         matches!(
             t,
             Tok::Eq | Tok::EqEq | Tok::Ne | Tok::Lt | Tok::Gt | Tok::Le | Tok::Ge
-                | Tok::Plus | Tok::Minus | Tok::Star | Tok::StarStar | Tok::Slash | Tok::Percent
+                | Tok::Plus | Tok::Minus | Tok::Star | Tok::StarStar | Tok::Slash | Tok::SlashSlash | Tok::Percent
                 | Tok::And | Tok::Or | Tok::Not | Tok::Comma | Tok::Dot
                 | Tok::LParen | Tok::LBracket | Tok::LBrace | Tok::Mut | Tok::FatArrow
                 | Tok::Colon | Tok::Arrow | Tok::Coalesce

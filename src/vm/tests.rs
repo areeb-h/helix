@@ -260,8 +260,8 @@
                 )
             }
             0 => {
-                // includes % and / (zero divisors error identically on both engines)
-                let op = ["+", "-", "*", "%", "/"][pick(rng, 5) as usize];
+                // includes %, /, // (zero divisors error identically on both engines)
+                let op = ["+", "-", "*", "%", "/", "//"][pick(rng, 6) as usize];
                 format!("({} {} {})", gen_expr(rng, depth - 1, vars), op, gen_expr(rng, depth - 1, vars))
             }
             1 => format!("(-{})", gen_expr(rng, depth - 1, vars)),

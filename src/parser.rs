@@ -889,6 +889,7 @@ impl Parser {
             let op = match self.peek() {
                 Tok::Star => BinOp::Mul,
                 Tok::Slash => BinOp::Div,
+                Tok::SlashSlash => BinOp::FloorDiv,
                 Tok::Percent => BinOp::Mod,
                 _ => break,
             };

@@ -250,6 +250,27 @@
     }
 
     #[test]
+    fn floor_div_log_gcd() {
+        // `//` is euclidean integer division, pairing with `%`: a == b*(a//b)+(a%b).
+        assert!(matches!(last("7 // 2").unwrap(), Value::Int(3)));
+        assert!(matches!(last("(0 - 7) // 2").unwrap(), Value::Int(-4)));
+        assert!(matches!(last("7 // (0 - 2)").unwrap(), Value::Int(-3)));
+        assert!(matches!(last("1 + 6 // 2").unwrap(), Value::Int(4))); // // binds like *
+        assert!(matches!(last("([7, 8, 9] // 2)[2]").unwrap(), Value::Int(4))); // broadcast
+        assert!(matches!(last("7.0 // 2.0").unwrap(), Value::Float(f) if (f - 3.0).abs() < 1e-9));
+        assert!(last("5 // 0").is_err());
+        assert!(matches!(last("5 // 2").unwrap(), Value::Int(2))); // merkle halving
+        // single-arg log = natural log (numpy parity); log(x, base) keeps working
+        assert!((float("log(2.718281828459045)") - 1.0).abs() < 1e-9);
+        assert!((float("log(8.0, 2.0)") - 3.0).abs() < 1e-9);
+        // gcd — sign-agnostic, gcd(n, 0) = |n|
+        assert!(matches!(last("gcd(12, 18)").unwrap(), Value::Int(6)));
+        assert!(matches!(last("gcd(17, 5)").unwrap(), Value::Int(1)));
+        assert!(matches!(last("gcd(0, 5)").unwrap(), Value::Int(5)));
+        assert!(matches!(last("gcd(0 - 12, 18)").unwrap(), Value::Int(6)));
+    }
+
+    #[test]
     fn bitwise_operators() {
         assert!(matches!(last("12 & 10").unwrap(), Value::Int(8)));
         assert!(matches!(last("12 | 10").unwrap(), Value::Int(14)));

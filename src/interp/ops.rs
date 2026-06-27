@@ -29,7 +29,7 @@ pub(crate) fn eval_binary(
     // array⊕array (same length). Comparison/equality deliberately do NOT
     // broadcast — `==` is whole-value, avoiding NumPy's "ambiguous truth value"
     // trap; use `.map`/`.where` for elementwise predicates.
-    if matches!(op, Add | Sub | Mul | Div | Mod | Pow) {
+    if matches!(op, Add | Sub | Mul | Div | FloorDiv | Mod | Pow) {
         // Fast path: `Add`/`Sub`/`Mul` over packed numeric arrays run as a tight
         // loop on the `i64`/`f64` buffer (no per-element `Value` boxing or dispatch)
         // and keep the result packed. Other ops / `Values` arrays fall through.
@@ -118,6 +118,24 @@ pub(crate) fn eval_binary(
                 let a = num_operand(op, &l, line, col)?;
                 let b = num_operand(op, &r, line, col)?;
                 Ok(Value::Float(a.rem_euclid(b)))
+            }
+        },
+        FloorDiv => match (&l, &r) {
+            (Value::Int(a), Value::Int(b)) => {
+                if *b == 0 {
+                    Err(HelixError::new("integer division by zero", line, col)
+                        .hint("guard the divisor, e.g. `if d != 0`."))
+                } else {
+                    Ok(Value::Int(a.div_euclid(*b)))
+                }
+            }
+            _ => {
+                let a = num_operand(op, &l, line, col)?;
+                let b = num_operand(op, &r, line, col)?;
+                if b == 0.0 {
+                    return Err(HelixError::new("division by zero", line, col));
+                }
+                Ok(Value::Float(a.div_euclid(b)))
             }
         },
         Pow => match (&l, &r) {

@@ -84,6 +84,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "min", pure: true },
     BuiltinDef { path: "max", pure: true },
     BuiltinDef { path: "erf", pure: true },
+    BuiltinDef { path: "gcd", pure: true },
     // content hash — pure (same string → same digest), so safely memoizable
     BuiltinDef { path: "sha256", pure: true },
     // --- random (reproducible: seeded + pure, so safely memoizable) ---

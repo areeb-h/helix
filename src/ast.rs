@@ -31,6 +31,9 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    /// `//` — euclidean (floor for positive divisors) integer division. Pairs with
+    /// `%` (`rem_euclid`): `a == b*(a//b) + (a%b)`. `Int//Int` stays `Int`.
+    FloorDiv,
     Mod,
     Pow,
     Eq,
@@ -60,6 +63,7 @@ impl BinOp {
             BinOp::Sub => "-",
             BinOp::Mul => "*",
             BinOp::Div => "/",
+            BinOp::FloorDiv => "//",
             BinOp::Mod => "%",
             BinOp::Pow => "**",
             BinOp::Eq => "==",
