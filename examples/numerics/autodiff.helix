@@ -1,0 +1,39 @@
+# Reverse-mode automatic differentiation — gradients of any computation, and the
+# gradient descent it powers. `variable(x)` wraps a number/tensor as a tracked leaf;
+# the ops you apply record a graph; `gradient(loss, x)` backpropagates through it.
+
+# --- gradients with known answers ---
+x = variable(3.0)
+print("d(x^2)/dx at 3:", gradient(x * x, x))                 # 2x = 6
+s = variable(0.0)
+print("d(sigmoid)/ds at 0:", gradient(sigmoid(s), s))        # 0.25
+
+# gradient of a vector reduction: d/dv sum(v^2) = 2v
+v = variable(tensor([1.0, 2.0, 3.0]))
+print("grad sum(v^2):", gradient((v * v).sum(), v))          # [2, 4, 6]
+
+# gradient w.r.t. several parameters at once → one per parameter
+a = variable(2.0)
+b = variable(5.0)
+print("grad of a*b wrt [a,b]:", gradient(a * b, [a, b]))     # [b, a] = [5, 2]
+
+# --- the payoff: train linear regression y = 2x + 1 by gradient descent ---
+# Features carry a bias column, so the weights to learn are [slope, intercept].
+X = tensor([[1.0, 1.0], [2.0, 1.0], [3.0, 1.0], [4.0, 1.0], [5.0, 1.0]])
+y = tensor([3.0, 5.0, 7.0, 9.0, 11.0])                       # exactly 2x + 1
+
+# One gradient-descent step: wrap the weights, build the loss, follow -gradient.
+fn step(w) = do {
+  wv = variable(w)
+  loss = ((X.matmul(wv) - y) ** 2).mean()                    # mean squared error
+  w - 0.03 * gradient(loss, wv)                              # plain-tensor SGD update
+}
+fn mse(w) = value_of(((X.matmul(variable(w)) - y) ** 2).mean())
+
+start = tensor([0.0, 0.0])
+print("\nstart loss:", mse(start))
+w1 = range(0, 200).reduce(start, (w, i) => step(w))
+print("loss after 200 steps:", mse(w1))
+trained = range(0, 800).reduce(w1, (w, i) => step(w))
+print("loss after 1000 steps:", mse(trained))
+print("learned weights (≈ [2, 1]):", trained)

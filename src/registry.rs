@@ -98,6 +98,10 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "to_float", pure: true },
     BuiltinDef { path: "lll", pure: true },
     BuiltinDef { path: "lll_exact", pure: true },
+    // reverse-mode autodiff: wrap a leaf, read its forward value, get a gradient
+    BuiltinDef { path: "variable", pure: true },
+    BuiltinDef { path: "value_of", pure: true },
+    BuiltinDef { path: "gradient", pure: true },
     // general pairwise sequence alignment (NW/SW) over arbitrary arrays
     BuiltinDef { path: "align", pure: true },
     // content hash — pure (same string → same digest), so safely memoizable

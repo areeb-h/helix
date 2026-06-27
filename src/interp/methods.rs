@@ -100,6 +100,15 @@ pub(crate) fn call_method(
     if matches!(recv, Value::Missing) {
         return Ok(Value::Missing);
     }
+    // If a method argument is tracked (autodiff) but the receiver is a plain number
+    // or tensor, lift the receiver into the graph too — so `X.matmul(w)` differentiates
+    // through `w` even though `X` is a constant.
+    if !matches!(recv, Value::Node(_))
+        && args.iter().any(|a| matches!(a, Value::Node(_)))
+        && let Some(n) = crate::autodiff::lift(recv)
+    {
+        return crate::autodiff::method(&n, name, &args, line, col);
+    }
     match recv {
         Value::Array(items) => match array_numeric_fast(items, name, &args, line, col)? {
             // A typed array's numeric reduction reads the packed buffer directly.
@@ -109,6 +118,7 @@ pub(crate) fn call_method(
         },
         Value::Str(s) => string_method(s, name, &args, line, col),
         Value::Dna(s) => dna_method(s, name, &args, line, col),
+        Value::Node(n) => crate::autodiff::method(n, name, &args, line, col),
         Value::Tensor(t) => crate::tensor::method(t, name, &args, line, col),
         Value::PyObject(h) => crate::python::method(h, name, &args, line, col),
         other => Err(HelixError::new(

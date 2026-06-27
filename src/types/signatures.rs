@@ -306,6 +306,20 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Int)
         }
+        // autodiff: a tracked value / its forward value / a gradient. The graph node
+        // is a runtime-only value, so the checker stays permissive (Unknown).
+        "variable" | "value_of" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            Ok(Type::Unknown)
+        }
+        "gradient" => {
+            if args.len() != 2 {
+                return Err(arity_err(name, 2, args.len(), line, col));
+            }
+            Ok(Type::Unknown)
+        }
         // argmax/argmin over an array or tensor → the Int index of the extreme value.
         "argmax" | "argmin" => {
             if args.len() != 1 {

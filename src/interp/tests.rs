@@ -1190,6 +1190,39 @@
     }
 
     #[test]
+    fn autodiff_reverse_mode() {
+        // d/dx x^2 = 2x = 6
+        assert!((float("let x = variable(3.0) in gradient(x * x, x)") - 6.0).abs() < 1e-9);
+        // d/da (a-2)^2 = 2(a-2) = 6
+        assert!((float("let a = variable(5.0) in gradient((a - 2.0) ** 2, a)") - 6.0).abs() < 1e-9);
+        // d/dx exp(x) at 1 = e ;  d/dx ln(x) at 2 = 0.5
+        assert!((float("let x = variable(1.0) in gradient(exp(x), x)") - std::f64::consts::E).abs() < 1e-9);
+        assert!((float("let x = variable(2.0) in gradient(ln(x), x)") - 0.5).abs() < 1e-9);
+        // sigmoid'(0) = 0.25 ;  tanh'(0) = 1
+        assert!((float("let s = variable(0.0) in gradient(sigmoid(s), s)") - 0.25).abs() < 1e-9);
+        assert!((float("let s = variable(0.0) in gradient(tanh(s), s)") - 1.0).abs() < 1e-9);
+        // vector: grad sum(v^2) = 2v → summed = 2*(1+2+3) = 12
+        assert!((float("let v = variable(tensor([1.0,2.0,3.0])) in gradient((v*v).sum(), v).sum()") - 12.0).abs() < 1e-9);
+        // relu gate: grad of sum(relu(z)) counts the positive entries (2 of 3 here)
+        assert!((float("let z = variable(tensor([0.0 - 1.0, 0.5, 2.0])) in gradient(relu(z).sum(), z).sum()") - 2.0).abs() < 1e-9);
+        // division: d/da (a/b) = 1/b = 0.5
+        assert!((float("let a = variable(6.0) in let b = variable(2.0) in gradient(a / b, a)") - 0.5).abs() < 1e-9);
+        // gradient w.r.t. an array of leaves returns an array of grads (∂(a*b): [b, a])
+        assert!(matches!(last("let a = variable(3.0) in let b = variable(4.0) in gradient(a * b, [a, b])[0]").unwrap(), Value::Float(f) if (f - 4.0).abs() < 1e-9));
+        // a non-scalar loss is rejected (must reduce first)
+        assert!(last("let v = variable(tensor([1.0,2.0])) in gradient(v * v, v)").is_err());
+        // end-to-end: linear regression (y=2x+1) trains to ~zero loss via matmul + GD
+        let prog = "X = tensor([[1.0,1.0],[2.0,1.0],[3.0,1.0],[4.0,1.0]])\n\
+                    yt = tensor([3.0,5.0,7.0,9.0])\n\
+                    fn step(w) = do { wv = variable(w)\n\
+                      loss = ((X.matmul(wv) - yt) ** 2).mean()\n\
+                      w - 0.05 * gradient(loss, wv) }\n\
+                    w = range(0,400).reduce(tensor([0.0,0.0]), (w,i) => step(w))\n\
+                    value_of(((X.matmul(variable(w)) - yt) ** 2).mean())";
+        assert!(float(prog) < 1e-4, "linear regression did not converge");
+    }
+
+    #[test]
     fn tensor_ragged_errors() {
         assert!(last("tensor([[1, 2], [3]])")
             .unwrap_err()

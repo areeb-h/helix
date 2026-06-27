@@ -96,6 +96,11 @@ pub enum Value {
     /// and dropping releases it. See ADR/Phase 6. The `python` global is a handle
     /// too (a namespace marker). Always compiled; only its bridge body is gated.
     PyObject(Rc<crate::python::PyHandle>),
+    /// A node in a reverse-mode autodiff graph (`src/autodiff.rs`): a tracked
+    /// scalar/tensor that records how it was computed so `gradient(...)` can
+    /// backpropagate. Created by `variable(x)`; one word (`Rc`), so `Value` stays
+    /// 16 bytes. Pure at the surface — the graph's interior mutability is hidden.
+    Node(Rc<crate::autodiff::Node>),
 }
 
 /// The backing store of a [`Value::Array`]. Homogeneous numeric arrays are kept as
@@ -311,6 +316,7 @@ impl Value {
             Value::Missing => "Missing",
             Value::Unit => "Unit",
             Value::PyObject(_) => "PyObject",
+            Value::Node(_) => "Node",
         }
     }
 
@@ -383,6 +389,8 @@ impl fmt::Display for Value {
             Value::Missing => write!(f, "missing"),
             Value::Unit => write!(f, "()"),
             Value::PyObject(h) => write!(f, "{}", h.repr()),
+            // A tracked value prints as its forward value (the graph stays hidden).
+            Value::Node(n) => write!(f, "{}", crate::autodiff::node_value(n)),
             Value::Array(items) => {
                 write!(f, "[")?;
                 for (i, v) in items.to_values().iter().enumerate() {

@@ -27,6 +27,12 @@ pub(crate) fn eval_binary(
         return Ok(Value::Missing);
     }
 
+    // Autodiff: if either operand is a tracked value, build a graph node instead of
+    // computing a plain result (so `gradient(...)` can backpropagate through it).
+    if matches!(l, Value::Node(_)) || matches!(r, Value::Node(_)) {
+        return crate::autodiff::binary(op, &l, &r, line, col);
+    }
+
     // Elementwise broadcasting for arithmetic: array⊕scalar, scalar⊕array, and
     // array⊕array (same length). Comparison/equality deliberately do NOT
     // broadcast — `==` is whole-value, avoiding NumPy's "ambiguous truth value"

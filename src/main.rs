@@ -8,6 +8,7 @@
 
 mod align;
 mod ast;
+mod autodiff;
 mod backend;
 mod bed;
 mod bio;

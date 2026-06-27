@@ -424,11 +424,28 @@ impl super::Interp {
                 }
                 Ok(Value::Tensor(Rc::new(tensor::eye(n))))
             }
+            // ---- reverse-mode autodiff (src/autodiff.rs) ----
+            "variable" => {
+                arity(name, &args, 1, line, col)?;
+                crate::autodiff::variable(&args[0], line, col)
+            }
+            "value_of" => {
+                arity(name, &args, 1, line, col)?;
+                Ok(crate::autodiff::value_of(&args[0]))
+            }
+            "gradient" => {
+                arity(name, &args, 2, line, col)?;
+                crate::autodiff::gradient(&args[0], &args[1], line, col)
+            }
             // ---- math standard library (broadcasts over arrays, propagates missing) ----
             "sqrt" | "cbrt" | "exp" | "ln" | "log10" | "log2" | "sin" | "cos" | "tan" | "asin"
             | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "degrees" | "radians" | "erf"
             | "normal_cdf" | "normal_pdf" | "relu" | "sigmoid" => {
                 arity(name, &args, 1, line, col)?;
+                // A tracked (autodiff) argument builds a graph node instead.
+                if matches!(&args[0], Value::Node(_)) {
+                    return crate::autodiff::unary_builtin(name, &args[0], line, col);
+                }
                 let f: fn(f64) -> f64 = match name {
                     "erf" => crate::stats::erf,
                     "normal_cdf" => crate::stats::normal_cdf,
