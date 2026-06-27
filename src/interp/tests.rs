@@ -388,6 +388,17 @@
     }
 
     #[test]
+    fn string_plus_runtime_hint() {
+        // `a` is Unknown at compile time, so the `+`-joins-strings nudge must also come
+        // from the runtime operand check.
+        let err = last("fn f(a) = a + \"!\"\nf(\"hi\")").unwrap_err();
+        assert!(
+            err.hint.unwrap_or_default().contains("interpolation"),
+            "expected an interpolation hint at runtime"
+        );
+    }
+
+    #[test]
     fn bitwise_operators() {
         assert!(matches!(last("12 & 10").unwrap(), Value::Int(8)));
         assert!(matches!(last("12 | 10").unwrap(), Value::Int(14)));

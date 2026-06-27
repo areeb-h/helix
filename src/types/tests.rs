@@ -70,6 +70,16 @@
     }
 
     #[test]
+    fn error_hints_guide_common_mistakes() {
+        // `+` to join strings → point at interpolation / join (compile-time path).
+        let h = tc("\"a\" + \"b\"").expect_err("expected error").hint.unwrap_or_default();
+        assert!(h.contains("interpolation") || h.contains("join"), "got: {h:?}");
+        // `=` (assignment) where `==` (equality) was meant, in a condition (parse path).
+        let h2 = tc("if x = 5 then 1 else 2").expect_err("expected error").hint.unwrap_or_default();
+        assert!(h2.contains("=="), "got: {h2:?}");
+    }
+
+    #[test]
     fn catches_provable_errors() {
         assert!(emsg("5 + \"x\"").contains("needs numbers"));
         assert!(emsg("if 5 then 1 else 2").contains("must be a boolean"));

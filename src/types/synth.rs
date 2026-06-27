@@ -119,19 +119,28 @@ impl super::Checker {
                 }
                 match arith_broadcast(op, lt, rt) {
                     Some(t) => Ok(t),
-                    None => Err(HelixError::new(
-                        format!(
-                            "operator `{}` needs numbers, but got a {}",
-                            op.symbol(),
-                            if is_numeric(lt) || matches!(lt, Type::Array(_) | Type::Tensor) {
-                                rt
-                            } else {
-                                lt
-                            }
-                        ),
-                        line,
-                        col,
-                    )),
+                    None => {
+                        let err = HelixError::new(
+                            format!(
+                                "operator `{}` needs numbers, but got a {}",
+                                op.symbol(),
+                                if is_numeric(lt) || matches!(lt, Type::Array(_) | Type::Tensor) {
+                                    rt
+                                } else {
+                                    lt
+                                }
+                            ),
+                            line,
+                            col,
+                        );
+                        // The common reflex: reaching for `+` to join strings.
+                        let strings = matches!(lt, Type::String) || matches!(rt, Type::String);
+                        Err(if matches!(op, Add) && strings {
+                            err.hint("strings don't join with `+` — use interpolation `\"{a}{b}\"`, or `xs.join(sep)` for a list of strings.")
+                        } else {
+                            err
+                        })
+                    }
                 }
             }
         }

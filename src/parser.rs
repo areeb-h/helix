@@ -1580,8 +1580,14 @@ impl Parser {
             Tok::If => {
                 self.advance();
                 let cond = self.expr()?;
+                let saw_eq = matches!(self.peek(), Tok::Eq);
                 self.eat(&Tok::Then, "after the condition").map_err(|e| {
-                    e.hint("an `if` expression looks like `if cond then a else b`.")
+                    if saw_eq {
+                        // `if x = 5` — the classic `=` (assignment) vs `==` (equality) slip.
+                        e.hint("did you mean `==`? A single `=` is assignment; conditions test with `==`.")
+                    } else {
+                        e.hint("an `if` expression looks like `if cond then a else b`.")
+                    }
                 })?;
                 let then_branch = self.expr()?;
                 self.eat(&Tok::Else, "after the `then` branch").map_err(|e| {

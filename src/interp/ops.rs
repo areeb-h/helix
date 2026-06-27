@@ -418,7 +418,7 @@ fn arith(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<Va
 
 fn num_operand(op: &BinOp, v: &Value, line: usize, col: usize) -> Result<f64, HelixError> {
     v.as_f64().ok_or_else(|| {
-        HelixError::new(
+        let err = HelixError::new(
             format!(
                 "operator `{}` needs numbers, but got a {}",
                 op.symbol(),
@@ -426,7 +426,13 @@ fn num_operand(op: &BinOp, v: &Value, line: usize, col: usize) -> Result<f64, He
             ),
             line,
             col,
-        )
+        );
+        // Same nudge as the type checker, for operands only known at runtime.
+        if matches!(op, BinOp::Add) && matches!(v, Value::Str(_)) {
+            err.hint("strings don't join with `+` — use interpolation `\"{a}{b}\"`, or `xs.join(sep)` for a list of strings.")
+        } else {
+            err
+        }
     })
 }
 
