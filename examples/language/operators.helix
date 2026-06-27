@@ -24,6 +24,15 @@ print("toggle bit 1:", flags ^ (1 << 1))   # flip a bit with XOR
 fn popcount(mask) = range(0, 8).filter(j => (mask >> j) & 1 == 1).count()
 print("popcount of 5:", popcount(5))
 
+# --- long expressions wrap across lines by STARTING a line with the operator ---
+# A line beginning with an infix operator (+ * == and …) continues the one above it,
+# so a big formula stays readable. (A leading `-` is NOT a continuation — it would be
+# a unary minus — so wrap subtraction as `… + (-x)` or end the prior line with `-`.)
+score = 1 * 100
+  + 2 * 10
+  + 3
+print("wrapped sum:", score)        # 123
+
 # --- ?? — supply a default when a value is `missing` ---
 # `missing` propagates through arithmetic; `??` is how you recover.
 measured = [1.0, missing, 3.0]

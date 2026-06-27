@@ -523,9 +523,20 @@ fn cook_newlines(raw: Vec<Token>) -> Vec<Token> {
     fn continues_after(t: &Tok) -> bool {
         // A line that's followed by `.`/`)`/`]`, or a `then`/`else` branch, is
         // clearly unfinished — drop the intervening newline.
+        //
+        // The infix operators below extend this to leading-operator continuation
+        // (`x = a\n  + b\n  + c`). This is purely additive: none of them can legally
+        // *begin* an expression, so a line that starts with one is otherwise a parse
+        // error — no currently-valid program changes meaning. `-` and `not` are
+        // deliberately excluded: they are valid unary prefixes, so a line starting
+        // with one is a real new statement, not a continuation.
         matches!(
             t,
             Tok::Dot | Tok::RParen | Tok::RBracket | Tok::RBrace | Tok::Then | Tok::Else | Tok::In
+                | Tok::Plus | Tok::Star | Tok::StarStar | Tok::Slash | Tok::SlashSlash | Tok::Percent
+                | Tok::EqEq | Tok::Ne | Tok::Lt | Tok::Gt | Tok::Le | Tok::Ge
+                | Tok::And | Tok::Or | Tok::Coalesce
+                | Tok::Amp | Tok::Caret | Tok::Pipe | Tok::Shl | Tok::Shr
         )
     }
 

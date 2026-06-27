@@ -542,6 +542,24 @@
     }
 
     #[test]
+    fn leading_operator_continuation() {
+        // A line that STARTS with an infix operator continues the previous one.
+        assert!(matches!(last("1\n  + 2\n  + 3").unwrap(), Value::Int(6)));
+        // precedence is unaffected — `* 4` binds before the `+`s: 1 + 2 + (3*4) = 15
+        assert!(matches!(last("1\n  + 2\n  + 3\n  * 4").unwrap(), Value::Int(15)));
+        // comparison / boolean operators continue too
+        assert!(matches!(last("10 > 5\n  and 2 == 2").unwrap(), Value::Bool(true)));
+        // works inside a function body split across lines (the research use case)
+        assert!(matches!(
+            last("fn f(n) = (if n > 0 then 1 else 0)\n  + (if n > 1 then 2 else 0)\nf(2)").unwrap(),
+            Value::Int(3)
+        ));
+        // a leading unary `-` is NOT a continuation: `x = 10` binds, `- 3` is a
+        // separate (discarded) statement, so `x` is still 10 (continuation would be 7).
+        assert!(matches!(last("x = 10\n- 3\nx").unwrap(), Value::Int(10)));
+    }
+
+    #[test]
     fn multiline_dot_chain() {
         let v = last("[3, 1, 2]\n    .sort()\n    .reverse()").unwrap();
         match v {
