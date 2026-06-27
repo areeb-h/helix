@@ -60,7 +60,8 @@ check covers them). New to Helix? Start with [`language/tour.helix`](language/to
 |------|-------|
 | [genomics.helix](bio/genomics.helix) | DNA sequences, GC content, k-mers |
 | [sequencing.helix](bio/sequencing.helix) | FASTQ reads and Phred quality |
-| [alignment.helix](bio/alignment.helix) | Pairwise sequence alignment |
+| [alignment.helix](bio/alignment.helix) | Pairwise DNA alignment (`Dna.align`) |
+| [sequence-similarity.helix](bio/sequence-similarity.helix) | General `align(a, b)` over any sequence — homology + containment |
 | [alignments.helix](bio/alignments.helix) | SAM/BAM alignment records + region queries |
 | [annotations.helix](bio/annotations.helix) | GFF/BED genome annotations |
 | [variants.helix](bio/variants.helix) | VCF/BCF variants + region queries |

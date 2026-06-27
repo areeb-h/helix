@@ -272,6 +272,177 @@ pub fn align(x: &[u8], y: &[u8], mode: Mode, sc: Scoring) -> Alignment {
     }
 }
 
+/// One column of an alignment path produced by [`align_path`]: both sequences
+/// contribute (`Both`), only `a` (a gap in `b`), or only `b` (a gap in `a`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Both(usize, usize),
+    OnlyA(usize),
+    OnlyB(usize),
+}
+
+/// Generic affine-gap alignment over index ranges `[0,n) x [0,m)`, matching via
+/// `eq(ia, ib)`. Returns the score and the alignment path in left-to-right order.
+/// The same Gotoh DP and modes as [`align`]; kept as a separate routine so the
+/// tested byte aligner is undisturbed (this powers the general `align(a, b)`
+/// builtin over arbitrary Helix values).
+pub fn align_path(
+    n: usize,
+    m: usize,
+    mode: Mode,
+    sc: Scoring,
+    eq: impl Fn(usize, usize) -> bool,
+) -> (i32, Vec<Step>) {
+    let w = m + 1;
+    let size = (n + 1) * w;
+    let mut mm = vec![NEG_INF; size];
+    let mut xx = vec![NEG_INF; size];
+    let mut yy = vec![NEG_INF; size];
+    let mut tm = vec![3u8; size];
+    let mut tx = vec![3u8; size];
+    let mut ty = vec![3u8; size];
+    let first_gap = sc.gap_open + sc.gap_extend;
+    mm[0] = 0;
+    for i in 1..=n {
+        let idx = i * w;
+        let open = mm[(i - 1) * w] + first_gap;
+        let ext = xx[(i - 1) * w] + sc.gap_extend;
+        let (v, from) = if open >= ext { (open, 0) } else { (ext, 1) };
+        xx[idx] = v;
+        tx[idx] = from;
+    }
+    for j in 1..=m {
+        let open = mm[j - 1] + first_gap;
+        let ext = yy[j - 1] + sc.gap_extend;
+        let (v, from) = if open >= ext { (open, 0) } else { (ext, 2) };
+        yy[j] = v;
+        ty[j] = from;
+    }
+    if mode == Mode::Semiglobal {
+        for j in 0..=m {
+            yy[j] = 0;
+            ty[j] = 3;
+        }
+    }
+    for i in 1..=n {
+        for j in 1..=m {
+            let idx = i * w + j;
+            let diag = (i - 1) * w + (j - 1);
+            let up = (i - 1) * w + j;
+            let left = i * w + (j - 1);
+            let sij = if eq(i - 1, j - 1) { sc.match_ } else { sc.mismatch };
+            let (best, from) = max3(mm[diag], xx[diag], yy[diag]);
+            // Local mode: a fresh start (empty prefix, score 0) may beat continuing a
+            // negative-scoring prefix, so clamp the predecessor to >= 0 before adding s.
+            let (prefix, pfrom) = if mode == Mode::Local && best < 0 { (0, 3u8) } else { (best, from) };
+            mm[idx] = prefix + sij;
+            tm[idx] = pfrom;
+            if mode == Mode::Local && mm[idx] < 0 {
+                mm[idx] = 0;
+                tm[idx] = 3;
+            }
+            let xo = mm[up] + first_gap;
+            let xe = xx[up] + sc.gap_extend;
+            if xo >= xe {
+                xx[idx] = xo;
+                tx[idx] = 0;
+            } else {
+                xx[idx] = xe;
+                tx[idx] = 1;
+            }
+            let yo = mm[left] + first_gap;
+            let ye = yy[left] + sc.gap_extend;
+            if yo >= ye {
+                yy[idx] = yo;
+                ty[idx] = 0;
+            } else {
+                yy[idx] = ye;
+                ty[idx] = 2;
+            }
+        }
+    }
+    let (mut i, mut j, mut state, score) = match mode {
+        Mode::Global => {
+            let (sc2, st) = max3(mm[n * w + m], xx[n * w + m], yy[n * w + m]);
+            (n, m, st, sc2)
+        }
+        Mode::Local => {
+            let (mut bi, mut bj, mut best) = (0usize, 0usize, 0i32);
+            for ii in 0..=n {
+                for jj in 0..=m {
+                    if mm[ii * w + jj] > best {
+                        best = mm[ii * w + jj];
+                        bi = ii;
+                        bj = jj;
+                    }
+                }
+            }
+            (bi, bj, 0u8, best)
+        }
+        Mode::Semiglobal => {
+            let (mut bj, mut bst, mut best) = (0usize, 0u8, NEG_INF);
+            for jj in 0..=m {
+                if mm[n * w + jj] >= best {
+                    best = mm[n * w + jj];
+                    bj = jj;
+                    bst = 0;
+                }
+                if xx[n * w + jj] > best {
+                    best = xx[n * w + jj];
+                    bj = jj;
+                    bst = 1;
+                }
+            }
+            (n, bj, bst, best)
+        }
+    };
+    let mut steps: Vec<Step> = Vec::new();
+    loop {
+        let idx = i * w + j;
+        match mode {
+            Mode::Local => {
+                // stop at an empty (score-0) M cell - the start of the local alignment
+                if state == 0 && mm[idx] <= 0 {
+                    break;
+                }
+            }
+            Mode::Semiglobal => {
+                if i == 0 {
+                    break;
+                }
+            }
+            Mode::Global => {
+                if i == 0 && j == 0 {
+                    break;
+                }
+            }
+        }
+        match state {
+            0 => {
+                steps.push(Step::Both(i - 1, j - 1));
+                state = tm[idx];
+                i -= 1;
+                j -= 1;
+                if state == 3 {
+                    break; // predecessor is the origin (a fresh local start)
+                }
+            }
+            1 => {
+                steps.push(Step::OnlyA(i - 1));
+                state = tx[idx];
+                i -= 1;
+            }
+            _ => {
+                steps.push(Step::OnlyB(j - 1));
+                state = ty[idx];
+                j -= 1;
+            }
+        }
+    }
+    steps.reverse();
+    (score, steps)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

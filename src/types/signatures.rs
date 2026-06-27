@@ -305,6 +305,23 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             // shape/element validation is the runtime's job.
             Ok(Type::Array(Box::new(Type::Array(Box::new(Type::Float)))))
         }
+        "align" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(HelixError::new(
+                    format!("`align` takes (a, b) or (a, b, mode), got {}", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            // two sequences (+ optional mode string) -> an alignment record
+            Ok(Type::Record(vec![
+                ("score".to_string(), Type::Int),
+                ("matches".to_string(), Type::Int),
+                ("length".to_string(), Type::Int),
+                ("a_aligned".to_string(), array_of_unknown()),
+                ("b_aligned".to_string(), array_of_unknown()),
+            ]))
+        }
         "correlation" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));

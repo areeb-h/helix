@@ -592,6 +592,73 @@ impl super::Interp {
                 let out: Vec<Value> = reduced.into_iter().map(Value::float_array).collect();
                 Ok(Value::array(out))
             }
+            "align" => {
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(HelixError::new(
+                        format!("`align` takes (a, b) or (a, b, mode), got {} arguments", args.len()),
+                        line,
+                        col,
+                    )
+                    .hint("e.g. `align(a, b)` or `align(a, b, \"local\")`."));
+                }
+                let seq = |v: &Value| -> Result<Vec<Value>, HelixError> {
+                    match v {
+                        Value::Array(arr) => Ok(arr.to_values().into_owned()),
+                        other => Err(type_err("align", "an array", other, line, col)),
+                    }
+                };
+                let a = seq(&args[0])?;
+                let b = seq(&args[1])?;
+                let mode = match args.get(2) {
+                    None => crate::align::Mode::Global,
+                    Some(Value::Str(s)) => match s.as_str() {
+                        "global" => crate::align::Mode::Global,
+                        "local" => crate::align::Mode::Local,
+                        "semiglobal" => crate::align::Mode::Semiglobal,
+                        other => {
+                            return Err(HelixError::new(
+                                format!("unknown align mode `{other}`"),
+                                line,
+                                col,
+                            )
+                            .hint("use \"global\", \"local\", or \"semiglobal\"."))
+                        }
+                    },
+                    Some(other) => return Err(type_err("align", "a mode string", other, line, col)),
+                };
+                let sc = crate::align::Scoring { match_: 1, mismatch: -1, gap_open: 0, gap_extend: -1 };
+                let (score, steps) =
+                    crate::align::align_path(a.len(), b.len(), mode, sc, |i, j| values_equal(&a[i], &b[j]));
+                let mut a_al = Vec::with_capacity(steps.len());
+                let mut b_al = Vec::with_capacity(steps.len());
+                let mut matches = 0i64;
+                for st in &steps {
+                    match st {
+                        crate::align::Step::Both(ia, ib) => {
+                            if values_equal(&a[*ia], &b[*ib]) {
+                                matches += 1;
+                            }
+                            a_al.push(a[*ia].clone());
+                            b_al.push(b[*ib].clone());
+                        }
+                        crate::align::Step::OnlyA(ia) => {
+                            a_al.push(a[*ia].clone());
+                            b_al.push(Value::Missing);
+                        }
+                        crate::align::Step::OnlyB(ib) => {
+                            a_al.push(Value::Missing);
+                            b_al.push(b[*ib].clone());
+                        }
+                    }
+                }
+                Ok(Value::Record(Rc::new(vec![
+                    (Symbol::intern("score"), Value::Int(score as i64)),
+                    (Symbol::intern("matches"), Value::Int(matches)),
+                    (Symbol::intern("length"), Value::Int(steps.len() as i64)),
+                    (Symbol::intern("a_aligned"), Value::array(a_al)),
+                    (Symbol::intern("b_aligned"), Value::array(b_al)),
+                ])))
+            }
             "min" | "max" => {
                 arity(name, &args, 2, line, col)?;
                 if matches!(args[0], Value::Missing) || matches!(args[1], Value::Missing) {

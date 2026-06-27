@@ -1,0 +1,23 @@
+# General pairwise alignment — `align(a, b, mode?)` works on ANY sequence (arrays
+# of numbers, strings, tokens), not just DNA. Modes: "global" (Needleman–Wunsch),
+# "local" (Smith–Waterman), "semiglobal". Returns {score, matches, length,
+# a_aligned, b_aligned} with gaps shown as `missing`.
+
+# --- global homology between two token sequences (e.g. linearized expression trees) ---
+a = ["mul", "x1", "x2"]
+b = ["add", "mul", "x1", "x2"]
+g = align(a, b)
+print("global score:", g.score, " matches:", g.matches)
+print("aligned a:", g.a_aligned)
+print("aligned b:", g.b_aligned)
+
+# --- local (Smith–Waterman) finds a CONTAINED sub-structure that global under-weights ---
+sub  = ["mul", "x1", "x2"]
+tree = ["sin", "mul", "x1", "x2", "add", "c"]
+loc = align(sub, tree, "local")
+# containment score: fraction of the smaller sequence that aligns
+containment = loc.matches * 1.0 / sub.count()
+print("\nlocal matches:", loc.matches, " containment:", containment)
+
+# --- numeric sequences align too ---
+print("\nnumeric:", align([1, 2, 3, 4], [1, 9, 3, 4]).matches, "of 4 positions match")

@@ -250,6 +250,27 @@
     }
 
     #[test]
+    fn general_pairwise_alignment() {
+        // global NW: identical sequences fully match
+        assert!(matches!(last("align([1, 2, 3], [1, 2, 3]).matches").unwrap(), Value::Int(3)));
+        assert!(matches!(last("align([1, 2, 3], [1, 2, 3]).score").unwrap(), Value::Int(3)));
+        // a gap: [1,2,3] vs [1,3] aligns 1 and 3, gaps the 2
+        assert!(matches!(last("align([1, 2, 3], [1, 3]).matches").unwrap(), Value::Int(2)));
+        // local SW: full containment of [2,3] inside [1,2,3,4] (score + matches both 2)
+        assert!(matches!(last("align([2, 3], [1, 2, 3, 4], \"local\").matches").unwrap(), Value::Int(2)));
+        assert!(matches!(last("align([2, 3], [1, 2, 3, 4], \"local\").score").unwrap(), Value::Int(2)));
+        // token sequences (linearized trees): a subtree is contained
+        assert!(matches!(
+            last("align([\"mul\", \"x\"], [\"sin\", \"mul\", \"x\"], \"local\").matches").unwrap(),
+            Value::Int(2)
+        ));
+        // gaps surface as `missing` in the aligned output
+        assert!(matches!(last("align([1, 2, 3], [1, 3]).b_aligned[1]").unwrap(), Value::Missing));
+        // unknown mode errors
+        assert!(last("align([1], [1], \"diagonal\")").is_err());
+    }
+
+    #[test]
     fn sort_by_and_int_valued_floats() {
         // sort_by(key) — ascending by a numeric key, stable
         assert!(matches!(last("[{a: 3}, {a: 1}, {a: 2}].sort_by(r => r.a)[0].a").unwrap(), Value::Int(1)));
