@@ -54,6 +54,7 @@ check covers them). New to Helix? Start with [`language/tour.helix`](language/to
 |------|-------|
 | [statistics.helix](statistics/statistics.helix) | Descriptive stats, t-test, correlation, regression |
 | [regression.helix](statistics/regression.helix) | Polynomial model selection with AIC/BIC |
+| [mdl-induction.helix](statistics/mdl-induction.helix) | Few-shot learning as MDL induction — shortest rule generalizes, flexible fit overfits |
 | [metrics.helix](statistics/metrics.helix) | Regression + classification metrics (RMSE, F1, confusion matrix) |
 | [experiment.helix](statistics/experiment.helix) | An end-to-end experiment loop |
 

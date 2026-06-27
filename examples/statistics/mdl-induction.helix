@@ -1,0 +1,52 @@
+# Few-shot learning as MDL induction — in-context learning, the explicit way.
+#
+# From a HANDFUL of examples of a hidden rule, recover the SHORTEST rule that
+# explains them (minimum description length), then watch it generalize where a
+# flexible exact fit only overfits. This is the Occam/Solomonoff view of learning:
+# the shortest program consistent with the data is the one that predicts the future.
+#
+# Hidden rule: y = 2^x.  Few-shot training at x = 0..3 ; held-out at x = 4..6.
+xs = [0, 1, 2, 3]
+ys = [1.0, 2.0, 4.0, 8.0]
+heldx = [4, 5, 6]
+heldy = [16.0, 32.0, 64.0]
+
+# --- three competing hypotheses: under-, right-, and over-fit ---
+cmean = ys.mean()
+fn h_const(x)  = round(cmean) * 1.0           # y = c     (1 free number)
+fn h_double(x) = 2.0 ** x                      # y = 2^x   (0 free numbers — pure structure)
+
+# the degree-3 polynomial through all 4 points: solve the Vandermonde system exactly
+Vrows = xs.map(x => [1.0, x * 1.0, (x * x) * 1.0, (x * x * x) * 1.0])
+coef  = tensor(Vrows).solve(tensor(ys))        # [c0, c1, c2, c3]   (4 free numbers)
+fn h_poly(x) = coef[0] + coef[1] * x + coef[2] * x * x + coef[3] * x * x * x
+
+# --- MDL: description length = L(H) bits to write the rule + L(D|H) bits for residuals ---
+# A rule that misfits pays to encode its errors; a complex rule pays for its parameters.
+fn resid_bits(r) = if abs(r) < 0.000001 then 0.0 else log2(abs(r) + 1.0) + 2.0
+fn data_bits(preds) = preds.zip(ys).map((p, y) => resid_bits(p - y)).sum()
+
+hyps = [
+  {name: "constant   y=c",      params: 1, train: xs.map(x => h_const(x)),  held: heldx.map(x => h_const(x))},
+  {name: "doubling   y=2^x",    params: 0, train: xs.map(x => h_double(x)), held: heldx.map(x => h_double(x))},
+  {name: "degree-3 polynomial", params: 4, train: xs.map(x => h_poly(x)),   held: heldx.map(x => h_poly(x))},
+]
+scored = hyps.map(h => do {
+  lh = 4.0 + 12.0 * h.params                   # ~12 bits per free parameter + an operator base
+  ld = data_bits(h.train)                      # residual code length (0 for an exact fit)
+  {name: h.name, lh: lh, ld: ld, dl: lh + ld, held: h.held}
+})
+
+print("rule                  L(H)  L(D|H)  total-DL   held-out (truth 16,32,64)")
+scored.map(s => print("  {s.name}    {s.lh:.0f}    {s.ld:.1f}     {s.dl:.1f}     {s.held.map(p => round(p))}"))
+
+best = scored.min_by(s => s.dl)
+poly = scored.where(s => s.name == "degree-3 polynomial").first()
+print("")
+print("MDL pick (shortest total description): {best.name}")
+print("  generalizes -> {best.held.map(p => round(p))}   (truth {heldy.map(y => round(y))})")
+print("flexible exact fit memorizes the 4 points but OVERFITS off-support:")
+print("  degree-3   -> {poly.held.map(p => round(p))}   (truth {heldy.map(y => round(y))})")
+print("")
+print("=> few-shot induction = MDL: the shortest rule that fits a handful generalizes;")
+print("   a fit flexible enough to interpolate them predicts nonsense (15 != 16).")
