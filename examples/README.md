@@ -36,6 +36,7 @@ check covers them). New to Helix? Start with [`language/tour.helix`](language/to
 |------|-------|
 | [math.helix](numerics/math.helix) | The math standard library (broadcast + `missing`) |
 | [vectors.helix](numerics/vectors.helix) | Vector ops: dot/norm/cumsum/softmax/argsort/clamp/zscores |
+| [lattice.helix](numerics/lattice.helix) | LLL lattice reduction + integer-relation detection (exact laws from data) |
 | [tensors.helix](numerics/tensors.helix) | N-d tensors: matmul, transpose, solve |
 | [random.helix](numerics/random.helix) | Reproducible seeded RNG (`random`/`randn`/shuffle/sample) |
 

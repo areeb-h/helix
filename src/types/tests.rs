@@ -201,6 +201,7 @@
             "language/bindings",
             "numerics/math",
             "numerics/vectors",
+            "numerics/lattice",
             "numerics/tensors",
             "dataframes/analysis",
             "dataframes/dataframes",

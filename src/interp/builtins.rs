@@ -548,6 +548,50 @@ impl super::Interp {
                     }
                 }
             }
+            "lll" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(HelixError::new(
+                        format!("`lll` takes a basis and an optional delta, got {}", args.len()),
+                        line,
+                        col,
+                    )
+                    .hint("e.g. `lll(basis)` or `lll(basis, 0.99)`."));
+                }
+                let rows = match &args[0] {
+                    Value::Array(outer) => outer,
+                    other => return Err(type_err("lll", "an array of basis vectors", other, line, col)),
+                };
+                let mut basis: Vec<Vec<f64>> = Vec::with_capacity(rows.len());
+                for row in rows.to_values().iter() {
+                    match row {
+                        Value::Array(inner) => {
+                            let mut v = Vec::with_capacity(inner.len());
+                            for x in inner.to_values().iter() {
+                                match x.as_f64() {
+                                    Some(f) => v.push(f),
+                                    None => {
+                                        return Err(type_err("lll", "numeric basis entries", x, line, col))
+                                    }
+                                }
+                            }
+                            basis.push(v);
+                        }
+                        other => {
+                            return Err(type_err("lll", "each basis vector to be an array", other, line, col))
+                        }
+                    }
+                }
+                let delta = match args.get(1) {
+                    Some(d) => d
+                        .as_f64()
+                        .ok_or_else(|| type_err("lll", "a numeric delta", &args[1], line, col))?,
+                    None => 0.75,
+                };
+                let reduced =
+                    crate::lattice::lll(basis, delta).map_err(|e| HelixError::new(e, line, col))?;
+                let out: Vec<Value> = reduced.into_iter().map(Value::float_array).collect();
+                Ok(Value::array(out))
+            }
             "min" | "max" => {
                 arity(name, &args, 2, line, col)?;
                 if matches!(args[0], Value::Missing) || matches!(args[1], Value::Missing) {

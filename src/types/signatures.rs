@@ -291,6 +291,18 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Int)
         }
+        "lll" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(HelixError::new(
+                    format!("`lll` takes a basis and an optional delta, got {}", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            // A basis (array of vectors) -> the reduced basis (array of float arrays);
+            // shape/element validation is the runtime's job.
+            Ok(Type::Array(Box::new(Type::Array(Box::new(Type::Float)))))
+        }
         "correlation" => {
             if args.len() != 2 {
                 return Err(arity_err(name, 2, args.len(), line, col));

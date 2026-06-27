@@ -1,0 +1,25 @@
+# LLL lattice reduction — finds short, nearly-orthogonal vectors in a lattice.
+# Its headline scientific use: INTEGER-RELATION DETECTION — recovering an exact
+# integer law hidden in real-valued measurements, which plain regression can't do.
+
+# A monomial law  ∏ qᵢ^pᵢ = const  is linear in log space (Σ pᵢ·ln qᵢ = 0), so the
+# integer exponents pᵢ form an integer relation among the ln qᵢ. Here the data hides
+# ln(6) = ln(2) + ln(3) — i.e. the relation [1, 1, -1].
+logs = [log(2.0), log(3.0), log(6.0)]
+scale = 1.0e9
+
+# Embed each quantity as a lattice row: (i-th unit vector) ++ [round(scale · logᵢ)].
+# A *short* vector of this lattice has a near-zero last coordinate — which is exactly
+# an integer combination of the logs that vanishes: the conservation law.
+basis = range(0, 3).map(i => do {
+  unit = range(0, 3).map(j => if i == j then 1.0 else 0.0)
+  unit.concat([round(scale * logs[i])])
+})
+
+reduced = lll(basis)
+relation = reduced[0].take(3).map(p => round(p))
+print("recovered law:  p =", relation, " (±[1,1,-1]: ln2 + ln3 - ln6 = 0)")
+print("residual:", round(reduced[0][3], 1), "— rounding noise, ~0 against scale 1e9")
+
+# Plain shortest-vector reduction: a skewed integer basis becomes short and tidy.
+print("reduced [[3,1],[2,1]]:", lll([[3.0, 1.0], [2.0, 1.0]]))

@@ -20,6 +20,7 @@ mod http;
 mod interp;
 mod jit;
 mod json;
+mod lattice;
 mod lexer;
 mod managed;
 mod module;
