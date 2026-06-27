@@ -778,6 +778,15 @@ pub(crate) fn tri(v: &Value, line: usize, col: usize) -> Result<Option<bool>, He
 pub(crate) fn as_int(v: &Value, who: &str, line: usize, col: usize) -> Result<i64, HelixError> {
     match v {
         Value::Int(i) => Ok(*i),
+        // An *integer-valued* float (e.g. `1.0` from `least_squares`/`lll`, a lattice
+        // coefficient, or arithmetic that stayed whole) counts as that integer — so
+        // `gcd`/`range`/`//`/… accept it directly. A fractional or out-of-range float
+        // is a clear error (use `round`/`floor`/`trunc` to choose how to convert).
+        Value::Float(f)
+            if f.fract() == 0.0 && *f >= -9.223_372_036_854_776e18 && *f < 9.223_372_036_854_776e18 =>
+        {
+            Ok(*f as i64)
+        }
         other => Err(type_err(who, "an integer", other, line, col)),
     }
 }

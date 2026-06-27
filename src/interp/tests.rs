@@ -250,6 +250,22 @@
     }
 
     #[test]
+    fn sort_by_and_int_valued_floats() {
+        // sort_by(key) — ascending by a numeric key, stable
+        assert!(matches!(last("[{a: 3}, {a: 1}, {a: 2}].sort_by(r => r.a)[0].a").unwrap(), Value::Int(1)));
+        assert!(matches!(last("[{a: 3}, {a: 1}, {a: 2}].sort_by(r => r.a)[2].a").unwrap(), Value::Int(3)));
+        // descending via a negated key
+        assert!(matches!(last("[3, 1, 4, 1, 5].sort_by(x => 0 - x)[0]").unwrap(), Value::Int(5)));
+        // string keys work (argsort generalized to strings)
+        assert!(matches!(last("[{n: \"c\"}, {n: \"a\"}, {n: \"b\"}].sort_by(r => r.n)[0].n").unwrap(), Value::Str(s) if s.as_str() == "a"));
+        assert!(matches!(last("[\"b\", \"a\", \"c\"].argsort()[0]").unwrap(), Value::Int(1)));
+        // as_int accepts integer-valued floats (least_squares/lll outputs); fractional errors
+        assert!(matches!(last("gcd(12.0, 18.0)").unwrap(), Value::Int(6)));
+        assert!(matches!(last("gcd(1.0, 0.0 - 1.0)").unwrap(), Value::Int(1)));
+        assert!(last("gcd(1.5, 2)").is_err());
+    }
+
+    #[test]
     fn floor_div_log_gcd() {
         // `//` is euclidean integer division, pairing with `%`: a == b*(a//b)+(a%b).
         assert!(matches!(last("7 // 2").unwrap(), Value::Int(3)));

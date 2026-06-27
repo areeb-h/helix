@@ -285,7 +285,9 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 return Ok(Type::Missing);
             }
             for a in args {
-                if !matches!(a, Type::Int | Type::Num) {
+                // Float is allowed at the type level (an integer-valued float like 1.0 from
+                // least_squares/lll is accepted at runtime); a fractional one errors there.
+                if !matches!(a, Type::Int | Type::Num | Type::Float) {
                     return Err(type_err("gcd", "an integer", a, line, col));
                 }
             }

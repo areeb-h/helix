@@ -65,6 +65,36 @@ pub fn parse_expression(src: &str, depth: usize) -> Result<Expr, HelixError> {
     Ok(e)
 }
 
+/// `recv.sort_by(key)` - sort `recv` ascending by `key(element)`. Desugars to
+/// `let $s = recv in $s.map(key).argsort().map($si => $s[$si])`, reusing the tested
+/// map/argsort/index path so both engines handle it identically (parity by
+/// construction). `$`-prefixed temporaries are unlexable, so they can't collide.
+fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Expr, HelixError> {
+    if args.len() != 1 {
+        return Err(HelixError::new(
+            format!("`sort_by` takes one key function, got {}", args.len()),
+            l,
+            c,
+        )
+        .hint("e.g. `people.sort_by(p => p.age)`."));
+    }
+    let key = args.into_iter().next().unwrap();
+    let s = || Expr::Ident { name: "$s".to_string(), line: l, col: c };
+    let keys = Expr::Method { recv: Box::new(s()), name: "map".into(), args: vec![key], line: l, col: c };
+    let order = Expr::Method { recv: Box::new(keys), name: "argsort".into(), args: vec![], line: l, col: c };
+    let gather = Expr::Lambda {
+        params: vec!["$si".to_string()],
+        body: Box::new(Expr::Index {
+            recv: Box::new(s()),
+            index: Box::new(Expr::Ident { name: "$si".to_string(), line: l, col: c }),
+            line: l,
+            col: c,
+        }),
+    };
+    let body = Expr::Method { recv: Box::new(order), name: "map".into(), args: vec![gather], line: l, col: c };
+    Ok(Expr::Let { bindings: vec![("$s".to_string(), recv)], body: Box::new(body) })
+}
+
 /// Desugar `recv.min_by(key)` / `max_by(key)` / `argmin()` / `argmax()` into
 /// existing constructs so both engines handle them with no new ops:
 ///
@@ -1020,6 +1050,7 @@ impl Parser {
                             "min_by" | "max_by" | "argmin" | "argmax" => {
                                 desugar_order_by(e, &name, args, l, c)?
                             }
+                            "sort_by" => desugar_sort_by(e, args, l, c)?,
                             // `a.zipmap(b, f)` == `a.zip(b).map(f)` — a paired
                             // elementwise map, desugared so both engines reuse the
                             // tested zip+map (parity by construction). For plain

@@ -810,12 +810,23 @@ fn array_method(
             if items.iter().any(|v| matches!(v, Value::Missing)) {
                 return Ok(Value::Missing);
             }
-            let xs = numeric_vec(items, "argsort", line, col)?;
-            let mut idx: Vec<i64> = (0..xs.len() as i64).collect();
-            // stable ascending sort by value (NaN sinks to the end, deterministically)
-            idx.sort_by(|&a, &b| {
-                xs[a as usize].partial_cmp(&xs[b as usize]).unwrap_or(std::cmp::Ordering::Greater)
-            });
+            let mut idx: Vec<i64> = (0..items.len() as i64).collect();
+            // Stable ascending sort of the *indices* by the values they point at -
+            // numeric (exact, like `sort`) or all-string; other element types error.
+            if items.iter().all(|v| v.as_f64().is_some()) {
+                idx.sort_by(|&a, &b| numeric_cmp(&items[a as usize], &items[b as usize]));
+            } else if items.iter().all(|v| matches!(v, Value::Str(_))) {
+                idx.sort_by(|&a, &b| match (&items[a as usize], &items[b as usize]) {
+                    (Value::Str(x), Value::Str(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
+                });
+            } else {
+                return Err(HelixError::new(
+                    "`argsort` needs an array of all numbers or all strings",
+                    line,
+                    col,
+                ));
+            }
             Ok(Value::int_array(idx))
         }
         "clamp" => {
