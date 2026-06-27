@@ -1184,12 +1184,33 @@ fn python_import_math_on_both_engines() {
 #[cfg(feature = "python")]
 #[test]
 fn python_object_is_opaque_until_to_array() {
-    // A Python list stays an opaque PyObject (NOT silently an Array); `to_array`
-    // is the explicit, on-demand materialization into a native Helix Array.
+    // A Python list stays an opaque PyObject (NOT silently an Array) — but it now
+    // PRINTS as its Python value; `to_array` is the explicit materialization to native.
     let src = "import python.builtins as b\nxs = b.list(b.range(0, 4))\nprint(xs)\nprint(to_array(xs).sum())\n";
     let (out, stderr, code) = run_script(src, &[], "opaque");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
-    assert_eq!(out.trim(), "<python list>\n6", "got: {out:?}");
+    assert_eq!(out.trim(), "[0, 1, 2, 3]\n6", "got: {out:?}");
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn python_handles_forward_indexing_operators_and_eval() {
+    // Indexing → __getitem__, operators → the operator protocol, and eval/exec share
+    // a persistent namespace (the kwargs escape hatch). Verified on both engines.
+    let src = "np = python.import(\"numpy\")\n\
+               a = np.arange(5)\n\
+               print(a[2])\n\
+               print(a * 10)\n\
+               print(a[1] < a[2])\n\
+               python.exec(\"import numpy as N\")\n\
+               print(python.eval(\"int(N.arange(4).sum())\"))\n\
+               print(python.eval(\"2 ** 10\"))\n\
+               print(python.import(\"json\").dumps({a: 1, b: 2}))\n";
+    let (vm, stderr, code) = run_script(src, &[], "forward_vm");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(vm.trim(), "2\n[ 0 10 20 30 40]\ntrue\n6\n1024\n{\"a\": 1, \"b\": 2}", "got: {vm:?}");
+    let (tw, _, _) = run_script(src, &[("HELIX_NOVM", "1")], "forward_tw");
+    assert_eq!(vm, tw, "VM and tree-walker disagree on Python forwarding");
 }
 
 #[cfg(feature = "python")]

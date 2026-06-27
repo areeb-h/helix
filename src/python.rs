@@ -263,10 +263,22 @@ mod imp {
     /// dict shows the *value*, not an opaque tag (Python already elides huge reprs).
     /// Falls back to `<python TYPE>` only if `str()` itself raises.
     pub fn object_repr(obj: &Py<PyAny>) -> String {
+        // Cap the rendered string so `print(huge_python_object)` can't build a
+        // multi-gigabyte display string (numpy already elides, but a plain list/str
+        // does not). 10k chars is far more than any readable line.
+        const MAX_REPR: usize = 10_000;
         Python::attach(|py| {
             let bound = obj.bind(py);
             if let Ok(s) = bound.str() {
-                return s.to_string();
+                let s = s.to_string();
+                if s.len() > MAX_REPR {
+                    let mut end = MAX_REPR;
+                    while !s.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    return format!("{}… (+{} more chars)", &s[..end], s.len() - end);
+                }
+                return s;
             }
             let ty = bound.get_type().name().map(|n| n.to_string()).unwrap_or_else(|_| "object".to_string());
             format!("<python {ty}>")
@@ -376,6 +388,20 @@ mod imp {
                     let iter = bound.try_iter().map_err(|e| py_err(py, e, line, col))?;
                     let mut out = Vec::new();
                     for item in iter {
+                        // Cap the pull so an unbounded Python iterable (a generator,
+                        // `itertools.count()`, …) fails cleanly instead of OOMing/hanging.
+                        // Matches the runtime's `MAX_ELEMENTS` collection cap.
+                        const MAX_PULL: usize = 100_000_000;
+                        if out.len() >= MAX_PULL {
+                            return Err(HelixError::new(
+                                format!(
+                                    "`to_array` stopped at {MAX_PULL} elements — is the Python iterable unbounded?"
+                                ),
+                                line,
+                                col,
+                            )
+                            .hint("slice or take a finite prefix on the Python side first."));
+                        }
                         let item = item.map_err(|e| py_err(py, e, line, col))?;
                         out.push(from_py(py, &item, line, col)?);
                     }
