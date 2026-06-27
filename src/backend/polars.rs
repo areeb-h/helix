@@ -344,12 +344,18 @@ impl DataHandle for PolarsFrame {
         Ok(wrap_lazy(stacked))
     }
 
-    fn unique(&self, _line: usize, _col: usize) -> Result<Df, HelixError> {
-        // Stable + keep-first → deterministic row order (parity-safe), unlike the
-        // unordered group-by.
-        Ok(wrap_lazy(
-            self.lf.clone().unique_stable(None, UniqueKeepStrategy::First),
-        ))
+    fn unique_by(&self, subset: &[String], _line: usize, _col: usize) -> Result<Df, HelixError> {
+        // Stable keep → deterministic row order (parity-safe), unlike the unordered
+        // group-by. Whole-row distinct keeps the first occurrence (standard); a key
+        // subset keeps the last (upsert: the newest row per key wins).
+        let (sub, keep) = if subset.is_empty() {
+            (None, UniqueKeepStrategy::First)
+        } else {
+            let names: std::sync::Arc<[PlSmallStr]> =
+                subset.iter().map(|s| PlSmallStr::from_str(s)).collect();
+            (Some(Selector::ByName { names, strict: true }), UniqueKeepStrategy::Last)
+        };
+        Ok(wrap_lazy(self.lf.clone().unique_stable(sub, keep)))
     }
 
     /// One grouped aggregation: `group(keys).<agg>(value_col)`. Lazy.

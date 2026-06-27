@@ -4,6 +4,7 @@
 # Everything is written under a scratch directory so the example is self-contained.
 
 dir = "/tmp/helix_io_demo"
+made = mkdir(dir)                       # create the dir (and parents) if needed
 
 # --- build a DataFrame from in-memory columns ---
 runs = dataframe({
@@ -29,9 +30,14 @@ print("\nparquet rows back:", read_parquet("{dir}/runs.parquet").count())
 more = dataframe({run: [4], model: ["spline"], rmse: [0.17]})
 grown = reloaded.vstack(more)
 print("\nafter vstack:", grown.count(), "rows")
-# Re-appending the same rows would duplicate them; `unique` keeps the KB clean.
+# Re-appending the same rows would duplicate them; `unique()` keeps the KB clean.
 deduped = grown.vstack(more).unique()
 print("after re-append + unique:", deduped.count(), "rows")
+# `unique("col")` upserts by key — re-running a model overwrites its old row
+# (newest wins), so the knowledge base stays one-row-per-model.
+rerun = dataframe({run: [4], model: ["spline"], rmse: [0.11]})  # better score
+upserted = grown.vstack(rerun).unique("model")
+print("upsert by model:", upserted.sort(@model).select(@model, @rmse).head(4).count(), "distinct models")
 
 # --- JSON round-trip via files ---
 text_ok = "[1, 2, 3, 4]".write_to("{dir}/nums.json")
@@ -41,3 +47,7 @@ print("\nread_json:", nums, " sum:", nums.sum())
 # --- content-addressing: a stable id for a piece of data ---
 config = "model=cubic;seed=42"
 print("\nsha256(config):", sha256(config))
+
+# --- tidy up: remove_file is idempotent (false if already gone) ---
+gone = remove_file("{dir}/nums.json")
+print("cleaned up nums.json:", gone)

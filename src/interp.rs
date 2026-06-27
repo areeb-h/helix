@@ -370,25 +370,26 @@ impl Interp {
                 for a in args {
                     vals.push(self.eval(a)?);
                 }
+                // A user binding of this name shadows a builtin of the same name —
+                // defining `fn sign(..)` calls *your* function, not the math builtin.
+                if let Some(b) = self.env.get(name) {
+                    return match &b.value {
+                        Value::Function(g) => {
+                            let g = g.clone();
+                            self.call_function(name, &g, vals, *line, *col)
+                        }
+                        // The name is bound, but not to something callable.
+                        other => Err(HelixError::new(
+                            format!("`{}` is a {}, not a function", name, other.type_name()),
+                            *line,
+                            *col,
+                        )
+                        .hint("only functions and the built-ins `print`/`dna`/`range` can be called.")),
+                    };
+                }
+                // No user binding → the builtin.
                 if crate::registry::lookup(name).is_some() {
                     return self.call_builtin(name, vals, *line, *col);
-                }
-                // A user-defined (or anonymous, stored-in-a-variable) function?
-                let func = self.env.get(name).and_then(|b| match &b.value {
-                    Value::Function(g) => Some(g.clone()),
-                    _ => None,
-                });
-                if let Some(g) = func {
-                    return self.call_function(name, &g, vals, *line, *col);
-                }
-                // The name exists but isn't callable.
-                if let Some(b) = self.env.get(name) {
-                    return Err(HelixError::new(
-                        format!("`{}` is a {}, not a function", name, b.value.type_name()),
-                        *line,
-                        *col,
-                    )
-                    .hint("only functions and the built-ins `print`/`dna`/`range` can be called."));
                 }
                 // Unknown — suggest the closest known function name.
                 let mut cands: Vec<String> = crate::registry::names().map(|s| s.to_string()).collect();

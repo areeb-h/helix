@@ -144,10 +144,8 @@ impl super::Checker {
         line: usize,
         col: usize,
     ) -> Result<Type, HelixError> {
-        if crate::registry::lookup(name).is_some() {
-            return builtin_type(name, args, line, col);
-        }
-        // user-defined function?
+        // A user binding of this name shadows a builtin of the same name — defining
+        // `fn sign(..)` checks against *your* signature, not the math builtin's.
         if let Some(Type::Function { params, ret }) = self.env.get(name).cloned() {
             if params.len() != args.len() {
                 return Err(HelixError::new(
@@ -193,6 +191,10 @@ impl super::Checker {
                 col,
             )
             .hint("only functions and the built-ins can be called."));
+        }
+        // No user binding → the builtin.
+        if crate::registry::lookup(name).is_some() {
+            return builtin_type(name, args, line, col);
         }
         // unknown — suggest from builtins + user functions
         let mut cands: Vec<String> = crate::registry::names().map(|s| s.to_string()).collect();

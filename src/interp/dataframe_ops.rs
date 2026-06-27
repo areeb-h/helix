@@ -224,11 +224,14 @@ impl super::Interp {
                 }
             }
             "unique" => {
-                if !args.is_empty() {
-                    return Err(HelixError::new("`unique` takes no arguments", line, col)
-                        .hint("e.g. `kb.unique()` to drop duplicate rows."));
+                // `unique()` drops duplicate whole rows; `unique("k1", "k2")` keeps
+                // one row per key combination (newest wins — upsert).
+                let vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<_, _>>()?;
+                let names = crate::interp::access::column_args("unique", &vals, line, col)?;
+                if !names.is_empty() {
+                    crate::backend::validate_columns_exist(&lf, &names, line, col)?;
                 }
-                Ok(Value::dataframe(lf.unique(line, col)?))
+                Ok(Value::dataframe(lf.unique_by(&names, line, col)?))
             }
             "count" => {
                 if !args.is_empty() {

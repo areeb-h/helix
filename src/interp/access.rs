@@ -183,6 +183,21 @@ pub(crate) fn column_arg(args: &[Value], line: usize, col: usize) -> Result<Stri
     }
 }
 
+/// Extract zero or more column-name strings from evaluated args (for `unique`).
+pub(crate) fn column_args(
+    who: &str,
+    args: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<Vec<String>, HelixError> {
+    args.iter()
+        .map(|v| match v {
+            Value::Str(s) => Ok((**s).clone()),
+            other => Err(type_err(who, "a column name string", other, line, col)),
+        })
+        .collect()
+}
+
 pub(crate) fn df_value_method(
     lf: &Df,
     name: &str,
@@ -238,11 +253,13 @@ pub(crate) fn df_value_method(
             }
         }
         "unique" => {
-            if !args.is_empty() {
-                return Err(HelixError::new("`unique` takes no arguments", line, col)
-                    .hint("e.g. `kb.unique()` to drop duplicate rows."));
+            // `unique()` drops duplicate whole rows; `unique("k1", "k2")` keeps one
+            // row per key combination (newest wins — upsert).
+            let names = column_args("unique", &args, line, col)?;
+            if !names.is_empty() {
+                crate::backend::validate_columns_exist(lf, &names, line, col)?;
             }
-            Ok(Value::dataframe(lf.unique(line, col)?))
+            Ok(Value::dataframe(lf.unique_by(&names, line, col)?))
         }
         "column" => {
             let name = column_arg(&args, line, col)?;

@@ -182,6 +182,17 @@
     }
 
     #[test]
+    fn user_function_shadows_builtin() {
+        // A user `fn` of the same name as a builtin wins (the reported papercut: a
+        // local `fn sign` was silently using the math builtin).
+        assert!(matches!(last("fn sign(n) = 99\nsign(-5)").unwrap(), Value::Int(99)));
+        assert!(matches!(last("fn max(a) = a + 1\nmax(10)").unwrap(), Value::Int(11)));
+        // unshadowed builtins are untouched
+        assert!(matches!(last("abs(-3)").unwrap(), Value::Int(3)));
+        assert!((float("sqrt(16.0)") - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn hashing_and_dataframe_unique() {
         // sha256 matches the canonical hex digest of "helix" (verified vs sha256sum)
         match last("sha256(\"helix\")").unwrap() {
@@ -191,10 +202,15 @@
             ),
             v => panic!("expected a string, got {:?}", v),
         }
-        // unique drops duplicate rows
+        // unique() drops duplicate whole rows
         assert!(matches!(
             last("dataframe({id: [1, 1, 2, 2, 2]}).unique().count()").unwrap(),
             Value::Int(2)
+        ));
+        // unique("key") upserts — one row per key, the newest (last) wins
+        assert!(matches!(
+            last("dataframe({k: [\"a\", \"a\"], v: [1, 9]}).unique(\"k\").column(\"v\")[0]").unwrap(),
+            Value::Int(9)
         ));
     }
 

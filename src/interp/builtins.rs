@@ -183,6 +183,39 @@ impl super::Interp {
                     other => Err(type_err("file_exists", "a string path", other, line, col)),
                 }
             }
+            // Storage-lifecycle ops. `remove_file` is idempotent (false if the file
+            // wasn't there); `mkdir` makes the directory and any parents, returning
+            // whether it was newly created. Both error only on a real I/O failure.
+            "remove_file" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => {
+                        let p = std::path::Path::new(s.as_str());
+                        if p.exists() {
+                            std::fs::remove_file(p).map_err(|e| {
+                                HelixError::new(format!("could not remove `{s}`: {e}"), line, col)
+                            })?;
+                            Ok(Value::Bool(true))
+                        } else {
+                            Ok(Value::Bool(false))
+                        }
+                    }
+                    other => Err(type_err("remove_file", "a string path", other, line, col)),
+                }
+            }
+            "mkdir" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => {
+                        let existed = std::path::Path::new(s.as_str()).exists();
+                        std::fs::create_dir_all(s.as_str()).map_err(|e| {
+                            HelixError::new(format!("could not create directory `{s}`: {e}"), line, col)
+                        })?;
+                        Ok(Value::Bool(!existed))
+                    }
+                    other => Err(type_err("mkdir", "a string path", other, line, col)),
+                }
+            }
             // Content hash (hex SHA-256) for content-addressing / reproducibility ids.
             "sha256" => {
                 arity(name, &args, 1, line, col)?;

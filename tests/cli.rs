@@ -146,6 +146,31 @@ fn text_and_json_io_round_trip() {
 }
 
 #[test]
+fn file_lifecycle_ops() {
+    let dir = std::env::temp_dir().join("helix_lifecycle");
+    let _ = std::fs::remove_dir_all(&dir);
+    let sub = dir.join("nested/deep");
+    let f = dir.join("nested/deep/note.txt");
+    let src = format!(
+        "print(mkdir(\"{d}\"))\n\
+         w = \"hi\".write_to(\"{f}\")\n\
+         print(file_exists(\"{f}\"))\n\
+         print(remove_file(\"{f}\"))\n\
+         print(remove_file(\"{f}\"))\n",
+        d = sub.to_str().unwrap(),
+        f = f.to_str().unwrap(),
+    );
+    let (out, err, code) = run_source(&src, &[], "lifecycle");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "true"); // mkdir -p created the nested dir
+    assert_eq!(lines[1], "true"); // file written + exists
+    assert_eq!(lines[2], "true"); // removed
+    assert_eq!(lines[3], "false"); // idempotent: already gone
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn version_and_help_flags() {
     for flag in ["--version", "-V"] {
         let (stdout, _, code) = run(&[flag], &[], "");

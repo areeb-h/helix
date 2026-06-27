@@ -32,6 +32,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "read_text", pure: false },
     BuiltinDef { path: "read_json", pure: false },
     BuiltinDef { path: "file_exists", pure: false },
+    BuiltinDef { path: "remove_file", pure: false },
+    BuiltinDef { path: "mkdir", pure: false },
     BuiltinDef { path: "read_fasta", pure: false },
     BuiltinDef { path: "read_fastq", pure: false },
     BuiltinDef { path: "read_vcf", pure: false },

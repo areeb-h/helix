@@ -789,71 +789,72 @@ impl Compiler {
                 b.next_slot = saved_next;
             }
             Expr::Call { name, args, line, col } => {
-                // Builtins win over user names, matching the tree-walker.
-                if crate::registry::lookup(name).is_some() {
-                    for a in args {
-                        self.compile_expr(b, a)?;
+                // A user binding of this name shadows a builtin of the same name —
+                // defining `fn sign(..)` calls *your* function, not the math builtin.
+                // Only a name with no user binding falls through to the builtin.
+                match self.resolve(b, name) {
+                    Some(NameRef::Func(idx)) => {
+                        for a in args {
+                            self.compile_expr(b, a)?;
+                        }
+                        b.emit(Op::CallFn { idx, nargs: args.len() as u32 }, *line, *col);
                     }
-                    let idx = self.builtin_idx(name);
-                    b.emit(Op::CallBuiltin { idx, nargs: args.len() as u32 }, *line, *col);
-                } else {
-                    match self.resolve(b, name) {
-                        Some(NameRef::Func(idx)) => {
+                    // A value-bound function: load the value, then the args, and
+                    // dispatch on the value's chunk at runtime (errors if not callable).
+                    Some(NameRef::Global(i)) => {
+                        b.emit(Op::LoadGlobal(i), *line, *col);
+                        for a in args {
+                            self.compile_expr(b, a)?;
+                        }
+                        b.emit(
+                            Op::CallValue(std::rc::Rc::new(CallValueData {
+                                nargs: args.len() as u32,
+                                name: std::rc::Rc::new(name.clone()),
+                            })),
+                            *line,
+                            *col,
+                        );
+                    }
+                    Some(NameRef::Local(slot)) => {
+                        b.emit(Op::LoadLocal(slot), *line, *col);
+                        for a in args {
+                            self.compile_expr(b, a)?;
+                        }
+                        b.emit(
+                            Op::CallValue(std::rc::Rc::new(CallValueData {
+                                nargs: args.len() as u32,
+                                name: std::rc::Rc::new(name.clone()),
+                            })),
+                            *line,
+                            *col,
+                        );
+                    }
+                    // A captured (upvalue) function value, e.g. a function-valued
+                    // parameter closed over by an inner lambda.
+                    Some(NameRef::Upvalue(uv)) => {
+                        b.emit(Op::GetUpvalue(uv), *line, *col);
+                        for a in args {
+                            self.compile_expr(b, a)?;
+                        }
+                        b.emit(
+                            Op::CallValue(std::rc::Rc::new(CallValueData {
+                                nargs: args.len() as u32,
+                                name: std::rc::Rc::new(name.clone()),
+                            })),
+                            *line,
+                            *col,
+                        );
+                    }
+                    // No user binding → the builtin, or (unreachable past the checker)
+                    // an unknown name. Args are still evaluated for their side effects.
+                    None => {
+                        if crate::registry::lookup(name).is_some() {
                             for a in args {
                                 self.compile_expr(b, a)?;
                             }
-                            b.emit(Op::CallFn { idx, nargs: args.len() as u32 }, *line, *col);
-                        }
-                        // Calling a value-bound function: load the value, then the
-                        // args, and dispatch on the value's chunk at runtime.
-                        Some(NameRef::Global(i)) => {
-                            b.emit(Op::LoadGlobal(i), *line, *col);
-                            for a in args {
-                                self.compile_expr(b, a)?;
-                            }
-                            b.emit(
-                                Op::CallValue(std::rc::Rc::new(CallValueData {
-                                    nargs: args.len() as u32,
-                                    name: std::rc::Rc::new(name.clone()),
-                                })),
-                                *line,
-                                *col,
-                            );
-                        }
-                        Some(NameRef::Local(slot)) => {
-                            b.emit(Op::LoadLocal(slot), *line, *col);
-                            for a in args {
-                                self.compile_expr(b, a)?;
-                            }
-                            b.emit(
-                                Op::CallValue(std::rc::Rc::new(CallValueData {
-                                    nargs: args.len() as u32,
-                                    name: std::rc::Rc::new(name.clone()),
-                                })),
-                                *line,
-                                *col,
-                            );
-                        }
-                        // Calling a captured (upvalue) function value, e.g. a
-                        // function-valued parameter closed over by an inner lambda.
-                        Some(NameRef::Upvalue(uv)) => {
-                            b.emit(Op::GetUpvalue(uv), *line, *col);
-                            for a in args {
-                                self.compile_expr(b, a)?;
-                            }
-                            b.emit(
-                                Op::CallValue(std::rc::Rc::new(CallValueData {
-                                    nargs: args.len() as u32,
-                                    name: std::rc::Rc::new(name.clone()),
-                                })),
-                                *line,
-                                *col,
-                            );
-                        }
-                        // Unknown name. The type checker rejects this before compile
-                        // (so it's unreachable normally); evaluate the args for their
-                        // side effects, then raise — keeping `compile` total.
-                        None => {
+                            let idx = self.builtin_idx(name);
+                            b.emit(Op::CallBuiltin { idx, nargs: args.len() as u32 }, *line, *col);
+                        } else {
                             for a in args {
                                 self.compile_expr(b, a)?;
                             }
