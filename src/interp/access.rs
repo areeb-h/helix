@@ -330,6 +330,10 @@ pub(crate) fn slice_bound(v: &Value, line: usize, col: usize) -> Result<Option<i
 }
 
 pub(crate) fn eval_index(recv: &Value, idx: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    // A Python handle forwards `[...]` to its `__getitem__` (numpy `a[i]`, dict `d[k]`).
+    if let Value::PyObject(h) = recv {
+        return crate::python::index(h, idx, line, col);
+    }
     // `r["key"]` — dynamic record-field access (handy for JSON whose keys aren't
     // valid identifiers). An absent key yields `missing`: this is the safe/optional
     // accessor, while `.field` is the static one that errors on a typo.

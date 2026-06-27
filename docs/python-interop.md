@@ -79,14 +79,45 @@ requested:
 ```helix
 builtins = python.import("builtins")
 nums = builtins.list(builtins.range(0, 5))
-print(nums)                 # <python list>        — opaque, not a Helix Array
-print(to_array(nums))       # [0, 1, 2, 3, 4]      — explicit materialization
-print(to_array(nums).sum()) # 10                   — now native methods work
+print(nums)                 # [0, 1, 2, 3, 4]      — handle, shown as its Python value
+print(to_array(nums).sum()) # 10                   — to_array makes it a native Array
 ```
 
-`to_array(x)` converts any Python iterable (or an already-native array) into a Helix
-`Array`. The reverse direction is automatic: Helix `Int`/`Float`/`Bool`/`String`/
-`missing`/`Array` convert to Python when passed as arguments.
+A handle is still opaque (it is a Python object, not a Helix `Array`), but it
+**prints as its `str(obj)`** so you can see what it holds. `to_array(x)` converts any
+Python iterable (or an already-native array) into a Helix `Array`. The reverse
+direction is automatic: Helix `Int`/`Float`/`Bool`/`String`/`missing`/`Array`/`Record`
+(→ `dict`)/`Tensor` (→ NumPy)/`DataFrame` (→ Polars) convert to Python as arguments.
+
+## Handles feel native: indexing, operators, expressions
+
+The bridge forwards Python's protocols, so an opaque handle is still usable directly:
+
+```helix
+np = python.import("numpy")
+a = np.arange(6)
+print(a[2])          # 2                       — forwards to __getitem__
+print(a * 10)        # [ 0 10 20 30 40 50]     — forwards to __mul__
+print(a[3] < a[4])   # true                    — forwards to __lt__
+```
+
+Indexing (`h[k]`) and binary operators (`+ - * / // % ** == != < > <= >=`) on a handle
+dispatch through Python. A record indexes a Python dict the same way (`d["key"]`).
+
+### `python.exec` / `python.eval` — the full-Python escape hatch
+
+Some Python syntax has no Helix equivalent — most importantly **keyword arguments**
+(`np.array(x, dtype="float64")`). `python.exec(code)` runs statements and
+`python.eval(expr)` evaluates an expression, both in one **persistent namespace**, so
+anything is expressible:
+
+```helix
+python.exec("import numpy as np")
+grid = python.eval("np.linspace(0, 1, 5, dtype='float64')")   # kwargs, just works
+print(python.eval("[x*x for x in range(5)]"))                 # comprehensions, slices…
+```
+
+`eval` converts its result by the same rules (scalars native, the rest opaque).
 
 ## DataFrames (zero-copy)
 
@@ -190,10 +221,17 @@ print("pi =", m.pi)
 stats = python.import("statistics")
 print("mean =", stats.mean([1.0, 2.0, 3.0, 4.0]))
 
-builtins = python.import("builtins")
-nums = builtins.list(builtins.range(0, 5))
-print("opaque:", nums)
-print("native sum:", to_array(nums).sum())
+# handles feel native: indexing, operators, value-printing
+np = python.import("numpy")
+a = np.arange(6)
+print("a[2] =", a[2], " a*10 =", a * 10)
+
+# exec/eval share a namespace — the kwargs / full-Python escape hatch
+python.exec("import numpy as N")
+print("eval kwargs:", python.eval("N.linspace(0, 1, 5, dtype='float64')"))
+
+t = to_tensor(python.eval("N.eye(3) * 5.0"))   # back to a native Helix tensor
+print(t)
 ```
 
 Run it with `cargo run --features python examples/python/interop.helix`.

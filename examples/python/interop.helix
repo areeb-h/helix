@@ -5,7 +5,8 @@
 # `import python.<module> [as alias]` embeds CPython and exposes the module;
 # `python.import("<module>")` is the equivalent expression form. Results convert
 # opaque-by-default: scalars become native Helix values, but containers/objects
-# stay opaque `<python ...>` handles until `to_array(...)` materializes them.
+# stay opaque Python handles (you can index, operate on, and print them — they show
+# their Python value — but `to_array`/`to_tensor`/`to_dataframe` bring them in native).
 
 import python.math as m
 print("sqrt(16) =", m.sqrt(16.0))
@@ -19,3 +20,23 @@ builtins = python.import("builtins")
 nums = builtins.list(builtins.range(0, 5))
 print("opaque:", nums)
 print("native sum:", to_array(nums).sum())
+
+# --- the bridge forwards Python's protocols, so handles feel native ---
+np = python.import("numpy")
+a = np.arange(6)
+print("indexing  a[2]:", a[2])              # __getitem__  -> 2
+print("operators a * 10:", a * 10)          # __mul__  ->  [ 0 10 20 30 40 50]
+print("a printed as its value:", np.array([1.5, 2.5]))   # str(obj), not <python ...>
+
+# --- exec/eval share a persistent namespace: the full-Python escape hatch ---
+# (use it for anything Helix syntax can't express directly — e.g. KEYWORD ARGS)
+python.exec("import numpy as N")
+grid = python.eval("N.linspace(0, 1, 5, dtype='float64')")   # kwargs!
+print("eval with kwargs:", grid)
+
+# Helix records cross as Python dicts (so `json.dumps(record)` just works).
+print("json:", python.import("json").dumps({name: "helix", n: 3}))
+
+# Bring a NumPy result home as a native Helix tensor.
+t = to_tensor(python.eval("N.eye(3) * 5.0"))
+print("native tensor from numpy:\n", t)

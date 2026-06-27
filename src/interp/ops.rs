@@ -33,6 +33,11 @@ pub(crate) fn eval_binary(
         return crate::autodiff::binary(op, &l, &r, line, col);
     }
 
+    // A Python operand forwards to Python's operator protocol (`a + b`, `a < b`, …).
+    if matches!(l, Value::PyObject(_)) || matches!(r, Value::PyObject(_)) {
+        return crate::python::binary(op, &l, &r, line, col);
+    }
+
     // Elementwise broadcasting for arithmetic: array⊕scalar, scalar⊕array, and
     // array⊕array (same length). Comparison/equality deliberately do NOT
     // broadcast — `==` is whole-value, avoiding NumPy's "ambiguous truth value"

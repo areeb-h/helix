@@ -133,6 +133,39 @@ pub fn to_tensor(arg: Value, line: usize, col: usize) -> Result<Value, HelixErro
     }
 }
 
+/// `pyobj[key]` — forward to Python's `__getitem__` (numpy `a[i]`, dict `d["k"]`, …).
+pub fn index(h: &Rc<PyHandle>, idx: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    #[cfg(feature = "python")]
+    {
+        imp::index(h, idx, line, col)
+    }
+    #[cfg(not(feature = "python"))]
+    {
+        let _ = (h, idx);
+        Err(unsupported(line, col))
+    }
+}
+
+/// A binary operator with at least one Python operand — forwards to Python's operator
+/// protocol so `a + b`, `a * 2`, `a < b`, … work directly on Python objects.
+pub fn binary(
+    op: &crate::ast::BinOp,
+    l: &Value,
+    r: &Value,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    #[cfg(feature = "python")]
+    {
+        imp::binary(op, l, r, line, col)
+    }
+    #[cfg(not(feature = "python"))]
+    {
+        let _ = (op, l, r);
+        Err(unsupported(line, col))
+    }
+}
+
 /// The error every bridge call returns when Helix was built without the feature.
 #[cfg(not(feature = "python"))]
 fn unsupported(line: usize, col: usize) -> HelixError {
@@ -143,27 +176,99 @@ fn unsupported(line: usize, col: usize) -> HelixError {
 #[cfg(feature = "python")]
 mod imp {
     use super::{Kind, PyHandle, Value};
+    use crate::ast::BinOp;
     use crate::error::HelixError;
     use numpy::ToPyArray;
     use pyo3::prelude::*;
-    use pyo3::types::{PyBool, PyFloat, PyList, PyString, PyTuple};
+    use pyo3::types::{PyBool, PyDict, PyFloat, PyList, PyString, PyTuple};
+    use std::ffi::CString;
     use std::rc::Rc;
+    use std::sync::OnceLock;
+
+    /// A persistent global namespace for `python.exec` / `python.eval`, so
+    /// `exec("import numpy as np")` then `eval("np.array(...)")` see each other.
+    /// `Py<PyDict>` is GIL-independent, so it can live in a process-wide cell.
+    fn globals(py: Python<'_>) -> Bound<'_, PyDict> {
+        static GLOBALS: OnceLock<Py<PyDict>> = OnceLock::new();
+        GLOBALS
+            .get_or_init(|| Python::attach(|p| PyDict::new(p).unbind()))
+            .bind(py)
+            .clone()
+    }
+
+    /// `pyobj[key]` → Python `__getitem__`.
+    pub fn index(
+        h: &Rc<PyHandle>,
+        idx: &Value,
+        line: usize,
+        col: usize,
+    ) -> Result<Value, HelixError> {
+        match &h.kind {
+            Kind::Object(obj) => Python::attach(|py| {
+                let key = to_py(py, idx, line, col)?;
+                let item = obj.bind(py).get_item(key).map_err(|e| py_err(py, e, line, col))?;
+                from_py(py, &item, line, col)
+            }),
+            Kind::Namespace => Err(HelixError::new("can't index the `python` namespace", line, col)),
+        }
+    }
+
+    /// A binary operator with a Python operand — dispatched through the `operator`
+    /// module so every object's `__add__`/`__lt__`/… protocol is honored.
+    pub fn binary(
+        op: &BinOp,
+        l: &Value,
+        r: &Value,
+        line: usize,
+        col: usize,
+    ) -> Result<Value, HelixError> {
+        let fname = match op {
+            BinOp::Add => "add",
+            BinOp::Sub => "sub",
+            BinOp::Mul => "mul",
+            BinOp::Div => "truediv",
+            BinOp::FloorDiv => "floordiv",
+            BinOp::Mod => "mod",
+            BinOp::Pow => "pow",
+            BinOp::Lt => "lt",
+            BinOp::Gt => "gt",
+            BinOp::Le => "le",
+            BinOp::Ge => "ge",
+            BinOp::Eq => "eq",
+            BinOp::Ne => "ne",
+            _ => {
+                return Err(HelixError::new(
+                    format!("operator `{}` is not supported on a Python object", op.symbol()),
+                    line,
+                    col,
+                ))
+            }
+        };
+        Python::attach(|py| {
+            let opmod = py.import("operator").map_err(|e| py_err(py, e, line, col))?;
+            let f = opmod.getattr(fname).map_err(|e| py_err(py, e, line, col))?;
+            let pl = to_py(py, l, line, col)?;
+            let pr = to_py(py, r, line, col)?;
+            let res = f.call1((pl, pr)).map_err(|e| py_err(py, e, line, col))?;
+            from_py(py, &res, line, col)
+        })
+    }
 
     /// Build an `Object` handle from a live Python value.
     fn object(obj: Py<PyAny>) -> Rc<PyHandle> {
         Rc::new(PyHandle { kind: Kind::Object(obj) })
     }
 
-    /// Label for Display/Debug, e.g. `<python list>`, `<python module>` — makes
-    /// clear the value is an opaque Python handle, not a native Helix value.
+    /// Display of a Python handle: its actual `str(obj)` so printing a numpy array or
+    /// dict shows the *value*, not an opaque tag (Python already elides huge reprs).
+    /// Falls back to `<python TYPE>` only if `str()` itself raises.
     pub fn object_repr(obj: &Py<PyAny>) -> String {
         Python::attach(|py| {
-            let ty = obj
-                .bind(py)
-                .get_type()
-                .name()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|_| "object".to_string());
+            let bound = obj.bind(py);
+            if let Ok(s) = bound.str() {
+                return s.to_string();
+            }
+            let ty = bound.get_type().name().map(|n| n.to_string()).unwrap_or_else(|_| "object".to_string());
             format!("<python {ty}>")
         })
     }
@@ -205,12 +310,39 @@ mod imp {
                     Ok(Value::PyObject(object(m.into_any().unbind())))
                 })
             }
+            // Run statements in the persistent namespace (`import numpy as np`, defs…).
+            "exec" => {
+                let code = expect_one_string(args, "python.exec", line, col)?;
+                let cstr = CString::new(code).map_err(|_| {
+                    HelixError::new("python code contains an interior NUL byte", line, col)
+                })?;
+                Python::attach(|py| {
+                    let g = globals(py);
+                    py.run(cstr.as_c_str(), Some(&g), None).map_err(|e| py_err(py, e, line, col))?;
+                    Ok(Value::Unit)
+                })
+            }
+            // Evaluate an expression in the persistent namespace and convert the result.
+            // The full-syntax escape hatch: kwargs, slices, comprehensions all work here.
+            "eval" => {
+                let code = expect_one_string(args, "python.eval", line, col)?;
+                let cstr = CString::new(code).map_err(|_| {
+                    HelixError::new("python code contains an interior NUL byte", line, col)
+                })?;
+                Python::attach(|py| {
+                    let g = globals(py);
+                    let res = py
+                        .eval(cstr.as_c_str(), Some(&g), None)
+                        .map_err(|e| py_err(py, e, line, col))?;
+                    from_py(py, &res, line, col)
+                })
+            }
             other => Err(HelixError::new(
                 format!("`python` has no method `{other}`"),
                 line,
                 col,
             )
-            .hint("use `python.import(\"name\")` to load a Python module.")),
+            .hint("use `python.import(\"name\")`, `python.exec(\"...\")`, or `python.eval(\"...\")`.")),
         }
     }
 
@@ -351,13 +483,34 @@ mod imp {
             Value::Str(s) => PyString::new(py, s).into_any(),
             Value::Missing => py.None().into_bound(py),
             Value::Array(items) => {
-                let mut elems = Vec::with_capacity(items.len());
-                for it in items.to_values().iter() {
-                    elems.push(to_py(py, it, line, col)?);
+                use crate::value::ArrayData;
+                // Packed numeric arrays cross straight from the f64/i64 buffer — no
+                // per-element `Value` boxing or recursive `to_py`.
+                match &**items {
+                    ArrayData::Floats(xs) => {
+                        PyList::new(py, xs.iter().copied()).map_err(|e| py_err(py, e, line, col))?.into_any()
+                    }
+                    ArrayData::Ints(xs) => {
+                        PyList::new(py, xs.iter().copied()).map_err(|e| py_err(py, e, line, col))?.into_any()
+                    }
+                    ArrayData::Values(vs) => {
+                        let mut elems = Vec::with_capacity(vs.len());
+                        for it in vs.iter() {
+                            elems.push(to_py(py, it, line, col)?);
+                        }
+                        PyList::new(py, elems).map_err(|e| py_err(py, e, line, col))?.into_any()
+                    }
                 }
-                PyList::new(py, elems)
-                    .map_err(|e| py_err(py, e, line, col))?
-                    .into_any()
+            }
+            // A Helix record becomes a Python dict (string keys) — so `json.dumps(rec)`,
+            // and any positional-dict argument, work.
+            Value::Record(fields) => {
+                let d = PyDict::new(py);
+                for (k, v) in fields.iter() {
+                    d.set_item(k.as_str(), to_py(py, v, line, col)?)
+                        .map_err(|e| py_err(py, e, line, col))?;
+                }
+                d.into_any()
             }
             Value::Tensor(t) => {
                 // Copy into a NumPy array. Helix tensors are immutable and Rc-shared,
