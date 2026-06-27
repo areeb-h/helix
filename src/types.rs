@@ -253,6 +253,8 @@ fn unknown_method(type_name: &str, name: &str, candidates: &[&str], line: usize,
 const MATH_UNARY_FLOAT: &[&str] = &[
     "sqrt", "cbrt", "exp", "ln", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
     "sinh", "cosh", "tanh", "degrees", "radians", "erf", "normal_cdf", "normal_pdf",
+    // neural-net activations — elementwise, so they broadcast over arrays/tensors too.
+    "relu", "sigmoid",
 ];
 
 // ---------- the checker ----------

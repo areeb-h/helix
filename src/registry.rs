@@ -73,6 +73,12 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "sinh", pure: true },
     BuiltinDef { path: "cosh", pure: true },
     BuiltinDef { path: "tanh", pure: true },
+    // neural-net activations (elementwise; broadcast over arrays/tensors)
+    BuiltinDef { path: "relu", pure: true },
+    BuiltinDef { path: "sigmoid", pure: true },
+    // index of the largest / smallest element (classification readout)
+    BuiltinDef { path: "argmax", pure: true },
+    BuiltinDef { path: "argmin", pure: true },
     BuiltinDef { path: "floor", pure: true },
     BuiltinDef { path: "ceil", pure: true },
     BuiltinDef { path: "round", pure: true },
@@ -167,7 +173,7 @@ pub static DNA_METHODS: &[&str] = &[
 /// Tensor methods (shape, aggregations, linear algebra).
 pub static TENSOR_METHODS: &[&str] = &[
     "shape", "ndim", "count", "sum", "mean", "min", "max", "flatten", "reshape", "transpose", "t",
-    "matmul", "dot", "norm", "det", "inv", "solve",
+    "matmul", "dot", "norm", "det", "inv", "solve", "softmax",
 ];
 
 /// DataFrame methods (column verbs + value methods + serialize/write).

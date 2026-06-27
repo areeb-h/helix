@@ -306,6 +306,16 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Int)
         }
+        // argmax/argmin over an array or tensor → the Int index of the extreme value.
+        "argmax" | "argmin" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            if !matches!(&args[0], Type::Array(_) | Type::Tensor | Type::Unknown) {
+                return Err(type_err(name, "an array or tensor of numbers", &args[0], line, col));
+            }
+            Ok(Type::Int)
+        }
         "to_float" => {
             if args.len() != 1 {
                 return Err(arity_err("to_float", 1, args.len(), line, col));
@@ -654,7 +664,7 @@ pub(super) fn tensor_method_type(name: &str, nargs: usize, line: usize, col: usi
                 Type::Tensor
             }
         }
-        "flatten" | "reshape" | "transpose" | "t" | "inv" | "solve" => Type::Tensor,
+        "flatten" | "reshape" | "transpose" | "t" | "inv" | "solve" | "softmax" => Type::Tensor,
         "matmul" | "dot" => Type::Unknown, // Float for vec·vec, Tensor otherwise
         "norm" | "det" => Type::Float,
         _ => {

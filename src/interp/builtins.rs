@@ -427,7 +427,7 @@ impl super::Interp {
             // ---- math standard library (broadcasts over arrays, propagates missing) ----
             "sqrt" | "cbrt" | "exp" | "ln" | "log10" | "log2" | "sin" | "cos" | "tan" | "asin"
             | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "degrees" | "radians" | "erf"
-            | "normal_cdf" | "normal_pdf" => {
+            | "normal_cdf" | "normal_pdf" | "relu" | "sigmoid" => {
                 arity(name, &args, 1, line, col)?;
                 let f: fn(f64) -> f64 = match name {
                     "erf" => crate::stats::erf,
@@ -450,9 +450,48 @@ impl super::Interp {
                     "tanh" => f64::tanh,
                     "degrees" => f64::to_degrees,
                     "radians" => f64::to_radians,
+                    "relu" => |x: f64| x.max(0.0),
+                    "sigmoid" => |x: f64| 1.0 / (1.0 + (-x).exp()),
                     _ => unreachable!(),
                 };
                 apply_float_fn(name, f, &args[0], line, col)
+            }
+            // Index of the largest / smallest element (first on ties) — over an array
+            // or a tensor (flattened). The classification companion to `softmax`.
+            "argmax" | "argmin" => {
+                arity(name, &args, 1, line, col)?;
+                let want_max = name == "argmax";
+                let vals: Vec<f64> = match &args[0] {
+                    Value::Array(items) => {
+                        let vs = items.to_values();
+                        let mut out = Vec::with_capacity(vs.len());
+                        for v in vs.iter() {
+                            out.push(
+                                v.as_f64()
+                                    .ok_or_else(|| type_err(name, "an array of numbers", v, line, col))?,
+                            );
+                        }
+                        out
+                    }
+                    Value::Tensor(t) => t.iter().copied().collect(),
+                    other => {
+                        return Err(type_err(name, "an array or tensor of numbers", other, line, col))
+                    }
+                };
+                if vals.is_empty() {
+                    return Err(HelixError::new(
+                        format!("`{name}` of an empty collection"),
+                        line,
+                        col,
+                    ));
+                }
+                let mut best = 0usize;
+                for (i, &x) in vals.iter().enumerate() {
+                    if (want_max && x > vals[best]) || (!want_max && x < vals[best]) {
+                        best = i;
+                    }
+                }
+                Ok(Value::Int(best as i64))
             }
             "floor" | "ceil" | "trunc" => {
                 arity(name, &args, 1, line, col)?;

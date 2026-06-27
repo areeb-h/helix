@@ -1170,6 +1170,26 @@
     }
 
     #[test]
+    fn activations_argmax_softmax() {
+        // relu / sigmoid broadcast over scalars, arrays, and tensors
+        assert_eq!(float("relu(0.0 - 2.0)"), 0.0);
+        assert_eq!(float("relu(3.0)"), 3.0);
+        assert!((float("sigmoid(0.0)") - 0.5).abs() < 1e-12);
+        assert_eq!(float("relu([0.0 - 1.0, 5.0, 0.0 - 2.0]).sum()"), 5.0);
+        assert_eq!(float("relu(tensor([[0.0 - 1.0, 2.0], [3.0, 0.0 - 4.0]])).sum()"), 5.0);
+        // argmax / argmin over arrays and tensors → Int index (first on ties)
+        assert!(matches!(last("argmax([3.0, 1.0, 9.0, 2.0])").unwrap(), Value::Int(2)));
+        assert!(matches!(last("argmin([3.0, 1.0, 9.0, 2.0])").unwrap(), Value::Int(1)));
+        assert!(matches!(last("argmax(tensor([5.0, 8.0, 1.0]))").unwrap(), Value::Int(1)));
+        assert!(last("argmax([])").is_err());
+        // tensor softmax (last axis): a row is a distribution that sums to 1
+        assert!((float("tensor([1.0, 2.0, 3.0]).softmax().sum()") - 1.0).abs() < 1e-12);
+        assert!((float("tensor([[1.0, 2.0], [3.0, 4.0]]).softmax().sum()") - 2.0).abs() < 1e-12);
+        // softmax is monotone: the largest logit gets the largest probability
+        assert!(matches!(last("argmax(tensor([1.0, 3.0, 2.0]).softmax())").unwrap(), Value::Int(1)));
+    }
+
+    #[test]
     fn tensor_ragged_errors() {
         assert!(last("tensor([[1, 2], [3]])")
             .unwrap_err()

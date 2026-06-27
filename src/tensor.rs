@@ -467,6 +467,29 @@ pub fn method(
             no_args(name)?;
             Ok(Value::Float(t.mapv(|x| x * x).sum().sqrt()))
         }
+        // softmax along one axis (default: the last) — numerically stable (subtract the
+        // per-slice max first). The standard neural-net output normalization: rows of a
+        // (batch × classes) tensor become probability distributions.
+        "softmax" => {
+            if t.ndim() == 0 {
+                return Err(HelixError::new("cannot take `softmax` of a 0-D (scalar) tensor", line, col));
+            }
+            let ax = axis_arg(args, t.ndim(), line, col)?.unwrap_or(t.ndim() - 1);
+            let axis = Axis(ax);
+            let maxes = t.fold_axis(axis, f64::NEG_INFINITY, |&a, &x| a.max(x)).insert_axis(axis);
+            let maxes_b = maxes
+                .broadcast(t.raw_dim())
+                .ok_or_else(|| HelixError::new("softmax broadcast failed", line, col))?;
+            let mut ex = ArrayD::<f64>::zeros(t.raw_dim());
+            Zip::from(&mut ex).and(&**t).and(&maxes_b).for_each(|o, &x, &m| *o = (x - m).exp());
+            let sums = ex.sum_axis(axis).insert_axis(axis);
+            let sums_b = sums
+                .broadcast(ex.raw_dim())
+                .ok_or_else(|| HelixError::new("softmax broadcast failed", line, col))?;
+            let mut out = ArrayD::<f64>::zeros(ex.raw_dim());
+            Zip::from(&mut out).and(&ex).and(&sums_b).for_each(|o, &e, &s| *o = e / s);
+            Ok(Value::Tensor(Rc::new(out)))
+        }
         "det" => {
             no_args(name)?;
             Ok(Value::Float(determinant(as_2d_square(t, "det", line, col)?)))
