@@ -1,0 +1,34 @@
+# Model selection — fit polynomials of increasing degree and let an information
+# criterion pick the simplest model that explains the data. Showcases least_squares
+# (fast OLS, no inference), rss, and aic/bic, scored in one currency.
+
+# Reproducible synthetic data from the true model  y = 2 + 3x - 0.5x^2 + noise.
+n = 40
+x = linspace(-2.0, 2.0, n)
+noise = randn(n, 7).map(z => 0.15 * z)
+y = (2.0 + 3.0 * x - 0.5 * (x * x)) + noise        # all broadcast, no loops
+
+# Polynomial design matrix: degree d -> predictors [x, x^2, ..., x^d].
+fn poly_features(x, degree) = range(1, degree + 1).map(p => x.map(v => v ** p))
+
+# Fit one degree and score it. `do` keeps the steps linear and readable.
+fn fit_degree(x, y, degree) = do {
+  feats = poly_features(x, degree)
+  f     = least_squares(feats, y)
+  k     = degree + 1                                # parameters incl. intercept
+  {degree: degree, rss: f.rss, r2: f.r_squared,
+   aic: aic(f.rss, y.count(), k), bic: bic(f.rss, y.count(), k)}
+}
+
+models = [1, 2, 3, 4].map(d => fit_degree(x, y, d))
+
+print("degree    RSS       R2       AIC       BIC")
+report = models.map(m =>
+  print("  {m.degree}     {m.rss:7.3f}   {m.r2:.4f}  {m.aic:8.2f}  {m.bic:8.2f}"))
+
+# Lower is better. AIC and BIC trade fit against complexity differently — BIC's
+# heavier penalty is more conservative, so here it recovers the true degree-2 model
+# while AIC slightly overfits. That disagreement is the point of comparing them.
+best_aic = models.min_by(it.aic)
+best_bic = models.min_by(it.bic)
+print("\nbest by AIC: degree {best_aic.degree}   best by BIC: degree {best_bic.degree}   (true model: degree 2)")

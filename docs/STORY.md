@@ -59,7 +59,7 @@ Each stage delivered working, tested code (the test count grew from 44 to 130+).
     summation (accurate to the last ulp; see below).
 11. **Genomics flagship** ([ROADMAP §Flagship](ROADMAP.md)) — FASTA via
     `needletail`; `read_fasta`, `gc_content`, `kmers`, `find`, `Array.top`; the
-    [genomics example](../examples/genomics.helix) runs end-to-end.
+    [genomics example](../examples/bio/genomics.helix) runs end-to-end.
 12. **Module system** ([ROADMAP §7](ROADMAP.md)) — `import name` / `import lib.stats
     as st`; a loader resolves the import graph and rewrites every module into one
     namespaced AST that the existing pipeline runs unchanged. Single files remain untouched.
@@ -208,6 +208,6 @@ These limitations are tracked in [ROADMAP.md](ROADMAP.md).
 - [python-interop.md](python-interop.md) — using Python from Helix (the v1 bridge).
 - [adr/](adr/) — accepted decision records (missing data, types, collections, functions,
   syntax, concurrency, tensors, CPython interop).
-- `examples/` — runnable programs, incl. [genomics.helix](../examples/genomics.helix)
+- `examples/` — runnable programs, incl. [genomics.helix](../examples/bio/genomics.helix)
   and [python/interop.helix](../examples/python/interop.helix).
 - `scripts/` — `langbench.sh`, `vmparity.sh`, benchmark + parity harnesses.

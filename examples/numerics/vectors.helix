@@ -1,0 +1,31 @@
+# Vector math on plain arrays — the building blocks of numeric and ML code.
+# Numeric arrays are stored packed (i64/f64), so these run as tight native loops.
+
+v = [3.0, 4.0]
+w = [1.0, 2.0]
+
+# --- elementwise arithmetic is broadcast (no map needed) ---
+print("v + w:", v + w)
+print("2 * v:", 2.0 * v)
+
+# --- linear-algebra primitives ---
+print("dot:   ", v.dot(w))         # 3*1 + 4*2 = 11
+print("norm:  ", v.norm())         # sqrt(9 + 16) = 5
+print("normalize:", v.normalize()) # scale to unit-ish range
+
+# --- reductions & scans ---
+xs = [1.0, 2.0, 3.0, 4.0]
+print("sum/product:", xs.sum(), xs.product())
+print("cumsum:", xs.cumsum())
+
+# --- ML-flavoured transforms ---
+logits = [2.0, 1.0, 0.1]
+probs = logits.softmax()
+print("softmax: {probs[0]:.3f} {probs[1]:.3f} {probs[2]:.3f}  (sums to {probs.sum():.3f})")
+print("argsort:", logits.argsort())       # indices that would sort ascending
+print("clamp:  ", [-2, 5, 12, 0].clamp(0, 10))
+
+# --- standardize (z-scores): zero mean, unit standard deviation ---
+data = [10.0, 12.0, 14.0, 16.0, 18.0]
+print("zscores:", data.zscores().map(z => round(z, 2)))
+

@@ -29,7 +29,7 @@ cargo install --path .
 It is then used like any language CLI:
 
 ```sh
-helix run examples/tour.helix     # run a script
+helix run examples/language/tour.helix     # run a script
 helix eval "print(1 + 2)"         # a one-liner
 helix repl                        # interactive session
 helix help                        # all commands
@@ -235,5 +235,5 @@ Requires a recent Rust toolchain.
 
 ```
 cargo build --release
-./target/release/helix examples/tour.helix
+./target/release/helix examples/language/tour.helix
 ```

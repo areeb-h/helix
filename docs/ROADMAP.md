@@ -16,7 +16,7 @@ in the same manner that DataFrames rely on Polars; Helix provides the consistent
 fast, memory-safe surface.
 - [x] **`read_fasta(path)`** → array of `{id, seq, length}` records via
       `needletail` (FASTA/FASTQ, gzip-aware). `seq` is a `Dna` (ambiguous bases
-      like `N` preserved). Demo: [examples/genomics.helix](../examples/genomics.helix).
+      like `N` preserved). Demo: [examples/bio/genomics.helix](../examples/bio/genomics.helix).
 - [x] **Sequence ops**: `gc_content`, `complement`, `reverse_complement`,
       `kmers(k)`, `find(motif)` (→ index or `missing`), slicing; plus `Array.top(n)`
       (frequency histogram) so `seq.kmers(9).top(20)` works. Native 2-bit-packed
@@ -29,14 +29,14 @@ fast, memory-safe surface.
       **header-typed** (an `Integer`/`Float`/`Flag` INFO field becomes a numeric/bool column,
       so `where(@af > 0.001)` is a numeric comparison). Parsing delegates to `noodles`; plain
       `.vcf`, gzipped/BGZF `.vcf.gz`, and binary **BCF** all share one record model and
-      column-building core. Demo: [examples/variants.helix](../examples/variants.helix). (No-arg
+      column-building core. Demo: [examples/bio/variants.helix](../examples/bio/variants.helix). (No-arg
       grouped `count()` for rows-per-group is a small follow-up.)
 - [x] **`read_fastq`** — FASTQ reads as records `{id, seq, qual, length}` (via
       `needletail`); `seq` is a DNA value and `qual` the Phred string. `qual.phred()`
       decodes the Phred+33 string to per-base integer quality scores, which compose
       with the array verbs — a read's mean quality is `qual.phred().mean()` and a
       quality filter is one `where`. Demo:
-      [examples/sequencing.helix](../examples/sequencing.helix).
+      [examples/bio/sequencing.helix](../examples/bio/sequencing.helix).
 - [x] **`read_gff` / `read_bed`** — feature/interval tables as DataFrames (GFF3 via
       `noodles-gff` with one column per attribute tag; BED hand-rolled for BED3/6/12).
 - [x] **`read_sam` / `read_bam`** — sequence alignments as a DataFrame: the eleven
@@ -44,17 +44,17 @@ fast, memory-safe surface.
       `pnext`, `tlen`, `seq`, `qual`) become columns (`ref`/`rnext` resolved to names
       from the header, CIGAR rendered to its SAM string). BAM is the binary, BGZF-framed
       form; both share one record model and column-building core via `noodles-sam`/
-      `noodles-bam`. Demo: [examples/alignments.helix](../examples/alignments.helix).
+      `noodles-bam`. Demo: [examples/bio/alignments.helix](../examples/bio/alignments.helix).
 - [x] **Indexed region queries** — `read_vcf(path, "chr17:43k-44k")` and
       `read_bam(path, "chr1:1k-2k")` seek via the file's index (`.tbi` for VCF, `.bai`
       for BAM) and read only the variants/reads in the region, never scanning the whole
       file (the local-first capability). The result is identical to a full read filtered
-      to the region. Demos: [variants.helix](../examples/variants.helix),
-      [alignments.helix](../examples/alignments.helix).
+      to the region. Demos: [variants.helix](../examples/bio/variants.helix),
+      [alignments.helix](../examples/bio/alignments.helix).
 - [x] **Pairwise alignment** — `seq.align(target[, mode])` (global / local /
       semiglobal) via a hand-rolled Gotoh affine-gap aligner (ADR 0015), returning a
       record `{score, cigar, query, target, start, end}`. Demo:
-      [examples/alignment.helix](../examples/alignment.helix).
+      [examples/bio/alignment.helix](../examples/bio/alignment.helix).
 - [ ] Region queries for BCF (its `.csi` index); CRAM via `noodles-cram`
       (reference-based compression); an RNA/protein sequence type model; custom
       alignment scoring (substitution matrices) — likely via a scoring-record
@@ -123,7 +123,7 @@ Lexer → parser → AST → tree-walking interpreter.
       `fn greet(name, greeting = "Hi") = …`, called `greet("Ada", greeting: "Hey")`.
       Resolved to positional form at parse time (zero run-time cost). Defaults are
       literal constants; builtins/methods stay positional (a follow-up). Demo:
-      [examples/named-arguments.helix](../examples/named-arguments.helix).
+      [examples/language/named-arguments.helix](../examples/language/named-arguments.helix).
 - [x] `missing` value (scalar part of [ADR 0001](adr/0001-missing-data.md)):
       Option-style absence, Julia-style propagation and three-valued logic,
       `.is_missing()`, `.drop_missing()`, propagating aggregations.

@@ -1,0 +1,31 @@
+# Operators — arithmetic, comparison, boolean, bitwise, and the `??` default.
+
+# --- arithmetic --- `/` is always float; `**` is power; `%` is euclidean modulo.
+print("arith:", 7 + 3, 7 - 3, 7 * 3, 7 / 3, 7 % 3, 2 ** 10)
+# Integer `**` stays Int when it can; mixing in a float widens the result.
+print("int pow:", 3 ** 4, "  float:", 2.0 ** 0.5)
+
+# --- comparison & boolean --- Helix has no "truthiness": conditions must be Bool.
+# Use the words `and` / `or` / `not` (not `&&`/`||`).
+print("bool:", 3 < 5 and not (2 > 4), 1 == 1 or 1 == 2)
+
+# --- bitwise (integers only): & | ^ << >> ---
+# Precedence follows Rust: bitwise binds tighter than comparison and looser than
+# `+`/`-`, with `|` < `^` < `&` < shifts. So `5 & 1 == 1` means `(5 & 1) == 1`.
+print("bitwise:", 12 & 10, 12 | 10, 12 ^ 10, 1 << 4, 255 >> 4)
+print("precedence 5 & 1 == 1:", 5 & 1 == 1)
+
+# Bitmasks: encode a set of choices as the bits of one integer.
+flags = (1 << 0) | (1 << 2)          # bits 0 and 2 set  -> 0b101 = 5
+print("flags:", flags)
+print("bit 2 set? ", (flags >> 2) & 1 == 1)
+print("toggle bit 1:", flags ^ (1 << 1))   # flip a bit with XOR
+# Count set bits (popcount) by folding over the bit positions.
+fn popcount(mask) = range(0, 8).filter(j => (mask >> j) & 1 == 1).count()
+print("popcount of 5:", popcount(5))
+
+# --- ?? — supply a default when a value is `missing` ---
+# `missing` propagates through arithmetic; `??` is how you recover.
+measured = [1.0, missing, 3.0]
+filled = measured.map(x => x ?? 0.0)
+print("?? fill:", filled)

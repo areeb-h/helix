@@ -1,0 +1,29 @@
+# String interpolation — `"{expr}"` embeds any expression; `"{expr:spec}"` formats
+# it. The spec is a pragmatic subset of Python's format mini-language.
+
+name = "Ada"
+score = 0.8765
+print("Hello, {name}! You scored {score}.")          # default display
+print("two decimals: {score:.2f}")                   # fixed-point
+print("as a percent: {score:.1%}")                   # value * 100, with %
+print("scientific:   {score:.3e}")
+
+# Integers in different bases.
+n = 42
+print("dec {n}  hex {n:x}  oct {n:o}  bin {n:b}")
+
+# Width, alignment, and zero-padding. Numbers right-align by default, text left.
+print("right [{n:6}]  left [{n:<6}]  center [{n:^6}]")
+print("zero  [{n:06}]")
+print("text  [{name:>8}] [{name:<8}] [{name:^8}]")
+
+# A tidy table built entirely with format specs — no manual padding helpers.
+rows = [{sym: "H", mass: 1.008}, {sym: "He", mass: 4.0026}, {sym: "Li", mass: 6.94}]
+print("")
+print("  el   mass")
+for_each = rows.map(r => print("  {r.sym:<3} {r.mass:>7.3f}"))
+
+# A top-level `:` is a format spec, but a `:` inside a slice or record literal in
+# the hole is NOT — bracket depth disambiguates.
+xs = [10, 20, 30, 40, 50]
+print("slice {xs[1:4]}, first formatted {xs[0]:04}")

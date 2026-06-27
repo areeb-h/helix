@@ -1,0 +1,57 @@
+# Control flow — Helix has no statements, only expressions: `if`, `match`, and
+# `do` all *produce a value*. There are no loops; you iterate with array verbs
+# (see collections.helix) or recursion.
+
+# --- if / then / else (always an expression, so `else` is required) ---
+grade = if 82 >= 90 then "A" else if 82 >= 80 then "B" else "C"
+print("grade:", grade)
+
+# --- match: the first arm whose pattern fits wins ---
+# Literal patterns, an or-pattern (`a | b | c`), and a `_` wildcard fallback.
+fn size(n) = match n {
+  0          => "none",
+  1 | 2 | 3  => "a few",
+  _          => "many",
+}
+print("size:", size(0), size(2), size(99))
+
+# A binding pattern captures the value; an `if` guard refines an arm.
+fn polarity(n) = match n {
+  0          => "zero",
+  x if x > 0 => "positive",
+  _          => "negative",
+}
+print("polarity:", polarity(0), polarity(7), polarity(-4))
+
+# Record and tuple patterns destructure nested data. The killer case: pulling a
+# value out of a `try` result with no `.ok`/`.value` plumbing (see also
+# error-handling.helix).
+fn safe_div(a, b) = match try (a / b) {
+  {ok: true, value: v} => v,
+  _                    => 0.0,
+}
+print("safe_div:", safe_div(10, 2), safe_div(10, 0))
+
+# --- do-blocks: a sequence of local bindings ending in a result expression ---
+# `do { ... }` reads top-to-bottom and desugars to `let … in`, so the bindings are
+# immutable. Use it instead of deeply nested `let a = … in let b = … in …`.
+stats = do {
+  xs    = [4, 8, 15, 16, 23, 42]
+  n     = xs.count()
+  total = xs.sum()
+  mean  = total / n
+  # the last expression is the block's value
+  {n: n, total: total, mean: mean}
+}
+print("stats: n={stats.n} total={stats.total} mean={stats.mean:.1f}")
+
+# do-blocks nest and compose like any expression.
+fn classify_point(x, y) = do {
+  r = sqrt(x * x + y * y)
+  match r {
+    d if d < 1.0 => "inside",
+    d if d < 2.0 => "ring",
+    _            => "outside",
+  }
+}
+print("point:", classify_point(0.5, 0.5), classify_point(1.5, 0.0), classify_point(3.0, 3.0))

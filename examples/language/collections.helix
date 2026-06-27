@@ -1,0 +1,44 @@
+# Collections — arrays are Helix's workhorse. You never write loops; you chain
+# verbs. The `.` is the pipe: each method flows its result into the next.
+
+xs = [42, 8, 15, 16, 23, 4]
+
+# --- comprehension verbs --- map / filter / where / reduce. `it` is the implicit
+# one-parameter name, so `it + 1` == `x => x + 1`.
+print("doubled:", xs.map(it * 2))
+print("evens:  ", xs.filter(it % 2 == 0))
+print("sum:    ", xs.reduce(0, (acc, x) => acc + x))
+
+# --- aggregations & ordering ---
+print("min/max/mean:", xs.min(), xs.max(), xs.mean())
+print("sorted:", xs.sort(), " reversed:", xs.reverse())
+print("first 3:", xs.take(3), " drop 2:", xs.drop(2))
+print("contains 23?", xs.contains(23))
+
+# --- selecting by a key --- min_by/max_by/argmin/argmax take a key function.
+people = [{name: "Ada", age: 36}, {name: "Bo", age: 24}, {name: "Cy", age: 41}]
+print("youngest:", people.min_by(it.age).name)
+print("oldest:  ", people.max_by(it.age).name)
+
+# --- combining arrays --- zip pairs two arrays; zipmap maps over the pairs in one
+# step (use it when broadcast can't express the per-pair function).
+a = [1, 2, 3]
+b = [10, 20, 30]
+print("zip:    ", a.zip(b))
+print("zipmap: ", a.zipmap(b, (x, y) => x * 10 + y))
+# Plain elementwise arithmetic is just broadcast — no zip needed.
+print("a + b:  ", a + b, "  a * b:", a * b)
+
+# --- flatten & concat ---
+nested = [[1, 2], [3], [4, 5, 6]]
+print("flatten:", nested.flatten())
+print("concat: ", a.concat(b, [99]))
+
+# --- ranges --- `range(stop)`, `range(start, stop)`, `range(start, stop, step)`.
+print("range:", range(5), range(2, 8), range(0, 20, 5), range(10, 0, -2))
+
+# --- a small end-to-end pipeline ---
+words = ["helix", "is", "expressive", "and", "fast"]
+print("longest word:", words.max_by(it.count()))
+print("lengths:     ", words.map(w => w.count()).sort())
+print("total chars: ", words.map(it.count()).sum())

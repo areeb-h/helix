@@ -1,0 +1,43 @@
+# Reading and writing data — CSV, JSON, and Parquet round-trips, plus the
+# building blocks for an append-only data store (vstack, unique, file_exists).
+#
+# Everything is written under a scratch directory so the example is self-contained.
+
+dir = "/tmp/helix_io_demo"
+
+# --- build a DataFrame from in-memory columns ---
+runs = dataframe({
+  run:  [1, 2, 3],
+  model: ["linear", "quadratic", "cubic"],
+  rmse:  [0.42, 0.19, 0.21],
+})
+print("built:")
+print(runs)
+
+# --- CSV round-trip ---
+csv_ok = runs.write_csv("{dir}/runs.csv")
+print("\ncsv exists?", file_exists("{dir}/runs.csv"))
+reloaded = read_csv("{dir}/runs.csv")
+print("reloaded {reloaded.count()} rows; best by rmse:")
+print(reloaded.sort(@rmse).head(1).select(@run, @model, @rmse))
+
+# --- Parquet round-trip (typed + binary: exact floats, no comma-injection) ---
+pq_ok = runs.write_parquet("{dir}/runs.parquet")
+print("\nparquet rows back:", read_parquet("{dir}/runs.parquet").count())
+
+# --- append-only growth: vstack new rows, then unique to drop duplicates ---
+more = dataframe({run: [4], model: ["spline"], rmse: [0.17]})
+grown = reloaded.vstack(more)
+print("\nafter vstack:", grown.count(), "rows")
+# Re-appending the same rows would duplicate them; `unique` keeps the KB clean.
+deduped = grown.vstack(more).unique()
+print("after re-append + unique:", deduped.count(), "rows")
+
+# --- JSON round-trip via files ---
+text_ok = "[1, 2, 3, 4]".write_to("{dir}/nums.json")
+nums = read_json("{dir}/nums.json")
+print("\nread_json:", nums, " sum:", nums.sum())
+
+# --- content-addressing: a stable id for a piece of data ---
+config = "model=cubic;seed=42"
+print("\nsha256(config):", sha256(config))

@@ -1,0 +1,33 @@
+# Model-evaluation metrics — the regression and classification halves of the
+# scoring surface. All are free functions taking (truth, prediction), mirroring
+# scikit-learn, so they read the same whatever you're scoring.
+
+# --- regression: continuous predictions vs. actual values ---
+actual = [3.0, 5.0, 2.5, 7.0, 4.0]
+pred   = [2.8, 5.2, 2.0, 6.5, 4.3]
+print("== regression ==")
+print("MSE:  {mse(actual, pred):.4f}")
+print("RMSE: {rmse(actual, pred):.4f}")
+print("MAE:  {mae(actual, pred):.4f}")
+print("R2:   {r2_score(pred, actual):.4f}")
+
+# --- classification: discrete labels ---
+# 1 = positive, 0 = negative.
+y_true = [1, 0, 1, 1, 0, 1, 0, 0]
+y_pred = [1, 0, 1, 0, 0, 1, 1, 0]
+print("")
+print("== classification ==")
+print("accuracy:  {accuracy(y_true, y_pred):.3f}")
+print("precision: {precision(y_true, y_pred):.3f}")
+print("recall:    {recall(y_true, y_pred):.3f}")
+print("f1:        {f1_score(y_true, y_pred):.3f}")
+
+# The confusion matrix is a {tp, fp, fn, tn} record you can drill into.
+cm = confusion_matrix(y_true, y_pred)
+print("confusion: tp={cm.tp} fp={cm.fp} fn={cm.fn} tn={cm.tn}")
+
+# Labels can be strings — pass the positive class as the third argument.
+truth = ["cat", "dog", "cat", "dog", "cat"]
+guess = ["cat", "cat", "cat", "dog", "cat"]
+print("")
+print("string labels — accuracy {accuracy(truth, guess):.2f}, precision(cat) {precision(truth, guess, \"cat\"):.2f}")

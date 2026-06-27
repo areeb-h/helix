@@ -45,15 +45,21 @@ fn run_source(src: &str, env: &[(&str, &str)], tag: &str) -> (String, String, Op
     r
 }
 
+/// The runnable, self-contained example categories. Excludes `examples/{data,
+/// modules,python,api}`: data holds fixtures (not programs), modules is an
+/// import demo, and python/api need optional features / network.
 fn example_files() -> Vec<std::path::PathBuf> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let mut out: Vec<_> = std::fs::read_dir(&dir)
-        .expect("examples/ dir")
-        .filter_map(|e| {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+    let mut out = Vec::new();
+    for cat in ["language", "numerics", "dataframes", "statistics", "bio"] {
+        let dir = base.join(cat);
+        for e in std::fs::read_dir(&dir).unwrap_or_else(|_| panic!("examples/{cat}/ dir")) {
             let p = e.unwrap().path();
-            (p.extension().and_then(|s| s.to_str()) == Some("helix")).then_some(p)
-        })
-        .collect();
+            if p.extension().and_then(|s| s.to_str()) == Some("helix") {
+                out.push(p);
+            }
+        }
+    }
     out.sort();
     out
 }
@@ -63,8 +69,8 @@ fn every_example_runs_clean() {
     let files = example_files();
     assert!(files.len() >= 10, "expected the example suite, saw {}", files.len());
     for path in files {
-        let rel = format!("examples/{}", path.file_name().unwrap().to_str().unwrap());
-        let (stdout, stderr, code) = run(&[&rel], &[], "");
+        let rel = path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap().to_str().unwrap();
+        let (stdout, stderr, code) = run(&[rel], &[], "");
         assert_eq!(code, Some(0), "`{rel}` exited {code:?}; stderr:\n{stderr}");
         assert!(!stdout.trim().is_empty(), "`{rel}` produced no output");
     }
@@ -83,9 +89,9 @@ fn vm_matches_tree_walker_via_cli() {
         if name == "dataframes.helix" || name == "variants.helix" {
             continue;
         }
-        let rel = format!("examples/{name}");
-        let (vm, _, vc) = run(&[&rel], &[], "");
-        let (tw, _, tc) = run(&[&rel], &[("HELIX_NOVM", "1")], "");
+        let rel = path.strip_prefix(env!("CARGO_MANIFEST_DIR")).unwrap().to_str().unwrap();
+        let (vm, _, vc) = run(&[rel], &[], "");
+        let (tw, _, tc) = run(&[rel], &[("HELIX_NOVM", "1")], "");
         assert_eq!(vc, Some(0), "VM run of `{rel}` failed");
         assert_eq!(tc, Some(0), "tree-walker run of `{rel}` failed");
         assert_eq!(vm, tw, "VM and tree-walker disagree on `{rel}`");

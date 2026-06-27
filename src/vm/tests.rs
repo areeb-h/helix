@@ -472,22 +472,26 @@
     /// change reintroduces a fallback for an example, this fails loudly.
     #[test]
     fn examples_compile_on_the_vm() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
         let mut checked = 0;
-        for entry in std::fs::read_dir(&dir).expect("examples/ dir") {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|e| e.to_str()) != Some("helix") {
-                continue;
+        // The runnable, self-contained categories (excludes modules/python/api, which
+        // need imports / optional features / network).
+        for cat in ["language", "numerics", "dataframes", "statistics", "bio"] {
+            for entry in std::fs::read_dir(base.join(cat)).expect("category dir") {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|e| e.to_str()) != Some("helix") {
+                    continue;
+                }
+                let src = std::fs::read_to_string(&path).unwrap();
+                let toks = lexer::lex(&src).unwrap_or_else(|_| panic!("lex failed: {path:?}"));
+                let ast = parser::parse(toks).unwrap_or_else(|_| panic!("parse failed: {path:?}"));
+                let types = crate::types::check(&ast)
+                    .unwrap_or_else(|_| panic!("type-check failed: {path:?}"));
+                bytecode::compile_with_types(&ast, Some(types)).unwrap_or_else(|_| {
+                    panic!("`{path:?}` falls back to the tree-walker — it should compile on the VM")
+                });
+                checked += 1;
             }
-            let src = std::fs::read_to_string(&path).unwrap();
-            let toks = lexer::lex(&src).unwrap_or_else(|_| panic!("lex failed: {path:?}"));
-            let ast = parser::parse(toks).unwrap_or_else(|_| panic!("parse failed: {path:?}"));
-            let types =
-                crate::types::check(&ast).unwrap_or_else(|_| panic!("type-check failed: {path:?}"));
-            bytecode::compile_with_types(&ast, Some(types)).unwrap_or_else(|_| {
-                panic!("`{path:?}` falls back to the tree-walker — it should compile on the VM")
-            });
-            checked += 1;
         }
         assert!(checked >= 10, "expected the full example suite, only saw {checked}");
     }

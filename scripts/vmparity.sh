@@ -10,7 +10,10 @@
 cd "$(dirname "$0")/.."
 BIN=./target/debug/helix
 fail=0
-for f in examples/*.helix; do
+# The runnable, self-contained example categories. Excludes examples/{data,modules,
+# python,api}: data holds fixtures (not programs), modules is an import demo, and
+# python/api need optional features / network.
+for f in $(find examples/language examples/numerics examples/dataframes examples/statistics examples/bio -name '*.helix' | sort); do
   a=$("$BIN" "$f" 2>&1)
   b=$(HELIX_NOVM=1 "$BIN" "$f" 2>&1)
   if [ "$a" = "$b" ]; then
