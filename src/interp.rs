@@ -775,9 +775,15 @@ pub(crate) fn tri(v: &Value, line: usize, col: usize) -> Result<Option<bool>, He
     }
 }
 
+use num_traits::ToPrimitive as _AsIntToPrim;
+
 pub(crate) fn as_int(v: &Value, who: &str, line: usize, col: usize) -> Result<i64, HelixError> {
     match v {
         Value::Int(i) => Ok(*i),
+        // An integer-valued rational (denominator 1) is that integer.
+        Value::Rational(r) if r.is_integer() => r.to_i64().ok_or_else(|| {
+            type_err(who, "an integer in range", v, line, col)
+        }),
         // An *integer-valued* float (e.g. `1.0` from `least_squares`/`lll`, a lattice
         // coefficient, or arithmetic that stayed whole) counts as that integer — so
         // `gcd`/`range`/`//`/… accept it directly. A fractional or out-of-range float

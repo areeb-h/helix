@@ -6,6 +6,8 @@
 use std::rc::Rc;
 
 use crate::ast::BinOp;
+use num_rational::BigRational;
+use num_traits::{ToPrimitive, Zero};
 use crate::error::HelixError;
 use crate::tensor;
 use crate::value::Value;
@@ -95,6 +97,11 @@ pub(crate) fn eval_binary(
         }
     }
 
+    // Exact arbitrary-precision rational arithmetic/comparison when a Rational is
+    // present (a scalar; rational *arrays* broadcast element-wise to here).
+    if matches!(l, Value::Rational(_)) || matches!(r, Value::Rational(_)) {
+        return rational_binary(op, &l, &r, line, col);
+    }
     match op {
         Add | Sub | Mul => arith(op, &l, &r, line, col),
         Div => {
@@ -323,6 +330,13 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Dna(a), Value::Dna(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Rational(a), Value::Rational(b)) => a == b,
+        (Value::Rational(a), Value::Int(b)) | (Value::Int(b), Value::Rational(a)) => {
+            **a == BigRational::from_integer((*b).into())
+        }
+        (Value::Rational(a), Value::Float(b)) | (Value::Float(b), Value::Rational(a)) => {
+            a.to_f64() == Some(*b)
+        }
         (Value::Array(a), Value::Array(b)) => {
             a.len() == b.len()
                 && a.to_values()
@@ -360,4 +374,141 @@ fn compare(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<
         _ => unreachable!(),
     };
     Ok(Value::Bool(res))
+}
+
+/// An `Int` or `Rational` as a `BigRational`; `None` for anything else.
+fn to_rational(v: &Value) -> Option<BigRational> {
+    match v {
+        Value::Int(i) => Some(BigRational::from_integer((*i).into())),
+        Value::Rational(r) => Some((**r).clone()),
+        _ => None,
+    }
+}
+
+/// The f64 value of an `Int`/`Float`/`Rational` (for mixing rationals with floats).
+fn to_f64_any(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(i) => Some(*i as f64),
+        Value::Float(f) => Some(*f),
+        Value::Rational(r) => r.to_f64(),
+        _ => None,
+    }
+}
+
+/// `(a/b)^exp` exactly for an integer exponent. Caller guards `exp` magnitude and
+/// the `0^negative` case.
+fn ratio_pow(base: &BigRational, exp: i64) -> BigRational {
+    let n = exp.unsigned_abs() as usize;
+    let p = num_traits::pow(base.clone(), n);
+    if exp < 0 {
+        p.recip()
+    } else {
+        p
+    }
+}
+
+/// f64 result of a binary op (used when a rational is mixed with a float).
+fn float_binary_result(op: &BinOp, a: f64, b: f64, line: usize, col: usize) -> Result<Value, HelixError> {
+    use BinOp::*;
+    Ok(match op {
+        Add => Value::Float(a + b),
+        Sub => Value::Float(a - b),
+        Mul => Value::Float(a * b),
+        Div => {
+            if b == 0.0 {
+                return Err(HelixError::new("division by zero", line, col));
+            }
+            Value::Float(a / b)
+        }
+        FloorDiv => {
+            if b == 0.0 {
+                return Err(HelixError::new("division by zero", line, col));
+            }
+            Value::Float(a.div_euclid(b))
+        }
+        Mod => Value::Float(a.rem_euclid(b)),
+        Pow => Value::Float(a.powf(b)),
+        Eq => Value::Bool(a == b),
+        Ne => Value::Bool(a != b),
+        Lt => Value::Bool(a < b),
+        Gt => Value::Bool(a > b),
+        Le => Value::Bool(a <= b),
+        Ge => Value::Bool(a >= b),
+        BitAnd | BitOr | BitXor | Shl | Shr => {
+            return Err(HelixError::new("bitwise operators need integers", line, col));
+        }
+        And | Or | Coalesce => unreachable!("short-circuit ops never reach here"),
+    })
+}
+
+/// Exact rational arithmetic/comparison. With a float operand it drops to f64
+/// (exactness already lost); two Int/Rational operands stay exact.
+pub(crate) fn rational_binary(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    use BinOp::*;
+    if matches!(l, Value::Float(_)) || matches!(r, Value::Float(_)) {
+        match (to_f64_any(l), to_f64_any(r)) {
+            (Some(a), Some(b)) => return float_binary_result(op, a, b, line, col),
+            _ => {
+                return Err(HelixError::new(
+                    format!("`{}` needs numbers", op.symbol()),
+                    line,
+                    col,
+                ))
+            }
+        }
+    }
+    let (a, b) = match (to_rational(l), to_rational(r)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => {
+            return Err(HelixError::new(
+                format!("`{}` needs numbers", op.symbol()),
+                line,
+                col,
+            ))
+        }
+    };
+    Ok(match op {
+        Add => Value::Rational(Rc::new(a + b)),
+        Sub => Value::Rational(Rc::new(a - b)),
+        Mul => Value::Rational(Rc::new(a * b)),
+        Div => {
+            if b.is_zero() {
+                return Err(HelixError::new("division by zero", line, col));
+            }
+            Value::Rational(Rc::new(a / b))
+        }
+        FloorDiv => {
+            if b.is_zero() {
+                return Err(HelixError::new("integer division by zero", line, col));
+            }
+            Value::Rational(Rc::new((a / b).floor()))
+        }
+        Mod => {
+            // rational modulo is unusual; computed in f64 (rem_euclid).
+            Value::Float(a.to_f64().unwrap_or(f64::NAN).rem_euclid(b.to_f64().unwrap_or(f64::NAN)))
+        }
+        Pow => {
+            if b.is_integer() {
+                let exp = b.to_i64().filter(|e| e.unsigned_abs() <= 4096).ok_or_else(|| {
+                    HelixError::new("rational exponent is out of range (max +/-4096)", line, col)
+                })?;
+                if exp < 0 && a.is_zero() {
+                    return Err(HelixError::new("0 cannot be raised to a negative power", line, col));
+                }
+                Value::Rational(Rc::new(ratio_pow(&a, exp)))
+            } else {
+                Value::Float(a.to_f64().unwrap_or(f64::NAN).powf(b.to_f64().unwrap_or(f64::NAN)))
+            }
+        }
+        Eq => Value::Bool(a == b),
+        Ne => Value::Bool(a != b),
+        Lt => Value::Bool(a < b),
+        Gt => Value::Bool(a > b),
+        Le => Value::Bool(a <= b),
+        Ge => Value::Bool(a >= b),
+        BitAnd | BitOr | BitXor | Shl | Shr => {
+            return Err(HelixError::new("bitwise operators need integers", line, col));
+        }
+        And | Or | Coalesce => unreachable!("short-circuit ops never reach here"),
+    })
 }

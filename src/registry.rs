@@ -85,6 +85,11 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "max", pure: true },
     BuiltinDef { path: "erf", pure: true },
     BuiltinDef { path: "gcd", pure: true },
+    // exact rationals
+    BuiltinDef { path: "rational", pure: true },
+    BuiltinDef { path: "numerator", pure: true },
+    BuiltinDef { path: "denominator", pure: true },
+    BuiltinDef { path: "to_float", pure: true },
     BuiltinDef { path: "lll", pure: true },
     // general pairwise sequence alignment (NW/SW) over arbitrary arrays
     BuiltinDef { path: "align", pure: true },

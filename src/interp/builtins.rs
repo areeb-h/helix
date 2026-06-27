@@ -548,6 +548,44 @@ impl super::Interp {
                     }
                 }
             }
+            "rational" => {
+                arity(name, &args, 2, line, col)?;
+                if matches!(args[0], Value::Missing) || matches!(args[1], Value::Missing) {
+                    return Ok(Value::Missing);
+                }
+                let n = as_int(&args[0], "rational", line, col)?;
+                let d = as_int(&args[1], "rational", line, col)?;
+                if d == 0 {
+                    return Err(HelixError::new("`rational` denominator cannot be zero", line, col));
+                }
+                Ok(Value::Rational(Rc::new(num_rational::BigRational::new(n.into(), d.into()))))
+            }
+            "numerator" | "denominator" => {
+                arity(name, &args, 1, line, col)?;
+                use num_traits::ToPrimitive;
+                match &args[0] {
+                    Value::Rational(r) => {
+                        let big = if name == "numerator" { r.numer() } else { r.denom() };
+                        big.to_i64().map(Value::Int).ok_or_else(|| {
+                            HelixError::new(format!("`{name}` is too large for an integer"), line, col)
+                        })
+                    }
+                    Value::Int(i) => Ok(Value::Int(if name == "numerator" { *i } else { 1 })),
+                    Value::Missing => Ok(Value::Missing),
+                    other => Err(type_err(name, "a rational or integer", other, line, col)),
+                }
+            }
+            "to_float" => {
+                arity(name, &args, 1, line, col)?;
+                use num_traits::ToPrimitive;
+                match &args[0] {
+                    Value::Int(i) => Ok(Value::Float(*i as f64)),
+                    Value::Float(f) => Ok(Value::Float(*f)),
+                    Value::Rational(r) => Ok(Value::Float(r.to_f64().unwrap_or(f64::NAN))),
+                    Value::Missing => Ok(Value::Missing),
+                    other => Err(type_err("to_float", "a number", other, line, col)),
+                }
+            }
             "lll" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(HelixError::new(

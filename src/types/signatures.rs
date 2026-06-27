@@ -293,6 +293,25 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Int)
         }
+        "rational" => {
+            if args.len() != 2 {
+                return Err(arity_err("rational", 2, args.len(), line, col));
+            }
+            // an exact rational; Unknown keeps arithmetic on it permissive
+            Ok(Type::Unknown)
+        }
+        "numerator" | "denominator" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            Ok(Type::Int)
+        }
+        "to_float" => {
+            if args.len() != 1 {
+                return Err(arity_err("to_float", 1, args.len(), line, col));
+            }
+            Ok(Type::Float)
+        }
         "lll" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(

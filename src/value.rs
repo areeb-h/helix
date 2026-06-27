@@ -20,6 +20,11 @@ use crate::symbol::Symbol;
 pub enum Value {
     Int(i64),
     Float(f64),
+    /// An exact arbitrary-precision rational (numerator/denominator, always in
+    /// lowest terms with a positive denominator) - for exact coefficients
+    /// (PSLQ/lll), exact fractions, etc. Built with `rational(n, d)`. Boxed (one
+    /// word) to keep `Value` at 16 bytes; never overflows (BigInt-backed).
+    Rational(Rc<num_rational::BigRational>),
     Str(Rc<String>),
     Bool(bool),
     /// An immutable array. Held behind [`ArrayData`], which stores a homogeneous
@@ -290,6 +295,7 @@ impl Value {
         match self {
             Value::Int(_) => "Int",
             Value::Float(_) => "Float",
+            Value::Rational(_) => "Rational",
             Value::Str(_) => "String",
             Value::Bool(_) => "Bool",
             Value::Array(_) => "Array",
@@ -313,6 +319,10 @@ impl Value {
         match self {
             Value::Int(i) => Some(*i as f64),
             Value::Float(f) => Some(*f),
+            Value::Rational(r) => {
+                use num_traits::ToPrimitive;
+                r.to_f64()
+            }
             _ => None,
         }
     }
@@ -350,6 +360,13 @@ impl fmt::Display for Value {
         match self {
             Value::Int(i) => write!(f, "{}", i),
             Value::Float(x) => write!(f, "{}", fmt_float(*x)),
+            Value::Rational(r) => {
+                if r.is_integer() {
+                    write!(f, "{}", r.numer())
+                } else {
+                    write!(f, "{}/{}", r.numer(), r.denom())
+                }
+            }
             Value::Str(s) => write!(f, "{}", s),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Dna(s) => write!(f, "{}", s),

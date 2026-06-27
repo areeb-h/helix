@@ -77,6 +77,16 @@ fn to_serde(v: &Value) -> Result<serde_json::Value, String> {
         Value::Int(i) => J::Number((*i).into()),
         // JSON has no NaN/Infinity — they serialize as `null` (the JSON convention).
         Value::Float(f) => serde_json::Number::from_f64(*f).map(J::Number).unwrap_or(J::Null),
+        // JSON has no rational type. Integer-valued ratios serialize as integers;
+        // others as their nearest f64 (matching how Float serializes).
+        Value::Rational(r) => {
+            use num_traits::ToPrimitive;
+            if r.is_integer() {
+                r.to_i64().map(|i| J::Number(i.into())).unwrap_or(J::Null)
+            } else {
+                r.to_f64().and_then(serde_json::Number::from_f64).map(J::Number).unwrap_or(J::Null)
+            }
+        }
         Value::Str(s) => J::String((**s).clone()),
         Value::Dna(s) => J::String((**s).clone()),
         Value::Array(xs) => {

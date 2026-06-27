@@ -308,6 +308,39 @@
     }
 
     #[test]
+    fn exact_rationals() {
+        // construction reduces to lowest terms; integer-valued ratios print as integers
+        assert!(matches!(last("rational(4, 8)").unwrap(), Value::Rational(r) if r.to_string() == "1/2"));
+        assert!(matches!(last("rational(6, 3)").unwrap(), Value::Rational(r) if r.is_integer()));
+        // EXACT arithmetic — the headline: no float drift
+        assert!(matches!(last("(rational(1,3) + rational(1,6)) == rational(1,2)").unwrap(), Value::Bool(true)));
+        assert!(matches!(last("(rational(2,3) * rational(3,4)) == rational(1,2)").unwrap(), Value::Bool(true)));
+        assert!(matches!(last("(rational(1,2) / rational(3,4)) == rational(2,3)").unwrap(), Value::Bool(true)));
+        // exact power, incl. negative exponent (reciprocal)
+        assert!(matches!(last("(rational(2,3) ** 2) == rational(4,9)").unwrap(), Value::Bool(true)));
+        assert!(matches!(last("(rational(2,3) ** (0 - 1)) == rational(3,2)").unwrap(), Value::Bool(true)));
+        // mixing with Int stays exact; mixing with Float drops to Float (documented)
+        assert!(matches!(last("(rational(1,2) + 3) == rational(7,2)").unwrap(), Value::Bool(true)));
+        assert!(matches!(last("rational(1,2) + 0.25").unwrap(), Value::Float(f) if (f - 0.75).abs() < 1e-12));
+        // cross-type equality and ordering
+        assert!(matches!(last("rational(2,1) == 2").unwrap(), Value::Bool(true)));
+        assert!(matches!(last("rational(1,3) < rational(1,2)").unwrap(), Value::Bool(true)));
+        // arbitrary precision — i64 would overflow these denominators
+        assert!(matches!(last("rational(1,1000000000) + rational(1,3000000000)").unwrap(),
+            Value::Rational(r) if r.to_string() == "1/750000000"));
+        // accessors and conversion
+        assert!(matches!(last("numerator(rational(22,7))").unwrap(), Value::Int(22)));
+        assert!(matches!(last("denominator(rational(22,7))").unwrap(), Value::Int(7)));
+        assert!((float("to_float(rational(7,2))") - 3.5).abs() < 1e-12);
+        // zero denominator errors; missing propagates
+        assert!(last("rational(1, 0)").is_err());
+        assert!(matches!(last("rational(missing, 2)").unwrap(), Value::Missing));
+        // sort orders rationals exactly; contains uses exact equality
+        assert!(matches!(last("[rational(3,4), rational(1,2), rational(2,3)].sort()[0] == rational(1,2)").unwrap(), Value::Bool(true)));
+        assert!(matches!(last("[rational(1,2), rational(1,3)].contains(rational(1,3))").unwrap(), Value::Bool(true)));
+    }
+
+    #[test]
     fn bitwise_operators() {
         assert!(matches!(last("12 & 10").unwrap(), Value::Int(8)));
         assert!(matches!(last("12 | 10").unwrap(), Value::Int(14)));
