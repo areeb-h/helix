@@ -221,6 +221,44 @@ pub(crate) fn bitwise(
 /// element-by-element path) for other operators, a `Values` array, a non-numeric
 /// scalar, or a length mismatch. Semantics match [`arith`] exactly: `Int`×`Int`
 /// wraps (two's complement); any `Float` widens both sides to `f64`.
+/// Packed-array elementwise math at or above this length runs in parallel (rayon).
+/// Below it the small-array hot path stays sequential. The map is order-preserving,
+/// so the output buffer is byte-identical to the sequential one.
+const PAR_BCAST_THRESHOLD: usize = 1 << 15;
+
+fn pz_f64(a: &[f64], b: &[f64], f: impl Fn(f64, f64) -> f64 + Sync) -> Vec<f64> {
+    if a.len() >= PAR_BCAST_THRESHOLD {
+        use rayon::prelude::*;
+        a.par_iter().zip(b.par_iter()).map(|(&x, &y)| f(x, y)).collect()
+    } else {
+        a.iter().zip(b).map(|(&x, &y)| f(x, y)).collect()
+    }
+}
+fn pm_f64(a: &[f64], f: impl Fn(f64) -> f64 + Sync) -> Vec<f64> {
+    if a.len() >= PAR_BCAST_THRESHOLD {
+        use rayon::prelude::*;
+        a.par_iter().map(|&x| f(x)).collect()
+    } else {
+        a.iter().map(|&x| f(x)).collect()
+    }
+}
+fn pz_i64(a: &[i64], b: &[i64], f: impl Fn(i64, i64) -> i64 + Sync) -> Vec<i64> {
+    if a.len() >= PAR_BCAST_THRESHOLD {
+        use rayon::prelude::*;
+        a.par_iter().zip(b.par_iter()).map(|(&x, &y)| f(x, y)).collect()
+    } else {
+        a.iter().zip(b).map(|(&x, &y)| f(x, y)).collect()
+    }
+}
+fn pm_i64(a: &[i64], f: impl Fn(i64) -> i64 + Sync) -> Vec<i64> {
+    if a.len() >= PAR_BCAST_THRESHOLD {
+        use rayon::prelude::*;
+        a.par_iter().map(|&x| f(x)).collect()
+    } else {
+        a.iter().map(|&x| f(x)).collect()
+    }
+}
+
 fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
     use crate::value::ArrayData;
     if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
@@ -261,30 +299,28 @@ fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
                 return None; // length-mismatch error belongs to the general path
             }
             if let (ArrayData::Ints(xa), ArrayData::Ints(xb)) = (&**a, &**b) {
-                return Some(Value::int_array(
-                    xa.iter().zip(xb).map(|(&x, &y)| iop(op, x, y)).collect(),
-                ));
+                return Some(Value::int_array(pz_i64(xa, xb, |x, y| iop(op, x, y))));
             }
             let (fa, fb) = (f64_view(a)?, f64_view(b)?);
-            Some(Value::float_array(
-                fa.iter().zip(fb.iter()).map(|(&x, &y)| fop(op, x, y)).collect(),
-            ))
+            Some(Value::float_array(pz_f64(&fa, &fb, |x, y| fop(op, x, y))))
         }
         // array ⊕ scalar  (`a[i] op s`)
         (Value::Array(a), s) => {
             if let (ArrayData::Ints(xa), Value::Int(k)) = (&**a, s) {
-                return Some(Value::int_array(xa.iter().map(|&x| iop(op, x, *k)).collect()));
+                let k = *k;
+                return Some(Value::int_array(pm_i64(xa, |x| iop(op, x, k))));
             }
             let (fa, sf) = (f64_view(a)?, scalar_f64(s)?);
-            Some(Value::float_array(fa.iter().map(|&x| fop(op, x, sf)).collect()))
+            Some(Value::float_array(pm_f64(&fa, |x| fop(op, x, sf))))
         }
         // scalar ⊕ array  (`s op a[i]`)
         (s, Value::Array(a)) => {
             if let (Value::Int(k), ArrayData::Ints(xa)) = (s, &**a) {
-                return Some(Value::int_array(xa.iter().map(|&x| iop(op, *k, x)).collect()));
+                let k = *k;
+                return Some(Value::int_array(pm_i64(xa, |x| iop(op, k, x))));
             }
             let (fa, sf) = (f64_view(a)?, scalar_f64(s)?);
-            Some(Value::float_array(fa.iter().map(|&x| fop(op, sf, x)).collect()))
+            Some(Value::float_array(pm_f64(&fa, |x| fop(op, sf, x))))
         }
         _ => None,
     }

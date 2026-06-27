@@ -113,6 +113,9 @@ flate2 = "1"
 # managed-runtime extraction reuses it. Pure Rust, no system dep.
 tar = "0.4"
 faer = "0.24.4"
+# Data-parallel elementwise math over large arrays/tensors (already in the tree via
+# polars). Gated by a size threshold so small arrays — the hot path — stay sequential.
+rayon = "1"
 # Fast cross-platform global allocator (ADR 0016). Default-on so every shipped binary
 # benefits; the static-musl build needs it because musl's default malloc is a
 # documented performance regression (ADR 0009 §8). `default-features = false` selects

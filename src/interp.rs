@@ -998,7 +998,29 @@ fn broadcast_unary(
     }
 }
 
+/// Arrays/tensors at or above this many elements map in parallel (rayon); below it
+/// the thread hand-off costs more than it saves, so the small-array hot path stays
+/// sequential. The mapped result is order-preserving, hence byte-identical either way.
+const PAR_MATH_THRESHOLD: usize = 1 << 15;
+
+/// Map a monomorphized `f64 -> f64` over a packed buffer, in parallel past the
+/// threshold. Order-preserving, so the output is identical to the sequential map.
+fn map_f64_buf(xs: &[f64], f: fn(f64) -> f64) -> Vec<f64> {
+    if xs.len() >= PAR_MATH_THRESHOLD {
+        use rayon::prelude::*;
+        xs.par_iter().map(|&x| f(x)).collect()
+    } else {
+        xs.iter().map(|&x| f(x)).collect()
+    }
+}
+
 /// A float→float math function (sqrt, sin, exp, …) lifted to Helix values.
+///
+/// Packed numeric arrays and tensors take a fast path that maps straight over the
+/// `f64`/`i64` buffer into a new buffer — no per-element `Value` boxing (the old path
+/// materialized a `Vec<Value>` for *every* element) and, past a size threshold, in
+/// parallel across cores. Heterogeneous (`Values`) arrays, scalars, and `missing`
+/// keep the general `broadcast_unary` path, so results are unchanged.
 fn apply_float_fn(
     name: &str,
     f: fn(f64) -> f64,
@@ -1006,10 +1028,44 @@ fn apply_float_fn(
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
-    broadcast_unary(v, &|s| match s.as_f64() {
-        Some(x) => Ok(Value::Float(f(x))),
-        None => Err(type_err(name, "a number or array of numbers", s, line, col)),
-    })
+    use crate::value::ArrayData;
+    match v {
+        Value::Array(ad) => match &**ad {
+            ArrayData::Floats(xs) => Ok(Value::float_array(map_f64_buf(xs, f))),
+            ArrayData::Ints(xs) => {
+                // i64 → f64 then `f`, fused so the buffer is read once.
+                let g = move |x: i64| f(x as f64);
+                let out = if xs.len() >= PAR_MATH_THRESHOLD {
+                    use rayon::prelude::*;
+                    xs.par_iter().map(|&x| g(x)).collect()
+                } else {
+                    xs.iter().map(|&x| g(x)).collect()
+                };
+                Ok(Value::float_array(out))
+            }
+            ArrayData::Values(_) => broadcast_unary(v, &|s| match s.as_f64() {
+                Some(x) => Ok(Value::Float(f(x))),
+                None => Err(type_err(name, "a number or array of numbers", s, line, col)),
+            }),
+        },
+        Value::Tensor(t) => {
+            // Contiguous tensors map over the slice (parallel past the threshold);
+            // a non-contiguous view (e.g. a transpose) falls back to ndarray's mapv.
+            match t.as_slice() {
+                Some(xs) => {
+                    let out = map_f64_buf(xs, f);
+                    let arr = ndarray::ArrayD::from_shape_vec(t.raw_dim(), out)
+                        .expect("same length as source tensor");
+                    Ok(Value::Tensor(Rc::new(arr)))
+                }
+                None => Ok(Value::Tensor(Rc::new(t.mapv(f)))),
+            }
+        }
+        _ => broadcast_unary(v, &|s| match s.as_f64() {
+            Some(x) => Ok(Value::Float(f(x))),
+            None => Err(type_err(name, "a number or array of numbers", s, line, col)),
+        }),
+    }
 }
 
 /// A rounding function (floor/ceil/round/trunc) that yields whole `Int`s.

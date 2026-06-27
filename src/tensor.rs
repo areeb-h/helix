@@ -442,7 +442,9 @@ pub fn method(
                     let s: f64 = t.iter().zip(other.iter()).map(|(&x, &y)| x * y).sum();
                     Ok(Value::Float(s))
                 }
-                // matrix · matrix
+                // matrix · matrix. ndarray's portable `dot` beats a faer round-trip at
+                // these sizes — the row-major↔column-major copy faer needs costs O(n²),
+                // which only pays off against its O(n³) gemm for much larger matrices.
                 (2, 2) => {
                     let a2 = (**t).clone().into_dimensionality::<Ix2>().unwrap();
                     let b2 = (**other).clone().into_dimensionality::<Ix2>().unwrap();
