@@ -327,8 +327,9 @@
     #[test]
     fn interpolation_error_points_at_the_real_line() {
         // A bad interpolation fragment used to report line 1 (the snippet); it must
-        // now point at the line of the string in the original source.
-        let err = last("x = 1\ny = 2\nprint(\"bad {a : b}\")").unwrap_err();
+        // now point at the line of the string in the original source. `{1 +}` is an
+        // unambiguous parse error in the embedded expression.
+        let err = last("x = 1\ny = 2\nprint(\"bad {1 +}\")").unwrap_err();
         assert_eq!(err.line, 3, "interpolation error should be on line 3, got {}", err.line);
     }
 

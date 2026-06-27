@@ -372,7 +372,7 @@ impl super::Compiler {
 
         // Range fusion: `range(...).reduce(...)` becomes a counting loop with no
         // array materialized at all — the element binder *is* the counter.
-        if let Some((start, end)) = as_range_call(recv) {
+        if let Some((start, end)) = self.builtin_range_call(b, recv) {
             return self.compile_reduce_range(b, start, end, &args[0], &pa, &pb, body, line, col);
         }
 
@@ -479,6 +479,7 @@ impl super::Compiler {
     /// needs ≥1 stage, a `Collect` sink needs ≥2.
     pub(super) fn collect_fusion_chain<'a>(
         &self,
+        b: &Builder,
         recv: &'a Expr,
         name: &str,
         args: &'a [Expr],
@@ -528,8 +529,12 @@ impl super::Compiler {
         let mut stages = outer_first;
         stages.reverse();
 
-        let (source, source_is_range) = if let Some((start, end)) = as_range_call(cur) {
+        let (source, source_is_range) = if let Some((start, end)) = self.builtin_range_call(b, cur) {
             (FusionSourceExpr::Range(start, end), true)
+        } else if matches!(cur, Expr::Call { name, .. } if name == "range") {
+            // `range` is shadowed by a user binding - don't fuse; the per-stage
+            // path compiles the user call, matching the tree-walker.
+            return None;
         } else if is_idempotent(cur) {
             (FusionSourceExpr::Array(cur), false)
         } else {

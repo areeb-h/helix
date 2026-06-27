@@ -29,13 +29,28 @@ mod imp {
         if !url.starts_with("https://") {
             return Err(format!("refusing a non-HTTPS download URL: {url}"));
         }
-        let resp = ureq::get(url)
+        // Connect/read timeouts (slow-loris defense) + a hard size cap so an
+        // adversarial mirror can't OOM the process by streaming forever *before* the
+        // hash check runs. The cap is generous (verified artifacts are pinned anyway).
+        const MAX_DOWNLOAD_BYTES: u64 = 1 << 30; // 1 GiB
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(30))
+            .timeout_read(std::time::Duration::from_secs(300))
+            .build();
+        let resp = agent
+            .get(url)
             .call()
             .map_err(|e| format!("download failed for {url}: {e}"))?;
         let mut buf = Vec::new();
         resp.into_reader()
+            .take(MAX_DOWNLOAD_BYTES + 1)
             .read_to_end(&mut buf)
             .map_err(|e| format!("reading the download body failed: {e}"))?;
+        if buf.len() as u64 > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "download for {url} exceeds the {MAX_DOWNLOAD_BYTES}-byte limit"
+            ));
+        }
         Ok(buf)
     }
 

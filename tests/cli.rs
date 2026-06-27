@@ -171,6 +171,30 @@ fn file_lifecycle_ops() {
 }
 
 #[test]
+fn deep_nesting_errors_cleanly_not_abort() {
+    // Deeply-nested patterns and interpolation must hit the parse-depth guard on
+    // the big parse stack - a clean exit-1 error, never a stack-overflow SIGABRT.
+    let pat = format!(
+        "print(match 0 {{ {}0{} => 1, _ => 2 }})",
+        "(".repeat(50000),
+        ")".repeat(50000)
+    );
+    let (_, err, code) = run_source(&pat, &[], "deep_pat");
+    assert_eq!(code, Some(1), "should exit 1 cleanly; stderr: {err}");
+    assert!(err.contains("too deeply"), "expected a depth error, got: {err}");
+
+    // Nested interpolation: each hole holds a string with its own interpolation,
+    // so the embedded-expression parser recurses - the depth guard must catch it.
+    let mut nested = "x".to_string();
+    for _ in 0..50000 {
+        nested = format!("\"{{{}}}\"", nested);
+    }
+    let (_, err2, code2) = run_source(&format!("y = {nested}\nprint(y)"), &[], "deep_interp");
+    assert_eq!(code2, Some(1), "nested interpolation should exit 1; stderr: {err2}");
+    assert!(err2.contains("too deeply"), "expected a depth error, got: {err2}");
+}
+
+#[test]
 fn version_and_help_flags() {
     for flag in ["--version", "-V"] {
         let (stdout, _, code) = run(&[flag], &[], "");

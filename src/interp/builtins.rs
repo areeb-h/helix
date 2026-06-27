@@ -790,9 +790,11 @@ impl super::Interp {
                     "mse" => Ok(Value::Float(a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / nf)),
                     "rmse" => Ok(Value::Float((a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / nf).sqrt())),
                     "mae" => Ok(Value::Float(a.iter().zip(&b).map(|(x, y)| (x - y).abs()).sum::<f64>() / nf)),
-                    // r2_score(pred, actual) = 1 - SS_res/SS_tot.
+                    // r2_score(y_true, y_pred) = 1 - SS_res/SS_tot — y_true first, to
+                    // match scikit-learn and the sibling metrics (mse/mae take y_true,
+                    // y_pred). SS_tot is the variance of the *true* values.
                     _ => {
-                        let (pred, actual) = (&a, &b);
+                        let (actual, pred) = (&a, &b);
                         let mean = actual.iter().sum::<f64>() / nf;
                         let ss_tot: f64 = actual.iter().map(|v| (v - mean).powi(2)).sum();
                         if ss_tot == 0.0 {

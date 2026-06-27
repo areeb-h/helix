@@ -365,6 +365,31 @@ impl Compiler {
         None
     }
 
+    /// Is `name` bound to a *user* value/function (local, captured upvalue,
+    /// enclosing-scope name, global, or top-level `fn`) - i.e. would it shadow a
+    /// builtin of the same name? Read-only, unlike `resolve` (no upvalue capture).
+    fn name_is_user_bound(&self, b: &Builder, name: &str) -> bool {
+        b.resolve_local(name).is_some()
+            || b.upvalues.iter().any(|(n, _)| n == name)
+            || b.enclosing.iter().any(|(n, _)| n == name)
+            || self.globals.iter().any(|g| g == name)
+            || self.func_names.iter().any(|f| f == name)
+    }
+
+    /// `as_range_call`, but only when `range` is the *builtin* (not shadowed by a
+    /// user binding) - otherwise range-fusion would wrongly fuse the user fn,
+    /// diverging from the tree-walker (which calls it).
+    fn builtin_range_call<'a>(
+        &self,
+        b: &Builder,
+        e: &'a Expr,
+    ) -> Option<(Option<&'a Expr>, &'a Expr)> {
+        if self.name_is_user_bound(b, "range") {
+            return None;
+        }
+        as_range_call(e)
+    }
+
     fn compile_stmt(&mut self, b: &mut Builder, stmt: &Stmt) -> R<()> {
         match stmt {
             Stmt::Assign { name, mutable, value, line, col } => {
@@ -1000,7 +1025,7 @@ impl Compiler {
                 // method; falls back to the per-stage path for anything ineligible.
                 if !self.no_fuse
                     && matches!(n, "map" | "filter" | "where" | "reduce" | "count")
-                    && let Some(plan) = self.collect_fusion_chain(recv, n, args)
+                    && let Some(plan) = self.collect_fusion_chain(b, recv, n, args)
                 {
                     return self.compile_fused(b, e, plan, *line, *col);
                 }

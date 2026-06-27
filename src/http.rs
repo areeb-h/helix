@@ -7,7 +7,13 @@
 
 #[cfg(feature = "http")]
 pub fn get(url: &str) -> Result<(i64, String), String> {
-    match ureq::get(url).call() {
+    // Connect/read timeouts so a hung or slow-loris server can't stall the program
+    // indefinitely. (`into_string` already caps the body at ureq's 10 MiB limit.)
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(30))
+        .timeout_read(std::time::Duration::from_secs(120))
+        .build();
+    match agent.get(url).call() {
         Ok(resp) => {
             let status = resp.status() as i64;
             let body = resp

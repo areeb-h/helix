@@ -45,9 +45,12 @@ fn is_const_default(e: &Expr) -> bool {
 }
 
 /// Lex + parse a single expression (used for `{expr}` interpolation fragments).
-pub fn parse_expression(src: &str) -> Result<Expr, HelixError> {
+/// `depth` is the enclosing parser's current nesting depth, so a `{...}` hole that
+/// itself contains an interpolated string keeps accumulating toward
+/// `MAX_PARSE_DEPTH` rather than resetting - bounding nested-interpolation recursion.
+pub fn parse_expression(src: &str, depth: usize) -> Result<Expr, HelixError> {
     let tokens = crate::lexer::lex(src)?;
-    let mut p = Parser { toks: tokens, pos: 0, depth: 0, fn_sigs: HashMap::new() };
+    let mut p = Parser { toks: tokens, pos: 0, depth, fn_sigs: HashMap::new() };
     p.skip_newlines();
     let e = p.expr()?;
     p.skip_newlines();
@@ -1268,8 +1271,18 @@ impl Parser {
         Ok(out)
     }
 
-    /// Parse a pattern, collecting `a | b | c` alternatives into an `Or`.
+    /// Parse a pattern, collecting `a | b | c` alternatives into an `Or`. Nested
+    /// tuple/record patterns recurse back through here, so this is the one chokepoint
+    /// that bounds pattern-nesting depth — without it, `match x { (((…))) => … }`
+    /// overflows the native stack (patterns don't pass through `unary`).
     fn parse_pattern(&mut self) -> Result<crate::ast::Pattern, HelixError> {
+        self.deepen()?;
+        let r = self.parse_pattern_alts();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_pattern_alts(&mut self) -> Result<crate::ast::Pattern, HelixError> {
         let (l, c) = self.pos();
         let first = self.parse_single_pattern()?;
         if !matches!(self.peek(), Tok::Pipe) {
@@ -1466,7 +1479,7 @@ impl Parser {
                             // error inside it carries snippet-relative positions (line 1).
                             // Relocate it to the interpolated string's real position so
                             // the caret points at the user's actual source, not line 1.
-                            let e = parse_expression(&src)
+                            let e = parse_expression(&src, self.depth)
                                 .map_err(|err| HelixError { line: l, col: c, ..err })?;
                             // Parse the format spec now, so a malformed spec is a parse
                             // error pointing at the string (never a runtime surprise).

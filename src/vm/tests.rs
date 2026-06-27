@@ -497,6 +497,24 @@
     }
 
     #[test]
+    fn user_range_shadow_does_not_fuse() {
+        // A user `fn range` must NOT be range-fused as the builtin — the VM must agree
+        // with the tree-walker (both call the user fn, then error on a method over the
+        // resulting Int). Regression for the range-shadow fusion divergence.
+        for src in [
+            "fn range(a, b) = a + b\nrange(0, 5).reduce(0, (acc, x) => acc + x)",
+            "fn range(a, b) = a + b\nrange(0, 5).filter(it > 1).count()",
+        ] {
+            assert_eq!(run_vm(src), run_tw(src), "engines diverge on `{src}`");
+        }
+        // the unshadowed builtin range still fuses correctly
+        assert_eq!(
+            run_vm("range(0, 100).map(it * 2).reduce(0, (a, x) => a + x)"),
+            Ok("9900".to_string())
+        );
+    }
+
+    #[test]
     fn differential_vm_vs_tree_walker() {
         let mut rng = 0x1234_5678_9ABC_DEF0u64;
         for _ in 0..40_000 {

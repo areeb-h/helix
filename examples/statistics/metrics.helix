@@ -9,7 +9,7 @@ print("== regression ==")
 print("MSE:  {mse(actual, pred):.4f}")
 print("RMSE: {rmse(actual, pred):.4f}")
 print("MAE:  {mae(actual, pred):.4f}")
-print("R2:   {r2_score(pred, actual):.4f}")
+print("R2:   {r2_score(actual, pred):.4f}")
 
 # --- classification: discrete labels ---
 # 1 = positive, 0 = negative.

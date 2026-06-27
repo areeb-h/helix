@@ -43,6 +43,9 @@ const MAX_WIDTH: usize = 1 << 16;
 const MAX_PRECISION: usize = 512;
 
 pub fn parse_spec(s: &str) -> Result<FormatSpec, String> {
+    // Tolerate surrounding whitespace (`"{x:.2f }"`, `"{ x :.2f}"`) — the expression
+    // side already does, and a space is never meaningful in a spec (no fill char).
+    let s = s.trim();
     let chars: Vec<char> = s.chars().collect();
     let n = chars.len();
     let mut i = 0;
