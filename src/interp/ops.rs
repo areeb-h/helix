@@ -163,7 +163,15 @@ pub(crate) fn eval_binary(
             _ => {
                 let a = num_operand(op, &l, line, col)?;
                 let b = num_operand(op, &r, line, col)?;
-                Ok(Value::Float(a.powf(b)))
+                // Strength-reduce an integer exponent: `x ** 2` is x*x (powi), far
+                // cheaper than the exp/log `powf` and what numpy does too. A fractional
+                // exponent (e.g. `x ** 0.5`) still uses powf.
+                let v = if b.fract() == 0.0 && b.abs() <= i32::MAX as f64 {
+                    a.powi(b as i32)
+                } else {
+                    a.powf(b)
+                };
+                Ok(Value::Float(v))
             }
         },
         Eq => Ok(Value::Bool(values_equal(&l, &r))),
@@ -261,7 +269,7 @@ fn pm_i64(a: &[i64], f: impl Fn(i64) -> i64 + Sync) -> Vec<i64> {
 
 fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
     use crate::value::ArrayData;
-    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
+    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow) {
         return None;
     }
     fn iop(op: &BinOp, x: i64, y: i64) -> i64 {
@@ -291,6 +299,59 @@ fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
             Value::Float(f) => Some(*f),
             _ => None,
         }
+    }
+    // `/` is always float; a zero divisor must raise the *same* error as the scalar
+    // path, so on any zero we bail to the general path (which produces that error).
+    if matches!(op, BinOp::Div) {
+        return match (l, r) {
+            (Value::Array(a), Value::Array(b)) => {
+                if a.len() != b.len() {
+                    return None;
+                }
+                let (fa, fb) = (f64_view(a)?, f64_view(b)?);
+                if fb.contains(&0.0) {
+                    return None;
+                }
+                Some(Value::float_array(pz_f64(&fa, &fb, |x, y| x / y)))
+            }
+            (Value::Array(a), s) => {
+                let (fa, sf) = (f64_view(a)?, scalar_f64(s)?);
+                if sf == 0.0 {
+                    return None;
+                }
+                Some(Value::float_array(pm_f64(&fa, |x| x / sf)))
+            }
+            (s, Value::Array(a)) => {
+                let (fa, sf) = (f64_view(a)?, scalar_f64(s)?);
+                if fa.contains(&0.0) {
+                    return None;
+                }
+                Some(Value::float_array(pm_f64(&fa, |x| sf / x)))
+            }
+            _ => None,
+        };
+    }
+    // `**` over a FLOAT-base array (e.g. `xs ** 2`). An `Int`-base power must stay
+    // `Int` (and may overflow to Float per element), so it's left to the general path.
+    if matches!(op, BinOp::Pow) {
+        return match (l, r) {
+            (Value::Array(a), s) => match &**a {
+                ArrayData::Floats(fa) => {
+                    let sf = scalar_f64(s)?;
+                    // Strength-reduce an integer exponent (`xs ** 2` → x*x via powi),
+                    // matching the scalar path so array and scalar agree to the bit.
+                    let out = if sf.fract() == 0.0 && sf.abs() <= i32::MAX as f64 {
+                        let n = sf as i32;
+                        pm_f64(fa, move |x| x.powi(n))
+                    } else {
+                        pm_f64(fa, move |x| x.powf(sf))
+                    };
+                    Some(Value::float_array(out))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
     }
     match (l, r) {
         // array ⊕ array (same length)
