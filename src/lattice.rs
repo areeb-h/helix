@@ -135,6 +135,155 @@ pub fn lll(mut b: Vec<Vec<f64>>, delta: f64) -> Result<Vec<Vec<f64>>, String> {
     Ok(b)
 }
 
+// ===========================================================================
+// Exact integer LLL — the same algorithm with no floating point at all.
+//
+// The `f64` `lll` above is exact only while every intermediate stays below 2⁵³;
+// for a lattice scaled past that (large embeddings, high-precision relations) the
+// Gram–Schmidt accumulates rounding and the reduction can miss the true short
+// vector. `lll_exact` runs entirely in `BigInt` lattice entries with a `BigRational`
+// Gram–Schmidt, so it is correct to the last bit for an integer lattice of *any*
+// magnitude — at the cost of arbitrary-precision arithmetic. Same structure as
+// `lll` (GS recomputed after each swap) so the two are easy to cross-check.
+// ===========================================================================
+
+use num_bigint::BigInt;
+use num_rational::BigRational;
+use num_traits::Zero;
+
+fn dot_rat(a: &[BigRational], b: &[BigRational]) -> BigRational {
+    let mut s = BigRational::zero();
+    for (x, y) in a.iter().zip(b) {
+        s += x * y;
+    }
+    s
+}
+
+/// Exact Gram–Schmidt of integer rows: `mu[i][j]` (`j < i`) is the rational GS
+/// coefficient and `bnorm[i] = |b*ᵢ|²` is the exact squared GS norm (zero exactly
+/// iff row `i` lies in the span of the earlier rows).
+fn gram_schmidt_exact(b: &[Vec<BigInt>]) -> (Vec<Vec<BigRational>>, Vec<BigRational>) {
+    let n = b.len();
+    let mut bstar: Vec<Vec<BigRational>> = Vec::with_capacity(n);
+    let mut mu = vec![vec![BigRational::zero(); n]; n];
+    let mut bnorm = vec![BigRational::zero(); n];
+    for i in 0..n {
+        let bi: Vec<BigRational> = b[i].iter().map(|x| BigRational::from(x.clone())).collect();
+        let mut row = bi.clone();
+        for j in 0..i {
+            let c = if bnorm[j].is_zero() {
+                BigRational::zero()
+            } else {
+                dot_rat(&bi, &bstar[j]) / &bnorm[j]
+            };
+            for t in 0..row.len() {
+                row[t] = &row[t] - &c * &bstar[j][t];
+            }
+            mu[i][j] = c;
+        }
+        bnorm[i] = dot_rat(&row, &row);
+        bstar.push(row);
+    }
+    (mu, bnorm)
+}
+
+/// Exact size reduction of row `k` against row `l` (`l < k`): subtract the nearest
+/// integer multiple so `|mu[k][l]| ≤ 1/2`. Mirrors [`reduce`] in `BigInt`/`BigRational`.
+fn reduce_exact(k: usize, l: usize, b: &mut [Vec<BigInt>], mu: &mut [Vec<BigRational>]) {
+    let half = BigRational::new(BigInt::from(1), BigInt::from(2));
+    if mu[k][l] > half || mu[k][l] < -half.clone() {
+        let q = mu[k][l].round().to_integer(); // nearest integer (half away from zero)
+        for t in 0..b[l].len() {
+            let prod = &q * &b[l][t];
+            b[k][t] = &b[k][t] - &prod;
+        }
+        let qr = BigRational::from(q);
+        mu[k][l] = &mu[k][l] - &qr;
+        for j in 0..l {
+            let mlj = mu[l][j].clone();
+            mu[k][j] = &mu[k][j] - &qr * &mlj;
+        }
+    }
+}
+
+/// Exact f64 → BigRational (no rounding): decode the IEEE-754 fields so a `delta`
+/// like `0.99` becomes its precise binary value, keeping the Lovász test exact.
+fn rational_from_f64(x: f64) -> BigRational {
+    let bits = x.to_bits();
+    let sign: i64 = if bits >> 63 == 0 { 1 } else { -1 };
+    let raw_exp = ((bits >> 52) & 0x7ff) as i64;
+    let frac = bits & 0xf_ffff_ffff_ffff;
+    let (mantissa, exp) = if raw_exp == 0 {
+        (frac, -1074) // subnormal
+    } else {
+        (frac | 0x10_0000_0000_0000, raw_exp - 1075) // normal: add the implicit bit
+    };
+    let mant = BigInt::from(sign * mantissa as i64);
+    if exp >= 0 {
+        BigRational::from(mant * num_traits::pow(BigInt::from(2), exp as usize))
+    } else {
+        BigRational::new(mant, num_traits::pow(BigInt::from(2), (-exp) as usize))
+    }
+}
+
+/// Exact LLL over an **integer** lattice. Same contract as [`lll`] but every entry
+/// is a `BigInt`, so the result is correct regardless of scale. `delta ∈ (0.25, 1.0]`.
+pub fn lll_exact(mut b: Vec<Vec<BigInt>>, delta: f64) -> Result<Vec<Vec<BigInt>>, String> {
+    let n = b.len();
+    if n == 0 {
+        return Err("`lll_exact` needs at least one basis vector".to_string());
+    }
+    let m = b[0].len();
+    if m == 0 || b.iter().any(|v| v.len() != m) {
+        return Err("`lll_exact` needs non-empty basis vectors all of the same length".to_string());
+    }
+    if m < n {
+        return Err(format!(
+            "`lll_exact` needs at most as many vectors as their dimension (got {n} vectors in dimension {m})"
+        ));
+    }
+    if n > MAX_DIM || m > MAX_DIM {
+        return Err(format!("`lll_exact` basis is too large (max {MAX_DIM} in each dimension)"));
+    }
+    if !(0.25 < delta && delta <= 1.0) {
+        return Err("`lll_exact` delta must be in (0.25, 1.0] (0.75 is standard)".to_string());
+    }
+    let delta = rational_from_f64(delta);
+
+    let (mut mu, mut bnorm) = gram_schmidt_exact(&b);
+    // Exact rank check: a GS norm is exactly zero iff the row is dependent.
+    if bnorm.iter().any(|x| x.is_zero()) {
+        return Err("`lll_exact` basis vectors must be linearly independent".to_string());
+    }
+
+    // Exact LLL terminates in O(n² log B) swaps; this is a defensive backstop only.
+    let max_iters = 1000 + 100 * n * n;
+    let mut iters = 0usize;
+    let mut k = 1usize;
+    while k < n {
+        iters += 1;
+        if iters > max_iters {
+            return Err("`lll_exact` did not converge".to_string());
+        }
+        reduce_exact(k, k - 1, &mut b, &mut mu);
+        let mkk = mu[k][k - 1].clone();
+        let bound = (&delta - &mkk * &mkk) * &bnorm[k - 1];
+        if bnorm[k] >= bound {
+            for l in (0..k - 1).rev() {
+                reduce_exact(k, l, &mut b, &mut mu);
+            }
+            k += 1;
+        } else {
+            b.swap(k, k - 1);
+            let (nmu, nbnorm) = gram_schmidt_exact(&b);
+            mu = nmu;
+            bnorm = nbnorm;
+            k = (k - 1).max(1);
+        }
+    }
+    Ok(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +357,65 @@ mod tests {
         assert!(lll(vec![vec![1.0, 2.0], vec![2.0, 4.0]], 0.75).is_err()); // dependent
         assert!(lll(vec![vec![1.0, 0.0], vec![0.0, 1.0]], 1.5).is_err()); // bad delta
         assert!(lll(vec![vec![1.0], vec![2.0]], 0.75).is_err()); // m < n
+    }
+
+    // ----- exact integer LLL -----
+
+    fn ivec(xs: &[i64]) -> Vec<BigInt> {
+        xs.iter().map(|&x| BigInt::from(x)).collect()
+    }
+
+    /// The relation `[1,1,-1]` among (a, b, c=a+b) is the lattice vector
+    /// `[1,1,-1, 0]` — exact LLL finds it with a residual of EXACTLY zero (the f64
+    /// version only gets "small").
+    #[test]
+    fn exact_recovers_relation_to_the_bit() {
+        let b = vec![
+            ivec(&[1, 0, 0, 3]),
+            ivec(&[0, 1, 0, 5]),
+            ivec(&[0, 0, 1, 8]), // 3 + 5 = 8
+        ];
+        let r = lll_exact(b, 0.99).unwrap();
+        let want = ivec(&[1, 1, -1, 0]);
+        let want_neg = ivec(&[-1, -1, 1, 0]);
+        assert!(r.iter().any(|v| *v == want || *v == want_neg), "relation not exact: {r:?}");
+    }
+
+    /// The payoff: entries past 2⁵³ where f64 GS would lose bits. `c = a + b` with
+    /// a, b ≈ 10¹⁷ ≫ 2⁵³ ≈ 9·10¹⁵; exact LLL still gives a zero-residual relation.
+    #[test]
+    fn exact_handles_entries_beyond_f64_precision() {
+        let a: BigInt = "100000000000000003".parse().unwrap();
+        let b_: BigInt = "200000000000000007".parse().unwrap();
+        let c = &a + &b_; // exact; not representable in f64
+        let basis = vec![
+            vec![BigInt::from(1), BigInt::from(0), BigInt::from(0), a],
+            vec![BigInt::from(0), BigInt::from(1), BigInt::from(0), b_],
+            vec![BigInt::from(0), BigInt::from(0), BigInt::from(1), c],
+        ];
+        let r = lll_exact(basis, 0.99).unwrap();
+        let want = ivec(&[1, 1, -1, 0]);
+        let want_neg = ivec(&[-1, -1, 1, 0]);
+        assert!(r.iter().any(|v| *v == want || *v == want_neg), "big-scale relation missed: {r:?}");
+    }
+
+    /// Exact LLL preserves the lattice (a unimodular transform) and is reduced —
+    /// checked against the float `is_reduced`/`vol_sq` after a cast back.
+    #[test]
+    fn exact_classic_example_reduces() {
+        use num_traits::ToPrimitive;
+        let b = vec![ivec(&[1, 1, 1]), ivec(&[-1, 0, 2]), ivec(&[3, 5, 6])];
+        let r = lll_exact(b, 0.75).unwrap();
+        let rf: Vec<Vec<f64>> =
+            r.iter().map(|row| row.iter().map(|x| x.to_f64().unwrap()).collect()).collect();
+        assert!(is_reduced(&rf, 0.75));
+        assert!((vol_sq(&rf) - 9.0).abs() < 1e-6); // |det| = 3
+    }
+
+    #[test]
+    fn exact_rejects_dependent_and_bad_delta() {
+        assert!(lll_exact(vec![ivec(&[1, 2]), ivec(&[2, 4])], 0.75).is_err()); // dependent
+        assert!(lll_exact(vec![ivec(&[1, 0]), ivec(&[0, 1])], 1.5).is_err()); // bad delta
+        assert!(lll_exact(vec![ivec(&[1]), ivec(&[2])], 0.75).is_err()); // m < n
     }
 }

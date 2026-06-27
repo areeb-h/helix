@@ -21,3 +21,12 @@ print("\nlocal matches:", loc.matches, " containment:", containment)
 
 # --- numeric sequences align too ---
 print("\nnumeric:", align([1, 2, 3, 4], [1, 9, 3, 4]).matches, "of 4 positions match")
+
+# --- custom scoring: pass a record to tune match/mismatch/gap weights ---
+# Default is match +1, mismatch -1, gap_open 0, gap_extend -1 (cheap linear gaps).
+# Penalize gaps heavily so the aligner prefers a mismatch over opening a gap.
+default_s = align([1, 2, 3, 4], [1, 3, 4]).score
+heavy_gap = align([1, 2, 3, 4], [1, 3, 4], "global", {gap_open: -10, gap_extend: -2}).score
+print("\ndefault gap score:", default_s, " heavy-gap score:", heavy_gap)
+# matches/containment are scoring-robust — only the raw score depends on the weights.
+print("matches unchanged:", align([1, 2, 3, 4], [1, 3, 4], {match: 9, gap_open: -1}).matches)

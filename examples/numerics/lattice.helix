@@ -23,3 +23,10 @@ print("residual:", round(reduced[0][3], 1), "— rounding noise, ~0 against scal
 
 # Plain shortest-vector reduction: a skewed integer basis becomes short and tidy.
 print("reduced [[3,1],[2,1]]:", lll([[3.0, 1.0], [2.0, 1.0]]))
+
+# `lll` is f64 — exact only while entries stay below 2^53. For an INTEGER lattice of
+# any magnitude, `lll_exact` runs entirely in arbitrary-precision integers, so the
+# residual is exact to the last bit. Here c = a + b exactly, so the relation [1,1,-1]
+# has a residual of EXACTLY 0 (not just "small"):
+exact = lll_exact([[1, 0, 0, 3], [0, 1, 0, 5], [0, 0, 1, 8]], 0.99)
+print("exact relation:", exact[0], "— last coord is exactly 0")

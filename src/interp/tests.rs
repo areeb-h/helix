@@ -341,6 +341,31 @@
     }
 
     #[test]
+    fn exact_lll_and_align_scoring() {
+        // Exact integer LLL recovers the relation a+b=c with a residual of EXACTLY
+        // zero (the f64 lll only gets "small"). [1,0,0,3],[0,1,0,5],[0,0,1,8] → the
+        // shortest vector is ±[1,1,-1,0]; its residual (4th coord) is exactly 0.
+        assert!(matches!(last("lll_exact([[1,0,0,3],[0,1,0,5],[0,0,1,8]], 0.99)[0][3]").unwrap(), Value::Int(0)));
+        // entries are exact integers
+        assert!(matches!(last("lll_exact([[2,1],[1,2]])[0][0]").unwrap(), Value::Int(_)));
+        // bad delta / dependent rows error
+        assert!(last("lll_exact([[1,0],[0,1]], 2.0)").is_err());
+        assert!(last("lll_exact([[1,2],[2,4]])").is_err());
+        // custom scoring changes the score; matches/containment stay scoring-robust.
+        // [1,2,3,4] vs [1,3,4]: 3 matches + one gap.
+        assert!(matches!(last("align([1,2,3,4],[1,3,4]).score").unwrap(), Value::Int(2))); // 3*(+1) + gap(-1)
+        // heavy gap: 3*(+1) + (gap_open -10 + gap_extend -2) = -9
+        assert!(matches!(last("align([1,2,3,4],[1,3,4],\"global\",{gap_open: -10, gap_extend: -2}).score").unwrap(), Value::Int(-9)));
+        // a scoring record with no explicit mode defaults to global: 3*(+2) + gap(-1) = 5
+        assert!(matches!(last("align([1,2,3,4],[1,3,4],{match: 2}).score").unwrap(), Value::Int(5)));
+        // matches are unaffected by the weights
+        assert!(matches!(last("align([1,2,3,4],[1,3,4],{match: 9, gap_open: -1}).matches").unwrap(), Value::Int(3)));
+        // unknown scoring field / too many modes error
+        assert!(last("align([1],[1],{bonus: 2})").is_err());
+        assert!(last("align([1],[1],\"local\",\"global\")").is_err());
+    }
+
+    #[test]
     fn bitwise_operators() {
         assert!(matches!(last("12 & 10").unwrap(), Value::Int(8)));
         assert!(matches!(last("12 | 10").unwrap(), Value::Int(14)));

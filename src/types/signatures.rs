@@ -324,15 +324,26 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             // shape/element validation is the runtime's job.
             Ok(Type::Array(Box::new(Type::Array(Box::new(Type::Float)))))
         }
-        "align" => {
-            if args.len() < 2 || args.len() > 3 {
+        "lll_exact" => {
+            if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(
-                    format!("`align` takes (a, b) or (a, b, mode), got {}", args.len()),
+                    format!("`lll_exact` takes a basis and an optional delta, got {}", args.len()),
                     line,
                     col,
                 ));
             }
-            // two sequences (+ optional mode string) -> an alignment record
+            // Exact integer LLL: an integer basis -> the reduced integer basis.
+            Ok(Type::Array(Box::new(Type::Array(Box::new(Type::Int)))))
+        }
+        "align" => {
+            if args.len() < 2 || args.len() > 4 {
+                return Err(HelixError::new(
+                    format!("`align` takes (a, b), (a, b, mode), or (a, b, mode, scoring), got {}", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            // two sequences (+ optional mode string and/or scoring record) -> a record
             Ok(Type::Record(vec![
                 ("score".to_string(), Type::Int),
                 ("matches".to_string(), Type::Int),

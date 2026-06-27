@@ -91,6 +91,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "denominator", pure: true },
     BuiltinDef { path: "to_float", pure: true },
     BuiltinDef { path: "lll", pure: true },
+    BuiltinDef { path: "lll_exact", pure: true },
     // general pairwise sequence alignment (NW/SW) over arbitrary arrays
     BuiltinDef { path: "align", pure: true },
     // content hash — pure (same string → same digest), so safely memoizable

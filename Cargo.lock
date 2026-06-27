@@ -1499,6 +1499,7 @@ dependencies = [
  "noodles-sam",
  "noodles-tabix",
  "noodles-vcf",
+ "num-bigint",
  "num-rational",
  "num-traits",
  "numpy",

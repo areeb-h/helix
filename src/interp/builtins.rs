@@ -630,14 +630,82 @@ impl super::Interp {
                 let out: Vec<Value> = reduced.into_iter().map(Value::float_array).collect();
                 Ok(Value::array(out))
             }
-            "align" => {
-                if args.len() < 2 || args.len() > 3 {
+            "lll_exact" => {
+                if args.is_empty() || args.len() > 2 {
                     return Err(HelixError::new(
-                        format!("`align` takes (a, b) or (a, b, mode), got {} arguments", args.len()),
+                        format!("`lll_exact` takes a basis and an optional delta, got {}", args.len()),
                         line,
                         col,
                     )
-                    .hint("e.g. `align(a, b)` or `align(a, b, \"local\")`."));
+                    .hint("e.g. `lll_exact(basis)` or `lll_exact(basis, 0.99)`."));
+                }
+                let rows = match &args[0] {
+                    Value::Array(outer) => outer,
+                    other => {
+                        return Err(type_err("lll_exact", "an array of basis vectors", other, line, col))
+                    }
+                };
+                // Coerce every entry to an exact integer (Int, or integer-valued
+                // Float/Rational); a fractional entry is a clean error — exact LLL is
+                // defined on an integer lattice.
+                let mut basis: Vec<Vec<num_bigint::BigInt>> = Vec::with_capacity(rows.len());
+                for row in rows.to_values().iter() {
+                    match row {
+                        Value::Array(inner) => {
+                            let mut v = Vec::with_capacity(inner.len());
+                            for x in inner.to_values().iter() {
+                                v.push(num_bigint::BigInt::from(as_int(x, "lll_exact", line, col)?));
+                            }
+                            basis.push(v);
+                        }
+                        other => {
+                            return Err(type_err(
+                                "lll_exact",
+                                "each basis vector to be an array",
+                                other,
+                                line,
+                                col,
+                            ))
+                        }
+                    }
+                }
+                let delta = match args.get(1) {
+                    Some(d) => d
+                        .as_f64()
+                        .ok_or_else(|| type_err("lll_exact", "a numeric delta", &args[1], line, col))?,
+                    None => 0.75,
+                };
+                let reduced = crate::lattice::lll_exact(basis, delta)
+                    .map_err(|e| HelixError::new(e, line, col))?;
+                use num_traits::ToPrimitive;
+                let mut out: Vec<Value> = Vec::with_capacity(reduced.len());
+                for row in reduced {
+                    let mut iv = Vec::with_capacity(row.len());
+                    for x in row {
+                        let i = x.to_i64().ok_or_else(|| {
+                            HelixError::new(
+                                "`lll_exact` reduced-basis entry overflows a 64-bit integer",
+                                line,
+                                col,
+                            )
+                        })?;
+                        iv.push(Value::Int(i));
+                    }
+                    out.push(Value::array(iv));
+                }
+                Ok(Value::array(out))
+            }
+            "align" => {
+                if args.len() < 2 || args.len() > 4 {
+                    return Err(HelixError::new(
+                        format!(
+                            "`align` takes (a, b), (a, b, mode), or (a, b, mode, scoring), got {} arguments",
+                            args.len()
+                        ),
+                        line,
+                        col,
+                    )
+                    .hint("e.g. `align(a, b)`, `align(a, b, \"local\")`, or `align(a, b, \"global\", {match: 2, mismatch: -3, gap_open: -5, gap_extend: -1})`."));
                 }
                 let seq = |v: &Value| -> Result<Vec<Value>, HelixError> {
                     match v {
@@ -647,24 +715,90 @@ impl super::Interp {
                 };
                 let a = seq(&args[0])?;
                 let b = seq(&args[1])?;
-                let mode = match args.get(2) {
-                    None => crate::align::Mode::Global,
-                    Some(Value::Str(s)) => match s.as_str() {
-                        "global" => crate::align::Mode::Global,
-                        "local" => crate::align::Mode::Local,
-                        "semiglobal" => crate::align::Mode::Semiglobal,
+                // The Gotoh DP fills an O(n·m) table; cap the cell count so a huge
+                // pair fails cleanly instead of trying to allocate gigabytes.
+                const MAX_ALIGN_CELLS: u128 = 100_000_000;
+                if (a.len() as u128 + 1) * (b.len() as u128 + 1) > MAX_ALIGN_CELLS {
+                    return Err(HelixError::new(
+                        "`align` sequences are too large (the alignment matrix would exceed 100M cells)",
+                        line,
+                        col,
+                    ));
+                }
+                // Optional trailing args, in either order: a mode string and/or a
+                // scoring record. Scoring defaults to match +1 / mismatch −1 / no
+                // gap-open / gap-extend −1; any field may be overridden.
+                let mut mode = crate::align::Mode::Global;
+                let mut sc =
+                    crate::align::Scoring { match_: 1, mismatch: -1, gap_open: 0, gap_extend: -1 };
+                let (mut mode_set, mut scoring_set) = (false, false);
+                for extra in &args[2..] {
+                    match extra {
+                        Value::Str(s) => {
+                            if mode_set {
+                                return Err(HelixError::new("`align` was given two modes", line, col));
+                            }
+                            mode = match s.as_str() {
+                                "global" => crate::align::Mode::Global,
+                                "local" => crate::align::Mode::Local,
+                                "semiglobal" => crate::align::Mode::Semiglobal,
+                                other => {
+                                    return Err(HelixError::new(
+                                        format!("unknown align mode `{other}`"),
+                                        line,
+                                        col,
+                                    )
+                                    .hint("use \"global\", \"local\", or \"semiglobal\"."))
+                                }
+                            };
+                            mode_set = true;
+                        }
+                        Value::Record(fields) => {
+                            if scoring_set {
+                                return Err(HelixError::new(
+                                    "`align` was given two scoring records",
+                                    line,
+                                    col,
+                                ));
+                            }
+                            for (k, v) in fields.iter() {
+                                let iv = as_int(v, "align scoring", line, col)?;
+                                if !(-1_000_000..=1_000_000).contains(&iv) {
+                                    return Err(HelixError::new(
+                                        "`align` scoring values must be within ±1000000",
+                                        line,
+                                        col,
+                                    ));
+                                }
+                                let iv = iv as i32;
+                                match k.as_str() {
+                                    "match" => sc.match_ = iv,
+                                    "mismatch" => sc.mismatch = iv,
+                                    "gap_open" => sc.gap_open = iv,
+                                    "gap_extend" => sc.gap_extend = iv,
+                                    other => {
+                                        return Err(HelixError::new(
+                                            format!("unknown align scoring field `{other}`"),
+                                            line,
+                                            col,
+                                        )
+                                        .hint("scoring fields: match, mismatch, gap_open, gap_extend."))
+                                    }
+                                }
+                            }
+                            scoring_set = true;
+                        }
                         other => {
-                            return Err(HelixError::new(
-                                format!("unknown align mode `{other}`"),
+                            return Err(type_err(
+                                "align",
+                                "a mode string or a scoring record",
+                                other,
                                 line,
                                 col,
-                            )
-                            .hint("use \"global\", \"local\", or \"semiglobal\"."))
+                            ))
                         }
-                    },
-                    Some(other) => return Err(type_err("align", "a mode string", other, line, col)),
-                };
-                let sc = crate::align::Scoring { match_: 1, mismatch: -1, gap_open: 0, gap_extend: -1 };
+                    }
+                }
                 let (score, steps) =
                     crate::align::align_path(a.len(), b.len(), mode, sc, |i, j| values_equal(&a[i], &b[j]));
                 let mut a_al = Vec::with_capacity(steps.len());
