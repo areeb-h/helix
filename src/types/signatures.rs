@@ -156,6 +156,22 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::DataFrame)
         }
+        // generic readers + hashing: one string argument each
+        "read_text" | "read_json" | "file_exists" | "sha256" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            let what = if name == "sha256" { "a string" } else { "a string path" };
+            if !compatible(&args[0], &Type::String) {
+                return Err(type_err(name, what, &args[0], line, col));
+            }
+            Ok(match name {
+                "read_text" | "sha256" => Type::String,
+                "file_exists" => Type::Bool,
+                // JSON shape isn't known statically; Unknown keeps field/index access permissive.
+                _ => Type::Unknown,
+            })
+        }
         // `read_vcf`/`read_bam` scan with one argument; the optional region second
         // argument runs an indexed query, so these readers accept one or two strings.
         "read_vcf" | "read_bam" => {
@@ -555,9 +571,8 @@ pub(super) fn tensor_method_type(name: &str, nargs: usize, line: usize, col: usi
 
 pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "where" | "filter" | "select" | "sort" | "head" | "cache" | "with" | "join" | "vstack" => {
-            Type::DataFrame
-        }
+        "where" | "filter" | "select" | "sort" | "head" | "cache" | "with" | "join" | "vstack"
+        | "unique" => Type::DataFrame,
         "group" => Type::GroupBy,
         "count" => Type::Int,
         "columns" => Type::Array(Box::new(Type::String)),

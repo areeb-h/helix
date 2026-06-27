@@ -237,6 +237,13 @@ pub(crate) fn df_value_method(
                 )),
             }
         }
+        "unique" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`unique` takes no arguments", line, col)
+                    .hint("e.g. `kb.unique()` to drop duplicate rows."));
+            }
+            Ok(Value::dataframe(lf.unique(line, col)?))
+        }
         "column" => {
             let name = column_arg(&args, line, col)?;
             Ok(Value::array_sniff(lf.column_values(&name, line, col)?))

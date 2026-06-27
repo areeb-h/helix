@@ -113,6 +113,33 @@ fn dataframe_vstack_appends_rows() {
 }
 
 #[test]
+fn text_and_json_io_round_trip() {
+    let dir = std::env::temp_dir().join("helix_io_rt");
+    std::fs::create_dir_all(&dir).unwrap();
+    let txt = dir.join("hello.txt");
+    let jsn = dir.join("data.json");
+    std::fs::write(&txt, "hello helix").unwrap();
+    std::fs::write(&jsn, "{\"a\": 1, \"b\": [2, 3]}").unwrap();
+    let src = format!(
+        "print(file_exists(\"{t}\"))\n\
+         print(read_text(\"{t}\"))\n\
+         j = read_json(\"{j}\")\n\
+         print(j.a, j.b[1])\n\
+         print(file_exists(\"{t}.nope\"))\n",
+        t = txt.to_str().unwrap(),
+        j = jsn.to_str().unwrap(),
+    );
+    let (out, err, code) = run_source(&src, &[], "io_rt");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "true"); // file_exists
+    assert_eq!(lines[1], "hello helix"); // read_text
+    assert_eq!(lines[2], "1 3"); // read_json field + index
+    assert_eq!(lines[3], "false"); // missing file
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn version_and_help_flags() {
     for flag in ["--version", "-V"] {
         let (stdout, _, code) = run(&[flag], &[], "");

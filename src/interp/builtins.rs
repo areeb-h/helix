@@ -156,6 +156,46 @@ impl super::Interp {
                     other => Err(type_err("read_csv", "a string path", other, line, col)),
                 }
             }
+            // Generic text/JSON readers — the non-tabular counterpart to read_csv,
+            // for reloading config, library definitions, and saved JSON across runs.
+            "read_text" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => Ok(Value::Str(Rc::new(read_text_file(s, line, col)?))),
+                    other => Err(type_err("read_text", "a string path", other, line, col)),
+                }
+            }
+            "read_json" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => {
+                        let text = read_text_file(s, line, col)?;
+                        crate::json::parse(&text)
+                            .map_err(|m| HelixError::new(format!("invalid JSON in `{s}`: {m}"), line, col))
+                    }
+                    other => Err(type_err("read_json", "a string path", other, line, col)),
+                }
+            }
+            "file_exists" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => Ok(Value::Bool(std::path::Path::new(s.as_str()).exists())),
+                    other => Err(type_err("file_exists", "a string path", other, line, col)),
+                }
+            }
+            // Content hash (hex SHA-256) for content-addressing / reproducibility ids.
+            "sha256" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Str(s) => {
+                        use sha2::{Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(s.as_bytes());
+                        Ok(Value::Str(Rc::new(format!("{:x}", hasher.finalize()))))
+                    }
+                    other => Err(type_err("sha256", "a string", other, line, col)),
+                }
+            }
             "read_vcf" => {
                 // `read_vcf(path)` scans; `read_vcf(path, "chr:start-end")` does an
                 // indexed region query against the file's `.tbi`.
@@ -972,6 +1012,25 @@ fn num_arrays(
         }
     }
     Ok(Some(cols))
+}
+
+/// Read a whole file to a `String`, capping at `MAX_STRING_LEN` so a huge file is a
+/// clean error rather than an allocator abort. Shared by `read_text` and `read_json`.
+fn read_text_file(path: &str, line: usize, col: usize) -> Result<String, HelixError> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        HelixError::new(format!("could not read `{path}`: {e}"), line, col)
+            .hint("check the path exists and is readable.")
+    })?;
+    if meta.len() as usize > crate::interp::MAX_STRING_LEN {
+        return Err(HelixError::new(
+            format!("`{path}` is larger than the {}-byte text limit", crate::interp::MAX_STRING_LEN),
+            line,
+            col,
+        )
+        .hint("read very large tabular files with read_csv/read_parquet instead."));
+    }
+    std::fs::read_to_string(path)
+        .map_err(|e| HelixError::new(format!("could not read `{path}`: {e}"), line, col))
 }
 
 /// Extract two equal-length, non-empty label arrays as raw `Value`s for the

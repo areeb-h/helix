@@ -223,6 +223,13 @@ impl super::Interp {
                     )),
                 }
             }
+            "unique" => {
+                if !args.is_empty() {
+                    return Err(HelixError::new("`unique` takes no arguments", line, col)
+                        .hint("e.g. `kb.unique()` to drop duplicate rows."));
+                }
+                Ok(Value::dataframe(lf.unique(line, col)?))
+            }
             "count" => {
                 if !args.is_empty() {
                     return Err(HelixError::new("`count` takes no arguments", line, col));

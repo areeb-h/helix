@@ -344,6 +344,14 @@ impl DataHandle for PolarsFrame {
         Ok(wrap_lazy(stacked))
     }
 
+    fn unique(&self, _line: usize, _col: usize) -> Result<Df, HelixError> {
+        // Stable + keep-first → deterministic row order (parity-safe), unlike the
+        // unordered group-by.
+        Ok(wrap_lazy(
+            self.lf.clone().unique_stable(None, UniqueKeepStrategy::First),
+        ))
+    }
+
     /// One grouped aggregation: `group(keys).<agg>(value_col)`. Lazy.
     fn group_agg(
         &self,

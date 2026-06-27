@@ -182,6 +182,23 @@
     }
 
     #[test]
+    fn hashing_and_dataframe_unique() {
+        // sha256 matches the canonical hex digest of "helix" (verified vs sha256sum)
+        match last("sha256(\"helix\")").unwrap() {
+            Value::Str(s) => assert_eq!(
+                s.as_str(),
+                "54a85d2ae7b0a4d8005ab5cf466d4e582c6ea9aa5060b261241ec65a0ea58506"
+            ),
+            v => panic!("expected a string, got {:?}", v),
+        }
+        // unique drops duplicate rows
+        assert!(matches!(
+            last("dataframe({id: [1, 1, 2, 2, 2]}).unique().count()").unwrap(),
+            Value::Int(2)
+        ));
+    }
+
+    #[test]
     fn zipmap_pairs_two_arrays() {
         // a.zipmap(b, f) == a.zip(b).map(f) — paired elementwise map
         assert!(matches!(last("[1, 2, 3].zipmap([10, 20, 30], (x, y) => x * y)[1]").unwrap(), Value::Int(40)));

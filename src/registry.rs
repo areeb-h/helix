@@ -29,6 +29,9 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "print", pure: false },
     BuiltinDef { path: "read_csv", pure: false },
     BuiltinDef { path: "read_parquet", pure: false },
+    BuiltinDef { path: "read_text", pure: false },
+    BuiltinDef { path: "read_json", pure: false },
+    BuiltinDef { path: "file_exists", pure: false },
     BuiltinDef { path: "read_fasta", pure: false },
     BuiltinDef { path: "read_fastq", pure: false },
     BuiltinDef { path: "read_vcf", pure: false },
@@ -79,6 +82,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "min", pure: true },
     BuiltinDef { path: "max", pure: true },
     BuiltinDef { path: "erf", pure: true },
+    // content hash — pure (same string → same digest), so safely memoizable
+    BuiltinDef { path: "sha256", pure: true },
     // --- random (reproducible: seeded + pure, so safely memoizable) ---
     BuiltinDef { path: "random", pure: true },
     BuiltinDef { path: "randn", pure: true },
@@ -155,8 +160,8 @@ pub static TENSOR_METHODS: &[&str] = &[
 
 /// DataFrame methods (column verbs + value methods + serialize/write).
 pub static DF_METHODS: &[&str] = &[
-    "where", "filter", "select", "sort", "group", "with", "join", "vstack", "column", "head",
-    "count", "columns", "cache", "write_csv", "write_tsv", "write_json", "write_parquet",
+    "where", "filter", "select", "sort", "group", "with", "join", "vstack", "unique", "column",
+    "head", "count", "columns", "cache", "write_csv", "write_tsv", "write_json", "write_parquet",
     "to_html", "to_markdown",
 ];
 

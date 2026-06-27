@@ -102,6 +102,9 @@ pub trait DataHandle {
     /// must have the same columns (names and order); a schema mismatch is a clean
     /// error, never a silent null-fill.
     fn vstack(&self, bottom: &Df, line: usize, col: usize) -> Result<Df, HelixError>;
+    /// Drop duplicate rows, keeping the first occurrence in order (stable, so the
+    /// result is deterministic — the two engines never diverge on row order).
+    fn unique(&self, line: usize, col: usize) -> Result<Df, HelixError>;
     fn group_agg(
         &self,
         keys: &[String],
