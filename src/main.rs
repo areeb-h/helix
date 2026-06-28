@@ -165,8 +165,61 @@ fn run() -> ExitCode {
         Some("verify") => pkg_result(pkg::cli_verify()),
         // `helix test [path]` — run `*_test.helix` files and report pass/fail.
         Some("test") => cli_test(&args),
+        // `helix doc [Type]` — list the methods on a type (API discovery).
+        Some("doc") => cli_doc(&args),
         // Shorthand: `helix script.helix` runs a file directly.
         Some(path) => run_file(path),
+    }
+}
+
+/// `helix doc [Type|builtins]` — list a type's methods (or the free functions) so the
+/// API is discoverable without triggering an unknown-method error. Names come straight
+/// from the registry (the same source the checker and "did you mean?" hints use).
+fn cli_doc(args: &[String]) -> ExitCode {
+    use crate::registry;
+    let tables = registry::type_method_tables();
+    let sorted = |names: &[&'static str]| {
+        let mut v: Vec<&str> = names.to_vec();
+        v.sort_unstable();
+        v.join(", ")
+    };
+    match args.get(2).map(|s| s.as_str()) {
+        // Overview: every receiver type + its method count, plus how to drill in.
+        None => {
+            println!("Helix methods by receiver type — `helix doc <Type>` lists one type:\n");
+            for (ty, methods) in tables {
+                println!("  {:<10} {} methods", ty, methods.len());
+            }
+            println!("\n  {:<10} {}", "(universal)", registry::UNIVERSAL_METHODS.join(", "));
+            println!("\nFree functions: `helix doc builtins`");
+            ExitCode::SUCCESS
+        }
+        // The free-function builtins (sqrt, read_csv, …).
+        Some("builtins") | Some("functions") => {
+            let names: Vec<&'static str> = registry::BUILTINS.iter().map(|b| b.path).collect();
+            println!("Free functions ({}):\n  {}", names.len(), sorted(&names));
+            ExitCode::SUCCESS
+        }
+        // A specific type (case-insensitive: `helix doc dna`).
+        Some(query) => {
+            let q = query.to_ascii_lowercase();
+            match tables.iter().find(|(ty, _)| ty.to_ascii_lowercase() == q) {
+                Some((ty, methods)) => {
+                    println!("{} methods ({}):\n  {}", ty, methods.len(), sorted(methods));
+                    println!("\nUniversal (any value): {}", registry::UNIVERSAL_METHODS.join(", "));
+                    ExitCode::SUCCESS
+                }
+                None => {
+                    let known: Vec<&str> = tables.iter().map(|(t, _)| *t).collect();
+                    eprintln!(
+                        "error: unknown type `{}`. Try one of: {} (or `builtins`).",
+                        query,
+                        known.join(", ")
+                    );
+                    ExitCode::FAILURE
+                }
+            }
+        }
     }
 }
 
@@ -321,6 +374,7 @@ fn print_help() {
          helix sync               resolve dependencies and write helix.lock\n    \
          helix verify             check the project matches helix.lock (no build)\n    \
          helix test [path]        run *_test.helix files and report pass/fail\n    \
+         helix doc [Type]         list a type's methods (Array/String/Dna/…) or `builtins`\n    \
          helix version            show the version\n    \
          helix help               show this help\n\n\
          The default `helix` is a self-contained binary. A build with the `python`\n\

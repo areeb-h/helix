@@ -224,6 +224,19 @@ pub fn methods_of(table: &[&'static str]) -> Vec<&'static str> {
     table.iter().copied().chain(UNIVERSAL_METHODS.iter().copied()).collect()
 }
 
+/// The method tables by receiver type — the single source for `helix doc <Type>`
+/// introspection and the method-uniqueness test.
+pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 6] {
+    [
+        ("Array", ARRAY_METHODS),
+        ("String", STRING_METHODS),
+        ("Dna", DNA_METHODS),
+        ("Tensor", TENSOR_METHODS),
+        ("DataFrame", DF_METHODS),
+        ("GroupBy", GROUPBY_METHODS),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

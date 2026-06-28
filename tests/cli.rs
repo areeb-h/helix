@@ -785,6 +785,28 @@ fn with_derives_columns_from_expressions() {
 }
 
 #[test]
+fn doc_lists_methods_by_type() {
+    // `helix doc` overview names every receiver type.
+    let (out, _, code) = run(&["doc"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("Array") && out.contains("Dna") && out.contains("DataFrame"));
+    // `helix doc <Type>` lists that type's methods, incl. recently-added ones.
+    let (dna, _, c2) = run(&["doc", "Dna"], &[], "");
+    assert_eq!(c2, Some(0));
+    assert!(dna.contains("base_counts") && dna.contains("hamming") && dna.contains("gc_content"));
+    // case-insensitive type name.
+    let (arr, _, _) = run(&["doc", "array"], &[], "");
+    assert!(arr.contains("scan") && arr.contains("take_while") && arr.contains("index_of"));
+    // free functions.
+    let (b, _, _) = run(&["doc", "builtins"], &[], "");
+    assert!(b.contains("sqrt") && b.contains("read_csv"));
+    // an unknown type is a clear error, not a panic.
+    let (_, err, c3) = run(&["doc", "Nope"], &[], "");
+    assert_eq!(c3, Some(1));
+    assert!(err.contains("unknown type"));
+}
+
+#[test]
 fn join_combines_frames_on_a_key() {
     // `a.join(b, key)` defaults to an inner join; a trailing string picks the type.
     // samples has S1..S4; sample_meta has S1..S3, S5 — so inner keeps 3, left keeps 4.
