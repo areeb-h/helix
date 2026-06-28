@@ -65,12 +65,18 @@ impl super::Compiler {
         // The guard's `after` target is patched to the convergence point once known.
         let is_map = matches!(kind, CompKind::Map);
         let fns = self.jit_fn_set();
-        // `map` may capture free `i64` variables (passed to the kernel as a `caps`
-        // slice); `filter` kernels take no captures.
+        // `map` may capture free numeric variables (passed to the kernel as a `caps`
+        // slice); `filter` kernels take no captures. A map body that is `i64`-closed
+        // emits the kernel via the `i64` analysis; an `f64`-closed body (float literals
+        // / `{+,-,*}` only) emits it via the `f64` analysis — the VM dispatches on the
+        // source array's element type at run time (`Int`→i64 kernel, `Float`→f64). Both
+        // analyses collect free vars in the same first-appearance order, so the stored
+        // capture list is consistent whichever kernel the dispatch ends up taking.
         let captures: Option<Vec<String>> = if params.len() != 1 {
             None
         } else if is_map {
             crate::jit::map_kernel_captures(body, &params[0], &fns)
+                .or_else(|| crate::jit::map_kernel_captures_f64(body, &params[0]))
         } else if crate::jit::filter_kernel_eligible(body, &params[0], &fns) {
             Some(Vec::new())
         } else {

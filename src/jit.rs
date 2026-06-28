@@ -85,9 +85,13 @@ pub struct Jit {
     /// `loop_idx` of [`crate::bytecode::Op::TryJitReduce`]. `None` for a site that
     /// the JIT declined (kept as a slot so indices stay aligned with the compiler).
     reduce_ptrs: Vec<Option<*const u8>>,
-    /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len)` map kernels,
-    /// indexed by [`crate::bytecode::Op::TryJitMap`]'s `kernel_idx`.
+    /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len, *const i64 caps)` map
+    /// kernels (Int source), indexed by [`crate::bytecode::Op::TryJitMap`]'s `kernel_idx`.
     map_ptrs: Vec<Option<*const u8>>,
+    /// The `f64` specialization of each map kernel (Float source): `extern "C"
+    /// fn(*const f64, *mut f64, i64, *const f64)`. Same index as `map_ptrs`; the VM picks
+    /// by the receiver array's element type.
+    map_ptrs_f64: Vec<Option<*const u8>>,
     /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len) -> i64` (kept count)
     /// filter kernels, indexed by [`crate::bytecode::Op::TryJitFilter`]'s `kernel_idx`.
     filter_ptrs: Vec<Option<*const u8>>,
@@ -105,9 +109,13 @@ impl Jit {
     pub fn reduce_loop(&self, idx: usize) -> Option<*const u8> {
         self.reduce_ptrs.get(idx).copied().flatten()
     }
-    /// The native map kernel for site `idx`, if one compiled.
+    /// The native `i64` map kernel for site `idx`, if one compiled.
     pub fn map_kernel(&self, idx: usize) -> Option<*const u8> {
         self.map_ptrs.get(idx).copied().flatten()
+    }
+    /// The native `f64` map kernel for site `idx`, if one compiled.
+    pub fn map_kernel_f64(&self, idx: usize) -> Option<*const u8> {
+        self.map_ptrs_f64.get(idx).copied().flatten()
     }
     /// The native filter kernel for site `idx`, if one compiled.
     pub fn filter_kernel(&self, idx: usize) -> Option<*const u8> {
@@ -262,14 +270,20 @@ pub fn build(
     // Compile each flagged `map`/`filter` body and fuseable pipeline into a native
     // kernel. Same defensive re-check + per-site `None` slot as the reduce loops; kernel
     // bodies may call the eligible functions in `fn_ids`.
-    let map_ids = define_array_kernels(&mut module, map_kernels, "map", false, &fn_ids, &int_eligible);
+    // `map` compiles two specializations — `i64` (Int source) and `f64` (Float source);
+    // the VM picks by the array's element type at runtime. `filter`/fused stay `Int`.
+    let map_ids =
+        define_array_kernels(&mut module, map_kernels, "map", false, &fn_ids, &int_eligible, NumKind::Int);
+    let map_f64_ids =
+        define_array_kernels(&mut module, map_kernels, "mapf", false, &fn_ids, &int_eligible, NumKind::Float);
     let filter_ids =
-        define_array_kernels(&mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible);
+        define_array_kernels(&mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, NumKind::Int);
     let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible);
 
     if compiled.is_empty()
         && reduce_ids.iter().all(|r| r.is_none())
         && map_ids.iter().all(|r| r.is_none())
+        && map_f64_ids.iter().all(|r| r.is_none())
         && filter_ids.iter().all(|r| r.is_none())
         && fused_ids.iter().all(|r| r.is_none())
     {
@@ -294,10 +308,11 @@ pub fn build(
     };
     let reduce_ptrs = finalize(reduce_ids, &module);
     let map_ptrs = finalize(map_ids, &module);
+    let map_ptrs_f64 = finalize(map_f64_ids, &module);
     let filter_ptrs = finalize(filter_ids, &module);
     let fused_ptrs = finalize(fused_ids, &module);
 
-    Some(Jit { _module: module, by_name, reduce_ptrs, map_ptrs, filter_ptrs, fused_ptrs })
+    Some(Jit { _module: module, by_name, reduce_ptrs, map_ptrs, map_ptrs_f64, filter_ptrs, fused_ptrs })
 }
 
 /// All stages and the reduce sink of a fused pipeline must be JIT-eligible.
@@ -355,15 +370,19 @@ fn define_array_kernels(
     is_filter: bool,
     fn_ids: &HashMap<&str, FuncId>,
     eligible: &HashSet<&str>,
+    elem_kind: NumKind,
 ) -> Vec<Option<FuncId>> {
     let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
     let mut ctx = module.make_context();
     let mut bctx = FunctionBuilderContext::new();
     for (i, k) in kernels.iter().enumerate() {
-        // `map` re-checks with the capture-aware eligibility (so a captured-var body is
-        // compiled, not declined); `filter` takes no captures.
+        // Eligibility per kind: filter (Int comparison), Int map (capture-aware, the body
+        // re-checked so a captured-var body compiles), or Float map (the safe `+ - *`
+        // subset over a Floats source — see `map_kernel_captures_f64`).
         let ok = if is_filter {
             filter_kernel_eligible(&k.body, &k.binder, eligible)
+        } else if matches!(elem_kind, NumKind::Float) {
+            map_kernel_captures_f64(&k.body, &k.binder).is_some()
         } else {
             map_kernel_captures(&k.body, &k.binder, eligible).is_some()
         };
@@ -374,7 +393,7 @@ fn define_array_kernels(
         let mut sig = module.make_signature();
         sig.call_conv = CallConv::SystemV;
         for _ in 0..3 {
-            sig.params.push(AbiParam::new(I64)); // src, dst, len
+            sig.params.push(AbiParam::new(I64)); // src, dst, len (pointers + length: i64)
         }
         if is_filter {
             sig.returns.push(AbiParam::new(I64)); // kept count
@@ -388,7 +407,8 @@ fn define_array_kernels(
                 continue;
             }
         };
-        let done = define_array_kernel(module, &mut ctx, &mut bctx, id, k, is_filter, fn_ids);
+        let done =
+            define_array_kernel(module, &mut ctx, &mut bctx, id, k, is_filter, fn_ids, elem_kind);
         ids.push(done.map(|()| id));
     }
     ids
@@ -469,6 +489,47 @@ pub fn map_kernel_captures(body: &Expr, binder: &str, fns: &HashSet<&str>) -> Op
         Some(caps)
     } else {
         None
+    }
+}
+
+/// f64 `map` eligibility (over a **Floats** source array). The body must use only
+/// `+ - *` over the binder, int/float literals, and captured variables, and it must
+/// **reference the binder** — so the result is provably `Float` (the binder is `f64`
+/// and float-ness propagates through `+ - *`), matching the interpreter. A constant or
+/// capture-only body (whose type could be `Int`) is excluded, as are `/` (the
+/// interpreter raises on /0 where native fdiv yields ±inf), `%`, `if`, comparisons, and
+/// calls — the safe subset that can't introduce a JIT↔interpreter divergence. Returns
+/// the ordered captures (passed to the kernel as `f64`), or `None`.
+pub fn map_kernel_captures_f64(body: &Expr, binder: &str) -> Option<Vec<String>> {
+    let mut caps: Vec<String> = Vec::new();
+    let mut uses_binder = false;
+    if f64_body_eligible(body, binder, &mut caps, &mut uses_binder)
+        && uses_binder
+        && caps.len() <= MAX_CAPTURES
+    {
+        Some(caps)
+    } else {
+        None
+    }
+}
+
+fn f64_body_eligible(e: &Expr, binder: &str, caps: &mut Vec<String>, uses_binder: &mut bool) -> bool {
+    match e {
+        Expr::Int(_) | Expr::Float(_) => true,
+        Expr::Ident { name, .. } => {
+            if name == binder {
+                *uses_binder = true;
+            } else if !caps.iter().any(|c| c == name) {
+                caps.push(name.clone());
+            }
+            true
+        }
+        Expr::Binary { op, left, right, .. } => {
+            matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+                && f64_body_eligible(left, binder, caps, uses_binder)
+                && f64_body_eligible(right, binder, caps, uses_binder)
+        }
+        _ => false,
     }
 }
 
@@ -780,6 +841,7 @@ fn define_reduce_loop(
 ///   `store dst[w]=src[i]; w += pred(src[i])` — returning `w` (kept count), so
 ///   `dst[0..w]` holds the kept elements in order. Integer arithmetic wraps, matching
 ///   the interpreter's release semantics and the bytecode loop byte-for-byte.
+#[allow(clippy::too_many_arguments)]
 fn define_array_kernel<'a>(
     module: &mut JITModule,
     ctx: &mut cranelift_codegen::Context,
@@ -788,7 +850,11 @@ fn define_array_kernel<'a>(
     k: &'a crate::bytecode::ArrayKernel,
     is_filter: bool,
     fn_ids: &HashMap<&'a str, FuncId>,
+    elem_kind: NumKind,
 ) -> Option<()> {
+    // Element + capture values are `i64` (map over an `Int` array) or `f64` (map over a
+    // `Float` array); the buffer pointers and length are always `i64`. Filter is `Int`.
+    let elem_ty = if matches!(elem_kind, NumKind::Float) { F64 } else { I64 };
     ctx.func.signature.call_conv = CallConv::SystemV;
     for _ in 0..3 {
         ctx.func.signature.params.push(AbiParam::new(I64)); // src, dst, len
@@ -841,14 +907,15 @@ fn define_array_kernel<'a>(
     let ioff = b.ins().imul_imm(iv2, 8);
     let srcp = b.use_var(src_var);
     let saddr = b.ins().iadd(srcp, ioff);
-    let elem = b.ins().load(I64, MemFlags::trusted(), saddr, 0);
-    let elem_var = b.declare_var(I64);
+    let elem = b.ins().load(elem_ty, MemFlags::trusted(), saddr, 0);
+    let elem_var = b.declare_var(elem_ty);
     b.def_var(elem_var, elem);
 
     let mut vars: HashMap<&'a str, Variable> = HashMap::new();
     vars.insert(k.binder.as_str(), elem_var);
     // Bind each captured variable to `caps[i]` — loop-invariant, so the loads are
-    // trivially hoistable; correctness only needs the right slot per name.
+    // trivially hoistable; correctness only needs the right slot per name. (`caps[i]`
+    // is `i64` for an `Int` kernel, `f64` for a `Float` one — the VM coerces to match.)
     if let Some(cp) = caps_ptr {
         let caps_var = b.declare_var(I64);
         b.def_var(caps_var, cp);
@@ -856,8 +923,8 @@ fn define_array_kernel<'a>(
             let base = b.use_var(caps_var);
             let off = b.ins().iconst(I64, (j * 8) as i64);
             let addr = b.ins().iadd(base, off);
-            let v = b.ins().load(I64, MemFlags::trusted(), addr, 0);
-            let cvar = b.declare_var(I64);
+            let v = b.ins().load(elem_ty, MemFlags::trusted(), addr, 0);
+            let cvar = b.declare_var(elem_ty);
             b.def_var(cvar, v);
             vars.insert(cname.as_str(), cvar);
         }
@@ -877,7 +944,7 @@ fn define_array_kernel<'a>(
         b.def_var(w_var, nw);
     } else {
         // dst[i] = body(elem)
-        let r = gen_value(&mut b, &k.body, &mut vars, fn_ids, module, NumKind::Int);
+        let r = gen_value(&mut b, &k.body, &mut vars, fn_ids, module, elem_kind);
         let iv3 = b.use_var(i_var);
         let doff = b.ins().imul_imm(iv3, 8);
         let dstp = b.use_var(dst_var);
@@ -1258,6 +1325,19 @@ pub unsafe fn run_map_kernel(ptr: *const u8, src: &[i64], caps: &[i64]) -> Vec<i
         let f: extern "C" fn(*const i64, *mut i64, i64, *const i64) =
             unsafe { std::mem::transmute(ptr) };
         // `caps.as_ptr()` is valid even when empty (a capture-free kernel never reads it).
+        f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, caps.as_ptr());
+    }
+    dst
+}
+
+/// The `f64` map kernel: `dst[i] = body(src[i])` over an `f64` buffer, with `f64`
+/// captures. SAFETY: as [`run_map_kernel`], with an `fn(*const f64, *mut f64, i64,
+/// *const f64)` contract guaranteed by the VM's `Float`-array + numeric-caps check.
+pub unsafe fn run_map_kernel_f64(ptr: *const u8, src: &[f64], caps: &[f64]) -> Vec<f64> {
+    let mut dst = vec![0.0f64; src.len()];
+    if !src.is_empty() {
+        let f: extern "C" fn(*const f64, *mut f64, i64, *const f64) =
+            unsafe { std::mem::transmute(ptr) };
         f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, caps.as_ptr());
     }
     dst

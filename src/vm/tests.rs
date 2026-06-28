@@ -649,6 +649,63 @@
         format!("{preamble}{terminal}")
     }
 
+    /// A random `f64`-map pipeline: a `Float`-array literal source followed by 1–3
+    /// `.map(it OP operand)` stages with `OP ∈ {+,-,*}` and a float operand that is
+    /// either a literal or a captured `f64` global. Every stage is `f64`-kernel
+    /// eligible (uses the binder, no `/`, no comparison/`if`/call), so a `Float` source
+    /// drives the native `f64` kernel — the path the oracle below must hold identical to
+    /// the bytecode VM and the tree-walker, bit-for-bit (Cranelift `fadd/fsub/fmul` are
+    /// the same SSE scalar ops the interpreter runs, in the same left-to-right order).
+    fn gen_float_map_pipeline(rng: &mut u64) -> String {
+        fn flit(rng: &mut u64) -> String {
+            let whole = (next(rng) % 21) as i64 - 10;
+            let frac = next(rng) % 1000;
+            format!("{}.{:03}", whole, frac)
+        }
+        let n_caps = pick(rng, 3) as usize; // 0–2 captured f64 globals
+        let mut preamble = String::new();
+        for i in 0..n_caps {
+            preamble.push_str(&format!("c{} = {}\n", i, flit(rng)));
+        }
+        fn operand(rng: &mut u64, n_caps: usize) -> String {
+            if n_caps > 0 && pick(rng, 2) == 0 {
+                format!("c{}", pick(rng, n_caps as u64))
+            } else {
+                flit(rng)
+            }
+        }
+        let n = 1 + pick(rng, 6);
+        let elems: Vec<String> = (0..n).map(|_| flit(rng)).collect();
+        let mut chain = format!("[{}]", elems.join(", "));
+        for _ in 0..(1 + pick(rng, 3)) {
+            let op = ["+", "-", "*"][pick(rng, 3) as usize];
+            chain = format!("({}).map(it {} {})", chain, op, operand(rng, n_caps));
+        }
+        format!("{preamble}{chain}")
+    }
+
+    /// Triple oracle for the `f64` map kernel: a random `Float`-array map pipeline must
+    /// render the *same* array on the JIT-native path, the pure bytecode loop, and the
+    /// tree-walker. Guards the monomorphized `f64` kernel + its `f64`-capture passing.
+    #[test]
+    fn differential_float_map_kernel_oracle() {
+        let mut rng = 0xF10A_7C0D_E5EE_9001u64;
+        for _ in 0..15_000 {
+            let src = gen_float_map_pipeline(&mut rng);
+            let jit = run_vm_jit(&src);
+            let no_jit = run_vm_no_jit(&src);
+            let tw = run_tw(&src);
+            match (jit, no_jit, tw) {
+                (Ok(a), Ok(b), Ok(c)) => {
+                    assert_eq!(a, b, "f64 map: JIT ≠ bytecode VM on `{src}`");
+                    assert_eq!(b, c, "f64 map: bytecode VM ≠ tree-walker on `{src}`");
+                }
+                (Err(()), Err(()), Err(())) => {}
+                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// Triple oracle for the JIT array/fused kernels: every random `Int`-array
     /// pipeline must produce the *same* result on the JIT-native path, the pure
     /// bytecode loop, and the tree-walker. This closes the one confirmed fuzzing gap
@@ -667,6 +724,22 @@
         // a float capture is not i64-closed → falls through identically on all engines
         let f = "k = 1.5\n[1, 2, 3].map(x => x + k).sum()";
         assert_eq!(run_vm_jit(f).expect("jit"), run_tw(f).expect("tw"));
+    }
+
+    #[test]
+    fn f64_map_kernel_matches() {
+        // A `Float`-array map with `{+,-,*}` and a captured `f64` drives the native f64
+        // kernel; it must agree with the bytecode VM and tree-walker bit-for-bit.
+        let src = "k = 0.5\n[1.0, 2.0, 3.0].map(x => x * 2.0 + k)";
+        let jit = run_vm_jit(src).expect("jit");
+        assert_eq!(jit, run_vm_no_jit(src).expect("vm"));
+        assert_eq!(jit, run_tw(src).expect("tw"));
+        // chained float maps each run as a standalone f64 kernel (floats don't fuse)
+        let chained = "[1.5, 2.5].map(x => x + 1.0).map(x => x * 3.0)";
+        assert_eq!(
+            run_vm_jit(chained).expect("jit"),
+            run_tw(chained).expect("tw")
+        );
     }
 
     #[test]

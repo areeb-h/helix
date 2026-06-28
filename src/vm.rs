@@ -849,35 +849,71 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // else: fall through (ip already advanced) to CompInitRange.
             }
             Op::TryJitMap { kernel_idx, after } => {
-                // The captured `i64` values (if any) sit on top of the receiver array.
-                // Pop and validate them whether or not the kernel is taken, so the
-                // bytecode fall-through (`CompInit`) sees only the array — and take the
-                // native kernel only when the array is `Int`, a kernel compiled, and
-                // every capture is an `Int` (a float capture falls through, correctly).
-                let n_caps = program.map_kernels[*kernel_idx as usize].captures.len();
+                // The captured values (if any) sit on top of the receiver array. Pop them
+                // off (taken or not) so the bytecode fall-through sees only the array, then
+                // dispatch by element type: an `Int` array → the `i64` kernel with `i64`
+                // captures (a non-`Int` capture falls through); a `Float` array → the `f64`
+                // kernel with `f64` captures (Int/Float coerce). Anything else falls
+                // through to the identical `CompInit` bytecode loop (the oracle path).
+                use crate::value::ArrayData;
+                let kidx = *kernel_idx as usize;
+                let n_caps = program.map_kernels[kidx].captures.len();
                 let split = stack.len() - n_caps;
-                let caps: Option<Vec<i64>> = stack[split..]
-                    .iter()
-                    .map(|v| if let Value::Int(i) = v { Some(*i) } else { None })
-                    .collect();
-                stack.truncate(split);
-                let ptr = match (jit, &caps, stack.last()) {
-                    (Some(j), Some(_), Some(Value::Array(a)))
-                        if matches!(&**a, crate::value::ArrayData::Ints(_)) =>
-                    {
-                        j.map_kernel(*kernel_idx as usize)
-                    }
-                    _ => None,
+                let cap_vals = stack.split_off(split);
+                enum Pick {
+                    I64(*const u8, Vec<i64>),
+                    F64(*const u8, Vec<f64>),
+                    No,
+                }
+                let pick = match (jit, stack.last()) {
+                    (Some(j), Some(Value::Array(a))) => match &**a {
+                        ArrayData::Ints(_) => {
+                            let caps: Option<Vec<i64>> = cap_vals
+                                .iter()
+                                .map(|v| if let Value::Int(i) = v { Some(*i) } else { None })
+                                .collect();
+                            match (caps, j.map_kernel(kidx)) {
+                                (Some(c), Some(p)) => Pick::I64(p, c),
+                                _ => Pick::No,
+                            }
+                        }
+                        ArrayData::Floats(_) => {
+                            let caps: Option<Vec<f64>> = cap_vals.iter().map(|v| v.as_f64()).collect();
+                            match (caps, j.map_kernel_f64(kidx)) {
+                                (Some(c), Some(p)) => Pick::F64(p, c),
+                                _ => Pick::No,
+                            }
+                        }
+                        _ => Pick::No,
+                    },
+                    _ => Pick::No,
                 };
-                if let (Some(ptr), Some(caps)) = (ptr, caps) {
-                    let arr = stack.pop().unwrap();
-                    if let Value::Array(a) = &arr
-                        && let crate::value::ArrayData::Ints(v) = &**a
-                    {
-                        let out = unsafe { crate::jit::run_map_kernel(ptr, v, &caps) };
-                        stack.push(Value::int_array(out));
-                        frames[fi].ip = *after as usize;
+                match pick {
+                    Pick::I64(ptr, caps) => {
+                        let arr = stack.pop().unwrap();
+                        if let Value::Array(a) = &arr
+                            && let ArrayData::Ints(v) = &**a
+                        {
+                            let out = unsafe { crate::jit::run_map_kernel(ptr, v, &caps) };
+                            stack.push(Value::int_array(out));
+                            frames[fi].ip = *after as usize;
+                        } else {
+                            stack.push(arr);
+                        }
                     }
+                    Pick::F64(ptr, caps) => {
+                        let arr = stack.pop().unwrap();
+                        if let Value::Array(a) = &arr
+                            && let ArrayData::Floats(v) = &**a
+                        {
+                            let out = unsafe { crate::jit::run_map_kernel_f64(ptr, v, &caps) };
+                            stack.push(Value::float_array(out));
+                            frames[fi].ip = *after as usize;
+                        } else {
+                            stack.push(arr);
+                        }
+                    }
+                    Pick::No => {} // fall through to the bytecode loop
                 }
             }
             Op::TryJitFilter { kernel_idx, after } => {

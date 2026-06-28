@@ -7,34 +7,48 @@ made per-element `map` the slowest path in the language.
 
 ## What compiles to a kernel
 
-A `map`/`filter` becomes a native kernel when the array is a packed `Int` array and the
-single-parameter body is a pure `i64` expression — integer `+ - *`, `%` by a positive
-constant, comparisons, `if`/`then`/`else`, `let`, **calls to JIT-eligible user functions**
-(`x => normalize(x)`; the function is compiled natively and called from inside the loop),
-and **captured `i64` variables** (`map`: `x => x*k + b`, where `k`/`b` come from the
-enclosing scope — they're loop-invariant, resolved once at the call site and passed to the
-kernel as a `caps` slice; up to 8 captures). Anything else — float arrays, a float body or
-float capture, `missing`, a body using `/`, multi-binder destructuring — transparently
-**falls through to the bytecode loop**. Correct everywhere; accelerated where it can be.
-The JIT itself is x86-64 Linux only; other targets always run the bytecode loop.
+An `Int`-array `map`/`filter` becomes a native kernel when the single-parameter body is a
+pure `i64` expression — integer `+ - *`, `%` by a positive constant, comparisons,
+`if`/`then`/`else`, `let`, **calls to JIT-eligible user functions** (`x => normalize(x)`;
+the function is compiled natively and called from inside the loop), and **captured `i64`
+variables** (`map`: `x => x*k + b`, where `k`/`b` come from the enclosing scope — they're
+loop-invariant, resolved once at the call site and passed to the kernel as a `caps` slice;
+up to 8 captures).
+
+A **`Float`-array `map`** compiles too: the kernel is monomorphized over the element type
+(the "Julia recipe" — one source, an `i64` and an `f64` instantiation, the VM dispatches on
+the array at run time). The `f64` body is a deliberately narrow, divergence-free subset —
+`+ - *` only (literals and up to 8 captured `f64`/`i64` values coerced to `f64`), no `/`
+(Helix raises on float `/0` where native `fdiv` yields `±inf`), no `if`/comparison/call (a
+float fn could return an `Int`, breaking result-type agreement), and the body **must**
+reference the binder (so a `Float` source guarantees a `Float` result, matching the
+interpreter). `fadd/fsub/fmul` are the same SSE scalar ops the interpreter runs, in the
+same left-to-right order, so the result is bit-for-bit identical.
+
+Anything else — `Float` *filters*, a float body over an `Int` source (`range.map(x =>
+x*0.001)` — mixed, the source stays `Int`), a body using `/` or `if`/comparison/call on
+floats, `missing`, multi-binder destructuring — transparently **falls through to the
+bytecode loop**. Correct everywhere; accelerated where it can be. The JIT itself is x86-64
+Linux only; other targets always run the bytecode loop.
 
 Every path is held to the tree-walker's result byte-for-byte (the parity oracle): integer
 arithmetic wraps identically, and `map`/`filter` preserve element order.
 
 ## Idiom: keep hot-loop element work on the typed path
 
-The fall-through to the bytecode loop is **correct but ~25–30× slower** than the native
-kernel. Captured `i64` variables now compile (`range(2M).map(x => x*2+k)` with a captured
-`k` is **0.04 s** — identical to the literal-`k` kernel, down from 1.15 s). The remaining
-case that bites is **a float body or float capture** (`xs.map(x => x*2.0)`): the JIT is
-`i64`-only today, so it falls through (~28× vs the integer kernel).
+The fall-through to the bytecode loop is **correct but ~25–100× slower** than the native
+kernel. Both `i64` and `f64` `map` bodies now compile: `range(2M).map(x => x*2+k)` (captured
+`i64` `k`) is **0.04 s**, and an `f64` map over 10M elements (`xs.map(x => x*2.0 + k)`) is
+**~0.012 s** — vs **~1.26 s** when the same body falls through to the bytecode loop (~100×).
 
-Until `f64` kernels land (roadmap below), the reliable fast idiom for a *float* hot loop is
-to **build with vectorized array ops rather than a `map` closure**, because the broadcast
+The cases that still fall through are **a float body over an `Int`/`range` source** (mixed —
+`range(N).map(j => j*0.001)`, where the source stays `Int`) and **any `f64` body outside the
+`{+,-,*}` subset** (a `/`, an `if`, a comparison, a call). For those, the reliable fast idiom
+is to **build with vectorized array ops rather than a `map` closure**, because the broadcast
 operators run on the packed buffer regardless of element type:
 
 ```helix
-# slow in a hot loop — captured `i`, float body → interpreter (~28×):
+# slow in a hot loop — captured `i`, float body over an Int range → interpreter:
 xs = range(0, 64).map(j => (i + j) * 0.001)
 # fast — typed broadcast over the packed buffer, no per-element closure:
 xs = (range(0, 64) + i) * 0.001
@@ -105,6 +119,9 @@ runtime — and runs at the bare reduce-loop's C/Go-class speed.
 - ~~captured numerics in bodies (`x => x*k`)~~ — **done** (single `map`; via a `caps`
   slice). Still to do: extend captures to the **fused** map→reduce path (a captured map
   feeding a `reduce` currently un-fuses and runs the map as a standalone kernel).
-- `f64` kernels (the dominant remaining fall-through — float bodies/captures/arrays); SIMD
-  lanes; horizontal fusion (several aggregates in one pass); statistical sinks
+- ~~`f64` `map` kernels~~ — **done** (monomorphized over element type; `{+,-,*}` subset,
+  `f64` captures). Still to do: `f64` *filters* and the wider float body (`/`, `if`,
+  comparison, calls) once each divergence (float `/0` → raise, result-type, NaN-compare) is
+  handled; the `f64` kernel in the **fused** pipeline; a float body over an `Int` source.
+- SIMD lanes; horizontal fusion (several aggregates in one pass); statistical sinks
   (`.sum()`/`.mean()` with an incremental Neumaier compensator).
