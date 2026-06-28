@@ -1104,6 +1104,16 @@ fn string_method(
             arity(0)?;
             crate::json::parse(s).map_err(|e| HelixError::new(e, line, col))
         }
+        // `"3.14".to_float()` / `"42".to_int()`: parse a numeric string. Same impl as the
+        // free functions `to_float`/`to_int`, so both spellings agree.
+        "to_float" => {
+            arity(0)?;
+            crate::interp::builtins::parse_str_float(s, line, col)
+        }
+        "to_int" => {
+            arity(0)?;
+            crate::interp::builtins::parse_str_int(s, line, col)
+        }
         // `text.write_to(path)` / `append_to(path)`: the receiver is the text and the
         // argument is the path (the reverse of the underlying `writers` arg order).
         "write_to" | "append_to" => {

@@ -103,6 +103,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "numerator", pure: true },
     BuiltinDef { path: "denominator", pure: true },
     BuiltinDef { path: "to_float", pure: true },
+    BuiltinDef { path: "to_int", pure: true },
     BuiltinDef { path: "lll", pure: true },
     BuiltinDef { path: "lll_exact", pure: true },
     // reverse-mode autodiff: wrap a leaf, read its forward value, get a gradient
@@ -174,7 +175,7 @@ pub static ARRAY_METHODS: &[&str] = &[
 /// String methods.
 pub static STRING_METHODS: &[&str] = &[
     "upper", "lower", "count", "length", "reverse", "trim", "split", "replace", "contains",
-    "starts_with", "ends_with", "phred", "parse_json", "write_to", "append_to",
+    "starts_with", "ends_with", "phred", "parse_json", "to_float", "to_int", "write_to", "append_to",
 ];
 
 /// DNA-sequence methods.

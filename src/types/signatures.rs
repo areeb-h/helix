@@ -347,6 +347,12 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Float)
         }
+        "to_int" => {
+            if args.len() != 1 {
+                return Err(arity_err("to_int", 1, args.len(), line, col));
+            }
+            Ok(Type::Int)
+        }
         "lll" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(
@@ -633,6 +639,8 @@ pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<
         "phred" => Type::Array(Box::new(Type::Int)),
         // parse a JSON string (shape unknown statically); write the text to a file.
         "parse_json" => Type::Unknown,
+        "to_float" => Type::Float,
+        "to_int" => Type::Int,
         "write_to" | "append_to" => Type::Unit,
         _ => {
             return Err(unknown_method(

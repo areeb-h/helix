@@ -651,8 +651,24 @@ impl super::Interp {
                     Value::Int(i) => Ok(Value::Float(*i as f64)),
                     Value::Float(f) => Ok(Value::Float(*f)),
                     Value::Rational(r) => Ok(Value::Float(r.to_f64().unwrap_or(f64::NAN))),
+                    // A numeric *string* is parsed (the honest spelling of what people
+                    // used to reach for `parse_json` to do).
+                    Value::Str(s) => parse_str_float(s, line, col),
                     Value::Missing => Ok(Value::Missing),
-                    other => Err(type_err("to_float", "a number", other, line, col)),
+                    other => Err(type_err("to_float", "a number or numeric string", other, line, col)),
+                }
+            }
+            "to_int" => {
+                arity(name, &args, 1, line, col)?;
+                use num_traits::ToPrimitive;
+                match &args[0] {
+                    Value::Int(i) => Ok(Value::Int(*i)),
+                    // Truncate toward zero — matches the usual numeric→int narrowing.
+                    Value::Float(f) => Ok(Value::Int(f.trunc() as i64)),
+                    Value::Rational(r) => Ok(Value::Int(r.to_f64().unwrap_or(f64::NAN).trunc() as i64)),
+                    Value::Str(s) => parse_str_int(s, line, col),
+                    Value::Missing => Ok(Value::Missing),
+                    other => Err(type_err("to_int", "a number or integer string", other, line, col)),
                 }
             }
             "lll" => {
@@ -1515,6 +1531,26 @@ fn num_array(who: &str, v: &Value, line: usize, col: usize) -> Result<Option<Vec
         }
     }
     Ok(Some(out))
+}
+
+/// Parse a string to a float for `to_float(s)` and `String.to_float()`. Leading/trailing
+/// whitespace is ignored; a non-numeric string is a clear error (not a silent NaN).
+pub(crate) fn parse_str_float(s: &str, line: usize, col: usize) -> Result<Value, HelixError> {
+    let t = s.trim();
+    t.parse::<f64>().map(Value::Float).map_err(|_| {
+        HelixError::new(format!("could not parse {t:?} as a number"), line, col)
+            .hint("`to_float` expects a numeric string like \"3.14\" or \"-2\".")
+    })
+}
+
+/// Parse a string to an integer for `to_int(s)` and `String.to_int()`. Strict: a decimal
+/// string like "3.5" is rejected (use `to_float`), so an integer field never rounds silently.
+pub(crate) fn parse_str_int(s: &str, line: usize, col: usize) -> Result<Value, HelixError> {
+    let t = s.trim();
+    t.parse::<i64>().map(Value::Int).map_err(|_| {
+        HelixError::new(format!("could not parse {t:?} as an integer"), line, col)
+            .hint("`to_int` expects an integer string like \"42\" or \"-7\"; for decimals use `to_float`.")
+    })
 }
 
 /// An IEEE float predicate (`is_nan`/`is_finite`/`is_infinite`): `Float` → `Bool` via `f`;

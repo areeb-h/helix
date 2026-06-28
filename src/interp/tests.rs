@@ -48,6 +48,27 @@
         }
     }
 
+    #[test]
+    fn string_to_number_parses_as_function_and_method() {
+        // Free function and method spellings agree — both parse numeric strings.
+        assert_eq!(float("to_float(\"1.5\")"), 1.5);
+        assert_eq!(float("\"1.5\".to_float()"), 1.5);
+        assert_eq!(int("to_int(\"42\")"), 42);
+        assert_eq!(int("\"-7\".to_int()"), -7);
+        // Whitespace is trimmed; negatives and the seqkit "P^-2" idiom work.
+        assert_eq!(float("\"  -2  \".to_float()"), -2.0);
+        assert_eq!(int("let p = \"P^-2\".split(\"^\") in p[1].to_int()"), -2);
+        // Numbers still convert (widen / truncate toward zero); missing propagates.
+        assert_eq!(float("to_float(5)"), 5.0);
+        assert_eq!(int("to_int(5.9)"), 5);
+        assert!(matches!(last("to_float(missing)").unwrap(), Value::Missing));
+        assert!(matches!(last("to_int(missing)").unwrap(), Value::Missing));
+        // A non-numeric string is a clear error, never a silent NaN; `to_int` is strict
+        // about decimals so an integer field can't round away its fraction.
+        assert!(last("to_float(\"3 apples\")").unwrap_err().message.contains("parse"));
+        assert!(last("to_int(\"3.5\")").unwrap_err().message.contains("integer"));
+    }
+
     /// Deterministic leak detection. `last()` drops the `Interp` before
     /// returning, so if the produced value's allocation has `strong_count == 1`,
     /// the environment and every intermediate provably released their
