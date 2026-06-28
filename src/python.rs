@@ -146,6 +146,27 @@ pub fn index(h: &Rc<PyHandle>, idx: &Value, line: usize, col: usize) -> Result<V
     }
 }
 
+/// `pyobj[a:b:step]` — forward to Python `__getitem__` with a real `slice` object,
+/// so numpy/list slicing (including open bounds and negative steps) works natively.
+pub fn slice(
+    h: &Rc<PyHandle>,
+    start: Option<i64>,
+    stop: Option<i64>,
+    step: i64,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    #[cfg(feature = "python")]
+    {
+        imp::slice(h, start, stop, step, line, col)
+    }
+    #[cfg(not(feature = "python"))]
+    {
+        let _ = (h, start, stop, step);
+        Err(unsupported(line, col))
+    }
+}
+
 /// A binary operator with at least one Python operand — forwards to Python's operator
 /// protocol so `a + b`, `a * 2`, `a < b`, … work directly on Python objects.
 pub fn binary(
@@ -211,6 +232,40 @@ mod imp {
             }),
             Kind::Namespace => Err(HelixError::new("can't index the `python` namespace", line, col)),
         }
+    }
+
+    /// `pyobj[a:b:step]` → Python `__getitem__(slice(a, b, step))`. Open bounds map
+    /// to Python `None`, so numpy/list slice semantics (negatives, steps) are native.
+    pub fn slice(
+        h: &Rc<PyHandle>,
+        start: Option<i64>,
+        stop: Option<i64>,
+        step: i64,
+        line: usize,
+        col: usize,
+    ) -> Result<Value, HelixError> {
+        let obj = match &h.kind {
+            Kind::Object(o) => o,
+            Kind::Namespace => return Err(HelixError::new("can't slice the `python` namespace", line, col)),
+        };
+        Python::attach(|py| {
+            let bound_int = |o: Option<i64>| match o {
+                Some(v) => v.into_pyobject(py).unwrap().into_any(),
+                None => py.None().into_bound(py),
+            };
+            let slice_ty = py
+                .import("builtins")
+                .and_then(|b| b.getattr("slice"))
+                .map_err(|e| py_err(py, e, line, col))?;
+            let args = PyTuple::new(
+                py,
+                [bound_int(start), bound_int(stop), step.into_pyobject(py).unwrap().into_any()],
+            )
+            .map_err(|e| py_err(py, e, line, col))?;
+            let sl = slice_ty.call1(&args).map_err(|e| py_err(py, e, line, col))?;
+            let item = obj.bind(py).get_item(sl).map_err(|e| py_err(py, e, line, col))?;
+            from_py(py, &item, line, col)
+        })
     }
 
     /// A binary operator with a Python operand — dispatched through the `operator`

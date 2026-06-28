@@ -97,12 +97,16 @@ The bridge forwards Python's protocols, so an opaque handle is still usable dire
 np = python.import("numpy")
 a = np.arange(6)
 print(a[2])          # 2                       — forwards to __getitem__
+print(a[1:4])        # [1 2 3]                 — slicing forwards too (numpy semantics)
+print(a[::-1])       # [5 4 3 2 1 0]           — steps / negatives included
 print(a * 10)        # [ 0 10 20 30 40 50]     — forwards to __mul__
 print(a[3] < a[4])   # true                    — forwards to __lt__
 ```
 
-Indexing (`h[k]`) and binary operators (`+ - * / // % ** == != < > <= >=`) on a handle
-dispatch through Python. A record indexes a Python dict the same way (`d["key"]`).
+Indexing (`h[k]`), **slicing** (`h[a:b:step]`, open bounds and negative steps included),
+and binary operators (`+ - * / // % ** == != < > <= >=`) on a handle dispatch through
+Python. A record indexes a Python dict the same way (`d["key"]`). For anything fancier
+(multi-axis `a[:, 0]`, keyword args), drop to `python.eval("…")`.
 
 ### `python.exec` / `python.eval` — the full-Python escape hatch
 

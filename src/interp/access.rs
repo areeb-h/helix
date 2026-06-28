@@ -85,6 +85,8 @@ pub(crate) fn eval_slice(
             let idxs = slice_indices(t.shape()[0] as i64, start, stop, step);
             Ok(tensor::slice_first(t, &idxs))
         }
+        // A Python handle slices via its own `__getitem__` (numpy/list semantics).
+        Value::PyObject(h) => crate::python::slice(h, start, stop, step, line, col),
         Value::Missing => Ok(Value::Missing),
         other => Err(HelixError::new(
             format!("a value of type {} cannot be sliced", other.type_name()),

@@ -1200,6 +1200,8 @@ fn python_handles_forward_indexing_operators_and_eval() {
     let src = "np = python.import(\"numpy\")\n\
                a = np.arange(5)\n\
                print(a[2])\n\
+               print(a[1:4])\n\
+               print(a[::-1])\n\
                print(a * 10)\n\
                print(a[1] < a[2])\n\
                python.exec(\"import numpy as N\")\n\
@@ -1208,7 +1210,11 @@ fn python_handles_forward_indexing_operators_and_eval() {
                print(python.import(\"json\").dumps({a: 1, b: 2}))\n";
     let (vm, stderr, code) = run_script(src, &[], "forward_vm");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
-    assert_eq!(vm.trim(), "2\n[ 0 10 20 30 40]\ntrue\n6\n1024\n{\"a\": 1, \"b\": 2}", "got: {vm:?}");
+    assert_eq!(
+        vm.trim(),
+        "2\n[1 2 3]\n[4 3 2 1 0]\n[ 0 10 20 30 40]\ntrue\n6\n1024\n{\"a\": 1, \"b\": 2}",
+        "got: {vm:?}"
+    );
     let (tw, _, _) = run_script(src, &[("HELIX_NOVM", "1")], "forward_tw");
     assert_eq!(vm, tw, "VM and tree-walker disagree on Python forwarding");
 }
