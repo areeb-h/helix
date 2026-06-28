@@ -21,12 +21,18 @@ the call site and passed to the kernel as a `caps` slice; up to 8 captures).
 A **`Float`-array `map`** compiles too: the kernel is monomorphized over the element type
 (the "Julia recipe" — one source, an `i64` and an `f64` instantiation, the VM dispatches on
 the array at run time). The `f64` body is a deliberately narrow, divergence-free subset —
-`+ - *` only (literals and up to 8 captured `f64`/`i64` values coerced to `f64`), no `/`
-(Helix raises on float `/0` where native `fdiv` yields `±inf`), no `if`/comparison/call (a
-float fn could return an `Int`, breaking result-type agreement), and the body **must**
+`+ - *` plus the pure float builtins **`sqrt`/`abs`/`min`/`max`** (`x => sqrt(x*x + 1.0)`,
+`x => max(x, 0.0)`; `sqrt` is hardware `fsqrt` — IEEE correctly-rounded, `NaN` on negatives,
+matching `f64::sqrt`; `min`/`max` are an `fcmp`+`select` that propagates `NaN` exactly as
+the interpreter's `<=`/`>=` does), over literals and up to 8 captured `f64`/`i64` values
+coerced to `f64`. Excluded: `/` (Helix raises on float `/0` where native `fdiv` yields
+`±inf`), `if`/comparison, the libm transcendentals (`exp`/`sin`/`tanh`/… — they'd need an
+external-symbol call whose rounding must match the host libm), and a user function
+shadowing a builtin name (the kernel can't call it, so it falls through). The body **must**
 reference the binder (so a `Float` source guarantees a `Float` result, matching the
-interpreter). `fadd/fsub/fmul` are the same SSE scalar ops the interpreter runs, in the
-same left-to-right order, so the result is bit-for-bit identical.
+interpreter). `fadd/fsub/fmul`/`fsqrt`/`fabs` are the same SSE scalar ops the interpreter
+runs, in the same order, so the result is bit-for-bit identical (`x => sqrt(x) + max(x,
+1.0)` over 10M floats: **~0.028 s native vs ~1.29 s** through the bytecode loop, ~46×).
 
 A **mixed `Int`-source → `Float` `map`** compiles as well (`range(N).map(j => j*0.001)`):
 the kernel reads an `i64` element and writes an `f64`, typing the body **node by node** by

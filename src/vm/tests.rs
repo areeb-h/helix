@@ -691,12 +691,24 @@
                 flit(rng)
             }
         }
+        // An f64 map body: a bare `{+,-,*}`, or a pure float builtin the kernel emits
+        // inline (`sqrt`/`abs`/`min`/`max`). A `sqrt` of a negative value yields `NaN` —
+        // both engines render it identically, so it's a valid differential case.
+        fn map_body(rng: &mut u64, n_caps: usize) -> String {
+            let op = ["+", "-", "*"][pick(rng, 3) as usize];
+            match pick(rng, 6) {
+                0 => format!("sqrt(it {} {})", op, operand(rng, n_caps)),
+                1 => format!("abs(it {} {})", op, operand(rng, n_caps)),
+                2 => format!("min(it, {})", operand(rng, n_caps)),
+                3 => format!("max(it, {})", operand(rng, n_caps)),
+                _ => format!("it {} {}", op, operand(rng, n_caps)),
+            }
+        }
         let n = 1 + pick(rng, 6);
         let elems: Vec<String> = (0..n).map(|_| flit(rng)).collect();
         let mut chain = format!("[{}]", elems.join(", "));
         for _ in 0..(1 + pick(rng, 3)) {
-            let op = ["+", "-", "*"][pick(rng, 3) as usize];
-            chain = format!("({}).map(it {} {})", chain, op, operand(rng, n_caps));
+            chain = format!("({}).map(it => {})", chain, map_body(rng, n_caps));
         }
         format!("{preamble}{chain}")
     }
@@ -846,6 +858,20 @@
             run_vm_jit(chained).expect("jit"),
             run_tw(chained).expect("tw")
         );
+        // inline float builtins: sqrt (incl. NaN on negatives), abs, min, max
+        for src in [
+            "[1.0, 4.0, 9.0].map(x => sqrt(x))",
+            "[-2.5, 3.5].map(x => abs(x))",
+            "[1.5, 9.0, 4.0].map(x => min(x, 3.0))",
+            "[1.5, 9.0, 4.0].map(x => max(x, 3.0))",
+            "[-1.0, 2.0].map(x => sqrt(x))", // sqrt(-1) = NaN on both engines
+            "[2.0, 5.0].map(x => sqrt(x * x + 1.0))",
+        ] {
+            assert_eq!(run_vm_jit(src).expect("jit"), run_tw(src).expect("tw"), "on `{src}`");
+        }
+        // a user function shadowing `sqrt` must NOT be replaced by the builtin op
+        let shadow = "fn sqrt(x) = x + 1.0\n[1.0, 2.0].map(x => sqrt(x))";
+        assert_eq!(run_vm_jit(shadow).expect("jit"), run_tw(shadow).expect("tw"));
     }
 
     #[test]

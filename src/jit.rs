@@ -186,6 +186,9 @@ pub fn build(
     // the VM instead (correct, and they're not hot after recursion is excluded).
     let kind = NumKind::Int;
     let int_eligible = eligible_set(&funcs, kind);
+    // All user-function names — so the f64 kernel's inline builtins (`sqrt`/`abs`/`min`/
+    // `max`) are recognized only when not shadowed by a user function of the same name.
+    let user_fns: HashSet<&str> = funcs.iter().map(|f| f.name).collect();
     // Eligible user functions, declared first so kernels and other functions can call
     // them. Kept alive for the kernel-compilation blocks below.
     let mut fn_ids: HashMap<&str, FuncId> = HashMap::new();
@@ -281,18 +284,18 @@ pub fn build(
     // `map` compiles two specializations — `i64` (Int source) and `f64` (Float source);
     // the VM picks by the array's element type at runtime. `filter`/fused stay `Int`.
     let map_ids = define_array_kernels(
-        &mut module, map_kernels, "map", false, &fn_ids, &int_eligible, NumKind::Int, false,
+        &mut module, map_kernels, "map", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int, false,
     );
     let map_f64_ids = define_array_kernels(
-        &mut module, map_kernels, "mapf", false, &fn_ids, &int_eligible, NumKind::Float, false,
+        &mut module, map_kernels, "mapf", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float, false,
     );
     // The mixed `Int`-source → `Float` specialization (`range.map(j => j*0.001)`): reads
     // `i64`, writes `f64`. `elem_kind` is ignored when `mixed` (the body is typed per node).
     let map_mixed_ids = define_array_kernels(
-        &mut module, map_kernels, "mapm", false, &fn_ids, &int_eligible, NumKind::Int, true,
+        &mut module, map_kernels, "mapm", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int, true,
     );
     let filter_ids = define_array_kernels(
-        &mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, NumKind::Int, false,
+        &mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, &user_fns, NumKind::Int, false,
     );
     let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible);
 
@@ -398,6 +401,7 @@ fn define_array_kernels(
     is_filter: bool,
     fn_ids: &HashMap<&str, FuncId>,
     eligible: &HashSet<&str>,
+    user_fns: &HashSet<&str>,
     elem_kind: NumKind,
     mixed: bool,
 ) -> Vec<Option<FuncId>> {
@@ -414,7 +418,7 @@ fn define_array_kernels(
         } else if mixed {
             mixed_map_eligible(&k.body, &k.binder)
         } else if matches!(elem_kind, NumKind::Float) {
-            map_kernel_captures_f64(&k.body, &k.binder).is_some()
+            map_kernel_captures_f64(&k.body, &k.binder, user_fns).is_some()
         } else {
             map_kernel_captures(&k.body, &k.binder, eligible).is_some()
         };
@@ -533,10 +537,14 @@ pub fn map_kernel_captures(body: &Expr, binder: &str, fns: &HashSet<&str>) -> Op
 /// interpreter raises on /0 where native fdiv yields ±inf), `%`, `if`, comparisons, and
 /// calls — the safe subset that can't introduce a JIT↔interpreter divergence. Returns
 /// the ordered captures (passed to the kernel as `f64`), or `None`.
-pub fn map_kernel_captures_f64(body: &Expr, binder: &str) -> Option<Vec<String>> {
+pub fn map_kernel_captures_f64(
+    body: &Expr,
+    binder: &str,
+    user_fns: &HashSet<&str>,
+) -> Option<Vec<String>> {
     let mut caps: Vec<String> = Vec::new();
     let mut uses_binder = false;
-    if f64_body_eligible(body, binder, &mut caps, &mut uses_binder)
+    if f64_body_eligible(body, binder, &mut caps, &mut uses_binder, user_fns)
         && uses_binder
         && caps.len() <= MAX_CAPTURES
     {
@@ -546,7 +554,13 @@ pub fn map_kernel_captures_f64(body: &Expr, binder: &str) -> Option<Vec<String>>
     }
 }
 
-fn f64_body_eligible(e: &Expr, binder: &str, caps: &mut Vec<String>, uses_binder: &mut bool) -> bool {
+fn f64_body_eligible(
+    e: &Expr,
+    binder: &str,
+    caps: &mut Vec<String>,
+    uses_binder: &mut bool,
+    user_fns: &HashSet<&str>,
+) -> bool {
     match e {
         Expr::Int(_) | Expr::Float(_) => true,
         Expr::Ident { name, .. } => {
@@ -559,8 +573,15 @@ fn f64_body_eligible(e: &Expr, binder: &str, caps: &mut Vec<String>, uses_binder
         }
         Expr::Binary { op, left, right, .. } => {
             matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
-                && f64_body_eligible(left, binder, caps, uses_binder)
-                && f64_body_eligible(right, binder, caps, uses_binder)
+                && f64_body_eligible(left, binder, caps, uses_binder, user_fns)
+                && f64_body_eligible(right, binder, caps, uses_binder, user_fns)
+        }
+        // `sqrt`/`abs`/`min`/`max` (emitted inline by `gen_builtin_f64`) — only the real
+        // builtin, never a user function of the same name (which the f64 kernel can't call).
+        Expr::Call { name, args, .. } => {
+            jit_float_builtin_arity(name) == Some(args.len())
+                && !user_fns.contains(name.as_str())
+                && args.iter().all(|a| f64_body_eligible(a, binder, caps, uses_binder, user_fns))
         }
         _ => false,
     }
@@ -799,6 +820,52 @@ fn jit_builtin_arity_ok(name: &str, nargs: usize) -> bool {
     match JIT_SCALAR_BUILTINS.iter().find(|(n, _)| *n == name) {
         Some((_, ar)) => *ar == nargs,
         None => true,
+    }
+}
+
+/// Pure float builtins the `f64` kernel codegen emits inline, bit-for-bit with the
+/// interpreter: `sqrt` → hardware `fsqrt` (IEEE correctly-rounded, NaN on negatives — the
+/// interpreter's `f64::sqrt` doesn't raise); `abs` → `fabs`; `min`/`max` → the
+/// interpreter's `as_f64()`-compare (identity for floats) then pick the original operand,
+/// so NaN propagates identically. The libm transcendentals (`exp`/`sin`/`tanh`/…) are NOT
+/// here: they'd need an external-symbol call whose result must match the host libm exactly.
+const JIT_FLOAT_BUILTINS: &[(&str, usize)] = &[("sqrt", 1), ("abs", 1), ("min", 2), ("max", 2)];
+
+/// The arity of a recognized JIT float builtin, or `None` if `name` is not one.
+fn jit_float_builtin_arity(name: &str) -> Option<usize> {
+    JIT_FLOAT_BUILTINS.iter().find(|(n, _)| *n == name).map(|(_, a)| *a)
+}
+
+/// Emit a recognized pure float builtin over `f64` operands (only reached for `Float`-kind
+/// codegen). Mirrors the interpreter exactly.
+fn gen_builtin_f64<'a>(
+    b: &mut FunctionBuilder,
+    name: &str,
+    args: &'a [Expr],
+    vars: &mut HashMap<&'a str, Variable>,
+    fn_ids: &HashMap<&str, FuncId>,
+    module: &mut JITModule,
+) -> ClValue {
+    match name {
+        "sqrt" => {
+            let x = gen_value(b, &args[0], vars, fn_ids, module, NumKind::Float);
+            b.ins().sqrt(x)
+        }
+        "abs" => {
+            let x = gen_value(b, &args[0], vars, fn_ids, module, NumKind::Float);
+            b.ins().fabs(x)
+        }
+        "min" | "max" => {
+            let a = gen_value(b, &args[0], vars, fn_ids, module, NumKind::Float);
+            let c = gen_value(b, &args[1], vars, fn_ids, module, NumKind::Float);
+            // `min` keeps the first iff `a <= b`; `max` iff `a >= b`. An `fcmp` is false
+            // when either operand is NaN, so `select` picks the second — matching the
+            // interpreter's `a <= b ? a : b` over `f64` (NaN-propagating identically).
+            let cc = if name == "min" { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
+            let keep_a = b.ins().fcmp(cc, a, c);
+            b.ins().select(keep_a, a, c)
+        }
+        _ => unreachable!("unrecognized JIT float builtin `{name}`"),
     }
 }
 
@@ -1347,6 +1414,8 @@ fn gen_value<'a>(
                     .collect();
                 let call = b.ins().call(fref, &argv);
                 b.inst_results(call)[0]
+            } else if kind == NumKind::Float {
+                gen_builtin_f64(b, name, args, vars, fn_ids, module)
             } else {
                 gen_builtin_i64(b, name, args, vars, fn_ids, module)
             }

@@ -65,6 +65,7 @@ impl super::Compiler {
         // The guard's `after` target is patched to the convergence point once known.
         let is_map = matches!(kind, CompKind::Map);
         let fns = self.jit_fn_set();
+        let user_fns = self.user_fn_set();
         // `map` may capture free numeric variables (passed to the kernel as a `caps`
         // slice); `filter` kernels take no captures. A map body that is `i64`-closed
         // emits the kernel via the `i64` analysis; an `f64`-closed body (float literals
@@ -76,7 +77,7 @@ impl super::Compiler {
             None
         } else if is_map {
             crate::jit::map_kernel_captures(body, &params[0], &fns)
-                .or_else(|| crate::jit::map_kernel_captures_f64(body, &params[0]))
+                .or_else(|| crate::jit::map_kernel_captures_f64(body, &params[0], &user_fns))
         } else if crate::jit::filter_kernel_eligible(body, &params[0], &fns) {
             Some(Vec::new())
         } else {
@@ -467,6 +468,12 @@ impl super::Compiler {
     /// checks (a kernel body may call these).
     fn jit_fn_set(&self) -> std::collections::HashSet<&str> {
         self.jit_fns.iter().map(String::as_str).collect()
+    }
+
+    /// All user-defined function names — so a kernel's inline float builtins
+    /// (`sqrt`/`abs`/`min`/`max`) are recognized only when not shadowed by a user fn.
+    fn user_fn_set(&self) -> std::collections::HashSet<&str> {
+        self.func_names.iter().map(String::as_str).collect()
     }
 
     /// Build a `FusionStage` from a `map`/`filter`/`where` method, or `None` if it is not
