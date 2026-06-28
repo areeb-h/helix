@@ -1570,6 +1570,23 @@
     }
 
     #[test]
+    fn native_base_counts_and_hamming() {
+        let r = |src: &str| format!("{}", last(src).unwrap());
+        // base_counts → {A,C,G,T,N}; N collects non-ACGT; fields are accessible.
+        assert_eq!(r("dna(\"AACGTN\").base_counts().A"), "2");
+        assert_eq!(r("dna(\"AACGTN\").base_counts().N"), "1");
+        assert_eq!(r("dna(\"\").base_counts().A"), "0");
+        // hamming = differing positions; accepts Dna or String; equal length required.
+        assert_eq!(r("dna(\"ACGT\").hamming(dna(\"ACCT\"))"), "1");
+        assert_eq!(r("dna(\"ACGT\").hamming(dna(\"TGCA\"))"), "4");
+        assert_eq!(r("dna(\"AAAA\").hamming(\"AAAA\")"), "0");
+        assert!(last("dna(\"ACGT\").hamming(dna(\"AC\"))")
+            .unwrap_err()
+            .message
+            .contains("equal-length"));
+    }
+
+    #[test]
     fn min_max_by_accept_destructuring_key() {
         let r = |src: &str| format!("{}", last(src).unwrap());
         // A destructuring `(k, n) =>` key returns the whole element (rebuilt tuple).

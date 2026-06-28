@@ -658,6 +658,15 @@ pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Typ
         }
         // 0-based index of the motif, or `missing` when absent.
         "find" => Type::Int,
+        // Per-base tally `{A, C, G, T, N}` and Hamming distance to another sequence.
+        "base_counts" => Type::Record(vec![
+            ("A".to_string(), Type::Int),
+            ("C".to_string(), Type::Int),
+            ("G".to_string(), Type::Int),
+            ("T".to_string(), Type::Int),
+            ("N".to_string(), Type::Int),
+        ]),
+        "hamming" => Type::Int,
         // Pairwise alignment result record (ADR 0015).
         "align" => Type::Record(vec![
             ("score".to_string(), Type::Int),

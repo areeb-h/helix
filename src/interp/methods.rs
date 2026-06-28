@@ -1356,6 +1356,58 @@ fn dna_method(
             // AT fraction = 1 − GC fraction (over called bases; `N` excluded).
             Ok(Value::Float(1.0 - dna_gc(s, "at_content", line, col)?))
         }
+        // Per-base tally in ONE pass over the sequence (no per-base string allocation):
+        // `{A, C, G, T, N}` where `N` collects every non-ACGT base. Access via `.A` etc.
+        "base_counts" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`base_counts` takes no arguments", line, col));
+            }
+            let (mut a, mut c, mut g, mut t, mut n) = (0i64, 0i64, 0i64, 0i64, 0i64);
+            for ch in s.chars() {
+                match ch {
+                    'A' => a += 1,
+                    'C' => c += 1,
+                    'G' => g += 1,
+                    'T' => t += 1,
+                    _ => n += 1,
+                }
+            }
+            use crate::symbol::Symbol;
+            Ok(Value::Record(Rc::new(vec![
+                (Symbol::intern("A"), Value::Int(a)),
+                (Symbol::intern("C"), Value::Int(c)),
+                (Symbol::intern("G"), Value::Int(g)),
+                (Symbol::intern("T"), Value::Int(t)),
+                (Symbol::intern("N"), Value::Int(n)),
+            ])))
+        }
+        // Hamming distance: differing positions between two equal-length sequences, in one
+        // pass (no per-base slices). The other sequence may be a `Dna` or a `String`.
+        "hamming" => {
+            arity("hamming", args, 1, line, col)?;
+            let other: &str = match &args[0] {
+                Value::Dna(o) => o,
+                Value::Str(o) => o,
+                v => {
+                    return Err(HelixError::new(
+                        format!("`hamming` needs a DNA or string sequence, but got a {}", v.type_name()),
+                        line,
+                        col,
+                    ))
+                }
+            };
+            let (ls, lo) = (s.chars().count(), other.chars().count());
+            if ls != lo {
+                return Err(HelixError::new(
+                    format!("`hamming` needs equal-length sequences, got {ls} and {lo}"),
+                    line,
+                    col,
+                )
+                .hint("align or trim the sequences to the same length first."));
+            }
+            let dist = s.chars().zip(other.chars()).filter(|(x, y)| x != y).count();
+            Ok(Value::Int(dist as i64))
+        }
         _ => Err(unknown_method(
             "Dna",
             name,
