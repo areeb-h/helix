@@ -49,6 +49,43 @@
     }
 
     #[test]
+    fn zero_arg_lambda_is_a_thunk() {
+        // `() => body` bound to a name is a callable thunk (the benchmark-harness pattern).
+        assert_eq!(int("f = () => 6 * 7\nf()"), 42);
+        // Passed to a higher-order context and called with no args (how `@bench`/timing
+        // harnesses use it). Direct IIFE `(() => x)()` is a separate, unsupported form —
+        // Helix calls named bindings, not arbitrary expressions.
+        assert_eq!(int("apply = g => g()\napply(() => 5)"), 5);
+        // A bare `()` with no `=>` is NOT a lambda — ordinary parenthesized expressions
+        // are unaffected.
+        assert_eq!(int("(3 + 4)"), 7);
+    }
+
+    #[test]
+    fn read_dir_lists_sorted_full_paths() {
+        // Lists the repo's own data dir; asserts the shape rather than exact contents.
+        let v = last("read_dir(\"examples/data\")").unwrap();
+        let arr = match &v {
+            Value::Array(a) => a,
+            other => panic!("expected an array, got {:?}", other),
+        };
+        let items = arr.to_values();
+        assert!(!items.is_empty(), "examples/data should not be empty");
+        let names: Vec<String> = items
+            .iter()
+            .map(|x| match x {
+                Value::Str(s) => (**s).clone(),
+                other => panic!("expected string entries, got {:?}", other),
+            })
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "entries must come back sorted");
+        // Full (dir-joined) paths, so they feed straight into a reader.
+        assert!(names.iter().all(|n| n.starts_with("examples/data")));
+    }
+
+    #[test]
     fn string_to_number_parses_as_function_and_method() {
         // Free function and method spellings agree — both parse numeric strings.
         assert_eq!(float("to_float(\"1.5\")"), 1.5);

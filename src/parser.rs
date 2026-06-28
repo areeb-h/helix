@@ -759,28 +759,34 @@ impl Parser {
             return Ok(None);
         }
 
-        // multiple parameters: ( IDENT (, IDENT)* ) =>
+        // zero or more parameters: ( ) =>  or  ( IDENT (, IDENT)* ) =>
         if matches!(self.peek(), Tok::LParen) {
             let mut k = self.pos + 1;
             let mut params = Vec::new();
-            loop {
-                match &self.toks[k].tok {
-                    Tok::Ident(nm) => {
-                        params.push(nm.clone());
-                        k += 1;
-                        match &self.toks[k].tok {
-                            Tok::Comma => {
-                                k += 1;
-                                continue;
+            // A zero-arg lambda `() => body` — a thunk (e.g. for benchmark harnesses).
+            // Only commit if `=>` follows, so a bare `()` stays an ordinary expression.
+            if matches!(self.toks[k].tok, Tok::RParen) {
+                k += 1;
+            } else {
+                loop {
+                    match &self.toks[k].tok {
+                        Tok::Ident(nm) => {
+                            params.push(nm.clone());
+                            k += 1;
+                            match &self.toks[k].tok {
+                                Tok::Comma => {
+                                    k += 1;
+                                    continue;
+                                }
+                                Tok::RParen => {
+                                    k += 1;
+                                    break;
+                                }
+                                _ => return Ok(None),
                             }
-                            Tok::RParen => {
-                                k += 1;
-                                break;
-                            }
-                            _ => return Ok(None),
                         }
+                        _ => return Ok(None), // non-ident in param list — not a lambda
                     }
-                    _ => return Ok(None), // empty `()` or non-ident — not a lambda
                 }
             }
             if !matches!(self.toks[k].tok, Tok::FatArrow) {

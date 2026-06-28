@@ -31,6 +31,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "read_parquet", pure: false },
     BuiltinDef { path: "read_text", pure: false },
     BuiltinDef { path: "read_json", pure: false },
+    BuiltinDef { path: "read_dir", pure: false },
     BuiltinDef { path: "file_exists", pure: false },
     BuiltinDef { path: "remove_file", pure: false },
     BuiltinDef { path: "mkdir", pure: false },

@@ -168,7 +168,8 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             Ok(Type::Float)
         }
         // generic readers + hashing + fs ops: one string argument each
-        "read_text" | "read_json" | "file_exists" | "sha256" | "remove_file" | "mkdir" => {
+        "read_text" | "read_json" | "read_dir" | "file_exists" | "sha256" | "remove_file"
+        | "mkdir" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
@@ -179,6 +180,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             Ok(match name {
                 "read_text" | "sha256" => Type::String,
                 "file_exists" | "remove_file" | "mkdir" => Type::Bool,
+                "read_dir" => Type::Array(Box::new(Type::String)),
                 // JSON shape isn't known statically; Unknown keeps field/index access permissive.
                 _ => Type::Unknown,
             })
