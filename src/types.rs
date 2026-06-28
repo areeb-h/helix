@@ -463,14 +463,22 @@ impl Checker {
             }
             Expr::Ident { name, line, col } => match self.env.get(name) {
                 Some(t) => Ok(t.clone()),
-                // A removed namespace (`stats`, `io`, …) used as a bare value — these
-                // are no longer namespaces; their members are now functions or methods.
+                // A name that collides with a removed namespace (`stats`, `io`, `bio`,
+                // …) used as a bare value. It's simply undefined — but because the name
+                // used to be a built-in prefix, say so and point at both escape hatches:
+                // the old members are functions/methods now, and a same-named *module*
+                // just needs importing. (A successful `import bio` is rewritten by the
+                // module loader before it reaches here, so this only fires when unbound.)
                 None if crate::namespace::is_namespace(name) => Err(HelixError::new(
-                    format!("`{}` is not a value — the `{}` namespace was removed", name, name),
+                    format!("`{name}` is not defined"),
                     *line,
                     *col,
                 )
-                .hint("its members are now free functions (e.g. `read_csv`) or methods (e.g. `value.to_json()`).")),
+                .hint(format!(
+                    "`{name}` is no longer a built-in namespace (ADR 0017) — its old members \
+                     are now free functions (e.g. `read_csv`) or methods (e.g. `value.to_json()`). \
+                     If you meant a module named `{name}`, import it first: `import {name}`."
+                ))),
                 None => {
                     let names: Vec<&str> = self.env.keys().map(|s| s.as_str()).collect();
                     let mut err =

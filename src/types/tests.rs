@@ -102,8 +102,12 @@
         assert!(emsg("correlation(1, 2)").contains("array"));
         assert!(emsg("read_vcf(5)").contains("string"));
         assert!(emsg("sqrt(1, 2)").contains("argument"));
-        // a bare removed-namespace name is not a value
-        assert!(emsg("x = stats").contains("namespace"));
+        // a bare removed-namespace name reads as plain "not defined" (it may be a typo
+        // or an un-imported module), with the namespace history + import path in the hint
+        assert!(emsg("x = stats").contains("not defined"));
+        let stats_err = tc("x = stats").expect_err("expected a type error");
+        let hint = stats_err.hint.unwrap_or_default();
+        assert!(hint.contains("namespace") && hint.contains("import stats"));
         // an old namespaced call points at the new spelling (function or method)
         assert!(emsg("stats.t_test([1.0], [2.0])").contains("no longer available"));
         assert!(emsg("json.parse(\"[]\")").contains("no longer available"));
