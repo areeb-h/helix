@@ -416,7 +416,7 @@ fn define_array_kernels(
         let ok = if is_filter {
             filter_kernel_eligible(&k.body, &k.binder, eligible)
         } else if mixed {
-            mixed_map_eligible(&k.body, &k.binder)
+            mixed_map_eligible(&k.body, &k.binder, user_fns)
         } else if matches!(elem_kind, NumKind::Float) {
             map_kernel_captures_f64(&k.body, &k.binder, user_fns).is_some()
         } else {
@@ -596,18 +596,42 @@ fn f64_body_eligible(
 /// the interpreter's promotion rule — `Int OP Int` stays `i64` (wrapping `iadd/isub/imul`),
 /// and the *first* `Float` operand promotes via `fcvt_from_sint` — so it matches the
 /// interpreter bit-for-bit, including any `i64` wrap in an integer subexpression.
-pub fn mixed_map_eligible(body: &Expr, binder: &str) -> bool {
+pub fn mixed_map_eligible(body: &Expr, binder: &str, user_fns: &HashSet<&str>) -> bool {
     let mut uses_binder = false;
-    matches!(infer_mixed_kind(body, binder, &mut uses_binder), Some(NumKind::Float)) && uses_binder
+    matches!(infer_mixed_kind(body, binder, &mut uses_binder, user_fns), Some(NumKind::Float))
+        && uses_binder
 }
 
 /// Bottom-up type of a mixed-map node, or `None` if it contains anything outside the
-/// eligible shape (a non-binder ident, a non-`{+,-,*}` operator, a call/if/…). Mirrors
-/// the codegen in [`gen_value_typed`] exactly.
-fn infer_mixed_kind(e: &Expr, binder: &str, uses_binder: &mut bool) -> Option<NumKind> {
+/// eligible shape (a non-binder ident, a non-`{+,-,*}` operator, a non-eligible call, …).
+/// Mirrors the codegen in [`gen_value_typed`] exactly. The pure builtins `sqrt`/`abs`/
+/// `min`/`max` are typed like the interpreter: `sqrt` is always `Float`; `abs` preserves
+/// its arg kind; `min`/`max` need both args the **same** kind (a mixed `min(int, float)`
+/// returns whichever original operand wins, so its type is runtime-dependent — rejected).
+fn infer_mixed_kind(
+    e: &Expr,
+    binder: &str,
+    uses_binder: &mut bool,
+    user_fns: &HashSet<&str>,
+) -> Option<NumKind> {
     match e {
         Expr::Int(_) => Some(NumKind::Int),
         Expr::Float(_) => Some(NumKind::Float),
+        Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
+            match (name.as_str(), args.len()) {
+                ("sqrt", 1) => {
+                    infer_mixed_kind(&args[0], binder, uses_binder, user_fns)?;
+                    Some(NumKind::Float) // sqrt always returns Float
+                }
+                ("abs", 1) => infer_mixed_kind(&args[0], binder, uses_binder, user_fns), // preserves kind
+                ("min" | "max", 2) => {
+                    let ka = infer_mixed_kind(&args[0], binder, uses_binder, user_fns)?;
+                    let kb = infer_mixed_kind(&args[1], binder, uses_binder, user_fns)?;
+                    if ka == kb { Some(ka) } else { None }
+                }
+                _ => None,
+            }
+        }
         Expr::Ident { name, .. } => {
             if name == binder {
                 *uses_binder = true;
@@ -617,8 +641,8 @@ fn infer_mixed_kind(e: &Expr, binder: &str, uses_binder: &mut bool) -> Option<Nu
             }
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_mixed_kind(left, binder, uses_binder)?;
-            let rk = infer_mixed_kind(right, binder, uses_binder)?;
+            let lk = infer_mixed_kind(left, binder, uses_binder, user_fns)?;
+            let rk = infer_mixed_kind(right, binder, uses_binder, user_fns)?;
             Some(if lk == NumKind::Float || rk == NumKind::Float {
                 NumKind::Float
             } else {
@@ -1675,6 +1699,43 @@ fn gen_value_typed<'a>(
                 (v, NumKind::Float)
             }
         }
+        // The pure builtins (eligibility guaranteed the names + arities, and same-kind
+        // `min`/`max`): `sqrt` promotes its arg to f64 (fsqrt → Float); `abs` is `iabs`
+        // (Int) / `fabs` (Float); `min`/`max` compare-then-select-original, on `i64`
+        // (via f64 compare, as the interpreter) or `f64`.
+        Expr::Call { name, args, .. } => match name.as_str() {
+            "sqrt" => {
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder);
+                let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
+                (b.ins().sqrt(af), NumKind::Float)
+            }
+            "abs" => {
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder);
+                match ak {
+                    NumKind::Int => (b.ins().iabs(av), NumKind::Int),
+                    NumKind::Float => (b.ins().fabs(av), NumKind::Float),
+                }
+            }
+            "min" | "max" => {
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder);
+                let (cv, _ck) = gen_value_typed(b, &args[1], vars, binder);
+                let le = name == "min";
+                let cc = if le { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
+                match ak {
+                    NumKind::Int => {
+                        let af = b.ins().fcvt_from_sint(F64, av);
+                        let cf = b.ins().fcvt_from_sint(F64, cv);
+                        let keep = b.ins().fcmp(cc, af, cf);
+                        (b.ins().select(keep, av, cv), NumKind::Int)
+                    }
+                    NumKind::Float => {
+                        let keep = b.ins().fcmp(cc, av, cv);
+                        (b.ins().select(keep, av, cv), NumKind::Float)
+                    }
+                }
+            }
+            _ => unreachable!("ineligible call reached mixed codegen"),
+        },
         _ => unreachable!("ineligible node reached mixed codegen"),
     }
 }

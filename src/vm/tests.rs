@@ -748,7 +748,20 @@
             let opd = if pick(rng, 2) == 0 { ilit(rng) } else { flit(rng) };
             body = format!("({} {} {})", body, op, opd);
         }
-        format!("({}).map(it => ({} * {}))", src, body, flit(rng))
+        let core = format!("({} * {})", body, flit(rng)); // Float root
+        let int_core = format!("(it {} {})", ["+", "-", "*"][pick(rng, 3) as usize], ilit(rng)); // Int
+        // Optionally wrap in a pure builtin — `sqrt`/`abs`/`min`/`max` — exercising the
+        // mixed kernel's Int→Float promotion (`sqrt`/`min` of an `Int` subexpression too).
+        let wrapped = match pick(rng, 7) {
+            0 => format!("sqrt(abs({}))", core),
+            1 => format!("abs({})", core),
+            2 => format!("min({}, {})", core, flit(rng)),
+            3 => format!("max({}, {})", core, flit(rng)),
+            4 => format!("sqrt({})", int_core), // sqrt(Int) → Float (tests fcvt in sqrt)
+            5 => format!("sqrt(min({}, {}))", int_core, next(rng) % 30), // i64 min then sqrt
+            _ => core,
+        };
+        format!("({}).map(it => {})", src, wrapped)
     }
 
     /// Triple oracle for the **mixed** `Int`→`Float` map kernel. The int-array-literal
