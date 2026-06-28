@@ -158,8 +158,8 @@ pub static UNIVERSAL_METHODS: &[&str] = &["is_missing", "to_json"];
 /// Array methods (comprehension verbs, aggregations, statistics, transforms,
 /// descriptive stats, charts, and tabular export/write).
 pub static ARRAY_METHODS: &[&str] = &[
-    "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count",
-    "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
+    "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count", "length",
+    "index_of", "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
     "all", "take", "drop", "zip", "enumerate", "top", "frequencies", "unique", "drop_missing",
     "join", "concat", "flatten", "min_by", "max_by", "argmin", "argmax", "zipmap", "sort_by", "zscores", "iqr",
     "spread", "standard_error", "coefficient_of_variation", "dot", "norm", "cumsum", "product",
@@ -171,14 +171,14 @@ pub static ARRAY_METHODS: &[&str] = &[
 
 /// String methods.
 pub static STRING_METHODS: &[&str] = &[
-    "upper", "lower", "count", "reverse", "trim", "split", "replace", "contains", "starts_with",
-    "ends_with", "phred", "parse_json", "write_to", "append_to",
+    "upper", "lower", "count", "length", "reverse", "trim", "split", "replace", "contains",
+    "starts_with", "ends_with", "phred", "parse_json", "write_to", "append_to",
 ];
 
 /// DNA-sequence methods.
 pub static DNA_METHODS: &[&str] = &[
     "gc_content", "reverse_complement", "complement", "kmers", "windows", "kmer_counts",
-    "canonical_kmer_counts", "align", "find", "length", "at_content",
+    "canonical_kmer_counts", "align", "find", "length", "count", "at_content",
 ];
 
 /// Tensor methods (shape, aggregations, linear algebra).

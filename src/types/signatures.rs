@@ -570,7 +570,9 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         ]),
         "sum" => Type::Num,
         "min" | "max" | "first" | "last" => el.clone(),
-        "count" => Type::Int,
+        // `length` is an alias for `count`; `index_of` is the first matching index (or
+        // `missing` when absent, like `Dna.find` — typed `Int`).
+        "count" | "length" | "index_of" => Type::Int,
         "normalize" => Type::Array(Box::new(Type::Float)),
         "sort" | "reverse" | "drop_missing" | "take" | "drop" | "unique" => {
             Type::Array(Box::new(el.clone()))
@@ -624,7 +626,7 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
 pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
         "upper" | "lower" | "reverse" | "trim" | "replace" => Type::String,
-        "count" => Type::Int,
+        "count" | "length" => Type::Int,
         "split" => Type::Array(Box::new(Type::String)),
         "contains" | "starts_with" | "ends_with" => Type::Bool,
         // FASTQ Phred+33 quality string → per-base integer quality scores.
@@ -646,7 +648,7 @@ pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<
 
 pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "length" => Type::Int,
+        "length" | "count" => Type::Int,
         "gc_content" | "at_content" => Type::Float,
         "complement" | "reverse_complement" => Type::Dna,
         "kmers" | "windows" => Type::Array(Box::new(Type::String)),

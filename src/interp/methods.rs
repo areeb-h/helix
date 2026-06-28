@@ -300,10 +300,20 @@ fn array_method(
     };
 
     match name {
-        "count" => {
+        "count" | "length" => {
             no_args(name)?;
-            // Counts every slot, including `missing` holes.
+            // Counts every slot, including `missing` holes. `length` is an alias so the
+            // size of an Array/String/Dna is the same call everywhere.
             Ok(Value::Int(items.len() as i64))
+        }
+        // The first index whose element equals `args[0]` (structural equality), or
+        // `missing` if none — pairs with `?? -1` / a `match`. Mirrors `Dna.find`.
+        "index_of" => {
+            arity("index_of", args, 1, line, col)?;
+            match items.iter().position(|v| crate::interp::ops::values_equal(v, &args[0])) {
+                Some(i) => Ok(Value::Int(i as i64)),
+                None => Ok(Value::Missing),
+            }
         }
         "mean" => {
             no_args(name)?;
@@ -1028,7 +1038,7 @@ fn string_method(
             arity(0)?;
             Ok(Value::Str(Rc::new(s.to_lowercase())))
         }
-        "count" => {
+        "count" | "length" => {
             arity(0)?;
             Ok(Value::Int(s.chars().count() as i64))
         }
@@ -1140,9 +1150,9 @@ fn dna_method(
     col: usize,
 ) -> Result<Value, HelixError> {
     match name {
-        "length" => {
+        "length" | "count" => {
             if !args.is_empty() {
-                return Err(HelixError::new("`length` takes no arguments", line, col));
+                return Err(HelixError::new(format!("`{}` takes no arguments", name), line, col));
             }
             Ok(Value::Int(s.len() as i64))
         }

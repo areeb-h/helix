@@ -1570,6 +1570,22 @@
     }
 
     #[test]
+    fn length_count_parity_and_index_of() {
+        let r = |src: &str| format!("{}", last(src).unwrap());
+        // `length` and `count` both work on Array / String / Dna (no mental tax).
+        assert_eq!(r("[1, 2, 3].length()"), "3");
+        assert_eq!(r("[1, 2, 3].count()"), "3");
+        assert_eq!(r("\"hello\".length()"), "5");
+        assert_eq!(r("\"hello\".count()"), "5");
+        assert_eq!(r("dna(\"ACGT\").count()"), "4");
+        assert_eq!(r("dna(\"ACGT\").length()"), "4");
+        // `index_of` — first matching index (structural), `missing` when absent.
+        assert_eq!(r("[10, 20, 30].index_of(20)"), "1");
+        assert_eq!(r("[10, 20, 30].index_of(99) ?? -1"), "-1");
+        assert_eq!(r("[(1, 2), (3, 4)].index_of((3, 4))"), "1");
+    }
+
+    #[test]
     fn tuple_and_record_equality_is_structural() {
         let r = |src: &str| format!("{}", last(src).unwrap());
         // Tuples compare element-wise.
