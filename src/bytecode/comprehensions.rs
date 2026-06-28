@@ -65,13 +65,25 @@ impl super::Compiler {
         // The guard's `after` target is patched to the convergence point once known.
         let is_map = matches!(kind, CompKind::Map);
         let fns = self.jit_fn_set();
-        let kernel_guard: Option<(usize, u32)> = if params.len() == 1
-            && (if is_map {
-                crate::jit::map_kernel_eligible(body, &params[0], &fns)
-            } else {
-                crate::jit::filter_kernel_eligible(body, &params[0], &fns)
-            }) {
-            let kernel = ArrayKernel { binder: params[0].clone(), body: body.clone() };
+        // `map` may capture free `i64` variables (passed to the kernel as a `caps`
+        // slice); `filter` kernels take no captures.
+        let captures: Option<Vec<String>> = if params.len() != 1 {
+            None
+        } else if is_map {
+            crate::jit::map_kernel_captures(body, &params[0], &fns)
+        } else if crate::jit::filter_kernel_eligible(body, &params[0], &fns) {
+            Some(Vec::new())
+        } else {
+            None
+        };
+        let kernel_guard: Option<(usize, u32)> = if let Some(caps) = captures {
+            // Push each captured value (in capture order) just above the receiver array;
+            // the VM pops them off whether or not it takes the native kernel.
+            for cap in &caps {
+                self.compile_expr(b, &Expr::Ident { name: cap.clone(), line, col })?;
+            }
+            let kernel =
+                ArrayKernel { binder: params[0].clone(), body: body.clone(), captures: caps };
             if is_map {
                 let idx = self.map_kernels.len() as u32;
                 self.map_kernels.push(kernel);

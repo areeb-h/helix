@@ -302,6 +302,11 @@ pub struct ArrayKernel {
     /// The body (a value expression for `map`, a boolean predicate for `filter`),
     /// evaluated over `{binder}` as `i64`.
     pub body: Expr,
+    /// Free (captured) variable names referenced by the body, in first-appearance
+    /// order — loop-invariant `i64` values the VM resolves at the call site and passes
+    /// to the kernel as a `caps` slice. Empty for a capture-free body (and for filter
+    /// kernels, which don't take captures). `map` only.
+    pub captures: Vec<String>,
 }
 
 /// One stage of a fused pipeline (`xs.filter(g).map(f)…`). Each is a pure single-binder

@@ -360,10 +360,12 @@ fn define_array_kernels(
     let mut ctx = module.make_context();
     let mut bctx = FunctionBuilderContext::new();
     for (i, k) in kernels.iter().enumerate() {
+        // `map` re-checks with the capture-aware eligibility (so a captured-var body is
+        // compiled, not declined); `filter` takes no captures.
         let ok = if is_filter {
             filter_kernel_eligible(&k.body, &k.binder, eligible)
         } else {
-            map_kernel_eligible(&k.body, &k.binder, eligible)
+            map_kernel_captures(&k.body, &k.binder, eligible).is_some()
         };
         if !ok {
             ids.push(None);
@@ -376,6 +378,8 @@ fn define_array_kernels(
         }
         if is_filter {
             sig.returns.push(AbiParam::new(I64)); // kept count
+        } else {
+            sig.params.push(AbiParam::new(I64)); // map: caps ptr (loop-invariant captures)
         }
         let id = match module.declare_function(&format!("{tag}${i}"), Linkage::Local, &sig) {
             Ok(id) => id,
@@ -447,6 +451,87 @@ pub fn map_kernel_eligible(body: &Expr, binder: &str, fns: &HashSet<&str>) -> bo
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(binder);
     value_eligible(body, fns, &locals, NumKind::Int)
+}
+
+/// At most this many captured variables per kernel (bounds the `caps` slice).
+pub const MAX_CAPTURES: usize = 8;
+
+/// Like [`map_kernel_eligible`] but a body referencing **free (captured) variables** is
+/// still eligible — each free `i64` variable is recorded (in first-appearance order) and
+/// passed to the kernel as a loop-invariant `caps[i]`. Returns the ordered capture names,
+/// or `None` if the body is ineligible (a float literal, `/`, a non-eligible call, …) or
+/// captures more than [`MAX_CAPTURES`]. Same i64-closed rules as `value_eligible(Int)`.
+pub fn map_kernel_captures(body: &Expr, binder: &str, fns: &HashSet<&str>) -> Option<Vec<String>> {
+    let mut locals: HashSet<&str> = HashSet::new();
+    locals.insert(binder);
+    let mut caps: Vec<String> = Vec::new();
+    if value_eligible_cap(body, fns, &locals, &mut caps) && caps.len() <= MAX_CAPTURES {
+        Some(caps)
+    } else {
+        None
+    }
+}
+
+fn value_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, caps: &mut Vec<String>) -> bool {
+    match e {
+        Expr::Int(_) => true,
+        // Float literals need the (dormant) f64 specialization; not this i64 kernel.
+        Expr::Float(_) => false,
+        Expr::Ident { name, .. } => {
+            if locals.contains(name.as_str()) {
+                true
+            } else {
+                // A free variable → a captured value. Record once, in first-appearance
+                // order, so the codegen's `caps[i]` and the VM's load order agree.
+                if !caps.iter().any(|c| c == name) {
+                    caps.push(name.clone());
+                }
+                true
+            }
+        }
+        Expr::Binary { op, left, right, .. } => {
+            let op_ok = match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul => true,
+                // `%` only by a positive integer constant (total `rem_euclid`, no `%0`).
+                BinOp::Mod => matches!(**right, Expr::Int(n) if n > 0),
+                _ => false, // `/` excluded: not i64-closed; native fdiv diverges on /0
+            };
+            op_ok
+                && value_eligible_cap(left, eligible, locals, caps)
+                && value_eligible_cap(right, eligible, locals, caps)
+        }
+        Expr::Call { name, args, .. } => {
+            eligible.contains(name.as_str())
+                && args.iter().all(|a| value_eligible_cap(a, eligible, locals, caps))
+        }
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            cond_eligible_cap(cond, eligible, locals, caps)
+                && value_eligible_cap(then_branch, eligible, locals, caps)
+                && value_eligible_cap(else_branch, eligible, locals, caps)
+        }
+        Expr::Let { bindings, body } => {
+            let mut locals2 = locals.clone();
+            for (n, v) in bindings {
+                if !value_eligible_cap(v, eligible, &locals2, caps) {
+                    return false;
+                }
+                locals2.insert(n.as_str());
+            }
+            value_eligible_cap(body, eligible, &locals2, caps)
+        }
+        _ => false,
+    }
+}
+
+fn cond_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, caps: &mut Vec<String>) -> bool {
+    match e {
+        Expr::Binary { op, left, right, .. } => {
+            matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne)
+                && value_eligible_cap(left, eligible, locals, caps)
+                && value_eligible_cap(right, eligible, locals, caps)
+        }
+        _ => false,
+    }
 }
 
 /// True if a `filter`/`where` predicate is a pure `i64` comparison over its binder
@@ -710,6 +795,8 @@ fn define_array_kernel<'a>(
     }
     if is_filter {
         ctx.func.signature.returns.push(AbiParam::new(I64));
+    } else {
+        ctx.func.signature.params.push(AbiParam::new(I64)); // map: caps ptr
     }
 
     let mut b = FunctionBuilder::new(&mut ctx.func, bctx);
@@ -720,6 +807,8 @@ fn define_array_kernel<'a>(
     let src = b.block_params(entry)[0];
     let dst = b.block_params(entry)[1];
     let len = b.block_params(entry)[2];
+    // map: the caps pointer (loop-invariant captured i64 values), bound below.
+    let caps_ptr = if is_filter { None } else { Some(b.block_params(entry)[3]) };
 
     let i_var = b.declare_var(I64); // read cursor
     let w_var = b.declare_var(I64); // write cursor (filter); == i for map
@@ -758,6 +847,21 @@ fn define_array_kernel<'a>(
 
     let mut vars: HashMap<&'a str, Variable> = HashMap::new();
     vars.insert(k.binder.as_str(), elem_var);
+    // Bind each captured variable to `caps[i]` — loop-invariant, so the loads are
+    // trivially hoistable; correctness only needs the right slot per name.
+    if let Some(cp) = caps_ptr {
+        let caps_var = b.declare_var(I64);
+        b.def_var(caps_var, cp);
+        for (j, cname) in k.captures.iter().enumerate() {
+            let base = b.use_var(caps_var);
+            let off = b.ins().iconst(I64, (j * 8) as i64);
+            let addr = b.ins().iadd(base, off);
+            let v = b.ins().load(I64, MemFlags::trusted(), addr, 0);
+            let cvar = b.declare_var(I64);
+            b.def_var(cvar, v);
+            vars.insert(cname.as_str(), cvar);
+        }
+    }
 
     if is_filter {
         // dst[w] = elem; w += (pred ? 1 : 0)
@@ -1148,11 +1252,13 @@ pub unsafe fn call_reduce(ptr: *const u8, start: i64, end: i64, init: i64) -> i6
 /// Run a native map kernel over `src`, returning the mapped buffer (same length, same
 /// order). SAFETY: `ptr` is a finalized `extern "C" fn(*const i64,*mut i64,i64)` from
 /// [`define_array_kernel`].
-pub unsafe fn run_map_kernel(ptr: *const u8, src: &[i64]) -> Vec<i64> {
+pub unsafe fn run_map_kernel(ptr: *const u8, src: &[i64], caps: &[i64]) -> Vec<i64> {
     let mut dst = vec![0i64; src.len()];
     if !src.is_empty() {
-        let f: extern "C" fn(*const i64, *mut i64, i64) = unsafe { std::mem::transmute(ptr) };
-        f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64);
+        let f: extern "C" fn(*const i64, *mut i64, i64, *const i64) =
+            unsafe { std::mem::transmute(ptr) };
+        // `caps.as_ptr()` is valid even when empty (a capture-free kernel never reads it).
+        f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, caps.as_ptr());
     }
     dst
 }

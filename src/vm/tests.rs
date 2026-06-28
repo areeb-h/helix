@@ -603,7 +603,24 @@
     /// stay in `{+,-,*}` and comparisons so the map/filter/fused kernels are genuinely
     /// JIT-compiled (the native path), not falling back.
     fn gen_int_pipeline(rng: &mut u64) -> String {
-        let lit = |rng: &mut u64| -> i64 { (next(rng) % 21) as i64 - 10 };
+        fn lit(rng: &mut u64) -> i64 {
+            (next(rng) % 21) as i64 - 10
+        }
+        // 0–3 captured `i64` globals (`c0 = …`). A map body sometimes uses a capture
+        // instead of a literal, exercising the captured-var kernel path.
+        let n_caps = pick(rng, 4) as usize;
+        let mut preamble = String::new();
+        for i in 0..n_caps {
+            preamble.push_str(&format!("c{} = {}\n", i, lit(rng)));
+        }
+        // An operand is a literal or (when any exist) a captured variable.
+        fn operand(rng: &mut u64, n_caps: usize) -> String {
+            if n_caps > 0 && pick(rng, 2) == 0 {
+                format!("c{}", pick(rng, n_caps as u64))
+            } else {
+                format!("{}", lit(rng))
+            }
+        }
         let src = if pick(rng, 2) == 0 {
             let s = (next(rng) % 40) as i64 - 10;
             let e = s + (next(rng) % 60) as i64; // non-negative length, within cap
@@ -618,17 +635,18 @@
         for _ in 0..stages {
             if pick(rng, 2) == 0 {
                 let op = ["+", "-", "*"][pick(rng, 3) as usize];
-                chain = format!("({}).map(it {} {})", chain, op, lit(rng));
+                chain = format!("({}).map(it {} {})", chain, op, operand(rng, n_caps));
             } else {
                 let cmp = ["<", ">", "<=", ">=", "==", "!="][pick(rng, 6) as usize];
-                chain = format!("({}).filter(it {} {})", chain, cmp, lit(rng));
+                chain = format!("({}).filter(it {} {})", chain, cmp, operand(rng, n_caps));
             }
         }
-        match pick(rng, 3) {
+        let terminal = match pick(rng, 3) {
             0 => format!("({}).reduce({}, (acc, x) => acc + x)", chain, lit(rng)),
             1 => format!("({}).sum()", chain),
             _ => format!("({}).count()", chain),
-        }
+        };
+        format!("{preamble}{terminal}")
     }
 
     /// Triple oracle for the JIT array/fused kernels: every random `Int`-array
@@ -636,6 +654,21 @@
     /// bytecode loop, and the tree-walker. This closes the one confirmed fuzzing gap
     /// — the map/filter/fused kernels were previously only exercised by hand. Any
     /// divergence (a mis-compiled kernel, an off-by-one, a wrap mismatch) fails here.
+    #[test]
+    fn captured_var_map_kernel_matches() {
+        // A map body capturing outer `i64` variables now compiles to a native kernel
+        // (passed the captures as loop-invariant args); it must agree with the bytecode
+        // VM and the tree-walker. 0..6 of x*3+7 = 7,10,13,16,19,22 → sum 87.
+        let src = "k = 7\nm = 3\nrange(0, 6).map(x => x * m + k).sum()";
+        let jit = run_vm_jit(src).expect("jit");
+        assert_eq!(jit, run_vm_no_jit(src).expect("vm"));
+        assert_eq!(jit, run_tw(src).expect("tw"));
+        assert_eq!(jit, "87");
+        // a float capture is not i64-closed → falls through identically on all engines
+        let f = "k = 1.5\n[1, 2, 3].map(x => x + k).sum()";
+        assert_eq!(run_vm_jit(f).expect("jit"), run_tw(f).expect("tw"));
+    }
+
     #[test]
     fn differential_array_kernels_triple_oracle() {
         let mut rng = 0xA11C_E0FF_EE00_1234u64;

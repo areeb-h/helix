@@ -849,23 +849,32 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // else: fall through (ip already advanced) to CompInitRange.
             }
             Op::TryJitMap { kernel_idx, after } => {
-                // Receiver is on the stack top. Take the native (optionally parallel)
-                // kernel only for an `Int` array with a compiled kernel; otherwise fall
-                // through to the identical `CompInit` bytecode loop (the oracle path).
-                let ptr = match (jit, stack.last()) {
-                    (Some(j), Some(Value::Array(a)))
+                // The captured `i64` values (if any) sit on top of the receiver array.
+                // Pop and validate them whether or not the kernel is taken, so the
+                // bytecode fall-through (`CompInit`) sees only the array — and take the
+                // native kernel only when the array is `Int`, a kernel compiled, and
+                // every capture is an `Int` (a float capture falls through, correctly).
+                let n_caps = program.map_kernels[*kernel_idx as usize].captures.len();
+                let split = stack.len() - n_caps;
+                let caps: Option<Vec<i64>> = stack[split..]
+                    .iter()
+                    .map(|v| if let Value::Int(i) = v { Some(*i) } else { None })
+                    .collect();
+                stack.truncate(split);
+                let ptr = match (jit, &caps, stack.last()) {
+                    (Some(j), Some(_), Some(Value::Array(a)))
                         if matches!(&**a, crate::value::ArrayData::Ints(_)) =>
                     {
                         j.map_kernel(*kernel_idx as usize)
                     }
                     _ => None,
                 };
-                if let Some(ptr) = ptr {
+                if let (Some(ptr), Some(caps)) = (ptr, caps) {
                     let arr = stack.pop().unwrap();
                     if let Value::Array(a) = &arr
                         && let crate::value::ArrayData::Ints(v) = &**a
                     {
-                        let out = unsafe { crate::jit::run_map_kernel(ptr, v) };
+                        let out = unsafe { crate::jit::run_map_kernel(ptr, v, &caps) };
                         stack.push(Value::int_array(out));
                         frames[fi].ip = *after as usize;
                     }

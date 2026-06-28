@@ -9,12 +9,14 @@ made per-element `map` the slowest path in the language.
 
 A `map`/`filter` becomes a native kernel when the array is a packed `Int` array and the
 single-parameter body is a pure `i64` expression — integer `+ - *`, `%` by a positive
-constant, comparisons, `if`/`then`/`else`, `let`, and **calls to JIT-eligible user
-functions** (`x => normalize(x)`; the function is compiled natively and called from inside
-the loop). Anything else — float arrays, `missing`, a body using `/`, multi-binder
-destructuring — transparently **falls through to the bytecode loop**. Correct
-everywhere; accelerated where it can be. The JIT itself is x86-64 Linux only; other targets
-always run the bytecode loop.
+constant, comparisons, `if`/`then`/`else`, `let`, **calls to JIT-eligible user functions**
+(`x => normalize(x)`; the function is compiled natively and called from inside the loop),
+and **captured `i64` variables** (`map`: `x => x*k + b`, where `k`/`b` come from the
+enclosing scope — they're loop-invariant, resolved once at the call site and passed to the
+kernel as a `caps` slice; up to 8 captures). Anything else — float arrays, a float body or
+float capture, `missing`, a body using `/`, multi-binder destructuring — transparently
+**falls through to the bytecode loop**. Correct everywhere; accelerated where it can be.
+The JIT itself is x86-64 Linux only; other targets always run the bytecode loop.
 
 Every path is held to the tree-walker's result byte-for-byte (the parity oracle): integer
 arithmetic wraps identically, and `map`/`filter` preserve element order.
@@ -22,19 +24,14 @@ arithmetic wraps identically, and `map`/`filter` preserve element order.
 ## Idiom: keep hot-loop element work on the typed path
 
 The fall-through to the bytecode loop is **correct but ~25–30× slower** than the native
-kernel, and the two cases that bite most in practice are easy to avoid:
+kernel. Captured `i64` variables now compile (`range(2M).map(x => x*2+k)` with a captured
+`k` is **0.04 s** — identical to the literal-`k` kernel, down from 1.15 s). The remaining
+case that bites is **a float body or float capture** (`xs.map(x => x*2.0)`): the JIT is
+`i64`-only today, so it falls through (~28× vs the integer kernel).
 
-- **A captured variable in the body** (`xs.map(x => x*2 + k)` where `k` comes from the
-  enclosing scope) is not kernel-eligible — the kernel signature has no slot for free
-  variables — so it runs on the interpreter. Measured: `range(2M).map(x => x*2+1)` is
-  **0.04 s** (native kernel); the same body with a captured `k` is **1.15 s** (~28×).
-- **A float body** (`xs.map(x => x*2.0)`) likewise falls through today (the JIT is
-  `i64`-only): also ~28× vs the integer kernel.
-
-Until those reach the kernel (roadmap below — *captured numerics in bodies*, *`f64`
-kernels*), the reliable fast idiom in a hot loop is to **build with vectorized array ops
-rather than a `map` closure**, because the broadcast operators run on the packed buffer
-regardless of capture or element type:
+Until `f64` kernels land (roadmap below), the reliable fast idiom for a *float* hot loop is
+to **build with vectorized array ops rather than a `map` closure**, because the broadcast
+operators run on the packed buffer regardless of element type:
 
 ```helix
 # slow in a hot loop — captured `i`, float body → interpreter (~28×):
@@ -105,6 +102,9 @@ runtime — and runs at the bare reduce-loop's C/Go-class speed.
 
 ## Roadmap
 
-- Statistical sinks (`.sum()`/`.mean()`, with an incremental Neumaier compensator);
-  inline immutable numeric globals into bodies (`x => x*k`); `f64` kernels; SIMD lanes;
-  horizontal fusion (several aggregates in one pass).
+- ~~captured numerics in bodies (`x => x*k`)~~ — **done** (single `map`; via a `caps`
+  slice). Still to do: extend captures to the **fused** map→reduce path (a captured map
+  feeding a `reduce` currently un-fuses and runs the map as a standalone kernel).
+- `f64` kernels (the dominant remaining fall-through — float bodies/captures/arrays); SIMD
+  lanes; horizontal fusion (several aggregates in one pass); statistical sinks
+  (`.sum()`/`.mean()` with an incremental Neumaier compensator).
