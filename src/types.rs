@@ -605,6 +605,12 @@ impl Checker {
                     // element types (precise when homogeneous, e.g. `(Int, Int)`).
                     Type::Tuple(els) => els.iter().fold(Type::Missing, |a, t| join(&a, t)),
                     Type::String | Type::Dna => Type::String,
+                    // A record indexed by a *dynamic* key (`CODE[codon]`, key type not
+                    // statically `String`) is runtime field access — the field value, or
+                    // `missing` if absent. The result type isn't known, so `Unknown`. (The
+                    // static-string-key case is handled above.) The checker must not reject
+                    // it: the identical access runs fine, per the never-reject-runnable rule.
+                    Type::Record(_) => Type::Unknown,
                     Type::Unknown | Type::Missing | Type::Tensor => Type::Unknown,
                     other => {
                         return Err(HelixError::new(

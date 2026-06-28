@@ -600,6 +600,17 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
                     .zip(b.to_values().iter())
                     .all(|(x, y)| values_equal(x, y))
         }
+        // Tuples compare structurally, element by element (`(a, b) == (a, b)`).
+        (Value::Tuple(a), Value::Tuple(b)) => {
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+        }
+        // Records compare by field → value, independent of field order (a record is its
+        // mapping). No duplicate keys, so equal length + every field matching is exact.
+        (Value::Record(a), Value::Record(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(k, v)| b.iter().any(|(k2, v2)| k == k2 && values_equal(v, v2)))
+        }
         _ => false,
     }
 }

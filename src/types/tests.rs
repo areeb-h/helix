@@ -89,6 +89,10 @@
         assert!(emsg("range(1, 2, 3, 4)").contains("1 to 3"));
         assert!(emsg("fn f(x: Int) -> String = x + 1").contains("declared to return"));
         assert!(emsg("xs = [1, 2]\nxs[\"a\"]").contains("cannot be indexed by a string"));
+        // A known Record indexed by a *dynamic* key is runtime field access — must be
+        // accepted (it runs; rejecting it broke the never-reject-runnable promise).
+        ok("CODE = {a: 1, b: 2}\nfn f(k) = CODE[k]\nf(\"a\")");
+        ok("CODE = {a: 1}\nks = [\"a\"]\nks.map(k => CODE[k])");
         assert!(emsg("undefinedvar").contains("not defined"));
         assert!(emsg("dna(5)").contains("expected a string"));
         // bitwise operators are int-only and statically checked

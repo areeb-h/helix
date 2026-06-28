@@ -1570,6 +1570,23 @@
     }
 
     #[test]
+    fn tuple_and_record_equality_is_structural() {
+        let r = |src: &str| format!("{}", last(src).unwrap());
+        // Tuples compare element-wise.
+        assert_eq!(r("(\"AT\", 3) == (\"AT\", 3)"), "true");
+        assert_eq!(r("(1, 2, 3) == (1, 2, 3)"), "true");
+        assert_eq!(r("(1, 2) == (1, 9)"), "false");
+        assert_eq!(r("(1, 2) == (1, 2, 3)"), "false"); // different arity
+        // Records compare by field, independent of order.
+        assert_eq!(r("{a: 1, b: 2} == {b: 2, a: 1}"), "true");
+        assert_eq!(r("{a: 1} == {a: 2}"), "false");
+        assert_eq!(r("{a: 1} == {a: 1, b: 2}"), "false");
+        // Downstream: `unique`/`contains` build on structural equality.
+        assert_eq!(r("[(1, 2), (1, 2), (3, 4)].unique()"), "[(1, 2), (3, 4)]");
+        assert_eq!(r("[(1, 2), (3, 4)].contains((1, 2))"), "true");
+    }
+
+    #[test]
     fn unary_inplace_never_mutates_shared() {
         let r = |src: &str| format!("{}", last(src).unwrap());
         // sqrt/abs reuse a unique buffer but must NEVER touch a still-bound array.
