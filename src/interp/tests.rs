@@ -1570,6 +1570,20 @@
     }
 
     #[test]
+    fn unary_inplace_never_mutates_shared() {
+        let r = |src: &str| format!("{}", last(src).unwrap());
+        // sqrt/abs reuse a unique buffer but must NEVER touch a still-bound array.
+        assert_eq!(r("xs = [1.0, 4.0, 9.0]\nys = sqrt(xs)\nxs"), "[1.0, 4.0, 9.0]"); // xs intact
+        assert_eq!(r("xs = [1.0, 4.0, 9.0]\nys = sqrt(xs)\nys"), "[1.0, 2.0, 3.0]");
+        assert_eq!(r("xs = [-2.0, 3.0]\nys = abs(xs)\nxs"), "[-2.0, 3.0]");
+        assert_eq!(r("xs = [-2, 7, -4]\nys = abs(xs)\nxs"), "[-2, 7, -4]"); // int abs, xs intact
+        // chains reuse the unique intermediate; result is exact
+        assert_eq!(r("sqrt(abs([-4.0, -9.0, 16.0]))"), "[2.0, 3.0, 4.0]");
+        // Ints → Floats (sqrt) allocates (type change), still correct
+        assert_eq!(r("sqrt([1, 4, 9])"), "[1.0, 2.0, 3.0]");
+    }
+
+    #[test]
     fn inplace_broadcast_never_mutates_shared() {
         let r = |src: &str| format!("{}", last(src).unwrap());
         // The in-place buffer reuse must NEVER touch a bound (shared) array — only a

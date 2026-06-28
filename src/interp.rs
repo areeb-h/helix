@@ -1031,6 +1031,18 @@ where
     }
 }
 
+/// Map a same-type function over a packed buffer **in place** (a uniquely-owned array
+/// reused instead of allocating a fresh one). Order-preserving and parallel past the
+/// threshold, so the result is byte-identical to the allocating `map_buf`.
+fn map_buf_inplace<T: Copy + Send>(a: &mut [T], f: impl Fn(T) -> T + Sync + Send) {
+    if a.len() >= PAR_MATH_THRESHOLD {
+        use rayon::prelude::*;
+        a.par_iter_mut().for_each(|x| *x = f(*x));
+    } else {
+        a.iter_mut().for_each(|x| *x = f(*x));
+    }
+}
+
 /// A float→float math function (sqrt, sin, exp, …) lifted to Helix values.
 ///
 /// Packed numeric arrays and tensors take a fast path that maps straight over the
@@ -1041,30 +1053,32 @@ where
 fn apply_float_fn(
     name: &str,
     f: fn(f64) -> f64,
-    v: &Value,
+    v: Value,
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
     use crate::value::ArrayData;
+    let scalar_fallback = |v: &Value| {
+        broadcast_unary(v, &|s| match s.as_f64() {
+            Some(x) => Ok(Value::Float(f(x))),
+            None => Err(type_err(name, "a number or array of numbers", s, line, col)),
+        })
+    };
     match v {
-        Value::Array(ad) => match &**ad {
-            ArrayData::Floats(xs) => Ok(Value::float_array(map_f64_buf(xs, f))),
-            ArrayData::Ints(xs) => {
-                // i64 → f64 then `f`, fused so the buffer is read once.
-                let g = move |x: i64| f(x as f64);
-                let out = if xs.len() >= PAR_MATH_THRESHOLD {
-                    use rayon::prelude::*;
-                    xs.par_iter().map(|&x| g(x)).collect()
-                } else {
-                    xs.iter().map(|&x| g(x)).collect()
-                };
-                Ok(Value::float_array(out))
+        Value::Array(mut a) => {
+            // A uniquely-owned `Floats` buffer is mapped IN PLACE (f64→f64 preserves type),
+            // so chains like `sqrt(abs(xs))` reuse the intermediate instead of allocating.
+            if let Some(ArrayData::Floats(buf)) = Rc::get_mut(&mut a) {
+                map_buf_inplace(buf, f);
+                return Ok(Value::Array(a));
             }
-            ArrayData::Values(_) => broadcast_unary(v, &|s| match s.as_f64() {
-                Some(x) => Ok(Value::Float(f(x))),
-                None => Err(type_err(name, "a number or array of numbers", s, line, col)),
-            }),
-        },
+            match &*a {
+                ArrayData::Floats(xs) => Ok(Value::float_array(map_f64_buf(xs, f))),
+                // `i64 → f64` changes the element type, so it allocates a fresh buffer.
+                ArrayData::Ints(xs) => Ok(Value::float_array(map_buf(xs, move |x: i64| f(x as f64)))),
+                ArrayData::Values(_) => scalar_fallback(&Value::Array(a)),
+            }
+        }
         Value::Tensor(t) => {
             // Contiguous tensors map over the slice (parallel past the threshold);
             // a non-contiguous view (e.g. a transpose) falls back to ndarray's mapv.
@@ -1078,10 +1092,7 @@ fn apply_float_fn(
                 None => Ok(Value::Tensor(Rc::new(t.mapv(f)))),
             }
         }
-        _ => broadcast_unary(v, &|s| match s.as_f64() {
-            Some(x) => Ok(Value::Float(f(x))),
-            None => Err(type_err(name, "a number or array of numbers", s, line, col)),
-        }),
+        other => scalar_fallback(&other),
     }
 }
 
@@ -1121,20 +1132,38 @@ fn round_box(name: &str, f: fn(f64) -> f64, v: &Value, line: usize, col: usize) 
 /// `abs` — preserves `Int` (`wrapping_abs`, matching the arithmetic ops) and `Float`. A
 /// packed `Int`/`Float` array maps over its buffer (no boxing); everything else keeps the
 /// exact general path. Output identical to the per-element map.
-pub(crate) fn apply_abs(v: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+pub(crate) fn apply_abs(v: Value, line: usize, col: usize) -> Result<Value, HelixError> {
     use crate::value::ArrayData;
-    if let Value::Array(ad) = v {
-        match &**ad {
-            ArrayData::Floats(xs) => return Ok(Value::float_array(map_buf(xs, |x: f64| x.abs()))),
-            ArrayData::Ints(xs) => return Ok(Value::int_array(map_buf(xs, |x: i64| x.wrapping_abs()))),
-            ArrayData::Values(_) => {}
+    let boxed = |v: &Value| {
+        broadcast_unary(v, &|s| match s {
+            Value::Int(i) => Ok(Value::Int(i.wrapping_abs())),
+            Value::Float(x) => Ok(Value::Float(x.abs())),
+            other => Err(type_err("abs", "a number or array of numbers", other, line, col)),
+        })
+    };
+    match v {
+        Value::Array(mut a) => {
+            // `abs` preserves the element type, so a uniquely-owned Int/Float buffer is
+            // mapped IN PLACE; a shared one (or a `Values` array) takes the copy path.
+            match Rc::get_mut(&mut a) {
+                Some(ArrayData::Floats(buf)) => {
+                    map_buf_inplace(buf, |x: f64| x.abs());
+                    return Ok(Value::Array(a));
+                }
+                Some(ArrayData::Ints(buf)) => {
+                    map_buf_inplace(buf, |x: i64| x.wrapping_abs());
+                    return Ok(Value::Array(a));
+                }
+                _ => {}
+            }
+            match &*a {
+                ArrayData::Floats(xs) => Ok(Value::float_array(map_buf(xs, |x: f64| x.abs()))),
+                ArrayData::Ints(xs) => Ok(Value::int_array(map_buf(xs, |x: i64| x.wrapping_abs()))),
+                ArrayData::Values(_) => boxed(&Value::Array(a)),
+            }
         }
+        other => boxed(&other),
     }
-    broadcast_unary(v, &|s| match s {
-        Value::Int(i) => Ok(Value::Int(i.wrapping_abs())),
-        Value::Float(x) => Ok(Value::Float(x.abs())),
-        other => Err(type_err("abs", "a number or array of numbers", other, line, col)),
-    })
 }
 
 /// `sign` → `Int` (`1`/`-1`/`0`). Packed arrays map over the buffer; everything else keeps

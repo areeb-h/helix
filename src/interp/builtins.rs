@@ -471,7 +471,8 @@ impl super::Interp {
                     "sigmoid" => |x: f64| 1.0 / (1.0 + (-x).exp()),
                     _ => unreachable!(),
                 };
-                apply_float_fn(name, f, &args[0], line, col)
+                // Pass the operand by value so a unique buffer can be reused in place.
+                apply_float_fn(name, f, args.into_iter().next().unwrap(), line, col)
             }
             // Index of the largest / smallest element (first on ties) — over an array
             // or a tensor (flattened). The classification companion to `softmax`.
@@ -545,7 +546,7 @@ impl super::Interp {
                 arity(name, &args, 1, line, col)?;
                 // `wrapping_abs` matches the wrapping-on-overflow convention used by the
                 // arithmetic ops; a packed array maps over its buffer (no per-element box).
-                super::apply_abs(&args[0], line, col)
+                super::apply_abs(args.into_iter().next().unwrap(), line, col)
             }
             "sign" => {
                 arity(name, &args, 1, line, col)?;
@@ -579,7 +580,7 @@ impl super::Interp {
             }
             "log" => match args.len() {
                 // single-arg log(x) = natural log (numpy parity); broadcasts + missing
-                1 => apply_float_fn("log", f64::ln, &args[0], line, col),
+                1 => apply_float_fn("log", f64::ln, args.into_iter().next().unwrap(), line, col),
                 2 => match two_nums(name, &args[0], &args[1], line, col)? {
                     None => Ok(Value::Missing),
                     Some((x, base)) => Ok(Value::Float(x.log(base))),
