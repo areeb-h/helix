@@ -1570,6 +1570,20 @@
     }
 
     #[test]
+    fn named_function_passed_to_higher_order_methods() {
+        let r = |src: &str| format!("{}", last(src).unwrap());
+        // A bare function name/variable is APPLIED, not used as a constant body — for the
+        // array-exclusive HOFs (`map`/`any`/`all`; `filter`/`where` overload DataFrame).
+        assert_eq!(r("fn dbl(x) = x * 2\n[1, 2, 3].map(dbl)"), "[2, 4, 6]");
+        assert_eq!(r("g = x => x + 1\n[1, 2, 3].map(g)"), "[2, 3, 4]");
+        assert_eq!(r("fn pos(x) = x > 0\n[-1, 2].any(pos)"), "true");
+        assert_eq!(r("fn pos(x) = x > 0\n[1, 2].all(pos)"), "true");
+        // implicit-`it` body forms are untouched.
+        assert_eq!(r("[1, 2, 3].map(it * 2)"), "[2, 4, 6]");
+        assert_eq!(r("[1, 2, 3].map(it)"), "[1, 2, 3]");
+    }
+
+    #[test]
     fn join_on_opaque_receiver_and_first_last_empty() {
         let r = |src: &str| format!("{}", last(src).unwrap());
         // `.join` on an Unknown-typed (opaque param) receiver is the array join, not the

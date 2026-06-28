@@ -131,6 +131,36 @@ fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize
     Ok(Expr::Let { bindings: vec![("$w".to_string(), recv)], body: Box::new(body) })
 }
 
+/// Let a higher-order method take a *named function* as its single argument:
+/// `xs.map(normalize)` / `xs.any(is_valid)` → `xs.map(it => normalize(it))`. Without this, a
+/// bare identifier is the implicit-`it` body, so `map(g)` maps every element to the *value*
+/// `g` (the function itself) rather than applying it. Only a bare `Ident` other than the
+/// binder `it` is wrapped — `map(it)` (identity) and `map(it * 2)` (a real body) are
+/// untouched; mapping to a constant via a bare name was meaningless anyway. Works for a
+/// top-level `fn` or a function-valued variable (the call resolves either).
+///
+/// Restricted to the array-EXCLUSIVE higher-order methods (`map`/`any`/`all`). `filter`/
+/// `where` are deliberately NOT wrapped: they are also DataFrame column-verbs, where
+/// `df.where(strong)` is a bare *column* reference, not a function — and parse time can't
+/// tell the receiver apart. For an array `filter`/`where` with a named predicate, use an
+/// explicit lambda (`xs.filter(x => is_valid(x))`).
+fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Expr> {
+    if matches!(name, "map" | "any" | "all")
+        && args.len() == 1
+        && let Expr::Ident { name: f, .. } = &args[0]
+        && f != "it"
+    {
+        let call = Expr::Call {
+            name: f.clone(),
+            args: vec![Expr::Ident { name: "it".to_string(), line: l, col: c }],
+            line: l,
+            col: c,
+        };
+        return vec![Expr::Lambda { params: vec!["it".to_string()], body: Box::new(call) }];
+    }
+    args
+}
+
 /// `recv.position(p)` → the first index where `p` holds, or `missing`. Just
 /// `recv.map(p).index_of(true)` (no double-eval — `recv` is used once).
 fn desugar_position(recv: Expr, mut args: Vec<Expr>, l: usize, c: usize) -> Result<Expr, HelixError> {
@@ -1153,8 +1183,8 @@ impl Parser {
                             }
                             _ => Expr::Method {
                                 recv: Box::new(e),
-                                name,
-                                args,
+                                name: name.clone(),
+                                args: wrap_bound_fn_arg(&name, args, l, c),
                                 line: l,
                                 col: c,
                             },
