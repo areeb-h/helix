@@ -1570,6 +1570,17 @@
     }
 
     #[test]
+    fn min_max_by_accept_destructuring_key() {
+        let r = |src: &str| format!("{}", last(src).unwrap());
+        // A destructuring `(k, n) =>` key returns the whole element (rebuilt tuple).
+        assert_eq!(r("[(\"a\", 3), (\"b\", 9), (\"c\", 1)].max_by((k, n) => n)"), "(\"b\", 9)");
+        assert_eq!(r("[(\"a\", 3), (\"b\", 9), (\"c\", 1)].min_by((k, n) => n)"), "(\"c\", 1)");
+        // single-param + implicit-it + record key still work.
+        assert_eq!(r("[1, -5, 3].max_by(x => x * x)"), "-5");
+        assert_eq!(r("[3, 1, 2].min_by(it)"), "1");
+    }
+
+    #[test]
     fn take_drop_while_and_position() {
         let r = |src: &str| format!("{}", last(src).unwrap());
         // take_while / drop_while split at the first element failing the predicate.

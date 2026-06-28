@@ -184,21 +184,20 @@ fn desugar_order_by(
 
     // The source array of comparison pairs, and which slot is the key vs. the result.
     let (src, key_idx, ret_idx) = if by {
-        // `min_by`/`max_by(key)` — extract the key body (`p => K` or implicit `it`).
-        let (param, key) = match args.len() {
+        // `min_by`/`max_by(key)` — extract the key body (`p => K`, a destructuring
+        // `(k, n) => K`, or an implicit-`it` bare expression).
+        let (params, key) = match args.len() {
             1 => match args.pop().unwrap() {
-                Expr::Lambda { params, body } if params.len() == 1 => {
-                    (params[0].clone(), *body)
-                }
+                Expr::Lambda { params, body } if !params.is_empty() => (params, *body),
                 Expr::Lambda { .. } => {
                     return Err(HelixError::new(
-                        format!("`{name}` takes a one-argument key function"),
+                        format!("`{name}` needs a key function with at least one parameter"),
                         line,
                         col,
                     )
-                    .hint("e.g. `rows.min_by(r => r.score)` or `xs.min_by(it * it)`."))
+                    .hint("e.g. `rows.min_by(r => r.score)` or `pairs.max_by((k, n) => n)`."))
                 }
-                other => ("it".to_string(), other),
+                other => (vec!["it".to_string()], other),
             },
             _ => {
                 return Err(HelixError::new(
@@ -209,11 +208,19 @@ fn desugar_order_by(
                 .hint("e.g. `rows.min_by(r => r.score)`."))
             }
         };
-        let pair = Expr::Tuple(vec![key, ident(&param)]);
+        // The result slot is the *whole* element: the single binder, or — for a
+        // destructuring lambda like `(k, n) => n` over tuple elements — the tuple of
+        // binders, which rebuilds the original element so `max_by` still returns it.
+        let elem = if params.len() == 1 {
+            ident(&params[0])
+        } else {
+            Expr::Tuple(params.iter().map(|p| ident(p)).collect())
+        };
+        let pair = Expr::Tuple(vec![key, elem]);
         let map = Expr::Method {
             recv: Box::new(recv),
             name: "map".to_string(),
-            args: vec![Expr::Lambda { params: vec![param], body: Box::new(pair) }],
+            args: vec![Expr::Lambda { params, body: Box::new(pair) }],
             line,
             col,
         };
