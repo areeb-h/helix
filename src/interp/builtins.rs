@@ -567,6 +567,16 @@ impl super::Interp {
                 arity(name, &args, 1, line, col)?;
                 float_predicate(&args[0], name, f64::is_infinite, false, line, col)
             }
+            // Monotonic seconds since the first call (process start), for `t0 =
+            // clock_monotonic()` … `clock_monotonic() - t0` timing. Impure + monotonic
+            // (never decreases); the absolute value is meaningless, only differences are.
+            "clock_monotonic" => {
+                arity(name, &args, 0, line, col)?;
+                use std::sync::OnceLock;
+                use std::time::Instant;
+                static START: OnceLock<Instant> = OnceLock::new();
+                Ok(Value::Float(START.get_or_init(Instant::now).elapsed().as_secs_f64()))
+            }
             "log" => match args.len() {
                 // single-arg log(x) = natural log (numpy parity); broadcasts + missing
                 1 => apply_float_fn("log", f64::ln, &args[0], line, col),

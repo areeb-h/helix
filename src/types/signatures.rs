@@ -160,6 +160,13 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::DataFrame)
         }
+        // Monotonic clock: no arguments, returns seconds as a Float.
+        "clock_monotonic" => {
+            if !args.is_empty() {
+                return Err(arity_err(name, 0, args.len(), line, col));
+            }
+            Ok(Type::Float)
+        }
         // generic readers + hashing + fs ops: one string argument each
         "read_text" | "read_json" | "file_exists" | "sha256" | "remove_file" | "mkdir" => {
             if args.len() != 1 {

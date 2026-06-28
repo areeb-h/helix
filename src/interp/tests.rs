@@ -1570,6 +1570,16 @@
     }
 
     #[test]
+    fn clock_monotonic_returns_monotonic_seconds() {
+        // Returns a non-negative Float; two successive reads never go backwards.
+        assert!(float("clock_monotonic()") >= 0.0);
+        match last("a = clock_monotonic()\nb = clock_monotonic()\nb - a").unwrap() {
+            Value::Float(d) => assert!(d >= 0.0, "monotonic clock went backwards: {d}"),
+            other => panic!("expected Float, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn unary_math_typed_array_fast_path() {
         // abs/sign/floor/round over a packed Int/Float array take the no-boxing buffer
         // path; the result must be byte-identical to the old per-element path (same values

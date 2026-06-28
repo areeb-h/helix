@@ -88,6 +88,9 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "is_nan", pure: true },
     BuiltinDef { path: "is_finite", pure: true },
     BuiltinDef { path: "is_infinite", pure: true },
+    // Monotonic seconds (f64) since the process started — for in-language timing.
+    // Impure: the value is non-deterministic, so never use it in a computed result.
+    BuiltinDef { path: "clock_monotonic", pure: false },
     BuiltinDef { path: "degrees", pure: true },
     BuiltinDef { path: "radians", pure: true },
     BuiltinDef { path: "hypot", pure: true },
