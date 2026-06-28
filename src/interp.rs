@@ -1014,6 +1014,23 @@ fn map_f64_buf(xs: &[f64], f: fn(f64) -> f64) -> Vec<f64> {
     }
 }
 
+/// Map a closure over a packed buffer into a new typed buffer — the generic form of
+/// [`map_f64_buf`] for `i64→i64` (`abs`/`sign` of ints) and `f64→i64` (`floor`/`sign` of
+/// floats). Order-preserving and parallel past the threshold, so the result is identical
+/// to the per-element path — just without materializing a `Vec<Value>` for every element.
+fn map_buf<T, U>(xs: &[T], f: impl Fn(T) -> U + Sync + Send) -> Vec<U>
+where
+    T: Copy + Sync,
+    U: Send,
+{
+    if xs.len() >= PAR_MATH_THRESHOLD {
+        use rayon::prelude::*;
+        xs.par_iter().map(|&x| f(x)).collect()
+    } else {
+        xs.iter().map(|&x| f(x)).collect()
+    }
+}
+
 /// A float→float math function (sqrt, sin, exp, …) lifted to Helix values.
 ///
 /// Packed numeric arrays and tensors take a fast path that maps straight over the
@@ -1068,7 +1085,10 @@ fn apply_float_fn(
     }
 }
 
-/// A rounding function (floor/ceil/round/trunc) that yields whole `Int`s.
+/// A rounding function (floor/ceil/round/trunc) that yields whole `Int`s. A packed
+/// `Int`/`Float` array maps straight over its buffer (an `Int` array is returned
+/// unchanged — rounding an integer is a no-op); heterogeneous/scalar inputs keep the
+/// general path. Output identical to the per-element map, no per-element boxing.
 fn apply_round_fn(
     name: &str,
     f: fn(f64) -> f64,
@@ -1076,10 +1096,71 @@ fn apply_round_fn(
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
+    use crate::value::ArrayData;
+    match v {
+        Value::Array(ad) => match &**ad {
+            ArrayData::Floats(xs) => Ok(Value::int_array(map_buf(xs, move |x| f(x) as i64))),
+            ArrayData::Ints(xs) => Ok(Value::int_array(xs.clone())),
+            ArrayData::Values(_) => round_box(name, f, v, line, col),
+        },
+        // Tensors and scalars keep the exact general path (a tensor stays a whole-valued
+        // `Float` tensor, with the same `as i64` saturation for out-of-range values).
+        _ => round_box(name, f, v, line, col),
+    }
+}
+
+/// The per-element rounding closure for heterogeneous arrays, scalars, and `missing`.
+fn round_box(name: &str, f: fn(f64) -> f64, v: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
     broadcast_unary(v, &|s| match s {
         Value::Int(i) => Ok(Value::Int(*i)),
         Value::Float(x) => Ok(Value::Int(f(*x) as i64)),
         other => Err(type_err(name, "a number or array of numbers", other, line, col)),
+    })
+}
+
+/// `abs` — preserves `Int` (`wrapping_abs`, matching the arithmetic ops) and `Float`. A
+/// packed `Int`/`Float` array maps over its buffer (no boxing); everything else keeps the
+/// exact general path. Output identical to the per-element map.
+pub(crate) fn apply_abs(v: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    use crate::value::ArrayData;
+    if let Value::Array(ad) = v {
+        match &**ad {
+            ArrayData::Floats(xs) => return Ok(Value::float_array(map_buf(xs, |x: f64| x.abs()))),
+            ArrayData::Ints(xs) => return Ok(Value::int_array(map_buf(xs, |x: i64| x.wrapping_abs()))),
+            ArrayData::Values(_) => {}
+        }
+    }
+    broadcast_unary(v, &|s| match s {
+        Value::Int(i) => Ok(Value::Int(i.wrapping_abs())),
+        Value::Float(x) => Ok(Value::Float(x.abs())),
+        other => Err(type_err("abs", "a number or array of numbers", other, line, col)),
+    })
+}
+
+/// `sign` → `Int` (`1`/`-1`/`0`). Packed arrays map over the buffer; everything else keeps
+/// the exact general path.
+pub(crate) fn apply_sign(v: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    use crate::value::ArrayData;
+    fn fsign(x: f64) -> i64 {
+        if x > 0.0 {
+            1
+        } else if x < 0.0 {
+            -1
+        } else {
+            0
+        }
+    }
+    if let Value::Array(ad) = v {
+        match &**ad {
+            ArrayData::Floats(xs) => return Ok(Value::int_array(map_buf(xs, fsign))),
+            ArrayData::Ints(xs) => return Ok(Value::int_array(map_buf(xs, |x: i64| x.signum()))),
+            ArrayData::Values(_) => {}
+        }
+    }
+    broadcast_unary(v, &|s| match s {
+        Value::Int(i) => Ok(Value::Int(i.signum())),
+        Value::Float(x) => Ok(Value::Int(fsign(*x))),
+        other => Err(type_err("sign", "a number or array of numbers", other, line, col)),
     })
 }
 

@@ -543,27 +543,13 @@ impl super::Interp {
             }
             "abs" => {
                 arity(name, &args, 1, line, col)?;
-                broadcast_unary(&args[0], &|s| match s {
-                    // `wrapping_abs` matches the wrapping-on-overflow convention used by
-                    // the arithmetic ops; `i64::MIN.abs()` would otherwise panic in debug.
-                    Value::Int(i) => Ok(Value::Int(i.wrapping_abs())),
-                    Value::Float(x) => Ok(Value::Float(x.abs())),
-                    other => Err(type_err("abs", "a number or array of numbers", other, line, col)),
-                })
+                // `wrapping_abs` matches the wrapping-on-overflow convention used by the
+                // arithmetic ops; a packed array maps over its buffer (no per-element box).
+                super::apply_abs(&args[0], line, col)
             }
             "sign" => {
                 arity(name, &args, 1, line, col)?;
-                broadcast_unary(&args[0], &|s| match s {
-                    Value::Int(i) => Ok(Value::Int(i.signum())),
-                    Value::Float(x) => Ok(Value::Int(if *x > 0.0 {
-                        1
-                    } else if *x < 0.0 {
-                        -1
-                    } else {
-                        0
-                    })),
-                    other => Err(type_err("sign", "a number or array of numbers", other, line, col)),
-                })
+                super::apply_sign(&args[0], line, col)
             }
             // IEEE float predicates → Bool (Bool array / 0.0-or-1.0 tensor mask when
             // broadcast). An `Int`/`Rational` is always finite, never NaN/inf. These let a

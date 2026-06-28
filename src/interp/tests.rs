@@ -1570,6 +1570,20 @@
     }
 
     #[test]
+    fn unary_math_typed_array_fast_path() {
+        // abs/sign/floor/round over a packed Int/Float array take the no-boxing buffer
+        // path; the result must be byte-identical to the old per-element path (same values
+        // AND element types — abs preserves Int/Float; sign/floor/round yield Int).
+        let r = |src: &str| format!("{}", last(src).unwrap());
+        assert_eq!(r("abs([-2, 3, -4])"), "[2, 3, 4]"); // Ints stay Ints
+        assert_eq!(r("abs([-2.5, 1.0])"), "[2.5, 1.0]"); // Floats stay Floats
+        assert_eq!(r("sign([-9, 0, 4])"), "[-1, 0, 1]");
+        assert_eq!(r("sign([-1.5, 0.0, 2.0])"), "[-1, 0, 1]"); // sign(Float) → Int
+        assert_eq!(r("floor([2.9, -1.1])"), "[2, -2]");
+        assert_eq!(r("round([2.4, 2.6])"), "[2, 3]");
+    }
+
+    #[test]
     fn math_broadcasts_over_array() {
         match last("sqrt([1, 4, 9])").unwrap() {
             Value::Array(a) => { let a = a.to_values();
