@@ -298,6 +298,40 @@ fn axis_arg(
     }
 }
 
+/// Matrix product, parallelized over output row-blocks past a work threshold. Each
+/// block is `A[rows] · B` via ndarray's `dot`, so every output element's inner sum is
+/// computed exactly as in the single-threaded path — the result is bit-identical, only
+/// spread across cores. Below the threshold (or few rows) it stays sequential.
+fn parallel_matmul(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+    let (m, k, n) = (a.nrows(), a.ncols(), b.ncols());
+    // Below ~64M multiply-adds (e.g. 400×400×400), the rayon hand-off + the O(m·n)
+    // re-stitch of the row blocks costs more than the parallel speedup — small matmul
+    // is SIMD/BLAS turf, not thread turf — so stay single-threaded there. (At 200×200
+    // ndarray's `dot` is the fast path; parallelism only pays at large sizes.)
+    if m < 16 || (m as u128) * (k as u128) * (n as u128) < 64_000_000 {
+        return a.dot(b);
+    }
+    parallel_matmul_blocks(a, b)
+}
+
+/// The parallel core (no threshold) — split out so a test can exercise it on a small
+/// matrix and assert bit-identicality against `a.dot(b)`.
+fn parallel_matmul_blocks(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+    use rayon::prelude::*;
+    let m = a.nrows();
+    let chunk = (m / (rayon::current_num_threads().max(1) * 4)).max(1);
+    let starts: Vec<usize> = (0..m).step_by(chunk).collect();
+    let parts: Vec<Array2<f64>> = starts
+        .par_iter()
+        .map(|&s| {
+            let e = (s + chunk).min(m);
+            a.slice(ndarray::s![s..e, ..]).dot(b)
+        })
+        .collect();
+    let views: Vec<_> = parts.iter().map(|p| p.view()).collect();
+    ndarray::concatenate(Axis(0), &views).expect("row blocks share column count")
+}
+
 pub fn method(
     t: &Rc<Tensor>,
     name: &str,
@@ -445,13 +479,18 @@ pub fn method(
                 // matrix · matrix. ndarray's portable `dot` beats a faer round-trip at
                 // these sizes — the row-major↔column-major copy faer needs costs O(n²),
                 // which only pays off against its O(n³) gemm for much larger matrices.
+                // Past a work threshold, the output rows are computed in parallel by
+                // chunk: each C row-block is `A[block] · B`, so every output element's
+                // sum is computed exactly as before — the result is BIT-IDENTICAL to the
+                // single-threaded dot, just spread across cores.
                 (2, 2) => {
                     let a2 = (**t).clone().into_dimensionality::<Ix2>().unwrap();
                     let b2 = (**other).clone().into_dimensionality::<Ix2>().unwrap();
                     if a2.ncols() != b2.nrows() {
                         return Err(misaligned(a2.shape(), b2.shape()));
                     }
-                    Ok(Value::Tensor(Rc::new(a2.dot(&b2).into_dyn())))
+                    let out = parallel_matmul(&a2, &b2);
+                    Ok(Value::Tensor(Rc::new(out.into_dyn())))
                 }
                 // matrix · vector -> vector
                 (2, 1) => {
@@ -576,5 +615,20 @@ pub fn method(
             }
             Err(err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parallel_matmul_is_bit_identical_to_sequential() {
+        // A matrix big enough to take the parallel path (150*90*120 > 1M).
+        let a = Array2::from_shape_fn((150, 90), |(i, j)| ((i * 7 + j) as f64).sin());
+        let b = Array2::from_shape_fn((90, 120), |(i, j)| ((i + j * 3) as f64).cos());
+        let par = parallel_matmul_blocks(&a, &b); // force the parallel core
+        let seq = a.dot(&b);
+        assert_eq!(par, seq, "parallel matmul must equal sequential bit-for-bit");
     }
 }

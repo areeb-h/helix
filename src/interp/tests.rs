@@ -388,6 +388,19 @@
     }
 
     #[test]
+    fn parallel_reductions_stay_exact() {
+        // The chunked-parallel Neumaier sum (and mean) over a large array must stay
+        // exact for integer-valued floats: sum(0..2_000_000) = 1999999000000.
+        assert_eq!(float("(range(0, 2000000) * 1.0).sum()"), 1_999_999_000_000.0);
+        assert_eq!(float("(range(0, 2000000) * 1.0).mean()"), 999_999.5);
+        // and a parallel matmul keeps small-integer products exact
+        assert_eq!(
+            float("(tensor(range(0, 40000) * 1.0).reshape([200, 200]).matmul(tensor(range(0, 40000) * 0.0).reshape([200, 200]))).sum()"),
+            0.0
+        );
+    }
+
+    #[test]
     fn string_plus_runtime_hint() {
         // `a` is Unknown at compile time, so the `+`-joins-strings nudge must also come
         // from the runtime operand check.

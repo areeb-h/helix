@@ -956,7 +956,24 @@ fn empty_guard(xs: &[f64], who: &str, line: usize, col: usize) -> Result<(), Hel
 /// Neumaier's improved Kahan compensated summation — bounds the rounding error of
 /// a float sum, recovering terms that naive left-to-right summation would lose to
 /// catastrophic cancellation. Every float aggregation routes through it.
+/// Neumaier compensated summation (low rounding error). Past a threshold it sums
+/// FIXED-size chunks in parallel and combines the (compensated) partials in chunk
+/// order — same accuracy, and the same result on every machine/core count, because
+/// the chunk boundaries depend only on the length, never on the thread pool.
 pub(crate) fn neumaier_sum(xs: &[f64]) -> f64 {
+    // 256k-element chunks; below 2 chunks it isn't worth a thread hand-off, and the
+    // result is then bit-identical to the old sequential path (no value churn for
+    // typical small/medium arrays).
+    const CHUNK: usize = 1 << 18;
+    if xs.len() < CHUNK * 2 {
+        return neumaier_seq(xs);
+    }
+    use rayon::prelude::*;
+    let partials: Vec<f64> = xs.par_chunks(CHUNK).map(neumaier_seq).collect();
+    neumaier_seq(&partials)
+}
+
+fn neumaier_seq(xs: &[f64]) -> f64 {
     let mut sum = 0.0;
     let mut c = 0.0; // running compensation for lost low-order bits
     for &x in xs {
