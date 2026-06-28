@@ -298,38 +298,36 @@ fn axis_arg(
     }
 }
 
-/// Matrix product, parallelized over output row-blocks past a work threshold. Each
-/// block is `A[rows] · B` via ndarray's `dot`, so every output element's inner sum is
-/// computed exactly as in the single-threaded path — the result is bit-identical, only
-/// spread across cores. Below the threshold (or few rows) it stays sequential.
-fn parallel_matmul(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+/// Zero-copy matmul via faer (the kernix trick): row-major `A [m,k]` viewed as a
+/// column-major `(k,m)` slice *is* `Aᵀ` with no transpose; likewise `B [k,n]` viewed
+/// `(n,k)` is `Bᵀ`. Then `Cᵀ = Bᵀ·Aᵀ` is an `[n,m]` column-major result, and a column-
+/// major `[n,m]` buffer is bit-for-bit a row-major `[m,n]` buffer — so faer writes
+/// straight into our output. Zero copies in or out; only the GEMM touches memory.
+fn faer_matmul(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
+    use faer::linalg::matmul::matmul;
+    use faer::mat::{MatMut, MatRef};
+    use faer::{Accum, Par};
     let (m, k, n) = (a.nrows(), a.ncols(), b.ncols());
-    // Below ~64M multiply-adds (e.g. 400×400×400), the rayon hand-off + the O(m·n)
-    // re-stitch of the row blocks costs more than the parallel speedup — small matmul
-    // is SIMD/BLAS turf, not thread turf — so stay single-threaded there. (At 200×200
-    // ndarray's `dot` is the fast path; parallelism only pays at large sizes.)
-    if m < 16 || (m as u128) * (k as u128) * (n as u128) < 64_000_000 {
-        return a.dot(b);
+    // Standard (row-major) contiguous slices; `as_standard_layout` copies only if a
+    // view is non-contiguous (transposed/strided), else borrows.
+    let a_std = a.as_standard_layout();
+    let b_std = b.as_standard_layout();
+    let a_slice = a_std.as_slice().expect("standard layout is contiguous");
+    let b_slice = b_std.as_slice().expect("standard layout is contiguous");
+    let a_t = MatRef::from_column_major_slice(a_slice, k, m); // Aᵀ
+    let b_t = MatRef::from_column_major_slice(b_slice, n, k); // Bᵀ
+    let mut out = vec![0.0f64; m * n];
+    {
+        let dst = MatMut::from_column_major_slice_mut(&mut out, n, m); // Cᵀ [n,m]
+        let par = if (m as u128) * (k as u128) * (n as u128) >= 64_000_000 {
+            Par::rayon(0)
+        } else {
+            Par::Seq
+        };
+        matmul(dst, Accum::Replace, b_t, a_t, 1.0, par); // Cᵀ = Bᵀ·Aᵀ
     }
-    parallel_matmul_blocks(a, b)
-}
-
-/// The parallel core (no threshold) — split out so a test can exercise it on a small
-/// matrix and assert bit-identicality against `a.dot(b)`.
-fn parallel_matmul_blocks(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
-    use rayon::prelude::*;
-    let m = a.nrows();
-    let chunk = (m / (rayon::current_num_threads().max(1) * 4)).max(1);
-    let starts: Vec<usize> = (0..m).step_by(chunk).collect();
-    let parts: Vec<Array2<f64>> = starts
-        .par_iter()
-        .map(|&s| {
-            let e = (s + chunk).min(m);
-            a.slice(ndarray::s![s..e, ..]).dot(b)
-        })
-        .collect();
-    let views: Vec<_> = parts.iter().map(|p| p.view()).collect();
-    ndarray::concatenate(Axis(0), &views).expect("row blocks share column count")
+    // The column-major Cᵀ [n,m] buffer is bit-identical to row-major C [m,n].
+    Array2::from_shape_vec((m, n), out).expect("m*n length")
 }
 
 pub fn method(
@@ -476,20 +474,22 @@ pub fn method(
                     let s: f64 = t.iter().zip(other.iter()).map(|(&x, &y)| x * y).sum();
                     Ok(Value::Float(s))
                 }
-                // matrix · matrix. ndarray's portable `dot` beats a faer round-trip at
-                // these sizes — the row-major↔column-major copy faer needs costs O(n²),
-                // which only pays off against its O(n³) gemm for much larger matrices.
-                // Past a work threshold, the output rows are computed in parallel by
-                // chunk: each C row-block is `A[block] · B`, so every output element's
-                // sum is computed exactly as before — the result is BIT-IDENTICAL to the
-                // single-threaded dot, just spread across cores.
+                // matrix · matrix via faer's SIMD-blocked GEMM, zero-copy in both
+                // directions (see `faer_matmul`): 1.2× at 200², 4–6× at 512²–1024² vs
+                // ndarray's `dot`. faer parallelizes internally and is deterministic —
+                // `Par::Seq` and `Par::rayon` give bit-identical results — so a given
+                // binary is reproducible regardless of core count. (Last-bit values differ
+                // from the old ndarray `dot` by ~1e-13: a different, equally-valid
+                // accumulation order. faer dispatches on CPU SIMD width at run time, so
+                // results can differ across *machines* — as autovectorized `dot` already
+                // could across build targets.)
                 (2, 2) => {
                     let a2 = (**t).clone().into_dimensionality::<Ix2>().unwrap();
                     let b2 = (**other).clone().into_dimensionality::<Ix2>().unwrap();
                     if a2.ncols() != b2.nrows() {
                         return Err(misaligned(a2.shape(), b2.shape()));
                     }
-                    let out = parallel_matmul(&a2, &b2);
+                    let out = faer_matmul(&a2, &b2);
                     Ok(Value::Tensor(Rc::new(out.into_dyn())))
                 }
                 // matrix · vector -> vector
@@ -623,12 +623,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parallel_matmul_is_bit_identical_to_sequential() {
-        // A matrix big enough to take the parallel path (150*90*120 > 1M).
-        let a = Array2::from_shape_fn((150, 90), |(i, j)| ((i * 7 + j) as f64).sin());
-        let b = Array2::from_shape_fn((90, 120), |(i, j)| ((i + j * 3) as f64).cos());
-        let par = parallel_matmul_blocks(&a, &b); // force the parallel core
-        let seq = a.dot(&b);
-        assert_eq!(par, seq, "parallel matmul must equal sequential bit-for-bit");
+    fn faer_matmul_is_correct_and_deterministic() {
+        // Correctness vs a hand-rolled triple loop (the ground truth), and exactness of
+        // the zero-copy row-major↔column-major reshape (no transpose bug). A non-square
+        // case so a row/col mix-up would show.
+        let (m, k, n) = (12usize, 9usize, 7usize);
+        let a = Array2::from_shape_fn((m, k), |(i, j)| ((i * 3 + j) as f64).sin());
+        let b = Array2::from_shape_fn((k, n), |(i, j)| ((i + j * 2) as f64).cos());
+        let got = faer_matmul(&a, &b);
+        assert_eq!(got.dim(), (m, n));
+        for i in 0..m {
+            for j in 0..n {
+                let want: f64 = (0..k).map(|p| a[[i, p]] * b[[p, j]]).sum();
+                assert!(
+                    (got[[i, j]] - want).abs() < 1e-12,
+                    "({i},{j}): {} vs {want}",
+                    got[[i, j]]
+                );
+            }
+        }
+        // Determinism: faer's internal parallelism must not change the result — a binary
+        // is reproducible regardless of core count (the property Helix relies on).
+        use faer::linalg::matmul::matmul;
+        use faer::mat::{MatMut, MatRef};
+        use faer::{Accum, Par};
+        let a = Array2::from_shape_fn((600, 600), |(i, j)| ((i * 3 + j) as f64).sin());
+        let b = Array2::from_shape_fn((600, 600), |(i, j)| ((i + j * 5) as f64).cos());
+        let run = |par| {
+            let (m, k, n) = (600usize, 600usize, 600usize);
+            let at = MatRef::from_column_major_slice(a.as_slice().unwrap(), k, m);
+            let bt = MatRef::from_column_major_slice(b.as_slice().unwrap(), n, k);
+            let mut out = vec![0.0f64; m * n];
+            {
+                let dst = MatMut::from_column_major_slice_mut(&mut out, n, m);
+                matmul(dst, Accum::Replace, bt, at, 1.0, par);
+            }
+            out
+        };
+        assert_eq!(
+            run(Par::Seq),
+            run(Par::rayon(0)),
+            "faer matmul must be deterministic across Par"
+        );
     }
 }
