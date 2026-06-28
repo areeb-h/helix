@@ -575,7 +575,12 @@ impl super::Compiler {
             return None;
         }
         let enough = match &sink {
-            FusionSink::Reduce { .. } => !stages.is_empty(),
+            // A `reduce` over an ARRAY runs as the native array→reduce kernel even with no
+            // stages (`ys.reduce(0, (a,x) => a+x*x)`) — there's no intermediate to remove,
+            // but the native loop still beats per-element VM dispatch (~75-100×). A bare
+            // `range(...).reduce(...)` (0 stages) is handled by `compile_reduce_range`
+            // instead, so a range source here still needs ≥1 stage to be worth fusing.
+            FusionSink::Reduce { .. } => !stages.is_empty() || !source_is_range,
             FusionSink::Collect => stages.len() >= 2,
             // `count` only benefits when a filter actually drops elements (a map-only
             // chain's count is just the length).
