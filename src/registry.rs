@@ -159,7 +159,8 @@ pub static UNIVERSAL_METHODS: &[&str] = &["is_missing", "to_json"];
 /// descriptive stats, charts, and tabular export/write).
 pub static ARRAY_METHODS: &[&str] = &[
     "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count", "length",
-    "index_of", "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
+    "index_of", "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce",
+    "scan", "any",
     "all", "take", "drop", "take_while", "drop_while", "position", "zip", "enumerate", "top",
     "frequencies", "unique", "drop_missing",
     "join", "concat", "flatten", "min_by", "max_by", "argmin", "argmax", "zipmap", "sort_by", "zscores", "iqr",

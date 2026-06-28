@@ -1029,7 +1029,7 @@ impl Compiler {
                 {
                     return self.compile_fused(b, e, plan, *line, *col);
                 }
-                if matches!(n, "map" | "filter" | "where" | "reduce") {
+                if matches!(n, "map" | "filter" | "where" | "reduce" | "scan") {
                     return self.compile_comprehension(b, recv, name, args, *line, *col);
                 }
                 if matches!(n, "any" | "all") {

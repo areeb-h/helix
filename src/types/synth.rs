@@ -326,7 +326,7 @@ impl super::Checker {
                     }
                 }
             }
-            "reduce" => {
+            "reduce" | "scan" => {
                 if args.len() != 2 {
                     return Ok(Type::Unknown); // malformed → runtime errors; don't false-positive
                 }
@@ -340,7 +340,10 @@ impl super::Checker {
                             el.clone(),
                             body,
                         )?;
-                        return Ok(join(&init_t, &body_t));
+                        // `reduce` yields the final accumulator; `scan` an array of every
+                        // intermediate accumulator.
+                        let acc = join(&init_t, &body_t);
+                        return Ok(if name == "scan" { Type::Array(Box::new(acc)) } else { acc });
                     }
                 Ok(Type::Unknown)
             }

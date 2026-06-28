@@ -106,10 +106,10 @@ impl super::Interp {
                     Ok(Value::Bool(name == "all"))
                 }
             }
-            "reduce" => {
+            "reduce" | "scan" => {
                 if args.len() != 2 {
                     return Err(HelixError::new(
-                        "`reduce` takes a starting value and an accumulator function",
+                        format!("`{name}` takes a starting value and an accumulator function"),
                         line,
                         col,
                     )
@@ -125,7 +125,7 @@ impl super::Interp {
                     Expr::Lambda { params, .. } => {
                         return Err(HelixError::new(
                             format!(
-                                "`reduce`'s function needs exactly two parameters, but got {}",
+                                "`{name}`'s function needs exactly two parameters, but got {}",
                                 params.len()
                             ),
                             line,
@@ -135,7 +135,7 @@ impl super::Interp {
                     }
                     _ => {
                         return Err(HelixError::new(
-                            "`reduce` needs an explicit accumulator function",
+                            format!("`{name}` needs an explicit accumulator function"),
                             line,
                             col,
                         )
@@ -143,10 +143,21 @@ impl super::Interp {
                     }
                 };
                 let mut acc = self.eval(&args[0])?;
-                for el in items.to_values().iter() {
-                    acc = self.eval_with_two(pa, acc, pb, el.clone(), body)?;
+                // `reduce` returns the final accumulator; `scan` returns the array of every
+                // intermediate accumulator (one per element — a generalized `cumsum`).
+                if name == "reduce" {
+                    for el in items.to_values().iter() {
+                        acc = self.eval_with_two(pa, acc, pb, el.clone(), body)?;
+                    }
+                    Ok(acc)
+                } else {
+                    let mut out = Vec::with_capacity(items.len());
+                    for el in items.to_values().iter() {
+                        acc = self.eval_with_two(pa, acc, pb, el.clone(), body)?;
+                        out.push(acc.clone());
+                    }
+                    Ok(Value::array(out))
                 }
-                Ok(acc)
             }
             _ => unreachable!(),
         }

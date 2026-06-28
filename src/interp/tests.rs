@@ -1570,6 +1570,18 @@
     }
 
     #[test]
+    fn scan_emits_running_accumulators() {
+        let r = |src: &str| format!("{}", last(src).unwrap());
+        // running sum (= cumsum), running max, and a general accumulation
+        assert_eq!(r("[1, 2, 3, 4].scan(0, (a, x) => a + x)"), "[1, 3, 6, 10]");
+        assert_eq!(r("[3, 1, 4, 1, 5].scan(0, (a, x) => max(a, x))"), "[3, 3, 4, 4, 5]");
+        assert_eq!(r("[1, 2, 3].scan([], (acc, x) => acc.concat([x]))"), "[[1], [1, 2], [1, 2, 3]]");
+        // empty source → empty; missing source → missing (as for map).
+        assert_eq!(r("[].scan(0, (a, x) => a + x)"), "[]");
+        assert!(matches!(last("missing.scan(0, (a, x) => a + x)").unwrap(), Value::Missing));
+    }
+
+    #[test]
     fn native_base_counts_and_hamming() {
         let r = |src: &str| format!("{}", last(src).unwrap());
         // base_counts → {A,C,G,T,N}; N collects non-ACGT; fields are accessible.

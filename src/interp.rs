@@ -455,7 +455,7 @@ impl Interp {
                 // that is run once per element with `it` bound to the element.
                 if matches!(
                     name.as_str(),
-                    "map" | "filter" | "where" | "reduce" | "any" | "all"
+                    "map" | "filter" | "where" | "reduce" | "scan" | "any" | "all"
                 ) {
                     return self.eval_comprehension(&recv_v, name, args, *line, *col);
                 }

@@ -33,6 +33,9 @@ impl super::Compiler {
         if name == "reduce" {
             return self.compile_reduce(b, recv, args, line, col);
         }
+        if name == "scan" {
+            return self.compile_scan(b, recv, args, line, col);
+        }
         if args.len() != 1 {
             let example = if name == "map" { "(it * 2)" } else { "(it > 0)" };
             return self.raise_after_recv(
@@ -423,6 +426,94 @@ impl super::Compiler {
 
         let missing_at = b.code.len() as u32;
         b.code[init_at] = Op::CompInit(CompKind::Reduce, missing_at);
+        let mk = b.add_const(Value::Missing);
+        b.emit(Op::Const(mk), line, col);
+
+        let done_at = b.code.len() as u32;
+        b.code[jump_done] = Op::Jump(done_at);
+
+        b.scopes.pop();
+        b.next_slot = saved_next;
+        Ok(())
+    }
+
+    /// `xs.scan(init, (acc, x) => …)` — like `reduce`, but it COLLECTS every intermediate
+    /// accumulator into an array (a generalized `cumsum`). Reuses the existing comprehension
+    /// ops: a `Map` collector (so each pushed value lands in the result array) with the
+    /// accumulator threaded through a local exactly as `reduce` does — `CompMapPush(acc)`
+    /// each iteration, `CompEnd` to yield the array. Byte-identical to the tree-walker.
+    fn compile_scan(
+        &mut self,
+        b: &mut Builder,
+        recv: &Expr,
+        args: &[Expr],
+        line: usize,
+        col: usize,
+    ) -> R<()> {
+        if args.len() != 2 {
+            return self.raise_after_recv(
+                b,
+                recv,
+                "`scan` takes a starting value and an accumulator function".to_string(),
+                "e.g. `xs.scan(0, (acc, x) => acc + x)` for a running sum.".to_string(),
+                line,
+                col,
+            );
+        }
+        let (pa, pb, body) = match &args[1] {
+            Expr::Lambda { params, body, .. } if params.len() == 2 => {
+                (params[0].clone(), params[1].clone(), body.as_ref())
+            }
+            Expr::Lambda { params, .. } => {
+                return self.raise_after_recv(
+                    b,
+                    recv,
+                    format!("`scan`'s function needs exactly two parameters, but got {}", params.len()),
+                    "the first is the running accumulator, e.g. `(acc, x) => acc + x`.".to_string(),
+                    line,
+                    col,
+                );
+            }
+            _ => {
+                return self.raise_after_recv(
+                    b,
+                    recv,
+                    "`scan` needs an explicit accumulator function".to_string(),
+                    "name both binders: `xs.scan(0, (acc, x) => acc + x)`.".to_string(),
+                    line,
+                    col,
+                );
+            }
+        };
+
+        self.compile_expr(b, recv)?;
+        let init_at = b.emit(Op::CompInit(CompKind::Map, 0), line, col);
+
+        b.scopes.push(Vec::new());
+        let saved_next = b.next_slot;
+
+        // `init` is evaluated in the outer scope (binders not visible), as in `reduce`.
+        self.compile_expr(b, &args[0])?;
+        let acc = b.declare_local(&pa);
+        let x = b.declare_local(&pb);
+        b.emit(Op::StoreLocal(acc), line, col);
+
+        let loop_start = b.code.len() as u32;
+        let next_at = b.emit(Op::CompNext(x, 0), line, col);
+        self.compile_expr(b, body)?; // new accumulator on the stack
+        b.emit(Op::StoreLocal(acc), line, col);
+        b.emit(Op::LoadLocal(acc), line, col); // push it again …
+        b.emit(Op::CompMapPush, line, col); // … and append to the result array
+        b.emit(Op::Jump(loop_start), line, col);
+
+        let end_at = b.code.len() as u32;
+        b.code[next_at] = Op::CompNext(x, end_at);
+        b.emit(Op::CompEnd, line, col); // result array on the stack
+        let jump_done = b.emit(Op::Jump(0), line, col);
+
+        // missing-source landing: the whole result is `missing` (as for `map`).
+        let missing_at = b.code.len() as u32;
+        b.code[init_at] = Op::CompInit(CompKind::Map, missing_at);
         let mk = b.add_const(Value::Missing);
         b.emit(Op::Const(mk), line, col);
 
