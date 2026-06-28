@@ -751,18 +751,32 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // Stack order: left receiver pushed first, then the right operand.
                 let right = stack.pop().unwrap();
                 let left = stack.pop().unwrap();
-                let as_df = |v: &Value| match v {
-                    Value::DataFrame(lf) => Ok(lf.clone()),
-                    other => Err(HelixError::new(
-                        format!("`join` expects a DataFrame, found {}", other.type_name()),
-                        line,
-                        col,
-                    )),
+                let result = match &left {
+                    // DataFrame join: the right operand is another frame; keys are by-name.
+                    Value::DataFrame(lf) => {
+                        let rf = match &right {
+                            Value::DataFrame(rf) => rf.clone(),
+                            other => {
+                                return Err(HelixError::new(
+                                    format!(
+                                        "`join` needs a DataFrame to join with, found {}",
+                                        other.type_name()
+                                    ),
+                                    line,
+                                    col,
+                                ))
+                            }
+                        };
+                        let (keys, how) = crate::interp::parse_join_spec(spec.as_slice(), line, col)?;
+                        Value::dataframe(lf.join(&rf, &keys, &how, line, col)?)
+                    }
+                    // The receiver's static type was `Unknown` and turned out NOT to be a
+                    // DataFrame — this is the value `xs.join(sep)` (an array of strings).
+                    // Dispatch by runtime type exactly as the tree-walker does; `spec`
+                    // (extra by-name keys) is empty for the array form.
+                    _ => crate::interp::call_method(&left, "join", vec![right], line, col)?,
                 };
-                let lf = as_df(&left)?;
-                let rf = as_df(&right)?;
-                let (keys, how) = crate::interp::parse_join_spec(spec.as_slice(), line, col)?;
-                stack.push(Value::dataframe(lf.join(&rf, &keys, &how, line, col)?));
+                stack.push(result);
             }
             Op::GroupByAgg(d) => {
                 let (name, args) = (&d.name, &d.args);

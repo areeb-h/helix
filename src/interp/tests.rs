@@ -1570,6 +1570,21 @@
     }
 
     #[test]
+    fn join_on_opaque_receiver_and_first_last_empty() {
+        let r = |src: &str| format!("{}", last(src).unwrap());
+        // `.join` on an Unknown-typed (opaque param) receiver is the array join, not the
+        // DataFrame join — it must not be rejected (it runs).
+        assert_eq!(r("fn cat(xs) = xs.join(\"-\")\ncat([\"a\", \"b\", \"c\"])"), "a-b-c");
+        assert_eq!(r("[\"x\", \"y\"].join(\",\")"), "x,y"); // concrete still fine
+        // `first`/`last` on an empty array → missing (a safe first-or-default), not a raise.
+        assert!(matches!(last("[].first()").unwrap(), Value::Missing));
+        assert!(matches!(last("[].last()").unwrap(), Value::Missing));
+        assert_eq!(r("[].first() ?? \"none\""), "none");
+        assert_eq!(r("[7, 8, 9].first()"), "7");
+        assert_eq!(r("[7, 8, 9].last()"), "9");
+    }
+
+    #[test]
     fn scan_emits_running_accumulators() {
         let r = |src: &str| format!("{}", last(src).unwrap());
         // running sum (= cumsum), running max, and a general accumulation

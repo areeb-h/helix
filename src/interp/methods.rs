@@ -532,12 +532,10 @@ fn array_method(
         }
         "first" | "last" => {
             no_args(name)?;
+            // `missing` (not an error) on an empty array, so `xs.first() ?? default` and
+            // `is_missing` give a safe first-or-default — missing propagates as elsewhere.
             if items.is_empty() {
-                return Err(HelixError::new(
-                    format!("cannot take `{}` of an empty array", name),
-                    line,
-                    col,
-                ));
+                return Ok(Value::Missing);
             }
             let idx = if name == "first" { 0 } else { items.len() - 1 };
             Ok(items[idx].clone())
