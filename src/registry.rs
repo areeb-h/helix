@@ -160,7 +160,8 @@ pub static UNIVERSAL_METHODS: &[&str] = &["is_missing", "to_json"];
 pub static ARRAY_METHODS: &[&str] = &[
     "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count", "length",
     "index_of", "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce", "any",
-    "all", "take", "drop", "zip", "enumerate", "top", "frequencies", "unique", "drop_missing",
+    "all", "take", "drop", "take_while", "drop_while", "position", "zip", "enumerate", "top",
+    "frequencies", "unique", "drop_missing",
     "join", "concat", "flatten", "min_by", "max_by", "argmin", "argmax", "zipmap", "sort_by", "zscores", "iqr",
     "spread", "standard_error", "coefficient_of_variation", "dot", "norm", "cumsum", "product",
     "argsort", "clamp", "softmax", "bootstrap", "contains", "mean_gc",

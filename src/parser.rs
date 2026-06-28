@@ -95,6 +95,64 @@ fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Ex
     Ok(Expr::Let { bindings: vec![("$s".to_string(), recv)], body: Box::new(body) })
 }
 
+/// `recv.take_while(p)` / `recv.drop_while(p)` → take/drop the leading run where `p`
+/// holds, via the first index where `p` is false (`?? count` so an all-true predicate
+/// keeps/drops everything). `recv` is bound once (`$w`) to avoid double evaluation.
+/// Desugared, so both engines get it for free. NOTE: like `min_by`'s key, `p` is mapped
+/// over the whole array — pure predicates (the norm) give the exact prefix semantics.
+fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize, c: usize) -> Result<Expr, HelixError> {
+    if args.len() != 1 {
+        return Err(HelixError::new(
+            format!("`{}` takes one predicate function, got {}", name, args.len()),
+            l,
+            c,
+        )
+        .hint("e.g. `xs.take_while(x => x > 0)`."));
+    }
+    let p = args.pop().unwrap();
+    let w = || Expr::Ident { name: "$w".to_string(), line: l, col: c };
+    let m = |recv: Expr, nm: &str, args: Vec<Expr>| Expr::Method {
+        recv: Box::new(recv),
+        name: nm.into(),
+        args,
+        line: l,
+        col: c,
+    };
+    let idx = m(m(w(), "map", vec![p]), "index_of", vec![Expr::Bool(false)]);
+    let stop = Expr::Binary {
+        op: BinOp::Coalesce,
+        left: Box::new(idx),
+        right: Box::new(m(w(), "count", vec![])),
+        line: l,
+        col: c,
+    };
+    let verb = if name == "take_while" { "take" } else { "drop" };
+    let body = m(w(), verb, vec![stop]);
+    Ok(Expr::Let { bindings: vec![("$w".to_string(), recv)], body: Box::new(body) })
+}
+
+/// `recv.position(p)` → the first index where `p` holds, or `missing`. Just
+/// `recv.map(p).index_of(true)` (no double-eval — `recv` is used once).
+fn desugar_position(recv: Expr, mut args: Vec<Expr>, l: usize, c: usize) -> Result<Expr, HelixError> {
+    if args.len() != 1 {
+        return Err(HelixError::new(
+            format!("`position` takes one predicate function, got {}", args.len()),
+            l,
+            c,
+        )
+        .hint("e.g. `xs.position(x => x == target)`."));
+    }
+    let p = args.pop().unwrap();
+    let m = |recv: Expr, nm: &str, args: Vec<Expr>| Expr::Method {
+        recv: Box::new(recv),
+        name: nm.into(),
+        args,
+        line: l,
+        col: c,
+    };
+    Ok(m(m(recv, "map", vec![p]), "index_of", vec![Expr::Bool(true)]))
+}
+
 /// Desugar `recv.min_by(key)` / `max_by(key)` / `argmin()` / `argmax()` into
 /// existing constructs so both engines handle them with no new ops:
 ///
@@ -1051,6 +1109,10 @@ impl Parser {
                                 desugar_order_by(e, &name, args, l, c)?
                             }
                             "sort_by" => desugar_sort_by(e, args, l, c)?,
+                            "take_while" | "drop_while" => {
+                                desugar_take_drop_while(e, &name, args, l, c)?
+                            }
+                            "position" => desugar_position(e, args, l, c)?,
                             // `a.zipmap(b, f)` == `a.zip(b).map(f)` — a paired
                             // elementwise map, desugared so both engines reuse the
                             // tested zip+map (parity by construction). For plain

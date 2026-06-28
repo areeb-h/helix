@@ -1570,6 +1570,26 @@
     }
 
     #[test]
+    fn take_drop_while_and_position() {
+        let r = |src: &str| format!("{}", last(src).unwrap());
+        // take_while / drop_while split at the first element failing the predicate.
+        assert_eq!(r("[1, 2, 3, 10, 2, 1].take_while(x => x < 5)"), "[1, 2, 3]");
+        assert_eq!(r("[1, 2, 3, 10, 2, 1].drop_while(x => x < 5)"), "[10, 2, 1]");
+        // all-true keeps everything / drops everything; empty is empty.
+        assert_eq!(r("[1, 2, 3].take_while(x => x > 0)"), "[1, 2, 3]");
+        assert_eq!(r("[1, 2, 3].drop_while(x => x > 0)"), "[]");
+        assert_eq!(r("[].take_while(x => true)"), "[]");
+        // position → first matching index, or missing.
+        assert_eq!(r("[10, 20, 30].position(x => x == 20)"), "1");
+        assert_eq!(r("[10, 20, 30].position(x => x > 99) ?? -1"), "-1");
+        // the bio idiom: take a codon run up to the stop.
+        assert_eq!(
+            r("[\"A\", \"B\", \"STOP\", \"C\"].take_while(c => c != \"STOP\")"),
+            "[\"A\", \"B\"]"
+        );
+    }
+
+    #[test]
     fn length_count_parity_and_index_of() {
         let r = |src: &str| format!("{}", last(src).unwrap());
         // `length` and `count` both work on Array / String / Dna (no mental tax).
