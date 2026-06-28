@@ -19,6 +19,35 @@ always run the bytecode loop.
 Every path is held to the tree-walker's result byte-for-byte (the parity oracle): integer
 arithmetic wraps identically, and `map`/`filter` preserve element order.
 
+## Idiom: keep hot-loop element work on the typed path
+
+The fall-through to the bytecode loop is **correct but ~25–30× slower** than the native
+kernel, and the two cases that bite most in practice are easy to avoid:
+
+- **A captured variable in the body** (`xs.map(x => x*2 + k)` where `k` comes from the
+  enclosing scope) is not kernel-eligible — the kernel signature has no slot for free
+  variables — so it runs on the interpreter. Measured: `range(2M).map(x => x*2+1)` is
+  **0.04 s** (native kernel); the same body with a captured `k` is **1.15 s** (~28×).
+- **A float body** (`xs.map(x => x*2.0)`) likewise falls through today (the JIT is
+  `i64`-only): also ~28× vs the integer kernel.
+
+Until those reach the kernel (roadmap below — *captured numerics in bodies*, *`f64`
+kernels*), the reliable fast idiom in a hot loop is to **build with vectorized array ops
+rather than a `map` closure**, because the broadcast operators run on the packed buffer
+regardless of capture or element type:
+
+```helix
+# slow in a hot loop — captured `i`, float body → interpreter (~28×):
+xs = range(0, 64).map(j => (i + j) * 0.001)
+# fast — typed broadcast over the packed buffer, no per-element closure:
+xs = (range(0, 64) + i) * 0.001
+```
+
+Same result, no per-element dispatch. As a rule: **one fat native/vectorized op beats many
+small interpreted ones** — a `range(0,N).reduce(0.0, (s,i) => s + work(i))` step-loop pays
+interpreter dispatch per step, where the same computation expressed as array/tensor
+broadcasts (or a single fused pipeline) stays on the typed path.
+
 ## Performance
 
 `map` over 10M integers, summing the result (debug build; the JIT emits the same native
