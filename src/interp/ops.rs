@@ -14,8 +14,8 @@ use crate::value::Value;
 
 pub(crate) fn eval_binary(
     op: &BinOp,
-    l: Value,
-    r: Value,
+    mut l: Value,
+    mut r: Value,
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
@@ -43,6 +43,13 @@ pub(crate) fn eval_binary(
     // broadcast — `==` is whole-value, avoiding NumPy's "ambiguous truth value"
     // trap; use `.map`/`.where` for elementwise predicates.
     if matches!(op, Add | Sub | Mul | Div | FloorDiv | Mod | Pow) {
+        // Memory fast path: when an array operand is a unique temporary (`Rc` count 1, as
+        // every intermediate in a chain like `(a+b)*c` is), reuse its buffer in place
+        // instead of allocating a new one. Falls through untouched (`l`/`r` intact) when
+        // nothing is reusable.
+        if let Some(v) = try_inplace_broadcast(op, &mut l, &mut r) {
+            return Ok(v);
+        }
         // Fast path: `Add`/`Sub`/`Mul` over packed numeric arrays run as a tight
         // loop on the `i64`/`f64` buffer (no per-element `Value` boxing or dispatch)
         // and keep the result packed. Other ops / `Values` arrays fall through.
@@ -272,37 +279,172 @@ fn pm_i64(a: &[i64], f: impl Fn(i64) -> i64 + Sync) -> Vec<i64> {
     }
 }
 
+// `Add`/`Sub`/`Mul` over `i64`/`f64`, hoisted so the in-place and allocating broadcast
+// paths share one definition (so they agree to the bit). Integer arithmetic wraps.
+fn iop(op: &BinOp, x: i64, y: i64) -> i64 {
+    match op {
+        BinOp::Add => x.wrapping_add(y),
+        BinOp::Sub => x.wrapping_sub(y),
+        _ => x.wrapping_mul(y),
+    }
+}
+fn fop(op: &BinOp, x: f64, y: f64) -> f64 {
+    match op {
+        BinOp::Add => x + y,
+        BinOp::Sub => x - y,
+        _ => x * y,
+    }
+}
+fn scalar_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(i) => Some(*i as f64),
+        Value::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+// In-place maps/zips — write back into a uniquely-owned buffer instead of allocating a
+// new one. Order-preserving and parallel past the same threshold, so the result is
+// byte-identical to the allocating `pm_*`/`pz_*` path. `dst[i] = f(dst[i])` /
+// `dst[i] = f(dst[i], other[i])`.
+fn pm_f64_inplace(a: &mut [f64], f: impl Fn(f64) -> f64 + Sync + Send) {
+    if a.len() >= PAR_BCAST_THRESHOLD {
+        use rayon::prelude::*;
+        a.par_iter_mut().for_each(|x| *x = f(*x));
+    } else {
+        a.iter_mut().for_each(|x| *x = f(*x));
+    }
+}
+fn pm_i64_inplace(a: &mut [i64], f: impl Fn(i64) -> i64 + Sync + Send) {
+    if a.len() >= PAR_BCAST_THRESHOLD {
+        use rayon::prelude::*;
+        a.par_iter_mut().for_each(|x| *x = f(*x));
+    } else {
+        a.iter_mut().for_each(|x| *x = f(*x));
+    }
+}
+fn zip_f64_inplace(a: &mut [f64], b: &[f64], f: impl Fn(f64, f64) -> f64 + Sync + Send) {
+    if a.len() >= PAR_BCAST_THRESHOLD {
+        use rayon::prelude::*;
+        a.par_iter_mut().zip(b.par_iter()).for_each(|(x, &y)| *x = f(*x, y));
+    } else {
+        a.iter_mut().zip(b).for_each(|(x, &y)| *x = f(*x, y));
+    }
+}
+fn zip_i64_inplace(a: &mut [i64], b: &[i64], f: impl Fn(i64, i64) -> i64 + Sync + Send) {
+    if a.len() >= PAR_BCAST_THRESHOLD {
+        use rayon::prelude::*;
+        a.par_iter_mut().zip(b.par_iter()).for_each(|(x, &y)| *x = f(*x, y));
+    } else {
+        a.iter_mut().zip(b).for_each(|(x, &y)| *x = f(*x, y));
+    }
+}
+
+/// Reuse a uniquely-owned (`Rc` strong-count 1) array buffer for `Add`/`Sub`/`Mul`,
+/// mutating it in place rather than allocating a fresh one — the key saving in
+/// elementwise chains (`(a + b) * c`, `xs * 2 + 1`), where every intermediate is a unique
+/// temporary. A bound variable has strong-count > 1 (the binding plus the evaluated copy),
+/// so `Rc::get_mut` returns `None` and we never mutate shared data. Only type-preserving
+/// cases reuse in place (Floats±num-scalar, Ints±int-scalar, Floats∘Floats, Ints∘Ints);
+/// everything else returns `None` and falls through to the allocating path. Byte-identical
+/// result, so both engines stay in lockstep.
+fn try_inplace_broadcast(op: &BinOp, l: &mut Value, r: &mut Value) -> Option<Value> {
+    use crate::value::ArrayData;
+    if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
+        return None;
+    }
+    // array ⊕ scalar  → reuse the (unique) array.
+    if let (Value::Array(a), Some(sf)) = (&mut *l, scalar_f64(r)) {
+        let done = match Rc::get_mut(a) {
+            Some(ArrayData::Floats(v)) => {
+                pm_f64_inplace(v, |x| fop(op, x, sf));
+                true
+            }
+            Some(ArrayData::Ints(v)) => {
+                if let Value::Int(k) = *r {
+                    pm_i64_inplace(v, |x| iop(op, x, k));
+                    true
+                } else {
+                    false // Ints array ⊕ Float scalar → Floats; can't reuse the i64 buffer
+                }
+            }
+            _ => false,
+        };
+        if done {
+            return Some(std::mem::replace(l, Value::Unit));
+        }
+    }
+    // scalar ⊕ array  → reuse the (unique) array, with the scalar as the left operand.
+    if let (Some(sf), Value::Array(a)) = (scalar_f64(l), &mut *r) {
+        let done = match Rc::get_mut(a) {
+            Some(ArrayData::Floats(v)) => {
+                pm_f64_inplace(v, |x| fop(op, sf, x));
+                true
+            }
+            Some(ArrayData::Ints(v)) => {
+                if let Value::Int(k) = *l {
+                    pm_i64_inplace(v, |x| iop(op, k, x));
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if done {
+            return Some(std::mem::replace(r, Value::Unit));
+        }
+    }
+    // array ⊕ array (same length, same packed type) → reuse a unique buffer: prefer the
+    // left, else the right (with the operands swapped in the closure to keep `Sub` order).
+    let same_len = matches!((&*l, &*r), (Value::Array(a), Value::Array(b)) if a.len() == b.len());
+    if same_len {
+        if let (Value::Array(a), Value::Array(b)) = (&mut *l, &*r) {
+            let done = match (Rc::get_mut(a), &**b) {
+                (Some(ArrayData::Floats(va)), ArrayData::Floats(vb)) => {
+                    zip_f64_inplace(va, vb, |x, y| fop(op, x, y));
+                    true
+                }
+                (Some(ArrayData::Ints(va)), ArrayData::Ints(vb)) => {
+                    zip_i64_inplace(va, vb, |x, y| iop(op, x, y));
+                    true
+                }
+                _ => false,
+            };
+            if done {
+                return Some(std::mem::replace(l, Value::Unit));
+            }
+        }
+        if let (Value::Array(a), Value::Array(b)) = (&*l, &mut *r) {
+            let done = match (&**a, Rc::get_mut(b)) {
+                (ArrayData::Floats(va), Some(ArrayData::Floats(vb))) => {
+                    zip_f64_inplace(vb, va, |y, x| fop(op, x, y)); // store into b; a is left
+                    true
+                }
+                (ArrayData::Ints(va), Some(ArrayData::Ints(vb))) => {
+                    zip_i64_inplace(vb, va, |y, x| iop(op, x, y));
+                    true
+                }
+                _ => false,
+            };
+            if done {
+                return Some(std::mem::replace(r, Value::Unit));
+            }
+        }
+    }
+    None
+}
+
 fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
     use crate::value::ArrayData;
     if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow) {
         return None;
-    }
-    fn iop(op: &BinOp, x: i64, y: i64) -> i64 {
-        match op {
-            BinOp::Add => x.wrapping_add(y),
-            BinOp::Sub => x.wrapping_sub(y),
-            _ => x.wrapping_mul(y),
-        }
-    }
-    fn fop(op: &BinOp, x: f64, y: f64) -> f64 {
-        match op {
-            BinOp::Add => x + y,
-            BinOp::Sub => x - y,
-            _ => x * y,
-        }
     }
     fn f64_view(ad: &ArrayData) -> Option<std::borrow::Cow<'_, [f64]>> {
         match ad {
             ArrayData::Floats(v) => Some(std::borrow::Cow::Borrowed(v)),
             ArrayData::Ints(v) => Some(std::borrow::Cow::Owned(v.iter().map(|&n| n as f64).collect())),
             ArrayData::Values(_) => None,
-        }
-    }
-    fn scalar_f64(v: &Value) -> Option<f64> {
-        match v {
-            Value::Int(i) => Some(*i as f64),
-            Value::Float(f) => Some(*f),
-            _ => None,
         }
     }
     // `/` is always float; a zero divisor must raise the *same* error as the scalar

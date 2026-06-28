@@ -1570,6 +1570,22 @@
     }
 
     #[test]
+    fn inplace_broadcast_never_mutates_shared() {
+        let r = |src: &str| format!("{}", last(src).unwrap());
+        // The in-place buffer reuse must NEVER touch a bound (shared) array — only a
+        // unique temporary. `xs + 1` reuses nothing because `xs` is still live.
+        assert_eq!(r("xs = [1, 2, 3]\nys = xs + 1\nxs"), "[1, 2, 3]"); // xs intact
+        assert_eq!(r("xs = [1, 2, 3]\nys = xs + 1\nys"), "[2, 3, 4]");
+        assert_eq!(r("a = [1.0, 2.0]\nb = [3.0, 4.0]\nc = (a + b) * 2.0\na"), "[1.0, 2.0]");
+        assert_eq!(r("a = [1.0, 2.0]\nb = [3.0, 4.0]\n(a + b) * 2.0"), "[8.0, 12.0]");
+        // aliasing: `xs + xs` (both operands the same Rc, count ≥ 2) must not corrupt xs
+        assert_eq!(r("xs = [1, 2, 3]\nys = xs + xs\nxs"), "[1, 2, 3]");
+        // chains reuse the unique intermediate; result + Sub order are exact
+        assert_eq!(r("a=[10.0,20.0]\nb=[1.0,2.0]\nc=[3.0,3.0]\n(a - b) * c"), "[27.0, 54.0]");
+        assert_eq!(r("b = [5.0, 6.0]\n100.0 * (b + 1.0)"), "[600.0, 700.0]"); // reuse-right
+    }
+
+    #[test]
     fn clock_monotonic_returns_monotonic_seconds() {
         // Returns a non-negative Float; two successive reads never go backwards.
         assert!(float("clock_monotonic()") >= 0.0);
