@@ -565,6 +565,22 @@ impl super::Interp {
                     other => Err(type_err("sign", "a number or array of numbers", other, line, col)),
                 })
             }
+            // IEEE float predicates → Bool (Bool array / 0.0-or-1.0 tensor mask when
+            // broadcast). An `Int`/`Rational` is always finite, never NaN/inf. These let a
+            // program guard a `NaN`/`inf` (e.g. from an `exp` overflow) BEFORE a comparison
+            // — which raises on a non-orderable `NaN` rather than silently mis-ordering.
+            "is_nan" => {
+                arity(name, &args, 1, line, col)?;
+                float_predicate(&args[0], name, f64::is_nan, false, line, col)
+            }
+            "is_finite" => {
+                arity(name, &args, 1, line, col)?;
+                float_predicate(&args[0], name, f64::is_finite, true, line, col)
+            }
+            "is_infinite" => {
+                arity(name, &args, 1, line, col)?;
+                float_predicate(&args[0], name, f64::is_infinite, false, line, col)
+            }
             "log" => match args.len() {
                 // single-arg log(x) = natural log (numpy parity); broadcasts + missing
                 1 => apply_float_fn("log", f64::ln, &args[0], line, col),
@@ -1502,4 +1518,38 @@ fn num_array(who: &str, v: &Value, line: usize, col: usize) -> Result<Option<Vec
         }
     }
     Ok(Some(out))
+}
+
+/// An IEEE float predicate (`is_nan`/`is_finite`/`is_infinite`): `Float` → `Bool` via `f`;
+/// an `Int`/`Rational` is exact so it yields `on_exact` (always finite, never NaN/inf);
+/// `missing` propagates; an array maps elementwise to a `Bool` array; a tensor (f64-only,
+/// so no `Bool` element type) yields a `1.0`/`0.0` mask tensor usable in arithmetic.
+fn float_predicate(
+    v: &Value,
+    name: &str,
+    f: fn(f64) -> bool,
+    on_exact: bool,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    match v {
+        Value::Array(items) => {
+            let out: Result<Vec<Value>, HelixError> = items
+                .to_values()
+                .iter()
+                .map(|e| float_predicate(e, name, f, on_exact, line, col))
+                .collect();
+            Ok(Value::array(out?))
+        }
+        Value::Tensor(t) => {
+            let data: Vec<f64> = t.iter().map(|&x| if f(x) { 1.0 } else { 0.0 }).collect();
+            let out = ndarray::ArrayD::from_shape_vec(t.raw_dim(), data)
+                .expect("same length as source tensor");
+            Ok(Value::Tensor(Rc::new(out)))
+        }
+        Value::Missing => Ok(Value::Missing),
+        Value::Float(x) => Ok(Value::Bool(f(*x))),
+        Value::Int(_) | Value::Rational(_) => Ok(Value::Bool(on_exact)),
+        other => Err(type_err(name, "a number or array of numbers", other, line, col)),
+    }
 }

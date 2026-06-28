@@ -23,6 +23,14 @@ print("abs array:  ", abs([-1, 2, -3]))
 print("floor/ceil: ", floor(2.7), ceil(2.1), round(2.5))
 print("sqrt(missing):", sqrt(missing))
 
+# IEEE predicates guard a NaN/inf *before* a comparison (which raises on a NaN,
+# since a NaN has no order). An Int/Rational is always finite.
+big = exp(exp(exp(800.0)))            # overflows to +inf
+print("is_finite(big):", is_finite(big))           # false
+print("is_nan(big - big):", is_nan(big - big))      # true (inf - inf)
+print("guarded:", if is_finite(big) then big else 0.0)  # 0.0, no raise
+print("is_finite array:", is_finite([1.0, big, 2.0]))   # [true, false, true]
+
 # Composes with functions and comprehensions, of course.
 fn magnitude(xs) = sqrt(xs.map(it ** 2).sum())
 print("magnitude [3,4]:", magnitude([3, 4]))

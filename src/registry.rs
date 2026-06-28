@@ -84,6 +84,10 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "round", pure: true },
     BuiltinDef { path: "trunc", pure: true },
     BuiltinDef { path: "sign", pure: true },
+    // IEEE float predicates — guard a `NaN`/`inf` before a comparison would raise.
+    BuiltinDef { path: "is_nan", pure: true },
+    BuiltinDef { path: "is_finite", pure: true },
+    BuiltinDef { path: "is_infinite", pure: true },
     BuiltinDef { path: "degrees", pure: true },
     BuiltinDef { path: "radians", pure: true },
     BuiltinDef { path: "hypot", pure: true },

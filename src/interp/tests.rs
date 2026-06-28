@@ -1535,6 +1535,35 @@
     }
 
     #[test]
+    fn float_predicates_guard_nan_and_inf() {
+        use Value::Bool;
+        assert!(matches!(last("is_finite(1.5)").unwrap(), Bool(true)));
+        assert!(matches!(last("is_finite(inf)").unwrap(), Bool(false)));
+        assert!(matches!(last("is_infinite(inf)").unwrap(), Bool(true)));
+        assert!(matches!(last("is_nan(inf - inf)").unwrap(), Bool(true)));
+        assert!(matches!(last("is_nan(1.5)").unwrap(), Bool(false)));
+        // an Int/Rational is exact — always finite, never NaN/inf
+        assert!(matches!(last("is_finite(5)").unwrap(), Bool(true)));
+        assert!(matches!(last("is_nan(5)").unwrap(), Bool(false)));
+        assert!(matches!(last("is_infinite(rational(1, 3))").unwrap(), Bool(false)));
+        // missing propagates (ADR-0001)
+        assert!(matches!(last("is_nan(missing)").unwrap(), Value::Missing));
+        // The guard the user needs: a `<` on a NaN raises ("cannot compare … (NaN?)"),
+        // but the predicate lets a program branch *before* the comparison.
+        assert_eq!(float("x = inf - inf\nif is_nan(x) then 0.0 else x"), 0.0);
+        // array form → a Bool array
+        match last("is_finite([1.0, inf, 2.0])").unwrap() {
+            Value::Array(a) => {
+                let a = a.to_values();
+                assert!(matches!(a[0], Bool(true)));
+                assert!(matches!(a[1], Bool(false)));
+                assert!(matches!(a[2], Bool(true)));
+            }
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn math_constants_predefined() {
         assert!((float("pi") - std::f64::consts::PI).abs() < 1e-12);
         assert!((float("e") - std::f64::consts::E).abs() < 1e-12);

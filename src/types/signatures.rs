@@ -58,7 +58,10 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
     }
     // math: container/Unknown ⇒ Unknown; Missing ⇒ Missing (the false-positive guard)
     if MATH_UNARY_FLOAT.contains(&name)
-        || matches!(name, "floor" | "ceil" | "trunc" | "abs" | "sign")
+        || matches!(
+            name,
+            "floor" | "ceil" | "trunc" | "abs" | "sign" | "is_nan" | "is_finite" | "is_infinite"
+        )
     {
         if args.len() != 1 {
             return Err(arity_err(name, 1, args.len(), line, col));
@@ -75,6 +78,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         return Ok(match name {
             "floor" | "ceil" | "trunc" | "sign" => Type::Int,
+            "is_nan" | "is_finite" | "is_infinite" => Type::Bool,
             "abs" => a.clone(),
             _ => Type::Float,
         });

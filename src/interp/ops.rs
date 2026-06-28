@@ -475,7 +475,9 @@ fn compare(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<
             let a = num_operand(op, l, line, col)?;
             let b = num_operand(op, r, line, col)?;
             a.partial_cmp(&b).ok_or_else(|| {
-                HelixError::new("cannot compare these values (NaN?)", line, col)
+                HelixError::new("cannot compare these values (NaN?)", line, col).hint(
+                    "a NaN has no order — guard it first with `is_nan(x)` / `is_finite(x)`.",
+                )
             })?
         }
     };
