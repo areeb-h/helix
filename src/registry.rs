@@ -9,11 +9,12 @@
 //! method" bug class is structural rather than a standing risk. The [`tests`] module
 //! enforces that no name is declared twice.
 //!
-//! Builtins are keyed by a dotted `path`: language primitives keep a bare name
-//! (`"sqrt"`), and domain functions live under a namespace (`"bio.read_vcf"`,
-//! `"stats.t_test"`). Methods are *not* namespaced — `recv.method()` — so their tables
-//! are plain name lists; `is_missing` is universal across every receiver, so it is held
-//! once in [`UNIVERSAL_METHODS`] rather than repeated in each table.
+//! Builtins are keyed by a flat `path` — language primitives and domain functions
+//! alike are bare names (`"sqrt"`, `"read_vcf"`, `"t_test"`); the old `bio.`/`stats.`/
+//! `io.` namespace prefixes were dropped (ADR 0017), so anything that acts on data is
+//! now a method instead. Methods are listed per-receiver below; `is_missing` and
+//! `to_json` are universal across every receiver, so they live once in
+//! [`UNIVERSAL_METHODS`] rather than repeated in each table.
 
 /// A built-in function: its dotted path and whether it is pure (free of side effects
 /// and reproducible). Impure builtins (I/O, output, network) must never be memoized.
@@ -22,8 +23,7 @@ pub struct BuiltinDef {
     pub pure: bool,
 }
 
-/// Every built-in function, keyed by dotted path. Language primitives are bare names;
-/// domain functions will move under namespaces in a later step.
+/// Every built-in function, keyed by a flat name (no namespace prefixes — ADR 0017).
 pub static BUILTINS: &[BuiltinDef] = &[
     // --- effectful / non-reproducible (I/O, output, network) -> not memoizable ---
     BuiltinDef { path: "print", pure: false },

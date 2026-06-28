@@ -234,7 +234,7 @@ impl super::Interp {
                 // indexed region query against the file's `.tbi`.
                 if args.is_empty() || args.len() > 2 {
                     return Err(HelixError::new(
-                        format!("`bio.read_vcf` takes 1 or 2 arguments, got {}", args.len()),
+                        format!("`read_vcf` takes 1 or 2 arguments, got {}", args.len()),
                         line,
                         col,
                     ));
@@ -275,7 +275,7 @@ impl super::Interp {
                 // indexed region query against the file's `.bai`.
                 if args.is_empty() || args.len() > 2 {
                     return Err(HelixError::new(
-                        format!("`bio.read_bam` takes 1 or 2 arguments, got {}", args.len()),
+                        format!("`read_bam` takes 1 or 2 arguments, got {}", args.len()),
                         line,
                         col,
                     ));
