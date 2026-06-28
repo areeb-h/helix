@@ -92,6 +92,10 @@ pub struct Jit {
     /// fn(*const f64, *mut f64, i64, *const f64)`. Same index as `map_ptrs`; the VM picks
     /// by the receiver array's element type.
     map_ptrs_f64: Vec<Option<*const u8>>,
+    /// The **mixed** specialization (Int source, float body): `extern "C"
+    /// fn(*const i64, *mut f64, i64, *const i64)` — reads `i64`, writes `f64`, no captures.
+    /// Same index as `map_ptrs`; taken for an `Int` array when no plain `i64` kernel exists.
+    map_ptrs_mixed: Vec<Option<*const u8>>,
     /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len) -> i64` (kept count)
     /// filter kernels, indexed by [`crate::bytecode::Op::TryJitFilter`]'s `kernel_idx`.
     filter_ptrs: Vec<Option<*const u8>>,
@@ -116,6 +120,10 @@ impl Jit {
     /// The native `f64` map kernel for site `idx`, if one compiled.
     pub fn map_kernel_f64(&self, idx: usize) -> Option<*const u8> {
         self.map_ptrs_f64.get(idx).copied().flatten()
+    }
+    /// The native **mixed** map kernel (Int source → Float result) for site `idx`.
+    pub fn map_kernel_mixed(&self, idx: usize) -> Option<*const u8> {
+        self.map_ptrs_mixed.get(idx).copied().flatten()
     }
     /// The native filter kernel for site `idx`, if one compiled.
     pub fn filter_kernel(&self, idx: usize) -> Option<*const u8> {
@@ -272,18 +280,27 @@ pub fn build(
     // bodies may call the eligible functions in `fn_ids`.
     // `map` compiles two specializations — `i64` (Int source) and `f64` (Float source);
     // the VM picks by the array's element type at runtime. `filter`/fused stay `Int`.
-    let map_ids =
-        define_array_kernels(&mut module, map_kernels, "map", false, &fn_ids, &int_eligible, NumKind::Int);
-    let map_f64_ids =
-        define_array_kernels(&mut module, map_kernels, "mapf", false, &fn_ids, &int_eligible, NumKind::Float);
-    let filter_ids =
-        define_array_kernels(&mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, NumKind::Int);
+    let map_ids = define_array_kernels(
+        &mut module, map_kernels, "map", false, &fn_ids, &int_eligible, NumKind::Int, false,
+    );
+    let map_f64_ids = define_array_kernels(
+        &mut module, map_kernels, "mapf", false, &fn_ids, &int_eligible, NumKind::Float, false,
+    );
+    // The mixed `Int`-source → `Float` specialization (`range.map(j => j*0.001)`): reads
+    // `i64`, writes `f64`. `elem_kind` is ignored when `mixed` (the body is typed per node).
+    let map_mixed_ids = define_array_kernels(
+        &mut module, map_kernels, "mapm", false, &fn_ids, &int_eligible, NumKind::Int, true,
+    );
+    let filter_ids = define_array_kernels(
+        &mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, NumKind::Int, false,
+    );
     let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible);
 
     if compiled.is_empty()
         && reduce_ids.iter().all(|r| r.is_none())
         && map_ids.iter().all(|r| r.is_none())
         && map_f64_ids.iter().all(|r| r.is_none())
+        && map_mixed_ids.iter().all(|r| r.is_none())
         && filter_ids.iter().all(|r| r.is_none())
         && fused_ids.iter().all(|r| r.is_none())
     {
@@ -309,10 +326,20 @@ pub fn build(
     let reduce_ptrs = finalize(reduce_ids, &module);
     let map_ptrs = finalize(map_ids, &module);
     let map_ptrs_f64 = finalize(map_f64_ids, &module);
+    let map_ptrs_mixed = finalize(map_mixed_ids, &module);
     let filter_ptrs = finalize(filter_ids, &module);
     let fused_ptrs = finalize(fused_ids, &module);
 
-    Some(Jit { _module: module, by_name, reduce_ptrs, map_ptrs, map_ptrs_f64, filter_ptrs, fused_ptrs })
+    Some(Jit {
+        _module: module,
+        by_name,
+        reduce_ptrs,
+        map_ptrs,
+        map_ptrs_f64,
+        map_ptrs_mixed,
+        filter_ptrs,
+        fused_ptrs,
+    })
 }
 
 /// All stages and the reduce sink of a fused pipeline must be JIT-eligible.
@@ -363,6 +390,7 @@ fn define_fused_kernels(
 /// Declare + define a batch of `map`/`filter` kernels, returning one slot per kernel
 /// (`None` for any the JIT declined). `is_filter` selects the predicate/compaction
 /// codegen and the `-> i64` (kept-count) signature.
+#[allow(clippy::too_many_arguments)]
 fn define_array_kernels(
     module: &mut JITModule,
     kernels: &[crate::bytecode::ArrayKernel],
@@ -371,16 +399,20 @@ fn define_array_kernels(
     fn_ids: &HashMap<&str, FuncId>,
     eligible: &HashSet<&str>,
     elem_kind: NumKind,
+    mixed: bool,
 ) -> Vec<Option<FuncId>> {
     let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
     let mut ctx = module.make_context();
     let mut bctx = FunctionBuilderContext::new();
     for (i, k) in kernels.iter().enumerate() {
-        // Eligibility per kind: filter (Int comparison), Int map (capture-aware, the body
-        // re-checked so a captured-var body compiles), or Float map (the safe `+ - *`
-        // subset over a Floats source — see `map_kernel_captures_f64`).
+        // Eligibility per kind: filter (Int comparison), mixed map (Int source, float body
+        // — `mixed_map_eligible`), Float map (the safe `+ - *` subset over a Floats source
+        // — `map_kernel_captures_f64`), or Int map (capture-aware, body re-checked so a
+        // captured-var body compiles).
         let ok = if is_filter {
             filter_kernel_eligible(&k.body, &k.binder, eligible)
+        } else if mixed {
+            mixed_map_eligible(&k.body, &k.binder)
         } else if matches!(elem_kind, NumKind::Float) {
             map_kernel_captures_f64(&k.body, &k.binder).is_some()
         } else {
@@ -407,8 +439,9 @@ fn define_array_kernels(
                 continue;
             }
         };
-        let done =
-            define_array_kernel(module, &mut ctx, &mut bctx, id, k, is_filter, fn_ids, elem_kind);
+        let done = define_array_kernel(
+            module, &mut ctx, &mut bctx, id, k, is_filter, fn_ids, elem_kind, mixed,
+        );
         ids.push(done.map(|()| id));
     }
     ids
@@ -530,6 +563,48 @@ fn f64_body_eligible(e: &Expr, binder: &str, caps: &mut Vec<String>, uses_binder
                 && f64_body_eligible(right, binder, caps, uses_binder)
         }
         _ => false,
+    }
+}
+
+/// Is `body` a **mixed** `Int`-source → `Float` map: an `f64`-producing expression over
+/// an `i64` element? Eligible when it uses the binder, is built only from `+ - *` over the
+/// binder / int / float literals (no captures — a capture's runtime type is unknown at
+/// compile time, and an `Int` capture in an `Int` subexpression must wrap as `i64`, which
+/// we couldn't guarantee), and its inferred root type is `Float` (else it's a pure `i64`
+/// map). The kernel ([`define_array_kernel`] with `mixed`) types every node bottom-up by
+/// the interpreter's promotion rule — `Int OP Int` stays `i64` (wrapping `iadd/isub/imul`),
+/// and the *first* `Float` operand promotes via `fcvt_from_sint` — so it matches the
+/// interpreter bit-for-bit, including any `i64` wrap in an integer subexpression.
+pub fn mixed_map_eligible(body: &Expr, binder: &str) -> bool {
+    let mut uses_binder = false;
+    matches!(infer_mixed_kind(body, binder, &mut uses_binder), Some(NumKind::Float)) && uses_binder
+}
+
+/// Bottom-up type of a mixed-map node, or `None` if it contains anything outside the
+/// eligible shape (a non-binder ident, a non-`{+,-,*}` operator, a call/if/…). Mirrors
+/// the codegen in [`gen_value_typed`] exactly.
+fn infer_mixed_kind(e: &Expr, binder: &str, uses_binder: &mut bool) -> Option<NumKind> {
+    match e {
+        Expr::Int(_) => Some(NumKind::Int),
+        Expr::Float(_) => Some(NumKind::Float),
+        Expr::Ident { name, .. } => {
+            if name == binder {
+                *uses_binder = true;
+                Some(NumKind::Int) // the `i64` element
+            } else {
+                None // captures are excluded from the mixed kernel
+            }
+        }
+        Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
+            let lk = infer_mixed_kind(left, binder, uses_binder)?;
+            let rk = infer_mixed_kind(right, binder, uses_binder)?;
+            Some(if lk == NumKind::Float || rk == NumKind::Float {
+                NumKind::Float
+            } else {
+                NumKind::Int
+            })
+        }
+        _ => None,
     }
 }
 
@@ -851,10 +926,19 @@ fn define_array_kernel<'a>(
     is_filter: bool,
     fn_ids: &HashMap<&'a str, FuncId>,
     elem_kind: NumKind,
+    mixed: bool,
 ) -> Option<()> {
     // Element + capture values are `i64` (map over an `Int` array) or `f64` (map over a
     // `Float` array); the buffer pointers and length are always `i64`. Filter is `Int`.
-    let elem_ty = if matches!(elem_kind, NumKind::Float) { F64 } else { I64 };
+    // A `mixed` map reads `i64` elements but writes `f64` (Int source, float body) — so the
+    // *load* type is `i64` and the result is the `f64` from `gen_value_typed`.
+    let elem_ty = if mixed {
+        I64
+    } else if matches!(elem_kind, NumKind::Float) {
+        F64
+    } else {
+        I64
+    };
     ctx.func.signature.call_conv = CallConv::SystemV;
     for _ in 0..3 {
         ctx.func.signature.params.push(AbiParam::new(I64)); // src, dst, len
@@ -943,8 +1027,13 @@ fn define_array_kernel<'a>(
         let nw = b.ins().iadd(wv2, keep64);
         b.def_var(w_var, nw);
     } else {
-        // dst[i] = body(elem)
-        let r = gen_value(&mut b, &k.body, &mut vars, fn_ids, module, elem_kind);
+        // dst[i] = body(elem). `mixed` types the body node-by-node (i64 element → f64
+        // result); the plain map uses the monomorphized `elem_kind` codegen.
+        let r = if mixed {
+            gen_value_typed(&mut b, &k.body, &vars, &k.binder).0
+        } else {
+            gen_value(&mut b, &k.body, &mut vars, fn_ids, module, elem_kind)
+        };
         let iv3 = b.use_var(i_var);
         let doff = b.ins().imul_imm(iv3, 8);
         let dstp = b.use_var(dst_var);
@@ -1246,6 +1335,55 @@ fn gen_value<'a>(
     }
 }
 
+/// Codegen for a **mixed** map body (`Int` element → `Float` result): returns the value
+/// and its `NumKind`. Types each node bottom-up by the interpreter's promotion rule —
+/// `Int OP Int` emits the wrapping `i64` op (`iadd/isub/imul`, exactly the pure-`i64`
+/// kernel's semantics), and as soon as either side is `Float` both are promoted to `f64`
+/// via `fcvt_from_sint` and the `f64` op runs. This reproduces the interpreter's
+/// "`i64` arithmetic until a float enters, then `as f64`" behavior bit-for-bit, including
+/// an `i64` wrap that happens *before* the float promotion. Only the binder (an `i64`
+/// element), int/float literals, and `+ - *` reach here (guaranteed by `mixed_map_eligible`).
+fn gen_value_typed<'a>(
+    b: &mut FunctionBuilder,
+    e: &'a Expr,
+    vars: &HashMap<&'a str, Variable>,
+    binder: &str,
+) -> (ClValue, NumKind) {
+    match e {
+        Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
+        Expr::Float(f) => (b.ins().f64const(*f), NumKind::Float),
+        Expr::Ident { name, .. } => {
+            debug_assert_eq!(name, binder, "only the binder reaches the mixed kernel");
+            (b.use_var(vars[name.as_str()]), NumKind::Int)
+        }
+        Expr::Binary { op, left, right, .. } => {
+            let (lv, lk) = gen_value_typed(b, left, vars, binder);
+            let (rv, rk) = gen_value_typed(b, right, vars, binder);
+            if lk == NumKind::Int && rk == NumKind::Int {
+                let v = match op {
+                    BinOp::Add => b.ins().iadd(lv, rv),
+                    BinOp::Sub => b.ins().isub(lv, rv),
+                    BinOp::Mul => b.ins().imul(lv, rv),
+                    _ => unreachable!("ineligible operator reached mixed codegen"),
+                };
+                (v, NumKind::Int)
+            } else {
+                // at least one side is Float → promote the Int side(s) to f64, then fop
+                let lf = if lk == NumKind::Int { b.ins().fcvt_from_sint(F64, lv) } else { lv };
+                let rf = if rk == NumKind::Int { b.ins().fcvt_from_sint(F64, rv) } else { rv };
+                let v = match op {
+                    BinOp::Add => b.ins().fadd(lf, rf),
+                    BinOp::Sub => b.ins().fsub(lf, rf),
+                    BinOp::Mul => b.ins().fmul(lf, rf),
+                    _ => unreachable!("ineligible operator reached mixed codegen"),
+                };
+                (v, NumKind::Float)
+            }
+        }
+        _ => unreachable!("ineligible node reached mixed codegen"),
+    }
+}
+
 fn gen_cond<'a>(
     b: &mut FunctionBuilder,
     e: &'a Expr,
@@ -1339,6 +1477,21 @@ pub unsafe fn run_map_kernel_f64(ptr: *const u8, src: &[f64], caps: &[f64]) -> V
         let f: extern "C" fn(*const f64, *mut f64, i64, *const f64) =
             unsafe { std::mem::transmute(ptr) };
         f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, caps.as_ptr());
+    }
+    dst
+}
+
+/// The **mixed** map kernel: `dst[i] = body(src[i])` reading an `i64` buffer and writing
+/// `f64` (Int source, float body), no captures. SAFETY: as [`run_map_kernel`], with an
+/// `fn(*const i64, *mut f64, i64, *const i64)` contract; the caps pointer is a valid
+/// (empty) slice the kernel never reads (mixed kernels are capture-free by construction).
+pub unsafe fn run_map_kernel_mixed(ptr: *const u8, src: &[i64]) -> Vec<f64> {
+    let mut dst = vec![0.0f64; src.len()];
+    if !src.is_empty() {
+        let f: extern "C" fn(*const i64, *mut f64, i64, *const i64) =
+            unsafe { std::mem::transmute(ptr) };
+        let no_caps: [i64; 0] = [];
+        f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, no_caps.as_ptr());
     }
     dst
 }

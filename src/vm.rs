@@ -863,18 +863,31 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 enum Pick {
                     I64(*const u8, Vec<i64>),
                     F64(*const u8, Vec<f64>),
+                    Mixed(*const u8),
                     No,
                 }
                 let pick = match (jit, stack.last()) {
                     (Some(j), Some(Value::Array(a))) => match &**a {
                         ArrayData::Ints(_) => {
-                            let caps: Option<Vec<i64>> = cap_vals
-                                .iter()
-                                .map(|v| if let Value::Int(i) = v { Some(*i) } else { None })
-                                .collect();
-                            match (caps, j.map_kernel(kidx)) {
-                                (Some(c), Some(p)) => Pick::I64(p, c),
-                                _ => Pick::No,
+                            if let Some(p) = j.map_kernel(kidx) {
+                                // plain i64 kernel: every capture must be an `Int`
+                                let caps: Option<Vec<i64>> = cap_vals
+                                    .iter()
+                                    .map(|v| if let Value::Int(i) = v { Some(*i) } else { None })
+                                    .collect();
+                                match caps {
+                                    Some(c) => Pick::I64(p, c),
+                                    None => Pick::No,
+                                }
+                            } else if cap_vals.is_empty() {
+                                // no i64 kernel + capture-free → a mixed Int→Float body
+                                // (`range.map(j => j*0.001)`) may have a mixed kernel.
+                                match j.map_kernel_mixed(kidx) {
+                                    Some(p) => Pick::Mixed(p),
+                                    None => Pick::No,
+                                }
+                            } else {
+                                Pick::No
                             }
                         }
                         ArrayData::Floats(_) => {
@@ -907,6 +920,18 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             && let ArrayData::Floats(v) = &**a
                         {
                             let out = unsafe { crate::jit::run_map_kernel_f64(ptr, v, &caps) };
+                            stack.push(Value::float_array(out));
+                            frames[fi].ip = *after as usize;
+                        } else {
+                            stack.push(arr);
+                        }
+                    }
+                    Pick::Mixed(ptr) => {
+                        let arr = stack.pop().unwrap();
+                        if let Value::Array(a) = &arr
+                            && let ArrayData::Ints(v) = &**a
+                        {
+                            let out = unsafe { crate::jit::run_map_kernel_mixed(ptr, v) };
                             stack.push(Value::float_array(out));
                             frames[fi].ip = *after as usize;
                         } else {

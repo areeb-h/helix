@@ -684,6 +684,67 @@
         format!("{preamble}{chain}")
     }
 
+    /// A random **mixed** `Int`-source → `Float`-body map: an `Int` array literal (with
+    /// some large values, to exercise `i64` wrap inside integer subexpressions before the
+    /// float promotion) or a `range`, mapped by a `{+,-,*}` body over the binder and int /
+    /// float literals whose root is `Float` (forced by a trailing `* <float>`). The body's
+    /// integer subexpressions must wrap as `i64` and convert to `f64` only at the first
+    /// float operand — exactly what the mixed kernel's node-by-node typing reproduces.
+    fn gen_mixed_map_pipeline(rng: &mut u64) -> String {
+        // An int literal that is *sometimes* large enough that a product wraps `i64`.
+        fn ilit(rng: &mut u64) -> String {
+            match pick(rng, 3) {
+                0 => format!("{}", (next(rng) % 21) as i64 - 10),
+                1 => format!("{}", 1_000_000_000_i64 + (next(rng) % 1000) as i64),
+                _ => "3000000000".to_string(),
+            }
+        }
+        fn flit(rng: &mut u64) -> String {
+            format!("{}.{:03}", (next(rng) % 21) as i64 - 10, next(rng) % 1000)
+        }
+        let src = if pick(rng, 2) == 0 {
+            let s = (next(rng) % 40) as i64 - 10;
+            let e = s + (next(rng) % 60) as i64;
+            format!("range({}, {})", s, e)
+        } else {
+            let n = 1 + pick(rng, 6);
+            let elems: Vec<String> = (0..n).map(|_| ilit(rng)).collect();
+            format!("[{}]", elems.join(", "))
+        };
+        // Build a `{+,-,*}` chain over `it` and int/float operands, then force a `Float`
+        // root with a trailing `* <float>` so the map is mixed-eligible.
+        let mut body = "it".to_string();
+        for _ in 0..(1 + pick(rng, 3)) {
+            let op = ["+", "-", "*"][pick(rng, 3) as usize];
+            let opd = if pick(rng, 2) == 0 { ilit(rng) } else { flit(rng) };
+            body = format!("({} {} {})", body, op, opd);
+        }
+        format!("({}).map(it => ({} * {}))", src, body, flit(rng))
+    }
+
+    /// Triple oracle for the **mixed** `Int`→`Float` map kernel. The int-array-literal
+    /// sources guarantee an `Int` receiver that actually drives the mixed kernel (not a
+    /// fall-through), so a mis-placed `fcvt` or an integer op done in `f64` (losing the
+    /// `i64` wrap) would diverge here.
+    #[test]
+    fn differential_mixed_map_kernel_oracle() {
+        let mut rng = 0x3117_C0DE_BEEF_2026u64;
+        for _ in 0..15_000 {
+            let src = gen_mixed_map_pipeline(&mut rng);
+            let jit = run_vm_jit(&src);
+            let no_jit = run_vm_no_jit(&src);
+            let tw = run_tw(&src);
+            match (jit, no_jit, tw) {
+                (Ok(a), Ok(b), Ok(c)) => {
+                    assert_eq!(a, b, "mixed map: JIT ≠ bytecode VM on `{src}`");
+                    assert_eq!(b, c, "mixed map: bytecode VM ≠ tree-walker on `{src}`");
+                }
+                (Err(()), Err(()), Err(())) => {}
+                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// Triple oracle for the `f64` map kernel: a random `Float`-array map pipeline must
     /// render the *same* array on the JIT-native path, the pure bytecode loop, and the
     /// tree-walker. Guards the monomorphized `f64` kernel + its `f64`-capture passing.
@@ -740,6 +801,23 @@
             run_vm_jit(chained).expect("jit"),
             run_tw(chained).expect("tw")
         );
+    }
+
+    #[test]
+    fn mixed_map_kernel_matches() {
+        // Int source, float body → the mixed (i64→f64) kernel; must match all engines.
+        let src = "[1, 2, 3].map(it => it * 0.5)";
+        let jit = run_vm_jit(src).expect("jit");
+        assert_eq!(jit, run_vm_no_jit(src).expect("vm"));
+        assert_eq!(jit, run_tw(src).expect("tw"));
+        // An integer subexpression must wrap as i64 *before* the float promotion: with the
+        // mixed kernel typing each node, `it * 3000000000` is an i64 product (wraps for the
+        // 5e9 element) and only the trailing `* 1.0` lifts to f64 — doing the whole thing in
+        // f64 would NOT wrap and would diverge. Held identical across all three engines.
+        let wrap = "[5000000000].map(it => (it * 3000000000) * 1.0)";
+        let j = run_vm_jit(wrap).expect("jit");
+        assert_eq!(j, run_vm_no_jit(wrap).expect("vm"));
+        assert_eq!(j, run_tw(wrap).expect("tw"));
     }
 
     #[test]

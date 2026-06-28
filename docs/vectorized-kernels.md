@@ -25,11 +25,18 @@ reference the binder (so a `Float` source guarantees a `Float` result, matching 
 interpreter). `fadd/fsub/fmul` are the same SSE scalar ops the interpreter runs, in the
 same left-to-right order, so the result is bit-for-bit identical.
 
-Anything else — `Float` *filters*, a float body over an `Int` source (`range.map(x =>
-x*0.001)` — mixed, the source stays `Int`), a body using `/` or `if`/comparison/call on
-floats, `missing`, multi-binder destructuring — transparently **falls through to the
-bytecode loop**. Correct everywhere; accelerated where it can be. The JIT itself is x86-64
-Linux only; other targets always run the bytecode loop.
+A **mixed `Int`-source → `Float` `map`** compiles as well (`range(N).map(j => j*0.001)`):
+the kernel reads an `i64` element and writes an `f64`, typing the body **node by node** by
+the interpreter's promotion rule — an `Int OP Int` subexpression stays `i64` (wrapping
+`iadd/isub/imul`) and only the first `Float` operand promotes via `fcvt`, so an `i64` wrap
+that happens *before* a float enters is preserved exactly. Same `{+,-,*}` subset, and —
+because a capture's runtime type isn't known at compile time — **no captures** (a captured
+`i` in `(i+j)*0.001` still falls through).
+
+Anything else — `Float` *filters*, a float body using `/` or `if`/comparison/call, a mixed
+body with a capture, `missing`, multi-binder destructuring — transparently **falls through
+to the bytecode loop**. Correct everywhere; accelerated where it can be. The JIT itself is
+x86-64 Linux only; other targets always run the bytecode loop.
 
 Every path is held to the tree-walker's result byte-for-byte (the parity oracle): integer
 arithmetic wraps identically, and `map`/`filter` preserve element order.
@@ -41,14 +48,16 @@ kernel. Both `i64` and `f64` `map` bodies now compile: `range(2M).map(x => x*2+k
 `i64` `k`) is **0.04 s**, and an `f64` map over 10M elements (`xs.map(x => x*2.0 + k)`) is
 **~0.012 s** — vs **~1.26 s** when the same body falls through to the bytecode loop (~100×).
 
-The cases that still fall through are **a float body over an `Int`/`range` source** (mixed —
-`range(N).map(j => j*0.001)`, where the source stays `Int`) and **any `f64` body outside the
-`{+,-,*}` subset** (a `/`, an `if`, a comparison, a call). For those, the reliable fast idiom
-is to **build with vectorized array ops rather than a `map` closure**, because the broadcast
-operators run on the packed buffer regardless of element type:
+A plain mixed body now compiles — `range(10M).map(j => j*0.001 + 2.5)` is **~0.031 s** vs
+**~0.89 s** through the bytecode loop (~28×). The cases that still fall through are a **mixed
+body with a capture** (`(i + j) * 0.001` — the captured `i`'s runtime type is unknown at
+compile time) and **any float body outside the `{+,-,*}` subset** (a `/`, an `if`, a
+comparison, a call). For those, the reliable fast idiom is to **build with vectorized array
+ops rather than a `map` closure**, because the broadcast operators run on the packed buffer
+regardless of element type:
 
 ```helix
-# slow in a hot loop — captured `i`, float body over an Int range → interpreter:
+# slow in a hot loop — captured `i` in a mixed body → interpreter:
 xs = range(0, 64).map(j => (i + j) * 0.001)
 # fast — typed broadcast over the packed buffer, no per-element closure:
 xs = (range(0, 64) + i) * 0.001
@@ -120,8 +129,10 @@ runtime — and runs at the bare reduce-loop's C/Go-class speed.
   slice). Still to do: extend captures to the **fused** map→reduce path (a captured map
   feeding a `reduce` currently un-fuses and runs the map as a standalone kernel).
 - ~~`f64` `map` kernels~~ — **done** (monomorphized over element type; `{+,-,*}` subset,
-  `f64` captures). Still to do: `f64` *filters* and the wider float body (`/`, `if`,
-  comparison, calls) once each divergence (float `/0` → raise, result-type, NaN-compare) is
-  handled; the `f64` kernel in the **fused** pipeline; a float body over an `Int` source.
+  `f64` captures). ~~mixed `Int`-source → `Float` `map`~~ — **done** (`range(N).map(j =>
+  j*0.001)`; node-by-node typing, no captures). Still to do: `f64` *filters* and the wider
+  float body (`/`, `if`, comparison, calls) once each divergence (float `/0` → raise,
+  result-type, NaN-compare) is handled; the `f64`/mixed kernel in the **fused** pipeline;
+  captures in the mixed kernel (needs compile-time capture types).
 - SIMD lanes; horizontal fusion (several aggregates in one pass); statistical sinks
   (`.sum()`/`.mean()` with an incremental Neumaier compensator).
