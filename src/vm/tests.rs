@@ -603,8 +603,15 @@
     /// stay in `{+,-,*}` and comparisons so the map/filter/fused kernels are genuinely
     /// JIT-compiled (the native path), not falling back.
     fn gen_int_pipeline(rng: &mut u64) -> String {
+        // A small literal, or — occasionally — a value past 2^53 where the interpreter's
+        // `as_f64()`-based `min`/`max` compare loses precision (so a naive native integer
+        // compare would diverge): the JIT must mirror the lossy compare exactly.
         fn lit(rng: &mut u64) -> i64 {
-            (next(rng) % 21) as i64 - 10
+            match pick(rng, 6) {
+                0 => 9_007_199_254_740_993, // 2^53 + 1
+                1 => -9_007_199_254_740_993,
+                _ => (next(rng) % 21) as i64 - 10,
+            }
         }
         // 0–3 captured `i64` globals (`c0 = …`). A map body sometimes uses a capture
         // instead of a literal, exercising the captured-var kernel path.
@@ -621,6 +628,17 @@
                 format!("{}", lit(rng))
             }
         }
+        // A map body over `it`: a bare arithmetic op, or a pure scalar builtin
+        // (`abs`/`min`/`max`) the kernel now compiles inline.
+        fn map_body(rng: &mut u64, n_caps: usize) -> String {
+            let op = ["+", "-", "*"][pick(rng, 3) as usize];
+            match pick(rng, 5) {
+                0 => format!("abs(it {} {})", op, operand(rng, n_caps)),
+                1 => format!("min(it, {})", operand(rng, n_caps)),
+                2 => format!("max(it, {})", operand(rng, n_caps)),
+                _ => format!("it {} {}", op, operand(rng, n_caps)),
+            }
+        }
         let src = if pick(rng, 2) == 0 {
             let s = (next(rng) % 40) as i64 - 10;
             let e = s + (next(rng) % 60) as i64; // non-negative length, within cap
@@ -634,8 +652,7 @@
         let stages = pick(rng, 4); // 0..3 transform stages
         for _ in 0..stages {
             if pick(rng, 2) == 0 {
-                let op = ["+", "-", "*"][pick(rng, 3) as usize];
-                chain = format!("({}).map(it {} {})", chain, op, operand(rng, n_caps));
+                chain = format!("({}).map(it => {})", chain, map_body(rng, n_caps));
             } else {
                 let cmp = ["<", ">", "<=", ">=", "==", "!="][pick(rng, 6) as usize];
                 chain = format!("({}).filter(it {} {})", chain, cmp, operand(rng, n_caps));
@@ -785,6 +802,34 @@
         // a float capture is not i64-closed → falls through identically on all engines
         let f = "k = 1.5\n[1, 2, 3].map(x => x + k).sum()";
         assert_eq!(run_vm_jit(f).expect("jit"), run_tw(f).expect("tw"));
+    }
+
+    #[test]
+    fn jit_scalar_builtins_match() {
+        // abs/min/max in a map body compile to native code; must agree on all engines.
+        for src in [
+            "[-3, 5, -7, 2].map(x => abs(x)).sum()",
+            "[1, 9, 4, 2].map(x => min(x, 3)).sum()",
+            "[1, 9, 4, 2].map(x => max(x, 3)).sum()",
+            "range(0, 6).reduce(-100, (a, x) => max(a, x))", // running max
+            "[5, 1, 8, 2].reduce(999, (a, x) => min(a, x))", // running min
+            // abs(i64::MIN) wraps to i64::MIN (wrapping_abs), matching the kernel's iabs.
+            "[-9223372036854775808].map(x => abs(x)).sum()",
+            // min/max past 2^53: the interpreter compares via f64 (lossy) and returns the
+            // original operand — the kernel mirrors that, so both pick the same element.
+            "[9007199254740993].map(x => min(x, 9007199254740992)).sum()",
+        ] {
+            let j = run_vm_jit(src).expect("jit");
+            assert_eq!(j, run_vm_no_jit(src).expect("vm"), "JIT≠VM on `{src}`");
+            assert_eq!(j, run_tw(src).expect("tw"), "JIT≠tw on `{src}`");
+        }
+        // A user function shadowing `max` must dispatch to the user's fn, NOT the builtin
+        // op — all engines agree (and the JIT must not silently emit the builtin).
+        let shadow = "fn max(a, b) = a + b\n[1, 2, 3].map(x => max(x, 10)).sum()";
+        let j = run_vm_jit(shadow).expect("jit");
+        assert_eq!(j, run_vm_no_jit(shadow).expect("vm"));
+        assert_eq!(j, run_tw(shadow).expect("tw"));
+        assert_eq!(j, "36"); // (1+10)+(2+10)+(3+10) = 36, the user's `+`, not max
     }
 
     #[test]

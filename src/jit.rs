@@ -638,6 +638,7 @@ fn value_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>
         }
         Expr::Call { name, args, .. } => {
             eligible.contains(name.as_str())
+                && jit_builtin_arity_ok(name, args.len())
                 && args.iter().all(|a| value_eligible_cap(a, eligible, locals, caps))
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
@@ -694,6 +695,17 @@ fn eligible_set<'a>(funcs: &[FnDef<'a>], kind: NumKind) -> HashSet<&'a str> {
         .filter(|f| f.params.len() <= MAX_ARITY && !recursive.contains(f.name))
         .map(|f| f.name)
         .collect();
+    // Pure scalar builtins the kernel codegen can emit inline (`abs`/`min`/`max`) — usable
+    // from a kernel body just like an eligible user function, EXCEPT when a user function
+    // of the same name shadows the builtin (then the call must dispatch to the user fn, so
+    // the JIT must not treat it as the builtin). Added before the fixpoint so user
+    // functions that call them are themselves eligible. This is the single source the
+    // compiler (`int_eligible_fns`) and the JIT build both read, so they always agree.
+    for (name, _) in JIT_SCALAR_BUILTINS {
+        if !funcs.iter().any(|f| f.name == *name) {
+            eligible.insert(name);
+        }
+    }
     loop {
         let snapshot = eligible.clone();
         let mut changed = false;
@@ -773,6 +785,53 @@ fn body_calls(e: &Expr, name: &str) -> bool {
     }
 }
 
+/// Pure scalar builtins the `i64` kernel codegen emits inline, matching the interpreter
+/// bit-for-bit: `abs` is `wrapping_abs` (Cranelift `iabs`, which wraps `i64::MIN` to
+/// itself); `min`/`max` reproduce the interpreter's `as_f64()`-compare-then-return-the-
+/// original-operand semantics (so they agree even past 2^53, where a native integer
+/// compare would differ). Added to the JIT-eligible set only when no user function of the
+/// same name shadows them (then the call dispatches to the user's function instead).
+pub const JIT_SCALAR_BUILTINS: &[(&str, usize)] = &[("abs", 1), ("min", 2), ("max", 2)];
+
+/// For a recognized JIT builtin, whether the call arity matches; for any other name (a
+/// user function) there is no constraint here — its arity is validated by the front end.
+fn jit_builtin_arity_ok(name: &str, nargs: usize) -> bool {
+    match JIT_SCALAR_BUILTINS.iter().find(|(n, _)| *n == name) {
+        Some((_, ar)) => *ar == nargs,
+        None => true,
+    }
+}
+
+/// Emit a recognized pure scalar builtin over `i64` operands (only reached for `Int`-kind
+/// codegen; the `f64` subset excludes calls). Mirrors the interpreter exactly.
+fn gen_builtin_i64<'a>(
+    b: &mut FunctionBuilder,
+    name: &str,
+    args: &'a [Expr],
+    vars: &mut HashMap<&'a str, Variable>,
+    fn_ids: &HashMap<&str, FuncId>,
+    module: &mut JITModule,
+) -> ClValue {
+    match name {
+        "abs" => {
+            let x = gen_value(b, &args[0], vars, fn_ids, module, NumKind::Int);
+            b.ins().iabs(x) // wraps i64::MIN to itself, matching `wrapping_abs`
+        }
+        "min" | "max" => {
+            let a = gen_value(b, &args[0], vars, fn_ids, module, NumKind::Int);
+            let c = gen_value(b, &args[1], vars, fn_ids, module, NumKind::Int);
+            // The interpreter compares via `as_f64()` and returns the ORIGINAL operand:
+            // `min` keeps the first iff `a_f64 <= b_f64`; `max` iff `a_f64 >= b_f64`.
+            let af = b.ins().fcvt_from_sint(F64, a);
+            let cf = b.ins().fcvt_from_sint(F64, c);
+            let cc = if name == "min" { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
+            let keep_a = b.ins().fcmp(cc, af, cf);
+            b.ins().select(keep_a, a, c)
+        }
+        _ => unreachable!("unrecognized JIT scalar builtin `{name}`"),
+    }
+}
+
 fn value_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, kind: NumKind) -> bool {
     match e {
         Expr::Int(_) => true,
@@ -802,6 +861,7 @@ fn value_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, ki
         }
         Expr::Call { name, args, .. } => {
             eligible.contains(name.as_str())
+                && jit_builtin_arity_ok(name, args.len())
                 && args.iter().all(|a| value_eligible(a, eligible, locals, kind))
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
@@ -1275,14 +1335,21 @@ fn gen_value<'a>(
             }
         }
         Expr::Call { name, args, .. } => {
-            let fid = fn_ids[name.as_str()];
-            let fref = module.declare_func_in_func(fid, b.func);
-            let argv: Vec<ClValue> = args
-                .iter()
-                .map(|a| gen_value(b, a, vars, fn_ids, module, kind))
-                .collect();
-            let call = b.ins().call(fref, &argv);
-            b.inst_results(call)[0]
+            // An eligible user function is in `fn_ids` (call it); otherwise eligibility
+            // guaranteed a recognized pure scalar builtin (emit it inline). The `fn_ids`
+            // lookup is what makes a user function shadowing `min`/`max`/`abs` dispatch to
+            // the user's function, never the builtin op.
+            if let Some(&fid) = fn_ids.get(name.as_str()) {
+                let fref = module.declare_func_in_func(fid, b.func);
+                let argv: Vec<ClValue> = args
+                    .iter()
+                    .map(|a| gen_value(b, a, vars, fn_ids, module, kind))
+                    .collect();
+                let call = b.ins().call(fref, &argv);
+                b.inst_results(call)[0]
+            } else {
+                gen_builtin_i64(b, name, args, vars, fn_ids, module)
+            }
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
             let then_b = b.create_block();

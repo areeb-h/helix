@@ -10,10 +10,13 @@ made per-element `map` the slowest path in the language.
 An `Int`-array `map`/`filter` becomes a native kernel when the single-parameter body is a
 pure `i64` expression — integer `+ - *`, `%` by a positive constant, comparisons,
 `if`/`then`/`else`, `let`, **calls to JIT-eligible user functions** (`x => normalize(x)`;
-the function is compiled natively and called from inside the loop), and **captured `i64`
-variables** (`map`: `x => x*k + b`, where `k`/`b` come from the enclosing scope — they're
-loop-invariant, resolved once at the call site and passed to the kernel as a `caps` slice;
-up to 8 captures).
+the function is compiled natively and called from inside the loop), the **pure scalar
+builtins `abs`/`min`/`max`** (`x => max(x, 0)`, `reduce((a, x) => max(a, x))` — emitted
+inline; `min`/`max` reproduce the interpreter's `as_f64()`-compare-then-pick-the-original
+semantics, exact even past 2⁵³, and a user function shadowing the name dispatches to the
+user's function, never the builtin), and **captured `i64` variables** (`map`: `x => x*k +
+b`, where `k`/`b` come from the enclosing scope — they're loop-invariant, resolved once at
+the call site and passed to the kernel as a `caps` slice; up to 8 captures).
 
 A **`Float`-array `map`** compiles too: the kernel is monomorphized over the element type
 (the "Julia recipe" — one source, an `i64` and an `f64` instantiation, the VM dispatches on
