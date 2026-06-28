@@ -796,6 +796,87 @@
         }
     }
 
+    /// A random `match`-bearing user function (`int` scrutinee: `Int` / `Or`-of-`Int` /
+    /// guarded-binder / `_` arms, the last always a catch-all) applied per element through
+    /// a map→reduce/sum. Exercises the JIT's `match` lowering ([`gen_match`]) against the
+    /// VM and tree-walker — arm order, or-patterns, guards, and binder scoping must agree.
+    fn gen_match_pipeline(rng: &mut u64) -> String {
+        fn lit(rng: &mut u64) -> i64 {
+            (next(rng) % 21) as i64 - 10
+        }
+        let k = 2 + pick(rng, 8) as i64; // scrutinee modulus → m in 0..k
+        // A small int body that may reference the param `m` (always in scope).
+        fn body(rng: &mut u64) -> String {
+            if pick(rng, 2) == 0 {
+                format!("{}", lit(rng))
+            } else {
+                let op = ["+", "-", "*"][pick(rng, 3) as usize];
+                format!("(m {} {})", op, lit(rng))
+            }
+        }
+        let mut arms = String::new();
+        for _ in 0..(1 + pick(rng, 4)) {
+            match pick(rng, 3) {
+                0 => arms.push_str(&format!("  {} => {},\n", pick(rng, k as u64), body(rng))),
+                1 => {
+                    let n = 2 + pick(rng, 2);
+                    let alts: Vec<String> = (0..n).map(|_| format!("{}", pick(rng, k as u64))).collect();
+                    arms.push_str(&format!("  {} => {},\n", alts.join(" | "), body(rng)));
+                }
+                _ => {
+                    let cmp = ["<", ">", "<=", ">=", "==", "!="][pick(rng, 6) as usize];
+                    arms.push_str(&format!("  x if x {} {} => {},\n", cmp, lit(rng), body(rng)));
+                }
+            }
+        }
+        arms.push_str(&format!("  _ => {},\n", body(rng)));
+        let preamble = format!("fn fm(m) = match m {{\n{}}}\n", arms);
+        let src = if pick(rng, 2) == 0 {
+            let s = (next(rng) % 20) as i64;
+            format!("range({}, {})", s, s + (next(rng) % 50) as i64)
+        } else {
+            let n = 1 + pick(rng, 6);
+            let elems: Vec<String> = (0..n).map(|_| format!("{}", next(rng) % 30)).collect();
+            format!("[{}]", elems.join(", "))
+        };
+        let mapped = format!("({}).map(it => fm(it % {}))", src, k);
+        let terminal = if pick(rng, 2) == 0 {
+            format!("({}).reduce(0, (a, x) => a + x)", mapped)
+        } else {
+            format!("({}).sum()", mapped)
+        };
+        format!("{preamble}{terminal}")
+    }
+
+    #[test]
+    fn match_kernel_matches() {
+        // The S4 benchmark function: literal, or-pattern, literal, guarded binder, wildcard.
+        let weight = "fn weight(m) = match m {\n  0 => 7,\n  1 | 2 | 3 => 2,\n  11 => 5,\n  x if x > 7 => 3,\n  _ => 1,\n}\n";
+        let src = format!("{weight}(0..40).map(k => weight(k % 12)).reduce(0, (a, x) => a + x)");
+        let j = run_vm_jit(&src).expect("jit");
+        assert_eq!(j, run_vm_no_jit(&src).expect("vm"));
+        assert_eq!(j, run_tw(&src).expect("tw"));
+    }
+
+    #[test]
+    fn differential_match_kernel_oracle() {
+        let mut rng = 0x6A7C_4ECD_0FF1_CE42u64;
+        for _ in 0..15_000 {
+            let src = gen_match_pipeline(&mut rng);
+            let jit = run_vm_jit(&src);
+            let no_jit = run_vm_no_jit(&src);
+            let tw = run_tw(&src);
+            match (jit, no_jit, tw) {
+                (Ok(a), Ok(b), Ok(c)) => {
+                    assert_eq!(a, b, "match: JIT ≠ bytecode VM on `{src}`");
+                    assert_eq!(b, c, "match: bytecode VM ≠ tree-walker on `{src}`");
+                }
+                (Err(()), Err(()), Err(())) => {}
+                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// Triple oracle for the JIT array/fused kernels: every random `Int`-array
     /// pipeline must produce the *same* result on the JIT-native path, the pure
     /// bytecode loop, and the tree-walker. This closes the one confirmed fuzzing gap

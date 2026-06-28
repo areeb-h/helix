@@ -9,7 +9,10 @@ made per-element `map` the slowest path in the language.
 
 An `Int`-array `map`/`filter` becomes a native kernel when the single-parameter body is a
 pure `i64` expression — integer `+ - *`, `%` by a positive constant, comparisons,
-`if`/`then`/`else`, `let`, **calls to JIT-eligible user functions** (`x => normalize(x)`;
+`if`/`then`/`else`, **`match`** (an `i64` scrutinee with `Int` / `Or`-of-`Int` / guarded-
+binder / `_` arms, lowered to an in-order if/else chain; the last arm must be an unguarded
+catch-all so the native code is total — a non-exhaustive `match` falls through to the VM),
+`let`, **calls to JIT-eligible user functions** (`x => normalize(x)`;
 the function is compiled natively and called from inside the loop), the **pure scalar
 builtins `abs`/`min`/`max`** (`x => max(x, 0)`, `reduce((a, x) => max(a, x))` — emitted
 inline; `min`/`max` reproduce the interpreter's `as_f64()`-compare-then-pick-the-original

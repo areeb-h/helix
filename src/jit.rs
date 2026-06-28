@@ -946,8 +946,56 @@ fn value_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, ki
             }
             value_eligible(body, eligible, &locals2, kind)
         }
+        Expr::Match { scrutinee, arms, .. } => match_eligible(scrutinee, arms, eligible, locals, kind),
         _ => false,
     }
+}
+
+/// An `i64`-scrutinee `match` the JIT can lower to an if/else chain ([`gen_match`]): the
+/// scrutinee and every arm body are `i64`-eligible; each pattern is an `Int` literal, an
+/// `Or` of `Int` literals, `_`, or a binder; each guard is an `i64` condition (seeing a
+/// binder if the pattern is one); and the **last** arm is an unguarded catch-all (`_`/
+/// binder) so the lowering is total — a non-exhaustive `match` (which the interpreter
+/// raises on) falls through to the VM instead. `Float`/`Str`/`Bool`/tuple/record patterns
+/// are not `i64`-closed and fall through.
+fn match_eligible(
+    scrutinee: &Expr,
+    arms: &[crate::ast::MatchArm],
+    eligible: &HashSet<&str>,
+    locals: &HashSet<&str>,
+    kind: NumKind,
+) -> bool {
+    use crate::ast::Pattern;
+    if kind != NumKind::Int || arms.is_empty() {
+        return false;
+    }
+    if !value_eligible(scrutinee, eligible, locals, kind) {
+        return false;
+    }
+    let last = arms.last().unwrap();
+    let last_total =
+        last.guard.is_none() && matches!(last.pattern, Pattern::Wildcard | Pattern::Bind(_));
+    if !last_total {
+        return false;
+    }
+    arms.iter().all(|arm| {
+        let pat_ok = match &arm.pattern {
+            Pattern::Int(_) | Pattern::Wildcard | Pattern::Bind(_) => true,
+            Pattern::Or(alts) => alts.iter().all(|p| matches!(p, Pattern::Int(_))),
+            _ => false,
+        };
+        if !pat_ok {
+            return false;
+        }
+        // A binder pattern adds its name (the scrutinee) for the guard + body.
+        let mut locals2 = locals.clone();
+        if let Pattern::Bind(n) = &arm.pattern {
+            locals2.insert(n.as_str());
+        }
+        let guard_ok =
+            arm.guard.as_ref().is_none_or(|g| cond_eligible(g, eligible, &locals2, kind));
+        guard_ok && value_eligible(&arm.body, eligible, &locals2, kind)
+    })
 }
 
 fn cond_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, kind: NumKind) -> bool {
@@ -1467,7 +1515,118 @@ fn gen_value<'a>(
             }
             r
         }
+        Expr::Match { scrutinee, arms, .. } => gen_match(b, scrutinee, arms, vars, fn_ids, module, kind),
         _ => unreachable!("ineligible node reached codegen"),
+    }
+}
+
+/// Lower an `i64`-scrutinee `match` to an if/else chain (arms tried in order; the first
+/// whose pattern matches *and* guard holds wins). Eligibility (`match_eligible`) guarantees
+/// the final arm is an unguarded catch-all (`_`/binder), so some arm always yields a value
+/// — the native code is total, matching every reachable case of the interpreter. A `Bind`
+/// pattern binds the scrutinee for that arm's guard and body. Guards are pure `i64`
+/// conditions, so evaluating one whose pattern didn't match is harmless (same value).
+fn gen_match<'a>(
+    b: &mut FunctionBuilder,
+    scrutinee: &'a Expr,
+    arms: &'a [crate::ast::MatchArm],
+    vars: &mut HashMap<&'a str, Variable>,
+    fn_ids: &HashMap<&str, FuncId>,
+    module: &mut JITModule,
+    kind: NumKind,
+) -> ClValue {
+    use crate::ast::Pattern;
+    let sv = gen_value(b, scrutinee, vars, fn_ids, module, kind);
+    let rvar = b.declare_var(kind.cl_type());
+    let merge = b.create_block();
+    for arm in arms {
+        // A `Bind` introduces its name (= the scrutinee value) for this arm's guard + body.
+        let saved = if let Pattern::Bind(name) = &arm.pattern {
+            let var = b.declare_var(I64);
+            b.def_var(var, sv);
+            Some((name.as_str(), vars.insert(name.as_str(), var)))
+        } else {
+            None
+        };
+        let unconditional =
+            arm.guard.is_none() && matches!(arm.pattern, Pattern::Wildcard | Pattern::Bind(_));
+        if unconditional {
+            let bv = gen_value(b, &arm.body, vars, fn_ids, module, kind);
+            b.def_var(rvar, bv);
+            b.ins().jump(merge, &[]);
+            if let Some((name, prev)) = saved {
+                restore_var(vars, name, prev);
+            }
+            break; // a catch-all is terminal — later arms are unreachable
+        }
+        let cond = gen_arm_cond(b, sv, &arm.pattern, &arm.guard, vars, fn_ids, module);
+        let take = b.create_block();
+        let next = b.create_block();
+        b.ins().brif(cond, take, &[], next, &[]);
+        b.switch_to_block(take);
+        b.seal_block(take);
+        let bv = gen_value(b, &arm.body, vars, fn_ids, module, kind);
+        b.def_var(rvar, bv);
+        b.ins().jump(merge, &[]);
+        b.switch_to_block(next);
+        b.seal_block(next);
+        if let Some((name, prev)) = saved {
+            restore_var(vars, name, prev);
+        }
+    }
+    b.switch_to_block(merge);
+    b.seal_block(merge);
+    b.use_var(rvar)
+}
+
+fn restore_var<'a>(vars: &mut HashMap<&'a str, Variable>, name: &'a str, prev: Option<Variable>) {
+    match prev {
+        Some(p) => {
+            vars.insert(name, p);
+        }
+        None => {
+            vars.remove(name);
+        }
+    }
+}
+
+/// The boolean condition for taking a (non-catch-all) match arm: the pattern test ANDed
+/// with the guard (if any). `Int(n)` → `sv == n`; `Or([n…])` → the OR of those; a guarded
+/// `Bind`/`_` has no pattern test, so the condition is the guard alone.
+fn gen_arm_cond<'a>(
+    b: &mut FunctionBuilder,
+    sv: ClValue,
+    pattern: &'a crate::ast::Pattern,
+    guard: &'a Option<Expr>,
+    vars: &mut HashMap<&'a str, Variable>,
+    fn_ids: &HashMap<&str, FuncId>,
+    module: &mut JITModule,
+) -> ClValue {
+    use crate::ast::Pattern;
+    let pat = match pattern {
+        Pattern::Int(n) => Some(b.ins().icmp_imm(IntCC::Equal, sv, *n)),
+        Pattern::Or(alts) => {
+            let mut acc: Option<ClValue> = None;
+            for p in alts {
+                if let Pattern::Int(n) = p {
+                    let eq = b.ins().icmp_imm(IntCC::Equal, sv, *n);
+                    acc = Some(match acc {
+                        Some(a) => b.ins().bor(a, eq),
+                        None => eq,
+                    });
+                }
+            }
+            acc
+        }
+        Pattern::Wildcard | Pattern::Bind(_) => None,
+        _ => unreachable!("ineligible match pattern reached codegen"),
+    };
+    let g = guard.as_ref().map(|g| gen_cond(b, g, vars, fn_ids, module, NumKind::Int));
+    match (pat, g) {
+        (Some(p), Some(g)) => b.ins().band(p, g),
+        (Some(p), None) => p,
+        (None, Some(g)) => g,
+        (None, None) => unreachable!("unconditional arm handled in gen_match"),
     }
 }
 
