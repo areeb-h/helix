@@ -1018,6 +1018,23 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let kern = &program.fused_kernels[*kernel_idx as usize];
                 let n = kern.n_operands();
                 let len = stack.len();
+                // Read a tuple-accumulator init (`want` `Int` slots) into a buffer.
+                let to_slots = |v: &Value, want: usize| -> Option<Vec<i64>> {
+                    match v {
+                        Value::Tuple(t) if t.len() == want => {
+                            let mut buf = Vec::with_capacity(want);
+                            for el in t.iter() {
+                                if let Value::Int(i) = el {
+                                    buf.push(*i);
+                                } else {
+                                    return None;
+                                }
+                            }
+                            Some(buf)
+                        }
+                        _ => None,
+                    }
+                };
                 let result: Option<Value> = jit
                     .and_then(|j| j.fused_kernel(*kernel_idx as usize))
                     .and_then(|ptr| {
@@ -1031,12 +1048,25 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 return None;
                             }
                             match &kern.sink {
-                                FusionSink::Reduce { .. } => match &ops[2] {
-                                    Value::Int(init) => Some(Value::Int(unsafe {
-                                        crate::jit::call_reduce(ptr, *s, *e, *init)
-                                    })),
-                                    _ => None,
-                                },
+                                FusionSink::Reduce { bodies, .. } if bodies.len() == 1 => {
+                                    match &ops[2] {
+                                        Value::Int(init) => Some(Value::Int(unsafe {
+                                            crate::jit::call_reduce(ptr, *s, *e, *init)
+                                        })),
+                                        _ => None,
+                                    }
+                                }
+                                // tuple accumulator: ops[2] is an N-Int tuple.
+                                FusionSink::Reduce { bodies, .. } => {
+                                    to_slots(&ops[2], bodies.len()).map(|mut buf| {
+                                        unsafe {
+                                            crate::jit::call_tuple_reduce(ptr, *s, *e, buf.as_mut_ptr())
+                                        };
+                                        Value::Tuple(std::rc::Rc::new(
+                                            buf.into_iter().map(Value::Int).collect(),
+                                        ))
+                                    })
+                                }
                                 // count: the kernel ignores the third arg.
                                 FusionSink::Count => Some(Value::Int(unsafe {
                                     crate::jit::call_reduce(ptr, *s, *e, 0)
@@ -1053,12 +1083,25 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 FusionSink::Count => Some(Value::Int(unsafe {
                                     crate::jit::run_fused_count(ptr, v)
                                 })),
-                                FusionSink::Reduce { .. } => match &ops[1] {
-                                    Value::Int(init) => Some(Value::Int(unsafe {
-                                        crate::jit::run_fused_reduce(ptr, v, *init)
-                                    })),
-                                    _ => None,
-                                },
+                                FusionSink::Reduce { bodies, .. } if bodies.len() == 1 => {
+                                    match &ops[1] {
+                                        Value::Int(init) => Some(Value::Int(unsafe {
+                                            crate::jit::run_fused_reduce(ptr, v, *init)
+                                        })),
+                                        _ => None,
+                                    }
+                                }
+                                // tuple accumulator: ops[1] is an N-Int tuple.
+                                FusionSink::Reduce { bodies, .. } => {
+                                    to_slots(&ops[1], bodies.len()).map(|mut buf| {
+                                        unsafe {
+                                            crate::jit::run_fused_tuple_reduce(ptr, v, buf.as_mut_ptr())
+                                        };
+                                        Value::Tuple(std::rc::Rc::new(
+                                            buf.into_iter().map(Value::Int).collect(),
+                                        ))
+                                    })
+                                }
                             }
                         } else {
                             None

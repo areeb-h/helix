@@ -358,7 +358,7 @@ fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &HashSet<&str>) -> boo
         FusionStage::Filter { binder, body } => filter_kernel_eligible(body, binder, fns),
     }) && match &k.sink {
         FusionSink::Collect | FusionSink::Count => true,
-        FusionSink::Reduce { pa, pb, body } => reduce_loop_eligible(body, pa, pb, fns),
+        FusionSink::Reduce { pa, pb, bodies } => bodies_eligible(pa, pb, bodies, fns),
     }
 }
 
@@ -382,7 +382,13 @@ fn define_fused_kernels(
         for _ in 0..3 {
             sig.params.push(AbiParam::new(I64));
         }
-        sig.returns.push(AbiParam::new(I64));
+        // A tuple reduce writes its slots through `acc_ptr` (no return); see
+        // `define_fused_kernel`.
+        let tuple_reduce = matches!(&k.sink,
+            crate::bytecode::FusionSink::Reduce { bodies, .. } if bodies.len() > 1);
+        if !tuple_reduce {
+            sig.returns.push(AbiParam::new(I64));
+        }
         let id = match module.declare_function(&format!("fused${i}"), Linkage::Local, &sig) {
             Ok(id) => id,
             Err(_) => {
@@ -511,11 +517,15 @@ pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>
 /// bytecode loop. The reduce kernel keeps every slot in a register.
 pub const MAX_ACC_SLOTS: usize = 4;
 
-/// The synthetic identifier bound to accumulator slot `k` (`$acc{k}`). A tuple body's
-/// `pa[k]` is rewritten to this so the existing `i64` codegen handles it unchanged; `$`
-/// can't appear in user source, so it never collides.
+/// The synthetic slot identifiers (`$acc0…`), as `'static` strings so the codegen's
+/// `vars` map (keyed by the kernel lifetime) can hold them without lifetime juggling.
+/// `$` can't appear in user source, so they never collide. Length == `MAX_ACC_SLOTS`.
+const ACC_IDENTS: [&str; MAX_ACC_SLOTS] = ["$acc0", "$acc1", "$acc2", "$acc3"];
+
+/// The identifier bound to accumulator slot `k`. A tuple body's `pa[k]` is rewritten to
+/// this so the existing `i64` codegen handles it unchanged.
 pub fn acc_ident(k: usize) -> String {
-    format!("$acc{k}")
+    ACC_IDENTS[k].to_string()
 }
 
 /// Rewrite `pa[k]` (literal `k < n`) to the slot ident `$acc{k}` throughout `e`. Only the
@@ -602,13 +612,14 @@ pub fn reduce_jit_bodies(
     None
 }
 
-/// Re-check (at JIT-compile time) that a [`ReduceLoop`]'s already-substituted bodies are
-/// `i64`-eligible — scalar over `{pa, pb}`, or tuple over `{$acc0.., pb}`.
-fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>) -> bool {
-    if rl.bodies.len() == 1 {
-        return reduce_loop_eligible(&rl.bodies[0], &rl.pa, &rl.pb, fns);
+/// Re-check (at JIT-compile time) that already-substituted reduce bodies are `i64`-eligible
+/// — a scalar (1 body) over `{pa, pb}`, or a tuple (2..=MAX_ACC_SLOTS bodies) over the slots
+/// `{$acc0.., pb}`. Shared by the range reduce loop and the fused reduce sink.
+fn bodies_eligible(pa: &str, pb: &str, bodies: &[Expr], fns: &HashSet<&str>) -> bool {
+    if bodies.len() == 1 {
+        return reduce_loop_eligible(&bodies[0], pa, pb, fns);
     }
-    let n = rl.bodies.len();
+    let n = bodies.len();
     if !(2..=MAX_ACC_SLOTS).contains(&n) {
         return false;
     }
@@ -617,8 +628,12 @@ fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>)
     for nm in &names {
         locals.insert(nm.as_str());
     }
-    locals.insert(rl.pb.as_str());
-    rl.bodies.iter().all(|c| value_eligible(c, fns, &locals, NumKind::Int))
+    locals.insert(pb);
+    bodies.iter().all(|c| value_eligible(c, fns, &locals, NumKind::Int))
+}
+
+fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>) -> bool {
+    bodies_eligible(&rl.pa, &rl.pb, &rl.bodies, fns)
 }
 
 /// True if a `map` body is a pure `i64` value expression over its single binder (calling
@@ -1196,7 +1211,6 @@ fn define_reduce_loop(
 
     // One register per accumulator slot. Scalar seeds slot 0 with `init`; tuple loads
     // each slot from `acc_ptr[k]`.
-    let names: Vec<String> = (0..n).map(acc_ident).collect();
     let acc_vars: Vec<Variable> = (0..n).map(|_| b.declare_var(I64)).collect();
     if scalar {
         b.def_var(acc_vars[0], third);
@@ -1228,7 +1242,7 @@ fn define_reduce_loop(
         vars.insert(rl.pa.as_str(), acc_vars[0]);
     } else {
         for (k, &v) in acc_vars.iter().enumerate() {
-            vars.insert(names[k].as_str(), v);
+            vars.insert(ACC_IDENTS[k], v);
         }
     }
     vars.insert(rl.pb.as_str(), x_var);
@@ -1438,12 +1452,21 @@ fn define_fused_kernel<'a>(
 ) -> Option<()> {
     use crate::bytecode::{FusionSink, FusionStage};
     let is_reduce = matches!(k.sink, FusionSink::Reduce { .. });
+    let n_acc = match &k.sink {
+        FusionSink::Reduce { bodies, .. } => bodies.len(),
+        _ => 0,
+    };
+    let tuple_reduce = n_acc > 1;
 
     ctx.func.signature.call_conv = CallConv::SystemV;
     for _ in 0..3 {
         ctx.func.signature.params.push(AbiParam::new(I64));
     }
-    ctx.func.signature.returns.push(AbiParam::new(I64)); // kept count, or accumulator
+    // Scalar reduce / collect / count return one `i64` (accumulator or kept count); a
+    // tuple reduce instead writes its N slots back through the `acc_ptr` (param 3).
+    if !tuple_reduce {
+        ctx.func.signature.returns.push(AbiParam::new(I64));
+    }
 
     let mut b = FunctionBuilder::new(&mut ctx.func, bctx);
     let entry = b.create_block();
@@ -1454,9 +1477,13 @@ fn define_fused_kernel<'a>(
 
     let idx_var = b.declare_var(I64); // read cursor (array index `i`, or range counter `x`)
     let limit_var = b.declare_var(I64);
-    let sink_var = b.declare_var(I64); // accumulator (reduce) or write cursor `w` (collect)
+    let sink_var = b.declare_var(I64); // scalar accumulator / write cursor `w` / counter
     let src_var = b.declare_var(I64);
     let dst_var = b.declare_var(I64);
+    // A tuple reduce keeps its N slots in their own registers (loaded from `acc_ptr`).
+    let acc_vars: Vec<Variable> = (0..if tuple_reduce { n_acc } else { 0 })
+        .map(|_| b.declare_var(I64))
+        .collect();
     let z = b.ins().iconst(I64, 0);
 
     // Wire the three params to roles by shape: range → (start,end,init?); array+reduce →
@@ -1488,6 +1515,14 @@ fn define_fused_kernel<'a>(
                 b.def_var(sink_var, z); // counter = 0
                 b.def_var(dst_var, z);
             }
+        }
+    }
+    // A tuple reduce's third param is the `acc_ptr`; seed each slot register from it.
+    // (`sink_var` was harmlessly set to the pointer above and stays unused.)
+    if tuple_reduce {
+        for (k2, &v) in acc_vars.iter().enumerate() {
+            let loaded = b.ins().load(I64, MemFlags::trusted(), p2, (k2 * 8) as i32);
+            b.def_var(v, loaded);
         }
     }
 
@@ -1553,12 +1588,28 @@ fn define_fused_kernel<'a>(
             let nw = b.ins().iadd_imm(w, 1);
             b.def_var(sink_var, nw);
         }
-        FusionSink::Reduce { pa, pb, body: rbody } => {
-            let mut vars: HashMap<&'a str, Variable> = HashMap::new();
-            vars.insert(pa.as_str(), sink_var);
-            vars.insert(pb.as_str(), cur_var);
-            let nacc = gen_value(&mut b, rbody, &mut vars, fn_ids, module, NumKind::Int);
-            b.def_var(sink_var, nacc);
+        FusionSink::Reduce { pa, pb, bodies } => {
+            if tuple_reduce {
+                // N slots → N components, computed from the OLD slots then assigned.
+                let mut vars: HashMap<&'a str, Variable> = HashMap::new();
+                for (k2, &v) in acc_vars.iter().enumerate() {
+                    vars.insert(ACC_IDENTS[k2], v);
+                }
+                vars.insert(pb.as_str(), cur_var);
+                let mut new_vals: Vec<ClValue> = Vec::with_capacity(n_acc);
+                for body in bodies {
+                    new_vals.push(gen_value(&mut b, body, &mut vars, fn_ids, module, NumKind::Int));
+                }
+                for (k2, &v) in acc_vars.iter().enumerate() {
+                    b.def_var(v, new_vals[k2]);
+                }
+            } else {
+                let mut vars: HashMap<&'a str, Variable> = HashMap::new();
+                vars.insert(pa.as_str(), sink_var);
+                vars.insert(pb.as_str(), cur_var);
+                let nacc = gen_value(&mut b, &bodies[0], &mut vars, fn_ids, module, NumKind::Int);
+                b.def_var(sink_var, nacc);
+            }
         }
         FusionSink::Count => {
             // A surviving element bumps the counter; nothing is stored.
@@ -1581,8 +1632,17 @@ fn define_fused_kernel<'a>(
 
     b.switch_to_block(exit);
     b.seal_block(exit);
-    let result = b.use_var(sink_var); // kept count (collect) or accumulator (reduce)
-    b.ins().return_(&[result]);
+    if tuple_reduce {
+        // Write the folded slots back through `acc_ptr`; no scalar return.
+        for (k2, &v) in acc_vars.iter().enumerate() {
+            let val = b.use_var(v);
+            b.ins().store(MemFlags::trusted(), val, p2, (k2 * 8) as i32);
+        }
+        b.ins().return_(&[]);
+    } else {
+        let result = b.use_var(sink_var); // kept count (collect) or accumulator (reduce)
+        b.ins().return_(&[result]);
+    }
 
     b.finalize();
     module.define_function(fid, ctx).ok()?;
@@ -2058,6 +2118,17 @@ pub unsafe fn run_fused_collect(ptr: *const u8, src: &[i64]) -> Vec<i64> {
 pub unsafe fn run_fused_reduce(ptr: *const u8, src: &[i64], init: i64) -> i64 {
     let f: extern "C" fn(*const i64, i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, init)
+}
+
+/// Run a fused array→**tuple**-`Reduce` pipeline over `src` (`fn(src, len, acc_ptr)`):
+/// `acc` holds the N `i64` slots — initial values in, folded result out.
+///
+/// # Safety
+/// `ptr` must be a tuple fused-reduce kernel and `acc` must point to its slot count of
+/// writable `i64`s.
+pub unsafe fn run_fused_tuple_reduce(ptr: *const u8, src: &[i64], acc: *mut i64) {
+    let f: extern "C" fn(*const i64, i64, *mut i64) = unsafe { std::mem::transmute(ptr) };
+    f(src.as_ptr(), src.len() as i64, acc)
 }
 
 /// Run a fused array→`Count` pipeline over `src` (`fn(src,len,_)->count`). SAFETY: as

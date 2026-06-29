@@ -331,9 +331,11 @@ pub enum FusionSink {
     Collect,
     /// Count the surviving elements (`.count()` after a filter) — allocates nothing.
     Count,
-    /// Fold the surviving elements to a scalar with wrapping `i64` arithmetic (the
-    /// explicit-accumulator `reduce`, matching the existing reduce-loop semantics).
-    Reduce { pa: String, pb: String, body: Expr },
+    /// Fold the surviving elements with wrapping `i64` arithmetic (the explicit-accumulator
+    /// `reduce`). `bodies` is one component per accumulator slot — length 1 for a scalar
+    /// accumulator, N for a tuple accumulator (each over the slots `$acc0…` and `pb`),
+    /// exactly like [`ReduceLoop::bodies`].
+    Reduce { pa: String, pb: String, bodies: Vec<Expr> },
 }
 
 /// A fuseable linear pipeline the compiler asked the JIT to lower into a single native

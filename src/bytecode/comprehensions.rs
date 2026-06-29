@@ -614,10 +614,9 @@ impl super::Compiler {
                 }
                 _ => return None,
             };
-            if !crate::jit::reduce_loop_eligible(body, &pa, &pb, &self.jit_fn_set()) {
-                return None;
-            }
-            (FusionSink::Reduce { pa, pb, body: body.clone() }, Some(&args[0]))
+            // Scalar OR tuple `i64` accumulator → component bodies, else don't fuse.
+            let bodies = crate::jit::reduce_jit_bodies(&args[0], body, &pa, &pb, &self.jit_fn_set())?;
+            (FusionSink::Reduce { pa, pb, bodies }, Some(&args[0]))
         } else if name == "count" {
             if !args.is_empty() {
                 return None;

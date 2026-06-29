@@ -642,6 +642,39 @@
         }
     }
 
+    /// The fold-JIT over an **array** source (the fused-kernel path, not the range loop):
+    /// a 2-tuple `i64` accumulator folded over a small int-array literal, sometimes behind
+    /// a `filter`/`map` stage — so `run_vm_jit` engages the native fused tuple-reduce
+    /// kernel. Asserts JIT == tree-walker bit-for-bit across 10k folds.
+    #[test]
+    fn differential_tuple_reduce_fused_jit() {
+        let mut rng = 0xFA57_F01D_0BAD_CAFEu64;
+        let atoms = vec!["a[0]".to_string(), "a[1]".to_string(), "x".to_string()];
+        for _ in 0..10_000 {
+            let nlen = 1 + pick(&mut rng, 8);
+            let elems: Vec<String> =
+                (0..nlen).map(|_| format!("{}", (next(&mut rng) % 41) as i64 - 20)).collect();
+            let arr = format!("[{}]", elems.join(", "));
+            // optionally a stage, exercising the staged fused-reduce path.
+            let recv = match pick(&mut rng, 3) {
+                0 => format!("({}).filter(x => x % 2 == 0)", arr),
+                1 => format!("({}).map(x => x + 1)", arr),
+                _ => arr,
+            };
+            let e0 = gen_i64_eligible(&mut rng, 3, &atoms);
+            let e1 = gen_i64_eligible(&mut rng, 3, &atoms);
+            let i0 = (next(&mut rng) % 41) as i64 - 20;
+            let i1 = (next(&mut rng) % 41) as i64 - 20;
+            let src =
+                format!("({}).reduce(({}, {}), (a, x) => ({}, {}))", recv, i0, i1, e0, e1);
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "fused tuple reduce JIT ≠ tree-walker on `{src}`"),
+                (Err(()), Err(())) => {}
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// Oracle foundation for the **fold-JIT** (the multi-slot, record/tuple-accumulator
     /// reduce — ADR-pending). A 2-tuple `i64` accumulator `a = (a[0], a[1])` folded over a
     /// range, each component an independent random `i64` expression over `{a[0], a[1], x}`.
