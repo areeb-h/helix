@@ -634,6 +634,7 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
 pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
         "upper" | "lower" | "reverse" | "trim" | "replace" => Type::String,
+        "repeat" | "ljust" | "rjust" | "center" => Type::String,
         "count" | "length" => Type::Int,
         "split" => Type::Array(Box::new(Type::String)),
         "contains" | "starts_with" | "ends_with" => Type::Bool,

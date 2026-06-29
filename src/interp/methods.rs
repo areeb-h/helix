@@ -1048,6 +1048,57 @@ fn string_method(
             arity(0)?;
             Ok(Value::Str(Rc::new(s.trim().to_string())))
         }
+        // Text layout: `repeat` builds separators (`"-".repeat(64)`); `ljust`/`rjust`/
+        // `center` pad to a width with spaces — for *computed* widths (the `{x:20}`
+        // format spec only takes a literal width), e.g. aligning a column to the
+        // longest label. Padding measures Unicode scalar count, like the format spec.
+        "repeat" => {
+            arity(1)?;
+            let n = match &args[0] {
+                Value::Int(n) if *n >= 0 => *n as usize,
+                Value::Int(_) => {
+                    return Err(HelixError::new("`repeat` needs a non-negative count", line, col))
+                }
+                other => return Err(type_err("repeat", "an integer count", other, line, col)),
+            };
+            if s.len().saturating_mul(n) > crate::interp::MAX_STRING_LEN {
+                return Err(HelixError::new(
+                    format!("`repeat` would exceed {} bytes", crate::interp::MAX_STRING_LEN),
+                    line,
+                    col,
+                )
+                .hint("use a smaller count."));
+            }
+            Ok(Value::Str(Rc::new(s.repeat(n))))
+        }
+        "ljust" | "rjust" | "center" => {
+            arity(1)?;
+            const MAX_PAD: usize = 1 << 20;
+            let width = match &args[0] {
+                Value::Int(w) if *w >= 0 && (*w as usize) <= MAX_PAD => *w as usize,
+                Value::Int(w) if *w < 0 => {
+                    return Err(HelixError::new(format!("`{name}` needs a non-negative width"), line, col))
+                }
+                Value::Int(_) => {
+                    return Err(HelixError::new(format!("`{name}` width is too large (max {MAX_PAD})"), line, col))
+                }
+                other => return Err(type_err(name, "an integer width", other, line, col)),
+            };
+            let len = s.chars().count();
+            if len >= width {
+                return Ok(Value::Str(s.clone()));
+            }
+            let fill = width - len;
+            let padded = match name {
+                "ljust" => format!("{s}{}", " ".repeat(fill)),
+                "rjust" => format!("{}{s}", " ".repeat(fill)),
+                _ => {
+                    let l = fill / 2;
+                    format!("{}{s}{}", " ".repeat(l), " ".repeat(fill - l))
+                }
+            };
+            Ok(Value::Str(Rc::new(padded)))
+        }
         "split" => {
             arity(1)?;
             let sep = str_arg(args, 0, name, line, col)?;

@@ -49,6 +49,26 @@
     }
 
     #[test]
+    fn string_layout_methods() {
+        fn s(src: &str) -> String {
+            match last(src).unwrap() {
+                Value::Str(r) => (*r).clone(),
+                other => panic!("expected a string, got {:?}", other),
+            }
+        }
+        assert_eq!(s("\"ab\".repeat(3)"), "ababab");
+        assert_eq!(s("\"x\".repeat(0)"), "");
+        assert_eq!(s("\"hi\".ljust(5)"), "hi   ");
+        assert_eq!(s("\"hi\".rjust(5)"), "   hi");
+        assert_eq!(s("\"hi\".center(6)"), "  hi  ");
+        // Already at/over the width → returned unchanged (never truncates).
+        assert_eq!(s("\"hello\".ljust(3)"), "hello");
+        // Negative count/width are clean errors, not panics.
+        assert!(last("\"x\".repeat(0 - 1)").unwrap_err().message.contains("non-negative"));
+        assert!(last("\"x\".rjust(0 - 1)").unwrap_err().message.contains("non-negative"));
+    }
+
+    #[test]
     fn dna_find_all_and_gc_skew_are_native() {
         // find_all: every 0-based start, overlapping allowed; accepts a string pattern.
         assert_eq!(int("dna(\"GAATTCAGAATTC\").find_all(\"GAATTC\").count()"), 2);
