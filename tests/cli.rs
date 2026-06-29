@@ -175,6 +175,55 @@ fn sleep_runs_and_validates() {
 }
 
 #[test]
+fn build_produces_runnable_standalone_exe() {
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_build_ok.helix");
+    std::fs::write(&src, "x = 21\nprint(x * 2)\n").unwrap();
+    let exe = dir.join("helix_build_ok_out");
+    let _ = std::fs::remove_file(&exe);
+
+    // Build the standalone executable.
+    let (out, stderr, code) =
+        run(&["build", src.to_str().unwrap(), "-o", exe.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "build failed; stderr:\n{stderr}");
+    assert!(out.contains("standalone"), "unexpected build output: {out}");
+    assert!(exe.exists(), "build produced no executable");
+
+    // Run the produced exe directly — it must execute the embedded program with no
+    // args and no `helix` on PATH (we invoke it by absolute path).
+    let produced = Command::new(&exe)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the produced executable");
+    let res = produced.wait_with_output().expect("failed to wait on produced exe");
+    assert_eq!(res.status.code(), Some(0), "produced exe stderr:\n{}", String::from_utf8_lossy(&res.stderr));
+    assert_eq!(String::from_utf8_lossy(&res.stdout), "42\n");
+
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
+fn build_rejects_a_program_that_does_not_type_check() {
+    // A broken program must fail the *build*, not produce an exe that fails when run.
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_build_bad.helix");
+    std::fs::write(&src, "print(1 + \"x\")\n").unwrap();
+    let exe = dir.join("helix_build_bad_out");
+    let _ = std::fs::remove_file(&exe);
+
+    let (_, stderr, code) =
+        run(&["build", src.to_str().unwrap(), "-o", exe.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(stderr.contains("type-check"), "expected a type-check error, got:\n{stderr}");
+    assert!(!exe.exists(), "a broken program must not yield an executable");
+
+    let _ = std::fs::remove_file(&src);
+}
+
+#[test]
 fn file_lifecycle_ops() {
     let dir = std::env::temp_dir().join("helix_lifecycle");
     let _ = std::fs::remove_dir_all(&dir);

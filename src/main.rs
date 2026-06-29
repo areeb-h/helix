@@ -12,6 +12,7 @@ mod autodiff;
 mod backend;
 mod bed;
 mod bio;
+mod bundle;
 mod bytecode;
 mod chart;
 mod dataframe;
@@ -119,6 +120,13 @@ fn install_robustness_hooks() {
 }
 
 fn run() -> ExitCode {
+    // A standalone executable built with `helix build` carries its program appended to
+    // this binary. If we are such an artifact, run the embedded program and ignore the
+    // command line entirely (the args belong to the user's program, not to `helix`).
+    // A plain `helix` binary has no overlay, so this returns `None` and the CLI runs.
+    if let Some((source, filename)) = bundle::embedded() {
+        return run_on_big_stack(move || run_source(&source, &filename));
+    }
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
         // No args (or `repl`) → interactive session. The REPL drives the
@@ -148,6 +156,8 @@ fn run() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        // `helix build <script> [-o name]` — bundle a program into a standalone exe.
+        Some("build") => run_build(&args),
         // `helix python <…>` — manage CPython runtimes for interop.
         Some("python") => run_python_cli(&args),
         // `helix new <name>` — initialize a `helix.toml`.
@@ -304,30 +314,84 @@ fn pkg_result(r: Result<(), crate::error::HelixError>) -> ExitCode {
 fn run_eval(code: &str) -> ExitCode {
     // The whole pipeline runs on the big stack so deeply-nested source can't
     // overflow the parser/type-checker/compiler before the depth guard fires.
-    run_on_big_stack(|| {
-        let tokens = match lexer::lex(code) {
-            Ok(t) => t,
-            Err(e) => {
-                eprint!("{}", e.render(code, "<eval>"));
+    run_on_big_stack(|| run_source(code, "<eval>"))
+}
+
+/// Lex, parse, type-check and run a single source string under `filename` (used by
+/// both `helix eval` and a `helix build` standalone artifact). Errors render against
+/// `filename`. Must be called on the big stack (the front-end recurses over the AST).
+fn run_source(code: &str, filename: &str) -> ExitCode {
+    let tokens = match lexer::lex(code) {
+        Ok(t) => t,
+        Err(e) => {
+            eprint!("{}", e.render(code, filename));
+            return ExitCode::FAILURE;
+        }
+    };
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            eprint!("{}", e.render(code, filename));
+            return ExitCode::FAILURE;
+        }
+    };
+    let spans = vec![module::Span {
+        start_line: 1,
+        source: code.to_string(),
+        filename: filename.to_string(),
+    }];
+    match run_program(&program, &spans, false) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(rendered) => {
+            eprint!("{}", rendered);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `helix build <script> [-o name]` — bundle a single-file program into a standalone
+/// executable (see `src/bundle.rs`). Runs on the big stack: the build path loads and
+/// type-checks the program, both of which recurse over the AST.
+fn run_build(args: &[String]) -> ExitCode {
+    let entry = match args.get(2) {
+        Some(p) if !p.starts_with('-') => p.clone(),
+        _ => {
+            eprintln!("error: `helix build` needs a script path, e.g. `helix build main.helix -o tool`");
+            return ExitCode::FAILURE;
+        }
+    };
+    // Optional `-o <name>` / `--output <name>`.
+    let mut out: Option<String> = None;
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => match args.get(i + 1) {
+                Some(name) => {
+                    out = Some(name.clone());
+                    i += 2;
+                }
+                None => {
+                    eprintln!("error: `{}` needs an output name", args[i]);
+                    return ExitCode::FAILURE;
+                }
+            },
+            other => {
+                eprintln!("error: unknown option `{other}` for `helix build`");
                 return ExitCode::FAILURE;
             }
-        };
-        let program = match parser::parse(tokens) {
-            Ok(p) => p,
-            Err(e) => {
-                eprint!("{}", e.render(code, "<eval>"));
-                return ExitCode::FAILURE;
+        }
+    }
+    run_on_big_stack(move || {
+        match bundle::build(std::path::Path::new(&entry), out.as_deref().map(std::path::Path::new)) {
+            Ok(path) => {
+                println!("built standalone executable: {}", path.display());
+                ExitCode::SUCCESS
             }
-        };
-        let spans = vec![module::Span {
-            start_line: 1,
-            source: code.to_string(),
-            filename: "<eval>".to_string(),
-        }];
-        match run_program(&program, &spans, false) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(rendered) => {
-                eprint!("{}", rendered);
+            Err(e) => {
+                eprintln!("error: {}", e.message);
+                if let Some(h) = &e.hint {
+                    eprintln!("  {h}");
+                }
                 ExitCode::FAILURE
             }
         }
@@ -369,6 +433,7 @@ fn print_help() {
          helix <script.helix>     run a script (shorthand)\n    \
          helix run <script>       run a script\n    \
          helix eval \"<code>\"       run a one-liner\n    \
+         helix build <script>     bundle a program into a standalone executable\n    \
          helix repl               start an interactive session\n    \
          helix new <name>         create a helix.toml in the current directory\n    \
          helix add <name> ...     add a dependency (--path <dir> | --url <tarball>)\n    \
