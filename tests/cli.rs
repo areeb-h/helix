@@ -291,6 +291,19 @@ fn cross_module_calls_and_local_shadowing() {
 }
 
 #[test]
+fn module_local_fn_shadows_a_builtin() {
+    // A module-local `fn` of the same name as a builtin must shadow it — even inside a
+    // multi-file program, where the loader rewrites names. (`dict` is a builtin; a user
+    // `fn dict(a, b, c)` here must win, not fall through to the 0-arg builtin.)
+    let lib = "export fn helper(x) = x * 10\n";
+    let main = "import lib\nfn dict(a, b, c) = a + b + c\nprint(dict(1, 2, 3))\nprint(lib.helper(2))\n";
+    let (out, stderr, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "shadowbuiltin");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "6\n20", "got: {out:?}"); // user dict(1,2,3)=6; builtin still reachable elsewhere
+}
+
+#[test]
 fn cross_module_runtime_error_points_at_the_dependency() {
     // A runtime error inside an imported module must render against that module's own
     // file and local line — not the entry file. `boom` is on line 2 of lib.helix.

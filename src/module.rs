@@ -565,7 +565,12 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
             for a in args.iter_mut() {
                 rw(a, ctx, bound)?;
             }
-            if !bound.contains(name) && crate::registry::lookup(name).is_none() {
+            if !bound.contains(name) {
+                // A module-local definition (or selectively-imported name) of the same
+                // name as a builtin *shadows* it — so it must mangle to the user's
+                // function even though `lookup` would find the builtin. Only a name that
+                // is neither defined here nor imported is left bare to hit the builtin.
+                // (Matches the `Ident` arm, which already mangles `top_level` first.)
                 if ctx.top_level.contains(name) {
                     *name = mangle(&ctx.prefix, name);
                 } else if let Some(dep) = ctx.selected.get(name) {
