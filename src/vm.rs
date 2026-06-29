@@ -172,6 +172,47 @@ struct Handler {
     catch_ip: usize,
 }
 
+/// Read a tuple/record accumulator's N `i64` slots into a buffer (field/element order),
+/// or `None` if it isn't an N-element Tuple/Record of all `Int`s — the marshalling for the
+/// native multi-slot fold kernel (tuple and record accumulators share the kernel).
+fn acc_to_slots(v: &Value, n: usize) -> Option<Vec<i64>> {
+    let items: &[Value] = match v {
+        Value::Tuple(t) if t.len() == n => t,
+        Value::Record(r) if r.len() == n => {
+            let mut buf = Vec::with_capacity(n);
+            for (_, el) in r.iter() {
+                match el {
+                    Value::Int(i) => buf.push(*i),
+                    _ => return None,
+                }
+            }
+            return Some(buf);
+        }
+        _ => return None,
+    };
+    let mut buf = Vec::with_capacity(n);
+    for el in items.iter() {
+        match el {
+            Value::Int(i) => buf.push(*i),
+            _ => return None,
+        }
+    }
+    Some(buf)
+}
+
+/// Rebuild an accumulator value from the folded slots, matching `template`'s shape: a
+/// Record reuses its field symbols (in order), anything else becomes a Tuple.
+fn rebuild_acc(template: &Value, buf: Vec<i64>) -> Value {
+    match template {
+        Value::Record(r) => {
+            let fields: Vec<(crate::symbol::Symbol, Value)> =
+                r.iter().zip(buf).map(|((sym, _), i)| (*sym, Value::Int(i))).collect();
+            Value::Record(std::rc::Rc::new(fields))
+        }
+        _ => Value::Tuple(std::rc::Rc::new(buf.into_iter().map(Value::Int).collect())),
+    }
+}
+
 /// Execute a compiled program, printing output and returning the first runtime
 /// error (if any) for the caller to render. `jit`, when present, supplies native
 /// code for eligible integer functions.
@@ -859,31 +900,17 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             false
                         }
                     } else {
-                        // Marshal the N-tuple of Ints into a slot buffer, fold natively,
-                        // rebuild the result tuple. A non-Int component falls back.
-                        let buf: Option<Vec<i64>> = match &locals[slot] {
-                            Value::Tuple(t) if t.len() == n_acc => {
-                                let mut v = Vec::with_capacity(n_acc);
-                                let mut ok = true;
-                                for el in t.iter() {
-                                    if let Value::Int(i) = el {
-                                        v.push(*i);
-                                    } else {
-                                        ok = false;
-                                        break;
-                                    }
-                                }
-                                if ok { Some(v) } else { None }
+                        // Marshal the N-slot tuple/record of Ints into a buffer, fold
+                        // natively, rebuild the same-shaped accumulator. A non-Int slot
+                        // falls back. (`tmpl` clone is an Rc bump, freeing the locals borrow.)
+                        let tmpl = locals[slot].clone();
+                        match acc_to_slots(&tmpl, n_acc) {
+                            Some(mut buf) => {
+                                unsafe { crate::jit::call_tuple_reduce(ptr, s, e, buf.as_mut_ptr()) };
+                                locals[slot] = rebuild_acc(&tmpl, buf);
+                                true
                             }
-                            _ => None,
-                        };
-                        if let Some(mut buf) = buf {
-                            unsafe { crate::jit::call_tuple_reduce(ptr, s, e, buf.as_mut_ptr()) };
-                            let out: Vec<Value> = buf.into_iter().map(Value::Int).collect();
-                            locals[slot] = Value::Tuple(std::rc::Rc::new(out));
-                            true
-                        } else {
-                            false
+                            None => false,
                         }
                     }
                 } else {
@@ -1019,22 +1046,6 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let n = kern.n_operands();
                 let len = stack.len();
                 // Read a tuple-accumulator init (`want` `Int` slots) into a buffer.
-                let to_slots = |v: &Value, want: usize| -> Option<Vec<i64>> {
-                    match v {
-                        Value::Tuple(t) if t.len() == want => {
-                            let mut buf = Vec::with_capacity(want);
-                            for el in t.iter() {
-                                if let Value::Int(i) = el {
-                                    buf.push(*i);
-                                } else {
-                                    return None;
-                                }
-                            }
-                            Some(buf)
-                        }
-                        _ => None,
-                    }
-                };
                 let result: Option<Value> = jit
                     .and_then(|j| j.fused_kernel(*kernel_idx as usize))
                     .and_then(|ptr| {
@@ -1056,15 +1067,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         _ => None,
                                     }
                                 }
-                                // tuple accumulator: ops[2] is an N-Int tuple.
+                                // tuple/record accumulator: ops[2] is its N-Int value.
                                 FusionSink::Reduce { bodies, .. } => {
-                                    to_slots(&ops[2], bodies.len()).map(|mut buf| {
+                                    acc_to_slots(&ops[2], bodies.len()).map(|mut buf| {
                                         unsafe {
                                             crate::jit::call_tuple_reduce(ptr, *s, *e, buf.as_mut_ptr())
                                         };
-                                        Value::Tuple(std::rc::Rc::new(
-                                            buf.into_iter().map(Value::Int).collect(),
-                                        ))
+                                        rebuild_acc(&ops[2], buf)
                                     })
                                 }
                                 // count: the kernel ignores the third arg.
@@ -1091,15 +1100,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         _ => None,
                                     }
                                 }
-                                // tuple accumulator: ops[1] is an N-Int tuple.
+                                // tuple/record accumulator: ops[1] is its N-Int value.
                                 FusionSink::Reduce { bodies, .. } => {
-                                    to_slots(&ops[1], bodies.len()).map(|mut buf| {
+                                    acc_to_slots(&ops[1], bodies.len()).map(|mut buf| {
                                         unsafe {
                                             crate::jit::run_fused_tuple_reduce(ptr, v, buf.as_mut_ptr())
                                         };
-                                        Value::Tuple(std::rc::Rc::new(
-                                            buf.into_iter().map(Value::Int).collect(),
-                                        ))
+                                        rebuild_acc(&ops[1], buf)
                                     })
                                 }
                             }

@@ -551,6 +551,7 @@ fn is_idempotent(e: &Expr) -> bool {
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Missing => true,
         Expr::Ident { .. } => true,
         Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().all(is_idempotent),
+        Expr::Record(fields) => fields.iter().all(|(_, v)| is_idempotent(v)),
         Expr::Call { name, args, .. } if name == "range" => args.iter().all(is_idempotent),
         _ => false,
     }

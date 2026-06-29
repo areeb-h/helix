@@ -528,11 +528,12 @@ pub fn acc_ident(k: usize) -> String {
     ACC_IDENTS[k].to_string()
 }
 
-/// Rewrite `pa[k]` (literal `k < n`) to the slot ident `$acc{k}` throughout `e`. Only the
-/// `i64`-eligible forms are recursed into; any other form is cloned as-is (so a `pa[k]`
-/// buried in an unhandled form stays an `Index` and fails eligibility — a safe fallback,
-/// never a miscompile).
-fn subst_acc(e: &Expr, pa: &str, n: usize) -> Expr {
+/// Rewrite an accumulator slot access — `pa[k]` (tuple) or `pa.field` (record, mapped to
+/// its position in `fields`) — to the slot ident `$acc{k}` throughout `e`. Only the
+/// `i64`-eligible forms are recursed into; any other form is cloned as-is (so an
+/// unsubstituted `pa[..]`/`pa.x` stays and fails eligibility — a safe fallback, never a
+/// miscompile).
+fn subst_acc(e: &Expr, pa: &str, n: usize, fields: &[String]) -> Expr {
     if let Expr::Index { recv, index, line, col } = e
         && let Expr::Ident { name, .. } = recv.as_ref()
         && name == pa
@@ -542,7 +543,14 @@ fn subst_acc(e: &Expr, pa: &str, n: usize) -> Expr {
     {
         return Expr::Ident { name: acc_ident(*k as usize), line: *line, col: *col };
     }
-    let s = |c: &Expr| Box::new(subst_acc(c, pa, n));
+    if let Expr::Field { recv, name, line, col } = e
+        && let Expr::Ident { name: rn, .. } = recv.as_ref()
+        && rn == pa
+        && let Some(k) = fields.iter().position(|f| f == name)
+    {
+        return Expr::Ident { name: acc_ident(k), line: *line, col: *col };
+    }
+    let s = |c: &Expr| Box::new(subst_acc(c, pa, n, fields));
     match e {
         Expr::Binary { op, left, right, line, col } => Expr::Binary {
             op: op.clone(),
@@ -559,7 +567,7 @@ fn subst_acc(e: &Expr, pa: &str, n: usize) -> Expr {
         },
         Expr::Call { name, args, line, col } => Expr::Call {
             name: name.clone(),
-            args: args.iter().map(|a| subst_acc(a, pa, n)).collect(),
+            args: args.iter().map(|a| subst_acc(a, pa, n, fields)).collect(),
             line: *line,
             col: *col,
         },
@@ -571,18 +579,45 @@ fn subst_acc(e: &Expr, pa: &str, n: usize) -> Expr {
             col: *col,
         },
         Expr::Let { bindings, body } => Expr::Let {
-            bindings: bindings.iter().map(|(nm, v)| (nm.clone(), subst_acc(v, pa, n))).collect(),
+            bindings: bindings
+                .iter()
+                .map(|(nm, v)| (nm.clone(), subst_acc(v, pa, n, fields)))
+                .collect(),
             body: s(body),
         },
         other => other.clone(),
     }
 }
 
-/// Decide whether a `reduce(init, (pa, pb) => body)` over a range can JIT, and if so
-/// return its component bodies (already `pa[k]`→`$acck`-substituted). `Some([body])` for
-/// a scalar `i64` accumulator; `Some([e0, e1, …])` for a 2..=MAX_ACC_SLOTS tuple
-/// accumulator whose every component is `i64`-eligible over the slots and `pb`. `None`
-/// (run the bytecode loop) otherwise.
+/// Substitute the slot accesses in each component (already in slot order) and keep them
+/// only if every one is `i64`-eligible over `{$acc0.., pb}`.
+fn check_slot_bodies(
+    comps: &[&Expr],
+    pa: &str,
+    pb: &str,
+    fields: &[String],
+    fns: &HashSet<&str>,
+) -> Option<Vec<Expr>> {
+    let n = comps.len();
+    let names: Vec<String> = (0..n).map(acc_ident).collect();
+    let mut locals: HashSet<&str> = HashSet::new();
+    for nm in &names {
+        locals.insert(nm.as_str());
+    }
+    locals.insert(pb);
+    let bodies: Vec<Expr> = comps.iter().map(|c| subst_acc(c, pa, n, fields)).collect();
+    bodies
+        .iter()
+        .all(|c| value_eligible(c, fns, &locals, NumKind::Int))
+        .then_some(bodies)
+}
+
+/// Decide whether a `reduce(init, (pa, pb) => body)` can JIT, and if so return its
+/// component bodies (slot accesses already substituted to `$acc0…`). `Some([body])` for a
+/// scalar `i64` accumulator; `Some([e0, e1, …])` for a 2..=MAX_ACC_SLOTS **tuple** (`a[k]`)
+/// or **record** (`a.field`) accumulator whose every component is `i64`-eligible. A record
+/// body's components are reordered to the init record's field order (so component `k` is
+/// always slot `k`). `None` → run the bytecode loop.
 pub fn reduce_jit_bodies(
     init: &Expr,
     body: &Expr,
@@ -598,16 +633,25 @@ pub fn reduce_jit_bodies(
         if n != inits.len() || !(2..=MAX_ACC_SLOTS).contains(&n) {
             return None;
         }
-        let names: Vec<String> = (0..n).map(acc_ident).collect();
-        let mut locals: HashSet<&str> = HashSet::new();
-        for nm in &names {
-            locals.insert(nm.as_str());
+        let refs: Vec<&Expr> = comps.iter().collect();
+        return check_slot_bodies(&refs, pa, pb, &[], fns);
+    }
+    if let (Expr::Record(inits), Expr::Record(comps)) = (init, body) {
+        let n = inits.len();
+        if comps.len() != n || !(2..=MAX_ACC_SLOTS).contains(&n) {
+            return None;
         }
-        locals.insert(pb);
-        let bodies: Vec<Expr> = comps.iter().map(|c| subst_acc(c, pa, n)).collect();
-        if bodies.iter().all(|c| value_eligible(c, fns, &locals, NumKind::Int)) {
-            return Some(bodies);
+        // Require the body's fields to be in the SAME order as the init's: the slots map
+        // to that order, and the tree-walker's result record carries the body's field
+        // order — matching them keeps the JIT result byte-identical (a reordered body
+        // would still be value-equal but display its fields in a different order, so it
+        // falls back to the bytecode loop instead).
+        let fields: Vec<String> = inits.iter().map(|(k, _)| k.clone()).collect();
+        if comps.iter().map(|(k, _)| k).ne(fields.iter()) {
+            return None;
         }
+        let ordered: Vec<&Expr> = comps.iter().map(|(_, e)| e).collect();
+        return check_slot_bodies(&ordered, pa, pb, &fields, fns);
     }
     None
 }

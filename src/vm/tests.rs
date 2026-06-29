@@ -642,6 +642,40 @@
         }
     }
 
+    /// The fold-JIT over a **record** accumulator (`{s: …, n: …}`) — slot accesses are
+    /// `a.field` (mapped to the field's init position), and the result is rebuilt as a
+    /// record reusing the init's symbols. Array source, sometimes staged, so `run_vm_jit`
+    /// engages the native multi-slot kernel. Asserts JIT == tree-walker across 10k folds.
+    #[test]
+    fn differential_record_reduce_jit() {
+        let mut rng = 0xD15E_A5ED_F00D_1357u64;
+        let atoms = vec!["a.s".to_string(), "a.n".to_string(), "x".to_string()];
+        for _ in 0..10_000 {
+            let nlen = 1 + pick(&mut rng, 8);
+            let elems: Vec<String> =
+                (0..nlen).map(|_| format!("{}", (next(&mut rng) % 41) as i64 - 20)).collect();
+            let arr = format!("[{}]", elems.join(", "));
+            let recv = match pick(&mut rng, 3) {
+                0 => format!("({}).filter(x => x % 2 == 0)", arr),
+                1 => format!("({}).map(x => x + 1)", arr),
+                _ => arr,
+            };
+            let e0 = gen_i64_eligible(&mut rng, 3, &atoms);
+            let e1 = gen_i64_eligible(&mut rng, 3, &atoms);
+            let i0 = (next(&mut rng) % 41) as i64 - 20;
+            let i1 = (next(&mut rng) % 41) as i64 - 20;
+            let src = format!(
+                "({}).reduce({{s: {}, n: {}}}, (a, x) => {{s: {}, n: {}}})",
+                recv, i0, i1, e0, e1
+            );
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "record reduce JIT ≠ tree-walker on `{src}`"),
+                (Err(()), Err(())) => {}
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// The fold-JIT over an **array** source (the fused-kernel path, not the range loop):
     /// a 2-tuple `i64` accumulator folded over a small int-array literal, sometimes behind
     /// a `filter`/`map` stage — so `run_vm_jit` engages the native fused tuple-reduce
