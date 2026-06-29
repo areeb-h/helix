@@ -1739,6 +1739,14 @@
         assert_eq!(r("dna(\"AACGTN\").base_counts().A"), "2");
         assert_eq!(r("dna(\"AACGTN\").base_counts().N"), "1");
         assert_eq!(r("dna(\"\").base_counts().A"), "0");
+        // The byte-branchless kernel must match the old char-match exactly: every IUPAC
+        // ambiguity code (not A/C/G/T) lands in N, and the five counts sum to the length.
+        assert_eq!(r("dna(\"RYSWKM\").base_counts().N"), "6");
+        assert_eq!(r("dna(\"GATTACA\").base_counts().N"), "0");
+        assert_eq!(
+            r("let b = dna(\"ACGTNRYSWGGCC\").base_counts() in b.A + b.C + b.G + b.T + b.N"),
+            "13",
+        );
         // hamming = differing positions; accepts Dna or String; equal length required.
         assert_eq!(r("dna(\"ACGT\").hamming(dna(\"ACCT\"))"), "1");
         assert_eq!(r("dna(\"ACGT\").hamming(dna(\"TGCA\"))"), "4");

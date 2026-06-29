@@ -1228,9 +1228,16 @@ fn dna_method(
                 ));
             }
             // GC fraction over *called* bases: `N` (unknown) is excluded from the
-            // denominator, so `gc_content("GCN") == 1.0`, not 2/3.
-            let gc = s.chars().filter(|c| *c == 'G' || *c == 'C').count();
-            let called = s.chars().filter(|c| *c != 'N').count();
+            // denominator, so `gc_content("GCN") == 1.0`, not 2/3. `Dna` is ASCII, so
+            // count raw bytes branchlessly in one pass (auto-vectorizes; no UTF-8 decode,
+            // no second pass) — `called = len - Ns`.
+            let bytes = s.as_bytes();
+            let (mut gc, mut ns) = (0i64, 0i64);
+            for &b in bytes {
+                gc += (b == b'G' || b == b'C') as i64;
+                ns += (b == b'N') as i64;
+            }
+            let called = bytes.len() as i64 - ns;
             Ok(Value::Float(if called == 0 { 0.0 } else { gc as f64 / called as f64 }))
         }
         "complement" => {
@@ -1475,16 +1482,20 @@ fn dna_method(
             if !args.is_empty() {
                 return Err(HelixError::new("`base_counts` takes no arguments", line, col));
             }
-            let (mut a, mut c, mut g, mut t, mut n) = (0i64, 0i64, 0i64, 0i64, 0i64);
-            for ch in s.chars() {
-                match ch {
-                    'A' => a += 1,
-                    'C' => c += 1,
-                    'G' => g += 1,
-                    'T' => t += 1,
-                    _ => n += 1,
-                }
+            // A `Dna` is ASCII (validated + upper-cased at construction), so iterate raw
+            // bytes — no UTF-8 decode — and count each base branchlessly: a per-byte
+            // boolean → 0/1 add. Four independent comparison-sum reductions auto-vectorize
+            // (vs a branchy 5-way match over `chars()`), and `N` (every non-ACGT base) is
+            // derived as the remainder, exactly matching the old `_ => n` arm.
+            let bytes = s.as_bytes();
+            let (mut a, mut c, mut g, mut t) = (0i64, 0i64, 0i64, 0i64);
+            for &b in bytes {
+                a += (b == b'A') as i64;
+                c += (b == b'C') as i64;
+                g += (b == b'G') as i64;
+                t += (b == b'T') as i64;
             }
+            let n = bytes.len() as i64 - a - c - g - t;
             use crate::symbol::Symbol;
             Ok(Value::Record(Rc::new(vec![
                 (Symbol::intern("A"), Value::Int(a)),
