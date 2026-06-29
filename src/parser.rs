@@ -1613,15 +1613,23 @@ impl Parser {
                      (`do { x = e\\n  result }`), or use `let x = e in result` without the `do {}`.",
                 ));
             }
-            let body = self.expr()?;
+            let expr = self.expr()?;
             self.skip_newlines();
-            self.eat(&Tok::RBrace, "to close the `do` block")
-                .map_err(|e| e.hint("a `do` block ends with `}` after its result expression."))?;
-            return Ok(if bindings.is_empty() {
-                body
-            } else {
-                Expr::Let { bindings, body: Box::new(body) }
-            });
+            if matches!(self.peek(), Tok::RBrace) {
+                // The last line is the block's result expression.
+                self.advance(); // `}`
+                return Ok(if bindings.is_empty() {
+                    expr
+                } else {
+                    Expr::Let { bindings, body: Box::new(expr) }
+                });
+            }
+            // A non-final bare expression is a side-effecting statement (e.g. `print(…)`).
+            // Bind it to a fresh throwaway name (`$do<N>` — `$` can't appear in user code,
+            // so it never collides or shadows) so it's evaluated for its effect, then
+            // continue to the next statement. This is the hand-written `p1 = print(…)`
+            // idiom, done by the parser — a `do` block reads as a true statement sequence.
+            bindings.push((format!("$do{}", bindings.len()), expr));
         }
     }
 

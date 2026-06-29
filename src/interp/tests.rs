@@ -109,6 +109,12 @@
         // Both correct forms still parse and run.
         assert_eq!(int("do { x = 1\n y = 2\n x + y }"), 3);
         assert_eq!(int("let a = 3 in a * a"), 9);
+        // Bare side-effecting statements are allowed between bindings and the result —
+        // they run in order; only the final expression is the block's value.
+        assert_eq!(int("do { x = 2\n print(x)\n print(x + 1)\n x * 5 }"), 10);
+        assert_eq!(int("do { print(\"hi\")\n 7 }"), 7);
+        // A block that ends on a binding (no result) is still an error.
+        assert!(last("do { x = 1 }").unwrap_err().message.contains("result expression"));
     }
 
     #[test]
