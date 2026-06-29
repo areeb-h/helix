@@ -185,12 +185,17 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
         }
     };
 
-    let (status, content_type, body) = build_response(value, line, col)?;
-    let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
-        reason = reason_phrase(status),
-        len = body.len(),
-    );
+    let (status, headers, body) = build_response(value, line, col)?;
+    let mut head = format!("HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
+    for (k, v) in &headers {
+        head.push_str(k);
+        head.push_str(": ");
+        head.push_str(v);
+        head.push_str("\r\n");
+    }
+    // Content-Length and Connection are computed here (a custom `headers` value can't
+    // override them — see `merge_headers`), so they are appended after the user's.
+    head.push_str(&format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()));
     let write = |s: &mut TcpStream| -> std::io::Result<()> {
         s.write_all(head.as_bytes())?;
         s.write_all(body.as_bytes())?;
@@ -206,42 +211,158 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
     Ok(Value::Unit)
 }
 
-/// Derive `(status, content_type, body)` from a response value (see [`respond`]).
-fn build_response(value: &Value, line: usize, col: usize) -> Result<(i64, &'static str, String), HelixError> {
+/// A built HTTP response: status code, header `(name, value)` pairs (always carrying a
+/// `Content-Type`), and the body. `Content-Length`/`Connection` are added by `respond`.
+type Response = (i64, Vec<(String, String)>, String);
+
+/// Derive `(status, headers, body)` from a response value (see [`respond`]). `headers`
+/// always carries a `Content-Type` (overridable) plus any the program supplied; the
+/// caller adds `Content-Length`/`Connection`.
+fn build_response(value: &Value, line: usize, col: usize) -> Result<Response, HelixError> {
     let json_of = |v: &Value| -> Result<String, HelixError> {
         match crate::writers::to_json(std::slice::from_ref(v), line, col)? {
             Value::Str(s) => Ok((*s).clone()),
             other => Ok(other.to_string()),
         }
     };
-    match value {
+    // `text`/`html` stringify any value via Display (a `Dna`, number, etc. — not only a
+    // `String`), so `{ text: seq.reverse_complement() }` sends the sequence text.
+    let as_text = |v: &Value| match v {
+        Value::Str(s) => (**s).clone(),
+        other => other.to_string(),
+    };
+    let one = |ct: &str, body: String| (vec![("Content-Type".to_string(), ct.to_string())], body);
+
+    let (status, (headers, body)) = match value {
         Value::Record(fields) => {
             let get = |name: &str| fields.iter().find(|(k, _)| k.as_str() == name).map(|(_, v)| v);
             let status = match get("status") {
                 Some(Value::Int(n)) => *n,
                 _ => 200,
             };
-            // `text`/`html` stringify any value via Display (a `Dna`, number, etc. —
-            // not only a `String`), so `{ text: seq.reverse_complement() }` sends the
-            // sequence text, not a JSON dump of the record.
-            let as_text = |v: &Value| match v {
-                Value::Str(s) => (**s).clone(),
-                other => other.to_string(),
-            };
-            if let Some(v) = get("json") {
-                Ok((status, "application/json", json_of(v)?))
+            let payload = if let Some(v) = get("json") {
+                one("application/json", json_of(v)?)
             } else if let Some(v) = get("html") {
-                Ok((status, "text/html; charset=utf-8", as_text(v)))
+                one("text/html; charset=utf-8", as_text(v))
             } else if let Some(v) = get("text").or_else(|| get("body")) {
-                Ok((status, "text/plain; charset=utf-8", as_text(v)))
+                one("text/plain; charset=utf-8", as_text(v))
+            } else if get("status").is_some() || get("headers").is_some() {
+                // An explicit response envelope with no body (e.g. a redirect:
+                // `{ status: 302, headers: { Location: "/" } }`) → empty body.
+                one("text/plain; charset=utf-8", String::new())
             } else {
-                // A record with neither a body field nor a recognized one → JSON of it.
-                Ok((status, "application/json", json_of(value)?))
+                // A plain data record (no envelope fields) → JSON of the whole record.
+                one("application/json", json_of(value)?)
+            };
+            // Merge any program-supplied response headers (record or dict of name→value).
+            let mut payload = payload;
+            if let Some(h) = get("headers") {
+                merge_headers(&mut payload.0, h);
+            }
+            (status, payload)
+        }
+        Value::Str(s) => (200, one("text/plain; charset=utf-8", (**s).clone())),
+        other => (200, one("application/json", json_of(other)?)),
+    };
+    Ok((status, headers, body))
+}
+
+/// Merge a program-supplied `headers` value (a record `{ Location: "/" }`, or a dict
+/// `{ "Set-Cookie" => "…" }` for names that aren't identifiers) into the response
+/// header list. A custom `Content-Type` replaces the auto one; `Content-Length` and
+/// `Connection` are reserved (the server computes them) and silently ignored.
+fn merge_headers(out: &mut Vec<(String, String)>, headers: &Value) {
+    let text = |v: &Value| match v {
+        Value::Str(s) => (**s).clone(),
+        other => other.to_string(),
+    };
+    let mut add = |name: String, val: String| {
+        let lname = name.to_ascii_lowercase();
+        if lname == "content-length" || lname == "connection" {
+            return; // server-controlled — never overridden
+        }
+        if lname == "content-type"
+            && let Some(ct) = out.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        {
+            ct.1 = val;
+            return;
+        }
+        out.push((name, val));
+    };
+    match headers {
+        Value::Record(fields) => {
+            for (k, v) in fields.iter() {
+                add(k.as_str().to_string(), text(v));
             }
         }
-        Value::Str(s) => Ok((200, "text/plain; charset=utf-8", (**s).clone())),
-        other => Ok((200, "application/json", json_of(other)?)),
+        Value::Dict(map) => {
+            for (k, v) in map.iter() {
+                if let DictKey::Str(s) = k {
+                    add((**s).clone(), text(v));
+                }
+            }
+        }
+        _ => {} // a non-record/dict `headers` field is ignored
     }
+}
+
+/// `conn.sse()` — begin a Server-Sent-Events response: status `200`, `text/event-stream`,
+/// no `Content-Length`, the socket kept open. Drive it with `conn.send(value)` per event.
+pub fn sse(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
+    let cell = match &**handle {
+        NetHandle::Conn { stream, .. } => stream,
+        NetHandle::Listener(_) => {
+            return Err(HelixError::new("`sse` works on a connection from `accept()`", line, col));
+        }
+    };
+    let mut guard = cell.borrow_mut();
+    let stream = match guard.as_mut() {
+        Some(s) => s,
+        None => return Err(HelixError::new("this connection is already closed", line, col)),
+    };
+    let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+    // Best-effort, like respond: if the client is already gone, send() will report it.
+    let _ = stream.write_all(head.as_bytes()).and_then(|_| stream.flush());
+    Ok(Value::Unit)
+}
+
+/// `conn.send(value)` — write one SSE event (`data: …\n\n`, flushed) on a streaming
+/// connection. Returns a **Bool**: `true` delivered, `false` the client has gone (so the
+/// producer loop can stop). A string/`Dna` is sent verbatim; any other value as JSON.
+pub fn send(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    let cell = match &**handle {
+        NetHandle::Conn { stream, .. } => stream,
+        NetHandle::Listener(_) => {
+            return Err(HelixError::new("`send` works on a connection from `accept()`", line, col));
+        }
+    };
+    let payload = match value {
+        Value::Str(s) => (**s).clone(),
+        Value::Dna(s) => (**s).clone(),
+        other => match crate::writers::to_json(std::slice::from_ref(other), line, col)? {
+            Value::Str(s) => (*s).clone(),
+            v => v.to_string(),
+        },
+    };
+    // SSE framing: each line of the payload is its own `data:` field; a blank line ends
+    // the event (so a multi-line body is delivered as one event, per the spec).
+    let mut frame = String::new();
+    for l in payload.split('\n') {
+        frame.push_str("data: ");
+        frame.push_str(l);
+        frame.push('\n');
+    }
+    frame.push('\n');
+
+    let mut guard = cell.borrow_mut();
+    let delivered = match guard.as_mut() {
+        Some(s) => s.write_all(frame.as_bytes()).and_then(|_| s.flush()).is_ok(),
+        None => false, // already closed / responded
+    };
+    if !delivered {
+        *guard = None; // the client is gone — drop the stream so further sends are no-ops
+    }
+    Ok(Value::Bool(delivered))
 }
 
 /// The reason phrase for the common status codes; unknown codes get a generic phrase

@@ -101,8 +101,21 @@ fn net_method(
             }
             crate::serve::respond(h, &args[0], line, col)
         }
+        "sse" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`sse` takes no arguments", line, col));
+            }
+            crate::serve::sse(h, line, col)
+        }
+        "send" => {
+            if args.len() != 1 {
+                return Err(HelixError::new("`send` takes one event value", line, col)
+                    .hint("e.g. `conn.send(world.to_json())` — returns false when the client leaves."));
+            }
+            crate::serve::send(h, &args[0], line, col)
+        }
         other => Err(HelixError::new(format!("type Net has no method `{other}`"), line, col)
-            .hint("a listener has `accept`; a connection has `request` and `respond`.")),
+            .hint("a listener has `accept`; a connection has `request`/`respond`, or `sse`/`send` to stream.")),
     }
 }
 

@@ -254,6 +254,99 @@ fn http_server_serves_a_request() {
 }
 
 #[test]
+fn http_server_sends_custom_headers_and_redirects() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    // A redirect: an explicit envelope `{ status, headers }` with no body — the response
+    // must carry the Location header and an empty body (the gap a real framework hit).
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_serve_hdr.helix");
+    std::fs::write(
+        &src,
+        "conn = listen(8235).accept()\n\
+         conn.respond({ status: 302, headers: { Location: \"/new\" } })\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the server");
+
+    let mut stream = None;
+    for _ in 0..50 {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:8235") {
+            stream = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut stream = stream.expect("server never came up");
+    stream.write_all(b"GET /old HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).unwrap();
+    let _ = child.wait();
+
+    assert!(resp.contains("302 Found"), "response:\n{resp}");
+    assert!(resp.contains("Location: /new"), "response:\n{resp}");
+    assert!(resp.contains("Content-Length: 0"), "response:\n{resp}");
+    let _ = std::fs::remove_file(&src);
+}
+
+#[test]
+fn http_server_streams_sse_events() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    // sse() opens an event stream; send() emits framed events; the program then ends,
+    // closing the socket. The client must see the headers and the `data:` frames.
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_serve_sse.helix");
+    std::fs::write(
+        &src,
+        // `send` JSON-encodes a record, so we avoid a literal `{` inside a Helix string
+        // (which would be parsed as an interpolation hole).
+        "conn = listen(8236).accept()\n\
+         conn.sse()\n\
+         a = conn.send({ n: 1 })\n\
+         b = conn.send(\"tick\")\n\
+         print(\"delivered\")\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the server");
+
+    let mut stream = None;
+    for _ in 0..50 {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:8236") {
+            stream = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut stream = stream.expect("server never came up");
+    stream.write_all(b"GET /live HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).unwrap();
+    let _ = child.wait();
+
+    assert!(resp.contains("text/event-stream"), "response:\n{resp}");
+    assert!(resp.contains("data: {\"n\":1}"), "response:\n{resp}");
+    assert!(resp.contains("data: tick"), "response:\n{resp}");
+    let _ = std::fs::remove_file(&src);
+}
+
+#[test]
 fn http_server_survives_a_client_disconnect() {
     use std::io::Read;
     use std::net::TcpStream;
