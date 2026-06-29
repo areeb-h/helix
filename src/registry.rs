@@ -27,6 +27,7 @@ pub struct BuiltinDef {
 pub static BUILTINS: &[BuiltinDef] = &[
     // --- effectful / non-reproducible (I/O, output, network) -> not memoizable ---
     BuiltinDef { path: "print", pure: false },
+    BuiltinDef { path: "emit", pure: false },
     BuiltinDef { path: "read_csv", pure: false },
     BuiltinDef { path: "read_parquet", pure: false },
     BuiltinDef { path: "read_text", pure: false },

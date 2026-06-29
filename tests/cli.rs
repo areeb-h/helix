@@ -146,6 +146,23 @@ fn text_and_json_io_round_trip() {
 }
 
 #[test]
+fn emit_writes_plain_flushed_lines() {
+    // `emit` is the streaming sink: one PLAIN line per value (no rich/grouped formatting,
+    // unlike `print`), flushed immediately. `emit(x.to_json())` is the NDJSON wire format.
+    let (out, stderr, code) = run(
+        &["eval", "emit(\"hi\")\nemit(1000000)\nemit({a: 1, b: 2}.to_json())"],
+        &[],
+        "",
+    );
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    // strings unquoted; integers ungrouped (1000000, not 1,000,000); records as NDJSON.
+    assert_eq!(out, "hi\n1000000\n{\"a\":1,\"b\":2}\n", "got: {out:?}");
+    // wrong arity is a clear error (one value = one line).
+    let (_, _, bad) = run(&["eval", "emit(1, 2)"], &[], "");
+    assert_eq!(bad, Some(1));
+}
+
+#[test]
 fn file_lifecycle_ops() {
     let dir = std::env::temp_dir().join("helix_lifecycle");
     let _ = std::fs::remove_dir_all(&dir);

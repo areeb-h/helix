@@ -24,6 +24,21 @@ impl super::Interp {
                 println!("{}", crate::render::render_print(&args, line, col)?);
                 Ok(Value::Unit)
             }
+            // `emit(x)` — write one value as a single PLAIN line and FLUSH immediately, so a
+            // downstream consumer sees it now rather than at exit. `print` is block-buffered
+            // when piped (and rich-formats for a terminal); `emit` is the streaming sink —
+            // one value per line, machine-readable (pair with `x.to_json()` for NDJSON).
+            "emit" => {
+                arity(name, &args, 1, line, col)?;
+                use std::io::Write;
+                let s = crate::value::display_value(&args[0], line, col)?;
+                let mut out = std::io::stdout().lock();
+                // Errors writing to a closed pipe are the consumer's business, not a Helix
+                // runtime error (a piped reader exiting first is normal); ignore them.
+                let _ = writeln!(out, "{s}");
+                let _ = out.flush();
+                Ok(Value::Unit)
+            }
             "assert" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(HelixError::new(

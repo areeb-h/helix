@@ -85,6 +85,12 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
     }
     match name {
         "print" => Ok(Type::Unit),
+        "emit" => {
+            if args.len() != 1 {
+                return Err(arity_err("emit", 1, args.len(), line, col));
+            }
+            Ok(Type::Unit)
+        }
         "assert" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(
