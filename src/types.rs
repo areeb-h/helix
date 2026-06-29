@@ -357,6 +357,7 @@ impl Checker {
                 body,
                 line,
                 col,
+                ..
             } => self.check_func(name, params, ret, body, *line, *col),
             Stmt::Expr(e) => {
                 self.synth(e)?;

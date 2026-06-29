@@ -392,7 +392,7 @@ impl Compiler {
 
     fn compile_stmt(&mut self, b: &mut Builder, stmt: &Stmt) -> R<()> {
         match stmt {
-            Stmt::Assign { name, mutable, value, line, col } => {
+            Stmt::Assign { name, mutable, value, line, col, .. } => {
                 self.compile_expr(b, value)?;
                 // Top-level assignments are globals, matching the tree-walker's
                 // `assign`: `mut x = …` always (re)declares as mutable; a plain
@@ -438,7 +438,7 @@ impl Compiler {
                 b.emit(Op::Pop, 0, 0);
                 Ok(())
             }
-            Stmt::Destructure { names, mutable, value, line, col } => {
+            Stmt::Destructure { names, mutable, value, line, col, .. } => {
                 self.compile_expr(b, value)?;
                 // Same mutability rule as `Assign`: `mut a, b = …` (re)declares each
                 // as mutable; a plain destructure reassigning an *immutable* global

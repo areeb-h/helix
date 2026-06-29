@@ -96,6 +96,7 @@ impl Interp {
                 value,
                 line,
                 col,
+                ..
             } => {
                 let v = self.eval(value)?;
                 self.bind(name, v.clone(), *mutable, *line, *col)?;
@@ -110,6 +111,7 @@ impl Interp {
                 value,
                 line,
                 col,
+                ..
             } => {
                 let v = self.eval(value)?;
                 let parts = destructure_parts(&v, names.len(), *line, *col)?;

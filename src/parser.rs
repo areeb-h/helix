@@ -455,6 +455,19 @@ impl Parser {
             };
             return Ok(Stmt::Import { segments, alias, selected, line: l, col: c });
         }
+        // Optional leading `export` (ADR 0019) — contextual: it's a keyword only
+        // directly before a definition (`export fn …`, `export x = …`, `export a, b = …`,
+        // `export mut …`), so `export` stays a usable identifier everywhere else.
+        let exported = matches!(self.peek(), Tok::Ident(n) if n == "export")
+            && match self.peek_at(1) {
+                Tok::Fn | Tok::Mut => true,
+                Tok::Ident(_) => matches!(self.peek_at(2), Tok::Eq | Tok::Comma),
+                _ => false,
+            };
+        if exported {
+            self.advance(); // consume `export`
+        }
+
         // `fn name(a, b) = expr`
         if matches!(self.peek(), Tok::Fn) {
             let (l, c) = self.pos();
@@ -531,6 +544,7 @@ impl Parser {
                 name,
                 params,
                 ret,
+                exported,
                 body,
                 line: l,
                 col: c,
@@ -545,13 +559,14 @@ impl Parser {
                 let names = self.finish_target_list(first)?;
                 self.eat(&Tok::Eq, "in destructuring assignment")?;
                 let value = self.expr()?;
-                return Ok(Stmt::Destructure { names, mutable: true, value, line: l, col: c });
+                return Ok(Stmt::Destructure { names, mutable: true, exported, value, line: l, col: c });
             }
             self.eat(&Tok::Eq, "in assignment")?;
             let value = self.expr()?;
             return Ok(Stmt::Assign {
                 name: first,
                 mutable: true,
+                exported,
                 value,
                 line: l,
                 col: c,
@@ -564,7 +579,7 @@ impl Parser {
             let names = self.finish_target_list(first)?;
             self.eat(&Tok::Eq, "in destructuring assignment")?;
             let value = self.expr()?;
-            return Ok(Stmt::Destructure { names, mutable: false, value, line: l, col: c });
+            return Ok(Stmt::Destructure { names, mutable: false, exported, value, line: l, col: c });
         }
         // `x = ...`  (only when an identifier is immediately followed by a single `=`)
         if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Eq) {
@@ -575,10 +590,19 @@ impl Parser {
             return Ok(Stmt::Assign {
                 name,
                 mutable: false,
+                exported,
                 value,
                 line: l,
                 col: c,
             });
+        }
+        // A leading `export` consumed above but no definition followed — the user wrote
+        // `export <expr>`; that's not a thing.
+        if exported {
+            let (l, c) = self.pos();
+            return Err(HelixError::new("`export` must precede a definition", l, c).hint(
+                "use `export fn …`, `export x = …`, or `export a, b = …`; only definitions are exported.",
+            ));
         }
         Ok(Stmt::Expr(self.expr()?))
     }

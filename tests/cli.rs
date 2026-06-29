@@ -281,7 +281,7 @@ fn module_program_runs_and_matches_engines() {
 
 #[test]
 fn cross_module_calls_and_local_shadowing() {
-    let lib = "fn double(x) = x * 2\nfn quad(x) = double(double(x))\nN = 7\n";
+    let lib = "fn double(x) = x * 2\nexport fn quad(x) = double(double(x))\nexport N = 7\n";
     // `double` is redefined locally in main — it must shadow the module's `double`.
     let main = "import lib\nprint(lib.quad(3))\nprint(lib.N)\nfn double(x) = x + 100\nprint(double(1))\n";
     let (out, stderr, code) =
@@ -294,7 +294,7 @@ fn cross_module_calls_and_local_shadowing() {
 fn cross_module_runtime_error_points_at_the_dependency() {
     // A runtime error inside an imported module must render against that module's own
     // file and local line — not the entry file. `boom` is on line 2 of lib.helix.
-    let lib = "# lib\nfn boom(n) = [10, 20, 30][n]\n";
+    let lib = "# lib\nexport fn boom(n) = [10, 20, 30][n]\n";
     let main = "import lib\nprint(\"start\")\nprint(lib.boom(99))\n";
     let (_out, stderr, code) =
         run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "caret");
@@ -324,7 +324,7 @@ fn missing_module_is_a_clean_error() {
 
 #[test]
 fn import_alias_renames_the_namespace() {
-    let lib = "fn mean2(a, b) = (a + b) / 2\nPI = 3\n";
+    let lib = "export fn mean2(a, b) = (a + b) / 2\nexport PI = 3\n";
     // `as st` makes the module reachable as `st`, not `stats`.
     let main = "import stats as st\nprint(st.mean2(2, 4))\nprint(st.PI)\n";
     let (out, stderr, code) =
@@ -349,7 +349,7 @@ fn subdirectory_import_resolves_nested_path() {
     let dir = std::env::temp_dir().join("helix_mod_subdir");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("lib")).unwrap();
-    std::fs::write(dir.join("lib").join("stats.helix"), "fn mean2(a, b) = (a + b) / 2\n").unwrap();
+    std::fs::write(dir.join("lib").join("stats.helix"), "export fn mean2(a, b) = (a + b) / 2\n").unwrap();
     std::fs::write(dir.join("main.helix"), "import lib.stats\nprint(stats.mean2(10, 20))\n").unwrap();
     let entry = dir.join("main.helix");
     let (vm, stderr, code) = run(&[entry.to_str().unwrap()], &[], "");
@@ -823,7 +823,7 @@ fn import_resolves_on_the_search_path() {
     let lib = std::env::temp_dir().join("helix_sp_lib");
     let _ = std::fs::remove_dir_all(&lib);
     std::fs::create_dir_all(lib.join("tools")).unwrap();
-    std::fs::write(lib.join("tools").join("util.helix"), "fn triple(x) = x * 3\n").unwrap();
+    std::fs::write(lib.join("tools").join("util.helix"), "export fn triple(x) = x * 3\n").unwrap();
     let src = "import tools.util as u\nprint(u.triple(7))\n";
     let (out, stderr, code) =
         run_source(src, &[("HELIX_PATH", lib.to_str().unwrap())], "searchpath");
@@ -844,12 +844,66 @@ fn bio_sequence_helpers_over_fastq() {
 #[test]
 fn selective_import_binds_names_unqualified() {
     // `import m.{a, b}` brings the chosen names into scope without the namespace.
-    let lib = "fn triple(x) = x * 3\nfn quad(x) = x * 4\n";
+    let lib = "export fn triple(x) = x * 3\nexport fn quad(x) = x * 4\n";
     let main = "import lib.{triple, quad}\nprint(triple(5))\nprint(quad(2))\n";
     let (out, stderr, code) =
         run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "selimp");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(out.trim(), "15\n8");
+}
+
+#[test]
+fn private_module_members_are_not_reachable() {
+    // Only `export`ed names cross a module boundary (ADR 0019). A private name is a hard
+    // boundary — qualified access fails at the use site, naming the module.
+    let lib = "export fn pub_fn(x) = x + 1\n_secret = 42\n";
+    let main = "import lib\nprint(lib._secret)\n";
+    let (_, stderr, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "priv");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("not exported by module `lib`"), "stderr:\n{stderr}");
+    // The exported one works fine.
+    let ok = "import lib\nprint(lib.pub_fn(4))\n";
+    let (out, _, code2) =
+        run_modules(&[("lib.helix", lib), ("main.helix", ok)], "main.helix", &[], "priv_ok");
+    assert_eq!(code2, Some(0));
+    assert_eq!(out.trim(), "5");
+}
+
+#[test]
+fn imported_module_may_not_run_side_effects() {
+    // A module is definitions-only: a bare top-level expression (a stray `print`) is an
+    // error, so importing never executes arbitrary code. The error points into the
+    // library file, not the entry.
+    let lib = "export fn f(x) = x + 1\nprint(\"side effect\")\n";
+    let main = "import lib\nprint(lib.f(1))\n";
+    let (_, stderr, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "deffx");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("may only contain definitions"), "stderr:\n{stderr}");
+    assert!(stderr.contains("lib.helix:2"), "should point into the library:\n{stderr}");
+}
+
+#[test]
+fn selective_import_of_a_private_name_fails_at_the_import() {
+    // `import m.{x}` where `x` isn't exported errors at the import, naming the module —
+    // not later at the use site.
+    let lib = "export fn a(x) = x\nfn b(x) = x\n";
+    let main = "import lib.{b}\nprint(b(1))\n";
+    let (_, stderr, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "selpriv");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("`b` is not exported by module `lib`"), "stderr:\n{stderr}");
+    assert!(stderr.contains("main.helix:1"), "should point at the import line:\n{stderr}");
+}
+
+#[test]
+fn export_is_a_contextual_keyword() {
+    // `export` is special only before a definition; elsewhere it's an ordinary name, so
+    // existing code that used `export` as an identifier keeps working.
+    let (out, stderr, code) = run(&["eval", "export = 5\nprint(export + 1)"], &[], "");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "6");
 }
 
 #[test]
@@ -860,11 +914,11 @@ fn imports_resolve_from_the_project_root() {
     let dir = std::env::temp_dir().join("helix_rootimp");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("sub")).unwrap();
-    std::fs::write(dir.join("utils.helix"), "fn double(x) = x * 2\n").unwrap();
+    std::fs::write(dir.join("utils.helix"), "export fn double(x) = x * 2\n").unwrap();
     // `sub/needs.helix` imports the ROOT module `utils`, which is not beside it.
     std::fs::write(
         dir.join("sub/needs.helix"),
-        "import utils\nfn sext(x) = utils.double(x) * 3\n",
+        "import utils\nexport fn sext(x) = utils.double(x) * 3\n",
     )
     .unwrap();
     std::fs::write(dir.join("main.helix"), "import sub.needs\nprint(needs.sext(2))\n").unwrap();
@@ -994,7 +1048,7 @@ fn helix_test_runs_test_files_and_reports() {
     let dir = std::env::temp_dir().join("helix_testrun");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("sub")).unwrap();
-    std::fs::write(dir.join("math.helix"), "fn double(x) = x * 2\n").unwrap();
+    std::fs::write(dir.join("math.helix"), "export fn double(x) = x * 2\n").unwrap();
     // Passing: imports a project module (root-anchored), asserts.
     std::fs::write(
         dir.join("math_test.helix"),

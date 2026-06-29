@@ -1,8 +1,9 @@
 # Multi-file program. Run from the project root:
 #   helix examples/modules/shapes.helix
 #
-# `import geometry` loads the sibling `geometry.helix`; its definitions are reached
-# as `geometry.area`, `geometry.PI`, etc. Modules can also live in subdirectories
+# `import geometry` loads the sibling `geometry.helix`; its `export`ed definitions are
+# reached as `geometry.area`, `geometry.PI`, etc. (unmarked names stay private to that
+# file — ADR 0019). Modules can also live in subdirectories
 # (`import lib.geometry` → `lib/geometry.helix`) and be aliased
 # (`import lib.geometry as geo` → reached as `geo.area`).
 

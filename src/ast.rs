@@ -281,9 +281,12 @@ impl Expr {
 pub enum Stmt {
     /// `x = expr` (mutable=false) or `mut x = expr` (mutable=true).
     /// Whether this defines a new binding or reassigns is resolved at runtime.
+    /// `exported` is set by a leading `export` (only meaningful at a module's top
+    /// level — it marks the binding as part of the module's public surface; ADR 0019).
     Assign {
         name: String,
         mutable: bool,
+        exported: bool,
         value: Expr,
         line: usize,
         col: usize,
@@ -292,25 +295,28 @@ pub enum Stmt {
     Destructure {
         names: Vec<String>,
         mutable: bool,
+        exported: bool,
         value: Expr,
         line: usize,
         col: usize,
     },
     /// `fn name(a: T, b) -> R = expr` — a named function definition.
     /// Parameter and return annotations are optional (inferred when absent).
+    /// `exported` mirrors `Assign` — a leading `export` makes it part of the public API.
     Func {
         name: String,
         params: Vec<(String, Option<TypeAnn>)>,
         ret: Option<TypeAnn>,
+        exported: bool,
         body: Expr,
         line: usize,
         col: usize,
     },
     /// `import a.b.c [as alias]` — load the module at the relative path
-    /// `a/b/c.helix` and make its public (top-level) definitions reachable as
-    /// `alias.member` (the alias defaults to the last path segment, `c`). Resolved
-    /// and stripped by the module loader before type-checking; the rest of the
-    /// pipeline never sees it.
+    /// `a/b/c.helix` and make its `export`ed definitions reachable as `alias.member`
+    /// (the alias defaults to the last path segment, `c`; private names are not
+    /// reachable — ADR 0019). Resolved and stripped by the module loader before
+    /// type-checking; the rest of the pipeline never sees it.
     Import {
         /// Path segments, e.g. `["math", "stats"]` for `import math.stats`.
         segments: Vec<String>,
