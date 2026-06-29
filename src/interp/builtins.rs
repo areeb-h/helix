@@ -39,6 +39,29 @@ impl super::Interp {
                 let _ = out.flush();
                 Ok(Value::Unit)
             }
+            // `sleep(ms)` — pause the program for `ms` milliseconds (wall clock). The
+            // pacing primitive for a paced loop (`emit(frame)` then `sleep(16)` ≈ 60 fps);
+            // pairs with `clock_monotonic()`. A non-deterministic effect, so (like `print`/
+            // `emit`) it lives outside the differential oracle. Fractional ms are honoured.
+            "sleep" => {
+                arity(name, &args, 1, line, col)?;
+                let ms = match &args[0] {
+                    Value::Int(n) => *n as f64,
+                    Value::Float(f) => *f,
+                    other => {
+                        return Err(type_err("sleep", "a number of milliseconds", other, line, col))
+                    }
+                };
+                if !ms.is_finite() || ms < 0.0 {
+                    return Err(HelixError::new(
+                        "`sleep` needs a non-negative, finite number of milliseconds",
+                        line,
+                        col,
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_secs_f64(ms / 1000.0));
+                Ok(Value::Unit)
+            }
             "assert" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(HelixError::new(

@@ -91,6 +91,15 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Unit)
         }
+        "sleep" => {
+            if args.len() != 1 {
+                return Err(arity_err("sleep", 1, args.len(), line, col));
+            }
+            if !compatible(&args[0], &Type::Float) {
+                return Err(type_err("sleep", "a number of milliseconds", &args[0], line, col));
+            }
+            Ok(Type::Unit)
+        }
         "assert" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(

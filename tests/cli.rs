@@ -163,6 +163,18 @@ fn emit_writes_plain_flushed_lines() {
 }
 
 #[test]
+fn sleep_runs_and_validates() {
+    // `sleep` paces a loop (timing not asserted to avoid flakiness — just that it runs and
+    // emits stream correctly around it). `sleep(0)` is a no-op; negatives / non-numbers err.
+    let (out, stderr, code) =
+        run(&["eval", "sleep(0)\nemit(\"a\")\nsleep(1)\nemit(\"b\")"], &[], "");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out, "a\nb\n");
+    assert_eq!(run(&["eval", "sleep(0 - 1)"], &[], "").2, Some(1)); // negative
+    assert_eq!(run(&["eval", "sleep(\"x\")"], &[], "").2, Some(1)); // non-number
+}
+
+#[test]
 fn file_lifecycle_ops() {
     let dir = std::env::temp_dir().join("helix_lifecycle");
     let _ = std::fs::remove_dir_all(&dir);
