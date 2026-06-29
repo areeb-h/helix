@@ -196,8 +196,12 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
         s.write_all(body.as_bytes())?;
         s.flush()
     };
-    write(&mut stream)
-        .map_err(|e| HelixError::new(format!("writing the response failed: {e}"), line, col))?;
+    // A write failure means the client went away (broken pipe / connection reset) — a
+    // routine event for a server, never the program's fault. Best-effort: drop the
+    // undeliverable response and keep the program's accept loop alive, the same
+    // philosophy as the SIGPIPE-for-stdout handling. A server that died because a
+    // browser tab closed would be unusable (and SSE clients disconnect constantly).
+    let _ = write(&mut stream);
     let _ = stream.shutdown(Shutdown::Both);
     Ok(Value::Unit)
 }

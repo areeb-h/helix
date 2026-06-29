@@ -254,6 +254,62 @@ fn http_server_serves_a_request() {
 }
 
 #[test]
+fn http_server_survives_a_client_disconnect() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    // A looping server. The first client sends a request then drops the socket without
+    // reading (a closed browser tab / health probe); the server's write fails with a
+    // broken pipe, which must be a no-op — the loop has to keep serving. A second client
+    // then gets a real response, proving the server survived.
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_serve_robust.helix");
+    std::fs::write(
+        &src,
+        "fn srv(l) = do {\n  c = l.accept()\n  c.respond({ status: 200, text: \"alive\" })\n  srv(l)\n}\nsrv(listen(8232))\n",
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the server");
+
+    let connect = || -> Option<TcpStream> {
+        for _ in 0..50 {
+            if let Ok(s) = TcpStream::connect("127.0.0.1:8232") {
+                return Some(s);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
+    };
+
+    // Rude client: send a request, then immediately drop (close) without reading.
+    {
+        let mut rude = connect().expect("server never came up");
+        rude.write_all(b"GET /a HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        // drop(rude) at end of scope closes the socket before the server can reply.
+    }
+    std::thread::sleep(Duration::from_millis(150));
+
+    // Polite client: the server must still be alive to answer.
+    let mut polite = connect().expect("server died after a client disconnect");
+    polite.write_all(b"GET /b HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    polite.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut resp = String::new();
+    polite.read_to_string(&mut resp).unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(resp.contains("200 OK") && resp.contains("alive"), "response:\n{resp}");
+    let _ = std::fs::remove_file(&src);
+}
+
+#[test]
 fn build_rejects_a_program_that_does_not_type_check() {
     // A broken program must fail the *build*, not produce an exe that fails when run.
     let dir = std::env::temp_dir();
