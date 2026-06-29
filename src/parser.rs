@@ -1578,6 +1578,17 @@ impl Parser {
                 return Err(HelixError::new("a `do` block must end with a result expression", l, c)
                     .hint("add a final line that produces the block's value, e.g. `do { x = 1\\n  x + 1 }`."));
             }
+            // `do { x = e in … }` mixes the two binding forms — the giveaway that the
+            // author reached for `let … in` muscle memory inside a block. Name the exact
+            // mistake instead of a generic "unexpected `in`".
+            if matches!(self.peek(), Tok::In) {
+                let (il, ic) = self.pos();
+                return Err(HelixError::new("unexpected `in` inside a `do` block", il, ic).hint(
+                    "`do {}` and `let … in …` are different binding forms. A `do` block \
+                     separates statements by newlines and has no `in` — either drop the `in` \
+                     (`do { x = e\\n  result }`), or use `let x = e in result` without the `do {}`.",
+                ));
+            }
             let body = self.expr()?;
             self.skip_newlines();
             self.eat(&Tok::RBrace, "to close the `do` block")

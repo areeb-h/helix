@@ -49,6 +49,17 @@
     }
 
     #[test]
+    fn do_block_with_in_explains_the_let_mixup() {
+        // The recurring `do { x = e in … }` mistake gets a precise, teaching error.
+        let err = last("y = do { x = 1 in x + 1 }\ny").unwrap_err();
+        assert!(err.message.contains("inside a `do` block"));
+        assert!(err.hint.unwrap_or_default().contains("let"));
+        // Both correct forms still parse and run.
+        assert_eq!(int("do { x = 1\n y = 2\n x + y }"), 3);
+        assert_eq!(int("let a = 3 in a * a"), 9);
+    }
+
+    #[test]
     fn zero_arg_lambda_is_a_thunk() {
         // `() => body` bound to a name is a callable thunk (the benchmark-harness pattern).
         assert_eq!(int("f = () => 6 * 7\nf()"), 42);
