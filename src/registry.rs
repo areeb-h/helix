@@ -29,6 +29,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "print", pure: false },
     BuiltinDef { path: "emit", pure: false },
     BuiltinDef { path: "sleep", pure: false },
+    BuiltinDef { path: "listen", pure: false },
     BuiltinDef { path: "read_csv", pure: false },
     BuiltinDef { path: "read_parquet", pure: false },
     BuiltinDef { path: "read_text", pure: false },
@@ -210,6 +211,11 @@ pub static GROUPBY_METHODS: &[&str] = &["mean", "sum", "min", "max", "count", "s
 pub static DICT_METHODS: &[&str] =
     &["get", "contains", "keys", "values", "items", "insert", "remove", "count", "length"];
 
+/// Network-handle (`Net`) methods — the HTTP server surface (`src/serve.rs`). A
+/// listener (from `listen(port)`) has `accept`; a connection (from `accept()`) has
+/// `respond`. Effects, dispatched at runtime like the other opaque types.
+pub static NET_METHODS: &[&str] = &["accept", "request", "respond"];
+
 /// Look up a builtin by its dotted path.
 pub fn lookup(path: &str) -> Option<&'static BuiltinDef> {
     BUILTINS.iter().find(|b| b.path == path)
@@ -236,7 +242,7 @@ pub fn methods_of(table: &[&'static str]) -> Vec<&'static str> {
 
 /// The method tables by receiver type — the single source for `helix doc <Type>`
 /// introspection and the method-uniqueness test.
-pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 7] {
+pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 8] {
     [
         ("Array", ARRAY_METHODS),
         ("String", STRING_METHODS),
@@ -245,6 +251,7 @@ pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 7] {
         ("DataFrame", DF_METHODS),
         ("GroupBy", GROUPBY_METHODS),
         ("Dict", DICT_METHODS),
+        ("Net", NET_METHODS),
     ]
 }
 
@@ -274,6 +281,7 @@ mod tests {
             ("Tensor", TENSOR_METHODS),
             ("DataFrame", DF_METHODS),
             ("GroupBy", GROUPBY_METHODS),
+            ("Net", NET_METHODS),
         ] {
             let mut seen = HashSet::new();
             for &m in table {

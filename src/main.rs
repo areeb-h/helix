@@ -35,6 +35,7 @@ mod registry;
 mod render;
 mod rng;
 mod sam;
+mod serve;
 mod simd;
 mod stats;
 mod strfmt;

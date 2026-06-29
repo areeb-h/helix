@@ -206,6 +206,54 @@ fn build_produces_runnable_standalone_exe() {
 }
 
 #[test]
+fn http_server_serves_a_request() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    // A one-shot server: bind, handle exactly one request, exit. The handler echoes
+    // the request path back in a JSON body — exercising listen/accept/request/respond.
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_serve.helix");
+    std::fs::write(
+        &src,
+        "conn = listen(8231).accept()\n\
+         conn.respond({ status: 200, json: { ok: true, echo: conn.request().path } })\n",
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the server");
+
+    // Wait for the listener to come up (retry the connect for ~2.5s).
+    let mut stream = None;
+    for _ in 0..50 {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:8231") {
+            stream = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut stream = stream.expect("server never started listening on 8231");
+    stream.write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).unwrap(); // server sends Connection: close → EOF
+    let _ = child.wait();
+
+    assert!(resp.contains("200 OK"), "response:\n{resp}");
+    assert!(resp.contains("application/json"), "response:\n{resp}");
+    assert!(resp.contains("\"ok\":true"), "response:\n{resp}");
+    assert!(resp.contains("\"echo\":\"/ping\""), "response:\n{resp}");
+
+    let _ = std::fs::remove_file(&src);
+}
+
+#[test]
 fn build_rejects_a_program_that_does_not_type_check() {
     // A broken program must fail the *build*, not produce an exe that fails when run.
     let dir = std::env::temp_dir();

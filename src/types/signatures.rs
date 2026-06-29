@@ -100,6 +100,18 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Unit)
         }
+        // `listen(port)` → an opaque network handle (the HTTP listener). The handle is a
+        // runtime-only type (`Value::Net`); the checker sees `Unknown`, so `.accept()` /
+        // `.respond()` on it dispatch at runtime — the opaque-type pattern shared with Dict.
+        "listen" => {
+            if args.len() != 1 {
+                return Err(arity_err("listen", 1, args.len(), line, col));
+            }
+            if !compatible(&args[0], &Type::Int) {
+                return Err(type_err("listen", "a port number", &args[0], line, col));
+            }
+            Ok(Type::Unknown)
+        }
         "assert" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(

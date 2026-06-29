@@ -62,6 +62,14 @@ impl super::Interp {
                 std::thread::sleep(std::time::Duration::from_secs_f64(ms / 1000.0));
                 Ok(Value::Unit)
             }
+            "listen" => {
+                arity(name, &args, 1, line, col)?;
+                let port = match &args[0] {
+                    Value::Int(n) => *n,
+                    other => return Err(type_err("listen", "a port number", other, line, col)),
+                };
+                crate::serve::listen(port, line, col)
+            }
             "assert" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(HelixError::new(

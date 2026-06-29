@@ -71,6 +71,41 @@ pub(crate) fn export_method(
     }
 }
 
+/// Methods on a [`Value::Net`] handle — the HTTP server surface (`src/serve.rs`).
+/// `accept` (on a listener) blocks for one request and returns `(request, connection)`;
+/// `respond` (on a connection) writes the reply. Both are effects, outside the oracle.
+fn net_method(
+    h: &Rc<crate::serve::NetHandle>,
+    name: &str,
+    args: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    match name {
+        "accept" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`accept` takes no arguments", line, col));
+            }
+            crate::serve::accept(h, line, col)
+        }
+        "request" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`request` takes no arguments", line, col));
+            }
+            crate::serve::request(h, line, col)
+        }
+        "respond" => {
+            if args.len() != 1 {
+                return Err(HelixError::new("`respond` takes one response value", line, col)
+                    .hint("e.g. `conn.respond({ status: 200, json: data })`."));
+            }
+            crate::serve::respond(h, &args[0], line, col)
+        }
+        other => Err(HelixError::new(format!("type Net has no method `{other}`"), line, col)
+            .hint("a listener has `accept`; a connection has `request` and `respond`.")),
+    }
+}
+
 pub(crate) fn call_method(
     recv: &Value,
     name: &str,
@@ -123,6 +158,7 @@ pub(crate) fn call_method(
         Value::Tensor(t) => crate::tensor::method(t, name, &args, line, col),
         Value::PyObject(h) => crate::python::method(h, name, &args, line, col),
         Value::Dict(map) => dict_method(map, name, &args, line, col),
+        Value::Net(h) => net_method(h, name, &args, line, col),
         other => Err(HelixError::new(
             format!("a {} has no method `{}`", other.type_name(), name),
             line,

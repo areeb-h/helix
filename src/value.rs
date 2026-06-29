@@ -108,6 +108,12 @@ pub enum Value {
     /// ([`DictKey`]: int, string, bool, or DNA); values are any `Value`. Immutable —
     /// `insert`/`remove` return a new dict (copy-on-write when uniquely owned).
     Dict(Rc<std::collections::BTreeMap<DictKey, Value>>),
+    /// An opaque network handle — a bound HTTP listener or a single accepted
+    /// connection (see `src/serve.rs`). Held behind an `Rc` so the variant is one
+    /// word. Effect-only (created by `listen`, consumed by `accept`/`respond`); never
+    /// compared, serialized, or sent through a computed result, so — like `PyObject`
+    /// — it falls through every value-equality / structural path with no extra arms.
+    Net(Rc<crate::serve::NetHandle>),
 }
 
 /// A [`Value::Dict`] key: a hashable, totally-orderable scalar. Floats are excluded
@@ -364,6 +370,7 @@ impl Value {
             Value::PyObject(_) => "PyObject",
             Value::Node(_) => "Node",
             Value::Dict(_) => "Dict",
+            Value::Net(_) => "Net",
         }
     }
 
@@ -435,6 +442,10 @@ impl fmt::Display for Value {
             Value::Closure(c) => write!(f, "<function/{}>", c.arity),
             Value::Missing => write!(f, "missing"),
             Value::Unit => write!(f, "()"),
+            Value::Net(h) => match &**h {
+                crate::serve::NetHandle::Listener(_) => write!(f, "<listener>"),
+                crate::serve::NetHandle::Conn { .. } => write!(f, "<connection>"),
+            },
             Value::PyObject(h) => write!(f, "{}", h.repr()),
             // A tracked value prints as its forward value (the graph stays hidden).
             Value::Node(n) => write!(f, "{}", crate::autodiff::node_value(n)),
