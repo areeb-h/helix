@@ -613,7 +613,7 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         "total_length" => Type::Int,
         // charts + text exports render to a String
         "bar_chart" | "histogram" | "line_chart" | "sparkline" | "scatter" | "svg_bar"
-        | "svg_line" | "to_html" | "to_markdown" => Type::String,
+        | "svg_line" | "to_html" | "to_markdown" | "to_table" => Type::String,
         // writers perform I/O and return Unit
         "write_csv" | "write_tsv" | "write_json" | "write_fasta" | "write_fastq" => Type::Unit,
         // reproducible sampling: shuffle/sample keep the element type; choice yields one
@@ -739,7 +739,7 @@ pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type
         "column" => array_of_unknown(),
         // serialize/write the frame
         "write_csv" | "write_tsv" | "write_json" | "write_parquet" => Type::Unit,
-        "to_html" | "to_markdown" => Type::String,
+        "to_html" | "to_markdown" | "to_table" => Type::String,
         _ => {
             return Err(unknown_method(
                 "DataFrame",

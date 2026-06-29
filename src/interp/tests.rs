@@ -49,6 +49,19 @@
     }
 
     #[test]
+    fn to_table_aligns_columns() {
+        let t = match last("[{a: 1, name: \"hi\"}, {a: 22, name: \"x\"}].to_table()").unwrap() {
+            Value::Str(s) => (*s).clone(),
+            other => panic!("expected a string, got {:?}", other),
+        };
+        // 'a' is numeric → right-aligned to width 2; 'name' is text → left-aligned to
+        // width 4; two-space gutter; header + dashed rule; no trailing whitespace.
+        assert_eq!(t, " a  name\n--  ----\n 1  hi\n22  x");
+        // A non-record array is a clean error, not a panic.
+        assert!(last("[1, 2, 3].to_table()").unwrap_err().message.contains("record"));
+    }
+
+    #[test]
     fn string_layout_methods() {
         fn s(src: &str) -> String {
             match last(src).unwrap() {

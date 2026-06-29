@@ -169,8 +169,8 @@ pub static ARRAY_METHODS: &[&str] = &[
     "spread", "standard_error", "coefficient_of_variation", "dot", "norm", "cumsum", "product",
     "argsort", "clamp", "softmax", "bootstrap", "contains", "mean_gc",
     "total_length", "bar_chart", "histogram", "line_chart", "sparkline", "scatter", "svg_bar",
-    "svg_line", "write_csv", "write_tsv", "write_json", "to_html", "to_markdown", "write_fasta",
-    "write_fastq", "shuffle", "sample", "choice",
+    "svg_line", "write_csv", "write_tsv", "write_json", "to_html", "to_markdown", "to_table",
+    "write_fasta", "write_fastq", "shuffle", "sample", "choice",
 ];
 
 /// String methods.
@@ -197,7 +197,7 @@ pub static TENSOR_METHODS: &[&str] = &[
 pub static DF_METHODS: &[&str] = &[
     "where", "filter", "select", "sort", "group", "with", "join", "vstack", "unique", "column",
     "head", "count", "columns", "cache", "write_csv", "write_tsv", "write_json", "write_parquet",
-    "to_html", "to_markdown",
+    "to_html", "to_markdown", "to_table",
 ];
 
 /// Grouped-DataFrame aggregations.

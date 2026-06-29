@@ -64,6 +64,7 @@ pub(crate) fn export_method(
         "write_json" => crate::writers::write_json(&a, line, col),
         "to_html" => crate::writers::to_html(&a, line, col),
         "to_markdown" => crate::writers::to_markdown(&a, line, col),
+        "to_table" => crate::writers::to_table(&a, line, col),
         "write_fasta" => crate::writers::write_fasta(&a, line, col),
         "write_fastq" => crate::writers::write_fastq(&a, line, col),
         other => Err(HelixError::new(format!("no export method `{other}`"), line, col)),
@@ -900,7 +901,7 @@ fn array_method(
         // --- charts + tabular export/write → shared dispatch (rebuild the receiver) ---
         "bar_chart" | "histogram" | "line_chart" | "sparkline" | "scatter" | "svg_bar"
         | "svg_line" | "write_csv" | "write_tsv" | "write_json" | "to_html" | "to_markdown"
-        | "write_fasta" | "write_fastq" => {
+        | "to_table" | "write_fasta" | "write_fastq" => {
             export_method(Value::array(items.to_vec()), name, args, line, col)
         }
         // --- reproducible sampling (seeded) ---

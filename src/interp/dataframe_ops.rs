@@ -268,7 +268,7 @@ impl super::Interp {
             // Serialize/write methods take *evaluated* args (a path string); share the
             // VM path's dispatch so the two engines never diverge.
             "to_json" | "write_csv" | "write_tsv" | "write_json" | "write_parquet" | "to_html"
-            | "to_markdown" => {
+            | "to_markdown" | "to_table" => {
                 let vals: Vec<Value> =
                     args.iter().map(|a| self.eval(a)).collect::<Result<_, _>>()?;
                 if name == "to_json" {

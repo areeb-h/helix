@@ -273,7 +273,8 @@ pub(crate) fn df_value_method(
             }
             crate::writers::to_json(&[Value::dataframe(lf.clone())], line, col)
         }
-        "write_csv" | "write_tsv" | "write_json" | "write_parquet" | "to_html" | "to_markdown" => {
+        "write_csv" | "write_tsv" | "write_json" | "write_parquet" | "to_html" | "to_markdown"
+        | "to_table" => {
             crate::interp::export_method(Value::dataframe(lf.clone()), name, &args, line, col)
         }
         _ => {

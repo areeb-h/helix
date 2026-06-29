@@ -166,6 +166,50 @@ pub fn to_markdown(args: &[Value], line: usize, col: usize) -> Result<Value, Hel
     Ok(string(s))
 }
 
+/// `rows.to_table()` — a whitespace-aligned plain-text table for console output, so a
+/// program prints a clean grid without hand-placing every column. Each column auto-sizes
+/// to its widest cell (header included); numeric columns right-align, the rest left-align
+/// (matching the `{x:N}` format-spec default). A `missing` shows as `·`. Accepts a
+/// DataFrame or an array of records with matching fields.
+pub fn to_table(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
+    let v = one_arg("to_table", args, line, col)?;
+    let (headers, rows) = tabular("to_table", v, line, col)?;
+    let numeric: Vec<bool> = (0..headers.len()).map(|c| numeric_col(&rows, c)).collect();
+    let cell_text = |v: &Value| -> String {
+        if matches!(v, Value::Missing) { "·".to_string() } else { plain_cell(v) }
+    };
+
+    // Column widths = max Unicode-scalar count over the header and every cell.
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
+    for row in &rows {
+        for (c, cell) in row.iter().enumerate() {
+            widths[c] = widths[c].max(cell_text(cell).chars().count());
+        }
+    }
+    let pad = |text: &str, w: usize, right: bool| -> String {
+        let fill = w.saturating_sub(text.chars().count());
+        if right { format!("{}{text}", " ".repeat(fill)) } else { format!("{text}{}", " ".repeat(fill)) }
+    };
+
+    // Two-space gutter between columns; trailing pad on the last cell is trimmed so no
+    // line carries dangling whitespace.
+    let mut s = String::new();
+    let hdr: Vec<String> =
+        headers.iter().enumerate().map(|(c, h)| pad(h, widths[c], numeric[c])).collect();
+    s.push_str(hdr.join("  ").trim_end());
+    s.push('\n');
+    let seps: Vec<String> = widths.iter().map(|w| "-".repeat(*w)).collect();
+    s.push_str(&seps.join("  "));
+    for row in &rows {
+        s.push('\n');
+        let cells: Vec<String> = (0..headers.len())
+            .map(|c| pad(&row.get(c).map(&cell_text).unwrap_or_default(), widths[c], numeric[c]))
+            .collect();
+        s.push_str(cells.join("  ").trim_end());
+    }
+    Ok(string(s))
+}
+
 /// `data.to_html()` — a self-contained, styled HTML document with a table.
 pub fn to_html(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     let v = one_arg("to_html", args, line, col)?;
