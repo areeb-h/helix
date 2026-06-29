@@ -590,6 +590,37 @@
         }
     }
 
+    /// Oracle foundation for the **fold-JIT** (the multi-slot, record/tuple-accumulator
+    /// reduce — ADR-pending). A 2-tuple `i64` accumulator `a = (a[0], a[1])` folded over a
+    /// range, each component an independent random `i64` expression over `{a[0], a[1], x}`.
+    /// Today this runs on the bytecode loop (no JIT for tuple accumulators yet), so this
+    /// pins **VM == tree-walker** bit-for-bit — the safety net the JIT codegen will plug
+    /// into. When the tuple-fold JIT lands, `run_vm_jit` engages the native kernel and the
+    /// SAME assertion becomes JIT == tree-walker, with no test change. (Divergent
+    /// components — floats, `/`, `%` — error or fall back identically on both engines.)
+    #[test]
+    fn differential_tuple_reduce_vm_vs_tree_walker() {
+        let mut rng = 0x7_0FDA_C115_EED1u64;
+        let atoms = vec!["a[0]".to_string(), "a[1]".to_string(), "x".to_string()];
+        for _ in 0..10_000 {
+            let e0 = gen_expr(&mut rng, 3, &atoms);
+            let e1 = gen_expr(&mut rng, 3, &atoms);
+            let start = (next(&mut rng) % 600) as i64 - 200;
+            let end = (next(&mut rng) % 600) as i64 - 200;
+            let i0 = gen_lit(&mut rng);
+            let i1 = gen_lit(&mut rng);
+            let src = format!(
+                "(range({}, {})).reduce(({}, {}), (a, x) => ({}, {}))",
+                start, end, i0, i1, e0, e1
+            );
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "tuple reduce VM ≠ tree-walker on `{src}`"),
+                (Err(()), Err(())) => {}
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vm={v:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// Run `src` on the VM with the JIT *disabled* (no native kernels) — the pure
     /// bytecode-loop oracle that `run_vm_jit` is diffed against for the array/fused
     /// kernels (which only engage when a `Jit` is supplied).
