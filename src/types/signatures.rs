@@ -662,7 +662,7 @@ pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Typ
         "length" | "count" => Type::Int,
         "gc_content" | "at_content" => Type::Float,
         "complement" | "reverse_complement" => Type::Dna,
-        "kmers" | "windows" => Type::Array(Box::new(Type::String)),
+        "kmers" | "windows" | "codons" => Type::Array(Box::new(Type::String)),
         // (kmer, count) tuples — the native packed spectrum (forward or strand-canonical).
         "kmer_counts" | "canonical_kmer_counts" => {
             Type::Array(Box::new(Type::Tuple(vec![Type::String, Type::Int])))

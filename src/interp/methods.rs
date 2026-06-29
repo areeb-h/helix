@@ -1363,6 +1363,24 @@ fn dna_method(
             }
             Ok(Value::array(out))
         }
+        "codons" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`codons` takes no arguments", line, col));
+            }
+            // Split into non-overlapping reading-frame-0 triplets, dropping a trailing
+            // partial codon (length not a multiple of 3) — the standard codon iteration
+            // for a coding sequence, feeding a `codon -> amino acid` lookup. A `Dna` is
+            // ASCII, so step the bytes in chunks of 3 (no per-base decode) and emit one
+            // string per codon. A sequence shorter than 3 yields `[]`.
+            let bytes = s.as_bytes();
+            let count = bytes.len() / 3;
+            window_count_guard("codons", count, line, col)?;
+            let mut out = Vec::with_capacity(count);
+            for chunk in bytes.chunks_exact(3) {
+                out.push(Value::Str(Rc::new(String::from_utf8_lossy(chunk).into_owned())));
+            }
+            Ok(Value::array(out))
+        }
         "kmer_counts" => {
             // Native 2-bit-packed k-mer spectrum (k ≤ 32): each ACGT window packs
             // into a u64 — no per-window string allocation — counted in a hash map;

@@ -854,6 +854,10 @@
         assert!(strs("dna(\"AT\").windows(5)").is_empty());
         // Pure ACGT: `kmers` keeps every window (spectrum == faithful here).
         assert_eq!(strs("dna(\"ATGC\").kmers(2)"), ["AT", "TG", "GC"]);
+        // `codons` is non-overlapping frame-0 triplets; a trailing partial codon drops.
+        assert_eq!(strs("dna(\"ATGAAATAG\").codons()"), ["ATG", "AAA", "TAG"]);
+        assert_eq!(strs("dna(\"ATGGC\").codons()"), ["ATG"]); // "GC" partial → dropped
+        assert!(strs("dna(\"AT\").codons()").is_empty());
     }
 
     #[test]
