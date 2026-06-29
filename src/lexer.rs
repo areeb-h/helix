@@ -421,7 +421,7 @@ fn lex_string(
                 loop {
                     if j >= n {
                         return Err(HelixError::new("unterminated `{` interpolation", line, col)
-                            .hint("close the `{...}` with a `}`."));
+                            .hint("close the hole with `}` (e.g. `\"hi {name}\"`), or write `{{` for a literal `{` (e.g. `\"{{\"`)."));
                     }
                     let e = chars[j];
                     // An outer-string escape: un-escape into the expression. `\"`
@@ -480,7 +480,7 @@ fn lex_string(
                 }
                 if expr.trim().is_empty() {
                     return Err(HelixError::new("empty `{}` interpolation", line, col)
-                        .hint("put an expression inside, e.g. `\"hi {name}\"`."));
+                        .hint("put an expression inside (e.g. `\"hi {name}\"`), or write `{{}}` for literal braces."));
                 }
                 segs.push(StrSeg::Expr(expr, spec));
                 j += 1; // skip closing `}`

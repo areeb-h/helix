@@ -363,6 +363,12 @@
         // an absurd width/precision is rejected at parse time — no giant allocation
         assert!(last("x = 1\n\"{x:99999999}\"").is_err());
         assert!(last("x = 1.0\n\"{x:.999999f}\"").is_err());
+        // `{{` / `}}` escape to literal braces; a lone `{` is a clear error that points
+        // the user at the escape (the `.replace("{", …)` papercut).
+        assert_eq!(s("\"x{{y}}z\""), "x{y}z");
+        let err = last("\"a{\"").unwrap_err();
+        assert!(err.message.contains("interpolation"));
+        assert!(err.hint.unwrap_or_default().contains("{{"), "should point at the `{{` escape");
     }
 
     #[test]
