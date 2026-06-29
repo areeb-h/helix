@@ -93,6 +93,11 @@
         assert_eq!(int("dna(\"GGCC\").gc_skew()[3]"), 0);
         assert_eq!(int("dna(\"ACGT\").gc_skew()[1]"), -1);
         assert_eq!(int("dna(\"ACGTN\").gc_skew().count()"), 5); // one point per base
+        // longest_homopolymer: longest run of one identical base (any base, incl. N).
+        assert_eq!(int("dna(\"AAAGGGGCC\").longest_homopolymer()"), 4);
+        assert_eq!(int("dna(\"ACGTACGT\").longest_homopolymer()"), 1); // no run
+        assert_eq!(int("dna(\"ACNNNNG\").longest_homopolymer()"), 4); // N runs count
+        assert_eq!(int("dna(\"\").longest_homopolymer()"), 0); // empty
     }
 
     #[test]

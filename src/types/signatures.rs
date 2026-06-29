@@ -669,6 +669,8 @@ pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Typ
         }
         // 0-based index of the motif, or `missing` when absent.
         "find" => Type::Int,
+        // Longest run of one identical base (a QC signal).
+        "longest_homopolymer" => Type::Int,
         // All 0-based match positions (overlapping); cumulative GC-skew walk per base.
         "find_all" | "gc_skew" => Type::Array(Box::new(Type::Int)),
         // Per-base tally `{A, C, G, T, N}` and Hamming distance to another sequence.

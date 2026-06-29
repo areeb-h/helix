@@ -1329,6 +1329,30 @@ fn dna_method(
                 .collect();
             Ok(Value::int_array(walk))
         }
+        "longest_homopolymer" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`longest_homopolymer` takes no arguments", line, col));
+            }
+            // Length of the longest run of a single identical base — a common QC signal
+            // (long homopolymers are a sequencer error mode). One byte pass, no allocation;
+            // an empty sequence is `0`. `prev = 0` (NUL) never equals an ASCII base, so the
+            // first base correctly starts a run of 1.
+            let mut best = 0i64;
+            let mut run = 0i64;
+            let mut prev = 0u8;
+            for &b in s.as_bytes() {
+                if b == prev {
+                    run += 1;
+                } else {
+                    run = 1;
+                    prev = b;
+                }
+                if run > best {
+                    best = run;
+                }
+            }
+            Ok(Value::Int(best))
+        }
         "kmers" => {
             // The countable k-mer *spectrum*: only windows of unambiguous ACGT —
             // any window containing `N`/IUPAC is skipped (the Jellyfish/KMC/KmerGo
