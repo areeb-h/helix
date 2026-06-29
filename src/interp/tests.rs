@@ -149,6 +149,46 @@
     }
 
     #[test]
+    fn dict_keyed_lookup() {
+        // Build from (k, v) pairs; O(log n) get/contains; absent → missing.
+        assert_eq!(int("[(\"a\", 3), (\"b\", 5)].to_dict().get(\"b\")"), 5);
+        assert_eq!(int("[(\"a\", 3), (\"b\", 5)].to_dict()[\"a\"]"), 3);
+        assert!(matches!(
+            last("[(\"a\", 3)].to_dict().get(\"zzz\")").unwrap(),
+            Value::Missing
+        ));
+        assert!(matches!(last("[(\"a\", 3)].to_dict()[\"zzz\"]").unwrap(), Value::Missing));
+        assert!(r#bool("[(\"a\", 3)].to_dict().contains(\"a\")"));
+        assert!(!r#bool("[(\"a\", 3)].to_dict().contains(\"x\")"));
+        assert_eq!(int("[(\"a\", 1), (\"b\", 2), (\"c\", 3)].to_dict().count()"), 3);
+        // keys() / values() come back sorted (deterministic), independent of insert order.
+        assert_eq!(
+            last("[(\"c\", 1), (\"a\", 2), (\"b\", 3)].to_dict().keys()").unwrap().to_string(),
+            "[\"a\", \"b\", \"c\"]"
+        );
+        // frequencies() -> dict turns an O(n) histogram into an O(log n) count lookup.
+        assert_eq!(int("[\"x\", \"y\", \"x\", \"x\"].frequencies().to_dict().get(\"x\")"), 3);
+        // insert is immutable (returns a new dict); last-write wins; int keys work.
+        assert_eq!(int("dict().insert(\"k\", 7).get(\"k\")"), 7);
+        assert_eq!(int("[(\"k\", 1)].to_dict().insert(\"k\", 9).get(\"k\")"), 9);
+        assert_eq!(int("[(1, 10), (2, 20)].to_dict()[2]"), 20);
+        // dicts compare by mapping, independent of order.
+        assert!(matches!(
+            last("[(\"a\", 1), (\"b\", 2)].to_dict() == [(\"b\", 2), (\"a\", 1)].to_dict()").unwrap(),
+            Value::Bool(true)
+        ));
+        // a float key is rejected with a clear message (no NaN-ordered map).
+        assert!(last("dict().insert(1.5, 3)").unwrap_err().message.contains("dict key"));
+    }
+
+    fn r#bool(src: &str) -> bool {
+        match last(src).unwrap() {
+            Value::Bool(b) => b,
+            other => panic!("expected bool, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn string_to_number_parses_as_function_and_method() {
         // Free function and method spellings agree — both parse numeric strings.
         assert_eq!(float("to_float(\"1.5\")"), 1.5);

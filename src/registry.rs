@@ -105,6 +105,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "denominator", pure: true },
     BuiltinDef { path: "to_float", pure: true },
     BuiltinDef { path: "to_int", pure: true },
+    BuiltinDef { path: "dict", pure: true },
     BuiltinDef { path: "lll", pure: true },
     BuiltinDef { path: "lll_exact", pure: true },
     // reverse-mode autodiff: wrap a leaf, read its forward value, get a gradient
@@ -170,7 +171,7 @@ pub static ARRAY_METHODS: &[&str] = &[
     "argsort", "clamp", "softmax", "bootstrap", "contains", "mean_gc",
     "total_length", "bar_chart", "histogram", "line_chart", "sparkline", "scatter", "svg_bar",
     "svg_line", "write_csv", "write_tsv", "write_json", "to_html", "to_markdown", "to_table",
-    "write_fasta", "write_fastq", "shuffle", "sample", "choice",
+    "to_dict", "write_fasta", "write_fastq", "shuffle", "sample", "choice",
 ];
 
 /// String methods.
@@ -203,6 +204,10 @@ pub static DF_METHODS: &[&str] = &[
 /// Grouped-DataFrame aggregations.
 pub static GROUPBY_METHODS: &[&str] = &["mean", "sum", "min", "max", "count", "std"];
 
+/// Keyed-map (`Dict`) methods — O(log n) lookup, sorted (deterministic) enumeration.
+pub static DICT_METHODS: &[&str] =
+    &["get", "contains", "keys", "values", "items", "insert", "remove", "count", "length"];
+
 /// Look up a builtin by its dotted path.
 pub fn lookup(path: &str) -> Option<&'static BuiltinDef> {
     BUILTINS.iter().find(|b| b.path == path)
@@ -229,7 +234,7 @@ pub fn methods_of(table: &[&'static str]) -> Vec<&'static str> {
 
 /// The method tables by receiver type — the single source for `helix doc <Type>`
 /// introspection and the method-uniqueness test.
-pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 6] {
+pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 7] {
     [
         ("Array", ARRAY_METHODS),
         ("String", STRING_METHODS),
@@ -237,6 +242,7 @@ pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 6] {
         ("Tensor", TENSOR_METHODS),
         ("DataFrame", DF_METHODS),
         ("GroupBy", GROUPBY_METHODS),
+        ("Dict", DICT_METHODS),
     ]
 }
 

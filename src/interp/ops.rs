@@ -611,6 +611,12 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
                 && a.iter()
                     .all(|(k, v)| b.iter().any(|(k2, v2)| k == k2 && values_equal(v, v2)))
         }
+        // A dict is its key→value mapping: equal iff same keys with structurally-equal
+        // values. Keys compare exactly (`DictKey: Eq`); values recurse through `values_equal`.
+        (Value::Dict(a), Value::Dict(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|(k, v)| b.get(k).is_some_and(|v2| values_equal(v, v2)))
+        }
         _ => false,
     }
 }

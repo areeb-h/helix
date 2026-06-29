@@ -681,6 +681,19 @@ impl super::Interp {
                     other => Err(type_err("to_float", "a number or numeric string", other, line, col)),
                 }
             }
+            "dict" => {
+                // An empty keyed map (ADR 0020); build a populated one with
+                // `[(k, v), …].to_dict()`. Grows via the immutable `.insert(k, v)`.
+                if !args.is_empty() {
+                    return Err(HelixError::new(
+                        "`dict()` takes no arguments",
+                        line,
+                        col,
+                    )
+                    .hint("build a populated dict with `[(k, v), …].to_dict()` or `xs.frequencies().to_dict()`."));
+                }
+                Ok(Value::Dict(Rc::new(std::collections::BTreeMap::new())))
+            }
             "to_int" => {
                 arity(name, &args, 1, line, col)?;
                 use num_traits::ToPrimitive;

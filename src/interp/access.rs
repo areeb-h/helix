@@ -348,6 +348,12 @@ pub(crate) fn eval_index(recv: &Value, idx: &Value, line: usize, col: usize) -> 
             .map(|(_, v)| v.clone())
             .unwrap_or(Value::Missing));
     }
+    // `d[key]` — dict lookup (ADR 0020); an absent key yields `missing`, the same safe
+    // accessor as `.get(key)`, so `d[k] ?? default` works.
+    if let Value::Dict(map) = recv {
+        let key = crate::value::DictKey::from_value(idx).map_err(|m| HelixError::new(m, line, col))?;
+        return Ok(map.get(&key).cloned().unwrap_or(Value::Missing));
+    }
     let i = match idx {
         Value::Int(i) => *i,
         other => return Err(type_err("index", "an integer", other, line, col)),

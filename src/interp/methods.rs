@@ -122,8 +122,94 @@ pub(crate) fn call_method(
         Value::Node(n) => crate::autodiff::method(n, name, &args, line, col),
         Value::Tensor(t) => crate::tensor::method(t, name, &args, line, col),
         Value::PyObject(h) => crate::python::method(h, name, &args, line, col),
+        Value::Dict(map) => dict_method(map, name, &args, line, col),
         other => Err(HelixError::new(
             format!("a {} has no method `{}`", other.type_name(), name),
+            line,
+            col,
+        )),
+    }
+}
+
+/// Methods on a [`Value::Dict`] (ADR 0020). Lookups (`get`/`contains`) are O(log n);
+/// enumeration (`keys`/`values`/`items`) is sorted by key, so output is deterministic.
+/// `insert`/`remove` are immutable — they return a new dict (the map is cloned, so a
+/// one-shot update is O(n); build in bulk with `pairs.to_dict()` for O(n log n)).
+fn dict_method(
+    map: &Rc<std::collections::BTreeMap<crate::value::DictKey, Value>>,
+    name: &str,
+    args: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    use crate::value::DictKey;
+    let arity = |n: usize| -> Result<(), HelixError> {
+        if args.len() == n {
+            Ok(())
+        } else {
+            Err(HelixError::new(
+                format!(
+                    "`{}` expects {} argument{}, got {}",
+                    name,
+                    n,
+                    if n == 1 { "" } else { "s" },
+                    args.len()
+                ),
+                line,
+                col,
+            ))
+        }
+    };
+    let key_of = |v: &Value| DictKey::from_value(v).map_err(|m| HelixError::new(m, line, col));
+    match name {
+        // `get(k)` → the value, or `missing` when absent (so `d.get(k) ?? default` works).
+        "get" => {
+            arity(1)?;
+            Ok(map.get(&key_of(&args[0])?).cloned().unwrap_or(Value::Missing))
+        }
+        "contains" => {
+            arity(1)?;
+            Ok(Value::Bool(map.contains_key(&key_of(&args[0])?)))
+        }
+        "count" | "length" => {
+            arity(0)?;
+            Ok(Value::Int(map.len() as i64))
+        }
+        "keys" => {
+            arity(0)?;
+            Ok(Value::array(map.keys().map(|k| k.to_value()).collect()))
+        }
+        "values" => {
+            arity(0)?;
+            Ok(Value::array(map.values().cloned().collect()))
+        }
+        // `(key, value)` tuples, sorted by key — round-trips through `to_dict`.
+        "items" => {
+            arity(0)?;
+            Ok(Value::array(
+                map.iter()
+                    .map(|(k, v)| Value::Tuple(Rc::new(vec![k.to_value(), v.clone()])))
+                    .collect(),
+            ))
+        }
+        "insert" => {
+            arity(2)?;
+            let k = key_of(&args[0])?;
+            let mut new = (**map).clone();
+            new.insert(k, args[1].clone());
+            Ok(Value::Dict(Rc::new(new)))
+        }
+        "remove" => {
+            arity(1)?;
+            let k = key_of(&args[0])?;
+            let mut new = (**map).clone();
+            new.remove(&k);
+            Ok(Value::Dict(Rc::new(new)))
+        }
+        _ => Err(unknown_method(
+            "Dict",
+            name,
+            &crate::registry::methods_of(crate::registry::DICT_METHODS),
             line,
             col,
         )),
@@ -600,6 +686,34 @@ fn array_method(
                 .map(|(v, c)| Value::Tuple(Rc::new(vec![v, Value::Int(c)])))
                 .collect();
             Ok(Value::array(out))
+        }
+        "to_dict" => {
+            // Array of `(key, value)` pairs → a `Dict` (ADR 0020), for O(log n) lookup
+            // instead of an O(n) scan. Later duplicate keys win (last-wins upsert), and
+            // `xs.frequencies().to_dict()` turns a histogram into a count lookup.
+            no_args(name)?;
+            use crate::value::DictKey;
+            let mut map = std::collections::BTreeMap::new();
+            for (i, item) in items.iter().enumerate() {
+                let pair = match item {
+                    Value::Tuple(t) if t.len() == 2 => t,
+                    other => {
+                        return Err(HelixError::new(
+                            format!(
+                                "`to_dict` needs (key, value) pairs, but element {} is a {}",
+                                i,
+                                other.type_name()
+                            ),
+                            line,
+                            col,
+                        )
+                        .hint("e.g. `[(\"a\", 1), (\"b\", 2)].to_dict()` or `xs.frequencies().to_dict()`."));
+                    }
+                };
+                let key = DictKey::from_value(&pair[0]).map_err(|m| HelixError::new(m, line, col))?;
+                map.insert(key, pair[1].clone());
+            }
+            Ok(Value::Dict(Rc::new(map)))
         }
         "unique" => {
             // Distinct values in first-seen order. O(n) for string/DNA arrays.

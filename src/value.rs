@@ -101,6 +101,52 @@ pub enum Value {
     /// backpropagate. Created by `variable(x)`; one word (`Rc`), so `Value` stays
     /// 16 bytes. Pure at the surface — the graph's interior mutability is hidden.
     Node(Rc<crate::autodiff::Node>),
+    /// A keyed map with O(log n) lookup (ADR 0020) — the escape from O(n) `.where`/
+    /// `.contains` scans for counting, vocabularies, bigram tables, etc. A `BTreeMap`
+    /// (not a hash map) so iteration order is **deterministic** (sorted by key),
+    /// matching Helix's reproducibility guarantee. Keys are hashable scalars
+    /// ([`DictKey`]: int, string, bool, or DNA); values are any `Value`. Immutable —
+    /// `insert`/`remove` return a new dict (copy-on-write when uniquely owned).
+    Dict(Rc<std::collections::BTreeMap<DictKey, Value>>),
+}
+
+/// A [`Value::Dict`] key: a hashable, totally-orderable scalar. Floats are excluded
+/// (NaN has no total order and float-equality keys are a footgun), as are arrays,
+/// records, and other compound values — so a key is always cheap to compare and the
+/// map's ordering is well-defined. The variant order here defines the cross-type sort
+/// order used for deterministic iteration.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DictKey {
+    Bool(bool),
+    Int(i64),
+    Str(Rc<String>),
+    Dna(Rc<String>),
+}
+
+impl DictKey {
+    /// Convert a value into a dict key, rejecting unhashable kinds with a message.
+    pub fn from_value(v: &Value) -> Result<DictKey, String> {
+        match v {
+            Value::Int(i) => Ok(DictKey::Int(*i)),
+            Value::Bool(b) => Ok(DictKey::Bool(*b)),
+            Value::Str(s) => Ok(DictKey::Str(s.clone())),
+            Value::Dna(s) => Ok(DictKey::Dna(s.clone())),
+            other => Err(format!(
+                "a dict key must be an int, string, bool, or DNA sequence, not a {}",
+                other.type_name()
+            )),
+        }
+    }
+
+    /// Recover the key as a `Value` (for `keys()` and display).
+    pub fn to_value(&self) -> Value {
+        match self {
+            DictKey::Bool(b) => Value::Bool(*b),
+            DictKey::Int(i) => Value::Int(*i),
+            DictKey::Str(s) => Value::Str(s.clone()),
+            DictKey::Dna(s) => Value::Dna(s.clone()),
+        }
+    }
 }
 
 /// The backing store of a [`Value::Array`]. Homogeneous numeric arrays are kept as
@@ -317,6 +363,7 @@ impl Value {
             Value::Unit => "Unit",
             Value::PyObject(_) => "PyObject",
             Value::Node(_) => "Node",
+            Value::Dict(_) => "Dict",
         }
     }
 
@@ -432,6 +479,22 @@ impl fmt::Display for Value {
                         Value::Str(s) => write!(f, "{}: \"{}\"", k, s)?,
                         other => write!(f, "{}: {}", k, other)?,
                     }
+                }
+                write!(f, "}}")
+            }
+            // `{k => v}` arrow notation (sorted by key) — visually distinct from a
+            // record's bare-identifier `{field: v}`; string keys and values are quoted.
+            Value::Dict(map) => {
+                write!(f, "{{")?;
+                let q = |v: &Value| match v {
+                    Value::Str(s) => format!("\"{}\"", s),
+                    other => format!("{}", other),
+                };
+                for (i, (k, v)) in map.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{} => {}", q(&k.to_value()), q(v))?;
                 }
                 write!(f, "}}")
             }

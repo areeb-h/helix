@@ -355,6 +355,13 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Int)
         }
+        // `dict()` → an empty Dict (ADR 0020); a runtime type, so `Unknown` to the checker.
+        "dict" => {
+            if !args.is_empty() {
+                return Err(arity_err("dict", 0, args.len(), line, col));
+            }
+            Ok(Type::Unknown)
+        }
         "lll" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(
@@ -614,6 +621,9 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         // charts + text exports render to a String
         "bar_chart" | "histogram" | "line_chart" | "sparkline" | "scatter" | "svg_bar"
         | "svg_line" | "to_html" | "to_markdown" | "to_table" => Type::String,
+        // a Dict is a runtime type (ADR 0020); the checker treats it as `Unknown` so
+        // `.get`/`.contains`/indexing stay permissive (like `parse_json`'s result).
+        "to_dict" => Type::Unknown,
         // writers perform I/O and return Unit
         "write_csv" | "write_tsv" | "write_json" | "write_fasta" | "write_fastq" => Type::Unit,
         // reproducible sampling: shuffle/sample keep the element type; choice yields one
