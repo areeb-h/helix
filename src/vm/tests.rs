@@ -590,6 +590,58 @@
         }
     }
 
+    /// A JIT-**eligible** `i64` expression over `atoms`: only `+ - *`, the inline scalar
+    /// builtins (`min`/`max`/`abs`), int literals, and the atoms — so a fold body built
+    /// from it genuinely compiles to the native tuple kernel (no float/div/bitwise to make
+    /// it fall back). All ops are total (wrapping `i64`, no `/0`/`%0`), so it never errors.
+    fn gen_i64_eligible(rng: &mut u64, depth: u32, atoms: &[String]) -> String {
+        if depth == 0 || pick(rng, 3) == 0 {
+            return match pick(rng, 3) {
+                0 if !atoms.is_empty() => atoms[pick(rng, atoms.len() as u64) as usize].clone(),
+                _ => format!("{}", (next(rng) % 41) as i64 - 20),
+            };
+        }
+        let op = pick(rng, 6);
+        let lhs = gen_i64_eligible(rng, depth - 1, atoms);
+        if op == 5 {
+            return format!("abs({})", lhs);
+        }
+        let rhs = gen_i64_eligible(rng, depth - 1, atoms);
+        match op {
+            0 => format!("(({}) + ({}))", lhs, rhs),
+            1 => format!("(({}) - ({}))", lhs, rhs),
+            2 => format!("(({}) * ({}))", lhs, rhs),
+            3 => format!("min(({}), ({}))", lhs, rhs),
+            _ => format!("max(({}), ({}))", lhs, rhs),
+        }
+    }
+
+    /// The **fold-JIT** in action: a 2-tuple `i64` accumulator whose components are
+    /// JIT-eligible, so `run_vm_jit` engages the native multi-slot reduce kernel. Asserts
+    /// JIT == tree-walker bit-for-bit across 10k random folds — the codegen's safety net.
+    #[test]
+    fn differential_tuple_reduce_jit() {
+        let mut rng = 0xB01D_FACE_1234_5678u64;
+        let atoms = vec!["a[0]".to_string(), "a[1]".to_string(), "x".to_string()];
+        for _ in 0..10_000 {
+            let e0 = gen_i64_eligible(&mut rng, 3, &atoms);
+            let e1 = gen_i64_eligible(&mut rng, 3, &atoms);
+            let start = (next(&mut rng) % 400) as i64 - 100;
+            let end = (next(&mut rng) % 400) as i64 - 100;
+            let i0 = (next(&mut rng) % 41) as i64 - 20;
+            let i1 = (next(&mut rng) % 41) as i64 - 20;
+            let src = format!(
+                "(range({}, {})).reduce(({}, {}), (a, x) => ({}, {}))",
+                start, end, i0, i1, e0, e1
+            );
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "tuple reduce JIT ≠ tree-walker on `{src}`"),
+                (Err(()), Err(())) => {}
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// Oracle foundation for the **fold-JIT** (the multi-slot, record/tuple-accumulator
     /// reduce — ADR-pending). A 2-tuple `i64` accumulator `a = (a[0], a[1])` folded over a
     /// range, each component an independent random `i64` expression over `{a[0], a[1], x}`.

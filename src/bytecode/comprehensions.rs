@@ -295,11 +295,13 @@ impl super::Compiler {
         // cap; otherwise it falls through to the identical bytecode loop — so float
         // accumulators, over-cap ranges, and non-x86/`HELIX_NOJIT` builds all run
         // the oracle-matched path.
-        let eligible = crate::jit::reduce_loop_eligible(body, pa, pb, &self.jit_fn_set());
+        // Scalar OR tuple `i64` accumulator → a native loop. `reduce_jit_bodies` returns
+        // the (substituted) component bodies for either shape, or `None` to run the loop.
+        let jit_bodies = crate::jit::reduce_jit_bodies(init, body, pa, pb, &self.jit_fn_set());
         let acc;
         let x;
         let guard;
-        if eligible {
+        if let Some(bodies) = jit_bodies {
             self.compile_expr(b, init)?; // stack: [start, end, init]
             acc = b.declare_local(pa);
             x = b.declare_local(pb);
@@ -308,7 +310,7 @@ impl super::Compiler {
             self.reduce_loops.push(ReduceLoop {
                 pa: pa.to_string(),
                 pb: pb.to_string(),
-                body: body.clone(),
+                bodies,
             });
             // `after` is patched once the trailing LoadLocal position is known.
             let at = b.emit(Op::TryJitReduce { loop_idx, acc_slot: acc, after: 0 }, line, col);

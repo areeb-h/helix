@@ -254,16 +254,21 @@ pub fn build(
         let mut ctx = module.make_context();
         let mut bctx = FunctionBuilderContext::new();
         for (i, rl) in reduce_loops.iter().enumerate() {
-            if !reduce_loop_eligible(&rl.body, &rl.pa, &rl.pb, &int_eligible) {
+            if !reduce_bodies_eligible(rl, &int_eligible) {
                 reduce_ids.push(None);
                 continue;
             }
+            // Both shapes take 3 `i64` params (start, end, and `init` for a scalar acc or
+            // an `acc_ptr` for a tuple acc); a scalar returns the accumulator, a tuple
+            // writes its slots back through the pointer (no return).
             let mut sig = module.make_signature();
             sig.call_conv = CallConv::SystemV;
             for _ in 0..3 {
                 sig.params.push(AbiParam::new(I64));
             }
-            sig.returns.push(AbiParam::new(I64));
+            if rl.bodies.len() == 1 {
+                sig.returns.push(AbiParam::new(I64));
+            }
             let id = match module.declare_function(&format!("reduce${i}"), Linkage::Local, &sig) {
                 Ok(id) => id,
                 Err(_) => {
@@ -500,6 +505,120 @@ pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>
     locals.insert(pa);
     locals.insert(pb);
     value_eligible(body, fns, &locals, NumKind::Int)
+}
+
+/// A tuple accumulator may have at most this many `i64` slots; a wider one runs on the
+/// bytecode loop. The reduce kernel keeps every slot in a register.
+pub const MAX_ACC_SLOTS: usize = 4;
+
+/// The synthetic identifier bound to accumulator slot `k` (`$acc{k}`). A tuple body's
+/// `pa[k]` is rewritten to this so the existing `i64` codegen handles it unchanged; `$`
+/// can't appear in user source, so it never collides.
+pub fn acc_ident(k: usize) -> String {
+    format!("$acc{k}")
+}
+
+/// Rewrite `pa[k]` (literal `k < n`) to the slot ident `$acc{k}` throughout `e`. Only the
+/// `i64`-eligible forms are recursed into; any other form is cloned as-is (so a `pa[k]`
+/// buried in an unhandled form stays an `Index` and fails eligibility — a safe fallback,
+/// never a miscompile).
+fn subst_acc(e: &Expr, pa: &str, n: usize) -> Expr {
+    if let Expr::Index { recv, index, line, col } = e
+        && let Expr::Ident { name, .. } = recv.as_ref()
+        && name == pa
+        && let Expr::Int(k) = index.as_ref()
+        && *k >= 0
+        && (*k as usize) < n
+    {
+        return Expr::Ident { name: acc_ident(*k as usize), line: *line, col: *col };
+    }
+    let s = |c: &Expr| Box::new(subst_acc(c, pa, n));
+    match e {
+        Expr::Binary { op, left, right, line, col } => Expr::Binary {
+            op: op.clone(),
+            left: s(left),
+            right: s(right),
+            line: *line,
+            col: *col,
+        },
+        Expr::Unary { op, expr, line, col } => Expr::Unary {
+            op: op.clone(),
+            expr: s(expr),
+            line: *line,
+            col: *col,
+        },
+        Expr::Call { name, args, line, col } => Expr::Call {
+            name: name.clone(),
+            args: args.iter().map(|a| subst_acc(a, pa, n)).collect(),
+            line: *line,
+            col: *col,
+        },
+        Expr::If { cond, then_branch, else_branch, line, col } => Expr::If {
+            cond: s(cond),
+            then_branch: s(then_branch),
+            else_branch: s(else_branch),
+            line: *line,
+            col: *col,
+        },
+        Expr::Let { bindings, body } => Expr::Let {
+            bindings: bindings.iter().map(|(nm, v)| (nm.clone(), subst_acc(v, pa, n))).collect(),
+            body: s(body),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Decide whether a `reduce(init, (pa, pb) => body)` over a range can JIT, and if so
+/// return its component bodies (already `pa[k]`→`$acck`-substituted). `Some([body])` for
+/// a scalar `i64` accumulator; `Some([e0, e1, …])` for a 2..=MAX_ACC_SLOTS tuple
+/// accumulator whose every component is `i64`-eligible over the slots and `pb`. `None`
+/// (run the bytecode loop) otherwise.
+pub fn reduce_jit_bodies(
+    init: &Expr,
+    body: &Expr,
+    pa: &str,
+    pb: &str,
+    fns: &HashSet<&str>,
+) -> Option<Vec<Expr>> {
+    if reduce_loop_eligible(body, pa, pb, fns) {
+        return Some(vec![body.clone()]);
+    }
+    if let (Expr::Tuple(inits), Expr::Tuple(comps)) = (init, body) {
+        let n = comps.len();
+        if n != inits.len() || !(2..=MAX_ACC_SLOTS).contains(&n) {
+            return None;
+        }
+        let names: Vec<String> = (0..n).map(acc_ident).collect();
+        let mut locals: HashSet<&str> = HashSet::new();
+        for nm in &names {
+            locals.insert(nm.as_str());
+        }
+        locals.insert(pb);
+        let bodies: Vec<Expr> = comps.iter().map(|c| subst_acc(c, pa, n)).collect();
+        if bodies.iter().all(|c| value_eligible(c, fns, &locals, NumKind::Int)) {
+            return Some(bodies);
+        }
+    }
+    None
+}
+
+/// Re-check (at JIT-compile time) that a [`ReduceLoop`]'s already-substituted bodies are
+/// `i64`-eligible — scalar over `{pa, pb}`, or tuple over `{$acc0.., pb}`.
+fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>) -> bool {
+    if rl.bodies.len() == 1 {
+        return reduce_loop_eligible(&rl.bodies[0], &rl.pa, &rl.pb, fns);
+    }
+    let n = rl.bodies.len();
+    if !(2..=MAX_ACC_SLOTS).contains(&n) {
+        return false;
+    }
+    let names: Vec<String> = (0..n).map(acc_ident).collect();
+    let mut locals: HashSet<&str> = HashSet::new();
+    for nm in &names {
+        locals.insert(nm.as_str());
+    }
+    locals.insert(rl.pb.as_str());
+    rl.bodies.iter().all(|c| value_eligible(c, fns, &locals, NumKind::Int))
 }
 
 /// True if a `map` body is a pure `i64` value expression over its single binder (calling
@@ -1047,11 +1166,19 @@ fn define_reduce_loop(
     rl: &crate::bytecode::ReduceLoop,
     fn_ids: &HashMap<&str, FuncId>,
 ) -> Option<()> {
+    // Scalar accumulator (1 body): `fn(start, end, init) -> i64`. Tuple accumulator
+    // (N bodies): `fn(start, end, acc_ptr)` — the N `i64` slots are loaded from / stored
+    // to `acc_ptr`, kept in N registers across the loop. Both keep `i64` arithmetic
+    // wrapping, matching the interpreter (and the differential oracle).
+    let n = rl.bodies.len();
+    let scalar = n == 1;
     ctx.func.signature.call_conv = CallConv::SystemV;
     for _ in 0..3 {
         ctx.func.signature.params.push(AbiParam::new(I64));
     }
-    ctx.func.signature.returns.push(AbiParam::new(I64));
+    if scalar {
+        ctx.func.signature.returns.push(AbiParam::new(I64));
+    }
 
     let mut b = FunctionBuilder::new(&mut ctx.func, bctx);
     let entry = b.create_block();
@@ -1060,14 +1187,25 @@ fn define_reduce_loop(
     b.seal_block(entry);
     let start = b.block_params(entry)[0];
     let end = b.block_params(entry)[1];
-    let init = b.block_params(entry)[2];
+    let third = b.block_params(entry)[2]; // scalar: init value; tuple: acc slot pointer
 
-    let acc_var = b.declare_var(I64);
     let x_var = b.declare_var(I64);
     let end_var = b.declare_var(I64);
-    b.def_var(acc_var, init);
     b.def_var(x_var, start);
     b.def_var(end_var, end);
+
+    // One register per accumulator slot. Scalar seeds slot 0 with `init`; tuple loads
+    // each slot from `acc_ptr[k]`.
+    let names: Vec<String> = (0..n).map(acc_ident).collect();
+    let acc_vars: Vec<Variable> = (0..n).map(|_| b.declare_var(I64)).collect();
+    if scalar {
+        b.def_var(acc_vars[0], third);
+    } else {
+        for (k, &v) in acc_vars.iter().enumerate() {
+            let loaded = b.ins().load(I64, MemFlags::trusted(), third, (k * 8) as i32);
+            b.def_var(v, loaded);
+        }
+    }
 
     let header = b.create_block();
     let body_blk = b.create_block();
@@ -1086,10 +1224,24 @@ fn define_reduce_loop(
     b.switch_to_block(body_blk);
     b.seal_block(body_blk);
     let mut vars: HashMap<&str, Variable> = HashMap::new();
-    vars.insert(rl.pa.as_str(), acc_var);
+    if scalar {
+        vars.insert(rl.pa.as_str(), acc_vars[0]);
+    } else {
+        for (k, &v) in acc_vars.iter().enumerate() {
+            vars.insert(names[k].as_str(), v);
+        }
+    }
     vars.insert(rl.pb.as_str(), x_var);
-    let new_acc = gen_value(&mut b, &rl.body, &mut vars, fn_ids, module, NumKind::Int);
-    b.def_var(acc_var, new_acc);
+    // Compute every component from the OLD slot values, then assign — so a component that
+    // reads another slot (`(a[0] + x, a[1] + a[0])`) sees the pre-update value.
+    let mut new_vals: Vec<ClValue> = Vec::with_capacity(n);
+    for body in &rl.bodies {
+        let v = gen_value(&mut b, body, &mut vars, fn_ids, module, NumKind::Int);
+        new_vals.push(v);
+    }
+    for (k, &v) in acc_vars.iter().enumerate() {
+        b.def_var(v, new_vals[k]);
+    }
     let xv2 = b.use_var(x_var);
     let one = b.ins().iconst(I64, 1);
     let nx = b.ins().iadd(xv2, one);
@@ -1100,8 +1252,16 @@ fn define_reduce_loop(
 
     b.switch_to_block(exit_blk);
     b.seal_block(exit_blk);
-    let result = b.use_var(acc_var);
-    b.ins().return_(&[result]);
+    if scalar {
+        let result = b.use_var(acc_vars[0]);
+        b.ins().return_(&[result]);
+    } else {
+        for (k, &v) in acc_vars.iter().enumerate() {
+            let val = b.use_var(v);
+            b.ins().store(MemFlags::trusted(), val, third, (k * 8) as i32);
+        }
+        b.ins().return_(&[]);
+    }
 
     b.finalize();
     module.define_function(fid, ctx).ok()?;
@@ -1807,6 +1967,19 @@ pub unsafe fn call_i64(ptr: *const u8, args: &[i64]) -> i64 {
 pub unsafe fn call_reduce(ptr: *const u8, start: i64, end: i64, init: i64) -> i64 {
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64) -> i64>(ptr)(start, end, init)
+    }
+}
+
+/// Run a native **tuple**-accumulator reduce loop (`define_reduce_loop`'s N-body shape).
+/// `acc` points to the N `i64` slots: their initial values on entry, the folded result on
+/// return. The caller owns the buffer (its length must equal the loop's accumulator arity).
+///
+/// # Safety
+/// `ptr` must be a tuple reduce kernel and `acc` must point to at least that kernel's slot
+/// count of writable `i64`s.
+pub unsafe fn call_tuple_reduce(ptr: *const u8, start: i64, end: i64, acc: *mut i64) {
+    unsafe {
+        std::mem::transmute::<*const u8, extern "C" fn(i64, i64, *mut i64)>(ptr)(start, end, acc)
     }
 }
 

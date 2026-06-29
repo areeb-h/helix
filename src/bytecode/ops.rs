@@ -286,8 +286,13 @@ pub struct ReduceLoop {
     pub pa: String,
     /// The element/counter binder name (lambda param 1).
     pub pb: String,
-    /// The reduce body expression, evaluated over `{pa, pb}` as `i64`.
-    pub body: Expr,
+    /// The reduce body component expressions, each evaluated as `i64`. A **scalar**
+    /// accumulator has exactly one body over `{pa, pb}`. A **tuple** accumulator of
+    /// arity N>1 has N bodies (the components of the result tuple), where each accesses
+    /// the accumulator slots as the substituted idents `$acc0…$acc{N-1}` and the element
+    /// as `pb` — so the same `i64` codegen handles both (the slots are kept in N
+    /// registers / marshalled through a pointer). See [`crate::jit::define_reduce_loop`].
+    pub bodies: Vec<Expr>,
 }
 
 /// A JIT-eligible `map`/`filter` body the compiler asked the JIT to compile into a

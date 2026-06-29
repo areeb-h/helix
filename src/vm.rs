@@ -837,27 +837,61 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // the tree-walker oracle matches.
                 let base = frames[fi].base;
                 let len = stack.len();
-                let taken = match (
-                    jit,
-                    &stack[len - 2],
-                    &stack[len - 1],
-                    &locals[base + *acc_slot as usize],
-                ) {
-                    (Some(j), Value::Int(s), Value::Int(e), Value::Int(init)) => {
-                        let span = (*e as i128) - (*s as i128);
-                        if span <= 100_000_000 {
-                            j.reduce_loop(*loop_idx as usize).map(|ptr| (ptr, *s, *e, *init))
-                        } else {
-                            None
-                        }
+                let slot = base + *acc_slot as usize;
+                // A scalar accumulator has 1 body; a tuple accumulator N (the slot then
+                // holds a `Tuple` of N `Int`s). Same Int-range + in-cap gate for both.
+                let n_acc = program.reduce_loops[*loop_idx as usize].bodies.len();
+                let bounds = match (jit, &stack[len - 2], &stack[len - 1]) {
+                    (Some(j), Value::Int(s), Value::Int(e))
+                        if ((*e as i128) - (*s as i128)) <= 100_000_000 =>
+                    {
+                        j.reduce_loop(*loop_idx as usize).map(|ptr| (ptr, *s, *e))
                     }
                     _ => None,
                 };
-                if let Some((ptr, s, e, init)) = taken {
+                let took_native = if let Some((ptr, s, e)) = bounds {
+                    if n_acc == 1 {
+                        if let Value::Int(init) = locals[slot] {
+                            let r = unsafe { crate::jit::call_reduce(ptr, s, e, init) };
+                            locals[slot] = Value::Int(r);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        // Marshal the N-tuple of Ints into a slot buffer, fold natively,
+                        // rebuild the result tuple. A non-Int component falls back.
+                        let buf: Option<Vec<i64>> = match &locals[slot] {
+                            Value::Tuple(t) if t.len() == n_acc => {
+                                let mut v = Vec::with_capacity(n_acc);
+                                let mut ok = true;
+                                for el in t.iter() {
+                                    if let Value::Int(i) = el {
+                                        v.push(*i);
+                                    } else {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                                if ok { Some(v) } else { None }
+                            }
+                            _ => None,
+                        };
+                        if let Some(mut buf) = buf {
+                            unsafe { crate::jit::call_tuple_reduce(ptr, s, e, buf.as_mut_ptr()) };
+                            let out: Vec<Value> = buf.into_iter().map(Value::Int).collect();
+                            locals[slot] = Value::Tuple(std::rc::Rc::new(out));
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                if took_native {
                     stack.pop(); // end
                     stack.pop(); // start
-                    let r = unsafe { crate::jit::call_reduce(ptr, s, e, init) };
-                    locals[base + *acc_slot as usize] = Value::Int(r);
                     frames[fi].ip = *after as usize;
                 }
                 // else: fall through (ip already advanced) to CompInitRange.
