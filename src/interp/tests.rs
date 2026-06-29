@@ -49,6 +49,20 @@
     }
 
     #[test]
+    fn dna_find_all_and_gc_skew_are_native() {
+        // find_all: every 0-based start, overlapping allowed; accepts a string pattern.
+        assert_eq!(int("dna(\"GAATTCAGAATTC\").find_all(\"GAATTC\").count()"), 2);
+        assert_eq!(int("dna(\"GAATTCAGAATTC\").find_all(\"GAATTC\")[1]"), 7);
+        assert_eq!(int("dna(\"AAAA\").find_all(\"AA\").count()"), 3); // overlapping
+        assert_eq!(int("dna(\"AAAA\").find_all(\"GG\").count()"), 0); // absent → empty
+        // gc_skew: cumulative +1 per G, -1 per C, 0 on A/T/N.
+        assert_eq!(int("dna(\"GGCC\").gc_skew()[1]"), 2);
+        assert_eq!(int("dna(\"GGCC\").gc_skew()[3]"), 0);
+        assert_eq!(int("dna(\"ACGT\").gc_skew()[1]"), -1);
+        assert_eq!(int("dna(\"ACGTN\").gc_skew().count()"), 5); // one point per base
+    }
+
+    #[test]
     fn do_block_with_in_explains_the_let_mixup() {
         // The recurring `do { x = e in … }` mistake gets a precise, teaching error.
         let err = last("y = do { x = 1 in x + 1 }\ny").unwrap_err();

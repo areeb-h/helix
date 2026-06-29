@@ -1217,6 +1217,59 @@ fn dna_method(
                 None => Ok(Value::Missing),
             }
         }
+        "find_all" => {
+            arity("find_all", args, 1, line, col)?;
+            let needle = match &args[0] {
+                Value::Str(p) => (**p).clone(),
+                Value::Dna(p) => (**p).clone(),
+                v => {
+                    return Err(HelixError::new(
+                        format!("`find_all` needs a string or DNA pattern, but got a {}", v.type_name()),
+                        line,
+                        col,
+                    ))
+                }
+            };
+            if needle.is_empty() {
+                return Err(HelixError::new("`find_all` needs a non-empty pattern", line, col)
+                    .hint("pass the motif you're scanning for, e.g. `seq.find_all(\"GAATTC\")`."));
+            }
+            // Every 0-based start position, overlapping allowed (advance by 1 past each
+            // hit) — the motif-scan / restriction-site convention. ACGT is ASCII so the
+            // byte offset is the base offset, and `str::find` is memchr/Two-Way backed,
+            // so this is one native O(n) pass instead of materializing n windows.
+            let hay = s.as_str();
+            let mut positions = Vec::new();
+            let mut start = 0usize;
+            while let Some(off) = hay[start..].find(needle.as_str()) {
+                let idx = start + off;
+                positions.push(idx as i64);
+                start = idx + 1;
+            }
+            Ok(Value::int_array(positions))
+        }
+        "gc_skew" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`gc_skew` takes no arguments", line, col));
+            }
+            // The cumulative GC-skew walk: +1 per G, -1 per C, unchanged on A/T/N. The
+            // running total at each base — the classic replication-origin signal, whose
+            // minimum marks the ori. One native pass replaces a per-base interpreter loop;
+            // exact integers (no float drift). An empty sequence yields `[]`.
+            let mut acc: i64 = 0;
+            let walk: Vec<i64> = s
+                .bytes()
+                .map(|b| {
+                    match b {
+                        b'G' => acc += 1,
+                        b'C' => acc -= 1,
+                        _ => {}
+                    }
+                    acc
+                })
+                .collect();
+            Ok(Value::int_array(walk))
+        }
         "kmers" => {
             // The countable k-mer *spectrum*: only windows of unambiguous ACGT —
             // any window containing `N`/IUPAC is skipped (the Jellyfish/KMC/KmerGo
