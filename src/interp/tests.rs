@@ -79,6 +79,12 @@
         // Negative count/width are clean errors, not panics.
         assert!(last("\"x\".repeat(0 - 1)").unwrap_err().message.contains("non-negative"));
         assert!(last("\"x\".rjust(0 - 1)").unwrap_err().message.contains("non-negative"));
+        // take/drop — first n / all but first n chars (Unicode-correct), clamped.
+        assert_eq!(s("\"hello world\".take(5)"), "hello");
+        assert_eq!(s("\"hello world\".drop(6)"), "world");
+        assert_eq!(s("\"hi\".take(100)"), "hi"); // clamps, no panic
+        assert_eq!(s("\"hi\".drop(100)"), "");
+        assert_eq!(s("\"über\".take(2)"), "üb"); // counts chars, not bytes
     }
 
     #[test]

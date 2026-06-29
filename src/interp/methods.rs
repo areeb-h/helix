@@ -1167,6 +1167,25 @@ fn string_method(
         // `center` pad to a width with spaces — for *computed* widths (the `{x:20}`
         // format spec only takes a literal width), e.g. aligning a column to the
         // longest label. Padding measures Unicode scalar count, like the format spec.
+        // `take(n)` / `drop(n)` — first n characters / all but the first n, mirroring the
+        // Array methods (slicing `s[a:b]` also works; these are the prefix shorthand).
+        // Counted by Unicode scalar, so they're correct on non-ASCII text.
+        "take" | "drop" => {
+            arity(1)?;
+            let n = match &args[0] {
+                Value::Int(n) if *n >= 0 => *n as usize,
+                Value::Int(_) => {
+                    return Err(HelixError::new(format!("`{name}` needs a non-negative count"), line, col))
+                }
+                other => return Err(type_err(name, "an integer count", other, line, col)),
+            };
+            let out: String = if name == "take" {
+                s.chars().take(n).collect()
+            } else {
+                s.chars().skip(n).collect()
+            };
+            Ok(Value::Str(Rc::new(out)))
+        }
         "repeat" => {
             arity(1)?;
             let n = match &args[0] {

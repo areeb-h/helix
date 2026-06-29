@@ -177,8 +177,8 @@ pub static ARRAY_METHODS: &[&str] = &[
 /// String methods.
 pub static STRING_METHODS: &[&str] = &[
     "upper", "lower", "count", "length", "reverse", "trim", "split", "replace", "contains",
-    "starts_with", "ends_with", "repeat", "ljust", "rjust", "center", "phred", "parse_json",
-    "to_float", "to_int", "write_to", "append_to",
+    "starts_with", "ends_with", "take", "drop", "repeat", "ljust", "rjust", "center", "phred",
+    "parse_json", "to_float", "to_int", "write_to", "append_to",
 ];
 
 /// DNA-sequence methods.
