@@ -1858,3 +1858,29 @@ fn capability_gate_audit_and_enforce() {
     assert!(!err.contains("capability denied"), "a pure builtin must not be gated: {err:?}");
     assert_eq!(code, Some(0));
 }
+
+#[test]
+fn capability_gate_covers_write_methods() {
+    // The `write_to` STRING METHOD is `fs-write` authority — a hole until phase 1b, since the
+    // builtin gate only saw the `read_*` builtins. Writing to a path must be denied under
+    // enforce without the grant, and allowed with it.
+    let path = "/tmp/helix_cap_write_probe.txt";
+    let _ = std::fs::remove_file(path);
+    let src = format!("x = \"capdata\".write_to(\"{path}\")\nprint(\"wrote\")\n");
+
+    // Enforce, no grant: the write is denied (fs-write), nothing is written.
+    let (_out, err, code) = run_source(&src, &[("HELIX_CAP", "enforce")], "cap_w_deny");
+    assert!(
+        err.contains("capability denied") && err.contains("fs-write"),
+        "enforce should deny an ungranted write_to: {err:?}"
+    );
+    assert_ne!(code, Some(0));
+    assert!(!std::path::Path::new(path).exists(), "denied write must not touch the disk");
+
+    // Enforce WITH the fs-write grant: allowed.
+    let (out, _err, code) =
+        run_source(&src, &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_FS", "write")], "cap_w_grant");
+    assert_eq!(out.trim(), "wrote");
+    assert_eq!(code, Some(0));
+    let _ = std::fs::remove_file(path);
+}

@@ -69,6 +69,20 @@ pub fn effect_of(name: &str) -> Effect {
     }
 }
 
+/// The effect category of a **method** by name. The write methods (`write_to`/`append_to` on
+/// String; `write_csv`/`write_tsv`/`write_json`/`write_parquet`/`write_fasta`/`write_fastq` on
+/// Array-of-records / DataFrame) are `FsWrite`; the socket-touching `Conn` verbs are `Net`.
+/// These names are receiver-exclusive, so keying off the name alone is unambiguous. Pure
+/// methods (`map`, `mean`, `request`, `to_html`, …) are ungated.
+pub fn method_effect_of(name: &str) -> Effect {
+    match name {
+        "write_to" | "append_to" | "write_csv" | "write_tsv" | "write_json" | "write_parquet"
+        | "write_fasta" | "write_fastq" => Effect::FsWrite,
+        "accept" | "poll" | "respond" | "sse" | "send" => Effect::Net,
+        _ => Effect::Pure,
+    }
+}
+
 /// How the gate behaves. `Off` (the default when `HELIX_CAP` is unset) performs no checks.
 /// `Audit` computes the deny-by-default decision and LOGS would-be denials to stderr but
 /// allows them. `Enforce` denies an ungranted access with a `HelixError`.
@@ -168,11 +182,22 @@ fn first_str_target(args: &[Value]) -> String {
     String::new()
 }
 
-/// The gate: consulted by `call_builtin` before dispatch. `Pure` builtins and `Off` mode are
+/// The gate for **builtins**: consulted by `call_builtin` before dispatch.
+pub fn gate(name: &str, args: &[Value], line: usize, col: usize) -> Result<(), HelixError> {
+    gate_effect(effect_of(name), name, args, line, col)
+}
+
+/// The gate for **methods**: consulted by the shared method sinks (`export_method`,
+/// `net_method`, and the String `write_to`/`append_to` arm) before the effect runs. Covers
+/// the fs-write and net-egress surface the builtin gate does not see.
+pub fn gate_method(name: &str, args: &[Value], line: usize, col: usize) -> Result<(), HelixError> {
+    gate_effect(method_effect_of(name), name, args, line, col)
+}
+
+/// Shared decision for the builtin and method gates. `Pure` effects and `Off` mode are
 /// no-ops; a granted access is silent. In `Audit` an ungranted access is logged (stderr) and
 /// allowed; in `Enforce` it is a `HelixError`.
-pub fn gate(name: &str, args: &[Value], line: usize, col: usize) -> Result<(), HelixError> {
-    let eff = effect_of(name);
+fn gate_effect(eff: Effect, name: &str, args: &[Value], line: usize, col: usize) -> Result<(), HelixError> {
     if !eff.gated() {
         return Ok(());
     }
@@ -211,6 +236,23 @@ mod tests {
         assert!(!effect_of("emit").gated());
         assert!(!effect_of("sleep").gated());
         assert!(!effect_of("aes_keygen").gated());
+    }
+
+    #[test]
+    fn authority_bearing_methods_are_categorised() {
+        assert_eq!(method_effect_of("write_to"), Effect::FsWrite);
+        assert_eq!(method_effect_of("append_to"), Effect::FsWrite);
+        assert_eq!(method_effect_of("write_csv"), Effect::FsWrite);
+        assert_eq!(method_effect_of("write_parquet"), Effect::FsWrite);
+        assert_eq!(method_effect_of("write_fasta"), Effect::FsWrite);
+        assert_eq!(method_effect_of("respond"), Effect::Net);
+        assert_eq!(method_effect_of("send"), Effect::Net);
+        assert_eq!(method_effect_of("accept"), Effect::Net);
+        // Pure methods (data verbs, request-record read, string export) stay ungated.
+        assert!(!method_effect_of("map").gated());
+        assert!(!method_effect_of("mean").gated());
+        assert!(!method_effect_of("request").gated());
+        assert!(!method_effect_of("to_html").gated());
     }
 
     #[test]

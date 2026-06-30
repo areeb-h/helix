@@ -38,6 +38,10 @@ pub(crate) fn export_method(
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
+    // Capability gate (ADR 0021): the `write_*` exports are `FsWrite` authority. This is the
+    // shared sink for both engines and both receiver types, so one gate here covers them all.
+    // (`to_html`/`to_markdown`/`to_table`/charts return strings — `Pure`, ungated.)
+    crate::capability::gate_method(name, args, line, col)?;
     // `write_parquet` is DataFrame-only and goes straight to the backend.
     if name == "write_parquet" {
         return match (&recv, args.first()) {
@@ -81,6 +85,10 @@ fn net_method(
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
+    // Capability gate (ADR 0021): the socket-touching verbs (accept/poll/respond/sse/send)
+    // are `Net` authority — defense-in-depth behind `listen` (itself gated). `request` reads
+    // the already-parsed request record (no socket I/O) and is ungated (`Pure`).
+    crate::capability::gate_method(name, args, line, col)?;
     match name {
         "accept" => {
             if !args.is_empty() {
@@ -1358,6 +1366,8 @@ fn string_method(
         // argument is the path (the reverse of the underlying `writers` arg order).
         "write_to" | "append_to" => {
             arity(1)?;
+            // Capability gate (ADR 0021): writing text to a path is `FsWrite` authority.
+            crate::capability::gate_method(name, args, line, col)?;
             let path = args[0].clone();
             let a = vec![path, Value::Str(s.clone())];
             if name == "write_to" {
