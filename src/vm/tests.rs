@@ -1307,6 +1307,77 @@
         }
     }
 
+    /// A curated battery of pathological / edge-case programs — the inputs a fuzzer rarely
+    /// lands on but a user will: empty collections, out-of-bounds and negative indices,
+    /// divide/mod by zero, `i64::MIN / -1`, NaN/inf, domain errors, malformed crypto input,
+    /// type confusion through an `Unknown`-typed parameter, and a format-spec edge. Each MUST
+    /// resolve to a value or a CLEAN error on all three engines — running them in-process is
+    /// the no-panic guard (a Rust panic here fails the test) — and the engines MUST agree on
+    /// the outcome. Locks the robustness an ad-hoc audit verified into a permanent test.
+    #[test]
+    fn robustness_edge_cases_never_panic_and_agree() {
+        let cases = [
+            "print([].max())",
+            "print([].mean())",
+            "print([].first())",
+            "print([].reduce(0, (a, x) => a + x))",
+            "print([1, 2, 3][999])",
+            "print([1, 2, 3][-99])",
+            "print(\"abc\"[99])",
+            "print(([1, 2, 3])[5:2])",
+            "print((1, 2, 3)[9])",
+            "print(1 / 0)",
+            "print(1 % 0)",
+            "print(1 // 0)",
+            "print(5 % 0)",
+            "print(-9223372036854775808 // -1)",
+            "print(-9223372036854775808 % -1)",
+            "print(sqrt(-1.0))",
+            "print(log(0.0))",
+            "print(log(-5.0))",
+            "print(0.0 / 0.0)",
+            "print((1.0 / 0.0) - (1.0 / 0.0))",
+            "print(2 ** 1000)",
+            "print(9223372036854775807 + 1)",
+            "print(chr(-1))",
+            "print(chr(99999999))",
+            "print(ord(\"\"))",
+            "print(hex_decode(\"xyz\"))",
+            "print(hex_decode(\"a\"))",
+            "print(base64_decode(\"!!!!\"))",
+            "print(aes_decrypt(\"short\", \"blob\"))",
+            "print(ed25519_verify(\"bad\", \"m\", \"sig\"))",
+            "fn f(x) = x[0]\nprint(f(5))",
+            "fn f(x) = x.foo()\nprint(f(5))",
+            "fn f(x) = x + 1\nprint(f(\"s\"))",
+            "fn f(x) = x[0]\nprint(f(missing))",
+            "x = 1.5\nprint(\"{x:.999f}\")",
+            "print([1, 2, 3].take(-5))",
+            "print(range(0, 99999999999999))",
+            "print(([0.0 / 0.0, 1.0]).sort())",
+        ];
+        for src in cases {
+            let jit = run_vm_jit(src);
+            let no_jit = run_vm_no_jit(src);
+            let tw = run_tw(src);
+            // Reaching here at all proves no engine panicked. Now require outcome parity.
+            assert_eq!(
+                jit.is_ok(),
+                no_jit.is_ok(),
+                "engine outcome disagreement (JIT vs VM) on `{src}`: {jit:?} vs {no_jit:?}"
+            );
+            assert_eq!(
+                no_jit.is_ok(),
+                tw.is_ok(),
+                "engine outcome disagreement (VM vs tree-walker) on `{src}`: {no_jit:?} vs {tw:?}"
+            );
+            if let (Ok(a), Ok(b), Ok(c)) = (&jit, &no_jit, &tw) {
+                assert_eq!(a, b, "value disagreement (JIT vs VM) on `{src}`");
+                assert_eq!(b, c, "value disagreement (VM vs tree-walker) on `{src}`");
+            }
+        }
+    }
+
     /// A random `match`-bearing user function (`int` scrutinee: `Int` / `Or`-of-`Int` /
     /// guarded-binder / `_` arms, the last always a catch-all) applied per element through
     /// a map→reduce/sum. Exercises the JIT's `match` lowering ([`gen_match`]) against the

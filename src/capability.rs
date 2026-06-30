@@ -239,6 +239,41 @@ mod tests {
     }
 
     #[test]
+    fn every_effectful_builtin_is_categorised() {
+        // Drift guard: every `pure: false` builtin is either capability-gated (fs/net
+        // authority) or in this known-harmless allowlist (output / time / randomness /
+        // assertions — effects, but not authority). A NEW effectful builtin that is neither
+        // fails here, forcing the capability decision at review time instead of silently
+        // shipping an ungated authority (ADR 0021).
+        let harmless: &[&str] = &[
+            "print", "emit", "sleep", "clock_monotonic", "aes_keygen", "aes_encrypt",
+            "ed25519_keygen", "assert", "assert_eq", "assert_close",
+        ];
+        for b in crate::registry::BUILTINS {
+            if b.pure || effect_of(b.path).gated() {
+                continue;
+            }
+            assert!(
+                harmless.contains(&b.path),
+                "effectful builtin `{}` is ungated and not known-harmless — categorise it in \
+                 `capability::effect_of` (is it fs/net?) or justify it in the harmless allowlist",
+                b.path
+            );
+        }
+    }
+
+    #[test]
+    fn known_fs_net_builtins_stay_gated() {
+        // A refactor must never silently un-gate a real authority builtin.
+        for n in [
+            "read_text", "read_csv", "read_json", "read_dir", "read_vcf", "read_bam",
+            "file_exists", "remove_file", "mkdir", "listen", "http_get",
+        ] {
+            assert!(effect_of(n).gated(), "`{n}` must remain capability-gated (ADR 0021)");
+        }
+    }
+
+    #[test]
     fn authority_bearing_methods_are_categorised() {
         assert_eq!(method_effect_of("write_to"), Effect::FsWrite);
         assert_eq!(method_effect_of("append_to"), Effect::FsWrite);
