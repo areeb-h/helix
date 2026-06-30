@@ -104,6 +104,12 @@ ureq = { version = "2", optional = true }
 # dependency by sha256 (the integrity/reproducibility property), and the managed
 # downloader verifies hashes before extract (ADR 0010).
 sha2 = "0.10"
+# HMAC-SHA256 (RustCrypto, composes with sha2 0.10) and base64 — the byte-level
+# crypto/encoding primitives a pure-Helix crypto lib can't do correctly (Helix strings
+# are UTF-8, so raw-byte XOR / arbitrary-byte base64 need a native, audited path). Same
+# "delegate to audited Rust crates" stance as sha2. base64 is already in the tree.
+hmac = "0.12"
+base64 = "0.22"
 # Pure-Rust gzip (miniz_oxide backend — no zlib system dep, keeps the binary
 # self-contained). Core, not optional: reading gzipped/BGZF bioinformatics files
 # (`.vcf.gz`) is a flagship capability, and the managed-runtime extraction reuses it.

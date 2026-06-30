@@ -193,6 +193,25 @@ fn raw_strings_and_chr_ord() {
 }
 
 #[test]
+fn crypto_hmac_and_base64() {
+    // HMAC-SHA256 against the canonical RFC vector — proves real byte-level HMAC.
+    assert_eq!(
+        run(
+            &["eval", "print(hmac_sha256(\"key\", \"The quick brown fox jumps over the lazy dog\"))"],
+            &[],
+            "",
+        )
+        .0,
+        "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8\n"
+    );
+    // base64 encode/decode round trip (with padding).
+    assert_eq!(run(&["eval", "print(base64_encode(\"hello\"))"], &[], "").0, "aGVsbG8=\n");
+    assert_eq!(run(&["eval", "print(base64_decode(\"aGVsbG8=\"))"], &[], "").0, "hello\n");
+    // Invalid base64 is a clean error (not a silent wrong answer).
+    assert_eq!(run(&["eval", "print(base64_decode(\"!@#\"))"], &[], "").2, Some(1));
+}
+
+#[test]
 fn build_produces_runnable_standalone_exe() {
     let dir = std::env::temp_dir();
     let src = dir.join("helix_build_ok.helix");

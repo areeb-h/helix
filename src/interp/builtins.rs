@@ -309,6 +309,65 @@ impl super::Interp {
                     other => Err(type_err("sha256", "a string", other, line, col)),
                 }
             }
+            // HMAC-SHA256(key, message) → lowercase hex. The auth workhorse (JWT, webhook
+            // and API-request signing, secure tokens) — needs raw-byte HMAC that pure Helix
+            // can't do (its strings are UTF-8). Key/message are hashed by their UTF-8 bytes.
+            "hmac_sha256" => {
+                arity(name, &args, 2, line, col)?;
+                if matches!(args[0], Value::Missing) || matches!(args[1], Value::Missing) {
+                    return Ok(Value::Missing);
+                }
+                let key = match &args[0] {
+                    Value::Str(s) => s,
+                    other => return Err(type_err("hmac_sha256", "a string key", other, line, col)),
+                };
+                let msg = match &args[1] {
+                    Value::Str(s) => s,
+                    other => return Err(type_err("hmac_sha256", "a string message", other, line, col)),
+                };
+                use hmac::{Hmac, Mac};
+                let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key.as_bytes())
+                    .expect("HMAC accepts a key of any length");
+                mac.update(msg.as_bytes());
+                let tag = mac.finalize().into_bytes();
+                let hex: String = tag.iter().map(|b| format!("{:02x}", b)).collect();
+                Ok(Value::Str(Rc::new(hex)))
+            }
+            "base64_encode" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Missing => Ok(Value::Missing),
+                    Value::Str(s) => {
+                        use base64::Engine;
+                        let enc = base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
+                        Ok(Value::Str(Rc::new(enc)))
+                    }
+                    other => Err(type_err("base64_encode", "a string", other, line, col)),
+                }
+            }
+            "base64_decode" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Missing => Ok(Value::Missing),
+                    Value::Str(s) => {
+                        use base64::Engine;
+                        let bytes = base64::engine::general_purpose::STANDARD
+                            .decode(s.as_bytes())
+                            .map_err(|e| {
+                                HelixError::new(format!("`base64_decode` got invalid base64: {e}"), line, col)
+                            })?;
+                        match String::from_utf8(bytes) {
+                            Ok(text) => Ok(Value::Str(Rc::new(text))),
+                            Err(_) => Err(HelixError::new(
+                                "`base64_decode` produced non-UTF-8 bytes — Helix strings are text, so binary payloads aren't representable",
+                                line,
+                                col,
+                            )),
+                        }
+                    }
+                    other => Err(type_err("base64_decode", "a string", other, line, col)),
+                }
+            }
             "read_vcf" => {
                 // `read_vcf(path)` scans; `read_vcf(path, "chr:start-end")` does an
                 // indexed region query against the file's `.tbi`.

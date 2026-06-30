@@ -366,6 +366,32 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Int)
         }
+        "hmac_sha256" => {
+            if args.len() != 2 {
+                return Err(arity_err("hmac_sha256", 2, args.len(), line, col));
+            }
+            if any(args, |t| matches!(t, Type::Missing)) {
+                return Ok(Type::Missing);
+            }
+            for a in args {
+                if !matches!(a, Type::String | Type::Unknown) {
+                    return Err(type_err("hmac_sha256", "a string", a, line, col));
+                }
+            }
+            Ok(Type::String)
+        }
+        "base64_encode" | "base64_decode" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            if matches!(args[0], Type::Missing) {
+                return Ok(Type::Missing);
+            }
+            if !matches!(args[0], Type::String | Type::Unknown) {
+                return Err(type_err(name, "a string", &args[0], line, col));
+            }
+            Ok(Type::String)
+        }
         "rational" => {
             if args.len() != 2 {
                 return Err(arity_err("rational", 2, args.len(), line, col));

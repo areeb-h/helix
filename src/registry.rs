@@ -122,6 +122,9 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "align", pure: true },
     // content hash — pure (same string → same digest), so safely memoizable
     BuiltinDef { path: "sha256", pure: true },
+    BuiltinDef { path: "hmac_sha256", pure: true },
+    BuiltinDef { path: "base64_encode", pure: true },
+    BuiltinDef { path: "base64_decode", pure: true },
     // --- random (reproducible: seeded + pure, so safely memoizable) ---
     BuiltinDef { path: "random", pure: true },
     BuiltinDef { path: "randn", pure: true },
