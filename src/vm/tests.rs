@@ -1073,6 +1073,65 @@
         }
     }
 
+    /// A **range-source** f64 reduce: `range(s, e).reduce(flit, (acc, x) => body)` where the
+    /// accumulator `acc` is `f64` but the element `x` is the `i64` range counter — so the body
+    /// is MIXED (`acc + x*x`: the integer subexpression `x*x` wraps as `i64`, then promotes to
+    /// `f64` at the first float operand, exactly as the interpreter's `arith`). Locks the
+    /// typed reduce codegen against the bytecode VM and the tree-walker. Ineligible bodies
+    /// (Int root, or a mixed-kind `min`/`max`) fall back on every engine — still parity.
+    fn gen_range_float_reduce(rng: &mut u64) -> String {
+        fn flit(rng: &mut u64) -> String {
+            format!("{}.{:03}", (next(rng) % 21) as i64 - 10, next(rng) % 1000)
+        }
+        fn atom(rng: &mut u64) -> String {
+            match pick(rng, 4) {
+                0 => "acc".to_string(),
+                1 | 2 => "x".to_string(), // the i64 range counter (biased so bodies stay mixed)
+                _ => flit(rng),
+            }
+        }
+        fn expr(rng: &mut u64, depth: u32) -> String {
+            if depth == 0 || pick(rng, 2) == 0 {
+                return atom(rng);
+            }
+            match pick(rng, 6) {
+                0 => format!("(({}) + ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                1 => format!("(({}) - ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                2 => format!("(({}) * ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                3 => format!("sqrt(abs({}))", expr(rng, depth - 1)),
+                4 => format!("min(({}), ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                _ => format!("max(({}), ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+            }
+        }
+        let s = (next(rng) % 8) as i64;
+        let e = s + (next(rng) % 14) as i64; // x in [s, e) — small so the fold stays finite
+        format!("range({}, {}).reduce({}, (acc, x) => ({}))", s, e, flit(rng), expr(rng, 3))
+    }
+
+    /// Triple oracle for the **range-source f64 reduce** kernel. Pre-codegen the fold runs on
+    /// the bytecode VM (Float init → `TryJitReduce` falls back), so this asserts VM ==
+    /// tree-walker; once the typed reduce loop lands, `run_vm_jit` engages it with no change
+    /// here and the assertion becomes JIT == VM == tree-walker. (Engagement: benchmark, not
+    /// a green oracle — `reduce_jit_bodies` would otherwise claim it as a never-firing i64.)
+    #[test]
+    fn differential_range_float_reduce_oracle() {
+        let mut rng = 0x2A3D_F00D_5EED_2026u64;
+        for _ in 0..15_000 {
+            let src = gen_range_float_reduce(&mut rng);
+            let jit = run_vm_jit(&src);
+            let no_jit = run_vm_no_jit(&src);
+            let tw = run_tw(&src);
+            match (jit, no_jit, tw) {
+                (Ok(a), Ok(b), Ok(c)) => {
+                    assert_eq!(a, b, "range f64 reduce: JIT ≠ bytecode VM on `{src}`");
+                    assert_eq!(b, c, "range f64 reduce: bytecode VM ≠ tree-walker on `{src}`");
+                }
+                (Err(()), Err(()), Err(())) => {}
+                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// A random `match`-bearing user function (`int` scrutinee: `Int` / `Or`-of-`Int` /
     /// guarded-binder / `_` arms, the last always a catch-all) applied per element through
     /// a map→reduce/sum. Exercises the JIT's `match` lowering ([`gen_match`]) against the

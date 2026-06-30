@@ -896,7 +896,17 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     _ => None,
                 };
                 let took_native = if let Some((ptr, s, e)) = bounds {
-                    if n_acc == 1 {
+                    if n_acc == 1 && program.reduce_loops[*loop_idx as usize].float {
+                        // A scalar f64 fold over the i64 counter (capture-free): a `Float`
+                        // init confirms the f64 ABI; anything else falls back to the VM loop.
+                        if let Value::Float(init) = locals[slot] {
+                            let r = unsafe { crate::jit::call_reduce_f64(ptr, s, e, init) };
+                            locals[slot] = Value::Float(r);
+                            true
+                        } else {
+                            false
+                        }
+                    } else if n_acc == 1 {
                         if let Value::Int(init) = locals[slot] {
                             if n_caps == 0 {
                                 let r = unsafe { crate::jit::call_reduce(ptr, s, e, init) };

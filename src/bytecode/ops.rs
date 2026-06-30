@@ -299,6 +299,13 @@ pub struct ReduceLoop {
     /// reduce capturing the outer `map` variable). Empty for a self-contained body.
     /// **Scalar accumulators only** (a tuple body that captures stays on the VM loop).
     pub captures: Vec<String>,
+    /// `true` marks a **scalar `f64`** accumulator (a `Float` init) folded over the `i64`
+    /// range counter `pb`: the body is MIXED — integer subexpressions of `pb` wrap as `i64`,
+    /// promoting to `f64` at the first float operand, exactly like the interpreter's `arith`.
+    /// The kernel takes its `init` and returns its result as `f64`. Set only for a scalar,
+    /// capture-free body whose inferred root type is `Float`. (Tuple/captured float reduces
+    /// stay on the VM loop.)
+    pub float: bool,
 }
 
 /// A JIT-eligible `map`/`filter` body the compiler asked the JIT to compile into a

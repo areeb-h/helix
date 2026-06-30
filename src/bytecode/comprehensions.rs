@@ -300,14 +300,27 @@ impl super::Compiler {
         // *scalar* body may still be eligible by capturing free outer `i64` vars (the
         // nested-fold case), in which case its values are pushed above `[start, end]` and
         // handed to the kernel as `caps`.
+        // The init literal's type fixes the accumulator type (as in the fused reduce path):
+        // a `Float` init → a scalar `f64` fold over the i64 counter (`reduce_jit_f64_range_body`,
+        // a mixed body whose root is `Float`). A non-float init → the i64 scalar/tuple path
+        // (`reduce_jit_bodies`), or a scalar capturing the outer fold var. These must NOT
+        // compete — `reduce_jit_bodies` keys only off body shape, so a `Float` init would
+        // otherwise be claimed as a never-firing i64 kernel (the engagement-gate trap).
         let fns = self.jit_fn_set();
-        let (jit_bodies, captures): (Option<Vec<Expr>>, Vec<String>) =
-            match crate::jit::reduce_jit_bodies(init, body, pa, pb, &fns) {
-                Some(bodies) => (Some(bodies), Vec::new()),
-                None => match crate::jit::reduce_loop_captures(body, pa, pb, &fns) {
-                    Some(caps) if !caps.is_empty() => (Some(vec![body.clone()]), caps),
-                    _ => (None, Vec::new()),
-                },
+        let (jit_bodies, captures, float): (Option<Vec<Expr>>, Vec<String>, bool) =
+            if matches!(init, Expr::Float(_)) {
+                match crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &self.user_fn_set()) {
+                    Some(fb) => (Some(vec![fb]), Vec::new(), true),
+                    None => (None, Vec::new(), false),
+                }
+            } else {
+                match crate::jit::reduce_jit_bodies(init, body, pa, pb, &fns) {
+                    Some(bodies) => (Some(bodies), Vec::new(), false),
+                    None => match crate::jit::reduce_loop_captures(body, pa, pb, &fns) {
+                        Some(caps) if !caps.is_empty() => (Some(vec![body.clone()]), caps, false),
+                        _ => (None, Vec::new(), false),
+                    },
+                }
             };
         let acc;
         let x;
@@ -329,6 +342,7 @@ impl super::Compiler {
                 pb: pb.to_string(),
                 bodies,
                 captures,
+                float,
             });
             // `after` is patched once the trailing LoadLocal position is known.
             let at = b.emit(Op::TryJitReduce { loop_idx, acc_slot: acc, after: 0 }, line, col);
