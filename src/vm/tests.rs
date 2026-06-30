@@ -536,6 +536,31 @@
         }
     }
 
+    /// The unified, maximum-coverage oracle: the SAME broad whole-program generator as
+    /// `differential_vm_vs_tree_walker`, but run **with the JIT engaged**. The no-JIT
+    /// fuzzer proves VM == tree-walker; this proves **JIT == tree-walker** across the
+    /// entire program space rather than only on isolated kernels. Its value is *composition*:
+    /// a `reduce`/`map` kernel nested inside `let`/`if`/`try`/`match`/a closure exercises the
+    /// native dispatch's stack discipline (e.g. `TryJitReduce`'s capture `split_off`) against
+    /// every surrounding op — the interaction bugs the per-kernel oracles can't reach. A
+    /// distinct seed explores different programs than the no-JIT fuzzer, widening coverage.
+    #[test]
+    fn differential_vm_jit_vs_tree_walker() {
+        let mut rng = 0x0123_4567_89AB_CDEFu64; // distinct seed from the no-JIT fuzzer
+        for _ in 0..30_000 {
+            let src = gen_expr(&mut rng, 5, &[]);
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "JIT ≠ tree-walker on `{src}`"),
+                (Err(()), Err(())) => {}
+                // The one accepted asymmetry (B2): VM frames are heap-deep (1M), the
+                // tree-walker recurses on the native stack (20k). gen_expr stays well under,
+                // so this is a defensive guard, identical to the no-JIT fuzzer above.
+                (Ok(_), Err(())) if tw_hit_recursion_limit(&src) => {}
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+    }
+
     #[test]
     fn differential_functions_with_jit() {
         let mut rng = 0xFEED_FACE_DEAD_BEEFu64;
