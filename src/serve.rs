@@ -79,6 +79,40 @@ pub fn accept(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, 
     let (stream, _peer) = listener
         .accept()
         .map_err(|e| HelixError::new(format!("accept failed: {e}"), line, col))?;
+    finish_connection(stream, line, col)
+}
+
+/// `listener.poll()` — a **non-blocking** accept: return a connection if a client is
+/// already waiting, else `missing`. This is the one primitive the language is missing
+/// to express a cooperative event loop in pure Helix — keep a list of live SSE
+/// connections, `poll()` for new ones each tick, and `send` a frame to each — so a
+/// single thread serves many slow streams at once (the within-core half of a
+/// thread-per-core design; no shared state, no `Arc`). Mixing `poll()` and the blocking
+/// `accept()` is fine: the listener is returned to blocking mode after each poll.
+pub fn poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
+    let listener = match &**handle {
+        NetHandle::Listener(l) => l,
+        NetHandle::Conn { .. } => {
+            return Err(HelixError::new(
+                "`poll` works on a listener from `listen(port)`, not a connection",
+                line,
+                col,
+            ));
+        }
+    };
+    listener.set_nonblocking(true).ok();
+    let accepted = listener.accept();
+    listener.set_nonblocking(false).ok(); // restore so `accept()` still blocks if used
+    match accepted {
+        Ok((stream, _peer)) => finish_connection(stream, line, col),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Value::Missing),
+        Err(e) => Err(HelixError::new(format!("poll failed: {e}"), line, col)),
+    }
+}
+
+/// Turn a freshly accepted stream into a connection value: apply the read timeout, read
+/// and parse the request, and wrap the stream for the reply. Shared by `accept`/`poll`.
+fn finish_connection(stream: TcpStream, line: usize, col: usize) -> Result<Value, HelixError> {
     stream.set_read_timeout(Some(READ_TIMEOUT)).ok();
     // Read the request from a clone so the original stream stays free for the reply
     // (both refer to the same socket; the read clone is dropped when this returns).

@@ -214,7 +214,7 @@ pub static DICT_METHODS: &[&str] =
 /// Network-handle (`Net`) methods — the HTTP server surface (`src/serve.rs`). A
 /// listener (from `listen(port)`) has `accept`; a connection (from `accept()`) has
 /// `respond`. Effects, dispatched at runtime like the other opaque types.
-pub static NET_METHODS: &[&str] = &["accept", "request", "respond", "sse", "send"];
+pub static NET_METHODS: &[&str] = &["accept", "poll", "request", "respond", "sse", "send"];
 
 /// Look up a builtin by its dotted path.
 pub fn lookup(path: &str) -> Option<&'static BuiltinDef> {

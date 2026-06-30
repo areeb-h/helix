@@ -88,6 +88,12 @@ fn net_method(
             }
             crate::serve::accept(h, line, col)
         }
+        "poll" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`poll` takes no arguments", line, col));
+            }
+            crate::serve::poll(h, line, col)
+        }
         "request" => {
             if !args.is_empty() {
                 return Err(HelixError::new("`request` takes no arguments", line, col));
@@ -115,7 +121,7 @@ fn net_method(
             crate::serve::send(h, &args[0], line, col)
         }
         other => Err(HelixError::new(format!("type Net has no method `{other}`"), line, col)
-            .hint("a listener has `accept`; a connection has `request`/`respond`, or `sse`/`send` to stream.")),
+            .hint("a listener has `accept`/`poll`; a connection has `request`/`respond`, or `sse`/`send` to stream.")),
     }
 }
 

@@ -347,6 +347,59 @@ fn http_server_streams_sse_events() {
 }
 
 #[test]
+fn http_server_poll_serves_cooperatively() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    // poll() is a non-blocking accept: the server loops (returning `missing` while idle)
+    // until a client connects, then serves it. This is the within-core cooperative model.
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_serve_poll.helix");
+    std::fs::write(
+        &src,
+        "fn tick(l) = do {\n\
+         \x20 c = l.poll()\n\
+         \x20 if c.is_missing()\n\
+         \x20 then do {\n\
+         \x20   sleep(10)\n\
+         \x20   tick(l)\n\
+         \x20 }\n\
+         \x20 else do {\n\
+         \x20   c.respond({ status: 200, text: \"served\" })\n\
+         \x20   0\n\
+         \x20 }\n\
+         }\n\
+         tick(listen(8237))\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the server");
+
+    let mut stream = None;
+    for _ in 0..50 {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:8237") {
+            stream = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut stream = stream.expect("server never came up");
+    stream.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).unwrap();
+    let _ = child.wait();
+
+    assert!(resp.contains("200 OK") && resp.contains("served"), "response:\n{resp}");
+    let _ = std::fs::remove_file(&src);
+}
+
+#[test]
 fn http_server_survives_a_client_disconnect() {
     use std::io::Read;
     use std::net::TcpStream;
