@@ -1014,6 +1014,65 @@
         }
     }
 
+    /// A random pure-`f64` fold over a `Float` array: `[…].reduce(<float>, (acc, x) => body)`
+    /// where `body` is `+ - *` / `sqrt(abs …)` / `min` / `max` over `{acc, x, float}`. Helix's
+    /// `.reduce` is naive left-to-right, so the kernel's straight `fadd`/`fmul` (same order as
+    /// the interpreter — NOT the Neumaier path that `.sum()` uses) is **bit-exact**; that is
+    /// what makes the f64 reduce kernel safe, and this is its safety net.
+    fn gen_float_reduce(rng: &mut u64) -> String {
+        fn flit(rng: &mut u64) -> String {
+            format!("{}.{:03}", (next(rng) % 21) as i64 - 10, next(rng) % 1000)
+        }
+        fn atom(rng: &mut u64) -> String {
+            match pick(rng, 3) {
+                0 => "acc".to_string(),
+                1 => "x".to_string(),
+                _ => flit(rng),
+            }
+        }
+        fn expr(rng: &mut u64, depth: u32) -> String {
+            if depth == 0 || pick(rng, 2) == 0 {
+                return atom(rng);
+            }
+            match pick(rng, 6) {
+                0 => format!("(({}) + ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                1 => format!("(({}) - ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                2 => format!("(({}) * ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                // `abs` keeps the radicand ≥ 0 → no NaN to complicate the diff.
+                3 => format!("sqrt(abs({}))", expr(rng, depth - 1)),
+                4 => format!("min(({}), ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                _ => format!("max(({}), ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+            }
+        }
+        // Small float array (bounded magnitudes → the fold can't drift to ±inf/NaN).
+        let n = 1 + pick(rng, 6);
+        let elems: Vec<String> = (0..n).map(|_| flit(rng)).collect();
+        format!("([{}]).reduce({}, (acc, x) => ({}))", elems.join(", "), flit(rng), expr(rng, 3))
+    }
+
+    /// Triple oracle for the **f64 reduce** kernel. Until the kernel lands the fold runs on
+    /// the bytecode VM, so this asserts VM == tree-walker; once it lands, `run_vm_jit` engages
+    /// the native f64 fold with no change here and the same assertion becomes JIT == VM ==
+    /// tree-walker bit-for-bit. (Engagement is confirmed by a benchmark, not a green oracle.)
+    #[test]
+    fn differential_float_reduce_oracle() {
+        let mut rng = 0xF01D_F10A_7C0D_2026u64;
+        for _ in 0..15_000 {
+            let src = gen_float_reduce(&mut rng);
+            let jit = run_vm_jit(&src);
+            let no_jit = run_vm_no_jit(&src);
+            let tw = run_tw(&src);
+            match (jit, no_jit, tw) {
+                (Ok(a), Ok(b), Ok(c)) => {
+                    assert_eq!(a, b, "f64 reduce: JIT ≠ bytecode VM on `{src}`");
+                    assert_eq!(b, c, "f64 reduce: bytecode VM ≠ tree-walker on `{src}`");
+                }
+                (Err(()), Err(()), Err(())) => {}
+                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// A random `match`-bearing user function (`int` scrutinee: `Int` / `Or`-of-`Int` /
     /// guarded-binder / `_` arms, the last always a catch-all) applied per element through
     /// a map→reduce/sum. Exercises the JIT's `match` lowering ([`gen_match`]) against the
