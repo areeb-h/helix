@@ -35,7 +35,14 @@ use crate::value::{DictKey, Value};
 /// connection is a clean error rather than a double write.
 pub enum NetHandle {
     Listener(TcpListener),
-    Conn { request: Value, stream: RefCell<Option<TcpStream>> },
+    Conn {
+        request: Value,
+        stream: RefCell<Option<TcpStream>>,
+        /// Outbound bytes not yet accepted by the kernel send buffer. For a streaming
+        /// (`sse`) connection the socket is non-blocking, so a slow client backs bytes
+        /// up here instead of freezing the event loop; they drain on later `send`s.
+        pending: RefCell<Vec<u8>>,
+    },
 }
 
 /// Cap on a request body we will buffer (a larger `Content-Length` is truncated to
@@ -45,6 +52,15 @@ const MAX_BODY: usize = 64 << 20; // 64 MiB
 /// How long to wait on a slow client mid-request before giving up — a blocking,
 /// single-threaded server would otherwise hang forever on one stalled connection.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Cap on a streaming connection's un-drained backlog. A client more than this far
+/// behind on an SSE stream is treated as gone (and `send` returns false), so one slow
+/// reader can never grow memory without bound or wedge the shard's event loop.
+const MAX_PENDING: usize = 4 << 20; // 4 MiB
+
+/// Bound on how long a one-shot `respond` write may block on a slow reader — without it,
+/// a client that stops reading mid-body would hang the (single-threaded) shard.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How to re-run this program from the top — stashed by the CLI before execution so a
 /// sharded `listen` can launch identical worker interpreters. `File` re-loads the entry
@@ -256,7 +272,31 @@ fn finish_connection(stream: TcpStream, line: usize, col: usize) -> Result<Value
     Ok(Value::Net(Rc::new(NetHandle::Conn {
         request,
         stream: RefCell::new(Some(stream)),
+        pending: RefCell::new(Vec::new()),
     })))
+}
+
+/// Append `bytes` to a streaming connection's backlog and drain as much as the kernel
+/// will take **without blocking**. Returns whether the connection is still usable:
+/// `false` if the peer is gone (broken pipe / reset) or the backlog passed
+/// [`MAX_PENDING`] (a client too slow to keep up — dropped); `true` otherwise (fully
+/// sent, or partially sent with the remainder buffered for a later `send`). Never blocks
+/// and never splits a frame mid-write, so one slow client can't stall the shard.
+fn push_and_flush(stream: &mut TcpStream, pending: &mut Vec<u8>, bytes: &[u8]) -> bool {
+    pending.extend_from_slice(bytes);
+    let mut written = 0;
+    while written < pending.len() {
+        match stream.write(&pending[written..]) {
+            Ok(0) => break, // the send buffer is full right now
+            Ok(n) => written += n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break, // full — keep remainder
+            Err(_) => return false, // broken pipe / reset → the client is gone
+        }
+    }
+    if written > 0 {
+        pending.drain(..written);
+    }
+    pending.len() <= MAX_PENDING
 }
 
 /// `conn.request()` — the parsed request record for this connection.
@@ -351,6 +391,9 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
             return Err(HelixError::new("this connection has already been responded to", line, col));
         }
     };
+    // A slow reader must not hang the (single-threaded) shard mid-response: bound the
+    // write. On timeout the write errors and is swallowed below, like a disconnect.
+    stream.set_write_timeout(Some(WRITE_TIMEOUT)).ok();
 
     let (status, headers, body) = build_response(value, line, col)?;
     let mut head = format!("HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
@@ -476,8 +519,8 @@ fn merge_headers(out: &mut Vec<(String, String)>, headers: &Value) {
 /// `conn.sse()` — begin a Server-Sent-Events response: status `200`, `text/event-stream`,
 /// no `Content-Length`, the socket kept open. Drive it with `conn.send(value)` per event.
 pub fn sse(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
-    let cell = match &**handle {
-        NetHandle::Conn { stream, .. } => stream,
+    let (cell, pending) = match &**handle {
+        NetHandle::Conn { stream, pending, .. } => (stream, pending),
         NetHandle::Listener(_) => {
             return Err(HelixError::new("`sse` works on a connection from `accept()`", line, col));
         }
@@ -487,18 +530,24 @@ pub fn sse(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, Hel
         Some(s) => s,
         None => return Err(HelixError::new("this connection is already closed", line, col)),
     };
+    // Streaming mode: the socket is non-blocking so a slow client backs bytes up in
+    // `pending` instead of freezing the loop. Best-effort header write; if the client is
+    // already gone, the next `send` reports it.
+    stream.set_nonblocking(true).ok();
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
-    // Best-effort, like respond: if the client is already gone, send() will report it.
-    let _ = stream.write_all(head.as_bytes()).and_then(|_| stream.flush());
+    if !push_and_flush(stream, &mut pending.borrow_mut(), head.as_bytes()) {
+        *guard = None; // client already gone
+    }
     Ok(Value::Unit)
 }
 
-/// `conn.send(value)` — write one SSE event (`data: …\n\n`, flushed) on a streaming
-/// connection. Returns a **Bool**: `true` delivered, `false` the client has gone (so the
-/// producer loop can stop). A string/`Dna` is sent verbatim; any other value as JSON.
+/// `conn.send(value)` — write one SSE event (`data: …\n\n`) on a streaming connection,
+/// **without blocking**. Returns a **Bool**: `true` the connection is alive (the event
+/// was sent or buffered), `false` the client is gone or too far behind to keep up (so the
+/// producer loop drops it). A string/`Dna` is sent verbatim; any other value as JSON.
 pub fn send(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
-    let cell = match &**handle {
-        NetHandle::Conn { stream, .. } => stream,
+    let (cell, pending) = match &**handle {
+        NetHandle::Conn { stream, pending, .. } => (stream, pending),
         NetHandle::Listener(_) => {
             return Err(HelixError::new("`send` works on a connection from `accept()`", line, col));
         }
@@ -522,14 +571,14 @@ pub fn send(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> R
     frame.push('\n');
 
     let mut guard = cell.borrow_mut();
-    let delivered = match guard.as_mut() {
-        Some(s) => s.write_all(frame.as_bytes()).and_then(|_| s.flush()).is_ok(),
+    let alive = match guard.as_mut() {
+        Some(s) => push_and_flush(s, &mut pending.borrow_mut(), frame.as_bytes()),
         None => false, // already closed / responded
     };
-    if !delivered {
-        *guard = None; // the client is gone — drop the stream so further sends are no-ops
+    if !alive {
+        *guard = None; // the client is gone (or too slow) — drop the stream
     }
-    Ok(Value::Bool(delivered))
+    Ok(Value::Bool(alive))
 }
 
 /// The reason phrase for the common status codes; unknown codes get a generic phrase
