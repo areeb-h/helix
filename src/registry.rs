@@ -131,6 +131,10 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "aes_keygen", pure: false },
     BuiltinDef { path: "aes_encrypt", pure: false },
     BuiltinDef { path: "aes_decrypt", pure: true },
+    // Ed25519 signatures. keygen draws randomness (impure); sign/verify are deterministic.
+    BuiltinDef { path: "ed25519_keygen", pure: false },
+    BuiltinDef { path: "ed25519_sign", pure: true },
+    BuiltinDef { path: "ed25519_verify", pure: true },
     // --- random (reproducible: seeded + pure, so safely memoizable) ---
     BuiltinDef { path: "random", pure: true },
     BuiltinDef { path: "randn", pure: true },

@@ -412,6 +412,28 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::String)
         }
+        // A keypair record `{private, public}` — Unknown keeps field access permissive.
+        "ed25519_keygen" => {
+            if !args.is_empty() {
+                return Err(arity_err("ed25519_keygen", 0, args.len(), line, col));
+            }
+            Ok(Type::Unknown)
+        }
+        "ed25519_sign" | "ed25519_verify" => {
+            let expected = if name == "ed25519_sign" { 2 } else { 3 };
+            if args.len() != expected {
+                return Err(arity_err(name, expected, args.len(), line, col));
+            }
+            if any(args, |t| matches!(t, Type::Missing)) {
+                return Ok(Type::Missing);
+            }
+            for a in args {
+                if !matches!(a, Type::String | Type::Unknown) {
+                    return Err(type_err(name, "a string", a, line, col));
+                }
+            }
+            Ok(if name == "ed25519_sign" { Type::String } else { Type::Bool })
+        }
         "rational" => {
             if args.len() != 2 {
                 return Err(arity_err("rational", 2, args.len(), line, col));

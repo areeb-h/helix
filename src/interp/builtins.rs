@@ -474,6 +474,74 @@ impl super::Interp {
                     Err(_) => Err(HelixError::new("`aes_decrypt` produced non-UTF-8 plaintext", line, col)),
                 }
             }
+            // Ed25519 signatures — the safe asymmetric primitive (deterministic, no nonce
+            // footgun). keygen → {private, public} (both hex); sign → 128-hex signature;
+            // verify → Bool (a wrong/forged signature is `false`, never an error). Strict
+            // verification (rejects malleable signatures).
+            "ed25519_keygen" => {
+                arity(name, &args, 0, line, col)?;
+                use aes_gcm::aead::{rand_core::RngCore, OsRng};
+                let mut seed = [0u8; 32];
+                OsRng.fill_bytes(&mut seed);
+                let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+                let pk = sk.verifying_key();
+                let priv_hex: String = sk.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+                let pub_hex: String = pk.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
+                Ok(Value::Record(Rc::new(vec![
+                    (crate::symbol::Symbol::intern("private"), Value::Str(Rc::new(priv_hex))),
+                    (crate::symbol::Symbol::intern("public"), Value::Str(Rc::new(pub_hex))),
+                ])))
+            }
+            "ed25519_sign" => {
+                arity(name, &args, 2, line, col)?;
+                if matches!(args[0], Value::Missing) || matches!(args[1], Value::Missing) {
+                    return Ok(Value::Missing);
+                }
+                let priv_hex = match &args[0] {
+                    Value::Str(s) => s,
+                    other => return Err(type_err("ed25519_sign", "a 64-hex private key", other, line, col)),
+                };
+                let msg = match &args[1] {
+                    Value::Str(s) => s,
+                    other => return Err(type_err("ed25519_sign", "a string message", other, line, col)),
+                };
+                let seed = hex_to_array32(priv_hex, "an ed25519 private key", line, col)?;
+                use ed25519_dalek::Signer;
+                let sk = ed25519_dalek::SigningKey::from_bytes(&seed);
+                let sig = sk.sign(msg.as_bytes());
+                Ok(Value::Str(Rc::new(sig.to_bytes().iter().map(|b| format!("{b:02x}")).collect())))
+            }
+            "ed25519_verify" => {
+                arity(name, &args, 3, line, col)?;
+                if args.iter().any(|a| matches!(a, Value::Missing)) {
+                    return Ok(Value::Missing);
+                }
+                let pub_hex = match &args[0] {
+                    Value::Str(s) => s,
+                    other => return Err(type_err("ed25519_verify", "a 64-hex public key", other, line, col)),
+                };
+                let msg = match &args[1] {
+                    Value::Str(s) => s,
+                    other => return Err(type_err("ed25519_verify", "a string message", other, line, col)),
+                };
+                let sig_hex = match &args[2] {
+                    Value::Str(s) => s,
+                    other => return Err(type_err("ed25519_verify", "a 128-hex signature", other, line, col)),
+                };
+                let pub_bytes = hex_to_array32(pub_hex, "an ed25519 public key", line, col)?;
+                let vk = match ed25519_dalek::VerifyingKey::from_bytes(&pub_bytes) {
+                    Ok(v) => v,
+                    Err(_) => return Err(HelixError::new("`ed25519_verify` got an invalid public key", line, col)),
+                };
+                // A malformed signature is just an invalid one → `false`, not an error.
+                let sig_bytes: [u8; 64] = match hex_to_bytes(sig_hex).and_then(|b| b.try_into().ok()) {
+                    Some(b) => b,
+                    None => return Ok(Value::Bool(false)),
+                };
+                let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+                // `verify_strict` rejects malleable (non-canonical) signatures.
+                Ok(Value::Bool(vk.verify_strict(msg.as_bytes(), &sig).is_ok()))
+            }
             "read_vcf" => {
                 // `read_vcf(path)` scans; `read_vcf(path, "chr:start-end")` does an
                 // indexed region query against the file's `.tbi`.
@@ -1759,6 +1827,15 @@ fn aes_key_bytes(hex: &str, line: usize, col: usize) -> Result<Vec<u8>, HelixErr
             line,
             col,
         )),
+    }
+}
+
+/// Parse exactly 32 bytes from a 64-hex string into a fixed array (Ed25519 keys), with a
+/// `what`-labelled error otherwise.
+fn hex_to_array32(hex: &str, what: &str, line: usize, col: usize) -> Result<[u8; 32], HelixError> {
+    match hex_to_bytes(hex).and_then(|b| <[u8; 32]>::try_from(b).ok()) {
+        Some(a) => Ok(a),
+        None => Err(HelixError::new(format!("{what} must be 64 hex characters (32 bytes)"), line, col)),
     }
 }
 

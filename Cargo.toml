@@ -114,6 +114,10 @@ base64 = "0.22"
 # misuse-resistant API only — internal random nonce (OsRng), AEAD (encrypt+authenticate)
 # always, so the common footguns (nonce reuse, unauthenticated modes) aren't reachable.
 aes-gcm = "0.10"
+# Ed25519 signatures (dalek) — the safe asymmetric primitive: deterministic, no nonce
+# footgun, no parameter choices. Verify with `verify_strict` (rejects malleable sigs).
+# Deliberately NOT RSA / raw-ECDSA (padding-oracle / nonce-reuse footguns).
+ed25519-dalek = "2"
 # Pure-Rust gzip (miniz_oxide backend — no zlib system dep, keeps the binary
 # self-contained). Core, not optional: reading gzipped/BGZF bioinformatics files
 # (`.vcf.gz`) is a flagship capability, and the managed-runtime extraction reuses it.

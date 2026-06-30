@@ -231,6 +231,21 @@ fn crypto_aes_and_hex() {
 }
 
 #[test]
+fn crypto_ed25519_sign_verify() {
+    // Sign with the private key, verify with the matching public key — the round trip holds.
+    let ok = "k = ed25519_keygen()\ns = ed25519_sign(k.private, \"hello\")\nprint(ed25519_verify(k.public, \"hello\", s))";
+    assert_eq!(run(&["eval", ok], &[], "").0, "true\n");
+    // A tampered message verifies false (not an error).
+    let tampered = "k = ed25519_keygen()\ns = ed25519_sign(k.private, \"hello\")\nprint(ed25519_verify(k.public, \"HELLO\", s))";
+    assert_eq!(run(&["eval", tampered], &[], "").0, "false\n");
+    // A malformed signature verifies false (not an error).
+    let bad = "k = ed25519_keygen()\nprint(ed25519_verify(k.public, \"x\", \"00\"))";
+    assert_eq!(run(&["eval", bad], &[], "").0, "false\n");
+    // A wrong-length key is a clean error.
+    assert_eq!(run(&["eval", "print(ed25519_sign(\"abcd\", \"x\"))"], &[], "").2, Some(1));
+}
+
+#[test]
 fn build_produces_runnable_standalone_exe() {
     let dir = std::env::temp_dir();
     let src = dir.join("helix_build_ok.helix");
