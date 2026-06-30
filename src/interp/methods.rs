@@ -1558,13 +1558,16 @@ fn dna_method(
             // convention), so every emitted k-mer round-trips through `dna()` and is
             // canonicalizable. A sequence shorter than `k` (or empty) yields `[]`.
             let k = kmer_k("kmers", args, line, col)?;
-            let chars: Vec<char> = s.chars().collect();
+            // DNA is validated ASCII, so windows are byte slices (no `Vec<char>` build,
+            // no per-char decode); a window is unambiguous iff every byte is `ACGT`.
+            let bytes = s.as_bytes();
             let mut out = Vec::new();
-            if k <= chars.len() {
-                window_count_guard("kmers", chars.len() - k + 1, line, col)?;
-                for w in chars.windows(k) {
-                    if w.iter().all(|c| is_acgt(*c)) {
-                        out.push(Value::Str(Rc::new(w.iter().collect())));
+            if k <= bytes.len() {
+                window_count_guard("kmers", bytes.len() - k + 1, line, col)?;
+                for w in bytes.windows(k) {
+                    if w.iter().all(|&b| matches!(b, b'A' | b'C' | b'G' | b'T')) {
+                        // SAFETY: a window of an ASCII DNA string is valid UTF-8.
+                        out.push(Value::Str(Rc::new(unsafe { String::from_utf8_unchecked(w.to_vec()) })));
                     }
                 }
             }
@@ -1574,14 +1577,16 @@ fn dna_method(
             // Every length-`k` substring, faithfully (ambiguity included) — the
             // sequence is reconstructable from its windows. Shorter than `k` → `[]`.
             let k = kmer_k("windows", args, line, col)?;
-            let chars: Vec<char> = s.chars().collect();
+            // DNA is validated ASCII → byte-slice windows (no `Vec<char>`, no decode).
+            let bytes = s.as_bytes();
             let mut out = Vec::new();
-            if k <= chars.len() {
-                let count = chars.len() - k + 1;
+            if k <= bytes.len() {
+                let count = bytes.len() - k + 1;
                 window_count_guard("windows", count, line, col)?;
                 out.reserve(count);
-                for w in chars.windows(k) {
-                    out.push(Value::Str(Rc::new(w.iter().collect())));
+                for w in bytes.windows(k) {
+                    // SAFETY: a window of an ASCII DNA string is valid UTF-8.
+                    out.push(Value::Str(Rc::new(unsafe { String::from_utf8_unchecked(w.to_vec()) })));
                 }
             }
             Ok(Value::array(out))
@@ -1754,6 +1759,22 @@ fn dna_method(
                     ))
                 }
             };
+            // Fast path: both ASCII (always, for a `Dna` receiver vs an ASCII sequence) →
+            // compare bytes (the comparison auto-vectorizes, no per-char decode). Falls
+            // back to the exact char-based count for any non-ASCII `other`.
+            if s.is_ascii() && other.is_ascii() {
+                let (sb, ob) = (s.as_bytes(), other.as_bytes());
+                if sb.len() != ob.len() {
+                    return Err(HelixError::new(
+                        format!("`hamming` needs equal-length sequences, got {} and {}", sb.len(), ob.len()),
+                        line,
+                        col,
+                    )
+                    .hint("align or trim the sequences to the same length first."));
+                }
+                let dist = sb.iter().zip(ob).filter(|(x, y)| x != y).count();
+                return Ok(Value::Int(dist as i64));
+            }
             let (ls, lo) = (s.chars().count(), other.chars().count());
             if ls != lo {
                 return Err(HelixError::new(
@@ -1774,11 +1795,6 @@ fn dna_method(
             col,
         )),
     }
-}
-
-/// The 4 unambiguous DNA bases (the `kmers` spectrum alphabet).
-fn is_acgt(c: char) -> bool {
-    matches!(c, 'A' | 'C' | 'G' | 'T')
 }
 
 /// 2-bit-packed k-mer counts (k ≤ 32), as `(kmer, count)` tuples sorted by count
