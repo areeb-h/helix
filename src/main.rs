@@ -14,6 +14,7 @@ mod bed;
 mod bio;
 mod bundle;
 mod bytecode;
+mod capability;
 mod chart;
 mod dataframe;
 mod error;
@@ -121,6 +122,10 @@ fn install_robustness_hooks() {
 }
 
 fn run() -> ExitCode {
+    // Install the capability authority before anything runs (ADR 0021). Phase 1 defaults to
+    // `Off` (no checks) unless `HELIX_CAP=audit|enforce` is set, so this is a no-op for every
+    // existing program; a bundled exe will later carry its baked grant here instead of env.
+    capability::install_from_env();
     // A standalone executable built with `helix build` carries its program appended to
     // this binary. If we are such an artifact, run the embedded program and ignore the
     // command line entirely (the args belong to the user's program, not to `helix`).

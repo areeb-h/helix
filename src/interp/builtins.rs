@@ -14,6 +14,10 @@ impl super::Interp {
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
+        // Capability gate (ADR 0021): authority-bearing builtins (fs/net) consult the
+        // process authority first. A no-op under the default `Off` mode and for `pure`
+        // builtins; logs (audit) or denies (enforce) an ungranted access otherwise.
+        crate::capability::gate(name, &args, line, col)?;
         match name {
             "print" => {
                 // Rich rendering on a terminal (tables, color, elision, grouped

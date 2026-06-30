@@ -1824,3 +1824,37 @@ fn python_without_feature_errors_with_rebuild_hint() {
         "stderr: {stderr:?}"
     );
 }
+
+#[test]
+fn capability_gate_audit_and_enforce() {
+    // An `fs-read` builtin (resolves against the package root, where Cargo.toml exists).
+    let src = "print(file_exists(\"Cargo.toml\"))\n";
+
+    // Default (no HELIX_CAP): byte-identical to pre-capability Helix — no checks, no noise.
+    let (out, err, code) = run_source(src, &[], "cap_default");
+    assert_eq!(out.trim(), "true");
+    assert!(!err.contains("capability"), "default run must not mention capabilities: {err:?}");
+    assert_eq!(code, Some(0));
+
+    // Audit: the fs-read is logged to stderr but still allowed (program succeeds).
+    let (out, err, code) = run_source(src, &[("HELIX_CAP", "audit")], "cap_audit");
+    assert_eq!(out.trim(), "true");
+    assert!(err.contains("capability [audit] would deny fs-read"), "audit log missing: {err:?}");
+    assert_eq!(code, Some(0));
+
+    // Enforce without a grant: the fs-read is denied with a clear error (non-zero exit).
+    let (_out, err, code) = run_source(src, &[("HELIX_CAP", "enforce")], "cap_enforce_deny");
+    assert!(err.contains("capability denied"), "enforce should deny an ungranted fs-read: {err:?}");
+    assert_ne!(code, Some(0));
+
+    // Enforce WITH the matching grant: allowed again.
+    let (out, _err, code) =
+        run_source(src, &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_FS", "read")], "cap_enforce_grant");
+    assert_eq!(out.trim(), "true");
+    assert_eq!(code, Some(0));
+
+    // A pure builtin is never gated, even under enforce.
+    let (_out, err, code) = run_source("print(sqrt(16.0))\n", &[("HELIX_CAP", "enforce")], "cap_pure");
+    assert!(!err.contains("capability denied"), "a pure builtin must not be gated: {err:?}");
+    assert_eq!(code, Some(0));
+}
