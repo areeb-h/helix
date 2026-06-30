@@ -362,11 +362,22 @@ fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &HashSet<&str>, user_f
         FusionSink::Collect | FusionSink::Count => true,
         // A float reduce is checked against the f64 subset (using `user_fns` to exclude a
         // user-shadowed `sqrt`/`min`, exactly like the f64 map path); the i64 path uses
-        // `bodies_eligible`. Float is scalar-only.
+        // `bodies_eligible`. Scalar (1 body) over `{pa, pb}`; tuple (N>1) over the f64 slots
+        // `{$acc0…, pb}` (the array element `pb` is `f64`).
         FusionSink::Reduce { pa, pb, bodies, float: true } if bodies.len() == 1 => {
             float_reduce_body_eligible(&bodies[0], pa, pb, user_fns)
         }
-        FusionSink::Reduce { float: true, .. } => false,
+        FusionSink::Reduce { pb, bodies, float: true, .. } => {
+            let n = bodies.len();
+            (2..=MAX_ACC_SLOTS).contains(&n) && {
+                let mut binders: HashMap<&str, NumKind> = HashMap::new();
+                for &slot in ACC_IDENTS.iter().take(n) {
+                    binders.insert(slot, NumKind::Float);
+                }
+                binders.insert(pb.as_str(), NumKind::Float);
+                bodies.iter().all(|c| infer_f64_typed(c, &binders, user_fns) == Some(NumKind::Float))
+            }
+        }
         FusionSink::Reduce { pa, pb, bodies, float: false } => bodies_eligible(pa, pb, bodies, fns),
     }
 }
@@ -642,40 +653,68 @@ pub fn reduce_jit_f64_range_body(init: &Expr, body: &Expr, pa: &str, pb: &str, u
     }
 }
 
-/// Typed codegen for a **mixed f64-range-reduce** body: `pa` (accumulator) maps to `pa_var`
-/// (`f64`), `pb` (the range counter) to `pb_var` (`i64`). Integer subexpressions stay `i64`
-/// (wrapping `iadd`/`isub`/`imul`); the first `Float` operand promotes via `fcvt_from_sint`,
-/// matching the interpreter's `arith` bit-for-bit (the same rule as [`gen_value_typed`],
-/// generalized to two typed binders). Returns the value and its kind; eligibility
-/// ([`infer_reduce_f64_kind`]) guarantees the root is `Float`.
-fn gen_reduce_f64_mixed(
+/// Bottom-up kind of a node in a **multi-binder f64** body, given each binder's kind in
+/// `binders` (the `f64` accumulator slots `$acc0…` plus the element/counter `pb`), or `None`
+/// if it falls outside the eligible shape. The N-binder generalization of
+/// [`infer_reduce_f64_kind`] — same promotion rules; used for f64 tuple/record accumulators.
+fn infer_f64_typed(e: &Expr, binders: &HashMap<&str, NumKind>, user_fns: &HashSet<&str>) -> Option<NumKind> {
+    match e {
+        Expr::Int(_) => Some(NumKind::Int),
+        Expr::Float(_) => Some(NumKind::Float),
+        Expr::Ident { name, .. } => binders.get(name.as_str()).copied(), // None = unknown var (no captures)
+        Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
+            let lk = infer_f64_typed(left, binders, user_fns)?;
+            let rk = infer_f64_typed(right, binders, user_fns)?;
+            Some(if lk == NumKind::Float || rk == NumKind::Float {
+                NumKind::Float
+            } else {
+                NumKind::Int
+            })
+        }
+        Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
+            match (name.as_str(), args.len()) {
+                ("sqrt", 1) => {
+                    infer_f64_typed(&args[0], binders, user_fns)?;
+                    Some(NumKind::Float)
+                }
+                ("abs", 1) => infer_f64_typed(&args[0], binders, user_fns),
+                ("min" | "max", 2) => {
+                    let ka = infer_f64_typed(&args[0], binders, user_fns)?;
+                    let kb = infer_f64_typed(&args[1], binders, user_fns)?;
+                    if ka == kb { Some(ka) } else { None }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Typed codegen for a **multi-binder f64** body: each binder maps to its `(Variable, kind)`
+/// in `binders`. Integer subexpressions wrap as `i64`, promoting to `f64` at the first float
+/// operand — the interpreter's `arith` rule, the N-binder twin of [`gen_reduce_f64_mixed`].
+/// Returns the value and its kind; eligibility ([`infer_f64_typed`]) guarantees presence.
+fn gen_f64_typed(
     b: &mut FunctionBuilder,
     e: &Expr,
-    pa_var: Variable,
-    pb_var: Variable,
-    pa: &str,
-    pb: &str,
+    binders: &HashMap<&str, (Variable, NumKind)>,
 ) -> (ClValue, NumKind) {
     match e {
         Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
         Expr::Float(f) => (b.ins().f64const(*f), NumKind::Float),
         Expr::Ident { name, .. } => {
-            if name == pa {
-                (b.use_var(pa_var), NumKind::Float)
-            } else {
-                debug_assert_eq!(name, pb, "only pa/pb reach the mixed reduce kernel");
-                (b.use_var(pb_var), NumKind::Int)
-            }
+            let (var, kind) = binders[name.as_str()];
+            (b.use_var(var), kind)
         }
         Expr::Binary { op, left, right, .. } => {
-            let (lv, lk) = gen_reduce_f64_mixed(b, left, pa_var, pb_var, pa, pb);
-            let (rv, rk) = gen_reduce_f64_mixed(b, right, pa_var, pb_var, pa, pb);
+            let (lv, lk) = gen_f64_typed(b, left, binders);
+            let (rv, rk) = gen_f64_typed(b, right, binders);
             if lk == NumKind::Int && rk == NumKind::Int {
                 let v = match op {
                     BinOp::Add => b.ins().iadd(lv, rv),
                     BinOp::Sub => b.ins().isub(lv, rv),
                     BinOp::Mul => b.ins().imul(lv, rv),
-                    _ => unreachable!("ineligible operator reached mixed reduce codegen"),
+                    _ => unreachable!("ineligible operator reached f64 tuple codegen"),
                 };
                 (v, NumKind::Int)
             } else {
@@ -685,27 +724,27 @@ fn gen_reduce_f64_mixed(
                     BinOp::Add => b.ins().fadd(lf, rf),
                     BinOp::Sub => b.ins().fsub(lf, rf),
                     BinOp::Mul => b.ins().fmul(lf, rf),
-                    _ => unreachable!("ineligible operator reached mixed reduce codegen"),
+                    _ => unreachable!("ineligible operator reached f64 tuple codegen"),
                 };
                 (v, NumKind::Float)
             }
         }
         Expr::Call { name, args, .. } => match name.as_str() {
             "sqrt" => {
-                let (av, ak) = gen_reduce_f64_mixed(b, &args[0], pa_var, pb_var, pa, pb);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
             }
             "abs" => {
-                let (av, ak) = gen_reduce_f64_mixed(b, &args[0], pa_var, pb_var, pa, pb);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders);
                 match ak {
                     NumKind::Int => (b.ins().iabs(av), NumKind::Int),
                     NumKind::Float => (b.ins().fabs(av), NumKind::Float),
                 }
             }
             "min" | "max" => {
-                let (av, ak) = gen_reduce_f64_mixed(b, &args[0], pa_var, pb_var, pa, pb);
-                let (cv, _ck) = gen_reduce_f64_mixed(b, &args[1], pa_var, pb_var, pa, pb);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders);
+                let (cv, _ck) = gen_f64_typed(b, &args[1], binders);
                 let le = name == "min";
                 let cc = if le { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
                 match ak {
@@ -721,9 +760,23 @@ fn gen_reduce_f64_mixed(
                     }
                 }
             }
-            _ => unreachable!("ineligible call reached mixed reduce codegen"),
+            _ => unreachable!("ineligible call reached f64 tuple codegen"),
         },
-        _ => unreachable!("ineligible node reached mixed reduce codegen"),
+        _ => unreachable!("ineligible node reached f64 tuple codegen"),
+    }
+}
+
+/// `true` if `init` makes the reduce accumulator `f64`: a `Float` literal (scalar), or a
+/// `Tuple`/`Record` of all-`Float` literals (multi-slot). The compiler routes these to the
+/// f64 reduce paths instead of the i64 ones (which key only off body shape).
+pub fn is_float_acc_init(init: &Expr) -> bool {
+    match init {
+        Expr::Float(_) => true,
+        Expr::Tuple(items) if items.len() >= 2 => items.iter().all(|e| matches!(e, Expr::Float(_))),
+        Expr::Record(fields) if fields.len() >= 2 => {
+            fields.iter().all(|(_, e)| matches!(e, Expr::Float(_)))
+        }
+        _ => false,
     }
 }
 
@@ -826,6 +879,75 @@ fn check_slot_bodies(
         .then_some(bodies)
 }
 
+/// Like [`check_slot_bodies`], but for an **all-`f64`** tuple/record accumulator: each
+/// component is substituted (`pa[k]`/`pa.field` → `$acc{k}`) and kept only if it is
+/// `f64`-eligible over `{$acc0…(Float), pb}` with root `Float`. `pb_kind` is `Int` for a
+/// range counter, `Float` for a `Float`-array element.
+fn check_slot_bodies_f64(
+    comps: &[&Expr],
+    pa: &str,
+    pb: &str,
+    pb_kind: NumKind,
+    fields: &[String],
+    user_fns: &HashSet<&str>,
+) -> Option<Vec<Expr>> {
+    let n = comps.len();
+    let bodies: Vec<Expr> = comps.iter().map(|c| subst_acc(c, pa, n, fields)).collect();
+    let mut binders: HashMap<&str, NumKind> = HashMap::new();
+    for &slot in ACC_IDENTS.iter().take(n) {
+        binders.insert(slot, NumKind::Float);
+    }
+    binders.insert(pb, pb_kind);
+    bodies
+        .iter()
+        .all(|c| infer_f64_typed(c, &binders, user_fns) == Some(NumKind::Float))
+        .then_some(bodies)
+}
+
+/// Decide whether a `reduce(init, (pa, pb) => body)` with an **all-`Float`** tuple/record
+/// init can JIT as a multi-slot `f64` fold, returning the substituted component bodies
+/// (`$acc0…`). `pb_is_int` is `true` for a range counter, `false` for a `Float`-array
+/// element. `None` → not eligible (run the bytecode loop). Mirrors [`reduce_jit_bodies`]'s
+/// tuple/record branches, but every slot is `f64` and the components are typed per-node.
+pub fn reduce_jit_f64_tuple_bodies(
+    init: &Expr,
+    body: &Expr,
+    pa: &str,
+    pb: &str,
+    pb_is_int: bool,
+    user_fns: &HashSet<&str>,
+) -> Option<Vec<Expr>> {
+    let pb_kind = if pb_is_int { NumKind::Int } else { NumKind::Float };
+    if let (Expr::Tuple(inits), Expr::Tuple(comps)) = (init, body) {
+        let n = comps.len();
+        if n != inits.len()
+            || !(2..=MAX_ACC_SLOTS).contains(&n)
+            || !inits.iter().all(|e| matches!(e, Expr::Float(_)))
+        {
+            return None;
+        }
+        let refs: Vec<&Expr> = comps.iter().collect();
+        return check_slot_bodies_f64(&refs, pa, pb, pb_kind, &[], user_fns);
+    }
+    if let (Expr::Record(inits), Expr::Record(comps)) = (init, body) {
+        let n = inits.len();
+        if comps.len() != n
+            || !(2..=MAX_ACC_SLOTS).contains(&n)
+            || !inits.iter().all(|(_, e)| matches!(e, Expr::Float(_)))
+        {
+            return None;
+        }
+        // Same field-order requirement as the i64 path: components map to the init's order.
+        let fields: Vec<String> = inits.iter().map(|(k, _)| k.clone()).collect();
+        if comps.iter().map(|(k, _)| k).ne(fields.iter()) {
+            return None;
+        }
+        let ordered: Vec<&Expr> = comps.iter().map(|(_, e)| e).collect();
+        return check_slot_bodies_f64(&ordered, pa, pb, pb_kind, &fields, user_fns);
+    }
+    None
+}
+
 /// Decide whether a `reduce(init, (pa, pb) => body)` can JIT, and if so return its
 /// component bodies (slot accesses already substituted to `$acc0…`). `Some([body])` for a
 /// scalar `i64` accumulator; `Some([e0, e1, …])` for a 2..=MAX_ACC_SLOTS **tuple** (`a[k]`)
@@ -891,12 +1013,26 @@ fn bodies_eligible(pa: &str, pb: &str, bodies: &[Expr], fns: &HashSet<&str>) -> 
 }
 
 fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>, user_fns: &HashSet<&str>) -> bool {
-    // A scalar f64 accumulator over the i64 counter: capture-free, root `Float`, exactly
-    // what `define_reduce_loop`'s float path lowers (via `gen_reduce_f64_mixed`).
+    // An f64 accumulator over the i64 counter: capture-free, every component's root `Float`,
+    // exactly what `define_reduce_loop`'s float path lowers (via `gen_f64_typed`). Scalar (1
+    // body over `{pa, pb}`) or tuple (N>1 substituted bodies over `{$acc0…, pb}`).
     if rl.float {
-        return rl.bodies.len() == 1
-            && rl.captures.is_empty()
-            && infer_reduce_f64_kind(&rl.bodies[0], &rl.pa, &rl.pb, user_fns) == Some(NumKind::Float);
+        if !rl.captures.is_empty() {
+            return false;
+        }
+        let n = rl.bodies.len();
+        if n == 1 {
+            return infer_reduce_f64_kind(&rl.bodies[0], &rl.pa, &rl.pb, user_fns) == Some(NumKind::Float);
+        }
+        if !(2..=MAX_ACC_SLOTS).contains(&n) {
+            return false;
+        }
+        let mut binders: HashMap<&str, NumKind> = HashMap::new();
+        for &slot in ACC_IDENTS.iter().take(n) {
+            binders.insert(slot, NumKind::Float);
+        }
+        binders.insert(rl.pb.as_str(), NumKind::Int);
+        return rl.bodies.iter().all(|c| infer_f64_typed(c, &binders, user_fns) == Some(NumKind::Float));
     }
     // A scalar captured body is eligible over `{pa, pb} ∪ captures` — exactly what
     // `define_reduce_loop` binds (the captures are loop-invariant `i64` locals loaded from
@@ -1465,23 +1601,26 @@ fn define_reduce_loop(
     // wrapping, matching the interpreter (and the differential oracle).
     let n = rl.bodies.len();
     let scalar = n == 1;
-    // A **scalar f64** accumulator: `init`/return are `f64`, the body is lowered per-node
-    // (the i64 counter `pb` stays `i64`, promoting at the first float operand). Tuple/captured
-    // float reduces never reach here (compile_reduce_range only flags scalar capture-free).
-    let float = scalar && rl.float;
-    let acc_ty = if float { F64 } else { I64 };
+    // An `f64` accumulator over the `i64` counter `pb`: the body is lowered per-node (integer
+    // subexpressions of `pb` stay `i64`, promoting at the first float operand). `float` covers
+    // both the scalar (1 slot) and tuple (N>1 slots) shapes; the counter stays `i64`.
+    let float = rl.float;
+    let float_scalar = scalar && float;
+    let slot_ty = if float { F64 } else { I64 }; // accumulator slot register
+    // param2: scalar → the init VALUE (f64 for a float scalar); tuple → the `acc_ptr` (i64).
+    let third_ty = if float_scalar { F64 } else { I64 };
     // A scalar body may capture loop-invariant outer `i64` values, passed via a 4th
-    // pointer param `caps` (the nested-fold case). Tuple accumulators don't capture.
+    // pointer param `caps` (the nested-fold case). Tuple/float accumulators don't capture.
     let has_caps = scalar && !rl.captures.is_empty();
     ctx.func.signature.call_conv = CallConv::SystemV;
     ctx.func.signature.params.push(AbiParam::new(I64)); // start
     ctx.func.signature.params.push(AbiParam::new(I64)); // end
-    ctx.func.signature.params.push(AbiParam::new(acc_ty)); // scalar: init; tuple: acc_ptr (i64)
+    ctx.func.signature.params.push(AbiParam::new(third_ty)); // scalar: init; tuple: acc_ptr (i64)
     if has_caps {
         ctx.func.signature.params.push(AbiParam::new(I64)); // caps: *const i64
     }
     if scalar {
-        ctx.func.signature.returns.push(AbiParam::new(acc_ty));
+        ctx.func.signature.returns.push(AbiParam::new(third_ty));
     }
 
     let mut b = FunctionBuilder::new(&mut ctx.func, bctx);
@@ -1499,13 +1638,14 @@ fn define_reduce_loop(
     b.def_var(end_var, end);
 
     // One register per accumulator slot. Scalar seeds slot 0 with `init`; tuple loads
-    // each slot from `acc_ptr[k]`. A scalar f64 accumulator's slot is `f64`.
-    let acc_vars: Vec<Variable> = (0..n).map(|_| b.declare_var(acc_ty)).collect();
+    // each slot from `acc_ptr[k]`. An f64 accumulator's slots are `f64` (8 bytes either way,
+    // so the i64 `acc_ptr` carries the f64 bit patterns the VM packed/unpacks).
+    let acc_vars: Vec<Variable> = (0..n).map(|_| b.declare_var(slot_ty)).collect();
     if scalar {
         b.def_var(acc_vars[0], third);
     } else {
         for (k, &v) in acc_vars.iter().enumerate() {
-            let loaded = b.ins().load(I64, MemFlags::trusted(), third, (k * 8) as i32);
+            let loaded = b.ins().load(slot_ty, MemFlags::trusted(), third, (k * 8) as i32);
             b.def_var(v, loaded);
         }
     }
@@ -1562,10 +1702,20 @@ fn define_reduce_loop(
     // reads another slot (`(a[0] + x, a[1] + a[0])`) sees the pre-update value.
     let mut new_vals: Vec<ClValue> = Vec::with_capacity(n);
     if float {
-        // Scalar f64 fold over the i64 counter: typed per-node (root is `f64`, eligibility-
-        // guaranteed). `vars` is unused on this path; `acc_vars[0]`/`x_var` bind pa/pb.
-        let v = gen_reduce_f64_mixed(&mut b, &rl.bodies[0], acc_vars[0], x_var, &rl.pa, &rl.pb).0;
-        new_vals.push(v);
+        // f64 fold over the i64 counter `pb`: typed per-node (roots are `f64`, eligibility-
+        // guaranteed). Scalar binds `pa`; a tuple binds the `$acc{k}` slots. `vars` is unused.
+        let mut binders: HashMap<&str, (Variable, NumKind)> = HashMap::new();
+        if scalar {
+            binders.insert(rl.pa.as_str(), (acc_vars[0], NumKind::Float));
+        } else {
+            for (k, &v) in acc_vars.iter().enumerate() {
+                binders.insert(ACC_IDENTS[k], (v, NumKind::Float));
+            }
+        }
+        binders.insert(rl.pb.as_str(), (x_var, NumKind::Int));
+        for body in &rl.bodies {
+            new_vals.push(gen_f64_typed(&mut b, body, &binders).0);
+        }
     } else {
         for body in &rl.bodies {
             let v = gen_value(&mut b, body, &mut vars, fn_ids, module, NumKind::Int);
@@ -1776,11 +1926,15 @@ fn define_fused_kernel<'a>(
         _ => 0,
     };
     let tuple_reduce = n_acc > 1;
-    // A scalar f64 reduce over a Float array: the accumulator/element/init/return are `f64`,
-    // and the body is lowered with `NumKind::Float`. Everything else stays `i64`. (Set only
-    // for `bodies.len() == 1`; the VM only dispatches it for a `Floats` source + `Float` init.)
-    let float_reduce = matches!(&k.sink, FusionSink::Reduce { float: true, .. }) && n_acc == 1;
-    let acc_ty = if float_reduce { F64 } else { I64 };
+    // A float-flagged reduce sink folds a `Float` array (the VM dispatches it only on a
+    // `Floats` source): scalar (1 slot) → the accumulator is `f64`; tuple (N>1) → every slot
+    // is `f64`. The element is `f64` in both. The i64 paths keep `I64` throughout.
+    let float_sink = matches!(&k.sink, FusionSink::Reduce { float: true, .. });
+    let float_reduce = float_sink && n_acc == 1; // scalar f64 accumulator
+    let float_tuple = float_sink && n_acc > 1; // N-slot f64 accumulator
+    let acc_ty = if float_reduce { F64 } else { I64 }; // scalar accumulator register
+    let slot_ty = if float_tuple { F64 } else { I64 }; // tuple slot register
+    let elem_ty = if float_sink { F64 } else { I64 }; // Float-array element
 
     ctx.func.signature.call_conv = CallConv::SystemV;
     ctx.func.signature.params.push(AbiParam::new(I64)); // src pointer / range start
@@ -1804,9 +1958,10 @@ fn define_fused_kernel<'a>(
     let sink_var = b.declare_var(acc_ty); // scalar accumulator (f64 for a float reduce) / cursor
     let src_var = b.declare_var(I64);
     let dst_var = b.declare_var(I64);
-    // A tuple reduce keeps its N slots in their own registers (loaded from `acc_ptr`).
+    // A tuple reduce keeps its N slots in their own registers (loaded from `acc_ptr`); an
+    // f64 tuple's slots are `f64`.
     let acc_vars: Vec<Variable> = (0..if tuple_reduce { n_acc } else { 0 })
-        .map(|_| b.declare_var(I64))
+        .map(|_| b.declare_var(slot_ty))
         .collect();
     let z = b.ins().iconst(I64, 0);
 
@@ -1845,7 +2000,7 @@ fn define_fused_kernel<'a>(
     // (`sink_var` was harmlessly set to the pointer above and stays unused.)
     if tuple_reduce {
         for (k2, &v) in acc_vars.iter().enumerate() {
-            let loaded = b.ins().load(I64, MemFlags::trusted(), p2, (k2 * 8) as i32);
+            let loaded = b.ins().load(slot_ty, MemFlags::trusted(), p2, (k2 * 8) as i32);
             b.def_var(v, loaded);
         }
     }
@@ -1873,10 +2028,12 @@ fn define_fused_kernel<'a>(
         let off = b.ins().imul_imm(i, 8);
         let base = b.use_var(src_var);
         let addr = b.ins().iadd(base, off);
-        // The element is `f64` for a float reduce (Floats source), else `i64` (8 bytes either way).
-        b.ins().load(acc_ty, MemFlags::trusted(), addr, 0)
+        // The element is `f64` for any float reduce (scalar or tuple — `Floats` source), else
+        // `i64` (8 bytes either way). `elem_ty` (not `acc_ty`) so an f64 *tuple*, whose scalar
+        // `acc_ty` is the unused `I64`, still loads an `f64` element.
+        b.ins().load(elem_ty, MemFlags::trusted(), addr, 0)
     };
-    let cur_var = b.declare_var(acc_ty);
+    let cur_var = b.declare_var(elem_ty);
     b.def_var(cur_var, elem);
 
     // Thread the element through the stages. A Map rebinds `cur`; a Filter splits the
@@ -1914,7 +2071,20 @@ fn define_fused_kernel<'a>(
             b.def_var(sink_var, nw);
         }
         FusionSink::Reduce { pa, pb, bodies, .. } => {
-            if tuple_reduce {
+            if float_tuple {
+                // N `f64` slots → N components, typed per-node over `{$acc0…(Float), pb(Float
+                // element)}`, computed from the OLD slots then assigned.
+                let mut binders: HashMap<&str, (Variable, NumKind)> = HashMap::new();
+                for (k2, &v) in acc_vars.iter().enumerate() {
+                    binders.insert(ACC_IDENTS[k2], (v, NumKind::Float));
+                }
+                binders.insert(pb.as_str(), (cur_var, NumKind::Float));
+                let new_vals: Vec<ClValue> =
+                    bodies.iter().map(|body| gen_f64_typed(&mut b, body, &binders).0).collect();
+                for (k2, &v) in acc_vars.iter().enumerate() {
+                    b.def_var(v, new_vals[k2]);
+                }
+            } else if tuple_reduce {
                 // N slots → N components, computed from the OLD slots then assigned.
                 let mut vars: HashMap<&'a str, Variable> = HashMap::new();
                 for (k2, &v) in acc_vars.iter().enumerate() {
@@ -2487,6 +2657,16 @@ pub unsafe fn run_fused_reduce_f64(ptr: *const u8, src: &[f64], init: f64) -> f6
 /// writable `i64`s.
 pub unsafe fn run_fused_tuple_reduce(ptr: *const u8, src: &[i64], acc: *mut i64) {
     let f: extern "C" fn(*const i64, i64, *mut i64) = unsafe { std::mem::transmute(ptr) };
+    f(src.as_ptr(), src.len() as i64, acc)
+}
+
+/// Run a fused **f64 tuple**-`Reduce` over a `Float` buffer `src`: the kernel reads `f64`
+/// elements and folds N `f64` accumulator slots packed as bit patterns in the `i64` `acc`
+/// buffer (initial values in, folded result out — the same memory the VM packs/unpacks via
+/// `acc_to_slots_f64`/`rebuild_acc_f64`). SAFETY: as [`run_fused_tuple_reduce`], but the
+/// element pointer is `*const f64` and `ptr` is a `float`-flagged tuple kernel.
+pub unsafe fn run_fused_tuple_reduce_f64(ptr: *const u8, src: &[f64], acc: *mut i64) {
+    let f: extern "C" fn(*const f64, i64, *mut i64) = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, acc)
 }
 

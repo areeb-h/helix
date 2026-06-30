@@ -1132,6 +1132,88 @@
         }
     }
 
+    /// An **f64 tuple/record** accumulator fold — multi-statistic one-pass reductions
+    /// (`(sum, sum_sq)`, `(min, max)`): every slot is `f64`, over either a `Float`-array
+    /// element (pure f64) or the `i64` range counter (mixed per slot). Covers tuple AND record
+    /// shapes, 2–3 slots, range AND array sources. Locks the f64-tuple codegen (both the fused
+    /// array kernel and the range reduce loop, with bit-pattern slot marshalling) against the
+    /// bytecode VM and tree-walker. Ineligible components (Int root / mixed `min`/`max`) fall
+    /// back on every engine — still parity.
+    fn gen_f64_tuple_reduce(rng: &mut u64) -> String {
+        fn flit(rng: &mut u64) -> String {
+            format!("{}.{:03}", (next(rng) % 21) as i64 - 10, next(rng) % 1000)
+        }
+        fn atom(rng: &mut u64, nslots: usize, is_record: bool) -> String {
+            let c = pick(rng, (nslots + 2) as u64) as usize;
+            if c < nslots {
+                if is_record { format!("a.f{c}") } else { format!("a[{c}]") }
+            } else if c == nslots {
+                "x".to_string() // the element (Float array) or i64 range counter
+            } else {
+                flit(rng)
+            }
+        }
+        fn expr(rng: &mut u64, depth: u32, nslots: usize, is_record: bool) -> String {
+            if depth == 0 || pick(rng, 2) == 0 {
+                return atom(rng, nslots, is_record);
+            }
+            let e = |r: &mut u64| expr(r, depth - 1, nslots, is_record);
+            match pick(rng, 6) {
+                0 => format!("(({}) + ({}))", e(rng), e(rng)),
+                1 => format!("(({}) - ({}))", e(rng), e(rng)),
+                2 => format!("(({}) * ({}))", e(rng), e(rng)),
+                3 => format!("sqrt(abs({}))", e(rng)),
+                4 => format!("min(({}), ({}))", e(rng), e(rng)),
+                _ => format!("max(({}), ({}))", e(rng), e(rng)),
+            }
+        }
+        let nslots = 2 + pick(rng, 2) as usize; // 2 or 3
+        let is_record = pick(rng, 2) == 0;
+        let is_range = pick(rng, 2) == 0;
+        let comps: Vec<String> = (0..nslots).map(|_| expr(rng, 2, nslots, is_record)).collect();
+        let inits: Vec<String> = (0..nslots).map(|_| flit(rng)).collect();
+        let (init_s, body_s) = if is_record {
+            let i: Vec<String> = (0..nslots).map(|k| format!("f{}: {}", k, inits[k])).collect();
+            let b: Vec<String> = (0..nslots).map(|k| format!("f{}: {}", k, comps[k])).collect();
+            (format!("{{{}}}", i.join(", ")), format!("{{{}}}", b.join(", ")))
+        } else {
+            (format!("({})", inits.join(", ")), format!("({})", comps.join(", ")))
+        };
+        let src = if is_range {
+            let s = (next(rng) % 6) as i64;
+            format!("range({}, {})", s, s + (next(rng) % 10) as i64)
+        } else {
+            let n = 1 + pick(rng, 6);
+            let elems: Vec<String> = (0..n).map(|_| flit(rng)).collect();
+            format!("[{}]", elems.join(", "))
+        };
+        format!("{src}.reduce({init_s}, (a, x) => {body_s})")
+    }
+
+    /// Triple oracle for the **f64 tuple/record reduce** kernel (range + array). Pre-codegen
+    /// the fold runs on the bytecode VM (a `Float`-tuple init → fall back); once the f64 tuple
+    /// kernel lands, `run_vm_jit` engages it (array literals are idempotent → fused) with no
+    /// change here, and the assertion becomes JIT == VM == tree-walker. (Engagement is a
+    /// benchmark, not a green oracle.)
+    #[test]
+    fn differential_f64_tuple_reduce_oracle() {
+        let mut rng = 0x7AB1_E5F0_0DED_2026u64;
+        for _ in 0..15_000 {
+            let src = gen_f64_tuple_reduce(&mut rng);
+            let jit = run_vm_jit(&src);
+            let no_jit = run_vm_no_jit(&src);
+            let tw = run_tw(&src);
+            match (jit, no_jit, tw) {
+                (Ok(a), Ok(b), Ok(c)) => {
+                    assert_eq!(a, b, "f64 tuple reduce: JIT ≠ bytecode VM on `{src}`");
+                    assert_eq!(b, c, "f64 tuple reduce: bytecode VM ≠ tree-walker on `{src}`");
+                }
+                (Err(()), Err(()), Err(())) => {}
+                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// A random `match`-bearing user function (`int` scrutinee: `Int` / `Or`-of-`Int` /
     /// guarded-binder / `_` arms, the last always a catch-all) applied per element through
     /// a map→reduce/sum. Exercises the JIT's `match` lowering ([`gen_match`]) against the

@@ -213,6 +213,49 @@ fn rebuild_acc(template: &Value, buf: Vec<i64>) -> Value {
     }
 }
 
+/// Like [`acc_to_slots`], but for an **all-`Float`** accumulator: each slot's f64 bit pattern
+/// is packed into the `i64` buffer (the f64-tuple kernel reads/writes these 8-byte slots as
+/// `f64` at the same addresses). A non-`Float` slot falls back. Keeping the buffer `Vec<i64>`
+/// reuses the existing tuple-reduce runner ABI (`*mut i64`) unchanged.
+fn acc_to_slots_f64(v: &Value, n: usize) -> Option<Vec<i64>> {
+    let items: &[Value] = match v {
+        Value::Tuple(t) if t.len() == n => t,
+        Value::Record(r) if r.len() == n => {
+            let mut buf = Vec::with_capacity(n);
+            for (_, el) in r.iter() {
+                match el {
+                    Value::Float(f) => buf.push(f.to_bits() as i64),
+                    _ => return None,
+                }
+            }
+            return Some(buf);
+        }
+        _ => return None,
+    };
+    let mut buf = Vec::with_capacity(n);
+    for el in items.iter() {
+        match el {
+            Value::Float(f) => buf.push(f.to_bits() as i64),
+            _ => return None,
+        }
+    }
+    Some(buf)
+}
+
+/// Rebuild an **all-`Float`** accumulator from the folded slot bit patterns (`f64::from_bits`),
+/// matching `template`'s shape (Record reuses its field symbols, else Tuple).
+fn rebuild_acc_f64(template: &Value, buf: Vec<i64>) -> Value {
+    let f = |i: i64| Value::Float(f64::from_bits(i as u64));
+    match template {
+        Value::Record(r) => {
+            let fields: Vec<(crate::symbol::Symbol, Value)> =
+                r.iter().zip(buf).map(|((sym, _), i)| (*sym, f(i))).collect();
+            Value::Record(std::rc::Rc::new(fields))
+        }
+        _ => Value::Tuple(std::rc::Rc::new(buf.into_iter().map(f).collect())),
+    }
+}
+
 /// Execute a compiled program, printing output and returning the first runtime
 /// error (if any) for the caller to render. `jit`, when present, supplies native
 /// code for eligible integer functions.
@@ -934,14 +977,20 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             false
                         }
                     } else {
-                        // Marshal the N-slot tuple/record of Ints into a buffer, fold
-                        // natively, rebuild the same-shaped accumulator. A non-Int slot
-                        // falls back. (`tmpl` clone is an Rc bump, freeing the locals borrow.)
+                        // Marshal the N-slot tuple/record into a buffer, fold natively, rebuild
+                        // the same-shaped accumulator. An f64 accumulator packs each slot's
+                        // bit pattern (the kernel reads/writes them as f64 — same `*mut i64`
+                        // runner); the i64 path takes Int slots. A wrong-typed slot falls back.
+                        // (`tmpl` clone is an Rc bump, freeing the locals borrow.)
                         let tmpl = locals[slot].clone();
-                        match acc_to_slots(&tmpl, n_acc) {
+                        let is_float = program.reduce_loops[*loop_idx as usize].float;
+                        let slots =
+                            if is_float { acc_to_slots_f64(&tmpl, n_acc) } else { acc_to_slots(&tmpl, n_acc) };
+                        match slots {
                             Some(mut buf) => {
                                 unsafe { crate::jit::call_tuple_reduce(ptr, s, e, buf.as_mut_ptr()) };
-                                locals[slot] = rebuild_acc(&tmpl, buf);
+                                locals[slot] =
+                                    if is_float { rebuild_acc_f64(&tmpl, buf) } else { rebuild_acc(&tmpl, buf) };
                                 true
                             }
                             None => false,
@@ -1147,8 +1196,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         } else if let Value::Array(a) = &ops[0]
                             && let crate::value::ArrayData::Floats(v) = &**a
                         {
-                            // A scalar `f64` reduce over a `Float` array — the only float-flagged
-                            // kernel. A `Float` init confirms the f64 ABI; anything else falls back.
+                            // An `f64` reduce over a `Float` array: scalar (1 body, `Float`
+                            // init → `run_fused_reduce_f64`) or tuple (N bodies, all-`Float`
+                            // accumulator marshalled as bit patterns → `run_fused_tuple_reduce`,
+                            // the same `*mut i64` runner the kernel reads/writes as f64).
                             match &kern.sink {
                                 FusionSink::Reduce { bodies, float: true, .. } if bodies.len() == 1 => {
                                     match &ops[1] {
@@ -1157,6 +1208,14 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         })),
                                         _ => None,
                                     }
+                                }
+                                FusionSink::Reduce { bodies, float: true, .. } => {
+                                    acc_to_slots_f64(&ops[1], bodies.len()).map(|mut buf| {
+                                        unsafe {
+                                            crate::jit::run_fused_tuple_reduce_f64(ptr, v, buf.as_mut_ptr())
+                                        };
+                                        rebuild_acc_f64(&ops[1], buf)
+                                    })
                                 }
                                 _ => None,
                             }

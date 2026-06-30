@@ -308,9 +308,17 @@ impl super::Compiler {
         // otherwise be claimed as a never-firing i64 kernel (the engagement-gate trap).
         let fns = self.jit_fn_set();
         let (jit_bodies, captures, float): (Option<Vec<Expr>>, Vec<String>, bool) =
-            if matches!(init, Expr::Float(_)) {
-                match crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &self.user_fn_set()) {
-                    Some(fb) => (Some(vec![fb]), Vec::new(), true),
+            if crate::jit::is_float_acc_init(init) {
+                // A `Float` init (scalar) or all-`Float` tuple/record init → an `f64`
+                // accumulator folded over the i64 counter (`pb_is_int = true`). Capture-free.
+                let user_fns = self.user_fn_set();
+                let fb = if matches!(init, Expr::Float(_)) {
+                    crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &user_fns).map(|b| vec![b])
+                } else {
+                    crate::jit::reduce_jit_f64_tuple_bodies(init, body, pa, pb, true, &user_fns)
+                };
+                match fb {
+                    Some(bodies) => (Some(bodies), Vec::new(), true),
                     None => (None, Vec::new(), false),
                 }
             } else {
@@ -655,13 +663,17 @@ impl super::Compiler {
             // folding a `Float` array left-to-right, which native `fadd`/`fmul` reproduce
             // bit-for-bit (`.reduce` is naive, unlike compensated `.sum`/`.mean`). The
             // f64 kernel is array-source + 0-stages only — enforced in the `enough` gate.
-            if matches!(&args[0], Expr::Float(_)) {
-                let fbody =
-                    crate::jit::reduce_jit_f64_body(&args[0], body, &pa, &pb, &self.user_fn_set())?;
-                (
-                    FusionSink::Reduce { pa, pb, bodies: vec![fbody], float: true },
-                    Some(&args[0]),
-                )
+            if crate::jit::is_float_acc_init(&args[0]) {
+                // A `Float` init (scalar) or all-`Float` tuple/record init → an `f64`
+                // accumulator over a `Float`-array element (`pb_is_int = false`). The VM
+                // dispatches it only on a `Floats` source; an `Ints` source falls back.
+                let user_fns = self.user_fn_set();
+                let bodies = if matches!(&args[0], Expr::Float(_)) {
+                    vec![crate::jit::reduce_jit_f64_body(&args[0], body, &pa, &pb, &user_fns)?]
+                } else {
+                    crate::jit::reduce_jit_f64_tuple_bodies(&args[0], body, &pa, &pb, false, &user_fns)?
+                };
+                (FusionSink::Reduce { pa, pb, bodies, float: true }, Some(&args[0]))
             } else {
                 let bodies =
                     crate::jit::reduce_jit_bodies(&args[0], body, &pa, &pb, &self.jit_fn_set())?;
