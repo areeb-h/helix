@@ -590,6 +590,36 @@
         }
     }
 
+    /// Oracle-first safety net for the **nested-fold / captured-reduce JIT** (the O(N²)
+    /// pairwise pattern: N-body, distance matrices, all-vs-all). The inner reduce's body
+    /// captures the OUTER map variable `i` — today that makes the reduce JIT-ineligible
+    /// (the kernel ABI has no capture slot), so `run_vm_jit` runs it on the VM and this
+    /// asserts VM == tree-walker. When the capture-aware reduce kernel lands, `run_vm_jit`
+    /// engages it with NO change here, and the same assertion becomes JIT == tree-walker
+    /// bit-for-bit — the safety net is in place *before* the codegen, as the cardinal rule
+    /// (never a silent miscompilation) demands.
+    #[test]
+    fn differential_captured_reduce_jit() {
+        let mut rng = 0xCAFE_D00D_F00D_BABEu64;
+        // `i` (the captured outer binder) joins the inner fold's `acc`/`x`.
+        let atoms = vec!["acc".to_string(), "x".to_string(), "i".to_string()];
+        for _ in 0..10_000 {
+            let body = gen_i64_eligible(&mut rng, 3, &atoms);
+            let n = (next(&mut rng) % 6) as i64; // small outer range, 0..6
+            let start = (next(&mut rng) % 20) as i64 - 5;
+            let end = (next(&mut rng) % 20) as i64 - 5;
+            let init = (next(&mut rng) % 11) as i64 - 5;
+            let src = format!(
+                "(range(0, {n})).map(i => (range({start}, {end})).reduce({init}, (acc, x) => ({body}))).sum()"
+            );
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "captured reduce JIT ≠ tree-walker on `{src}`"),
+                (Err(()), Err(())) => {}
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// A JIT-**eligible** `i64` expression over `atoms`: only `+ - *`, the inline scalar
     /// builtins (`min`/`max`/`abs`), int literals, and the atoms — so a fold body built
     /// from it genuinely compiles to the native tuple kernel (no float/div/bitwise to make
