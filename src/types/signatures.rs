@@ -380,7 +380,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::String)
         }
-        "base64_encode" | "base64_decode" => {
+        "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
@@ -389,6 +389,26 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             if !matches!(args[0], Type::String | Type::Unknown) {
                 return Err(type_err(name, "a string", &args[0], line, col));
+            }
+            Ok(Type::String)
+        }
+        "aes_keygen" => {
+            if !args.is_empty() {
+                return Err(arity_err("aes_keygen", 0, args.len(), line, col));
+            }
+            Ok(Type::String)
+        }
+        "aes_encrypt" | "aes_decrypt" => {
+            if args.len() != 2 {
+                return Err(arity_err(name, 2, args.len(), line, col));
+            }
+            if any(args, |t| matches!(t, Type::Missing)) {
+                return Ok(Type::Missing);
+            }
+            for a in args {
+                if !matches!(a, Type::String | Type::Unknown) {
+                    return Err(type_err(name, "a string", a, line, col));
+                }
             }
             Ok(Type::String)
         }

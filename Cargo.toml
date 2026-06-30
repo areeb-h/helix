@@ -110,6 +110,10 @@ sha2 = "0.10"
 # "delegate to audited Rust crates" stance as sha2. base64 is already in the tree.
 hmac = "0.12"
 base64 = "0.22"
+# AES-256-GCM authenticated encryption (RustCrypto, constant-time). Exposed with a
+# misuse-resistant API only — internal random nonce (OsRng), AEAD (encrypt+authenticate)
+# always, so the common footguns (nonce reuse, unauthenticated modes) aren't reachable.
+aes-gcm = "0.10"
 # Pure-Rust gzip (miniz_oxide backend — no zlib system dep, keeps the binary
 # self-contained). Core, not optional: reading gzipped/BGZF bioinformatics files
 # (`.vcf.gz`) is a flagship capability, and the managed-runtime extraction reuses it.

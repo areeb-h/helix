@@ -368,6 +368,112 @@ impl super::Interp {
                     other => Err(type_err("base64_decode", "a string", other, line, col)),
                 }
             }
+            "hex_encode" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Missing => Ok(Value::Missing),
+                    Value::Str(s) | Value::Dna(s) => {
+                        Ok(Value::Str(Rc::new(s.bytes().map(|b| format!("{b:02x}")).collect())))
+                    }
+                    other => Err(type_err("hex_encode", "a string", other, line, col)),
+                }
+            }
+            "hex_decode" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Missing => Ok(Value::Missing),
+                    Value::Str(s) => match hex_to_bytes(s) {
+                        Some(bytes) => match String::from_utf8(bytes) {
+                            Ok(t) => Ok(Value::Str(Rc::new(t))),
+                            Err(_) => Err(HelixError::new(
+                                "`hex_decode` produced non-UTF-8 bytes — Helix strings are text",
+                                line,
+                                col,
+                            )),
+                        },
+                        None => Err(HelixError::new(
+                            "`hex_decode` needs an even number of hex digits (0-9, a-f)",
+                            line,
+                            col,
+                        )),
+                    },
+                    other => Err(type_err("hex_decode", "a hex string", other, line, col)),
+                }
+            }
+            // AES-256-GCM authenticated encryption. Misuse-resistant by construction: the
+            // nonce is random per call (internal, prepended to the ciphertext) so it can't be
+            // reused, and decryption verifies the tag — a wrong key or tampered ciphertext is
+            // an error, never a silent garbage plaintext. Keys are 64-hex (use `aes_keygen()`).
+            "aes_keygen" => {
+                arity(name, &args, 0, line, col)?;
+                use aes_gcm::{aead::OsRng, Aes256Gcm, KeyInit};
+                let key = Aes256Gcm::generate_key(&mut OsRng);
+                Ok(Value::Str(Rc::new(key.iter().map(|b| format!("{b:02x}")).collect())))
+            }
+            "aes_encrypt" => {
+                arity(name, &args, 2, line, col)?;
+                if matches!(args[0], Value::Missing) || matches!(args[1], Value::Missing) {
+                    return Ok(Value::Missing);
+                }
+                let key_hex = match &args[0] {
+                    Value::Str(s) => s,
+                    other => return Err(type_err("aes_encrypt", "a 64-hex key", other, line, col)),
+                };
+                let plaintext = match &args[1] {
+                    Value::Str(s) => s,
+                    other => return Err(type_err("aes_encrypt", "a string to encrypt", other, line, col)),
+                };
+                let key_bytes = aes_key_bytes(key_hex, line, col)?;
+                use aes_gcm::{
+                    aead::{Aead, AeadCore, OsRng},
+                    Aes256Gcm, Key, KeyInit,
+                };
+                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+                let nonce = Aes256Gcm::generate_nonce(&mut OsRng); // 96-bit, unique per call
+                let ct = cipher
+                    .encrypt(&nonce, plaintext.as_bytes())
+                    .map_err(|_| HelixError::new("`aes_encrypt` failed", line, col))?;
+                let mut blob = nonce.to_vec();
+                blob.extend_from_slice(&ct);
+                use base64::Engine;
+                Ok(Value::Str(Rc::new(base64::engine::general_purpose::STANDARD.encode(&blob))))
+            }
+            "aes_decrypt" => {
+                arity(name, &args, 2, line, col)?;
+                if matches!(args[0], Value::Missing) || matches!(args[1], Value::Missing) {
+                    return Ok(Value::Missing);
+                }
+                let key_hex = match &args[0] {
+                    Value::Str(s) => s,
+                    other => return Err(type_err("aes_decrypt", "a 64-hex key", other, line, col)),
+                };
+                let blob_b64 = match &args[1] {
+                    Value::Str(s) => s,
+                    other => return Err(type_err("aes_decrypt", "a base64 ciphertext", other, line, col)),
+                };
+                let key_bytes = aes_key_bytes(key_hex, line, col)?;
+                use base64::Engine;
+                let blob = base64::engine::general_purpose::STANDARD
+                    .decode(blob_b64.as_bytes())
+                    .map_err(|_| HelixError::new("`aes_decrypt` got invalid base64", line, col))?;
+                if blob.len() < 12 {
+                    return Err(HelixError::new("`aes_decrypt` ciphertext is too short", line, col));
+                }
+                let (nonce, ct) = blob.split_at(12);
+                use aes_gcm::{aead::Aead, Aes256Gcm, Key, KeyInit, Nonce};
+                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+                let pt = cipher.decrypt(Nonce::from_slice(nonce), ct).map_err(|_| {
+                    HelixError::new(
+                        "`aes_decrypt` failed — wrong key, or the ciphertext was tampered with",
+                        line,
+                        col,
+                    )
+                })?;
+                match String::from_utf8(pt) {
+                    Ok(t) => Ok(Value::Str(Rc::new(t))),
+                    Err(_) => Err(HelixError::new("`aes_decrypt` produced non-UTF-8 plaintext", line, col)),
+                }
+            }
             "read_vcf" => {
                 // `read_vcf(path)` scans; `read_vcf(path, "chr:start-end")` does an
                 // indexed region query against the file's `.tbi`.
@@ -1626,6 +1732,34 @@ fn gcd_i64(a: i64, b: i64) -> i64 {
         a = t;
     }
     a as i64
+}
+
+/// Parse an even-length hex string (`0-9a-fA-F`) into its bytes; `None` on odd length or a
+/// non-hex digit. Shared by `hex_decode` and the AES key parser.
+fn hex_to_bytes(s: &str) -> Option<Vec<u8>> {
+    let hb = s.as_bytes();
+    if !hb.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(hb.len() / 2);
+    for pair in hb.chunks(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push((hi * 16 + lo) as u8);
+    }
+    Some(out)
+}
+
+/// Parse a 32-byte (64-hex-char) AES-256 key, with a clear error otherwise.
+fn aes_key_bytes(hex: &str, line: usize, col: usize) -> Result<Vec<u8>, HelixError> {
+    match hex_to_bytes(hex) {
+        Some(b) if b.len() == 32 => Ok(b),
+        _ => Err(HelixError::new(
+            "an AES key must be 64 hex characters (32 bytes) — generate one with `aes_keygen()`",
+            line,
+            col,
+        )),
+    }
 }
 
 /// Read a whole file to a `String`, capping at `MAX_STRING_LEN` so a huge file is a

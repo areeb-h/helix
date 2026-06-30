@@ -125,6 +125,12 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "hmac_sha256", pure: true },
     BuiltinDef { path: "base64_encode", pure: true },
     BuiltinDef { path: "base64_decode", pure: true },
+    BuiltinDef { path: "hex_encode", pure: true },
+    BuiltinDef { path: "hex_decode", pure: true },
+    // AES-256-GCM. keygen/encrypt draw fresh randomness (NOT memoizable); decrypt is pure.
+    BuiltinDef { path: "aes_keygen", pure: false },
+    BuiltinDef { path: "aes_encrypt", pure: false },
+    BuiltinDef { path: "aes_decrypt", pure: true },
     // --- random (reproducible: seeded + pure, so safely memoizable) ---
     BuiltinDef { path: "random", pure: true },
     BuiltinDef { path: "randn", pure: true },

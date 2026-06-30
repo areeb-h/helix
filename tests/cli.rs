@@ -212,6 +212,25 @@ fn crypto_hmac_and_base64() {
 }
 
 #[test]
+fn crypto_aes_and_hex() {
+    // hex round trip.
+    assert_eq!(run(&["eval", "print(hex_encode(\"hi\"))"], &[], "").0, "6869\n");
+    assert_eq!(run(&["eval", "print(hex_decode(\"6869\"))"], &[], "").0, "hi\n");
+    // AES-256-GCM round trip with a fixed key (encrypt's nonce is random; decrypt recovers).
+    let k = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    let prog = format!("key = \"{k}\"\nprint(aes_decrypt(key, aes_encrypt(key, \"secret message\")))");
+    assert_eq!(run(&["eval", &prog], &[], "").0, "secret message\n");
+    // A wrong-length key is a clean error.
+    assert_eq!(run(&["eval", "print(aes_encrypt(\"abc\", \"x\"))"], &[], "").2, Some(1));
+    // The wrong key fails to decrypt — authenticated, never silent garbage.
+    let k2 = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
+    let wrong = format!(
+        "b = aes_encrypt(\"{k}\", \"x\")\nr = try aes_decrypt(\"{k2}\", b)\nprint(r.ok)"
+    );
+    assert_eq!(run(&["eval", &wrong], &[], "").0, "false\n");
+}
+
+#[test]
 fn build_produces_runnable_standalone_exe() {
     let dir = std::env::temp_dir();
     let src = dir.join("helix_build_ok.helix");
