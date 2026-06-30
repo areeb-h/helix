@@ -1214,6 +1214,99 @@
         }
     }
 
+    /// A JIT-eligible `f64` reduce (range/array scalar, tuple, or record — the kernels from
+    /// `8f656d8`/`f35e4ce`/`225a8b3`) reduced to a scalar and wrapped in a random scalar
+    /// CONTEXT: `let`, `if`, arithmetic, `try`, `match`. The per-kernel oracles prove these
+    /// fire and are bit-exact in ISOLATION; this proves the native multi-slot dispatch (with
+    /// its bit-pattern slot marshalling and stack choreography) stays bit-exact in
+    /// COMPOSITION — a kernel result feeding surrounding ops is where a stack-discipline bug
+    /// in `TryJitReduce`/`TryJitFused` would surface.
+    fn gen_f64_reduce_composed(rng: &mut u64) -> String {
+        fn flit(rng: &mut u64) -> String {
+            format!("{}.{:03}", (next(rng) % 13) as i64 - 6, next(rng) % 1000)
+        }
+        // An eligible f64 body over the accumulator atom(s) and the element `x`: `+ - *` and
+        // `sqrt(abs(.))` only — within the JIT-eligible subset so the kernel actually fires
+        // (no `min`/`max`, which would be mixed-kind and fall back over a range counter).
+        fn body(rng: &mut u64, accs: &[&str]) -> String {
+            fn atom(rng: &mut u64, accs: &[&str]) -> String {
+                let c = pick(rng, (accs.len() + 2) as u64) as usize;
+                if c < accs.len() {
+                    accs[c].to_string()
+                } else if c == accs.len() {
+                    "x".to_string()
+                } else {
+                    flit(rng)
+                }
+            }
+            fn ex(rng: &mut u64, d: u32, accs: &[&str]) -> String {
+                if d == 0 || pick(rng, 2) == 0 {
+                    return atom(rng, accs);
+                }
+                match pick(rng, 4) {
+                    0 => format!("(({}) + ({}))", ex(rng, d - 1, accs), ex(rng, d - 1, accs)),
+                    1 => format!("(({}) - ({}))", ex(rng, d - 1, accs), ex(rng, d - 1, accs)),
+                    2 => format!("(({}) * ({}))", ex(rng, d - 1, accs), ex(rng, d - 1, accs)),
+                    _ => format!("sqrt(abs({}))", ex(rng, d - 1, accs)),
+                }
+            }
+            ex(rng, 2, accs)
+        }
+        // A small `Float` array (x is a `f64` element) or a small range (x is the i64 counter).
+        fn src(rng: &mut u64) -> String {
+            if pick(rng, 2) == 0 {
+                let n = 1 + pick(rng, 5);
+                let e: Vec<String> = (0..n).map(|_| flit(rng)).collect();
+                format!("[{}]", e.join(", "))
+            } else {
+                let s = (next(rng) % 6) as i64;
+                format!("range({}, {})", s, s + (next(rng) % 9) as i64)
+            }
+        }
+        let inner = match pick(rng, 4) {
+            1 => {
+                let k = pick(rng, 2);
+                format!(
+                    "({}.reduce(({}, {}), (a, x) => (({}), ({}))))[{}]",
+                    src(rng), flit(rng), flit(rng), body(rng, &["a[0]", "a[1]"]), body(rng, &["a[0]", "a[1]"]), k
+                )
+            }
+            2 => format!(
+                "({}.reduce({{p: {}, q: {}}}, (a, x) => {{p: ({}), q: ({})}})).{}",
+                src(rng), flit(rng), flit(rng), body(rng, &["a.p", "a.q"]), body(rng, &["a.p", "a.q"]),
+                if pick(rng, 2) == 0 { "p" } else { "q" }
+            ),
+            _ => format!("{}.reduce({}, (acc, x) => ({}))", src(rng), flit(rng), body(rng, &["acc"])),
+        };
+        match pick(rng, 5) {
+            0 => format!("(let w = ({inner}) in ((w) + ({})))", flit(rng)),
+            1 => format!("(if (({inner}) > ({})) then ({inner}) else ({}))", flit(rng), flit(rng)),
+            2 => format!("(({inner}) * ({}))", flit(rng)),
+            3 => format!("((try ({inner})).value ?? ({}))", flit(rng)),
+            _ => format!("(match 0 {{ 0 => ({inner}), _ => ({}) }})", flit(rng)),
+        }
+    }
+
+    /// Triple oracle for the f64 reduce kernels **in composition** (see `gen_f64_reduce_composed`).
+    #[test]
+    fn differential_f64_reduce_composition_oracle() {
+        let mut rng = 0x5EED_F64C_0FFE_2026u64;
+        for _ in 0..15_000 {
+            let src = gen_f64_reduce_composed(&mut rng);
+            let jit = run_vm_jit(&src);
+            let no_jit = run_vm_no_jit(&src);
+            let tw = run_tw(&src);
+            match (jit, no_jit, tw) {
+                (Ok(a), Ok(b), Ok(c)) => {
+                    assert_eq!(a, b, "f64 reduce composition: JIT ≠ bytecode VM on `{src}`");
+                    assert_eq!(b, c, "f64 reduce composition: bytecode VM ≠ tree-walker on `{src}`");
+                }
+                (Err(()), Err(()), Err(())) => {}
+                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
+            }
+        }
+    }
+
     /// A random `match`-bearing user function (`int` scrutinee: `Int` / `Or`-of-`Int` /
     /// guarded-binder / `_` arms, the last always a catch-all) applied per element through
     /// a map→reduce/sum. Exercises the JIT's `match` lowering ([`gen_match`]) against the
