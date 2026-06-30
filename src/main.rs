@@ -322,6 +322,9 @@ fn run_eval(code: &str) -> ExitCode {
 /// both `helix eval` and a `helix build` standalone artifact). Errors render against
 /// `filename`. Must be called on the big stack (the front-end recurses over the AST).
 fn run_source(code: &str, filename: &str) -> ExitCode {
+    // Record how to re-run this program, so a sharded `listen(port, shards)` can launch
+    // identical worker interpreters (no-op after the first call / on shard workers).
+    serve::set_rerun(serve::Rerun::Source(code.to_string(), filename.to_string()));
     let tokens = match lexer::lex(code) {
         Ok(t) => t,
         Err(e) => {
@@ -451,6 +454,9 @@ fn print_help() {
 }
 
 fn run_file(path: &str) -> ExitCode {
+    // Record how to re-run this entry file, so a sharded `listen(port, shards)` can
+    // launch identical worker interpreters that re-load the same program.
+    serve::set_rerun(serve::Rerun::File(std::path::PathBuf::from(path)));
     // The whole pipeline runs on the big stack (see `run_on_big_stack`) so the
     // front-end's AST recursion can't overflow before the depth guard fires.
     run_on_big_stack(|| match run_file_capture(std::path::Path::new(path)) {

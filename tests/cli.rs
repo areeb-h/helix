@@ -347,6 +347,56 @@ fn http_server_streams_sse_events() {
 }
 
 #[test]
+fn http_server_shards_across_workers() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    // `listen(port, 2)` spins up a second share-nothing worker on the same port via
+    // SO_REUSEPORT. We can't observe which worker the kernel routes to, but we verify the
+    // server announces sharding and serves a request correctly.
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_serve_shard.helix");
+    std::fs::write(
+        &src,
+        "fn srv(l) = do {\n\
+         \x20 c = l.accept()\n\
+         \x20 c.respond({ status: 200, text: \"sharded\" })\n\
+         \x20 srv(l)\n\
+         }\n\
+         srv(listen(8238, 2))\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the server");
+
+    let mut stream = None;
+    for _ in 0..60 {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:8238") {
+            stream = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut stream = stream.expect("sharded server never came up");
+    stream.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).unwrap();
+    let _ = child.kill();
+    let out = child.wait_with_output().expect("failed to wait on the server");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(resp.contains("200 OK") && resp.contains("sharded"), "response:\n{resp}");
+    assert!(stderr.contains("2 shards"), "expected a sharding announcement; stderr:\n{stderr}");
+    let _ = std::fs::remove_file(&src);
+}
+
+#[test]
 fn http_server_poll_serves_cooperatively() {
     use std::io::Read;
     use std::net::TcpStream;

@@ -104,11 +104,20 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // runtime-only type (`Value::Net`); the checker sees `Unknown`, so `.accept()` /
         // `.respond()` on it dispatch at runtime — the opaque-type pattern shared with Dict.
         "listen" => {
-            if args.len() != 1 {
-                return Err(arity_err("listen", 1, args.len(), line, col));
+            if args.is_empty() || args.len() > 2 {
+                return Err(HelixError::new(
+                    format!("`listen` takes a port and an optional shard count, got {}", args.len()),
+                    line,
+                    col,
+                ));
             }
             if !compatible(&args[0], &Type::Int) {
                 return Err(type_err("listen", "a port number", &args[0], line, col));
+            }
+            if let Some(a) = args.get(1)
+                && !compatible(a, &Type::Int)
+            {
+                return Err(type_err("listen", "a shard count", a, line, col));
             }
             Ok(Type::Unknown)
         }

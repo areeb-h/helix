@@ -63,12 +63,23 @@ impl super::Interp {
                 Ok(Value::Unit)
             }
             "listen" => {
-                arity(name, &args, 1, line, col)?;
+                if args.is_empty() || args.len() > 2 {
+                    return Err(HelixError::new(
+                        format!("`listen` takes a port and an optional shard count, got {}", args.len()),
+                        line,
+                        col,
+                    ));
+                }
                 let port = match &args[0] {
                     Value::Int(n) => *n,
                     other => return Err(type_err("listen", "a port number", other, line, col)),
                 };
-                crate::serve::listen(port, line, col)
+                let shards = match args.get(1) {
+                    None => 1,
+                    Some(Value::Int(n)) => *n,
+                    Some(other) => return Err(type_err("listen", "a shard count", other, line, col)),
+                };
+                crate::serve::listen(port, shards, line, col)
             }
             "assert" => {
                 if args.is_empty() || args.len() > 2 {

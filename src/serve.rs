@@ -16,10 +16,12 @@
 //! keep-alive, no chunked transfer. Pure `std::net` — no new dependency, so a built
 //! binary stays self-contained.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::error::HelixError;
@@ -44,22 +46,153 @@ const MAX_BODY: usize = 64 << 20; // 64 MiB
 /// single-threaded server would otherwise hang forever on one stalled connection.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `listen(port)` — bind a TCP listener on `127.0.0.1:port` (loopback by default, like
-/// Flask's dev server; front it with a proxy to expose it). Returns a listener value
-/// to drive with `.accept()`.
-pub fn listen(port: i64, line: usize, col: usize) -> Result<Value, HelixError> {
+/// How to re-run this program from the top — stashed by the CLI before execution so a
+/// sharded `listen` can launch identical worker interpreters. `File` re-loads the entry
+/// (and its imports); `Source` re-runs an inline program (`helix eval` / a bundled exe).
+#[derive(Clone)]
+pub enum Rerun {
+    File(PathBuf),
+    Source(String, String),
+}
+
+static RERUN: OnceLock<Rerun> = OnceLock::new();
+
+/// Record how to re-run this program (called once by the CLI at startup). Idempotent.
+pub fn set_rerun(spec: Rerun) {
+    let _ = RERUN.set(spec);
+}
+
+thread_local! {
+    /// True on a spawned shard worker, so its own `listen(port, shards)` call binds its
+    /// socket but does NOT recursively spawn more shards.
+    static IS_SHARD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Stack size for a shard worker — matches the main interpreter thread (the front-end
+/// recurses over the AST); reserved address space, not resident memory.
+const SHARD_STACK: usize = 1024 * 1024 * 1024;
+
+/// `listen(port)` / `listen(port, shards)` — bind a listener on `127.0.0.1:port`.
+///
+/// With `shards > 1`, Helix serves on N **share-nothing** worker interpreters: this
+/// spawns `shards - 1` threads, each of which re-runs the whole program independently
+/// (its own parse → compile → VM → globals — nothing is shared, so `Rc` values never
+/// cross a thread and no `Arc`/locks are needed) and binds the *same* port via
+/// `SO_REUSEPORT`. The Linux kernel then hashes each incoming connection to one worker
+/// — true multi-core serving with no lock contention. This is the across-core half of
+/// a thread-per-core design (ScyllaDB/Redpanda/Seastar); `poll()` is the within-core
+/// half. Top-level code runs once per shard (each worker re-initializes its own state).
+pub fn listen(port: i64, shards: i64, line: usize, col: usize) -> Result<Value, HelixError> {
     if !(1..=65535).contains(&port) {
-        return Err(HelixError::new(
-            format!("`listen` needs a port in 1..=65535, got {port}"),
-            line,
-            col,
-        ));
+        return Err(HelixError::new(format!("`listen` needs a port in 1..=65535, got {port}"), line, col));
     }
-    let listener = TcpListener::bind(("127.0.0.1", port as u16)).map_err(|e| {
+    if shards < 1 {
+        return Err(HelixError::new(format!("`listen` needs at least 1 shard, got {shards}"), line, col));
+    }
+    let listener = bind_listener(port as u16, line, col)?;
+    // The primary worker (not itself a shard) spawns the rest.
+    if shards > 1 && !IS_SHARD.with(Cell::get) {
+        spawn_shards(shards as usize, line, col)?;
+    }
+    Ok(Value::Net(Rc::new(NetHandle::Listener(listener))))
+}
+
+/// Bind a loopback listener. On Linux it sets `SO_REUSEPORT`/`SO_REUSEADDR` so multiple
+/// shard workers can bind the same port and the kernel load-balances; elsewhere it falls
+/// back to a plain bind (so `shards > 1` would fail on the second bind — sharding is
+/// Linux-only for now).
+fn bind_listener(port: u16, line: usize, col: usize) -> Result<TcpListener, HelixError> {
+    let bind_err = |e: std::io::Error| {
         HelixError::new(format!("could not bind 127.0.0.1:{port}: {e}"), line, col)
             .hint("the port may already be in use — try another, or stop the process holding it.")
+    };
+    #[cfg(target_os = "linux")]
+    {
+        bind_reuseport(port).map_err(bind_err)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        TcpListener::bind(("127.0.0.1", port)).map_err(bind_err)
+    }
+}
+
+/// Create a `127.0.0.1:port` listener with `SO_REUSEPORT` + `SO_REUSEADDR` set before
+/// bind, so N worker sockets can share the port and the kernel distributes connections.
+#[cfg(target_os = "linux")]
+fn bind_reuseport(port: u16) -> std::io::Result<TcpListener> {
+    use std::os::unix::io::FromRawFd;
+    // SAFETY: a straight-line socket/setsockopt/bind/listen sequence on a fresh fd. The
+    // fd is wrapped in a `TcpListener` immediately, so every early return (a failed
+    // option/bind/listen) drops it and closes the fd — no leak.
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let listener = TcpListener::from_raw_fd(fd);
+        let one: libc::c_int = 1;
+        let set_opt = |opt| {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                opt,
+                &one as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if set_opt(libc::SO_REUSEADDR) < 0 || set_opt(libc::SO_REUSEPORT) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let addr = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: port.to_be(),
+            sin_addr: libc::in_addr { s_addr: libc::INADDR_LOOPBACK.to_be() },
+            sin_zero: [0; 8],
+        };
+        let bind = libc::bind(
+            fd,
+            &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        );
+        if bind < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::listen(fd, 128) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(listener)
+    }
+}
+
+/// Spawn `total - 1` shard workers, each re-running the program on its own thread with
+/// `IS_SHARD` set (so it binds but doesn't recurse into spawning). Workers are detached:
+/// they run their own accept loops for the life of the process.
+fn spawn_shards(total: usize, line: usize, col: usize) -> Result<(), HelixError> {
+    let rerun = RERUN.get().cloned().ok_or_else(|| {
+        HelixError::new("internal: cannot shard — the program's source was not recorded", line, col)
     })?;
-    Ok(Value::Net(Rc::new(NetHandle::Listener(listener))))
+    for k in 1..total {
+        let spec = rerun.clone();
+        std::thread::Builder::new()
+            .name(format!("shard-{k}"))
+            .stack_size(SHARD_STACK)
+            .spawn(move || {
+                IS_SHARD.with(|s| s.set(true));
+                match spec {
+                    Rerun::File(p) => {
+                        if let Err(e) = crate::run_file_capture(&p) {
+                            eprint!("shard {k}: {e}");
+                        }
+                    }
+                    Rerun::Source(code, name) => {
+                        crate::run_source(&code, &name);
+                    }
+                }
+            })
+            .map_err(|e| HelixError::new(format!("could not spawn shard {k}: {e}"), line, col))?;
+    }
+    eprintln!("serving on {total} shards (SO_REUSEPORT, share-nothing)");
+    Ok(())
 }
 
 /// `listener.accept()` — block until a client connects, read one HTTP request, and
