@@ -876,12 +876,17 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // float accumulators, over-cap ranges (which must error exactly as
                 // `CompInitRange` does), and no-JIT builds all take the same path
                 // the tree-walker oracle matches.
+                // A scalar accumulator has 1 body; a tuple accumulator N (the slot then
+                // holds a `Tuple` of N `Int`s). A scalar body may carry `captures` — their
+                // values sit above `[start, end]`; split them off (taken or not) so the
+                // fall-through `CompInitRange` sees only `[start, end]`.
+                let n_acc = program.reduce_loops[*loop_idx as usize].bodies.len();
+                let n_caps = program.reduce_loops[*loop_idx as usize].captures.len();
+                let cap_vals =
+                    if n_caps > 0 { stack.split_off(stack.len() - n_caps) } else { Vec::new() };
                 let base = frames[fi].base;
                 let len = stack.len();
                 let slot = base + *acc_slot as usize;
-                // A scalar accumulator has 1 body; a tuple accumulator N (the slot then
-                // holds a `Tuple` of N `Int`s). Same Int-range + in-cap gate for both.
-                let n_acc = program.reduce_loops[*loop_idx as usize].bodies.len();
                 let bounds = match (jit, &stack[len - 2], &stack[len - 1]) {
                     (Some(j), Value::Int(s), Value::Int(e))
                         if ((*e as i128) - (*s as i128)) <= 100_000_000 =>
@@ -893,9 +898,28 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let took_native = if let Some((ptr, s, e)) = bounds {
                     if n_acc == 1 {
                         if let Value::Int(init) = locals[slot] {
-                            let r = unsafe { crate::jit::call_reduce(ptr, s, e, init) };
-                            locals[slot] = Value::Int(r);
-                            true
+                            if n_caps == 0 {
+                                let r = unsafe { crate::jit::call_reduce(ptr, s, e, init) };
+                                locals[slot] = Value::Int(r);
+                                true
+                            } else {
+                                // Every captured value must be an `Int` (else fall back to
+                                // the bytecode loop, which reads the captures by name).
+                                let caps: Option<Vec<i64>> = cap_vals
+                                    .iter()
+                                    .map(|v| if let Value::Int(i) = v { Some(*i) } else { None })
+                                    .collect();
+                                match caps {
+                                    Some(c) => {
+                                        let r = unsafe {
+                                            crate::jit::call_reduce_caps(ptr, s, e, init, c.as_ptr())
+                                        };
+                                        locals[slot] = Value::Int(r);
+                                        true
+                                    }
+                                    None => false,
+                                }
+                            }
                         } else {
                             false
                         }

@@ -296,8 +296,19 @@ impl super::Compiler {
         // accumulators, over-cap ranges, and non-x86/`HELIX_NOJIT` builds all run
         // the oracle-matched path.
         // Scalar OR tuple `i64` accumulator → a native loop. `reduce_jit_bodies` returns
-        // the (substituted) component bodies for either shape, or `None` to run the loop.
-        let jit_bodies = crate::jit::reduce_jit_bodies(init, body, pa, pb, &self.jit_fn_set());
+        // the (substituted) component bodies for either shape, or `None`. If that fails, a
+        // *scalar* body may still be eligible by capturing free outer `i64` vars (the
+        // nested-fold case), in which case its values are pushed above `[start, end]` and
+        // handed to the kernel as `caps`.
+        let fns = self.jit_fn_set();
+        let (jit_bodies, captures): (Option<Vec<Expr>>, Vec<String>) =
+            match crate::jit::reduce_jit_bodies(init, body, pa, pb, &fns) {
+                Some(bodies) => (Some(bodies), Vec::new()),
+                None => match crate::jit::reduce_loop_captures(body, pa, pb, &fns) {
+                    Some(caps) if !caps.is_empty() => (Some(vec![body.clone()]), caps),
+                    _ => (None, Vec::new()),
+                },
+            };
         let acc;
         let x;
         let guard;
@@ -306,11 +317,18 @@ impl super::Compiler {
             acc = b.declare_local(pa);
             x = b.declare_local(pb);
             b.emit(Op::StoreLocal(acc), line, col); // stack: [start, end]; acc=init
+            // Push each captured value above `[start, end]` (resolved in the enclosing
+            // scope — captures are free vars, never `pa`/`pb`). The VM splits them off
+            // before `CompInitRange` whether or not it takes the native path.
+            for cap in &captures {
+                self.compile_expr(b, &Expr::Ident { name: cap.clone(), line, col })?;
+            }
             let loop_idx = self.reduce_loops.len() as u32;
             self.reduce_loops.push(ReduceLoop {
                 pa: pa.to_string(),
                 pb: pb.to_string(),
                 bodies,
+                captures,
             });
             // `after` is patched once the trailing LoadLocal position is known.
             let at = b.emit(Op::TryJitReduce { loop_idx, acc_slot: acc, after: 0 }, line, col);

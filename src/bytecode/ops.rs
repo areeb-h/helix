@@ -293,6 +293,12 @@ pub struct ReduceLoop {
     /// as `pb` — so the same `i64` codegen handles both (the slots are kept in N
     /// registers / marshalled through a pointer). See [`crate::jit::define_reduce_loop`].
     pub bodies: Vec<Expr>,
+    /// Free (captured) variable names the body references beyond `{pa, pb}`, in
+    /// first-appearance order — loop-invariant `i64` values the VM resolves at the call
+    /// site and passes to the kernel as a `caps` slice (the nested-fold case: an inner
+    /// reduce capturing the outer `map` variable). Empty for a self-contained body.
+    /// **Scalar accumulators only** (a tuple body that captures stays on the VM loop).
+    pub captures: Vec<String>,
 }
 
 /// A JIT-eligible `map`/`filter` body the compiler asked the JIT to compile into a

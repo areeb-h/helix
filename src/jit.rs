@@ -513,6 +513,24 @@ pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>
     value_eligible(body, fns, &locals, NumKind::Int)
 }
 
+/// Like [`reduce_loop_eligible`], but a **scalar** body referencing free (captured)
+/// variables is still eligible — each free `i64` variable is recorded (in first-appearance
+/// order) and passed to the kernel as a loop-invariant `caps[i]`. This is the nested-fold
+/// case: an inner `range(..).reduce(..)` whose body reads the outer `map` variable. Returns
+/// the ordered captures (possibly empty), or `None` if the body is ineligible or captures
+/// more than [`MAX_CAPTURES`]. Mirrors [`map_kernel_captures`]; same i64-closed rules.
+pub fn reduce_loop_captures(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>) -> Option<Vec<String>> {
+    let mut locals: HashSet<&str> = HashSet::new();
+    locals.insert(pa);
+    locals.insert(pb);
+    let mut caps: Vec<String> = Vec::new();
+    if value_eligible_cap(body, fns, &locals, &mut caps) && caps.len() <= MAX_CAPTURES {
+        Some(caps)
+    } else {
+        None
+    }
+}
+
 /// A tuple accumulator may have at most this many `i64` slots; a wider one runs on the
 /// bytecode loop. The reduce kernel keeps every slot in a register.
 pub const MAX_ACC_SLOTS: usize = 4;
@@ -677,6 +695,19 @@ fn bodies_eligible(pa: &str, pb: &str, bodies: &[Expr], fns: &HashSet<&str>) -> 
 }
 
 fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>) -> bool {
+    // A scalar captured body is eligible over `{pa, pb} ∪ captures` — exactly what
+    // `define_reduce_loop` binds (the captures are loop-invariant `i64` locals loaded from
+    // the `caps` pointer). This must match the codegen's variable set, or the build would
+    // compile a loop the VM can't safely take (or skip one it could).
+    if rl.bodies.len() == 1 && !rl.captures.is_empty() {
+        let mut locals: HashSet<&str> = HashSet::new();
+        locals.insert(rl.pa.as_str());
+        locals.insert(rl.pb.as_str());
+        for c in &rl.captures {
+            locals.insert(c.as_str());
+        }
+        return value_eligible(&rl.bodies[0], fns, &locals, NumKind::Int);
+    }
     bodies_eligible(&rl.pa, &rl.pb, &rl.bodies, fns)
 }
 
@@ -1231,9 +1262,15 @@ fn define_reduce_loop(
     // wrapping, matching the interpreter (and the differential oracle).
     let n = rl.bodies.len();
     let scalar = n == 1;
+    // A scalar body may capture loop-invariant outer `i64` values, passed via a 4th
+    // pointer param `caps` (the nested-fold case). Tuple accumulators don't capture.
+    let has_caps = scalar && !rl.captures.is_empty();
     ctx.func.signature.call_conv = CallConv::SystemV;
     for _ in 0..3 {
         ctx.func.signature.params.push(AbiParam::new(I64));
+    }
+    if has_caps {
+        ctx.func.signature.params.push(AbiParam::new(I64)); // caps: *const i64
     }
     if scalar {
         ctx.func.signature.returns.push(AbiParam::new(I64));
@@ -1265,6 +1302,23 @@ fn define_reduce_loop(
         }
     }
 
+    // Load each captured value once (loop-invariant) from the `caps` pointer (4th param).
+    let cap_vars: Vec<Variable> = if has_caps {
+        let caps_ptr = b.block_params(entry)[3];
+        rl.captures
+            .iter()
+            .enumerate()
+            .map(|(j, _)| {
+                let v = b.ins().load(I64, MemFlags::trusted(), caps_ptr, (j * 8) as i32);
+                let var = b.declare_var(I64);
+                b.def_var(var, v);
+                var
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let header = b.create_block();
     let body_blk = b.create_block();
     let exit_blk = b.create_block();
@@ -1290,6 +1344,12 @@ fn define_reduce_loop(
         }
     }
     vars.insert(rl.pb.as_str(), x_var);
+    // Bind each captured variable to its (loop-invariant) loaded value.
+    for (j, capname) in rl.captures.iter().enumerate() {
+        if let Some(&cv) = cap_vars.get(j) {
+            vars.insert(capname.as_str(), cv);
+        }
+    }
     // Compute every component from the OLD slot values, then assign — so a component that
     // reads another slot (`(a[0] + x, a[1] + a[0])`) sees the pre-update value.
     let mut new_vals: Vec<ClValue> = Vec::with_capacity(n);
@@ -2071,6 +2131,18 @@ pub unsafe fn call_i64(ptr: *const u8, args: &[i64]) -> i64 {
 pub unsafe fn call_reduce(ptr: *const u8, start: i64, end: i64, init: i64) -> i64 {
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64) -> i64>(ptr)(start, end, init)
+    }
+}
+
+/// Call a **captured** scalar reduce loop `fn(start, end, init, caps) -> i64` (the nested-
+/// fold kernel). `caps` points to the loop's capture count of loop-invariant `i64`s.
+/// SAFETY: the VM guarantees `ptr` is a finalized captured scalar kernel from
+/// [`define_reduce_loop`] and `caps` points to at least that many `i64`s.
+pub unsafe fn call_reduce_caps(ptr: *const u8, start: i64, end: i64, init: i64, caps: *const i64) -> i64 {
+    unsafe {
+        std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64, *const i64) -> i64>(ptr)(
+            start, end, init, caps,
+        )
     }
 }
 
