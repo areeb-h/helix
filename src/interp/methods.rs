@@ -1438,7 +1438,22 @@ fn dna_method(
                     col,
                 ));
             }
-            let rc: String = complement(s).chars().rev().collect();
+            // One pass, one allocation: write the complement of byte `i` straight into the
+            // reversed output slot (`complement(s).chars().rev()` was two passes + two
+            // allocations). Byte-reverse equals char-reverse for ASCII (always, for DNA).
+            let rc = if s.is_ascii() {
+                let lut = complement_lut();
+                let bytes = s.as_bytes();
+                let n = bytes.len();
+                let mut out = vec![0u8; n];
+                for (i, &b) in bytes.iter().enumerate() {
+                    out[n - 1 - i] = lut[b as usize];
+                }
+                // SAFETY: ASCII in, LUT maps ASCII→ASCII, so every output byte is valid UTF-8.
+                unsafe { String::from_utf8_unchecked(out) }
+            } else {
+                complement(s).chars().rev().collect()
+            };
             Ok(Value::Dna(Rc::new(rc)))
         }
         "find" => {
@@ -1893,8 +1908,40 @@ fn iupac_complement(c: char) -> char {
     }
 }
 
+/// A 256-entry byte lookup table for the IUPAC complement: each mapped uppercase code
+/// (A↔T, C↔G, R↔Y, K↔M, B↔V, D↔H; S/W/N self-complementary) to its complement, identity
+/// for every other byte. DNA is validated ASCII, so a per-byte map is exactly equivalent
+/// to the per-char [`iupac_complement`] but branchless and vectorizable. Built once.
+fn complement_lut() -> &'static [u8; 256] {
+    static LUT: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut t = [0u8; 256];
+        for (i, e) in t.iter_mut().enumerate() {
+            *e = i as u8; // identity for every unmapped byte (matches `other => other`)
+        }
+        for (k, v) in [
+            (b'A', b'T'), (b'T', b'A'), (b'C', b'G'), (b'G', b'C'), (b'R', b'Y'), (b'Y', b'R'),
+            (b'K', b'M'), (b'M', b'K'), (b'B', b'V'), (b'V', b'B'), (b'D', b'H'), (b'H', b'D'),
+            (b'S', b'S'), (b'W', b'W'), (b'N', b'N'),
+        ] {
+            t[k as usize] = v;
+        }
+        t
+    })
+}
+
 fn complement(s: &str) -> String {
-    s.chars().map(iupac_complement).collect()
+    // Fast path for ASCII (always, for a validated DNA string): a branchless byte LUT in
+    // one pass. The fallback keeps exact behaviour for any non-ASCII input.
+    if s.is_ascii() {
+        let lut = complement_lut();
+        let bytes: Vec<u8> = s.bytes().map(|b| lut[b as usize]).collect();
+        // SAFETY: input is ASCII and the LUT maps each ASCII byte to another ASCII byte,
+        // so every output byte is valid single-byte UTF-8.
+        unsafe { String::from_utf8_unchecked(bytes) }
+    } else {
+        s.chars().map(iupac_complement).collect()
+    }
 }
 
 fn unknown_method(
