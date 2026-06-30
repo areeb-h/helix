@@ -302,7 +302,7 @@ pub fn build(
     let filter_ids = define_array_kernels(
         &mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, &user_fns, NumKind::Int, false,
     );
-    let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible);
+    let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns);
 
     if compiled.is_empty()
         && reduce_ids.iter().all(|r| r.is_none())
@@ -351,14 +351,21 @@ pub fn build(
 }
 
 /// All stages and the reduce sink of a fused pipeline must be JIT-eligible.
-fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &HashSet<&str>) -> bool {
+fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &HashSet<&str>, user_fns: &HashSet<&str>) -> bool {
     use crate::bytecode::{FusionSink, FusionStage};
     k.stages.iter().all(|s| match s {
         FusionStage::Map { binder, body } => map_kernel_eligible(body, binder, fns),
         FusionStage::Filter { binder, body } => filter_kernel_eligible(body, binder, fns),
     }) && match &k.sink {
         FusionSink::Collect | FusionSink::Count => true,
-        FusionSink::Reduce { pa, pb, bodies } => bodies_eligible(pa, pb, bodies, fns),
+        // A float reduce is checked against the f64 subset (using `user_fns` to exclude a
+        // user-shadowed `sqrt`/`min`, exactly like the f64 map path); the i64 path uses
+        // `bodies_eligible`. Float is scalar-only.
+        FusionSink::Reduce { pa, pb, bodies, float: true } if bodies.len() == 1 => {
+            float_reduce_body_eligible(&bodies[0], pa, pb, user_fns)
+        }
+        FusionSink::Reduce { float: true, .. } => false,
+        FusionSink::Reduce { pa, pb, bodies, float: false } => bodies_eligible(pa, pb, bodies, fns),
     }
 }
 
@@ -368,26 +375,30 @@ fn define_fused_kernels(
     kernels: &[crate::bytecode::FusedKernel],
     fn_ids: &HashMap<&str, FuncId>,
     eligible: &HashSet<&str>,
+    user_fns: &HashSet<&str>,
 ) -> Vec<Option<FuncId>> {
     let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
     let mut ctx = module.make_context();
     let mut bctx = FunctionBuilderContext::new();
     for (i, k) in kernels.iter().enumerate() {
-        if !fusion_eligible(k, eligible) {
+        if !fusion_eligible(k, eligible, user_fns) {
             ids.push(None);
             continue;
         }
-        let mut sig = module.make_signature();
-        sig.call_conv = CallConv::SystemV;
-        for _ in 0..3 {
-            sig.params.push(AbiParam::new(I64));
-        }
-        // A tuple reduce writes its slots through `acc_ptr` (no return); see
-        // `define_fused_kernel`.
+        // A scalar **float** reduce takes its `init` as `f64` (param 2) and returns `f64`;
+        // everything else is `i64`. A tuple reduce writes its slots through `acc_ptr` (no
+        // return) — see `define_fused_kernel`.
+        let float_reduce = matches!(&k.sink,
+            crate::bytecode::FusionSink::Reduce { bodies, float: true, .. } if bodies.len() == 1);
         let tuple_reduce = matches!(&k.sink,
             crate::bytecode::FusionSink::Reduce { bodies, .. } if bodies.len() > 1);
+        let mut sig = module.make_signature();
+        sig.call_conv = CallConv::SystemV;
+        sig.params.push(AbiParam::new(I64)); // src pointer / range start
+        sig.params.push(AbiParam::new(I64)); // length / range end
+        sig.params.push(AbiParam::new(if float_reduce { F64 } else { I64 })); // init (f64 for a float reduce)
         if !tuple_reduce {
-            sig.returns.push(AbiParam::new(I64));
+            sig.returns.push(AbiParam::new(if float_reduce { F64 } else { I64 }));
         }
         let id = match module.declare_function(&format!("fused${i}"), Linkage::Local, &sig) {
             Ok(id) => id,
@@ -526,6 +537,42 @@ pub fn reduce_loop_captures(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>
     let mut caps: Vec<String> = Vec::new();
     if value_eligible_cap(body, fns, &locals, &mut caps) && caps.len() <= MAX_CAPTURES {
         Some(caps)
+    } else {
+        None
+    }
+}
+
+/// Is `body` a pure-`f64` reduce body over exactly `{pa, pb}` (accumulator and element)?
+/// The same safe subset as the f64 map kernel — `+ - *`, the inline float builtins
+/// (`sqrt`/`abs`/`min`/`max`), int/float literals — but BOTH binders are allowed and NO
+/// free (captured) variable is (a capture's runtime type is unknown, so it can't be folded
+/// as `f64`). `.reduce` is naive left-to-right, so the kernel's `fadd`/`fmul` in this order
+/// is bit-exact to the interpreter (the property `differential_float_reduce_oracle` locks).
+fn float_reduce_body_eligible(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>) -> bool {
+    match e {
+        Expr::Int(_) | Expr::Float(_) => true,
+        Expr::Ident { name, .. } => name == pa || name == pb,
+        Expr::Binary { op, left, right, .. } => {
+            matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+                && float_reduce_body_eligible(left, pa, pb, user_fns)
+                && float_reduce_body_eligible(right, pa, pb, user_fns)
+        }
+        Expr::Call { name, args, .. } => {
+            jit_float_builtin_arity(name) == Some(args.len())
+                && !user_fns.contains(name.as_str())
+                && args.iter().all(|a| float_reduce_body_eligible(a, pa, pb, user_fns))
+        }
+        _ => false,
+    }
+}
+
+/// Decide whether `reduce(init, (pa, pb) => body)` can JIT as a **scalar `f64`** fold — a
+/// `Float`-literal init (so the accumulator is `f64`) and a pure-`f64` body over `{pa, pb}`.
+/// Returns the body, or `None`. (The source must be a `Float` array; the VM checks that at
+/// dispatch and falls back otherwise.)
+pub fn reduce_jit_f64_body(init: &Expr, body: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>) -> Option<Expr> {
+    if matches!(init, Expr::Float(_)) && float_reduce_body_eligible(body, pa, pb, user_fns) {
+        Some(body.clone())
     } else {
         None
     }
@@ -1561,15 +1608,20 @@ fn define_fused_kernel<'a>(
         _ => 0,
     };
     let tuple_reduce = n_acc > 1;
+    // A scalar f64 reduce over a Float array: the accumulator/element/init/return are `f64`,
+    // and the body is lowered with `NumKind::Float`. Everything else stays `i64`. (Set only
+    // for `bodies.len() == 1`; the VM only dispatches it for a `Floats` source + `Float` init.)
+    let float_reduce = matches!(&k.sink, FusionSink::Reduce { float: true, .. }) && n_acc == 1;
+    let acc_ty = if float_reduce { F64 } else { I64 };
 
     ctx.func.signature.call_conv = CallConv::SystemV;
-    for _ in 0..3 {
-        ctx.func.signature.params.push(AbiParam::new(I64));
-    }
-    // Scalar reduce / collect / count return one `i64` (accumulator or kept count); a
+    ctx.func.signature.params.push(AbiParam::new(I64)); // src pointer / range start
+    ctx.func.signature.params.push(AbiParam::new(I64)); // length / range end
+    ctx.func.signature.params.push(AbiParam::new(acc_ty)); // init (f64 for a float reduce)
+    // Scalar reduce / collect / count return one value (accumulator or kept count); a
     // tuple reduce instead writes its N slots back through the `acc_ptr` (param 3).
     if !tuple_reduce {
-        ctx.func.signature.returns.push(AbiParam::new(I64));
+        ctx.func.signature.returns.push(AbiParam::new(acc_ty));
     }
 
     let mut b = FunctionBuilder::new(&mut ctx.func, bctx);
@@ -1581,7 +1633,7 @@ fn define_fused_kernel<'a>(
 
     let idx_var = b.declare_var(I64); // read cursor (array index `i`, or range counter `x`)
     let limit_var = b.declare_var(I64);
-    let sink_var = b.declare_var(I64); // scalar accumulator / write cursor `w` / counter
+    let sink_var = b.declare_var(acc_ty); // scalar accumulator (f64 for a float reduce) / cursor
     let src_var = b.declare_var(I64);
     let dst_var = b.declare_var(I64);
     // A tuple reduce keeps its N slots in their own registers (loaded from `acc_ptr`).
@@ -1653,9 +1705,10 @@ fn define_fused_kernel<'a>(
         let off = b.ins().imul_imm(i, 8);
         let base = b.use_var(src_var);
         let addr = b.ins().iadd(base, off);
-        b.ins().load(I64, MemFlags::trusted(), addr, 0)
+        // The element is `f64` for a float reduce (Floats source), else `i64` (8 bytes either way).
+        b.ins().load(acc_ty, MemFlags::trusted(), addr, 0)
     };
-    let cur_var = b.declare_var(I64);
+    let cur_var = b.declare_var(acc_ty);
     b.def_var(cur_var, elem);
 
     // Thread the element through the stages. A Map rebinds `cur`; a Filter splits the
@@ -1692,7 +1745,7 @@ fn define_fused_kernel<'a>(
             let nw = b.ins().iadd_imm(w, 1);
             b.def_var(sink_var, nw);
         }
-        FusionSink::Reduce { pa, pb, bodies } => {
+        FusionSink::Reduce { pa, pb, bodies, .. } => {
             if tuple_reduce {
                 // N slots → N components, computed from the OLD slots then assigned.
                 let mut vars: HashMap<&'a str, Variable> = HashMap::new();
@@ -1711,7 +1764,9 @@ fn define_fused_kernel<'a>(
                 let mut vars: HashMap<&'a str, Variable> = HashMap::new();
                 vars.insert(pa.as_str(), sink_var);
                 vars.insert(pb.as_str(), cur_var);
-                let nacc = gen_value(&mut b, &bodies[0], &mut vars, fn_ids, module, NumKind::Int);
+                // `f64` body for a float reduce (`fadd`/`fmul`/`fcmp`+`select`/`fsqrt`); else i64.
+                let kind = if float_reduce { NumKind::Float } else { NumKind::Int };
+                let nacc = gen_value(&mut b, &bodies[0], &mut vars, fn_ids, module, kind);
                 b.def_var(sink_var, nacc);
             }
         }
@@ -2233,6 +2288,16 @@ pub unsafe fn run_fused_collect(ptr: *const u8, src: &[i64]) -> Vec<i64> {
 /// [`run_fused_collect`].
 pub unsafe fn run_fused_reduce(ptr: *const u8, src: &[i64], init: i64) -> i64 {
     let f: extern "C" fn(*const i64, i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    f(src.as_ptr(), src.len() as i64, init)
+}
+
+/// Run a native **scalar `f64`** reduce over a `Float` buffer: `acc = init; for x in src
+/// { acc = body(acc, x) }` with `fadd`/`fmul` left-to-right — bit-exact to the interpreter.
+/// SAFETY: `ptr` is a finalized `extern "C" fn(*const f64, i64, f64) -> f64` from a
+/// `float`-flagged `define_fused_kernel`, guaranteed by the VM's `Floats` source + `Float`
+/// init check.
+pub unsafe fn run_fused_reduce_f64(ptr: *const u8, src: &[f64], init: f64) -> f64 {
+    let f: extern "C" fn(*const f64, i64, f64) -> f64 = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, init)
 }
 

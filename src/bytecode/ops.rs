@@ -341,7 +341,12 @@ pub enum FusionSink {
     /// `reduce`). `bodies` is one component per accumulator slot — length 1 for a scalar
     /// accumulator, N for a tuple accumulator (each over the slots `$acc0…` and `pb`),
     /// exactly like [`ReduceLoop::bodies`].
-    Reduce { pa: String, pb: String, bodies: Vec<Expr> },
+    ///
+    /// `float` marks a **scalar `f64`** accumulator (a `Float` init + a pure-`f64` body over
+    /// `{pa, pb}`) over a `Float`-array source: the kernel reads `f64` elements, folds with
+    /// `fadd`/`fmul` left-to-right (bit-exact to the interpreter — `.reduce` is naive, not
+    /// Neumaier), and returns `f64`. Only ever set for `bodies.len() == 1` over an array.
+    Reduce { pa: String, pb: String, bodies: Vec<Expr>, float: bool },
 }
 
 /// A fuseable linear pipeline the compiler asked the JIT to lower into a single native

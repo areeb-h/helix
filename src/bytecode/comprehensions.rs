@@ -633,9 +633,26 @@ impl super::Compiler {
                 }
                 _ => return None,
             };
-            // Scalar OR tuple `i64` accumulator → component bodies, else don't fuse.
-            let bodies = crate::jit::reduce_jit_bodies(&args[0], body, &pa, &pb, &self.jit_fn_set())?;
-            (FusionSink::Reduce { pa, pb, bodies }, Some(&args[0]))
+            // The init literal's type fixes the accumulator type — and they must not
+            // compete: `reduce_jit_bodies` keys only off the body shape (`acc + x*x` is
+            // structurally i64-eligible), so a `Float` init would otherwise be claimed as
+            // an i64 kernel that can never match its `Float` array at dispatch (silent
+            // fallback). A `0.0`-style init → the scalar `f64` kernel: a single body
+            // folding a `Float` array left-to-right, which native `fadd`/`fmul` reproduce
+            // bit-for-bit (`.reduce` is naive, unlike compensated `.sum`/`.mean`). The
+            // f64 kernel is array-source + 0-stages only — enforced in the `enough` gate.
+            if matches!(&args[0], Expr::Float(_)) {
+                let fbody =
+                    crate::jit::reduce_jit_f64_body(&args[0], body, &pa, &pb, &self.user_fn_set())?;
+                (
+                    FusionSink::Reduce { pa, pb, bodies: vec![fbody], float: true },
+                    Some(&args[0]),
+                )
+            } else {
+                let bodies =
+                    crate::jit::reduce_jit_bodies(&args[0], body, &pa, &pb, &self.jit_fn_set())?;
+                (FusionSink::Reduce { pa, pb, bodies, float: false }, Some(&args[0]))
+            }
         } else if name == "count" {
             if !args.is_empty() {
                 return None;
@@ -691,6 +708,9 @@ impl super::Compiler {
             // but the native loop still beats per-element VM dispatch (~75-100×). A bare
             // `range(...).reduce(...)` (0 stages) is handled by `compile_reduce_range`
             // instead, so a range source here still needs ≥1 stage to be worth fusing.
+            // The f64 reduce kernel loads `f64` elements straight from a `Float` array,
+            // so it requires an array source and no element-transforming stages.
+            FusionSink::Reduce { float: true, .. } => !source_is_range && stages.is_empty(),
             FusionSink::Reduce { .. } => !stages.is_empty() || !source_is_range,
             FusionSink::Collect => stages.len() >= 2,
             // `count` only benefits when a filter actually drops elements (a map-only

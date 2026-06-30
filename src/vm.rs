@@ -1083,7 +1083,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 return None;
                             }
                             match &kern.sink {
-                                FusionSink::Reduce { bodies, .. } if bodies.len() == 1 => {
+                                FusionSink::Reduce { bodies, float: false, .. } if bodies.len() == 1 => {
                                     match &ops[2] {
                                         Value::Int(init) => Some(Value::Int(unsafe {
                                             crate::jit::call_reduce(ptr, *s, *e, *init)
@@ -1116,7 +1116,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 FusionSink::Count => Some(Value::Int(unsafe {
                                     crate::jit::run_fused_count(ptr, v)
                                 })),
-                                FusionSink::Reduce { bodies, .. } if bodies.len() == 1 => {
+                                FusionSink::Reduce { bodies, float: false, .. } if bodies.len() == 1 => {
                                     match &ops[1] {
                                         Value::Int(init) => Some(Value::Int(unsafe {
                                             crate::jit::run_fused_reduce(ptr, v, *init)
@@ -1133,6 +1133,22 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         rebuild_acc(&ops[1], buf)
                                     })
                                 }
+                            }
+                        } else if let Value::Array(a) = &ops[0]
+                            && let crate::value::ArrayData::Floats(v) = &**a
+                        {
+                            // A scalar `f64` reduce over a `Float` array — the only float-flagged
+                            // kernel. A `Float` init confirms the f64 ABI; anything else falls back.
+                            match &kern.sink {
+                                FusionSink::Reduce { bodies, float: true, .. } if bodies.len() == 1 => {
+                                    match &ops[1] {
+                                        Value::Float(init) => Some(Value::Float(unsafe {
+                                            crate::jit::run_fused_reduce_f64(ptr, v, *init)
+                                        })),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
                             }
                         } else {
                             None
