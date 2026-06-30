@@ -25,6 +25,9 @@ they are made deliberately and in the open.
 | [0016](0016-build-and-packaging.md) | Build perf, allocator & containerization | Accepted — mimalloc + musl + Docker implemented; PGO wired in CI |
 | [0017](0017-methods-and-functions.md) | Methods on data + free functions (no namespaces) | Accepted — implemented; supersedes 0011's namespaces |
 | [0018](0018-random.md) | Reproducible random numbers (seeded, pure, SplitMix64) | Accepted — implemented (`random`/`randn`/`random_int` + shuffle/sample/choice) |
+| [0019](0019-module-system.md) | Module system (`import`, path resolution) | Accepted — implemented |
+| [0020](0020-dict-type.md) | `Dict`: keyed map with O(log n) lookup | Accepted — implemented |
+| [0021](0021-capability-sandbox.md) | Capability sandbox: deny-by-default authority | Proposed — phase 1 in progress |
 
 ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
 (23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a
