@@ -175,6 +175,24 @@ fn sleep_runs_and_validates() {
 }
 
 #[test]
+fn raw_strings_and_chr_ord() {
+    // Triple-quoted raw string: braces are literal (no interpolation), and quotes go in
+    // verbatim — the fix for the brace-doubling wart (CSS/JSON/regex).
+    let (out, err, code) = run(&["eval", "print(\"\"\"x{a}y\"\"\")"], &[], "");
+    assert_eq!(code, Some(0), "stderr:\n{err}");
+    assert_eq!(out, "x{a}y\n");
+    // JSON with braces AND quotes, literal.
+    assert_eq!(run(&["eval", "print(\"\"\"{\"k\": 1}\"\"\")"], &[], "").0, "{\"k\": 1}\n");
+    // chr/ord round trip, including a non-ASCII codepoint.
+    assert_eq!(run(&["eval", "print(chr(65))"], &[], "").0, "A\n");
+    assert_eq!(run(&["eval", "print(ord(\"A\"))"], &[], "").0, "65\n");
+    assert_eq!(run(&["eval", "print(chr(955))"], &[], "").0, "\u{3bb}\n"); // λ
+    assert_eq!(run(&["eval", "print(ord(\"\u{3bb}\"))"], &[], "").0, "955\n");
+    // An invalid codepoint is a clean error.
+    assert_eq!(run(&["eval", "print(chr(0 - 1))"], &[], "").2, Some(1));
+}
+
+#[test]
 fn build_produces_runnable_standalone_exe() {
     let dir = std::env::temp_dir();
     let src = dir.join("helix_build_ok.helix");

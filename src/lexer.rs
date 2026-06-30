@@ -55,26 +55,41 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                 }
             }
             '"' => {
-                let (segs, used, newlines, end_col) = lex_string(&chars, i, line, col)?;
-                // Plain string if there are no `{expr}` interpolations.
-                let tok = if segs.iter().any(|s| matches!(s, StrSeg::Expr(..))) {
-                    Tok::InterpStr(segs)
-                } else {
-                    let mut s = String::new();
-                    for seg in &segs {
-                        if let StrSeg::Lit(t) = seg {
-                            s.push_str(t);
-                        }
+                // A triple-quoted RAW string `"""…"""` is literal — no `{…}` interpolation
+                // and no `\` escapes — so braces (CSS/JSON), backslashes (regex/paths) and
+                // quotes go in verbatim. This is the fix for the brace-doubling wart.
+                if i + 2 < n && chars[i + 1] == '"' && chars[i + 2] == '"' {
+                    let (s, used, newlines, end_col) = lex_raw_string(&chars, i, line, col)?;
+                    push!(Tok::Str(s), start_col);
+                    i += used;
+                    if newlines > 0 {
+                        line += newlines;
+                        col = end_col;
+                    } else {
+                        col += used;
                     }
-                    Tok::Str(s)
-                };
-                push!(tok, start_col);
-                i += used;
-                if newlines > 0 {
-                    line += newlines;
-                    col = end_col;
                 } else {
-                    col += used;
+                    let (segs, used, newlines, end_col) = lex_string(&chars, i, line, col)?;
+                    // Plain string if there are no `{expr}` interpolations.
+                    let tok = if segs.iter().any(|s| matches!(s, StrSeg::Expr(..))) {
+                        Tok::InterpStr(segs)
+                    } else {
+                        let mut s = String::new();
+                        for seg in &segs {
+                            if let StrSeg::Lit(t) = seg {
+                                s.push_str(t);
+                            }
+                        }
+                        Tok::Str(s)
+                    };
+                    push!(tok, start_col);
+                    i += used;
+                    if newlines > 0 {
+                        line += newlines;
+                        col = end_col;
+                    } else {
+                        col += used;
+                    }
                 }
             }
             c if c.is_ascii_digit() => {
@@ -328,6 +343,44 @@ fn lex_number(chars: &[char], start: usize) -> (Tok, usize) {
         }
     };
     (tok, j - start)
+}
+
+/// Lex a triple-quoted RAW string `"""…"""`: every character up to the closing `"""`
+/// is literal — no `{…}` interpolation, no `\` escape processing — so CSS braces, JSON,
+/// regex backslashes, Windows paths, and prose all go in verbatim. May span lines and
+/// contain single or double quotes (anything but three in a row). Returns
+/// `(content, chars_consumed, newlines_inside, end_col)` to match [`lex_string`].
+fn lex_raw_string(
+    chars: &[char],
+    start: usize,
+    line: usize,
+    col: usize,
+) -> Result<(String, usize, usize, usize), HelixError> {
+    let n = chars.len();
+    let body = start + 3; // past the opening `"""`
+    let mut j = body;
+    let mut newlines = 0usize;
+    // Index of column 1 on `start`'s line, for computing the end column after newlines.
+    let mut line_start = (start + 1).saturating_sub(col);
+    let mut close = None;
+    while j < n {
+        if chars[j] == '"' && j + 2 < n && chars[j + 1] == '"' && chars[j + 2] == '"' {
+            close = Some(j);
+            break;
+        }
+        if chars[j] == '\n' {
+            newlines += 1;
+            line_start = j + 1;
+        }
+        j += 1;
+    }
+    let close = close.ok_or_else(|| {
+        HelixError::new("unterminated `\"\"\"` raw string", line, col).hint("close it with `\"\"\"`.")
+    })?;
+    let content: String = chars[body..close].iter().collect();
+    let used = (close + 3) - start;
+    let end_col = (close + 3) - line_start + 1;
+    Ok((content, used, newlines, end_col))
 }
 
 /// Lex a `"..."` into segments, recognizing `{expr}` interpolations (`{{`/`}}`

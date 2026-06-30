@@ -102,6 +102,9 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "max", pure: true },
     BuiltinDef { path: "erf", pure: true },
     BuiltinDef { path: "gcd", pure: true },
+    // codepoint <-> single-character string (URL/percent decoding, ANSI escapes, byte work)
+    BuiltinDef { path: "chr", pure: true },
+    BuiltinDef { path: "ord", pure: true },
     // exact rationals
     BuiltinDef { path: "rational", pure: true },
     BuiltinDef { path: "numerator", pure: true },

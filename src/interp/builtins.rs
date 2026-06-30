@@ -697,6 +697,35 @@ impl super::Interp {
                     }
                 }
             }
+            "chr" => {
+                arity(name, &args, 1, line, col)?;
+                if matches!(args[0], Value::Missing) {
+                    return Ok(Value::Missing);
+                }
+                let cp = as_int(&args[0], "chr", line, col)?;
+                match u32::try_from(cp).ok().and_then(char::from_u32) {
+                    Some(c) => Ok(Value::Str(Rc::new(c.to_string()))),
+                    None => Err(HelixError::new(
+                        format!("`chr` got {cp}, which is not a valid Unicode codepoint"),
+                        line,
+                        col,
+                    )
+                    .hint("pass 0..=1114111 (0x10FFFF), excluding the surrogate range.")),
+                }
+            }
+            "ord" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Missing => Ok(Value::Missing),
+                    // The codepoint of the FIRST character (forgiving on longer strings).
+                    Value::Str(s) | Value::Dna(s) => match s.chars().next() {
+                        Some(c) => Ok(Value::Int(c as i64)),
+                        None => Err(HelixError::new("`ord` got an empty string", line, col)
+                            .hint("pass a one-character string, e.g. `ord(\"A\")`.")),
+                    },
+                    other => Err(type_err("ord", "a single-character string", other, line, col)),
+                }
+            }
             "rational" => {
                 arity(name, &args, 2, line, col)?;
                 if matches!(args[0], Value::Missing) || matches!(args[1], Value::Missing) {

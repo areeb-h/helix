@@ -342,6 +342,30 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Int)
         }
+        "chr" => {
+            if args.len() != 1 {
+                return Err(arity_err("chr", 1, args.len(), line, col));
+            }
+            if matches!(args[0], Type::Missing) {
+                return Ok(Type::Missing);
+            }
+            if !matches!(args[0], Type::Int | Type::Num | Type::Unknown) {
+                return Err(type_err("chr", "a codepoint integer", &args[0], line, col));
+            }
+            Ok(Type::String)
+        }
+        "ord" => {
+            if args.len() != 1 {
+                return Err(arity_err("ord", 1, args.len(), line, col));
+            }
+            if matches!(args[0], Type::Missing) {
+                return Ok(Type::Missing);
+            }
+            if !matches!(args[0], Type::String | Type::Dna | Type::Unknown) {
+                return Err(type_err("ord", "a single-character string", &args[0], line, col));
+            }
+            Ok(Type::Int)
+        }
         "rational" => {
             if args.len() != 2 {
                 return Err(arity_err("rational", 2, args.len(), line, col));
