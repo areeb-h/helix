@@ -58,6 +58,15 @@ pub enum NetHandle {
 /// this) — a single malicious/oversized request must not OOM the process.
 const MAX_BODY: usize = 64 << 20; // 64 MiB
 
+/// Cap on a single request-head line (the request line or one header). Without it,
+/// `read_line` would grow a `String` until a newline arrives — a client sending one
+/// endless header line (no `\n`) could OOM the process before the read timeout fires.
+const MAX_HEADER_LINE: usize = 16 << 10; // 16 KiB (matches nginx's default)
+
+/// Cap on the number of request headers. Without it, a client sending millions of tiny
+/// headers would grow the header map unbounded (header-bombing) within the read timeout.
+const MAX_HEADER_COUNT: usize = 1000;
+
 /// How long to wait on a slow client mid-request before giving up — a blocking,
 /// single-threaded server would otherwise hang forever on one stalled connection.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -390,9 +399,13 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
     let err = |e: std::io::Error| HelixError::new(format!("reading the request failed: {e}"), line, col);
     let mut reader = BufReader::new(stream);
 
-    // Request line: METHOD TARGET HTTP/1.1
+    // Request line: METHOD TARGET HTTP/1.1. Bounded like a header line so a client can't
+    // stream an endless first line to exhaust memory (`take` caps the bytes read).
     let mut request_line = String::new();
-    reader.read_line(&mut request_line).map_err(err)?;
+    (&mut reader)
+        .take(MAX_HEADER_LINE as u64)
+        .read_line(&mut request_line)
+        .map_err(err)?;
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("/").to_string();
@@ -401,15 +414,36 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
         None => (target, String::new()),
     };
 
-    // Headers until the blank line; capture Content-Length for the body.
+    // Headers until the blank line; capture Content-Length for the body. Each line is
+    // read through `take(MAX_HEADER_LINE)` (bounds one giant header) and the count is
+    // capped (bounds header-bombing) — the body already has MAX_BODY, so the head needs
+    // its own limits to be DoS-safe.
     let mut headers = std::collections::BTreeMap::new();
     let mut content_length = 0usize;
+    let mut header_count = 0usize;
     loop {
         let mut h = String::new();
-        let n = reader.read_line(&mut h).map_err(err)?;
+        let n = (&mut reader).take(MAX_HEADER_LINE as u64).read_line(&mut h).map_err(err)?;
+        // A read that stopped at the cap without reaching a newline is an over-long line.
+        if n >= MAX_HEADER_LINE && !h.ends_with('\n') {
+            return Err(HelixError::new(
+                format!("request header line exceeds {MAX_HEADER_LINE} bytes"),
+                line,
+                col,
+            ));
+        }
         let t = h.trim_end_matches(['\r', '\n']);
         if n == 0 || t.is_empty() {
             break;
+        }
+        header_count += 1;
+        if header_count > MAX_HEADER_COUNT {
+            return Err(HelixError::new(
+                format!("request has more than {MAX_HEADER_COUNT} headers"),
+                line,
+                col,
+            )
+            .hint("this looks like a header-bombing request; a well-formed one has far fewer."));
         }
         if let Some((k, v)) = t.split_once(':') {
             let key = k.trim().to_ascii_lowercase();
