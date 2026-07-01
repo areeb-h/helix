@@ -740,6 +740,60 @@ fn cross_module_calls_and_local_shadowing() {
 }
 
 #[test]
+fn qualified_call_resolves_named_args_and_defaults() {
+    // Named arguments and default parameters must work through module qualification
+    // `dep.f(...)` — the parser can't resolve them (the callee is in another file), so the
+    // module loader does, emitting a plain positional call. This is what makes the new
+    // function features usable in a library (always consumed as `lib.fn(...)`).
+    let lib =
+        "export fn greet(name, status = 200, loud = false) = { name: name, status: status, loud: loud }\n";
+    let main = concat!(
+        "import lib\n",
+        "print(lib.greet(\"Ada\").status)\n",              // omitted default → 200
+        "print(lib.greet(\"Ada\", 201).status)\n",         // positional override → 201
+        "print(lib.greet(\"Ada\", status: 404).status)\n", // named override → 404
+        "print(lib.greet(\"Ada\", loud: true).loud)\n",    // named skips the middle default → true
+        "print(lib.greet(\"Ada\", loud: true).status)\n",  // ...and the skipped middle keeps 200
+        "print(lib.greet(\"Ada\").name)\n",                // the required positional still binds → Ada
+    );
+    let (vm, stderr, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "qualnamed");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(vm.lines().collect::<Vec<_>>(), ["200", "201", "404", "true", "200", "Ada"]);
+    // Both engines run the same rewritten positional call, so they must agree.
+    let (tw, _, _) = run_modules(
+        &[("lib.helix", lib), ("main.helix", main)],
+        "main.helix",
+        &[("HELIX_NOVM", "1")],
+        "qualnamed_tw",
+    );
+    assert_eq!(tw, vm, "VM and tree-walker disagree on qualified named/default calls");
+}
+
+#[test]
+fn qualified_call_named_arg_errors_are_precise() {
+    let lib = "export fn f(a, b = 1) = a + b\n";
+    // An unknown named parameter is named in the error.
+    let main1 = "import lib\nprint(lib.f(1, z: 9))\n";
+    let (_, e1, c1) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main1)], "main.helix", &[], "qnerr1");
+    assert_ne!(c1, Some(0), "unknown named param must error");
+    assert!(e1.contains("has no parameter named `z`"), "got: {e1}");
+    // Positional + named for the same parameter is a double-bind.
+    let main2 = "import lib\nprint(lib.f(1, a: 2))\n";
+    let (_, e2, c2) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main2)], "main.helix", &[], "qnerr2");
+    assert_ne!(c2, Some(0), "double-bound param must error");
+    assert!(e2.contains("was given more than once"), "got: {e2}");
+    // A named arg on a genuine method call (a value's method) is still rejected.
+    let main3 = "import lib\nprint([1, 2, 3].map(x: 1))\n";
+    let (_, e3, c3) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main3)], "main.helix", &[], "qnerr3");
+    assert_ne!(c3, Some(0), "named arg on a method must error");
+    assert!(e3.contains("named arguments are not supported on method calls"), "got: {e3}");
+}
+
+#[test]
 fn module_local_fn_shadows_a_builtin() {
     // A module-local `fn` of the same name as a builtin must shadow it — even inside a
     // multi-file program, where the loader rewrites names. (`dict` is a builtin; a user

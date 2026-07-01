@@ -80,8 +80,8 @@ fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Ex
     }
     let key = args.into_iter().next().unwrap();
     let s = || Expr::Ident { name: "$s".to_string(), line: l, col: c };
-    let keys = Expr::Method { recv: Box::new(s()), name: "map".into(), args: vec![key], line: l, col: c };
-    let order = Expr::Method { recv: Box::new(keys), name: "argsort".into(), args: vec![], line: l, col: c };
+    let keys = Expr::Method { recv: Box::new(s()), name: "map".into(), args: vec![key], named: vec![], line: l, col: c };
+    let order = Expr::Method { recv: Box::new(keys), name: "argsort".into(), args: vec![], named: vec![], line: l, col: c };
     let gather = Expr::Lambda {
         params: vec!["$si".to_string()],
         body: Box::new(Expr::Index {
@@ -91,7 +91,7 @@ fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Ex
             col: c,
         }),
     };
-    let body = Expr::Method { recv: Box::new(order), name: "map".into(), args: vec![gather], line: l, col: c };
+    let body = Expr::Method { recv: Box::new(order), name: "map".into(), args: vec![gather], named: vec![], line: l, col: c };
     Ok(Expr::Let { bindings: vec![("$s".to_string(), recv)], body: Box::new(body) })
 }
 
@@ -115,6 +115,7 @@ fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize
         recv: Box::new(recv),
         name: nm.into(),
         args,
+        named: vec![],
         line: l,
         col: c,
     };
@@ -177,6 +178,7 @@ fn desugar_position(recv: Expr, mut args: Vec<Expr>, l: usize, c: usize) -> Resu
         recv: Box::new(recv),
         name: nm.into(),
         args,
+        named: vec![],
         line: l,
         col: c,
     };
@@ -251,6 +253,7 @@ fn desugar_order_by(
             recv: Box::new(recv),
             name: "map".to_string(),
             args: vec![Expr::Lambda { params, body: Box::new(pair) }],
+            named: vec![],
             line,
             col,
         };
@@ -265,6 +268,7 @@ fn desugar_order_by(
             recv: Box::new(recv),
             name: "enumerate".to_string(),
             args: vec![],
+            named: vec![],
             line,
             col,
         };
@@ -292,6 +296,7 @@ fn desugar_order_by(
         recv: Box::new(ident("$ob")),
         name: "reduce".to_string(),
         args: vec![index(ident("$ob"), 0), cmp],
+        named: vec![],
         line,
         col,
     };
@@ -528,7 +533,10 @@ impl Parser {
             // it resolves named arguments and defaults against this function.
             self.fn_sigs.insert(
                 name.clone(),
-                FnSig { params: params.iter().map(|(n, _)| n.clone()).collect(), defaults },
+                FnSig {
+                    params: params.iter().map(|(n, _)| n.clone()).collect(),
+                    defaults: defaults.clone(),
+                },
             );
             // optional `-> Type` return annotation
             let ret = if matches!(self.peek(), Tok::Arrow) {
@@ -543,6 +551,7 @@ impl Parser {
             return Ok(Stmt::Func {
                 name,
                 params,
+                defaults,
                 ret,
                 exported,
                 body,
@@ -1159,15 +1168,25 @@ impl Parser {
                     if matches!(self.peek(), Tok::LParen) {
                         self.advance();
                         let (args, named) = self.call_args()?;
-                        if !named.is_empty() {
-                            return Err(HelixError::new(
-                                "named arguments are not supported on method calls",
-                                l,
-                                c,
-                            )
-                            .hint("pass method arguments positionally."));
-                        }
                         self.eat(&Tok::RParen, "to close the argument list")?;
+                        // Named arguments are only meaningful on a *qualified module call*
+                        // (`dep.f(a, k: v)`) — an ordinary `Method` here that the module
+                        // loader resolves against the callee's signature. The sugar methods
+                        // below take positional args only, so route a named call straight to
+                        // the generic `Method` (carrying `named`); a named arg on a genuine
+                        // method is then rejected by the checker, not the parser (the parser
+                        // can't yet tell a module from a value).
+                        if !named.is_empty() {
+                            e = Expr::Method {
+                                recv: Box::new(e),
+                                name: name.clone(),
+                                args,
+                                named,
+                                line: l,
+                                col: c,
+                            };
+                            continue;
+                        }
                         // `min_by`/`max_by`/`argmin`/`argmax` are sugar — desugared here
                         // into `map`/`enumerate` + `reduce` + index, so both engines get
                         // them for free (no new ops, parity by construction).
@@ -1200,6 +1219,7 @@ impl Parser {
                                     recv: Box::new(e),
                                     name: "zip".into(),
                                     args: vec![other],
+                                    named: vec![],
                                     line: l,
                                     col: c,
                                 };
@@ -1207,6 +1227,7 @@ impl Parser {
                                     recv: Box::new(zipped),
                                     name: "map".into(),
                                     args: vec![f],
+                                    named: vec![],
                                     line: l,
                                     col: c,
                                 }
@@ -1215,6 +1236,7 @@ impl Parser {
                                 recv: Box::new(e),
                                 name: name.clone(),
                                 args: wrap_bound_fn_arg(&name, args, l, c),
+                                named: vec![],
                                 line: l,
                                 col: c,
                             },

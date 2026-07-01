@@ -953,7 +953,7 @@ impl Compiler {
                 self.compile_expr(b, recv)?;
                 b.emit(Op::GetField(crate::symbol::Symbol::intern(name)), *line, *col);
             }
-            Expr::Method { recv, name, args, line, col } => {
+            Expr::Method { recv, name, args, line, col, .. } => {
                 use crate::types::Type;
                 let n = name.as_str();
 

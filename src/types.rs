@@ -578,9 +578,24 @@ impl Checker {
                 recv,
                 name,
                 args,
+                named,
                 line,
                 col,
-            } => self.synth_method(recv, name, args, *line, *col),
+            } => {
+                // A `Method` still carrying named arguments here is a genuine method call on a
+                // value (a qualified module call was rewritten to a resolved `Call` by the
+                // loader before type-checking). Named arguments bind to a declared function's
+                // parameter names, which a value's method doesn't expose — so reject them.
+                if !named.is_empty() {
+                    return Err(HelixError::new(
+                        "named arguments are not supported on method calls",
+                        *line,
+                        *col,
+                    )
+                    .hint("only functions take named arguments; pass method arguments positionally."));
+                }
+                self.synth_method(recv, name, args, *line, *col)
+            }
             Expr::CallValue { callee, args, .. } => {
                 // Calling a first-class function *value* — its parameter/return types
                 // aren't tracked statically (functions live in records/arrays as opaque

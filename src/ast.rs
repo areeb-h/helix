@@ -193,6 +193,12 @@ pub enum Expr {
         recv: Box<Expr>,
         name: String,
         args: Vec<Expr>,
+        /// Named arguments (`k: v`). Only ever non-empty for a *qualified module call*
+        /// (`dep.f(a, k: v)`), which the module loader resolves into a plain positional
+        /// `Call` against the callee's signature. A named argument on a genuine method call
+        /// (a value's method) is rejected by the type checker — so no engine sees a `Method`
+        /// with a non-empty `named`.
+        named: Vec<(String, Expr)>,
         line: usize,
         col: usize,
     },
@@ -328,6 +334,12 @@ pub enum Stmt {
     Func {
         name: String,
         params: Vec<(String, Option<TypeAnn>)>,
+        /// Per-parameter default value, parallel to `params` (`None` = required). Defaults
+        /// are literal expressions (`= 0`, `= true`, `= ""`, `= missing`). Kept on the node —
+        /// not just in the parser's call-resolution table — so the module loader can fill a
+        /// default when a *qualified* call `dep.f(...)` omits a trailing argument (the parser
+        /// only sees same-file signatures, so cross-module defaults must live on the AST).
+        defaults: Vec<Option<Expr>>,
         ret: Option<TypeAnn>,
         exported: bool,
         body: Expr,

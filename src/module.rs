@@ -232,6 +232,7 @@ impl Loader {
                             recv: Box::new(Expr::Ident { name: "python".to_string(), line: l, col: c }),
                             name: "import".to_string(),
                             args: vec![Expr::Str(module)],
+                            named: vec![],
                             line: l,
                             col: c,
                         },
@@ -345,6 +346,31 @@ impl Loader {
     }
 }
 
+/// A module function's call signature, as the loader needs it to resolve a qualified call:
+/// parameter names (to place named arguments) and per-parameter defaults (to fill omissions).
+struct FnSig {
+    params: Vec<String>,
+    defaults: Vec<Option<Expr>>,
+}
+
+/// The exported-function signatures of a module, keyed by name. Only `export`ed functions are
+/// reachable as `alias.member`, so only those need resolving.
+fn module_fn_sigs(m: &Module) -> HashMap<String, FnSig> {
+    let mut sigs = HashMap::new();
+    for s in &m.stmts {
+        if let Stmt::Func { name, params, defaults, exported: true, .. } = s {
+            sigs.insert(
+                name.clone(),
+                FnSig {
+                    params: params.iter().map(|(n, _)| n.clone()).collect(),
+                    defaults: defaults.clone(),
+                },
+            );
+        }
+    }
+    sigs
+}
+
 /// The rename context for one module.
 struct Ctx {
     /// This module's own prefix, e.g. `m2`.
@@ -357,6 +383,11 @@ struct Ctx {
     /// Each dependency prefix → that dependency's exported names, so a qualified
     /// `alias.member` access can be checked against the module's public surface.
     import_exports: HashMap<String, HashSet<String>>,
+    /// Each dependency prefix → (exported function name → its signature: parameter names +
+    /// per-parameter defaults). A qualified call `alias.f(...)` resolves named arguments and
+    /// fills omitted defaults against this at load time — the parser can't, because it only
+    /// sees same-file signatures. So the runtime still receives a plain positional call.
+    import_sigs: HashMap<String, HashMap<String, FnSig>>,
     /// Each selectively-imported name → its dependency's prefix, so a bare reference
     /// rewrites to the dependency's mangled name.
     selected: HashMap<String, String>,
@@ -410,6 +441,11 @@ fn rewrite_module(
             .imports
             .iter()
             .map(|(_, dep)| (format!("m{dep}"), modules[*dep].exports.clone()))
+            .collect(),
+        import_sigs: m
+            .imports
+            .iter()
+            .map(|(_, dep)| (format!("m{dep}"), module_fn_sigs(&modules[*dep])))
             .collect(),
         selected: m
             .selected
@@ -504,18 +540,28 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
     // `dep.member(...)` / `dep.member` where `dep` is an imported module → a direct
     // reference to the dependency's mangled name. Handled before generic recursion
     // because they replace the whole node. The member must be exported by the module.
-    if let Expr::Method { recv, name, args, line, col } = e
+    if let Expr::Method { recv, name, args, named, line, col } = e
         && let Some(dep) = module_of(recv, ctx, bound) {
             check_exported(ctx, recv, &dep, name, *line, *col)?;
             for a in args.iter_mut() {
                 rw(a, ctx, bound)?;
             }
-            *e = Expr::Call {
-                name: mangle(&dep, name),
-                args: std::mem::take(args),
-                line: *line,
-                col: *col,
-            };
+            for (_, v) in named.iter_mut() {
+                rw(v, ctx, bound)?;
+            }
+            // Resolve named arguments and omitted defaults against the callee's signature —
+            // the parser couldn't, since `dep`'s definition lives in another file. The runtime
+            // only ever sees the resulting plain positional call.
+            let resolved = resolve_qualified_call(
+                ctx,
+                &dep,
+                name,
+                std::mem::take(args),
+                std::mem::take(named),
+                *line,
+                *col,
+            )?;
+            *e = Expr::Call { name: mangle(&dep, name), args: resolved, line: *line, col: *col };
             return Ok(());
         }
     if let Expr::Field { recv, name, line, col } = e
@@ -578,10 +624,16 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
                 }
             }
         }
-        Expr::Method { recv, args, .. } => {
+        Expr::Method { recv, args, named, .. } => {
             rw(recv, ctx, bound)?;
             for a in args.iter_mut() {
                 rw(a, ctx, bound)?;
+            }
+            // A non-module method that carries named args is a checker error, but its arg
+            // values may still reference imports — rewrite them so the error (or a future
+            // valid use) sees resolved names.
+            for (_, v) in named.iter_mut() {
+                rw(v, ctx, bound)?;
             }
         }
         Expr::CallValue { callee, args, .. } => {
@@ -663,6 +715,107 @@ fn check_exported(
         )));
     }
     Ok(())
+}
+
+/// Resolve a qualified call `dep.member(pos, named)` into the positional argument list the
+/// runtime runs: place named arguments into their parameter slots and fill any omission with the
+/// parameter's default, all from the callee's signature (which the parser couldn't see — the
+/// definition is in another file). This mirrors the parser's own same-file resolution, so a
+/// qualified call behaves exactly like a bare one. Named arguments and unknown-parameter /
+/// duplicate errors are reported here (at the call's position, `line`/`col`).
+///
+/// When the callee's signature isn't known (a re-exported value, not a function) the arguments
+/// pass through unchanged if there are no named ones; a named argument in that case is an error
+/// (there's no signature to bind it to). Defaults are literal expressions, so cloning one into a
+/// foreign call site is always safe.
+fn resolve_qualified_call(
+    ctx: &Ctx,
+    dep: &str,
+    member: &str,
+    pos: Vec<Expr>,
+    named: Vec<(String, Expr)>,
+    line: usize,
+    col: usize,
+) -> Result<Vec<Expr>, HelixError> {
+    let Some(sig) = ctx.import_sigs.get(dep).and_then(|s| s.get(member)) else {
+        if named.is_empty() {
+            return Ok(pos);
+        }
+        return Err(HelixError::new(
+            format!("`{member}` cannot take named arguments"),
+            line,
+            col,
+        )
+        .hint("named arguments are only supported when calling a function; pass positionally."));
+    };
+    // Pure-positional fast path: fill any omitted trailing defaults (the common case).
+    if named.is_empty() {
+        if pos.len() >= sig.params.len() {
+            return Ok(pos); // enough already (or too many → arity error downstream)
+        }
+        let mut out = pos;
+        for d in &sig.defaults[out.len()..] {
+            match d {
+                Some(v) => out.push(v.clone()),
+                None => break, // a required parameter with no default — arity check reports it
+            }
+        }
+        return Ok(out);
+    }
+    // Named arguments present: bind each into its parameter slot, then fill the rest from
+    // defaults. Positional arguments occupy the leading slots.
+    let n = sig.params.len();
+    if pos.len() > n {
+        return Err(HelixError::new(
+            format!(
+                "`{member}` takes {n} parameter{}, but {} positional arguments were given",
+                if n == 1 { "" } else { "s" },
+                pos.len()
+            ),
+            line,
+            col,
+        ));
+    }
+    let mut slots: Vec<Option<Expr>> = (0..n).map(|_| None).collect();
+    for (i, p) in pos.into_iter().enumerate() {
+        slots[i] = Some(p);
+    }
+    for (pname, value) in named {
+        let Some(idx) = sig.params.iter().position(|p| *p == pname) else {
+            return Err(HelixError::new(
+                format!("`{member}` has no parameter named `{pname}`"),
+                line,
+                col,
+            )
+            .hint(format!("its parameters are: {}", sig.params.join(", "))));
+        };
+        if slots[idx].is_some() {
+            return Err(HelixError::new(
+                format!("parameter `{pname}` of `{member}` was given more than once"),
+                line,
+                col,
+            ));
+        }
+        slots[idx] = Some(value);
+    }
+    let mut out = Vec::with_capacity(n);
+    for (i, slot) in slots.into_iter().enumerate() {
+        match slot {
+            Some(e) => out.push(e),
+            None => match &sig.defaults[i] {
+                Some(d) => out.push(d.clone()),
+                None => {
+                    return Err(HelixError::new(
+                        format!("`{member}` is missing an argument for parameter `{}`", sig.params[i]),
+                        line,
+                        col,
+                    )
+                    .hint("pass it positionally or by name, or give the parameter a default."))
+                }
+            },
+        }
+    }
+    Ok(out)
 }
 
 /// If `recv` is a bare identifier naming an imported module (not shadowed by a

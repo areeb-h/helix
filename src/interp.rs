@@ -439,6 +439,7 @@ impl Interp {
                 args,
                 line,
                 col,
+                ..
             } => {
                 let recv_v = self.eval(recv)?;
                 // `is_missing` is universal — every value answers it. DataFrame and
