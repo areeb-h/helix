@@ -1884,3 +1884,34 @@ fn capability_gate_covers_write_methods() {
     assert_eq!(code, Some(0));
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn describe_emits_machine_readable_catalog() {
+    // `helix describe` is the LLM/agent grounding surface: the whole API as JSON, each entry
+    // tagged with its capability effect, sourced from the registry so it can't drift.
+    let (out, _err, code) = run(&["describe"], &[], "");
+    assert_eq!(code, Some(0));
+    let v: serde_json::Value =
+        serde_json::from_str(&out).expect("`helix describe` must emit valid JSON");
+
+    // Builtins carry name + pure + effect. `read_text` is fs-read; `sqrt` is pure.
+    let builtins = v["builtins"].as_array().expect("builtins array");
+    let read_text = builtins.iter().find(|b| b["name"] == "read_text").expect("read_text listed");
+    assert_eq!(read_text["effect"], "fs-read");
+    let sqrt = builtins.iter().find(|b| b["name"] == "sqrt").expect("sqrt listed");
+    assert_eq!(sqrt["effect"], "pure");
+
+    // Methods are grouped by receiver type, each tagged with its effect.
+    let methods = v["methods"].as_object().expect("methods object");
+    let has_map = methods
+        .values()
+        .any(|ms| ms.as_array().unwrap().iter().any(|m| m["name"] == "map"));
+    assert!(has_map, "the `map` method should be in the catalog");
+    let write_is_gated = methods
+        .values()
+        .any(|ms| ms.as_array().unwrap().iter().any(|m| m["name"] == "write_to" && m["effect"] == "fs-write"));
+    assert!(write_is_gated, "`write_to` should be tagged fs-write");
+
+    assert!(v["helix_version"].is_string(), "version present");
+    assert!(v["universal_methods"].as_array().is_some(), "universal methods present");
+}

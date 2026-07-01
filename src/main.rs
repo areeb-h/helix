@@ -184,6 +184,8 @@ fn run() -> ExitCode {
         Some("test") => cli_test(&args),
         // `helix doc [Type]` — list the methods on a type (API discovery).
         Some("doc") => cli_doc(&args),
+        // `helix describe` — the whole API as JSON (machine-readable, for LLMs/agents/tools).
+        Some("describe") => cli_describe(),
         // Shorthand: `helix script.helix` runs a file directly.
         Some(path) => run_file(path),
     }
@@ -236,6 +238,52 @@ fn cli_doc(args: &[String]) -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+    }
+}
+
+/// `helix describe` — emit the entire public API (free functions + per-type methods) as
+/// JSON on stdout, each tagged with its capability effect. This is the machine-readable
+/// twin of `helix doc`: a catalog an LLM/agent/tool grounds on to generate correct Helix
+/// (real names, which methods live on which receiver, what is capability-gated) instead of
+/// hallucinating. Sourced from the registry — the same single source of truth the checker,
+/// runtime, and `did you mean?` hints use, so it can never drift from the language.
+fn cli_describe() -> ExitCode {
+    use crate::{capability, registry};
+    let builtins: Vec<serde_json::Value> = registry::BUILTINS
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "name": b.path,
+                "pure": b.pure,
+                "effect": capability::effect_of(b.path).label(),
+            })
+        })
+        .collect();
+    let mut methods = serde_json::Map::new();
+    for (ty, ms) in registry::type_method_tables() {
+        let arr: Vec<serde_json::Value> = ms
+            .iter()
+            .map(|&m| serde_json::json!({ "name": m, "effect": capability::method_effect_of(m).label() }))
+            .collect();
+        methods.insert(ty.to_string(), serde_json::Value::Array(arr));
+    }
+    let doc = serde_json::json!({
+        "helix_version": env!("CARGO_PKG_VERSION"),
+        "builtins": builtins,
+        "methods": methods,
+        "universal_methods": registry::UNIVERSAL_METHODS,
+        // Effect categories a consumer may see; the gated ones require a capability grant.
+        "effects": ["pure", "fs-read", "fs-write", "net", "process", "env"],
+    });
+    match serde_json::to_string_pretty(&doc) {
+        Ok(s) => {
+            println!("{s}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: could not serialize the API catalog: {e}");
+            ExitCode::FAILURE
         }
     }
 }
@@ -450,6 +498,7 @@ fn print_help() {
          helix verify             check the project matches helix.lock (no build)\n    \
          helix test [path]        run *_test.helix files and report pass/fail\n    \
          helix doc [Type]         list a type's methods (Array/String/Dna/…) or `builtins`\n    \
+         helix describe           the whole API as JSON (for LLMs/agents/tools)\n    \
          helix version            show the version\n    \
          helix help               show this help\n\n\
          The default `helix` is a self-contained binary. A build with the `python`\n\
