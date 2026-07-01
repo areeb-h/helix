@@ -1898,8 +1898,10 @@ fn describe_emits_machine_readable_catalog() {
     let builtins = v["builtins"].as_array().expect("builtins array");
     let read_text = builtins.iter().find(|b| b["name"] == "read_text").expect("read_text listed");
     assert_eq!(read_text["effect"], "fs-read");
+    assert_eq!(read_text["category"], "io");
     let sqrt = builtins.iter().find(|b| b["name"] == "sqrt").expect("sqrt listed");
     assert_eq!(sqrt["effect"], "pure");
+    assert_eq!(sqrt["category"], "math");
 
     // Methods are grouped by receiver type, each tagged with its effect.
     let methods = v["methods"].as_object().expect("methods object");

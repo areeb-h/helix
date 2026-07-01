@@ -257,6 +257,7 @@ fn cli_describe() -> ExitCode {
                 "name": b.path,
                 "pure": b.pure,
                 "effect": capability::effect_of(b.path).label(),
+                "category": registry::category_of(b.path),
             })
         })
         .collect();

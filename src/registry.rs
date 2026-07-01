@@ -23,6 +23,60 @@ pub struct BuiltinDef {
     pub pure: bool,
 }
 
+/// A coarse *purpose* category for a builtin — the one place the ~120 free functions are
+/// grouped by what they do, for `helix describe` and human navigation. The user-facing names
+/// stay flat (ADR 0017 removed the `math.`/`io.`/`stats.` prefixes); this is metadata, not a
+/// namespace. A name not listed here defaults to `"core"`. The [`tests`] module asserts every
+/// builtin lands in a real category (nothing silently falls through).
+pub fn category_of(name: &str) -> &'static str {
+    match name {
+        // Filesystem I/O (readers + the two writers).
+        "read_csv" | "read_parquet" | "read_text" | "read_json" | "read_dir" | "file_exists"
+        | "remove_file" | "mkdir" | "read_fasta" | "read_fastq" | "read_vcf" | "read_bcf"
+        | "read_sam" | "read_bam" | "read_gff" | "read_bed" => "io",
+        // Networking — client + server.
+        "listen" | "http_get" | "http_post" | "http_request" => "net",
+        // Program output / streaming sinks.
+        "print" | "emit" => "output",
+        // Time / pacing.
+        "sleep" | "clock_monotonic" => "time",
+        // Constructors — make a value of a given type.
+        "dna" | "range" | "tensor" | "zeros" | "ones" | "eye" | "to_array" | "to_dataframe"
+        | "to_tensor" | "dataframe" | "dict" | "rational" | "linspace" => "constructor",
+        // Scalar conversions / accessors.
+        "chr" | "ord" | "to_float" | "to_int" | "numerator" | "denominator" => "conversion",
+        // Math — elementwise, broadcasting, missing-propagating.
+        "sqrt" | "cbrt" | "abs" | "exp" | "ln" | "log10" | "log2" | "log" | "sin" | "cos"
+        | "tan" | "asin" | "acos" | "atan" | "atan2" | "sinh" | "cosh" | "tanh" | "floor"
+        | "ceil" | "round" | "trunc" | "sign" | "is_nan" | "is_finite" | "is_infinite"
+        | "degrees" | "radians" | "hypot" | "min" | "max" | "erf" | "gcd" | "argmax"
+        | "argmin" => "math",
+        // Neural-net activations.
+        "relu" | "sigmoid" => "nn",
+        // Cryptography.
+        "sha256" | "hmac_sha256" | "aes_keygen" | "aes_encrypt" | "aes_decrypt"
+        | "ed25519_keygen" | "ed25519_sign" | "ed25519_verify" => "crypto",
+        // Encoding.
+        "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" => "encoding",
+        // Reproducible random.
+        "random" | "randn" | "random_int" => "random",
+        // Statistics, ML metrics, regression.
+        "mse" | "rmse" | "mae" | "r2_score" | "aic" | "bic" | "accuracy" | "precision"
+        | "recall" | "f1_score" | "confusion_matrix" | "normal_cdf" | "normal_pdf"
+        | "correlation" | "t_test" | "linear_regression" | "multiple_regression"
+        | "least_squares" => "stats",
+        // Lattice / number-theoretic.
+        "lll" | "lll_exact" => "linalg",
+        // Automatic differentiation.
+        "variable" | "value_of" | "gradient" => "autodiff",
+        // Bioinformatics.
+        "align" => "bio",
+        // Assertions / test helpers.
+        "assert" | "assert_eq" | "assert_close" => "assert",
+        _ => "core",
+    }
+}
+
 /// Every built-in function, keyed by a flat name (no namespace prefixes — ADR 0017).
 pub static BUILTINS: &[BuiltinDef] = &[
     // --- effectful / non-reproducible (I/O, output, network) -> not memoizable ---
@@ -285,6 +339,20 @@ mod tests {
         let mut seen = HashSet::new();
         for b in BUILTINS {
             assert!(seen.insert(b.path), "duplicate builtin path `{}`", b.path);
+        }
+    }
+
+    /// Every builtin lands in a real category — a new one that isn't added to `category_of`
+    /// falls through to `"core"` and fails here, so the catalog stays fully organized.
+    #[test]
+    fn every_builtin_has_a_category() {
+        for b in BUILTINS {
+            assert_ne!(
+                category_of(b.path),
+                "core",
+                "builtin `{}` has no category — add it to `category_of`",
+                b.path
+            );
         }
     }
 
