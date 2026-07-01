@@ -199,6 +199,7 @@ pub(crate) fn call_method(
         Value::PyObject(h) => crate::python::method(h, name, &args, line, col),
         Value::Dict(map) => dict_method(map, name, &args, line, col),
         Value::Net(h) => net_method(h, name, &args, line, col),
+        Value::Record(fields) => record_method(fields, name, &args, line, col),
         other => Err(HelixError::new(
             format!("a {} has no method `{}`", other.type_name(), name),
             line,
@@ -286,6 +287,89 @@ fn dict_method(
             "Dict",
             name,
             &crate::registry::methods_of(crate::registry::DICT_METHODS),
+            line,
+            col,
+        )),
+    }
+}
+
+/// Methods on a [`Value::Record`] for **dynamic** field access — the escape hatch for
+/// consuming unknown-shape data (a parsed JSON API response). `get`/`has`/`keys` look fields
+/// up by string name at runtime, so a maybe-absent field is `missing`/`false` rather than a
+/// compile error. Static `rec.field` access is unchanged; this is for shapes you don't know
+/// until runtime.
+fn record_method(
+    fields: &Rc<Vec<(crate::symbol::Symbol, Value)>>,
+    name: &str,
+    args: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    let arity = |n: usize| -> Result<(), HelixError> {
+        if args.len() == n {
+            Ok(())
+        } else {
+            Err(HelixError::new(
+                format!("`{name}` expects {n} argument{}, got {}", if n == 1 { "" } else { "s" }, args.len()),
+                line,
+                col,
+            ))
+        }
+    };
+    let key = |v: &Value| -> Result<String, HelixError> {
+        match v {
+            Value::Str(s) => Ok((**s).clone()),
+            other => Err(type_err(name, "a string field name", other, line, col)),
+        }
+    };
+    match name {
+        // `get(k)` → the field's value, or `missing` when absent (so `rec.get(k) ?? default`
+        // works). `get(k, default)` → the value, or `default` when absent.
+        "get" => {
+            if args.len() != 1 && args.len() != 2 {
+                return Err(HelixError::new(
+                    format!("`get` expects 1 or 2 arguments, got {}", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            let k = key(&args[0])?;
+            let found = fields.iter().find(|(s, _)| s.as_str() == k).map(|(_, v)| v.clone());
+            Ok(found.unwrap_or_else(|| args.get(1).cloned().unwrap_or(Value::Missing)))
+        }
+        "has" => {
+            arity(1)?;
+            let k = key(&args[0])?;
+            Ok(Value::Bool(fields.iter().any(|(s, _)| s.as_str() == k)))
+        }
+        "keys" => {
+            arity(0)?;
+            Ok(Value::array(
+                fields.iter().map(|(s, _)| Value::Str(Rc::new(s.as_str().to_string()))).collect(),
+            ))
+        }
+        "values" => {
+            arity(0)?;
+            Ok(Value::array(fields.iter().map(|(_, v)| v.clone()).collect()))
+        }
+        "items" => {
+            arity(0)?;
+            Ok(Value::array(
+                fields
+                    .iter()
+                    .map(|(s, v)| {
+                        Value::Tuple(Rc::new(vec![
+                            Value::Str(Rc::new(s.as_str().to_string())),
+                            v.clone(),
+                        ]))
+                    })
+                    .collect(),
+            ))
+        }
+        _ => Err(unknown_method(
+            "Record",
+            name,
+            &crate::registry::methods_of(crate::registry::RECORD_METHODS),
             line,
             col,
         )),

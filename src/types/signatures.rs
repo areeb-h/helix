@@ -863,6 +863,27 @@ pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Typ
     })
 }
 
+/// Type of a record **dynamic-access** method (`get`/`has`/`keys`/`values`/`items`, see
+/// `record_method`). `get` is permissive (Unknown — the field value's type isn't statically
+/// known); `has` is Bool; the enumerators are arrays. Static `rec.field` access is typed the
+/// normal way (this is the escape hatch for runtime-unknown shapes).
+pub(super) fn record_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
+    Ok(match name {
+        "get" => Type::Unknown,
+        "has" => Type::Bool,
+        "keys" => Type::Array(Box::new(Type::String)),
+        "values" => Type::Array(Box::new(Type::Unknown)),
+        "items" => Type::Array(Box::new(Type::Unknown)),
+        other => {
+            return Err(HelixError::new(format!("type Record has no method `{other}`"), line, col)
+                .hint(
+                    "records have dynamic access `get`/`has`/`keys`/`values`/`items` — or use \
+                     `rec.field` directly for a known field.",
+                ));
+        }
+    })
+}
+
 pub(super) fn tensor_method_type(name: &str, nargs: usize, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
         "shape" => Type::Array(Box::new(Type::Int)),

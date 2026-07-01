@@ -284,6 +284,12 @@ impl super::Checker {
                 self.synth_simple_args(args)?;
                 dna_method_type(name, line, col)
             }
+            // Records get dynamic-access methods (`get`/`has`/`keys`/…) on top of static
+            // `rec.field` access — the escape hatch for runtime-unknown shapes (parsed JSON).
+            Type::Record(_) => {
+                self.synth_simple_args(args)?;
+                record_method_type(name, line, col)
+            }
             other => Err(HelixError::new(
                 format!("type {} has no method `{}`", other, name),
                 line,

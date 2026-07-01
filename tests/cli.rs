@@ -2093,3 +2093,25 @@ fn http_stream_pulls_chunks_line_by_line() {
     assert!(got.contains("chunk-c"), "third chunk: {got}");
     assert!(got.contains("true"), "the 4th next() should be missing at EOF: {got}");
 }
+
+#[test]
+fn record_dynamic_field_access() {
+    // Dynamic access for unknown-shape data (a parsed JSON response): get/has/keys probe
+    // fields by name at runtime, so a maybe-absent field is missing/false — not a compile
+    // error. `get(k, default)` supplies a fallback.
+    let src = "r = { name: \"Ada\", age: 36 }\n\
+               print(r.get(\"name\"))\n\
+               print(r.get(\"missing\") ?? \"none\")\n\
+               print(r.get(\"missing\", \"def\"))\n\
+               print(r.has(\"age\"))\n\
+               print(r.has(\"nope\"))\n\
+               print(r.keys().sort())\n";
+    let (out, err, code) = run_source(src, &[], "rec_access");
+    assert_eq!(code, Some(0), "err: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["Ada", "none", "def", "true", "false", "[\"age\", \"name\"]"],
+        "record dynamic access: {out}"
+    );
+}

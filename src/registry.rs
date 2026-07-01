@@ -284,6 +284,12 @@ pub static GROUPBY_METHODS: &[&str] = &["mean", "sum", "min", "max", "count", "s
 pub static DICT_METHODS: &[&str] =
     &["get", "contains", "keys", "values", "items", "insert", "remove", "count", "length"];
 
+/// Record methods for **dynamic** field access — `get(k[, default])` (value or missing/
+/// default), `has(k)`, `keys()`/`values()`/`items()`. The escape hatch for consuming
+/// unknown-shape data (a parsed JSON response) where a static `rec.field` would be a compile
+/// error. Static field access is the normal path; these are for runtime-unknown shapes.
+pub static RECORD_METHODS: &[&str] = &["get", "has", "keys", "values", "items"];
+
 /// Network-handle (`Net`) methods — the HTTP server surface (`src/serve.rs`). A
 /// listener (from `listen(port)`) has `accept`; a connection (from `accept()`) has
 /// `respond`. Effects, dispatched at runtime like the other opaque types.
@@ -316,7 +322,7 @@ pub fn methods_of(table: &[&'static str]) -> Vec<&'static str> {
 
 /// The method tables by receiver type — the single source for `helix doc <Type>`
 /// introspection and the method-uniqueness test.
-pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 8] {
+pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 9] {
     [
         ("Array", ARRAY_METHODS),
         ("String", STRING_METHODS),
@@ -326,6 +332,7 @@ pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 8] {
         ("GroupBy", GROUPBY_METHODS),
         ("Dict", DICT_METHODS),
         ("Net", NET_METHODS),
+        ("Record", RECORD_METHODS),
     ]
 }
 
@@ -362,15 +369,9 @@ mod tests {
     /// may redeclare a universal method (`is_missing` lives only in UNIVERSAL_METHODS).
     #[test]
     fn method_names_are_unique_and_disjoint_from_universal() {
-        for (who, table) in [
-            ("Array", ARRAY_METHODS),
-            ("String", STRING_METHODS),
-            ("Dna", DNA_METHODS),
-            ("Tensor", TENSOR_METHODS),
-            ("DataFrame", DF_METHODS),
-            ("GroupBy", GROUPBY_METHODS),
-            ("Net", NET_METHODS),
-        ] {
+        // Iterate the single source (`type_method_tables`) so every receiver — including Dict
+        // and Record — is covered, not a hand-maintained subset that can drift.
+        for (who, table) in type_method_tables() {
             let mut seen = HashSet::new();
             for &m in table {
                 assert!(seen.insert(m), "duplicate {who} method `{m}`");
