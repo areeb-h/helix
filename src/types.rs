@@ -518,6 +518,36 @@ impl Checker {
                 }
                 Ok(Type::Record(tys))
             }
+            Expr::RecordUpdate { base, fields, line, col } => {
+                let base_t = self.synth(base)?;
+                let mut updates = Vec::with_capacity(fields.len());
+                for (k, v) in fields {
+                    updates.push((k.clone(), self.synth(v)?));
+                }
+                match base_t {
+                    // A statically-known record: merge the update fields (override or extend)
+                    // so field access on the result is still precisely checked.
+                    Type::Record(mut tys) => {
+                        for (name, ty) in updates {
+                            match tys.iter_mut().find(|(k, _)| *k == name) {
+                                Some(slot) => slot.1 = ty,
+                                None => tys.push((name, ty)),
+                            }
+                        }
+                        Ok(Type::Record(tys))
+                    }
+                    // The base's shape isn't known (a `parse_json` result, a parameter, …).
+                    // The result is a record, but its full field set can't be proven — stay
+                    // permissive, exactly as for dynamic field access.
+                    Type::Unknown | Type::Missing => Ok(Type::Unknown),
+                    other => Err(HelixError::new(
+                        format!("`...` record update needs a record, got {other}"),
+                        *line,
+                        *col,
+                    )
+                    .hint("the spread base must be a record, e.g. `{ ...resp, status: 500 }`.")),
+                }
+            }
             Expr::Field {
                 recv,
                 name,

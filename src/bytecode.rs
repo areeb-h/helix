@@ -949,6 +949,17 @@ impl Compiler {
                     fields.iter().map(|(k, _)| crate::symbol::Symbol::intern(k)).collect();
                 b.emit(Op::MakeRecord(std::rc::Rc::new(names)), 0, 0);
             }
+            Expr::RecordUpdate { base, fields, line, col } => {
+                // Base first (it sits below the field values), then each update value in
+                // order — same evaluation order as the tree-walker, so side effects match.
+                self.compile_expr(b, base)?;
+                for (_, v) in fields {
+                    self.compile_expr(b, v)?;
+                }
+                let names: Vec<crate::symbol::Symbol> =
+                    fields.iter().map(|(k, _)| crate::symbol::Symbol::intern(k)).collect();
+                b.emit(Op::UpdateRecord(std::rc::Rc::new(names)), *line, *col);
+            }
             Expr::Field { recv, name, line, col } => {
                 self.compile_expr(b, recv)?;
                 b.emit(Op::GetField(crate::symbol::Symbol::intern(name)), *line, *col);

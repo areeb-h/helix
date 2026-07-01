@@ -718,6 +718,28 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     names.iter().copied().zip(vals).collect();
                 stack.push(Value::Record(std::rc::Rc::new(fields)));
             }
+            Op::UpdateRecord(names) => {
+                let start = stack.len() - names.len();
+                let vals: Vec<Value> = stack.split_off(start);
+                let base = stack.pop().unwrap();
+                let Value::Record(base_fields) = base else {
+                    return Err(HelixError::new(
+                        format!("`...` record update needs a record, got a {}", base.type_name()),
+                        line,
+                        col,
+                    )
+                    .hint("the spread base must be a record, e.g. `{ ...resp, status: 500 }`."));
+                };
+                // Clone the base, then set (override) or append each update field, in order.
+                let mut out: Vec<(crate::symbol::Symbol, Value)> = (*base_fields).clone();
+                for (name, val) in names.iter().copied().zip(vals) {
+                    match out.iter_mut().find(|(s, _)| *s == name) {
+                        Some(slot) => slot.1 = val,
+                        None => out.push((name, val)),
+                    }
+                }
+                stack.push(Value::Record(std::rc::Rc::new(out)));
+            }
             Op::GetField(name) => {
                 let recv = stack.pop().unwrap();
                 stack.push(crate::interp::eval_field(&recv, *name, line, col)?);

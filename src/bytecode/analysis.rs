@@ -122,6 +122,9 @@ fn any_call(e: &Expr, pred: &dyn Fn(&str) -> bool) -> bool {
             .any(|p| matches!(p, InterpPart::Expr(e, _) if any_call(e, pred))),
         Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().any(|x| any_call(x, pred)),
         Expr::Record(fs) => fs.iter().any(|(_, v)| any_call(v, pred)),
+        Expr::RecordUpdate { base, fields, .. } => {
+            any_call(base, pred) || fields.iter().any(|(_, v)| any_call(v, pred))
+        }
         Expr::Field { recv, .. } => any_call(recv, pred),
         Expr::Unary { expr, .. } => any_call(expr, pred),
         Expr::Binary { left, right, .. } => any_call(left, pred) || any_call(right, pred),
@@ -215,6 +218,11 @@ fn children(e: &Expr) -> Vec<&Expr> {
             .collect(),
         Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().collect(),
         Expr::Record(fs) => fs.iter().map(|(_, v)| v).collect(),
+        Expr::RecordUpdate { base, fields, .. } => {
+            let mut v = vec![&**base];
+            v.extend(fields.iter().map(|(_, e)| e));
+            v
+        }
         Expr::Field { recv, .. } => vec![recv],
         Expr::Unary { expr, .. } => vec![expr],
         Expr::Binary { left, right, .. } => vec![left, right],
@@ -337,6 +345,12 @@ fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String
         }
         Expr::Record(fs) => {
             for (_, v) in fs {
+                collect_free(v, bound, free);
+            }
+        }
+        Expr::RecordUpdate { base, fields, .. } => {
+            collect_free(base, bound, free);
+            for (_, v) in fields {
                 collect_free(v, bound, free);
             }
         }

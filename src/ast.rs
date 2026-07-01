@@ -161,6 +161,16 @@ pub enum Expr {
     Tuple(Vec<Expr>),
     /// A record literal: `{name: "Ada", age: 41}` (ordered, identifier keys).
     Record(Vec<(String, Expr)>),
+    /// A record update: `{ ...base, status: 500 }` — clone `base` (a record), then set/append
+    /// each field (a later field overrides a same-named one from `base`). The one clean way to
+    /// derive a modified record from an immutable one (add a header, bump a status). `fields`
+    /// may be empty (`{ ...base }` is a shallow copy).
+    RecordUpdate {
+        base: Box<Expr>,
+        fields: Vec<(String, Expr)>,
+        line: usize,
+        col: usize,
+    },
     /// Field access on a record: `r.name` (no parens — `r.method()` is a `Method`).
     Field {
         recv: Box<Expr>,
@@ -284,6 +294,7 @@ impl Expr {
             | Expr::Call { line, col, .. }
             | Expr::Method { line, col, .. }
             | Expr::CallValue { line, col, .. }
+            | Expr::RecordUpdate { line, col, .. }
             | Expr::Index { line, col, .. }
             | Expr::Slice { line, col, .. }
             | Expr::If { line, col, .. }

@@ -87,6 +87,10 @@ pub enum Op {
     /// Names are interned [`crate::symbol::Symbol`]s (resolved once at compile), so
     /// building a record is an integer copy per field — no per-record allocation.
     MakeRecord(std::rc::Rc<Vec<crate::symbol::Symbol>>),
+    /// Record update `{ ...base, k: v }`: pop `names.len()` field values, then the base
+    /// record beneath them, and push a new record = base with each named field set (override)
+    /// or appended. Errors if the base isn't a record.
+    UpdateRecord(std::rc::Rc<Vec<crate::symbol::Symbol>>),
     /// Pop a receiver; push `recv.<name>` (record field access). The field name is
     /// an interned `Symbol`, so the lookup compares a `u32` against the record keys.
     GetField(crate::symbol::Symbol),

@@ -298,6 +298,29 @@ impl Interp {
                 }
                 Ok(Value::Record(Rc::new(vals)))
             }
+            Expr::RecordUpdate { base, fields, line, col } => {
+                let base_v = self.eval(base)?;
+                let Value::Record(base_fields) = base_v else {
+                    return Err(HelixError::new(
+                        format!("`...` record update needs a record, got a {}", base_v.type_name()),
+                        *line,
+                        *col,
+                    )
+                    .hint("the spread base must be a record, e.g. `{ ...resp, status: 500 }`."));
+                };
+                // Clone the base fields, then set (override) or append each update field, in
+                // order — a later field wins over a same-named base field or earlier update.
+                let mut out: Vec<(Symbol, Value)> = (*base_fields).clone();
+                for (k, ve) in fields {
+                    let sym = Symbol::intern(k);
+                    let val = self.eval(ve)?;
+                    match out.iter_mut().find(|(s, _)| *s == sym) {
+                        Some(slot) => slot.1 = val,
+                        None => out.push((sym, val)),
+                    }
+                }
+                Ok(Value::Record(Rc::new(out)))
+            }
             Expr::Field {
                 recv,
                 name,

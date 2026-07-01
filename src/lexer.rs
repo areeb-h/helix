@@ -213,7 +213,11 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
             '}' => single(Tok::RBrace, &mut raw, line, start_col, &mut i, &mut col),
             ',' => single(Tok::Comma, &mut raw, line, start_col, &mut i, &mut col),
             '.' => {
-                if i + 1 < n && chars[i + 1] == '.' {
+                if i + 2 < n && chars[i + 1] == '.' && chars[i + 2] == '.' {
+                    push!(Tok::DotDotDot, start_col);
+                    i += 3;
+                    col += 3;
+                } else if i + 1 < n && chars[i + 1] == '.' {
                     push!(Tok::DotDot, start_col);
                     i += 2;
                     col += 2;

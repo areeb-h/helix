@@ -68,8 +68,9 @@ pub enum Tok {
     RBrace, // }
     Comma,
     Dot,
-    DotDot,   // .. (range literal: `0..n`)
-    Colon,    // :
+    DotDot,    // .. (range literal: `0..n`)
+    DotDotDot, // ... (record spread: `{ ...base, k: v }`)
+    Colon,     // :
     Arrow,    // ->
     FatArrow, // =>
     Pipe,     // | (match-pattern alternatives)
@@ -133,6 +134,7 @@ impl Tok {
             Tok::Comma => "`,`".into(),
             Tok::Dot => "`.`".into(),
             Tok::DotDot => "`..`".into(),
+            Tok::DotDotDot => "`...`".into(),
             Tok::Colon => "`:`".into(),
             Tok::Arrow => "`->`".into(),
             Tok::FatArrow => "`=>`".into(),

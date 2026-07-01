@@ -1876,11 +1876,41 @@ impl Parser {
                 Ok(Expr::Array(elems))
             }
             Tok::LBrace => {
-                // record literal: `{ name: expr, age: expr }`
+                // record literal: `{ name: expr, age: expr }`, or a record UPDATE that
+                // starts with a spread: `{ ...base, status: 500 }`.
+                let (l, c) = self.pos();
                 self.advance();
+                // A leading `...expr` makes this a record update: clone `expr`, then apply the
+                // fields that follow. The spread must come first (there is one base).
+                if matches!(self.peek(), Tok::DotDotDot) {
+                    self.advance();
+                    let base = self.expr()?;
+                    let mut fields: Vec<(String, Expr)> = Vec::new();
+                    while matches!(self.peek(), Tok::Comma) {
+                        self.advance();
+                        if matches!(self.peek(), Tok::RBrace) {
+                            break; // trailing comma
+                        }
+                        let key = self.member_name("as a record field name")?;
+                        self.eat(&Tok::Colon, &format!("after field `{}`", key))?;
+                        fields.push((key, self.expr()?));
+                    }
+                    self.eat(&Tok::RBrace, "to close the record update")?;
+                    return Ok(Expr::RecordUpdate { base: Box::new(base), fields, line: l, col: c });
+                }
                 let mut fields: Vec<(String, Expr)> = Vec::new();
                 if !matches!(self.peek(), Tok::RBrace) {
                     loop {
+                        // A spread is only valid as the FIRST element (there is one base).
+                        if matches!(self.peek(), Tok::DotDotDot) {
+                            let (sl, sc) = self.pos();
+                            return Err(HelixError::new(
+                                "a `...spread` must be the first element of a record update",
+                                sl,
+                                sc,
+                            )
+                            .hint("write `{ ...base, field: value }` — the spread comes first."));
+                        }
                         // Field names may be keywords (`match`, `in`, `if`, …) — they
                         // are contextual here, never ambiguous before a `:`.
                         let key = self.member_name("as a record field name")?;

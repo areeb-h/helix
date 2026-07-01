@@ -443,6 +443,24 @@
         }
     }
 
+    /// Record update `{ ...base, k: v }` runs identically on both engines: overriding an
+    /// existing field, appending a new one, a bare copy, override-precedence when a key
+    /// repeats, and that the base record is left unmutated (immutability).
+    #[test]
+    fn record_update_matches_tree_walker_on_vm() {
+        let cases = [
+            "b = {x: 1, y: 2}\nprint({...b, x: 9})",              // override
+            "b = {x: 1}\nprint({...b, z: 3})",                    // append
+            "b = {x: 1, y: 2}\nprint({...b})",                    // bare copy
+            "b = {x: 1}\nr = {...b, x: 5}\nprint(b.x)\nprint(r.x)", // base unmutated
+            "b = {x: 1}\nprint({...b, x: 2, x: 3}.x)",            // last write wins
+            "b = {x: 1, y: 2}\nprint({...b, y: 20, z: 30}.y + {...b, y: 20, z: 30}.z)",
+        ];
+        for src in cases {
+            assert_eq!(run_vm(src), run_tw(src), "VM ≠ tree-walker on `{src}`");
+        }
+    }
+
     /// Calling a first-class function *value* produced by an expression —
     /// `(rec.handler)(x)`, `(fns[i])(x)` — runs natively on both engines. These pin
     /// the VM's `CallValue` opcode path (and its error text) to the tree-walker:

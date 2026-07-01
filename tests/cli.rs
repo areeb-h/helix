@@ -978,6 +978,30 @@ fn calls_a_function_value_from_an_expression() {
 }
 
 #[test]
+fn record_update_spread_derives_a_modified_record() {
+    // `{ ...base, k: v }` is the clean way to derive a changed record from an immutable
+    // one (add a header, bump a status) — override existing fields, append new ones, and
+    // leave the base untouched. This is the response-composition primitive for a web layer.
+    let src = concat!(
+        "resp = { status: 200, body: \"ok\" }\n",
+        "err = { ...resp, status: 500 }\n",
+        "print(err.status)\n",                       // 500 (overridden)
+        "print(err.body)\n",                         // ok (carried over)
+        "withhdr = { ...resp, cookie: \"tok\" }\n",
+        "print(withhdr.cookie)\n",                   // tok (appended)
+        "print(withhdr.status)\n",                   // 200 (carried)
+        "print(resp.status)\n",                      // 200 (base unmutated)
+    );
+    let (out, err, code) = run_source(src, &[], "recupdate");
+    assert_eq!(code, Some(0), "stderr:\n{err}");
+    assert_eq!(out.lines().collect::<Vec<_>>(), ["500", "ok", "tok", "200", "200"]);
+    // A non-record spread base is a clear error.
+    let (_, e2, c2) = run_source("x = { ...5, a: 1 }\nprint(x)\n", &[], "recupdate_err");
+    assert_ne!(c2, Some(0));
+    assert!(e2.contains("record update needs a record"), "got: {e2}");
+}
+
+#[test]
 fn interpolation_hole_resolves_named_args_and_defaults() {
     // A `{expr}` interpolation hole is parsed as its own snippet; it must still see the
     // program's function signatures, so a call inside a hole resolves named arguments and
