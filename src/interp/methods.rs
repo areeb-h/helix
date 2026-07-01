@@ -250,7 +250,9 @@ fn dict_method(
             arity(1)?;
             Ok(map.get(&key_of(&args[0])?).cloned().unwrap_or(Value::Missing))
         }
-        "contains" => {
+        // `has` is the alias that matches a record's `has` — the same key-presence question,
+        // one name across both keyed types.
+        "contains" | "has" => {
             arity(1)?;
             Ok(Value::Bool(map.contains_key(&key_of(&args[0])?)))
         }

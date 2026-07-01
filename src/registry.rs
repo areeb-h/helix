@@ -283,8 +283,9 @@ pub static DF_METHODS: &[&str] = &[
 pub static GROUPBY_METHODS: &[&str] = &["mean", "sum", "min", "max", "count", "std"];
 
 /// Keyed-map (`Dict`) methods — O(log n) lookup, sorted (deterministic) enumeration.
-pub static DICT_METHODS: &[&str] =
-    &["get", "contains", "keys", "values", "items", "insert", "remove", "count", "length"];
+pub static DICT_METHODS: &[&str] = &[
+    "get", "contains", "has", "keys", "values", "items", "insert", "remove", "count", "length",
+];
 
 /// Record methods for **dynamic** field access — `get(k[, default])` (value or missing/
 /// default), `has(k)`, `keys()`/`values()`/`items()`. The escape hatch for consuming
