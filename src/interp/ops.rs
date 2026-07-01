@@ -759,8 +759,19 @@ pub(crate) fn rational_binary(op: &BinOp, l: &Value, r: &Value, line: usize, col
             Value::Rational(Rc::new((a / b).floor()))
         }
         Mod => {
-            // rational modulo is unusual; computed in f64 (rem_euclid).
-            Value::Float(a.to_f64().unwrap_or(f64::NAN).rem_euclid(b.to_f64().unwrap_or(f64::NAN)))
+            // Rational modulo is unusual; it's computed in f64 via rem_euclid. A rational
+            // too large to represent in f64 would silently become NaN — error instead of
+            // returning a lie.
+            match (a.to_f64(), b.to_f64()) {
+                (Some(af), Some(bf)) => Value::Float(af.rem_euclid(bf)),
+                _ => {
+                    return Err(HelixError::new(
+                        "rational is too large to take a modulo (exceeds f64 range)",
+                        line,
+                        col,
+                    ))
+                }
+            }
         }
         Pow => {
             if b.is_integer() {
@@ -772,7 +783,16 @@ pub(crate) fn rational_binary(op: &BinOp, l: &Value, r: &Value, line: usize, col
                 }
                 Value::Rational(Rc::new(ratio_pow(&a, exp)))
             } else {
-                Value::Float(a.to_f64().unwrap_or(f64::NAN).powf(b.to_f64().unwrap_or(f64::NAN)))
+                match (a.to_f64(), b.to_f64()) {
+                    (Some(af), Some(bf)) => Value::Float(af.powf(bf)),
+                    _ => {
+                        return Err(HelixError::new(
+                            "rational is too large to raise to a fractional power (exceeds f64 range)",
+                            line,
+                            col,
+                        ))
+                    }
+                }
             }
         }
         Eq => Value::Bool(a == b),
