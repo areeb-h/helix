@@ -243,10 +243,19 @@ pub fn accept(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, 
             ));
         }
     };
-    let (stream, _peer) = listener
-        .accept()
-        .map_err(|e| HelixError::new(format!("accept failed: {e}"), line, col))?;
-    finish_connection(stream, line, col)
+    // Loop so a malformed / oversized request — already answered with a best-effort 400 and
+    // closed inside `finish_connection` — is skipped rather than propagated. One bad or
+    // hostile client (a header bomb, a mid-request disconnect) must never take down the
+    // accept loop; only a genuine *listener* failure is returned to the program.
+    loop {
+        let (stream, _peer) = listener
+            .accept()
+            .map_err(|e| HelixError::new(format!("accept failed: {e}"), line, col))?;
+        match finish_connection(stream, line, col) {
+            Ok(conn) => return Ok(conn),
+            Err(_) => continue,
+        }
+    }
 }
 
 /// `listener.poll()` — a **non-blocking** accept: return a connection if a client is
@@ -271,7 +280,13 @@ pub fn poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, He
     let accepted = listener.accept();
     listener.set_nonblocking(false).ok(); // restore so `accept()` still blocks if used
     match accepted {
-        Ok((stream, _peer)) => finish_connection(stream, line, col),
+        // A malformed request was answered with a 400 and dropped inside `finish_connection`;
+        // there's no valid connection to hand back this tick, so report `missing` (as if none
+        // had arrived) — the cooperative loop just continues.
+        Ok((stream, _peer)) => match finish_connection(stream, line, col) {
+            Ok(conn) => Ok(conn),
+            Err(_) => Ok(Value::Missing),
+        },
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Value::Missing),
         Err(e) => Err(HelixError::new(format!("poll failed: {e}"), line, col)),
     }
@@ -350,12 +365,24 @@ fn finish_connection(stream: TcpStream, line: usize, col: usize) -> Result<Value
     let read_side = stream
         .try_clone()
         .map_err(|e| HelixError::new(format!("could not read the connection: {e}"), line, col))?;
-    let request = parse_request(read_side, line, col)?;
-    Ok(Value::Net(Rc::new(NetHandle::Conn {
-        request,
-        stream: RefCell::new(Some(stream)),
-        pending: RefCell::new(Vec::new()),
-    })))
+    match parse_request(read_side, line, col) {
+        Ok(request) => Ok(Value::Net(Rc::new(NetHandle::Conn {
+            request,
+            stream: RefCell::new(Some(stream)),
+            pending: RefCell::new(Vec::new()),
+        }))),
+        Err(e) => {
+            // A malformed / oversized request (a header bomb, a bad request line, a client
+            // that vanished mid-request). Answer with a best-effort `400` and drop the
+            // connection; `accept`/`poll` skip this Err so the server keeps serving.
+            let mut s = stream;
+            s.set_write_timeout(Some(WRITE_TIMEOUT)).ok();
+            let _ = s.write_all(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Append `bytes` to a streaming connection's backlog and drain as much as the kernel
