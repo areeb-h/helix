@@ -25,6 +25,7 @@ use crate::token::{StrSeg, Tok, Token};
 /// A user function's signature, captured at its definition so calls to it can be
 /// desugared: named arguments reordered into position and omitted parameters filled
 /// with their (literal) defaults. `defaults` is parallel to `params`.
+#[derive(Clone)]
 struct FnSig {
     params: Vec<String>,
     defaults: Vec<Option<Expr>>,
@@ -48,9 +49,12 @@ fn is_const_default(e: &Expr) -> bool {
 /// `depth` is the enclosing parser's current nesting depth, so a `{...}` hole that
 /// itself contains an interpolated string keeps accumulating toward
 /// `MAX_PARSE_DEPTH` rather than resetting - bounding nested-interpolation recursion.
-pub fn parse_expression(src: &str, depth: usize) -> Result<Expr, HelixError> {
+/// `sigs` carries the enclosing program's function signatures (defined-so-far), so a call
+/// inside the hole resolves named arguments and defaults exactly as it would outside — an
+/// interpolated `"{greet(name, loud: true)}"` is the same call as a bare one.
+fn parse_expression(src: &str, depth: usize, sigs: &HashMap<String, FnSig>) -> Result<Expr, HelixError> {
     let tokens = crate::lexer::lex(src)?;
-    let mut p = Parser { toks: tokens, pos: 0, depth, fn_sigs: HashMap::new() };
+    let mut p = Parser { toks: tokens, pos: 0, depth, fn_sigs: (*sigs).clone() };
     p.skip_newlines();
     let e = p.expr()?;
     p.skip_newlines();
@@ -1702,7 +1706,7 @@ impl Parser {
                             // error inside it carries snippet-relative positions (line 1).
                             // Relocate it to the interpolated string's real position so
                             // the caret points at the user's actual source, not line 1.
-                            let e = parse_expression(&src, self.depth)
+                            let e = parse_expression(&src, self.depth, &self.fn_sigs)
                                 .map_err(|err| HelixError { line: l, col: c, ..err })?;
                             // Parse the format spec now, so a malformed spec is a parse
                             // error pointing at the string (never a runtime surprise).

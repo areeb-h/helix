@@ -978,6 +978,24 @@ fn calls_a_function_value_from_an_expression() {
 }
 
 #[test]
+fn interpolation_hole_resolves_named_args_and_defaults() {
+    // A `{expr}` interpolation hole is parsed as its own snippet; it must still see the
+    // program's function signatures, so a call inside a hole resolves named arguments and
+    // fills defaults exactly like the same call outside a string. (Regression: the hole used
+    // to parse with an empty signature table, so `"{f(x, k: v)}"` errored.)
+    let src = concat!(
+        "fn f(x, k = 10) = x + k\n",
+        "print(\"a={f(1)}\")\n",          // default fills → 11
+        "print(\"b={f(1, k: 5)}\")\n",    // named arg → 6
+        "y = 3.14159\n",
+        "print(\"c={y:.2f}\")\n",         // format spec still works → 3.14
+    );
+    let (out, err, code) = run_source(src, &[], "interpnamed");
+    assert_eq!(code, Some(0), "stderr:\n{err}");
+    assert_eq!(out.lines().collect::<Vec<_>>(), ["a=11", "b=6", "c=3.14"]);
+}
+
+#[test]
 fn dict_serializes_to_a_json_object() {
     // A Dict is the natural carrier for a dynamic-keyed payload (arbitrary string keys
     // decided at runtime); it must serialize as a JSON object. Build one from pairs,
