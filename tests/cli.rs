@@ -1973,3 +1973,61 @@ fn http_post_round_trips_to_a_helix_server() {
     assert!(got.contains("POST"), "server should report method POST: {got}");
     assert!(got.contains("hello-post"), "the POST body should be echoed: {got}");
 }
+
+#[test]
+fn http_request_general_method_headers_and_response_headers() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir();
+    // Echo server: reflect the method, body, and a custom request header back.
+    let srv = dir.join("helix_req_srv.helix");
+    std::fs::write(
+        &srv,
+        "l = listen(8252)\n\
+         served = range(0, 100).map(i => do {\n\
+           c = l.accept()\n\
+           r = c.request()\n\
+           c.respond({ status: 200, json: { method: r.method, body: r.body, xtest: r.headers[\"x-test\"] } })\n\
+           0\n\
+         })\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&srv)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+
+    // A PUT with a custom request header; assert the response carries headers back too.
+    let cli = dir.join("helix_req_cli.helix");
+    std::fs::write(
+        &cli,
+        "resp = http_request({ method: \"PUT\", url: \"http://127.0.0.1:8252/\", body: \"req-body\", headers: [[\"X-Test\", \"hi\"]] })\n\
+         print(resp.status)\n\
+         print(resp.body)\n\
+         print(resp.headers.count() > 0)\n",
+    )
+    .unwrap();
+
+    let mut got = String::new();
+    let mut ok = false;
+    for _ in 0..40 {
+        let (out, _e, code) = run(&[cli.to_str().unwrap()], &[], "");
+        if code == Some(0) && out.contains("200") {
+            got = out;
+            ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&srv);
+    let _ = std::fs::remove_file(&cli);
+
+    assert!(ok, "http_request never succeeded; last: {got:?}");
+    assert!(got.contains("PUT"), "method PUT should reach the server: {got}");
+    assert!(got.contains("req-body"), "the body should reach the server: {got}");
+    assert!(got.contains("hi"), "the custom request header should reach the server: {got}");
+    assert!(got.contains("true"), "response headers should be returned (count > 0): {got}");
+}

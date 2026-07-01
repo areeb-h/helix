@@ -48,6 +48,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "read_bed", pure: false },
     BuiltinDef { path: "http_get", pure: false },
     BuiltinDef { path: "http_post", pure: false },
+    BuiltinDef { path: "http_request", pure: false },
     // --- constructors / conversions ---
     BuiltinDef { path: "dna", pure: true },
     BuiltinDef { path: "range", pure: true },

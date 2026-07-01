@@ -5,6 +5,11 @@
 //! binary). HTTPS is preferred; an HTTP error status is returned as data (so a 404
 //! is a `status`, not a crash), while transport failures are Helix errors.
 
+/// A fetched response: `(status, body, response_headers)`. `get`/`post` ignore the headers
+/// (returning `(status, body)`); the general `request` returns all three.
+#[cfg(feature = "http")]
+pub type Fetched = (i64, String, Vec<(String, String)>);
+
 #[cfg(feature = "http")]
 pub fn get(url: &str) -> Result<(i64, String), String> {
     // Connect/read timeouts so a hung or slow-loris server can't stall the program
@@ -55,4 +60,48 @@ pub fn post(url: &str, body: &str, content_type: &str) -> Result<(i64, String), 
         }
         Err(e) => Err(format!("HTTP POST to {url} failed: {e}")),
     }
+}
+
+/// The general client primitive behind `http_request({method, url, body, headers})`: any
+/// method, caller-supplied request `headers`, and — unlike get/post — the **response
+/// headers** are returned too. `body` is sent verbatim (empty → no request body). A non-2xx
+/// status is data (status + body + headers), transport failures are errors.
+#[cfg(feature = "http")]
+pub fn request(
+    method: &str,
+    url: &str,
+    body: &str,
+    headers: &[(String, String)],
+) -> Result<Fetched, String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(30))
+        .timeout_read(std::time::Duration::from_secs(120))
+        .build();
+    let mut req = agent.request(method, url);
+    for (k, v) in headers {
+        req = req.set(k, v);
+    }
+    // An empty body → `call()` (no request body); otherwise send it as-is.
+    let result = if body.is_empty() { req.call() } else { req.send_string(body) };
+    match result {
+        Ok(resp) => Ok(collect_response(resp)),
+        // A non-2xx status still carries a full response — return it as data, not an error.
+        Err(ureq::Error::Status(_, resp)) => Ok(collect_response(resp)),
+        Err(e) => Err(format!("HTTP {method} to {url} failed: {e}")),
+    }
+}
+
+/// Split a `ureq::Response` into `(status, body, response_headers)`. Headers are collected
+/// before the body, since `into_string` consumes the response.
+#[cfg(feature = "http")]
+fn collect_response(resp: ureq::Response) -> Fetched {
+    let status = resp.status() as i64;
+    let mut hs = Vec::new();
+    for name in resp.headers_names() {
+        if let Some(v) = resp.header(&name) {
+            hs.push((name, v.to_string()));
+        }
+    }
+    let body = resp.into_string().unwrap_or_default();
+    (status, body, hs)
 }
