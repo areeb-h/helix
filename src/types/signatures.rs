@@ -658,6 +658,13 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             // Returns a `{status, body}` record; Unknown keeps field access permissive.
             Ok(Type::Unknown)
         }
+        "http_post" => {
+            if args.len() != 2 {
+                return Err(arity_err(name, 2, args.len(), line, col));
+            }
+            // `(url, body)` → a `{status, body}` record (Unknown keeps field access permissive).
+            Ok(Type::Unknown)
+        }
         // Reproducible RNG: `random`/`randn` → Float array; `random_int` → Int array.
         // (argument values are validated at runtime).
         "random" | "randn" => Ok(Type::Array(Box::new(Type::Float))),

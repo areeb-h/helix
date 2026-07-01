@@ -1914,4 +1914,62 @@ fn describe_emits_machine_readable_catalog() {
 
     assert!(v["helix_version"].is_string(), "version present");
     assert!(v["universal_methods"].as_array().is_some(), "universal methods present");
+    // The just-added client verb is discoverable and correctly tagged net.
+    let http_post = v["builtins"].as_array().unwrap().iter().find(|b| b["name"] == "http_post");
+    assert_eq!(http_post.expect("http_post listed")["effect"], "net");
+}
+
+#[test]
+fn http_post_round_trips_to_a_helix_server() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir();
+    // Echo server (handles up to 100 requests, then exits): reply with method + body, so the
+    // round trip proves the client sent a real POST with the right body.
+    let srv = dir.join("helix_post_srv.helix");
+    std::fs::write(
+        &srv,
+        "l = listen(8251)\n\
+         served = range(0, 100).map(i => do {\n\
+           c = l.accept()\n\
+           r = c.request()\n\
+           c.respond({ status: 201, json: { method: r.method, echo: r.body } })\n\
+           0\n\
+         })\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&srv)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+
+    let cli = dir.join("helix_post_cli.helix");
+    std::fs::write(
+        &cli,
+        "r = http_post(\"http://127.0.0.1:8251/\", \"hello-post\")\nprint(r.status)\nprint(r.body)\n",
+    )
+    .unwrap();
+
+    // Retry the client until the listener is up (each attempt is a real POST; early ones
+    // fail with a transport error until the server binds).
+    let mut got = String::new();
+    let mut ok = false;
+    for _ in 0..40 {
+        let (out, _e, code) = run(&[cli.to_str().unwrap()], &[], "");
+        if code == Some(0) && out.contains("201") {
+            got = out;
+            ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&srv);
+    let _ = std::fs::remove_file(&cli);
+
+    assert!(ok, "http_post never succeeded against the server; last: {got:?}");
+    assert!(got.contains("POST"), "server should report method POST: {got}");
+    assert!(got.contains("hello-post"), "the POST body should be echoed: {got}");
 }

@@ -210,6 +210,36 @@ impl super::Interp {
                     other => Err(type_err("http_get", "a URL string", other, line, col)),
                 }
             }
+            "http_post" => {
+                // `http_post(url, body)` → `{status, body}`, mirroring `http_get`. The body
+                // is sent verbatim with `Content-Type: application/json` (the dominant REST
+                // case — the caller usually passes `record.to_json()`); custom methods and
+                // headers will arrive via a general `http_request` primitive.
+                arity(name, &args, 2, line, col)?;
+                match (&args[0], &args[1]) {
+                    (Value::Str(url), Value::Str(body)) => {
+                        #[cfg(feature = "http")]
+                        {
+                            let (status, resp) = crate::http::post(url, body, "application/json")
+                                .map_err(|e| HelixError::new(e, line, col))?;
+                            Ok(Value::Record(Rc::new(vec![
+                                (Symbol::intern("status"), Value::Int(status)),
+                                (Symbol::intern("body"), Value::Str(Rc::new(resp))),
+                            ])))
+                        }
+                        #[cfg(not(feature = "http"))]
+                        {
+                            let _ = (url, body);
+                            Err(HelixError::new("this build has no HTTP support", line, col)
+                                .hint("build without `--no-default-features`, or with `--features http`."))
+                        }
+                    }
+                    (Value::Str(_), other) => {
+                        Err(type_err("http_post", "a string body", other, line, col))
+                    }
+                    (other, _) => Err(type_err("http_post", "a URL string", other, line, col)),
+                }
+            }
             "read_csv" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
