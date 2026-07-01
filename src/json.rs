@@ -102,6 +102,21 @@ fn to_serde(v: &Value) -> Result<serde_json::Value, String> {
             }
             J::Object(m)
         }
+        // A Dict serializes as a JSON object — the natural way to build a dynamic-keyed
+        // payload (`{ properties: params.to_dict() }.to_json()`). JSON object keys must be
+        // strings, so a non-string dict key is stringified.
+        Value::Dict(map) => {
+            let mut m = serde_json::Map::new();
+            for (k, val) in map.iter() {
+                let key = match k {
+                    crate::value::DictKey::Str(s) | crate::value::DictKey::Dna(s) => (**s).clone(),
+                    crate::value::DictKey::Int(i) => i.to_string(),
+                    crate::value::DictKey::Bool(b) => b.to_string(),
+                };
+                m.insert(key, to_serde(val)?);
+            }
+            J::Object(m)
+        }
         other => return Err(format!("can't serialize a {} to JSON", other.type_name())),
     })
 }

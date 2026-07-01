@@ -876,6 +876,28 @@ fn json_round_trips_through_the_cli() {
 }
 
 #[test]
+fn dict_serializes_to_a_json_object() {
+    // A Dict is the natural carrier for a dynamic-keyed payload (arbitrary string keys
+    // decided at runtime); it must serialize as a JSON object. Build one from pairs,
+    // serialize, re-parse, and read a value back — the round trip proves the object form.
+    let src = concat!(
+        "d = [(\"model\", \"opus\"), (\"n\", 3)].to_dict()\n",
+        "s = d.to_json()\n",
+        "print(s)\n",
+        "back = s.parse_json()\n",
+        "print(back.model)\n", // opus
+        "print(back.n)\n",     // 3
+    );
+    let (out, stderr, code) = run_source(src, &[], "dictjson");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    let lines: Vec<&str> = out.lines().collect();
+    // Dict keys are sorted (BTreeMap), so the object order is stable: model before n.
+    assert_eq!(lines[0], "{\"model\":\"opus\",\"n\":3}");
+    assert_eq!(lines[1], "opus");
+    assert_eq!(lines[2], "3");
+}
+
+#[test]
 fn try_catches_runtime_errors() {
     // `try EXPR` yields {ok, value, error}; a runtime error is caught (not aborting),
     // and recovery composes with `??`.
