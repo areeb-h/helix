@@ -443,6 +443,36 @@
         }
     }
 
+    /// Oracle coverage for surfaces an audit flagged as untested by the differential oracle:
+    /// Dict operations, record/dict enumeration order, record-update and value-call error
+    /// paths, interpolation error paths, and signed integer/modulo edge cases. Each must be
+    /// bit-identical across the VM and tree-walker (a value on both, or the same error on
+    /// both). A divergence here would be a real correctness bug.
+    #[test]
+    fn audit_flagged_surfaces_match_tree_walker() {
+        let cases = [
+            // --- Dict operations (were untested by the oracle) ---
+            "d = [(\"b\", 2), (\"a\", 1)].to_dict()\nprint(d.get(\"a\"))",
+            "d = [(\"b\", 2), (\"a\", 1)].to_dict()\nprint(d.has(\"a\"))\nprint(d.contains(\"z\"))",
+            "d = [(\"b\", 2), (\"a\", 1)].to_dict()\nprint(d.keys())\nprint(d.values())",
+            "d = [(\"x\", 9)].to_dict()\nprint(d[\"x\"])",
+            // --- record enumeration order + order-independent equality ---
+            "r = {z: 1, a: 2, m: 3}\nprint(r.keys())\nprint(r.values())",
+            "r1 = {z: 1, a: 2}\nr2 = {a: 2, z: 1}\nprint(r1 == r2)",
+            // --- record-update + value-call error paths (error text must match) ---
+            "print(try ({...5, x: 1}).ok)",             // non-record spread base
+            "f = (x => x)\nprint((try (f)(1, 2)).ok)",  // arity error via value call
+            // --- interpolation error path (format spec applied to a string) ---
+            "x = \"hi\"\nprint((try \"{x:.2f}\").ok)",
+            // --- signed integer / euclidean modulo edge cases ---
+            "print(-7 % 3)\nprint(-7 // 3)\nprint(7 % -3)",
+            "print(0 - 9223372036854775807 - 1)", // i64::MIN via wrap
+        ];
+        for src in cases {
+            assert_eq!(run_vm(src), run_tw(src), "VM ≠ tree-walker on `{src}`");
+        }
+    }
+
     /// Tail-call optimization reuses the frame for a call in tail position instead of pushing
     /// one. It must change only stack behavior, never a result — so shallow tail recursion
     /// stays bit-identical to the tree-walker. Covers an if-tail, a let/do-body tail, a
