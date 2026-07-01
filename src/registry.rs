@@ -35,7 +35,7 @@ pub fn category_of(name: &str) -> &'static str {
         | "remove_file" | "mkdir" | "read_fasta" | "read_fastq" | "read_vcf" | "read_bcf"
         | "read_sam" | "read_bam" | "read_gff" | "read_bed" => "io",
         // Networking — client + server.
-        "listen" | "http_get" | "http_post" | "http_request" => "net",
+        "listen" | "http_get" | "http_post" | "http_request" | "http_stream" => "net",
         // Program output / streaming sinks.
         "print" | "emit" => "output",
         // Time / pacing.
@@ -103,6 +103,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "http_get", pure: false },
     BuiltinDef { path: "http_post", pure: false },
     BuiltinDef { path: "http_request", pure: false },
+    BuiltinDef { path: "http_stream", pure: false },
     // --- constructors / conversions ---
     BuiltinDef { path: "dna", pure: true },
     BuiltinDef { path: "range", pure: true },
@@ -286,7 +287,8 @@ pub static DICT_METHODS: &[&str] =
 /// Network-handle (`Net`) methods — the HTTP server surface (`src/serve.rs`). A
 /// listener (from `listen(port)`) has `accept`; a connection (from `accept()`) has
 /// `respond`. Effects, dispatched at runtime like the other opaque types.
-pub static NET_METHODS: &[&str] = &["accept", "poll", "request", "respond", "sse", "send"];
+pub static NET_METHODS: &[&str] =
+    &["accept", "poll", "request", "respond", "sse", "send", "next", "status"];
 
 /// Look up a builtin by its dotted path.
 pub fn lookup(path: &str) -> Option<&'static BuiltinDef> {

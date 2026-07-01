@@ -2033,3 +2033,63 @@ fn http_request_general_method_headers_and_response_headers() {
     assert!(got.contains("hi"), "the custom request header should reach the server: {got}");
     assert!(got.contains("true"), "response headers should be returned (count > 0): {got}");
 }
+
+#[test]
+fn http_stream_pulls_chunks_line_by_line() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir();
+    // Server returns a 3-line body; the client pulls it chunk-by-chunk via `.next()`.
+    let srv = dir.join("helix_stream_srv.helix");
+    std::fs::write(
+        &srv,
+        "l = listen(8255)\n\
+         served = range(0, 100).map(i => do {\n\
+           c = l.accept()\n\
+           x = c.request()\n\
+           c.respond({ status: 200, text: \"chunk-a\\nchunk-b\\nchunk-c\" })\n\
+           0\n\
+         })\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&srv)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+
+    // Pull-based client: status(), then next() until missing (EOF).
+    let cli = dir.join("helix_stream_cli.helix");
+    std::fs::write(
+        &cli,
+        "s = http_stream({ method: \"GET\", url: \"http://127.0.0.1:8255/\" })\n\
+         print(s.status())\n\
+         print(s.next())\n\
+         print(s.next())\n\
+         print(s.next())\n\
+         print(s.next().is_missing())\n",
+    )
+    .unwrap();
+
+    let mut got = String::new();
+    let mut ok = false;
+    for _ in 0..40 {
+        let (out, _e, code) = run(&[cli.to_str().unwrap()], &[], "");
+        if code == Some(0) && out.contains("200") {
+            got = out;
+            ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&srv);
+    let _ = std::fs::remove_file(&cli);
+
+    assert!(ok, "http_stream never succeeded; last: {got:?}");
+    assert!(got.contains("chunk-a"), "first chunk: {got}");
+    assert!(got.contains("chunk-b"), "second chunk: {got}");
+    assert!(got.contains("chunk-c"), "third chunk: {got}");
+    assert!(got.contains("true"), "the 4th next() should be missing at EOF: {got}");
+}

@@ -245,76 +245,7 @@ impl super::Interp {
                 // `{status, body, headers}`. One primitive for PUT/DELETE/PATCH + custom
                 // request headers + returned response headers; get/post are the shortcuts.
                 arity(name, &args, 1, line, col)?;
-                let Value::Record(fields) = &args[0] else {
-                    return Err(type_err(
-                        "http_request",
-                        "a `{ method, url, … }` record",
-                        &args[0],
-                        line,
-                        col,
-                    ));
-                };
-                let field = |k: &str| fields.iter().find(|(s, _)| s.as_str() == k).map(|(_, v)| v);
-                let str_field = |v: &Value, what: &str| -> Result<String, HelixError> {
-                    match v {
-                        Value::Str(s) => Ok((**s).clone()),
-                        other => Err(type_err("http_request", what, other, line, col)),
-                    }
-                };
-                let method = match field("method") {
-                    Some(v) => str_field(v, "a string `method`")?.to_uppercase(),
-                    None => {
-                        return Err(HelixError::new("`http_request` needs a `method` field", line, col)
-                            .hint("e.g. `http_request({method: \"PUT\", url: u, body: b})`"));
-                    }
-                };
-                let url = match field("url") {
-                    Some(v) => str_field(v, "a string `url`")?,
-                    None => return Err(HelixError::new("`http_request` needs a `url` field", line, col)),
-                };
-                let body = match field("body") {
-                    Some(v) => str_field(v, "a string `body`")?,
-                    None => String::new(),
-                };
-                // `headers`: a Dict (any name) or a Record (identifier names) of name → value.
-                let hval = |v: &Value| match v {
-                    Value::Str(s) => (**s).clone(),
-                    other => other.to_string(),
-                };
-                let mut hdrs: Vec<(String, String)> = Vec::new();
-                match field("headers") {
-                    // Identifier-name headers read cleanly as a record: `{Accept: "…"}`.
-                    Some(Value::Record(hf)) => {
-                        for (k, v) in hf.iter() {
-                            hdrs.push((k.as_str().to_string(), hval(v)));
-                        }
-                    }
-                    // A `dict()`/`to_dict()`-built map (any name).
-                    Some(Value::Dict(map)) => {
-                        for (k, v) in map.iter() {
-                            if let crate::value::DictKey::Str(s) = k {
-                                hdrs.push(((**s).clone(), hval(v)));
-                            }
-                        }
-                    }
-                    // An array of `[name, value]` pairs — the inline-friendly form for names
-                    // that aren't identifiers (`Content-Type`, `X-…`), since Helix has no dict
-                    // literal: `headers: [["Content-Type", "application/json"]]`.
-                    Some(Value::Array(items)) => {
-                        for it in items.to_values().iter() {
-                            // Pull a 2-element `[name, value]` out of a nested Array or Tuple.
-                            let two: Vec<Value> = match it {
-                                Value::Array(a) => a.to_values().to_vec(),
-                                Value::Tuple(t) => t.iter().cloned().collect(),
-                                _ => continue,
-                            };
-                            if let [Value::Str(k), v] = two.as_slice() {
-                                hdrs.push(((**k).clone(), hval(v)));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                let (method, url, body, hdrs) = http_request_fields(&args[0], line, col)?;
                 #[cfg(feature = "http")]
                 {
                     let (status, rbody, rhdrs) = crate::http::request(&method, &url, &body, &hdrs)
@@ -328,6 +259,29 @@ impl super::Interp {
                         (Symbol::intern("body"), Value::Str(Rc::new(rbody))),
                         (Symbol::intern("headers"), Value::Dict(Rc::new(hmap))),
                     ])))
+                }
+                #[cfg(not(feature = "http"))]
+                {
+                    let _ = (&method, &url, &body, &hdrs);
+                    Err(HelixError::new("this build has no HTTP support", line, col)
+                        .hint("build without `--no-default-features`, or with `--features http`."))
+                }
+            }
+            "http_stream" => {
+                // Streaming client: `http_stream({method, url, body?, headers?})` opens the
+                // request and returns a handle the program pulls line-by-line — `s.status()`
+                // then `s.next()` in a loop, `missing` at EOF — for token-by-token model
+                // output (Ollama NDJSON / OpenAI SSE), the client mirror of accept→send.
+                arity(name, &args, 1, line, col)?;
+                let (method, url, body, hdrs) = http_request_fields(&args[0], line, col)?;
+                #[cfg(feature = "http")]
+                {
+                    let (status, reader) = crate::http::open_stream(&method, &url, &body, &hdrs)
+                        .map_err(|e| HelixError::new(e, line, col))?;
+                    Ok(Value::Net(Rc::new(crate::serve::NetHandle::HttpStream {
+                        status,
+                        reader: std::cell::RefCell::new(Some(std::io::BufReader::new(reader))),
+                    })))
                 }
                 #[cfg(not(feature = "http"))]
                 {
@@ -1967,6 +1921,75 @@ fn hex_to_array32(hex: &str, what: &str, line: usize, col: usize) -> Result<[u8;
         Some(a) => Ok(a),
         None => Err(HelixError::new(format!("{what} must be 64 hex characters (32 bytes)"), line, col)),
     }
+}
+
+/// Extract `(method, url, body, headers)` from an `http_request`/`http_stream` request record
+/// (`{method, url, body?, headers?}`). `headers` may be a Record (identifier names), a Dict,
+/// or an array of `[name, value]` pairs (the inline-friendly form for dash-named headers,
+/// since Helix has no dict literal). Shared by both client verbs.
+/// The parsed parts of an http request record: `(method, url, body, headers)`.
+type HttpReqParts = (String, String, String, Vec<(String, String)>);
+
+#[cfg_attr(not(feature = "http"), allow(dead_code))]
+fn http_request_fields(req: &Value, line: usize, col: usize) -> Result<HttpReqParts, HelixError> {
+    let Value::Record(fields) = req else {
+        return Err(type_err("http_request", "a `{ method, url, … }` record", req, line, col));
+    };
+    let field = |k: &str| fields.iter().find(|(s, _)| s.as_str() == k).map(|(_, v)| v);
+    let str_field = |v: &Value, what: &str| -> Result<String, HelixError> {
+        match v {
+            Value::Str(s) => Ok((**s).clone()),
+            other => Err(type_err("http_request", what, other, line, col)),
+        }
+    };
+    let method = match field("method") {
+        Some(v) => str_field(v, "a string `method`")?.to_uppercase(),
+        None => {
+            return Err(HelixError::new("the request record needs a `method` field", line, col)
+                .hint("e.g. `{method: \"PUT\", url: u, body: b}`"));
+        }
+    };
+    let url = match field("url") {
+        Some(v) => str_field(v, "a string `url`")?,
+        None => return Err(HelixError::new("the request record needs a `url` field", line, col)),
+    };
+    let body = match field("body") {
+        Some(v) => str_field(v, "a string `body`")?,
+        None => String::new(),
+    };
+    let hval = |v: &Value| match v {
+        Value::Str(s) => (**s).clone(),
+        other => other.to_string(),
+    };
+    let mut hdrs: Vec<(String, String)> = Vec::new();
+    match field("headers") {
+        Some(Value::Record(hf)) => {
+            for (k, v) in hf.iter() {
+                hdrs.push((k.as_str().to_string(), hval(v)));
+            }
+        }
+        Some(Value::Dict(map)) => {
+            for (k, v) in map.iter() {
+                if let crate::value::DictKey::Str(s) = k {
+                    hdrs.push(((**s).clone(), hval(v)));
+                }
+            }
+        }
+        Some(Value::Array(items)) => {
+            for it in items.to_values().iter() {
+                let two: Vec<Value> = match it {
+                    Value::Array(a) => a.to_values().to_vec(),
+                    Value::Tuple(t) => t.iter().cloned().collect(),
+                    _ => continue,
+                };
+                if let [Value::Str(k), v] = two.as_slice() {
+                    hdrs.push(((**k).clone(), hval(v)));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok((method, url, body, hdrs))
 }
 
 /// Read a whole file to a `String`, capping at `MAX_STRING_LEN` so a huge file is a

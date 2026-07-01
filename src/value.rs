@@ -445,6 +445,7 @@ impl fmt::Display for Value {
             Value::Net(h) => match &**h {
                 crate::serve::NetHandle::Listener(_) => write!(f, "<listener>"),
                 crate::serve::NetHandle::Conn { .. } => write!(f, "<connection>"),
+                crate::serve::NetHandle::HttpStream { .. } => write!(f, "<http-stream>"),
             },
             Value::PyObject(h) => write!(f, "{}", h.repr()),
             // A tracked value prints as its forward value (the graph stays hidden).

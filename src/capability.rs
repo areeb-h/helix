@@ -64,7 +64,7 @@ pub fn effect_of(name: &str) -> Effect {
         | "read_fasta" | "read_fastq" | "read_vcf" | "read_bcf" | "read_sam" | "read_bam"
         | "read_gff" | "read_bed" => Effect::FsRead,
         "remove_file" | "mkdir" => Effect::FsWrite,
-        "listen" | "http_get" | "http_post" | "http_request" => Effect::Net,
+        "listen" | "http_get" | "http_post" | "http_request" | "http_stream" => Effect::Net,
         _ => Effect::Pure,
     }
 }

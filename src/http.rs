@@ -91,6 +91,35 @@ pub fn request(
     }
 }
 
+/// Open a request for **streaming**: return `(status, body_reader)` without reading the body
+/// up front (unlike get/post/request), so the caller pulls it line-by-line. Powers
+/// `http_stream` for token-by-token model output. No read timeout — a streaming response may
+/// idle between chunks (a model thinking) far longer than a normal body read, and the program
+/// decides when to stop.
+#[cfg(feature = "http")]
+pub fn open_stream(
+    method: &str,
+    url: &str,
+    body: &str,
+    headers: &[(String, String)],
+) -> Result<(i64, Box<dyn std::io::Read>), String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(30))
+        .build();
+    let mut req = agent.request(method, url);
+    for (k, v) in headers {
+        req = req.set(k, v);
+    }
+    let result = if body.is_empty() { req.call() } else { req.send_string(body) };
+    match result {
+        Ok(resp) | Err(ureq::Error::Status(_, resp)) => {
+            let status = resp.status() as i64;
+            Ok((status, resp.into_reader()))
+        }
+        Err(e) => Err(format!("HTTP stream {method} to {url} failed: {e}")),
+    }
+}
+
 /// Split a `ureq::Response` into `(status, body, response_headers)`. Headers are collected
 /// before the body, since `into_string` consumes the response.
 #[cfg(feature = "http")]

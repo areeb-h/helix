@@ -43,6 +43,15 @@ pub enum NetHandle {
         /// up here instead of freezing the event loop; they drain on later `send`s.
         pending: RefCell<Vec<u8>>,
     },
+    /// An open HTTP response body being read incrementally (`http_stream`) — the pull-based
+    /// streaming *client*. Holds the response `status` and a buffered reader consumed
+    /// line-by-line by `.next()`, so a model's token stream (Ollama NDJSON, OpenAI SSE) is
+    /// forwarded chunk-by-chunk by the program's own loop — the client mirror of the
+    /// `accept`→`send` server loop. `reader` is `None` once EOF is reached.
+    HttpStream {
+        status: i64,
+        reader: RefCell<Option<std::io::BufReader<Box<dyn std::io::Read>>>>,
+    },
 }
 
 /// Cap on a request body we will buffer (a larger `Content-Length` is truncated to
@@ -217,7 +226,7 @@ fn spawn_shards(total: usize, line: usize, col: usize) -> Result<(), HelixError>
 pub fn accept(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
     let listener = match &**handle {
         NetHandle::Listener(l) => l,
-        NetHandle::Conn { .. } => {
+        _ => {
             return Err(HelixError::new(
                 "`accept` works on a listener from `listen(port)`, not a connection",
                 line,
@@ -241,7 +250,7 @@ pub fn accept(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, 
 pub fn poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
     let listener = match &**handle {
         NetHandle::Listener(l) => l,
-        NetHandle::Conn { .. } => {
+        _ => {
             return Err(HelixError::new(
                 "`poll` works on a listener from `listen(port)`, not a connection",
                 line,
@@ -256,6 +265,46 @@ pub fn poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, He
         Ok((stream, _peer)) => finish_connection(stream, line, col),
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Value::Missing),
         Err(e) => Err(HelixError::new(format!("poll failed: {e}"), line, col)),
+    }
+}
+
+/// `stream.next()` — read the next line/chunk from an `http_stream` response body, returning
+/// it as a `String` (trailing newline stripped) or `missing` at end of stream. The program
+/// drives this in its own loop (the client mirror of `accept`), so a model's token stream is
+/// forwarded chunk-by-chunk. A read error, or a non-stream handle, ends the stream.
+pub fn stream_next(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
+    use std::io::BufRead;
+    let reader_cell = match &**handle {
+        NetHandle::HttpStream { reader, .. } => reader,
+        _ => return Err(HelixError::new("`next` works on an `http_stream` handle", line, col)),
+    };
+    let mut guard = reader_cell.borrow_mut();
+    let Some(rdr) = guard.as_mut() else {
+        return Ok(Value::Missing); // already at EOF
+    };
+    let mut buf = String::new();
+    match rdr.read_line(&mut buf) {
+        Ok(0) => {
+            *guard = None; // EOF — drop the reader (closes the connection)
+            Ok(Value::Missing)
+        }
+        Ok(_) => {
+            let keep = buf.trim_end_matches(['\n', '\r']).len();
+            buf.truncate(keep);
+            Ok(Value::Str(Rc::new(buf)))
+        }
+        Err(_) => {
+            *guard = None;
+            Ok(Value::Missing)
+        }
+    }
+}
+
+/// `stream.status()` — the HTTP status of an `http_stream` response (e.g. `200`).
+pub fn stream_status(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
+    match &**handle {
+        NetHandle::HttpStream { status, .. } => Ok(Value::Int(*status)),
+        _ => Err(HelixError::new("`status` works on an `http_stream` handle", line, col)),
     }
 }
 
@@ -303,7 +352,7 @@ fn push_and_flush(stream: &mut TcpStream, pending: &mut Vec<u8>, bytes: &[u8]) -
 pub fn request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
     match &**handle {
         NetHandle::Conn { request, .. } => Ok(request.clone()),
-        NetHandle::Listener(_) => Err(HelixError::new(
+        _ => Err(HelixError::new(
             "`request` works on a connection from `accept()`, not a listener",
             line,
             col,
@@ -377,7 +426,7 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
 pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
     let cell = match &**handle {
         NetHandle::Conn { stream, .. } => stream,
-        NetHandle::Listener(_) => {
+        _ => {
             return Err(HelixError::new(
                 "`respond` works on a connection from `accept()`, not a listener",
                 line,
@@ -521,7 +570,7 @@ fn merge_headers(out: &mut Vec<(String, String)>, headers: &Value) {
 pub fn sse(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
     let (cell, pending) = match &**handle {
         NetHandle::Conn { stream, pending, .. } => (stream, pending),
-        NetHandle::Listener(_) => {
+        _ => {
             return Err(HelixError::new("`sse` works on a connection from `accept()`", line, col));
         }
     };
@@ -548,7 +597,7 @@ pub fn sse(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, Hel
 pub fn send(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
     let (cell, pending) = match &**handle {
         NetHandle::Conn { stream, pending, .. } => (stream, pending),
-        NetHandle::Listener(_) => {
+        _ => {
             return Err(HelixError::new("`send` works on a connection from `accept()`", line, col));
         }
     };
