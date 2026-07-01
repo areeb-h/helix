@@ -897,6 +897,23 @@ impl Compiler {
                     }
                 }
             }
+            Expr::CallValue { callee, args, line, col } => {
+                // The callee value sits below the args on the stack; `Op::CallValue`
+                // dispatches on it at runtime (the same opcode a value-bound name uses),
+                // erroring if it isn't a function.
+                self.compile_expr(b, callee)?;
+                for a in args {
+                    self.compile_expr(b, a)?;
+                }
+                b.emit(
+                    Op::CallValue(std::rc::Rc::new(CallValueData {
+                        nargs: args.len() as u32,
+                        name: std::rc::Rc::new(callee.call_label()),
+                    })),
+                    *line,
+                    *col,
+                );
+            }
             Expr::Array(items) => {
                 for item in items {
                     self.compile_expr(b, item)?;

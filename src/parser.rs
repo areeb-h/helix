@@ -1300,9 +1300,30 @@ impl Parser {
                             col,
                         };
                     } else {
+                        // The call target is an expression, not a bare name:
+                        // `(rec.handler)(x)`, `(fns[i])(x)`. Evaluate it to a function
+                        // value and call it. Positional args only — named arguments
+                        // bind to a declared function's parameter names, which a value
+                        // call doesn't have visible.
                         let (l, c) = self.pos();
-                        return Err(HelixError::new("this value cannot be called", l, c)
-                            .hint("only named functions can be called, e.g. `print(...)`."));
+                        self.deepen()?;
+                        self.advance();
+                        let (pos, named) = self.call_args()?;
+                        self.eat(&Tok::RParen, "to close the argument list")?;
+                        if !named.is_empty() {
+                            return Err(HelixError::new(
+                                "a value call cannot use named arguments",
+                                l,
+                                c,
+                            )
+                            .hint("pass the arguments positionally, e.g. `(rec.handler)(x, y)`."));
+                        }
+                        e = Expr::CallValue {
+                            callee: Box::new(e),
+                            args: pos,
+                            line: l,
+                            col: c,
+                        };
                     }
                 }
                 _ => break,

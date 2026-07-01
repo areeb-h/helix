@@ -128,6 +128,9 @@ fn any_call(e: &Expr, pred: &dyn Fn(&str) -> bool) -> bool {
         Expr::Method { recv, args, .. } => {
             any_call(recv, pred) || args.iter().any(|a| any_call(a, pred))
         }
+        Expr::CallValue { callee, args, .. } => {
+            any_call(callee, pred) || args.iter().any(|a| any_call(a, pred))
+        }
         Expr::Index { recv, index, .. } => any_call(recv, pred) || any_call(index, pred),
         Expr::Slice { recv, start, stop, step, .. } => {
             any_call(recv, pred)
@@ -221,6 +224,11 @@ fn children(e: &Expr) -> Vec<&Expr> {
             v.extend(args.iter());
             v
         }
+        Expr::CallValue { callee, args, .. } => {
+            let mut v = vec![&**callee];
+            v.extend(args.iter());
+            v
+        }
         Expr::Index { recv, index, .. } => vec![recv, index],
         Expr::Slice { recv, start, stop, step, .. } => {
             let mut v = vec![&**recv];
@@ -302,6 +310,12 @@ fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String
         }
         Expr::Method { recv, args, .. } => {
             collect_free(recv, bound, free);
+            for a in args {
+                collect_free(a, bound, free);
+            }
+        }
+        Expr::CallValue { callee, args, .. } => {
+            collect_free(callee, bound, free);
             for a in args {
                 collect_free(a, bound, free);
             }

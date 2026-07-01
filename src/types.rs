@@ -581,6 +581,17 @@ impl Checker {
                 line,
                 col,
             } => self.synth_method(recv, name, args, *line, *col),
+            Expr::CallValue { callee, args, .. } => {
+                // Calling a first-class function *value* — its parameter/return types
+                // aren't tracked statically (functions live in records/arrays as opaque
+                // values). Check the callee and args for their own errors, then yield
+                // Unknown, matching the permissive treatment of dynamic access.
+                self.synth(callee)?;
+                for a in args {
+                    self.synth(a)?;
+                }
+                Ok(Type::Unknown)
+            }
             Expr::Index {
                 recv,
                 index,

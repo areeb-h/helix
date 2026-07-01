@@ -196,6 +196,16 @@ pub enum Expr {
         line: usize,
         col: usize,
     },
+    /// Call a first-class function *value* produced by an expression, not a bare
+    /// name: `(rec.handler)(x)`, `(fns[i])(x)`. `Call` handles the bare-name case
+    /// (which also resolves builtins); this handles everything else — the callee is
+    /// evaluated to a `Value` and must be a function. Positional args only.
+    CallValue {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+        line: usize,
+        col: usize,
+    },
     /// Indexing, e.g. `xs[0]`, `xs[-1]`.
     Index {
         recv: Box<Expr>,
@@ -267,12 +277,24 @@ impl Expr {
             | Expr::Binary { line, col, .. }
             | Expr::Call { line, col, .. }
             | Expr::Method { line, col, .. }
+            | Expr::CallValue { line, col, .. }
             | Expr::Index { line, col, .. }
             | Expr::Slice { line, col, .. }
             | Expr::If { line, col, .. }
             | Expr::Try { line, col, .. }
             | Expr::Match { line, col, .. } => (*line, *col),
             _ => (0, 0),
+        }
+    }
+
+    /// A human label for a call target that is an expression rather than a bare
+    /// name (used by [`Expr::CallValue`] in "`X` is not a function" / arity errors).
+    /// Both engines derive it from the same AST node so their error text stays
+    /// byte-identical — the differential oracle depends on that.
+    pub fn call_label(&self) -> String {
+        match self {
+            Expr::Field { name, .. } => name.clone(),
+            _ => "this value".to_string(),
         }
     }
 }

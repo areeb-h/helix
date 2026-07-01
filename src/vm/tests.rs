@@ -443,6 +443,27 @@
         }
     }
 
+    /// Calling a first-class function *value* produced by an expression —
+    /// `(rec.handler)(x)`, `(fns[i])(x)` — runs natively on both engines. These pin
+    /// the VM's `CallValue` opcode path (and its error text) to the tree-walker:
+    /// a record-stored closure, a dispatch table indexed at runtime, a closure that
+    /// captures a free variable, and the three failure modes (not callable, wrong
+    /// arity, an inner runtime error propagating out of the called value).
+    #[test]
+    fn call_value_matches_tree_walker_on_vm() {
+        let cases = [
+            "r = {handler: (x => x + 1)}\nprint((r.handler)(10))", // record-stored closure
+            "fns = [(x => x * 2), (x => x + 100)]\nprint((fns[0])(5))\nprint((fns[1])(5))", // dispatch table
+            "k = 7\nr = {f: (x => x + k)}\nprint((r.f)(3))",       // captured free var
+            "r = {handler: 3}\nprint((r.handler)(10))",           // not callable → same error
+            "r = {f: (x => x)}\nprint((r.f)(1, 2))",              // arity mismatch → same error
+            "r = {f: (x => 1 / x)}\nprint((r.f)(0))",             // inner error propagates
+        ];
+        for src in cases {
+            assert_eq!(run_vm(src), run_tw(src), "VM ≠ tree-walker on `{src}`");
+        }
+    }
+
     /// `try` runs natively on the VM (commit landing it removed the whole-program
     /// tree-walker fallback). These cases pin the VM's handler/unwind path to the
     /// tree-walker oracle: success and error records, nested `try`, an error thrown

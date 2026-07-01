@@ -20,3 +20,14 @@ print(apply_twice(double, 5)) # 20
 # Capturing a local inside a comprehension lambda.
 fn scale_all(xs, factor) = xs.map((x) => x * factor)
 print(scale_all([1, 2, 3], 100)) # [100, 200, 300]
+
+# A function stored in a record field or an array is just a value — call it in
+# place by parenthesizing the target: `(expr)(args)`. This is the dispatch-table
+# pattern: route a name or index to a handler without a temporary binding.
+ops = {double: (x => x * 2), square: (x => x * x)}
+print((ops.double)(21)) # 42
+print((ops.square)(9))  # 81
+
+pipeline = [(x => x + 1), (x => x * 10)]
+print((pipeline[0])(4)) # 5
+print((pipeline[1])(4)) # 40

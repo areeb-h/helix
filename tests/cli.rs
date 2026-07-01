@@ -876,6 +876,28 @@ fn json_round_trips_through_the_cli() {
 }
 
 #[test]
+fn calls_a_function_value_from_an_expression() {
+    // A function stored in a record field or an array is a first-class value; a
+    // parenthesized call target `(expr)(args)` invokes it. This is the dispatch-table
+    // pattern (route a name/index to a handler) without binding to a temp first.
+    let src = concat!(
+        "handlers = {double: (x => x * 2), inc: (x => x + 1)}\n",
+        "print((handlers.double)(21))\n", // 42
+        "fns = [(x => x + 100), (x => x - 100)]\n",
+        "print((fns[0])(5))\n",           // 105
+        // Not callable → a clear error (caught here so the CLI exits 0).
+        "bad = {v: 3}\n",
+        "print((try (bad.v)(1)).ok)\n",   // false
+    );
+    let (out, stderr, code) = run_source(src, &[], "callvalue");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "42");
+    assert_eq!(lines[1], "105");
+    assert_eq!(lines[2], "false");
+}
+
+#[test]
 fn dict_serializes_to_a_json_object() {
     // A Dict is the natural carrier for a dynamic-keyed payload (arbitrary string keys
     // decided at runtime); it must serialize as a JSON object. Build one from pairs,

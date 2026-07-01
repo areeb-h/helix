@@ -410,6 +410,29 @@ impl Interp {
                 }
                 Err(err)
             }
+            Expr::CallValue {
+                callee,
+                args,
+                line,
+                col,
+            } => {
+                let callee_v = self.eval(callee)?;
+                let mut vals = Vec::with_capacity(args.len());
+                for a in args {
+                    vals.push(self.eval(a)?);
+                }
+                let label = callee.call_label();
+                match callee_v {
+                    Value::Function(g) => self.call_function(&label, &g, vals, *line, *col),
+                    // The expression evaluated to something that isn't callable.
+                    other => Err(HelixError::new(
+                        format!("`{}` is a {}, not a function", label, other.type_name()),
+                        *line,
+                        *col,
+                    )
+                    .hint("only functions can be called this way, e.g. `(rec.handler)(x)`.")),
+                }
+            }
             Expr::Method {
                 recv,
                 name,

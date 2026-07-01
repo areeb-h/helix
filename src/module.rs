@@ -584,6 +584,12 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
                 rw(a, ctx, bound)?;
             }
         }
+        Expr::CallValue { callee, args, .. } => {
+            rw(callee, ctx, bound)?;
+            for a in args.iter_mut() {
+                rw(a, ctx, bound)?;
+            }
+        }
         Expr::Index { recv, index, .. } => {
             rw(recv, ctx, bound)?;
             rw(index, ctx, bound)?;
