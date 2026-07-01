@@ -978,6 +978,17 @@ fn calls_a_function_value_from_an_expression() {
 }
 
 #[test]
+fn deep_tail_recursion_runs_in_constant_space() {
+    // A tail-recursive loop far deeper than VM_MAX_DEPTH (1,000,000) must complete — tail-call
+    // optimization reuses the frame, so the accept-loop / state-machine idiom that a real
+    // server relies on no longer leaks a frame per iteration or overflows the depth limit.
+    let src = "fn count(n, acc) = if n <= 0 then acc else count(n - 1, acc + 1)\nprint(count(2500000, 0))\n";
+    let (out, err, code) = run_source(src, &[], "tco_deep");
+    assert_eq!(code, Some(0), "stderr:\n{err}");
+    assert_eq!(out.trim(), "2500000");
+}
+
+#[test]
 fn record_update_spread_derives_a_modified_record() {
     // `{ ...base, k: v }` is the clean way to derive a changed record from an immutable
     // one (add a header, bump a status) — override existing fields, append new ones, and

@@ -443,6 +443,24 @@
         }
     }
 
+    /// Tail-call optimization reuses the frame for a call in tail position instead of pushing
+    /// one. It must change only stack behavior, never a result — so shallow tail recursion
+    /// stays bit-identical to the tree-walker. Covers an if-tail, a let/do-body tail, a
+    /// bare-body tail call, and a call inside `try` (which must NOT be optimized — the frame
+    /// has to survive for the handler to unwind to).
+    #[test]
+    fn tail_calls_match_tree_walker_on_vm() {
+        let cases = [
+            "fn c(n, a) = if n <= 0 then a else c(n - 1, a + 1)\nprint(c(500, 0))",
+            "fn s(n, a) = do { x = n\n if n <= 0 then a else s(n - 1, a + x) }\nprint(s(100, 0))",
+            "fn f(n) = if n <= 0 then 0 else f(n - 1)\nprint(f(300))",
+            "fn g(n, a) = if n <= 0 then a else (try g(n - 1, a + 1)).value\nprint(g(50, 0))",
+        ];
+        for src in cases {
+            assert_eq!(run_vm(src), run_tw(src), "VM ≠ tree-walker on `{src}`");
+        }
+    }
+
     /// Record update `{ ...base, k: v }` runs identically on both engines: overriding an
     /// existing field, appending a new one, a bare copy, override-precedence when a key
     /// repeats, and that the base record is left unmutated (immutability).
@@ -1930,10 +1948,14 @@
         assert!(err.message.contains("division by zero"), "got: {}", err.message);
     }
 
-    /// Runtime errors must still surface (and match the tree-walker's wording).
+    /// Runtime errors must still surface (and match the tree-walker's wording). The depth
+    /// guard catches runaway *non-tail* recursion; the `+ 1` keeps the self-call non-tail
+    /// (its result is consumed by the add), so it still pushes frames to the limit. A *tail*
+    /// runaway like `boom(n) = boom(n + 1)` is now constant-space under TCO — an intentional
+    /// infinite loop (`while true`), the shape a server's accept loop relies on.
     #[test]
     fn errors_propagate() {
-        let toks = lexer::lex("fn boom(n) = boom(n + 1)\nboom(0)").unwrap();
+        let toks = lexer::lex("fn boom(n) = 1 + boom(n + 1)\nboom(0)").unwrap();
         let ast = parser::parse(toks).unwrap();
         let prog = bytecode::compile_with_types(&ast, None).unwrap();
         let err = run(&prog, None).unwrap_err();

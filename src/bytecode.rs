@@ -313,6 +313,45 @@ fn as_range_call(e: &Expr) -> Option<(Option<&Expr>, &Expr)> {
     None
 }
 
+/// Tail-call peephole: rewrite every `CallFn` whose control-flow successor leads straight to
+/// `Return` (directly, or through a chain of unconditional `Jump`s) into a `TailCallFn`, which
+/// reuses the current frame instead of pushing one. This is exactly "the call is in tail
+/// position": its result is immediately returned, so the caller's frame is dead. Makes tail
+/// recursion (an accept loop, a state machine) constant-space — no frame accumulation, no leak.
+///
+/// It works on the *final* bytecode (all jumps patched), so it uniformly covers tail calls
+/// nested in `if`/`match`/`let`/`do`. A call inside a `try` region is followed by `TryOk`
+/// (not `Jump`/`Return`), so it is correctly left as a plain `CallFn` — the frame must survive
+/// for the handler to unwind to it.
+fn tco_peephole(code: &mut [Op]) {
+    // memo[pc]: -1 unknown, 0 no, 1 yes. Marking "no" before recursing breaks `Jump` cycles
+    // (an infinite jump loop never reaches a `Return`).
+    fn leads_to_return(code: &[Op], memo: &mut [i8], pc: usize) -> bool {
+        if pc >= code.len() {
+            return false;
+        }
+        if memo[pc] != -1 {
+            return memo[pc] == 1;
+        }
+        memo[pc] = 0;
+        let r = match &code[pc] {
+            Op::Return => true,
+            Op::Jump(t) => leads_to_return(code, memo, *t as usize),
+            _ => false,
+        };
+        memo[pc] = i8::from(r);
+        r
+    }
+    let mut memo = vec![-1i8; code.len()];
+    for pc in 0..code.len() {
+        if let Op::CallFn { idx, nargs } = code[pc]
+            && leads_to_return(code, &mut memo, pc + 1)
+        {
+            code[pc] = Op::TailCallFn { idx, nargs };
+        }
+    }
+}
+
 impl Compiler {
     /// The type checker's inferred type for a method receiver expression, if a
     /// type-check ran. Keyed by the receiver's node address (stable: the AST is
@@ -507,6 +546,7 @@ impl Compiler {
         }
         self.compile_expr(&mut fb, body)?;
         fb.emit(Op::Return, 0, 0);
+        tco_peephole(&mut fb.code);
 
         let chunk = Chunk {
             code: fb.code,
@@ -543,6 +583,7 @@ impl Compiler {
         }
         self.compile_expr(&mut fb, body)?;
         fb.emit(Op::Return, 0, 0);
+        tco_peephole(&mut fb.code);
 
         let captures: Vec<CaptureSrc> = fb.upvalues.iter().map(|(_, src)| *src).collect();
         let chunk = Chunk {

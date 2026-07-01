@@ -58,6 +58,13 @@ pub enum Op {
     CoalesceCheck(u32),
     /// Call user function `funcs[idx]` with `nargs` args from the stack top.
     CallFn { idx: u32, nargs: u32 },
+    /// **Tail call** to user function `funcs[idx]`: like `CallFn`, but *reuses the current
+    /// frame* instead of pushing a new one — the call is in tail position (its result is the
+    /// caller's result), so the caller's frame is dead. This makes tail recursion (an accept
+    /// loop, a state machine) constant-space: no frame accumulation, no per-iteration leak,
+    /// and no `VM_MAX_DEPTH` ceiling. Emitted by a peephole pass over `CallFn` whose successor
+    /// leads straight to `Return`.
+    TailCallFn { idx: u32, nargs: u32 },
     /// Push a first-class function value referencing `funcs[idx]` (from a lambda
     /// or a bare function-name used as a value).
     MakeFunc { idx: u32, arity: u32 },

@@ -567,6 +567,41 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 locals.resize(base + callee.n_locals as usize, Value::Unit);
                 frames.push(Frame { func: idx, ip: 0, base, memo_key: None, upvalues: no_upvalues.clone() });
             }
+            Op::TailCallFn { idx, nargs } => {
+                let idx = *idx as usize;
+                let nargs = *nargs as usize;
+                let callee = &program.funcs[idx];
+                if nargs != callee.n_params as usize {
+                    let np = callee.n_params as usize;
+                    return Err(HelixError::new(
+                        format!(
+                            "`{}` expects {} argument{}, got {}",
+                            program.func_names[idx],
+                            np,
+                            if np == 1 { "" } else { "s" },
+                            nargs
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+                // Reuse the CURRENT frame (`fi`) rather than pushing a new one — the call is
+                // in tail position, so this frame is dead. Discard its locals, move the
+                // already-evaluated args into the callee's parameter slots, and re-point the
+                // frame at the callee from ip 0. `frames`/`locals` never grow, so tail
+                // recursion (an accept loop, a state machine) is constant-space and can't hit
+                // VM_MAX_DEPTH. `ip = 0` overrides the loop's default `ip + 1` advance.
+                let start = stack.len() - nargs;
+                let base = frames[fi].base;
+                locals.truncate(base);
+                locals.extend(stack.drain(start..));
+                locals.resize(base + callee.n_locals as usize, Value::Unit);
+                let frame = &mut frames[fi];
+                frame.func = idx;
+                frame.ip = 0;
+                frame.memo_key = None;
+                frame.upvalues = no_upvalues.clone();
+            }
             Op::MakeFunc { idx, arity } => {
                 stack.push(Value::VmFunc { idx: *idx, arity: *arity });
             }
