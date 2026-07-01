@@ -876,6 +876,32 @@ fn json_round_trips_through_the_cli() {
 }
 
 #[test]
+fn write_streams_tokens_inline_without_newlines() {
+    // `write(x)` is the no-newline sibling of `emit` — tokens flow across one line
+    // (live-chat streaming) instead of one-per-line. A trailing `emit("")` closes the
+    // line. VM and tree-walker must agree byte-for-byte.
+    let src = "_ = [\"He\", \"ll\", \"o\"].map(t => write(t))\nemit(\"\")\nemit(\"done\")\n";
+    let (vm, stderr, code) = run_source(src, &[], "writes");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(vm, "Hello\ndone\n"); // 3 tokens on one line, then a break, then done
+    let (tw, _, tc) = run_source(src, &[("HELIX_NOVM", "1")], "writes_tw");
+    assert_eq!(tc, Some(0));
+    assert_eq!(tw, vm, "tree-walker disagrees with VM on write()");
+}
+
+#[test]
+fn elog_writes_to_stderr_leaving_stdout_clean() {
+    // `elog(x)` streams to stderr, so a program can emit results on stdout and progress
+    // on stderr without the two interleaving when stdout is piped.
+    let src = "elog(\"progress\")\nemit(\"result\")\n";
+    let (out, err, code) = run_source(src, &[], "elogs");
+    assert_eq!(code, Some(0), "stderr:\n{err}");
+    assert_eq!(out, "result\n", "stdout must carry only the result");
+    assert!(err.contains("progress"), "stderr must carry the log; got: {err:?}");
+    assert!(!out.contains("progress"), "the log must not leak onto stdout");
+}
+
+#[test]
 fn calls_a_function_value_from_an_expression() {
     // A function stored in a record field or an array is a first-class value; a
     // parenthesized call target `(expr)(args)` invokes it. This is the dispatch-table
@@ -2136,6 +2162,68 @@ fn http_stream_pulls_chunks_line_by_line() {
     assert!(got.contains("chunk-b"), "second chunk: {got}");
     assert!(got.contains("chunk-c"), "third chunk: {got}");
     assert!(got.contains("true"), "the 4th next() should be missing at EOF: {got}");
+}
+
+#[cfg(feature = "http")]
+#[test]
+fn http_stream_close_cancels_early() {
+    use std::time::Duration;
+    let dir = std::env::temp_dir();
+    // Server returns a 5-line body; the client reads one chunk, then `.close()` — the
+    // early-cancel path (seen enough). A subsequent `.next()` must be `missing`, exactly
+    // as at EOF, and `close()` again is a harmless no-op.
+    let srv = dir.join("helix_stream_close_srv.helix");
+    std::fs::write(
+        &srv,
+        "l = listen(8256)\n\
+         served = range(0, 100).map(i => do {\n\
+           c = l.accept()\n\
+           x = c.request()\n\
+           c.respond({ status: 200, text: \"a\\nb\\nc\\nd\\ne\" })\n\
+           0\n\
+         })\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&srv)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+
+    let cli = dir.join("helix_stream_close_cli.helix");
+    std::fs::write(
+        &cli,
+        "s = http_stream({ method: \"GET\", url: \"http://127.0.0.1:8256/\" })\n\
+         print(s.status())\n\
+         print(s.next())\n\
+         print(s.close().is_missing())\n\
+         print(s.next().is_missing())\n\
+         print(s.close().is_missing())\n",
+    )
+    .unwrap();
+
+    let mut got = String::new();
+    let mut ok = false;
+    for _ in 0..40 {
+        let (out, _e, code) = run(&[cli.to_str().unwrap()], &[], "");
+        if code == Some(0) && out.contains("200") {
+            got = out;
+            ok = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&srv);
+    let _ = std::fs::remove_file(&cli);
+
+    assert!(ok, "http_stream never succeeded; last: {got:?}");
+    assert!(got.contains("a\n"), "should read the first chunk before closing: {got}");
+    assert!(!got.contains('b'), "must NOT read past close: {got}");
+    // status, first chunk, then three `true`s: close→missing, next→missing, close→missing.
+    assert_eq!(got.matches("true").count(), 3, "close/next after close all missing: {got}");
 }
 
 #[test]

@@ -43,6 +43,31 @@ impl super::Interp {
                 let _ = out.flush();
                 Ok(Value::Unit)
             }
+            // `write(x)` — the inline sibling of `emit`: same plain, flush-now streaming sink,
+            // but with NO trailing newline, so tokens flow across one line like a live chat UI
+            // (`for t in stream: write(t)`). `emit` frames one value per line; `write` frames
+            // nothing — the program decides where breaks go (a final `emit("")` ends the line).
+            "write" => {
+                arity(name, &args, 1, line, col)?;
+                use std::io::Write;
+                let s = crate::value::display_value(&args[0], line, col)?;
+                let mut out = std::io::stdout().lock();
+                let _ = write!(out, "{s}");
+                let _ = out.flush();
+                Ok(Value::Unit)
+            }
+            // `elog(x)` — `emit` for the **stderr** channel: one value per line, flushed now.
+            // Lets a program stream results on stdout while sending progress/logs to stderr, so
+            // the two don't interleave when stdout is piped (`helix run x.helix | consumer`).
+            "elog" => {
+                arity(name, &args, 1, line, col)?;
+                use std::io::Write;
+                let s = crate::value::display_value(&args[0], line, col)?;
+                let mut err = std::io::stderr().lock();
+                let _ = writeln!(err, "{s}");
+                let _ = err.flush();
+                Ok(Value::Unit)
+            }
             // `sleep(ms)` — pause the program for `ms` milliseconds (wall clock). The
             // pacing primitive for a paced loop (`emit(frame)` then `sleep(16)` ≈ 60 fps);
             // pairs with `clock_monotonic()`. A non-deterministic effect, so (like `print`/
@@ -274,10 +299,13 @@ impl super::Interp {
                 // output (Ollama NDJSON / OpenAI SSE), the client mirror of accept→send.
                 arity(name, &args, 1, line, col)?;
                 let (method, url, body, hdrs) = http_request_fields(&args[0], line, col)?;
+                // Optional `timeout_ms` (per-chunk read deadline) — a positive integer field.
+                let timeout_ms = http_timeout_ms(&args[0], line, col)?;
                 #[cfg(feature = "http")]
                 {
-                    let (status, reader) = crate::http::open_stream(&method, &url, &body, &hdrs)
-                        .map_err(|e| HelixError::new(e, line, col))?;
+                    let (status, reader) =
+                        crate::http::open_stream(&method, &url, &body, &hdrs, timeout_ms)
+                            .map_err(|e| HelixError::new(e, line, col))?;
                     Ok(Value::Net(Rc::new(crate::serve::NetHandle::HttpStream {
                         status,
                         reader: std::cell::RefCell::new(Some(std::io::BufReader::new(reader))),
@@ -285,7 +313,7 @@ impl super::Interp {
                 }
                 #[cfg(not(feature = "http"))]
                 {
-                    let _ = (&method, &url, &body, &hdrs);
+                    let _ = (&method, &url, &body, &hdrs, &timeout_ms);
                     Err(HelixError::new("this build has no HTTP support", line, col)
                         .hint("build without `--no-default-features`, or with `--features http`."))
                 }
@@ -1990,6 +2018,24 @@ fn http_request_fields(req: &Value, line: usize, col: usize) -> Result<HttpReqPa
         _ => {}
     }
     Ok((method, url, body, hdrs))
+}
+
+/// Read the optional `timeout_ms` field from an `http_stream` request record — a positive
+/// integer per-chunk read deadline in milliseconds. Absent → `None` (no read timeout). A
+/// non-integer or non-positive value is a clean error rather than a silently-ignored field.
+#[cfg_attr(not(feature = "http"), allow(dead_code))]
+fn http_timeout_ms(req: &Value, line: usize, col: usize) -> Result<Option<u64>, HelixError> {
+    let Value::Record(fields) = req else { return Ok(None) };
+    match fields.iter().find(|(s, _)| s.as_str() == "timeout_ms").map(|(_, v)| v) {
+        None | Some(Value::Missing) => Ok(None),
+        Some(Value::Int(n)) if *n > 0 => Ok(Some(*n as u64)),
+        Some(_) => Err(HelixError::new(
+            "`timeout_ms` must be a positive integer (milliseconds)",
+            line,
+            col,
+        )
+        .hint("e.g. `http_stream({method: \"POST\", url: u, body: b, timeout_ms: 5000})`.")),
+    }
 }
 
 /// Read a whole file to a `String`, capping at `MAX_STRING_LEN` so a huge file is a

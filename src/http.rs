@@ -93,19 +93,28 @@ pub fn request(
 
 /// Open a request for **streaming**: return `(status, body_reader)` without reading the body
 /// up front (unlike get/post/request), so the caller pulls it line-by-line. Powers
-/// `http_stream` for token-by-token model output. No read timeout — a streaming response may
-/// idle between chunks (a model thinking) far longer than a normal body read, and the program
-/// decides when to stop.
+/// `http_stream` for token-by-token model output.
+///
+/// `timeout_ms` bounds the wait for *each* chunk (via the socket read timeout, `SO_RCVTIMEO` —
+/// applied per read, so it's a per-chunk deadline, not a whole-stream one). `None` means no
+/// read timeout: a streaming response may idle between chunks (a model thinking) far longer
+/// than a normal body read, and the program decides when to stop. `Some(ms)` lets a caller
+/// tell a genuinely hung server from a merely slow one — a chunk that doesn't arrive in time
+/// surfaces as a (recoverable) read timeout on `.next()`.
 #[cfg(feature = "http")]
 pub fn open_stream(
     method: &str,
     url: &str,
     body: &str,
     headers: &[(String, String)],
+    timeout_ms: Option<u64>,
 ) -> Result<(i64, Box<dyn std::io::Read>), String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(30))
-        .build();
+    let mut builder =
+        ureq::AgentBuilder::new().timeout_connect(std::time::Duration::from_secs(30));
+    if let Some(ms) = timeout_ms {
+        builder = builder.timeout_read(std::time::Duration::from_millis(ms));
+    }
+    let agent = builder.build();
     let mut req = agent.request(method, url);
     for (k, v) in headers {
         req = req.set(k, v);

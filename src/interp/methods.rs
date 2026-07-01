@@ -141,8 +141,14 @@ fn net_method(
             }
             crate::serve::stream_status(h, line, col)
         }
+        "close" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`close` takes no arguments", line, col));
+            }
+            crate::serve::stream_close(h, line, col)
+        }
         other => Err(HelixError::new(format!("type Net has no method `{other}`"), line, col)
-            .hint("a listener has `accept`/`poll`; a connection has `request`/`respond`, or `sse`/`send` to stream; an http_stream has `status`/`next`.")),
+            .hint("a listener has `accept`/`poll`; a connection has `request`/`respond`, or `sse`/`send` to stream; an http_stream has `status`/`next`/`close`.")),
     }
 }
 

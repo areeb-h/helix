@@ -293,6 +293,16 @@ pub fn stream_next(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Va
             buf.truncate(keep);
             Ok(Value::Str(Rc::new(buf)))
         }
+        // A per-chunk timeout (`timeout_ms`) means the server is idle, not gone: the socket
+        // read hit its deadline (`TimedOut`/`WouldBlock`) with no data. Keep the stream OPEN
+        // — the caller can retry `.next()` or `.close()` — and raise a catchable error, so a
+        // hung server is distinguishable from the `missing` that signals clean end-of-stream.
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => {
+            Err(HelixError::new("`next` timed out waiting for the next chunk", line, col)
+                .hint("the server sent nothing within `timeout_ms`; retry `.next()`, or `.close()` to give up."))
+        }
+        // Any other read error ends the stream (a reset/broken connection is, for the
+        // program's purposes, the end) — drop the reader and report EOF.
         Err(_) => {
             *guard = None;
             Ok(Value::Missing)
@@ -305,6 +315,20 @@ pub fn stream_status(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<
     match &**handle {
         NetHandle::HttpStream { status, .. } => Ok(Value::Int(*status)),
         _ => Err(HelixError::new("`status` works on an `http_stream` handle", line, col)),
+    }
+}
+
+/// `stream.close()` — abandon the stream early (a stop-word, a token budget, a user hitting
+/// stop) without draining to EOF: drop the reader, which closes the underlying socket and frees
+/// it now. Idempotent — closing an already-closed or exhausted stream is a no-op — and a
+/// subsequent `.next()` returns `missing`, exactly as at EOF. Returns `missing`.
+pub fn stream_close(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
+    match &**handle {
+        NetHandle::HttpStream { reader, .. } => {
+            *reader.borrow_mut() = None; // drop the reader → close the socket
+            Ok(Value::Missing)
+        }
+        _ => Err(HelixError::new("`close` works on an `http_stream` handle", line, col)),
     }
 }
 

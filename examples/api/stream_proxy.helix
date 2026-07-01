@@ -1,0 +1,56 @@
+# The server IS the demo: proxy a model's token stream straight to a browser.
+#   helix run examples/api/stream_proxy.helix
+#
+# A browser opens our SSE endpoint; we open an upstream stream to a local model and
+# forward each token the instant it arrives — `http_stream(...).next()` piped into
+# `conn.send()`. The client mirror of the server loop meets the server: tokens flow
+# model -> Helix -> browser with no buffering in between.
+#
+# This needs a local model server (e.g. Ollama on :11434). It is a network example,
+# so it is not part of the offline test suite — it documents the pattern.
+
+l = listen(8080)
+elog("proxy listening on http://127.0.0.1:8080  (Ctrl-C to stop)")
+
+# One connection per accepted browser. `range(...).map` is the accept loop; each
+# iteration handles a full request/response.
+served = range(0, 1000000).map(i => do {
+  c = l.accept()
+  req = c.request()
+  elog("→ {req.method} {req.path}")
+
+  # Open the SSE response to the browser first, so tokens can start flowing the
+  # moment the model produces them.
+  c.sse()
+
+  # Open the upstream model stream. The browser's POST body carries the prompt.
+  # `timeout_ms` bounds the wait for EACH token, so a hung model is abandoned (a
+  # catchable error on `.next()`) rather than wedging the connection forever.
+  up = http_stream({
+    method: "POST",
+    url: "http://127.0.0.1:11434/api/generate",
+    body: { model: "llama3", prompt: req.body, stream: true }.to_json(),
+    timeout_ms: 30000
+  })
+
+  # Forward at most `budget` tokens, then stop — the token-budget cap is just a
+  # bounded pull. Each Ollama line is a JSON object with a `.response` token; parse
+  # it and relay the token. `up.next()` is `missing` at end-of-stream.
+  budget = 2000
+  forwarded = range(0, budget).map(j => do {
+    line = up.next()
+    if line.is_missing() then
+      0
+    else do {
+      tok = (try line.parse_json()).value ?? { response: "" }
+      c.send(tok.response)   # push this token to the browser as an SSE event
+      0
+    }
+  })
+
+  # Free the upstream socket immediately whether we hit EOF or the budget — no need
+  # to drain a model that may keep generating past what we asked for.
+  up.close()
+  elog("← closed upstream after ≤{budget} tokens")
+  0
+})

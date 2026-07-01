@@ -37,7 +37,7 @@ pub fn category_of(name: &str) -> &'static str {
         // Networking — client + server.
         "listen" | "http_get" | "http_post" | "http_request" | "http_stream" => "net",
         // Program output / streaming sinks.
-        "print" | "emit" => "output",
+        "print" | "emit" | "write" | "elog" => "output",
         // Time / pacing.
         "sleep" | "clock_monotonic" => "time",
         // Constructors — make a value of a given type.
@@ -82,6 +82,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     // --- effectful / non-reproducible (I/O, output, network) -> not memoizable ---
     BuiltinDef { path: "print", pure: false },
     BuiltinDef { path: "emit", pure: false },
+    BuiltinDef { path: "write", pure: false },
+    BuiltinDef { path: "elog", pure: false },
     BuiltinDef { path: "sleep", pure: false },
     BuiltinDef { path: "listen", pure: false },
     BuiltinDef { path: "read_csv", pure: false },
@@ -294,7 +296,7 @@ pub static RECORD_METHODS: &[&str] = &["get", "has", "keys", "values", "items"];
 /// listener (from `listen(port)`) has `accept`; a connection (from `accept()`) has
 /// `respond`. Effects, dispatched at runtime like the other opaque types.
 pub static NET_METHODS: &[&str] =
-    &["accept", "poll", "request", "respond", "sse", "send", "next", "status"];
+    &["accept", "poll", "request", "respond", "sse", "send", "next", "status", "close"];
 
 /// Look up a builtin by its dotted path.
 pub fn lookup(path: &str) -> Option<&'static BuiltinDef> {

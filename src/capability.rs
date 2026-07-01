@@ -246,8 +246,8 @@ mod tests {
         // fails here, forcing the capability decision at review time instead of silently
         // shipping an ungated authority (ADR 0021).
         let harmless: &[&str] = &[
-            "print", "emit", "sleep", "clock_monotonic", "aes_keygen", "aes_encrypt",
-            "ed25519_keygen", "assert", "assert_eq", "assert_close",
+            "print", "emit", "write", "elog", "sleep", "clock_monotonic", "aes_keygen",
+            "aes_encrypt", "ed25519_keygen", "assert", "assert_eq", "assert_close",
         ];
         for b in crate::registry::BUILTINS {
             if b.pure || effect_of(b.path).gated() {
