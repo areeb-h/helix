@@ -1231,6 +1231,12 @@ fn value_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>
                 BinOp::Add | BinOp::Sub | BinOp::Mul => true,
                 // `%` only by a positive integer constant (total `rem_euclid`, no `%0`).
                 BinOp::Mod => matches!(**right, Expr::Int(n) if n > 0),
+                // Bitwise ops are unconditionally i64-closed (this is the i64 kernel).
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => true,
+                // `<<`/`>>` only by an in-range constant (0..=63); `//` only by a
+                // positive constant — same safe subset as `value_eligible` above.
+                BinOp::Shl | BinOp::Shr => matches!(**right, Expr::Int(n) if (0..=63).contains(&n)),
+                BinOp::FloorDiv => matches!(**right, Expr::Int(n) if n > 0),
                 _ => false, // `/` excluded: not i64-closed; native fdiv diverges on /0
             };
             op_ok
@@ -1263,6 +1269,12 @@ fn value_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>
 
 fn cond_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, caps: &mut Vec<String>) -> bool {
     match e {
+        // `and`/`or` in condition position (see `cond_eligible`); recurse through the
+        // capture-collecting twin so captured names inside the operands are still found.
+        Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
+            cond_eligible_cap(left, eligible, locals, caps)
+                && cond_eligible_cap(right, eligible, locals, caps)
+        }
         Expr::Binary { op, left, right, .. } => {
             matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne)
                 && value_eligible_cap(left, eligible, locals, caps)
@@ -1500,6 +1512,23 @@ fn value_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, ki
                 BinOp::Mod => {
                     kind == NumKind::Int && matches!(**right, Expr::Int(n) if n > 0)
                 }
+                // Bitwise ops on two Ints are unconditionally i64-closed — the
+                // interpreter returns `Int(a & b)` etc. with no overflow, promotion, or
+                // trap — so `band`/`bor`/`bxor` match exactly. Int kind only.
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => kind == NumKind::Int,
+                // `<<`/`>>` only by a constant in `0..=63`: the interpreter *raises* for
+                // an out-of-range shift, while native `ishl`/`sshr` silently mask the
+                // count, so only an in-range constant is provably equivalent.
+                BinOp::Shl | BinOp::Shr => {
+                    kind == NumKind::Int
+                        && matches!(**right, Expr::Int(n) if (0..=63).contains(&n))
+                }
+                // `//` (euclidean floor division) is i64-closed like `%`; JIT only by a
+                // positive constant divisor (rules out `//0` and the `sdiv(i64::MIN,-1)`
+                // trap), lowered as `sdiv` adjusted down when the remainder is negative.
+                BinOp::FloorDiv => {
+                    kind == NumKind::Int && matches!(**right, Expr::Int(n) if n > 0)
+                }
                 _ => false,
             };
             op_ok
@@ -1580,6 +1609,16 @@ fn match_eligible(
 
 fn cond_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, kind: NumKind) -> bool {
     match e {
+        // `and`/`or` are widenable ONLY in condition position (an `if`/filter/guard
+        // condition is forced to `Bool`). Each side must itself be a condition, so every
+        // leaf is a comparison whose operands are pure and total — a native
+        // non-short-circuit `band`/`bor` is then bit-identical to the interpreter's
+        // short-circuit `and`/`or` (no operand can be `Missing` or raise). NOT added to
+        // `value_eligible`: in *value* position `true or missing` is `Missing`, not i64.
+        Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
+            cond_eligible(left, eligible, locals, kind)
+                && cond_eligible(right, eligible, locals, kind)
+        }
         Expr::Binary { op, left, right, .. } => matches!(
             op,
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne
@@ -2190,6 +2229,31 @@ fn gen_value<'a>(
                     let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
                     b.ins().select(is_neg, fixed, rem)
                 }
+                (NumKind::Int, BinOp::BitAnd) => b.ins().band(l, r),
+                (NumKind::Int, BinOp::BitOr) => b.ins().bor(l, r),
+                (NumKind::Int, BinOp::BitXor) => b.ins().bxor(l, r),
+                (NumKind::Int, BinOp::Shl) => {
+                    // Constant shift in 0..=63 (guaranteed by `value_eligible`); the
+                    // immediate form avoids computing a throwaway count value.
+                    let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
+                    b.ins().ishl_imm(l, n)
+                }
+                (NumKind::Int, BinOp::Shr) => {
+                    // `>>` on i64 is arithmetic (sign-extending) in Rust → `sshr`.
+                    let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
+                    b.ins().sshr_imm(l, n)
+                }
+                (NumKind::Int, BinOp::FloorDiv) => {
+                    // `a.div_euclid(d)` for a positive constant `d`: `q = a / d`, then
+                    // `q - 1` when the remainder is negative (floor for `d > 0`). A
+                    // positive constant `d` keeps `sdiv`/`srem` trap-free.
+                    let q = b.ins().sdiv(l, r);
+                    let rem = b.ins().srem(l, r);
+                    let zero = b.ins().iconst(I64, 0);
+                    let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
+                    let qm1 = b.ins().iadd_imm(q, -1);
+                    b.ins().select(is_neg, qm1, q)
+                }
                 (NumKind::Float, BinOp::Add) => b.ins().fadd(l, r),
                 (NumKind::Float, BinOp::Sub) => b.ins().fsub(l, r),
                 (NumKind::Float, BinOp::Mul) => b.ins().fmul(l, r),
@@ -2474,6 +2538,21 @@ fn gen_cond<'a>(
     kind: NumKind,
 ) -> ClValue {
     match e {
+        // `and`/`or` combine two i1 conditions. Handled before the comparison arm
+        // because a nested `and`/`or` is itself an `Expr::Binary` and would otherwise
+        // fall into the comparison `match op` and hit its `unreachable!`. Non-short-
+        // circuit `band`/`bor` is exact here: both operands are pure i64 comparisons, so
+        // evaluating the RHS eagerly is observationally identical to short-circuiting.
+        Expr::Binary { op: BinOp::And, left, right, .. } => {
+            let l = gen_cond(b, left, vars, fn_ids, module, kind);
+            let r = gen_cond(b, right, vars, fn_ids, module, kind);
+            b.ins().band(l, r)
+        }
+        Expr::Binary { op: BinOp::Or, left, right, .. } => {
+            let l = gen_cond(b, left, vars, fn_ids, module, kind);
+            let r = gen_cond(b, right, vars, fn_ids, module, kind);
+            b.ins().bor(l, r)
+        }
         Expr::Binary { op, left, right, .. } => {
             let l = gen_value(b, left, vars, fn_ids, module, kind);
             let r = gen_value(b, right, vars, fn_ids, module, kind);

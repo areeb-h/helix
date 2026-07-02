@@ -694,6 +694,38 @@
         }
     }
 
+    /// The widened i64 JIT op set (bitwise, constant shifts, `//` by a positive constant,
+    /// and `and`/`or` in a condition) must be bit-identical to the tree-walker. `gen_expr`
+    /// already fuzzes `//`; bitwise/shift/and-or are not in its grammar, so pin them here
+    /// (scalar functions, a fused reduce/filter kernel, and negative operands for the
+    /// arithmetic-shift and euclidean-floor edges). Each is called with all-Int args so the
+    /// native i64 specialization is compiled and dispatched.
+    #[test]
+    fn jit_widened_ops_match_tree_walker() {
+        let cases = [
+            "fn f(x, y) = x & y\nf(12, 10)",
+            "fn f(x, y) = x | y\nf(12, 10)",
+            "fn f(x, y) = x ^ y\nf(12, 10)",
+            "fn f(x) = x & 7\nf(29)",
+            "fn f(x) = x << 5\nf(3)",
+            "fn f(x) = x >> 2\nf(-13)", // arithmetic (sign-extending) shift
+            "fn f(x) = x << 0\nf(7)",
+            "fn f(x) = x // 3\nf(-7)", // euclidean floor: -3, not truncating -2
+            "fn f(x) = x // 4\nf(-1)",
+            "fn f(x) = x // 3\nf(7)",
+            "fn f(x) = if x > 0 and x < 10 then 1 else 0\nf(5)",
+            "fn f(x) = if x > 0 and x < 10 then 1 else 0\nf(15)",
+            "fn f(x) = if x == 1 or x == 2 then 9 else 0\nf(2)",
+            "fn f(x) = if x > 0 and x < 100 or x == 500 then 1 else 0\nf(500)",
+            "(range(0, 20)).reduce(0, (acc, x) => acc + (x & 1))", // bitmask in a fused kernel
+            "(range(0, 20)).filter(x => x > 2 and x % 2 == 0).count()", // and-cond in a filter
+            "(range(-5, 6)).reduce(0, (acc, x) => acc + (x // 2))", // floor-div in a kernel
+        ];
+        for src in cases {
+            assert_eq!(run_vm_jit(src), run_tw(src), "JIT ≠ tree-walker on `{src}`");
+        }
+    }
+
     /// The native reduce loop (`TryJitReduce`) must equal the tree-walker. Drives
     /// `range(s, e).reduce(init, (acc, x) => body)` through the JIT-enabled runner
     /// with random `i64`-eligible bodies over `{acc, x}`, random (incl. negative
