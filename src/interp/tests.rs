@@ -363,6 +363,15 @@
             last("range(-9000000000000000000, -9223372036854775807, -9000000000000000000).count()").unwrap(),
             Value::Int(1)
         )); // [-9e18]; the next add (−1.8e19) would underflow → stop
+        // packed-array fast paths (count/length/first/last read the buffer directly;
+        // unique gets an O(n) all-Int path) must return the same values as before.
+        assert!(matches!(last("range(0, 5).first()").unwrap(), Value::Int(0)));
+        assert!(matches!(last("range(0, 5).last()").unwrap(), Value::Int(4)));
+        assert!(matches!(last("range(0, 0).first()").unwrap(), Value::Missing));
+        assert!(matches!(last("range(0, 5).length()").unwrap(), Value::Int(5)));
+        assert!(matches!(last("(range(0, 5) * 1.0).last()").unwrap(), Value::Float(f) if f == 4.0));
+        assert!(matches!(last("[5, 1, 5, 2, 1].unique().count()").unwrap(), Value::Int(3)));
+        assert!(matches!(last("[1, 1.0].unique().count()").unwrap(), Value::Int(1))); // 1 == 1.0 collapses
     }
 
     #[test]

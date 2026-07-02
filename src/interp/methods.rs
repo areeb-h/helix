@@ -495,11 +495,44 @@ fn array_numeric_fast(
     col: usize,
 ) -> Result<Option<Value>, HelixError> {
     use crate::value::ArrayData;
+    if !args.is_empty() {
+        return Ok(None);
+    }
+    // Cheap length/positional methods read the packed buffer directly, so they don't
+    // box every element into a `Value` the way `to_values()` would — e.g.
+    // `range(1_000_000).first()` returns element 0 without materializing a million
+    // Values. Byte-identical to the general path (`length`==`count`==len; `first`/`last`
+    // are Missing on empty else the element).
+    match name {
+        "count" | "length" => {
+            return Ok(match ad {
+                ArrayData::Values(_) => None,
+                ArrayData::Ints(xs) => Some(Value::Int(xs.len() as i64)),
+                ArrayData::Floats(xs) => Some(Value::Int(xs.len() as i64)),
+            });
+        }
+        "first" | "last" => {
+            let first = name == "first";
+            return Ok(match ad {
+                ArrayData::Values(_) => None,
+                ArrayData::Ints(xs) => Some(if xs.is_empty() {
+                    Value::Missing
+                } else {
+                    Value::Int(if first { xs[0] } else { xs[xs.len() - 1] })
+                }),
+                ArrayData::Floats(xs) => Some(if xs.is_empty() {
+                    Value::Missing
+                } else {
+                    Value::Float(if first { xs[0] } else { xs[xs.len() - 1] })
+                }),
+            });
+        }
+        _ => {}
+    }
     if !matches!(
         name,
-        "count" | "sum" | "mean" | "std" | "var" | "median" | "min" | "max"
-    ) || !args.is_empty()
-    {
+        "sum" | "mean" | "std" | "var" | "median" | "min" | "max"
+    ) {
         return Ok(None);
     }
     match ad {
@@ -939,6 +972,18 @@ fn array_method(
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for v in items.iter() {
                     if seen.insert(v.to_string()) {
+                        out.push(v.clone());
+                    }
+                }
+            } else if items.iter().all(|v| matches!(v, Value::Int(_))) {
+                // Ints are hashable — O(n), not the O(n^2) `values_equal` scan below
+                // (`range(50_000).unique()` was ~1.25 billion comparisons). Only all-Int:
+                // a Float path would mishandle `1 == 1.0` cross-type collapse and -0.0/NaN.
+                let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+                for v in items.iter() {
+                    if let Value::Int(n) = v
+                        && seen.insert(*n)
+                    {
                         out.push(v.clone());
                     }
                 }

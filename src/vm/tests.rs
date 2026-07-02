@@ -509,6 +509,29 @@
         }
     }
 
+    /// Packed-array fast paths (perf, must stay bit-identical): `unique` gained an O(n)
+    /// all-Int path (Str/DNA already had one; mixed/Float stay on `values_equal` so
+    /// `1 == 1.0` still collapses), and `count`/`length`/`first`/`last` read the packed
+    /// Int/Float buffer directly instead of materializing boxed Values.
+    #[test]
+    fn packed_array_fast_methods_match_tree_walker_on_vm() {
+        let cases = [
+            "print([3, 1, 2, 3, 1].unique())",                              // all-Int, first-seen order
+            "print(range(0, 100).concat(range(0, 100)).unique().count())", // larger all-Int
+            "print([1, 1.0].unique())",                                    // mixed: 1 == 1.0 collapses
+            "print([1.0, 1, 2].unique())",                                 // mixed, Float first
+            "print(range(0, 5).first())",                                  // packed Int first
+            "print(range(0, 5).last())",                                   // packed Int last
+            "print(range(0, 0).first())",                                  // empty → missing
+            "print(range(0, 5).length())",                                 // packed Int length
+            "print((range(0, 5) * 1.0).first())",                          // packed Float first
+            "print((range(0, 5) * 1.0).last())",                           // packed Float last
+        ];
+        for src in cases {
+            assert_eq!(run_vm(src), run_tw(src), "VM ≠ tree-walker on `{src}`");
+        }
+    }
+
     /// Calling a first-class function *value* produced by an expression —
     /// `(rec.handler)(x)`, `(fns[i])(x)` — runs natively on both engines. These pin
     /// the VM's `CallValue` opcode path (and its error text) to the tree-walker:
