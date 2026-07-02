@@ -1,270 +1,240 @@
 # Helix
 
-> A scientific programming language designed for data-intensive research.
+**A scientific programming language that reads like a notebook and runs its numeric kernels at C speed.**
 
-Helix is a modern scientific programming language implemented in Rust, designed for
-data science, machine learning, artificial intelligence, computational biology, and
-high-performance scientific computing.
+Helix is a from-scratch language and runtime, written in Rust, for data science, machine
+learning, computational biology, and high-performance scientific computing. It pairs a clean,
+high-level surface syntax with a **Cranelift JIT** that compiles hot numeric loops to native
+machine code — so a dot product or an N-body inner loop, written as a one-line `reduce`, runs
+*at or beyond single-threaded C*, while the rest of your program stays as readable as a notebook.
 
-It aims to combine **Python's readability**, **R's data workflow**, **Rust's
-safety**, **Julia's scientific elegance**, **SQL's data operations**, and **Arrow's
-zero-copy memory model**, while avoiding their respective pitfalls.
+What makes that trustworthy: every JIT-compiled kernel is proven **bit-identical** to two
+independent reference engines (a bytecode VM and a tree-walker) by a differential oracle over
+tens of thousands of random programs. **Speed is never traded for a silently wrong answer.**
+
+[Performance](#performance) · [Install](#install) · [A tour](#a-tour) · [What's inside](#whats-inside) · [Architecture](#architecture)
+
+---
+
+## Performance
+
+The JIT compiles pure-numeric `map` / `filter` / `reduce` kernels over ranges and packed
+arrays — including **array-indexed reductions** (`a[j]`) and **nested reductions** (a `map` of a
+`reduce`) — to native code, and auto-parallelizes across cores above a size threshold.
+
+A 50-million-element **dot product** (best of 3, wall-seconds; every language prints the
+identical result):
+
+| dtype | **Helix (JIT)** | C `-O3` | Rust | Go | NumPy | CPython |
+|---|---|---|---|---|---|---|
+| `i64` | **~0.34 s** | 0.47 | 0.47 | 0.46 | 0.94 | 9.4 |
+| `f64` | **0.36 s** | 0.47 | 0.47 | 0.48 | 1.5 | 9.4 |
+
+A 900-million-pair **O(N²) all-pairs reduction** (`range(n).map(i => range(n).reduce(…))` — the
+distance-matrix / N-body shape):
+
+| | **Helix (JIT)** | C `-O3` (1 thread) | C (OpenMP) | Go | NumPy | interpreted |
+|---|---|---|---|---|---|---|
+| wall | **0.06 s** (~569% CPU) | 0.08 | 0.01 | 0.17 | 0.25 | ~12 s |
+
+The single-threaded reduction is memory-bandwidth-bound *at parity with C*; Helix pulls ahead on
+totals by **auto-parallelizing** array construction and outer loops across cores — a real win, but
+an honest one: the C/Rust/Go baselines here are single-threaded, and Helix does not yet
+auto-vectorize (SIMD), which is why threaded+vectorized C-OpenMP is still faster on the last kernel.
+Full methodology, per-language source, and the load-bearing caveats:
+**[docs/jit-benchmarks.md](docs/jit-benchmarks.md)**. DataFrame throughput (a 50M-row
+filter→group→sort→head in ~0.2 s from Parquet) is measured separately in
+[docs/benchmarks.md](docs/benchmarks.md).
 
 ## Install
 
-Helix is a **single self-contained binary** — no runtime to install (no Python, no
-system BLAS; the core links nothing external). It is large (~65 MB) because of the
-embedded Polars engine, but starts instantly and links no system libraries beyond the
-C runtime — see [binary size](docs/binary-size.md) for the analysis.
+Helix ships as a **single self-contained binary** — no runtime to install (no Python, no system
+BLAS; the core links nothing external beyond the C runtime). It's ~60 MB because it embeds the
+Polars engine, yet starts instantly.
 
 ```sh
-# one-line install — downloads the prebuilt binary for your platform,
-# or falls back to a source build if no release is available
+# one-line install — prebuilt binary for your platform, or a source build as a fallback
 curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | sh
 
-# or, with Rust installed, from a checkout:
+# or, with a Rust toolchain, from a checkout:
 cargo install --path .
 ```
 
-It is then used like any language CLI:
-
 ```sh
-helix run examples/language/tour.helix     # run a script
-helix eval "print(1 + 2)"         # a one-liner
-helix repl                        # interactive session
-helix help                        # all commands
+helix run script.helix       # run a script
+helix eval "print(1 + 2)"    # a one-liner
+helix repl                   # interactive session
+helix build script.helix     # compile to a standalone executable (no toolchain needed)
+helix help                   # all commands
 ```
 
-> Prebuilt one-line installs activate once the project is published on GitHub with a
-> release tag (the [release workflow](.github/workflows/release.yml) is prepared);
-> until then the installer source-builds, which requires Rust. The distribution plan
-> is described in [ADR 0009](docs/adr/0009-distribution-and-install.md).
+> Prebuilt one-line installs activate once the project ships a tagged GitHub release (the
+> [release workflow](.github/workflows/release.yml) is prepared); until then the installer
+> source-builds, which requires Rust.
 
-## Status
+## A tour
 
-The implementation extends beyond a prototype. It comprises a tree-walking
-interpreter, a bytecode VM, and a Cranelift JIT (numeric kernels compiled to native
-code — array reductions such as dot products run at C speed; scalar recursion
-outperforms Node and Python), lazy Polars/Arrow **DataFrames**, ndarray
-**tensors** with linear algebra, a static type checker, a **module system**, **data
-access** (`http_get` plus `parse_json`/`to_json` for REST APIs), **error handling**
-(`try EXPR` yielding `{ok, value, error}`), **genomics** (`read_fasta`/`read_fastq`
-sequences, `read_vcf`/`read_bcf` variants, and `read_sam`/`read_bam` alignments into a
-queryable DataFrame), and a feature-gated
-**CPython interop** layer (calling NumPy, polars, and similar
-libraries; see [docs/python-interop.md](docs/python-interop.md)). The test suite
-contains 400 or more tests and compiles with zero warnings. The remaining roadmap
-(GPU support, package manager, bundled Python) is described below.
+```python
+# Immutable by default; `mut` is explicit. String interpolation needs no `f` prefix.
+mean_score = scores.where(it >= 60).map(it + 5).mean()
+print("adjusted mean: {mean_score}")
 
-### Performance
+# `if` is an expression; functions are single expressions (recursion supported).
+fn variance(xs) = let m = xs.mean(), n = xs.count() in xs.map((it - m) ** 2).sum() / n
 
-The JIT compiles pure-numeric kernels — `map`/`filter`/`reduce` over ranges and packed
-arrays — to native machine code, including **array-indexed reductions**
-(`range(0, n).reduce(0.0, (acc, j) => acc + a[j] * b[j])`) — the shape behind dot
-products, weighted sums, and N-body / distance-matrix inner loops. A **differential
-oracle** asserts the JIT, the bytecode VM, and the tree-walker produce **bit-identical**
-results across tens of thousands of random programs, so the native path can never silently
-diverge — even native reads past an array bound fall back to the exact, checked interpreter
-error.
+# Native-speed numeric kernels — this reduce JIT-compiles to a native loop.
+dot = (range(0, n)).reduce(0.0, (acc, j) => acc + a[j] * b[j])
 
-Measured on a 50-million-element **dot product** (best of 3, wall-seconds; every language
-prints the identical sum):
-
-| dtype | Helix (JIT) | C `-O3` | Rust | Go | NumPy | CPython |
-|---|---|---|---|---|---|---|
-| `i64` | **0.34 s** | 0.47 | 0.48 | 0.46 | 0.94 | 9.4 |
-| `f64` | **0.36 s** | 0.47 | 0.47 | 0.48 | 1.5 | 9.4 |
-
-The single-threaded reduction is memory-bandwidth-bound at parity with C; Helix edges ahead
-on the total because it **auto-parallelizes array construction** across cores while the
-C / Rust / Go baselines are single-threaded loops. (This is a naming/dispatch win, not a
-lower-precision one — the float sum is exact and matches NumPy bit-for-bit.)
-
-Nested reductions parallelize too: a **900M-pair O(N²) all-pairs kernel**
-(`range(n).map(i => range(n).reduce(...))` — distance matrices, N-body) runs in **0.06 s at
-~569% CPU**, *ahead of* SIMD-vectorized single-threaded C (0.08 s) and ~600× over the
-interpreter. Full methodology, source, and honest caveats (auto-parallelism vs single-threaded
-baselines; no SIMD in the JIT yet): **[docs/jit-benchmarks.md](docs/jit-benchmarks.md)**.
-
-## Current capabilities
-
-```text
-# Immutable by default; mutability is explicit
-x = 42
-mut counter = 0
-counter = counter + 1
-
-# Arrays and statistics
-xs = [1, 2, 3, 4]
-xs.mean()
-xs.std()
-xs.normalize()
-
-# Multi-line dot-chains, no pipes or line-continuations
-[10, 5, 8, 3, 9]
-    .sort()
-    .reverse()
-
-# Comprehensions: `it` is the current element; `where` is equivalent to `filter`.
-scores
-    .where(it >= 60)
-    .map(it + 5)
-    .mean()
-
-# `if` is an expression that yields a value
-grade = if score > 90 then "A" else "B"
-
-# DataFrames (Polars/Arrow-backed) use the same `where`/`sort` verbs as arrays.
-# Columns are written with `@`: `@age` is *always* the age column, never a variable —
-# so a column and a local can never collide, and editors autocomplete after `@`.
-# `where(@age > 40)` lowers to a native Polars filter rather than an interpreter loop.
-patients = read_csv("patients.csv")
-patients
+# DataFrames (Polars/Arrow, lazy). Columns use `@` — always a column, never a variable,
+# so the two can't collide, and the whole chain lowers to one native Polars query.
+read_csv("patients.csv")
     .where(@age > 40 and @resting_hr < 75)
     .select(@name, @diagnosis)
     .sort(@age)
-genes.group(@species).mean(@expression)
+    .write_csv("cohort.csv")
 
-# DNA sequences as a first-class type
+# First-class genomics.
 seq = dna("ATGCGTAC")
 seq.gc_content()
 seq.reverse_complement()
-seq.kmers(3)
+reads = read_fastq("reads.fq")       # → a queryable DataFrame
+
+# An HTTP server is a pure handler folded over a request stream — no framework, no global state.
+fn serve(listener) = do {
+    conn = listener.accept()
+    conn.respond(route(conn.request()))
+    serve(listener)
+}
+serve(listen(8080))
 ```
 
-### Language features in v0.1
-- **Records** — structured data with named fields, comparable to a Python dict or a
-  TypeScript object: `{name: "Ada", age: 41}`, accessed with `.name` (no parens;
-  `.method()` requires parens, so the two never collide). Nested records,
-  arrays-of-records, and function-returning-record are all supported and
-  **type-checked**: a field typo is a compile-time error with a suggestion. Trailing
-  commas are allowed.
-- **Local bindings** — `let a = x, b = y in expr` introduces intermediate values
-  (sequential; scoped to the body). This is the standard way to write a function in
-  multiple steps: `fn variance(xs) = let m = xs.mean(), n = xs.count() in xs.map((it
-  - m) ** 2).sum() / n`. Helix uses `let … in` rather than indented blocks because
-  indentation would collide with multi-line dot-chains (see ADR-0004).
-- **Tuples and destructuring** — `(a, b)` groups fixed-size values; `a, b = pair`
-  unpacks them. Functions return multiple values directly: `q, r = divmod(17, 5)`.
-  `zip`/`enumerate` yield tuples (`("Ada", 41)`) rather than two-element arrays, and
-  **lambda parameters destructure them**:
-  `names.zip(ages).map((name, age) => "{name} ({age})")`. Destructuring length is
-  type-checked, since a tuple has a known arity.
-- **Missing-safe access** — `.` propagates `missing` through both field access and
-  method calls, so `user.name ?? "anon"` works without a `?.` operator.
-- **Slicing and indexing** — Python-style `xs[1:3]`, `xs[:n]`, `xs[::2]`, `xs[::-1]`,
-  with negative indices, on arrays, strings, DNA (a DNA slice retains type `Dna`),
-  and **tensors** (first axis: `t[0]` is a row, `t[1:3]` a sub-tensor, `t[i][j]` a
-  scalar).
-- **String interpolation** — any string interpolates `{expr}` (no `f` prefix;
-  `{{`/`}}` for literal braces). Embedded expressions are full expressions and are
-  type-checked: `print("mean {xs.mean()}, grade {if s >= 90 then "A" else "B"}")`.
-- **`??` missing-default** — `config.timeout ?? 30` yields the right-hand side only
-  when the left operand is `missing`. Inside DataFrame predicates it lowers to Polars
-  `fill_null`.
-- **Static type checking** (ADR-0002): a bidirectional, localized inference pass
-  runs *before* execution and catches type mistakes early — `5 + "x"`, calling a
-  non-function, incorrect arity, an unknown method, a non-boolean `if` — with the
-  same caret-annotated, "did you mean …?" errors. **Permissive by design**: it
-  errors only on *provable* mistakes and never rejects a program that would run, so
-  DataFrame columns and dynamic data pass through untouched. Type annotations on
-  function signatures are optional and checked: `fn area(w: Int, h: Int) -> Int =
-  w * h`.
-- Immutable bindings by default; `mut` for explicit mutability.
-  Reassigning an immutable binding is a compile-time-style error.
-- `Int`, `Float`, `String`, `Bool`, `Array`, `Tensor`, `DataFrame`, `Dna`,
-  `Function`, and `missing` values.
-- **Tensors** — dense n-dimensional `f64` arrays (ndarray-backed): `tensor([[1,
-  2], [3, 4]])`, `zeros([2,3])`, `ones(...)`, `eye(n)`; elementwise arithmetic
-  with **NumPy-style broadcasting** (`a + 10`, `a + tensor([10,20])`); `shape`,
-  `ndim`, `reshape`, `transpose`/`t`; whole-tensor and **axis-wise** reductions
-  (`sum()`, `sum(0)`, `mean(1)`, `min`/`max`); `matmul`/`dot` (vector·vector,
-  matrix·matrix, matrix·vector); and **linear algebra** — `det`, `inv`, `solve`,
-  `norm` (pure-Rust, no BLAS dependency). The math stdlib broadcasts over tensors
-  too (`sqrt(a)`).
-- **`missing`** — a single dedicated absent-value (ADR 0001), distinct from any real
-  value and from float `NaN`. It propagates through arithmetic (`missing + 1` →
-  `missing`), uses three-valued boolean logic (`true or missing` → `true`), and is
-  tested with `.is_missing()` (never `==`, which propagates). Aggregations propagate
-  (`[1, missing, 3].mean()` → `missing`); `.drop_missing()` opts out explicitly.
-- Arithmetic (`+ - * / %`), comparison (`< > <= >= == !=`), and **word-based**
-  boolean logic (`and`, `or`, `not`), with no truthiness coercion.
-- **Elementwise broadcasting** for arithmetic: `xs - xs.mean()`, `xs * 2`,
-  `xs + ys`. `==` remains whole-value, avoiding the NumPy "ambiguous truth value"
-  behavior.
-- **User-defined functions:** `fn name(params) = expr` (the body is an expression;
-  recursion is supported). A `=>` function is a first-class value that can be stored
-  and called.
-- Method calls with `.`, chainable across multiple lines.
-- `if cond then a else b` as an **expression** (yields a value; `else` is required).
-- Comprehension methods: `map`, `filter`, `where`, `reduce`, `any`, `all`. The
-  element is `it` by default (`xs.map(it + 1)`); the binder is named with `=>` when
-  nesting or when there is more than one (`grid.map(row => row.map(v => v + 1))`,
-  `xs.reduce(0, (acc, x) => acc + x)`). `where` and `filter` are the same
-  operation; the former is the data-query spelling that DataFrames reuse in Phase 3.
-- Negative indexing (`xs[-1]`).
-- Built-ins: `print`, `range`, `dna`.
-- Methods are **always called with `()`** — a single rule, and the parens signal
-  that the call performs computation, which is significant once large collections
-  are evaluated lazily.
-- Array methods: `mean`, `std`, `sum`, `min`, `max`, `count`, `normalize`,
-  `sort`, `reverse`, `first`, `last`, `take`, `drop`, `zip`, `enumerate`,
-  `map`, `filter`, `where`, `reduce`, `any`, `all`, `drop_missing`, `is_missing`.
-- String methods: `upper`, `lower`, `count`, `reverse`.
-- **DataFrames** backed by **Polars (latest), held as a lazy `LazyFrame`**:
-  `read_csv(path)` / `read_parquet(path)` or build one in memory from computed
-  columns with `dataframe({col: array, …})`, then `where(predicate)`,
-  `select(@cols…)`, `sort(@cols…)`, `group(@keys…)` + a grouped
-  `mean`/`sum`/`min`/`max`/`count`/`std`, plus `head(n)`, `count()`, `columns()`,
-  and `df.write_parquet(path)` (streaming sink). Columns use the `@name` sigil —
-  unambiguously a column, never a variable, so the two can never collide.
-  Verbs only *extend the query plan*; it materializes once, at `print`/`count`,
-  so a single chain is **delegated to Polars' lazy execution** (columnar,
-  multi-threaded, with projection and predicate pushdown). Predicates such as
-  `@age > 40 and @resting_hr < 75` are **translated to Polars expressions** using the
-  same `where` verb as arrays. Measured: a **50M-row filter+group+sort+head runs
-  in ~0.2s from Parquet** (~2.3s from CSV), warm cache. See
-  [docs/benchmarks.md](docs/benchmarks.md), including caveats (warm-cache only;
-  separate statements re-scan; not yet benchmarked against pandas/DuckDB).
-- **Math standard library** (broadcasts over arrays, propagates `missing`):
-  `sqrt`, `cbrt`, `exp`, `ln`, `log10`, `log2`, `log(x, base)`, `sin`/`cos`/`tan`
-  + inverses + hyperbolics, `floor`/`ceil`/`round`/`trunc`, `abs`, `sign`,
-  `hypot`, `atan2`, `degrees`/`radians`, `min`/`max`; constants `pi`, `e`, `inf`.
-- **`**` power operator** — right-associative, binds tighter than unary minus
-  (`-2 ** 2 == -4`, `2 ** 3 ** 2 == 512`); stays `Int` when it can.
-- DNA methods: `gc_content` (excludes `N`), `complement`/`reverse_complement`
-  (IUPAC-aware), `kmers(k)` (the ACGT-only k-mer **spectrum** — windows spanning
-  `N`/IUPAC are skipped), `windows(k)` (every length-k substring, faithfully),
-  `length`. `dna()` accepts `N` and IUPAC ambiguity codes; DNA is orderable (`<`).
-- Errors that point a caret at the source and suggest a fix (including
-  "did you mean ...?" via edit distance).
+More in [`examples/`](examples/) and the [language & DX guide](docs/syntax-and-dx.md).
 
-## Design principles (and their realization in v0.1)
+## What's inside
 
-| Principle | In v0.1 |
+### The language
+- **Expression-oriented** — `if/then/else`, `match`, `let … in`, and comprehensions are all
+  expressions that yield values. No statements-vs-expressions friction, no truthiness coercion.
+- **Records, tuples, destructuring** — `{name: "Ada", age: 41}` with `.field` access;
+  `(a, b)` tuples that unpack (`q, r = divmod(17, 5)`) and destructure in lambda params
+  (`pairs.map((k, v) => …)`). Record spread/update: `{ ...base, status: 500 }`.
+- **Pattern matching** — `match` with literal, or-, guard, and binding patterns.
+- **`missing`-safe by design** — a single dedicated absent value (not `NaN`), propagated through
+  `.` access, method calls, and arithmetic, with three-valued boolean logic; `x ?? default`
+  supplies a fallback. No `?.` operator needed.
+- **Static type checking, permissively** — a fast bidirectional pass runs *before* execution and
+  flags provable mistakes (`5 + "x"`, wrong arity, unknown method, non-boolean `if`) with
+  caret-anchored, "did you mean…?" errors — but **never rejects a program that would run**, so
+  dynamic and DataFrame code passes through untouched. Annotations are optional and checked.
+- **One obvious way** — dot-chains over pipes, methods always with `()`, one assignment operator,
+  `@column` sigils, euclidean `%` and `//`. Multi-line method chains, no line-continuations.
+
+### Numeric compute & the JIT
+- **Three execution engines** behind one language: a tree-walker, a **bytecode VM**, and a
+  **Cranelift JIT**. The VM runs everything; the JIT accelerates the numeric hot paths it
+  recognizes and transparently falls back for everything else.
+- **What compiles to native code:** scalar recursion; `map`/`filter`/`reduce`/`scan` over `i64`
+  and `f64` ranges and packed arrays; **array-indexed reductions** (`a[j]` — dot products,
+  weighted sums, N-body); **tuple/record accumulators** (mean+variance in one pass); and
+  **parallel nested reductions** (all-pairs / distance matrices, fanned out across cores).
+- **Auto-parallel & auto-memoized** — large maps/reductions split across cores (rayon,
+  order-preserving); pure overlapping recursion (e.g. naive Fibonacci) is memoized `O(2ⁿ)→O(n)`.
+- **Tensors** — dense n-dimensional `f64` arrays with NumPy-style broadcasting, axis-wise
+  reductions, `matmul`/`dot`, and pure-Rust linear algebra (`det`, `inv`, `solve`, `norm` — no
+  BLAS dependency).
+
+### Data
+- **DataFrames** backed by **Polars/Arrow**, held lazily: `read_csv`/`read_parquet`, in-memory
+  `dataframe({…})`, then `where`/`select`/`sort`/`group` + aggregations, `write_csv`/`write_parquet`
+  and `to_html`/`to_markdown`. A chain builds a single query plan and materializes once, delegated
+  to Polars' columnar, multi-threaded execution with predicate/projection pushdown.
+- **Math standard library** that broadcasts over arrays/tensors and propagates `missing`: the full
+  transcendental/rounding set plus `hypot`, `atan2`, constants, and the `**` power operator.
+
+### Scientific computing & genomics
+- **First-class DNA** with an IUPAC-aware `Dna` type: `gc_content`, `complement`/`reverse_complement`,
+  `kmers(k)` (canonical spectrum), `windows(k)`, Hamming distance, base counts — the hot paths
+  are SIMD/byte-level native (memory-bandwidth-bound).
+- **Bioinformatics readers** into queryable DataFrames: `read_fasta`/`read_fastq` sequences,
+  `read_vcf`/`read_bcf` variants, `read_sam`/`read_bam` alignments, `read_gff`/`read_bed`
+  (via the noodles crates).
+
+### Web: servers, streaming, clients
+- **HTTP server** as a pure `(request) → response` handler you fold over a request stream — no
+  framework, no global app state, native DataFrame/record/DNA → JSON. Custom headers, redirects,
+  cookies/CORS, and **Server-Sent-Events streaming** (`conn.sse()` / `conn.send()`).
+- **Concurrency by *not* sharing** — a cooperative event loop within a core (`poll()`), and
+  share-nothing **`SO_REUSEPORT` sharding** across cores (no locks, no `Arc`, nothing crosses a
+  thread) — the ScyllaDB/Redpanda thread-per-core architecture Helix's immutable core is built for.
+- **HTTP client** — `http_get`, POST with methods/body, and pull-based streaming (`http_stream`).
+- **Real-time** — `emit` (flushed NDJSON sink) + `sleep` compose into paced live streams.
+
+### Cryptography
+Native, audited-crate-backed primitives, misuse-resistant by construction: `sha256`,
+`hmac_sha256`, `base64`/`hex` encode/decode, **AES-256-GCM** (fresh nonce per call, authenticated),
+and **Ed25519** (deterministic, strict verification). Enough to sign a JWT or seal a payload
+end-to-end in pure Helix.
+
+### Safety & correctness
+- **The differential oracle** — the JIT, the bytecode VM, and the tree-walker are asserted
+  **bit-identical** on tens of thousands of randomly generated programs. A JIT miscompilation
+  cannot ship silently; an out-of-bounds native read falls back to the exact checked interpreter
+  error. This is the project's cardinal rule.
+- **Memory-safe** (inherited from the Rust host) **and authority-confined** — a
+  **capability sandbox** (denied-by-default filesystem/network authority, enforced at one registry
+  chokepoint, carried per-evaluation so self-generated code gets a *narrower* grant) is rolling out
+  `audit → enforce`. See [docs/memory-safety.md](docs/memory-safety.md).
+
+### Packaging & interop
+- **`helix build`** copies the interpreter and appends your program as an overlay → a standalone
+  executable that runs with no toolchain and no Helix on `PATH`.
+- **CPython interop** (feature-gated) calls into NumPy, Polars, and friends — see
+  [docs/python-interop.md](docs/python-interop.md).
+
+## Architecture
+
+Helix keeps **three engines on purpose**, as defense in depth:
+
+- the **tree-walker** (`src/interp.rs`) — a direct AST executor, the independent correctness
+  reference and the REPL backend;
+- the **bytecode VM** (`src/vm.rs`) — the production host; runs the whole language;
+- the **Cranelift JIT** (`src/jit.rs`) — compiles the numeric kernels the VM dispatches into,
+  falling back to the VM for anything it doesn't handle.
+
+Because the tree-walker is written independently of the VM/JIT, a shared VM/JIT bug still fails the
+`JIT == VM == tree-walker` differential test — the safety net is *another implementation*, not more
+tests of the same one. Details in [docs/execution-engine.md](docs/execution-engine.md).
+
+## Design principles
+
+| Principle | How it shows up |
 |---|---|
-| Simple syntax, dots over pipes | dot-chains, no `|>`, no `;` |
-| One obvious way | methods always use `()`; one assignment operator |
-| Immutable by default | `mut` is required to mutate |
-| Informative errors | caret, hint, and typo suggestions |
-| Memory efficiency | values share via `Rc` (zero-copy clones) |
+| Read like a notebook, run like a compiler | high-level syntax; numeric kernels JIT to native |
+| One obvious way | dot-chains (no `\|>`), methods always `()`, one assignment operator, `@column` |
+| Immutable by default | `mut` is required to mutate; values share via `Rc` (zero-copy clones) |
+| Correctness is not negotiable | three engines held bit-identical by a differential oracle |
+| Honest about limits | measured benchmarks with caveats; permissive types never over-reject |
+| Safe by default | memory-safe host + a denied-by-default capability model |
 
-## Roadmap
+## Status & roadmap
 
-See [docs/ROADMAP.md](docs/ROADMAP.md). In summary:
+A mature implementation, **not a prototype**: ~420 tests, zero compiler warnings, a
+differential oracle and VM/tree-walker parity gate on every change. Phase status (full plan in
+[docs/ROADMAP.md](docs/ROADMAP.md)):
 
-1. **Phase 1 — core interpreter** — done
-2. **Phase 2 — type checker, modules, package manager** — checker + module system done; package manager pending
-3. **Phase 3 — DataFrame engine (Polars / Arrow)** — done
-4. **Phase 4 — tensor engine** — done
-5. **Phase 5 — JIT compilation** — done for numeric kernels (map/filter/reduce, array-indexed reductions); coverage expanding
-6. **Phase 6 — GPU support** — future
+1. **Core language & interpreter** — done
+2. **Type checker & module system** — done (package manager pending)
+3. **DataFrame engine** (Polars/Arrow) — done
+4. **Tensor engine & linear algebra** — done
+5. **JIT compilation** — done for numeric kernels (coverage expanding; SIMD is the next lever)
+6. **GPU support** — future
 
 ## Building
 
-Requires a recent Rust toolchain.
-
-```
+```sh
 cargo build --release
 ./target/release/helix examples/language/tour.helix
 ```
+
+Requires a recent Rust toolchain. For fast iteration during development, `scripts/gate.sh` runs
+clippy + the full test suite + the VM/tree-walker parity diff on an optimized-but-fast profile.
