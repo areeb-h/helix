@@ -989,9 +989,8 @@ fn broadcast_unary(
     match v {
         Value::Array(items) => {
             let out: Result<Vec<Value>, HelixError> = items
-                .to_values()
-                .iter()
-                .map(|e| broadcast_unary(e, scalar))
+                .iter_values()
+                .map(|e| broadcast_unary(&e, scalar))
                 .collect();
             Ok(Value::array(out?))
         }

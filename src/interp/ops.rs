@@ -72,22 +72,22 @@ pub(crate) fn eval_binary(
                     .hint("elementwise operations need matching lengths."));
                 }
                 let mut out = Vec::with_capacity(a.len());
-                for (x, y) in a.to_values().iter().zip(b.to_values().iter()) {
-                    out.push(eval_binary(op, x.clone(), y.clone(), line, col)?);
+                for (x, y) in a.iter_values().zip(b.iter_values()) {
+                    out.push(eval_binary(op, x, y, line, col)?);
                 }
                 return Ok(Value::array_sniff(out));
             }
             (Value::Array(a), scalar) => {
                 let mut out = Vec::with_capacity(a.len());
-                for x in a.to_values().iter() {
-                    out.push(eval_binary(op, x.clone(), scalar.clone(), line, col)?);
+                for x in a.iter_values() {
+                    out.push(eval_binary(op, x, scalar.clone(), line, col)?);
                 }
                 return Ok(Value::array_sniff(out));
             }
             (scalar, Value::Array(b)) => {
                 let mut out = Vec::with_capacity(b.len());
-                for y in b.to_values().iter() {
-                    out.push(eval_binary(op, scalar.clone(), y.clone(), line, col)?);
+                for y in b.iter_values() {
+                    out.push(eval_binary(op, scalar.clone(), y, line, col)?);
                 }
                 return Ok(Value::array_sniff(out));
             }
@@ -594,11 +594,23 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
             a.to_f64() == Some(*b)
         }
         (Value::Array(a), Value::Array(b)) => {
-            a.len() == b.len()
-                && a.to_values()
-                    .iter()
-                    .zip(b.to_values().iter())
-                    .all(|(x, y)| values_equal(x, y))
+            use crate::value::ArrayData::{Floats, Ints};
+            match (&**a, &**b) {
+                // Two packed columns of the same kind compare as native slices — no
+                // per-element boxing (`Vec<i64>`/`Vec<f64>` `PartialEq`; `NaN != NaN`
+                // preserved, matching the per-element rule).
+                (Ints(xa), Ints(xb)) => xa == xb,
+                (Floats(fa), Floats(fb)) => fa == fb,
+                // Mixed (incl. whole-array Int-vs-Float) / `Values` keep the general
+                // per-element path so cross-type collapse (`1 == 1.0`) stays exact.
+                _ => {
+                    a.len() == b.len()
+                        && a.to_values()
+                            .iter()
+                            .zip(b.to_values().iter())
+                            .all(|(x, y)| values_equal(x, y))
+                }
+            }
         }
         // Tuples compare structurally, element by element (`(a, b) == (a, b)`).
         (Value::Tuple(a), Value::Tuple(b)) => {

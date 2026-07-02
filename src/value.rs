@@ -204,6 +204,14 @@ impl ArrayData {
         }
     }
 
+    /// Iterate the elements as owned `Value`s **without materializing a `Vec`** — the
+    /// per-element hot-path alternative to `to_values()` (broadcast, elementwise ops)
+    /// where the intermediate `Vec<Value>` would be allocated only to be iterated and
+    /// dropped. Boxes one scalar (or clones one `Value`) on demand. Index-map form so it
+    /// is a single concrete iterator type across the variants (no `Box<dyn>`).
+    pub fn iter_values(&self) -> impl Iterator<Item = Value> + '_ {
+        (0..self.len()).map(move |i| self.get(i))
+    }
 }
 
 /// An incremental, type-adaptive array builder. It accumulates packed `Int`/`Float`
