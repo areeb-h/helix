@@ -68,31 +68,59 @@ pub unsafe fn call_tuple_reduce(ptr: *const u8, start: i64, end: i64, acc: *mut 
     }
 }
 
-/// Run a native map kernel over `src`, returning the mapped buffer (same length, same
-/// order). SAFETY: `ptr` is a finalized `extern "C" fn(*const i64,*mut i64,i64)` from
-/// [`define_array_kernel`].
-pub unsafe fn run_map_kernel(ptr: *const u8, src: &[i64], caps: &[i64]) -> Vec<i64> {
-    let mut dst = vec![0i64; src.len()];
-    if !src.is_empty() {
-        let f: extern "C" fn(*const i64, *mut i64, i64, *const i64) =
-            unsafe { std::mem::transmute(ptr) };
-        // `caps.as_ptr()` is valid even when empty (a capture-free kernel never reads it).
-        f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, caps.as_ptr());
+/// Run a native map kernel `f(src_ptr, dst_ptr, len, caps_ptr)` over `src`, producing a
+/// fresh `Vec<D>` of the same length and order. **At or above `PAR_MATH_THRESHOLD` the
+/// buffer is split into fixed chunks run on rayon workers.** This is safe *and* fully
+/// deterministic for a map: each `dst[i]` depends only on `src[i]` and the read-only
+/// `caps`, chunk `k` reads and writes the SAME index range `[k*CH, (k+1)*CH)` on both
+/// sides (so output order is byte-identical to the sequential run), the `dst` chunks are
+/// disjoint sub-slices of a freshly-owned `Vec` (no aliasing), and a map performs no
+/// cross-element accumulation — the forbidden non-associative float reduction never
+/// occurs here. The threshold is shared with the interpreter's own parallel map.
+///
+/// # Safety
+/// `ptr` must be a finalized `extern "C" fn(*const S, *mut D, i64, *const C)` matching
+/// `S`/`D`/`C`, and `caps` a valid `[C]` the kernel only reads.
+unsafe fn run_map_chunked<S, D, C>(ptr: *const u8, src: &[S], caps: &[C]) -> Vec<D>
+where
+    S: Sync,
+    D: Copy + Default + Send,
+    C: Sync,
+{
+    let n = src.len();
+    let mut dst: Vec<D> = vec![D::default(); n];
+    if n == 0 {
+        return dst;
+    }
+    // A finalized native fn pointer is `Send + Sync` (it's an address), so it may be
+    // shared across rayon workers; the raw data pointers are re-derived per chunk INSIDE
+    // the closure from the (Sync) slices, never captured across threads.
+    let f: extern "C" fn(*const S, *mut D, i64, *const C) = unsafe { std::mem::transmute(ptr) };
+    if n >= crate::interp::PAR_MATH_THRESHOLD {
+        use rayon::prelude::*;
+        const CH: usize = 1 << 14;
+        src.par_chunks(CH)
+            .zip(dst.par_chunks_mut(CH))
+            .for_each(|(s, d)| f(s.as_ptr(), d.as_mut_ptr(), s.len() as i64, caps.as_ptr()));
+    } else {
+        f(src.as_ptr(), dst.as_mut_ptr(), n as i64, caps.as_ptr());
     }
     dst
 }
 
+/// Run a native map kernel over `src` (same length and order). Parallel past the shared
+/// threshold — see [`run_map_chunked`]. SAFETY: `ptr` is a finalized
+/// `extern "C" fn(*const i64,*mut i64,i64,*const i64)` from [`define_array_kernel`].
+pub unsafe fn run_map_kernel(ptr: *const u8, src: &[i64], caps: &[i64]) -> Vec<i64> {
+    unsafe { run_map_chunked::<i64, i64, i64>(ptr, src, caps) }
+}
+
 /// The `f64` map kernel: `dst[i] = body(src[i])` over an `f64` buffer, with `f64`
-/// captures. SAFETY: as [`run_map_kernel`], with an `fn(*const f64, *mut f64, i64,
-/// *const f64)` contract guaranteed by the VM's `Float`-array + numeric-caps check.
+/// captures. A map has no cross-element accumulation, so the chunked-parallel form is
+/// byte-identical to sequential (see [`run_map_chunked`]). SAFETY: as [`run_map_kernel`],
+/// with an `fn(*const f64, *mut f64, i64, *const f64)` contract.
 pub unsafe fn run_map_kernel_f64(ptr: *const u8, src: &[f64], caps: &[f64]) -> Vec<f64> {
-    let mut dst = vec![0.0f64; src.len()];
-    if !src.is_empty() {
-        let f: extern "C" fn(*const f64, *mut f64, i64, *const f64) =
-            unsafe { std::mem::transmute(ptr) };
-        f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, caps.as_ptr());
-    }
-    dst
+    unsafe { run_map_chunked::<f64, f64, f64>(ptr, src, caps) }
 }
 
 /// The **mixed** map kernel: `dst[i] = body(src[i])` reading an `i64` buffer and writing
@@ -100,14 +128,9 @@ pub unsafe fn run_map_kernel_f64(ptr: *const u8, src: &[f64], caps: &[f64]) -> V
 /// `fn(*const i64, *mut f64, i64, *const i64)` contract; the caps pointer is a valid
 /// (empty) slice the kernel never reads (mixed kernels are capture-free by construction).
 pub unsafe fn run_map_kernel_mixed(ptr: *const u8, src: &[i64]) -> Vec<f64> {
-    let mut dst = vec![0.0f64; src.len()];
-    if !src.is_empty() {
-        let f: extern "C" fn(*const i64, *mut f64, i64, *const i64) =
-            unsafe { std::mem::transmute(ptr) };
-        let no_caps: [i64; 0] = [];
-        f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, no_caps.as_ptr());
-    }
-    dst
+    // Capture-free by construction — pass an empty caps slice the kernel never reads.
+    let no_caps: [i64; 0] = [];
+    unsafe { run_map_chunked::<i64, f64, i64>(ptr, src, &no_caps) }
 }
 
 /// Run a native filter kernel over `src`, returning the kept elements in order. SAFETY:

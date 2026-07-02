@@ -1022,7 +1022,9 @@ fn broadcast_unary(
 /// Arrays/tensors at or above this many elements map in parallel (rayon); below it
 /// the thread hand-off costs more than it saves, so the small-array hot path stays
 /// sequential. The mapped result is order-preserving, hence byte-identical either way.
-const PAR_MATH_THRESHOLD: usize = 1 << 15;
+/// `pub(crate)` so the JIT map kernels (`jit::ffi::run_map_chunked`) share the exact
+/// same cutoff — one documented threshold across both engines.
+pub(crate) const PAR_MATH_THRESHOLD: usize = 1 << 15;
 
 /// Map a monomorphized `f64 -> f64` over a packed buffer, in parallel past the
 /// threshold. Order-preserving, so the output is identical to the sequential map.

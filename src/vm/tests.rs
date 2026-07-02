@@ -726,6 +726,24 @@
         }
     }
 
+    /// A map over `>= PAR_MATH_THRESHOLD` (1<<15) elements takes the rayon-chunked native
+    /// map kernel; the result must stay byte-identical to the sequential tree-walker
+    /// (order-preserving parallelism — each `dst[i]` is `body(src[i])`, no cross-element
+    /// accumulation). Covers the i64, f64, mixed (Int→Float), and captured-variable kernels.
+    #[test]
+    fn parallel_map_kernel_matches_tree_walker() {
+        let cases = [
+            "print((range(0, 100000)).map(it * 2 + 1).sum())",       // i64 map kernel
+            "print(((range(0, 100000)) * 1.0).map(it * 2.0).sum())", // f64 map kernel
+            "print((range(0, 100000)).map(it * 1.5).sum())",         // mixed Int→Float kernel
+            "k = 7\nprint((range(0, 100000)).map(it * k + k).sum())", // captured var (shared caps)
+            "print((range(-50000, 50000)).map((it & 255) ^ 3).sum())", // bitwise body, negatives
+        ];
+        for src in cases {
+            assert_eq!(run_vm_jit(src), run_tw(src), "parallel map JIT ≠ tree-walker on `{src}`");
+        }
+    }
+
     /// The native reduce loop (`TryJitReduce`) must equal the tree-walker. Drives
     /// `range(s, e).reduce(init, (acc, x) => body)` through the JIT-enabled runner
     /// with random `i64`-eligible bodies over `{acc, x}`, random (incl. negative
