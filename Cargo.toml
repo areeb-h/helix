@@ -12,10 +12,24 @@ path = "src/main.rs"
 
 [profile.release]
 opt-level = 3        # keep speed — Helix is performance-first; do NOT use "z"
-lto = "fat"
+lto = "fat"          # whole-program LTO: SHIPPING ONLY (slow, ~4GB single-unit link)
 codegen-units = 1
 panic = "abort"
 strip = true         # drop debug symbols — pure size win, no perf cost (ADR 0009)
+
+# The iteration profile: release-grade `opt-level = 3` (so the differential fuzzers and
+# perf tests run at full speed) but WITHOUT fat-LTO + single-codegen-unit, which is what
+# made `cargo test --release` take ~20 min and ~4 GB in one rustc (whole-program LTO of
+# Polars/noodles/cranelift on every build). Dropping LTO and parallelising codegen makes
+# a rebuild minutes-faster and memory-light, at a negligible (~few %) runtime cost that
+# does not affect any test outcome. `scripts/gate.sh` uses this; `release` stays the
+# shipping profile. Invoke with `cargo test --profile gate` / `cargo build --profile gate`.
+[profile.gate]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+strip = false        # keep symbols so a test panic gives a real backtrace
 
 # A fast dev profile that still optimizes dependencies (Polars) so the REPL and
 # tests aren't crippled by a debug-built Polars.

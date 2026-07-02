@@ -8,7 +8,9 @@
 # the `recursion_depth_is_a_by_design_engine_difference` unit test pin this as
 # accepted agreement (B2); keep example programs' recursion well under 20k.
 cd "$(dirname "$0")/.."
-BIN=./target/debug/helix
+# Binary under test — overridable so the gate can reuse whatever profile it just built
+# (e.g. BIN=./target/gate/helix). Defaults to the debug binary.
+BIN="${BIN:-./target/debug/helix}"
 fail=0
 # The runnable, self-contained example categories. Excludes examples/{data,modules,
 # python,api}: data holds fixtures (not programs), modules is an import demo, and
