@@ -45,27 +45,41 @@ fallback, HTTP/1.1 for compatibility** — but stage it by tractability and, cri
 > particular is where weekend projects go to acquire packet-loss trauma. Use an
 > established implementation.
 
-### Stage 1 — HTTP/1.1 keep-alive (now; in the current sync model)
+### Stage 1 — HTTP/1.1 keep-alive: needs a cooperative event loop, NOT the blocking model
 
-The 4×+ throughput lever, and it needs **no new dependency and no async runtime**. It fits
-the existing blocking/`poll` server once tail-call optimization is in place (ADR-less perf
-commit — done: the per-connection loop is now constant-space, so a keep-alive loop can't
-leak).
+**This was prototyped and benchmarked, and the naive form is a regression — recorded here
+so it isn't re-attempted.** The obvious design (`respond` keeps the socket open + sends
+`Connection: keep-alive`; `request()` re-reads the next request from a persistent buffered
+reader; the program loops `accept → while request(): respond`, constant-space via TCO;
++ `TCP_NODELAY` to kill the Nagle/delayed-ACK ~40 ms stall) was implemented in full.
 
-Design (a connection-oriented shape layered over today's request/respond):
-- `respond` sends `Connection: keep-alive` (+ `Content-Length`, already present) and
-  **keeps the socket open** instead of dropping it, unless the request asked to close
-  (`Connection: close`) or an idle/2xx-count budget is hit.
-- The connection becomes re-readable: after `respond`, the program pulls the **next**
-  request on the same connection (`conn.request()` re-parses from the socket; `missing`
-  when the client closes or an idle timeout fires).
-- The accept loop gains an inner per-connection loop:
-  `accept → while conn.request(): respond`. Constant-space thanks to TCO.
-- Bounds: per-connection request cap + idle read timeout (already have `READ_TIMEOUT`),
-  so a kept-alive connection can't be held forever (slowloris).
+Measured (6 shards, localhost, this box):
 
-This is an API change to the connection model, so it lands as its own focused,
-oracle/gate-verified change and the `web` lib's `serve_loop` is updated in lockstep.
+| Load | req/s | failures |
+|---|---|---|
+| conn-per-request, conc=100 | **47,003** | 0 |
+| keep-alive, conc=100 | 22,354 | **94** |
+| keep-alive, conc=300 | 27,237 | **294** |
+
+The blocking model **serializes** keep-alive: a shard that enters `while request(): respond`
+on a persistent connection is *pinned* to that one client until it closes, so the other
+`conc − shards` connections **starve** (the 94 / 294 failures) and throughput roughly
+*halves*. Go/actix reach 157k because they interleave every connection on an async runtime
+(thread-per-connection / task-per-connection). A blocking server cannot — closing after each
+request (conn-per-request) is actually **better** for concurrent load, because it cycles
+through all connections instead of pinning one per shard. So naive keep-alive was reverted.
+
+Keep-alive is only a win when connections are **interleaved**. Two ways to get that:
+- **Cooperative event loop, in-model (no deps):** the same pattern Helix already uses for
+  SSE (`poll()` + `send` to many). It needs a **non-blocking `request()`** — peek a
+  connection for a *ready* request (parse if bytes are buffered, else `missing`) — plus a
+  program that keeps a list of open connections and services whichever is ready each tick.
+  This multiplexes many keep-alive connections on one thread with no async runtime. This is
+  the real Stage 1, and it is a genuine new primitive + event-loop shape, not a small patch.
+- **Async runtime (Stage 2/3 stack):** falls out for free once on tokio+hyper (below).
+
+Net for the blocking `std::net` server: **stay conn-per-request** (sharded ≈ 47–51k here —
+a fine floor), and pursue interleaved keep-alive via the cooperative loop or the async stack.
 
 ### Stage 2 — HTTP/2, and Stage 3 — HTTP/3, via an async stack
 
@@ -101,10 +115,16 @@ the parts that are the product, borrow the parts that are a decade of hardening.
 
 ## Consequences
 
-- **Now:** implement Stage 1 (keep-alive) — the measured 4×+ win, no new deps. Sharded
-  across 6 cores this targets ~100k+ req/s on this box (the low end of the Rust tier).
+- **Now:** the blocking `std::net` server stays **conn-per-request** (sharded ≈ 47–51k
+  req/s here — a solid floor). Naive keep-alive was prototyped, measured to *regress*
+  concurrent load (serialization/starvation), and reverted.
+- **Next (in-model, no deps):** interleaved keep-alive via a **cooperative event loop** — a
+  non-blocking `request()` primitive + a poll-based multi-connection serve loop (the same
+  shape as SSE). This is the real path to higher concurrent throughput without an async
+  runtime; it's a new primitive, so its own focused change.
 - **Later, as a major version:** Stages 2–3 behind a feature flag, on Tokio + hyper +
-  Quinn, TLS via rustls, sandbox-preserving. Never a hand-rolled QUIC/TLS/H2 core.
+  Quinn, TLS via rustls, sandbox-preserving. Never a hand-rolled QUIC/TLS/H2 core. The
+  async stack gets HTTP/1.1 keep-alive, HTTP/2, and HTTP/3 all at once.
 - The minimal `std::net` server stays for dev/simple use and the SSE cooperative model;
   the async stack is additive.
 
