@@ -1332,15 +1332,26 @@ fn int_range_step(a: i64, b: i64, step: i64, line: usize, col: usize) -> Result<
     }
     let mut v: Vec<i64> = Vec::with_capacity(len.max(0) as usize);
     let mut x = a;
+    // Advance with `checked_add`: after pushing the last in-range element the loop
+    // runs one more `x += step` before re-testing the guard, which can overflow i64
+    // for large `start`/`step` even though `len` (and thus the element count) is
+    // small. On overflow the next value is necessarily past `b`, so the range is
+    // already complete — break rather than panic (debug) or silently wrap (release).
     if step > 0 {
         while x < b {
             v.push(x);
-            x += step;
+            match x.checked_add(step) {
+                Some(nx) => x = nx,
+                None => break,
+            }
         }
     } else {
         while x > b {
             v.push(x);
-            x += step;
+            match x.checked_add(step) {
+                Some(nx) => x = nx,
+                None => break,
+            }
         }
     }
     Ok(Value::int_array(v))

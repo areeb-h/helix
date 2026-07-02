@@ -352,6 +352,17 @@
         assert!(matches!(last("range(5, 5, 1).count()").unwrap(), Value::Int(0)));
         assert!(matches!(last("range(0, 10, -1).count()").unwrap(), Value::Int(0)));
         assert!(last("range(0, 10, 0)").is_err());
+        // Advancing the counter must not overflow i64 near the bounds: the loop does
+        // one `x += step` past the last element, which used to panic (debug) or wrap
+        // (release). These terminate cleanly at the correct element count.
+        assert!(matches!(
+            last("range(0, 9223372036854775807, 9223372036854775806).count()").unwrap(),
+            Value::Int(2)
+        )); // [0, 9223372036854775806]; the next add (2*MAX-2) would overflow → stop
+        assert!(matches!(
+            last("range(-9000000000000000000, -9223372036854775807, -9000000000000000000).count()").unwrap(),
+            Value::Int(1)
+        )); // [-9e18]; the next add (−1.8e19) would underflow → stop
     }
 
     #[test]
