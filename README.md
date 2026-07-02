@@ -80,6 +80,12 @@ on the total because it **auto-parallelizes array construction** across cores wh
 C / Rust / Go baselines are single-threaded loops. (This is a naming/dispatch win, not a
 lower-precision one — the float sum is exact and matches NumPy bit-for-bit.)
 
+Nested reductions parallelize too: a **900M-pair O(N²) all-pairs kernel**
+(`range(n).map(i => range(n).reduce(...))` — distance matrices, N-body) runs in **0.06 s at
+~569% CPU**, *ahead of* SIMD-vectorized single-threaded C (0.08 s) and ~600× over the
+interpreter. Full methodology, source, and honest caveats (auto-parallelism vs single-threaded
+baselines; no SIMD in the JIT yet): **[docs/jit-benchmarks.md](docs/jit-benchmarks.md)**.
+
 ## Current capabilities
 
 ```text
