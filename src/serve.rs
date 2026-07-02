@@ -573,7 +573,14 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
     };
 
     let (status, headers, body) = build_response(value, line, col)?;
-    let mut head = format!("HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
+    // Build the whole message (head + body) in one buffer and send it with a single
+    // write_all. Two writes meant two packets per response on the TCP_NODELAY keep-alive
+    // path; and `write!` into a pre-sized String avoids the throwaway format!() the
+    // Content-Length/Connection tail used to allocate. `fmt::Write` is imported
+    // anonymously so it doesn't shadow the io::Write used for the socket below.
+    use std::fmt::Write as _;
+    let mut head = String::with_capacity(64 + body.len());
+    let _ = write!(head, "HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
     for (k, v) in &headers {
         head.push_str(k);
         head.push_str(": ");
@@ -586,10 +593,10 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
     // blocking connection is closed after the reply.
     let ka = event.get();
     let conn_hdr = if ka { "keep-alive" } else { "close" };
-    head.push_str(&format!("Content-Length: {}\r\nConnection: {conn_hdr}\r\n\r\n", body.len()));
+    let _ = write!(head, "Content-Length: {}\r\nConnection: {conn_hdr}\r\n\r\n", body.len());
+    head.push_str(&body);
     let write = |s: &mut TcpStream| -> std::io::Result<()> {
         s.write_all(head.as_bytes())?;
-        s.write_all(body.as_bytes())?;
         s.flush()
     };
 
@@ -829,7 +836,10 @@ pub fn wait(
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
-        let mut fds: Vec<libc::pollfd> = Vec::new();
+        // One slot for the listener + one per connection: pre-size so the per-tick fill
+        // doesn't reallocate (this runs every event-loop tick).
+        let cap = 1 + if let Value::Array(arr) = conns { arr.len() } else { 0 };
+        let mut fds: Vec<libc::pollfd> = Vec::with_capacity(cap);
         let mut push_fd = |fd: std::os::fd::RawFd| {
             fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
         };
@@ -991,17 +1001,27 @@ pub fn send(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> R
             return Err(HelixError::new("`send` works on a connection from `accept()`", line, col));
         }
     };
-    let payload = match value {
-        Value::Str(s) => (**s).clone(),
-        Value::Dna(s) => (**s).clone(),
+    // Borrow the string/Dna case; only the JSON case needs an owned buffer. This avoids
+    // cloning the whole payload on every event — the framing loop below only reads it.
+    let owned;
+    let payload: &str = match value {
+        Value::Str(s) => s.as_str(),
+        Value::Dna(s) => s.as_str(),
         other => match crate::writers::to_json(std::slice::from_ref(other), line, col)? {
-            Value::Str(s) => (*s).clone(),
-            v => v.to_string(),
+            Value::Str(s) => {
+                owned = (*s).clone();
+                owned.as_str()
+            }
+            v => {
+                owned = v.to_string();
+                owned.as_str()
+            }
         },
     };
     // SSE framing: each line of the payload is its own `data:` field; a blank line ends
-    // the event (so a multi-line body is delivered as one event, per the spec).
-    let mut frame = String::new();
+    // the event (so a multi-line body is delivered as one event, per the spec). Pre-size
+    // the frame: "data: " + line + '\n' per line (7 bytes of framing), plus a trailing '\n'.
+    let mut frame = String::with_capacity(payload.len() + (payload.matches('\n').count() + 1) * 7 + 1);
     for l in payload.split('\n') {
         frame.push_str("data: ");
         frame.push_str(l);
