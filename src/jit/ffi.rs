@@ -43,10 +43,29 @@ pub unsafe fn call_reduce_f64(ptr: *const u8, start: i64, end: i64, init: f64) -
     }
 }
 
+/// Call a **captured** scalar `f64` range reduce `fn(start, end, init, caps) -> f64` (the
+/// float dot-product kernel). Each `caps` slot is a packed `f64`-array BASE pointer the
+/// kernel indexes by the loop counter (`CaptureKind::ArrayF64`), loading `f64` elements.
+/// SAFETY: the VM guarantees `ptr` is a finalized captured f64 scalar kernel from
+/// [`define_reduce_loop`], `caps` points to at least the loop's capture count of pointers,
+/// and for every array the whole counter range `[start, end)` is within its bounds (the VM's
+/// pre-check) so the kernel's unchecked `f64` loads stay in-bounds.
+pub unsafe fn call_reduce_f64_caps(ptr: *const u8, start: i64, end: i64, init: f64, caps: *const i64) -> f64 {
+    unsafe {
+        std::mem::transmute::<*const u8, extern "C" fn(i64, i64, f64, *const i64) -> f64>(ptr)(
+            start, end, init, caps,
+        )
+    }
+}
+
 /// Call a **captured** scalar reduce loop `fn(start, end, init, caps) -> i64` (the nested-
-/// fold kernel). `caps` points to the loop's capture count of loop-invariant `i64`s.
-/// SAFETY: the VM guarantees `ptr` is a finalized captured scalar kernel from
-/// [`define_reduce_loop`] and `caps` points to at least that many `i64`s.
+/// fold / dot-product kernel). `caps` points to the loop's capture count of `i64` slots —
+/// each either a loop-invariant scalar VALUE (`CaptureKind::Scalar`) or a packed-array BASE
+/// pointer the kernel indexes by the loop counter (`CaptureKind::ArrayI64`), per the loop's
+/// ordered `captures`. SAFETY: the VM guarantees `ptr` is a finalized captured scalar kernel
+/// from [`define_reduce_loop`], `caps` points to at least that many `i64`s, and for every
+/// array slot the whole counter range `[start, end)` is within that array's bounds (the VM's
+/// pre-check) so the kernel's unchecked element loads stay in-bounds.
 pub unsafe fn call_reduce_caps(ptr: *const u8, start: i64, end: i64, init: i64, caps: *const i64) -> i64 {
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64, *const i64) -> i64>(ptr)(

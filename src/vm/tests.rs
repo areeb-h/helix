@@ -805,6 +805,222 @@
         }
     }
 
+    /// The **array-indexed reduce kernel** (`arr[counter]`, the dot-product / weighted-sum
+    /// pattern) must equal the tree-walker. The inner fold reads two captured `Int` arrays by
+    /// the loop counter `j`; when the range is in-bounds the JIT engages the native kernel with
+    /// its base-pointer captures, when it runs off the end the VM's bounds pre-check falls back
+    /// to the bytecode `Op::Index` — this diffs BOTH paths against the tree-walker. Bodies are
+    /// random `i64`-eligible expressions over `{acc, a[j], b[j]}`, so `+ - * min max abs` and
+    /// literals combine with the indexed reads exactly as a real kernel would.
+    #[test]
+    fn differential_dot_product_reduce_jit() {
+        let mut rng = 0xD07_9403_1CE5_0FF5u64;
+        let atoms = vec!["acc".to_string(), "a[j]".to_string(), "b[j]".to_string()];
+        for _ in 0..5_000 {
+            let len = 1 + (next(&mut rng) % 8) as i64; // 1..=8
+            let a: Vec<i64> = (0..len).map(|_| (next(&mut rng) % 21) as i64 - 10).collect();
+            let b: Vec<i64> = (0..len).map(|_| (next(&mut rng) % 21) as i64 - 10).collect();
+            // `n` spans in-bounds (native engages) AND past-the-end (pre-check → fallback → OOB).
+            let n = (next(&mut rng) % (len as u64 + 3)) as i64;
+            let init = (next(&mut rng) % 11) as i64 - 5;
+            let body = gen_i64_eligible(&mut rng, 3, &atoms);
+            let src = format!(
+                "a = {}\nb = {}\n(range(0, {n})).reduce({init}, (acc, j) => ({body}))",
+                fmt_i64_arr(&a),
+                fmt_i64_arr(&b),
+            );
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(x), Ok(y)) => assert_eq!(x, y, "dot-product JIT ≠ tree-walker on `{src}`"),
+                (Err(()), Err(())) => {}
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+    }
+
+    /// When `arr[j]` runs out of bounds the VM's pre-check must fall back to the bytecode
+    /// loop, which raises the SAME out-of-bounds error the tree-walker does — identical
+    /// message, not merely identical `Err` outcome (proving the native kernel never silently
+    /// swallows an access the interpreter would reject). Covers `end > len` and a negative
+    /// start whose Python-wrap is still out of range.
+    #[test]
+    fn differential_indexed_reduce_oob_fallback() {
+        let over = "a = [10, 20, 30]\n(range(0, 5)).reduce(0, (acc, j) => acc + a[j])";
+        let vm = vm_jit_err_msg(over).expect("VM must error (end > len)");
+        let tw = tw_err_msg(over).expect("tree-walker must error (end > len)");
+        assert_eq!(vm, tw, "OOB message must match across engines on `{over}`");
+        assert!(vm.contains("out of bounds for length 3"), "unexpected OOB message: {vm}");
+
+        // `start < 0` whose wrap `a[len + j]` is STILL out of range: the pre-check's `s < 0`
+        // arm forces the fallback, where the interpreter wraps and then raises.
+        let neg = "a = [10, 20, 30]\n(range(-100, 3)).reduce(0, (acc, j) => acc + a[j])";
+        let vm2 = vm_jit_err_msg(neg).expect("VM must error (negative wrap OOB)");
+        let tw2 = tw_err_msg(neg).expect("tree-walker must error (negative wrap OOB)");
+        assert_eq!(vm2, tw2, "negative-index OOB message must match across engines on `{neg}`");
+        assert!(vm2.contains("out of bounds"), "unexpected negative OOB message: {vm2}");
+    }
+
+    /// A negative start whose Python-wrap IS in range (`a[-1] == a[len-1]`): the kernel would
+    /// do a raw (wrong) load, so the `s < 0` pre-check must force the fallback where the
+    /// interpreter wraps. Both engines must agree on the wrapped result — proving the native
+    /// path is never wrongly taken on a negative counter. Plus the empty-array boundary.
+    #[test]
+    fn differential_indexed_reduce_edge_cases() {
+        // Negative counters that wrap into range: j = -2, -1 → a[2] + a[3] = 30 + 40 = 70.
+        let wrap = "a = [10, 20, 30, 40]\n(range(-2, 0)).reduce(0, (acc, j) => acc + a[j])";
+        assert_eq!(run_tw(wrap), Ok("70".to_string()), "tree-walker wrap result");
+        assert_eq!(run_vm_jit(wrap), run_tw(wrap), "wrapped negative index JIT ≠ tree-walker");
+
+        // Empty array + empty range → just the init (zero loads); both engines agree.
+        let empty_ok = "a = []\n(range(0, 0)).reduce(7, (acc, j) => acc + a[j])";
+        assert_eq!(run_vm_jit(empty_ok), Ok("7".to_string()), "empty range must yield init");
+        assert_eq!(run_vm_jit(empty_ok), run_tw(empty_ok));
+
+        // Empty array + a real range → `a[0]` is OOB on both (pre-check `e=1 > len=0`).
+        let empty_oob = "a = []\n(range(0, 1)).reduce(0, (acc, j) => acc + a[j])";
+        assert_eq!(run_vm_jit(empty_oob), Err(()), "index into empty array must error");
+        assert_eq!(run_tw(empty_oob), Err(()));
+    }
+
+    /// The O(N²) flagship (all-pairs / N-body inner sum): an outer `map`'s scalar `k` AND an
+    /// indexed array `xs[j]` are BOTH captured by one inner reduce — a `Scalar` value and an
+    /// `ArrayI64` base pointer in the SAME `caps` buffer, ordered by first appearance. Exercises
+    /// the mixed-kind marshalling on both engines (and its out-of-bounds fallback).
+    #[test]
+    fn indexed_reduce_mixed_scalar_and_array_caps() {
+        let cases = [
+            "xs = [2, 3, 5, 7, 11]\n(range(0, 3)).map(k => (range(0, 5)).reduce(0, (acc, j) => acc + k * xs[j])).sum()",
+            "xs = [1, -2, 3, -4]\n(range(1, 4)).map(k => (range(0, 4)).reduce(k, (acc, j) => acc + xs[j] - k)).sum()",
+            // inner range runs off `xs` → every outer iteration falls back; both engines error.
+            "xs = [1, 2, 3]\n(range(0, 2)).map(k => (range(0, 9)).reduce(0, (acc, j) => acc + k + xs[j])).sum()",
+        ];
+        for src in cases {
+            assert_eq!(run_vm_jit(src), run_tw(src), "mixed-caps indexed reduce JIT ≠ tree-walker on `{src}`");
+        }
+    }
+
+    /// The **f64 array-indexed reduce kernel** (v1b) — the float dot product, the scientific
+    /// flagship. Two captured `Float` arrays are read by the loop counter and folded into an
+    /// `f64` accumulator (`0.0` init). `.reduce` is naive left-to-right, so the kernel's
+    /// `fmul`/`fadd` in source order must be BIT-identical to the tree-walker. Random
+    /// `+ - * min max abs` bodies over `{acc, a[j], b[j]}`, in-bounds (native) and past-the-end
+    /// (pre-check → fallback → OOB) alike.
+    #[test]
+    fn differential_f64_dot_product_reduce_jit() {
+        let mut rng = 0xF10A_7D07_1DEA_5EEDu64;
+        let atoms = vec!["acc".to_string(), "a[j]".to_string(), "b[j]".to_string()];
+        for _ in 0..5_000 {
+            let len = 1 + (next(&mut rng) % 8) as i64; // 1..=8
+            let a: Vec<i64> = (0..len).map(|_| (next(&mut rng) % 21) as i64 - 10).collect();
+            let b: Vec<i64> = (0..len).map(|_| (next(&mut rng) % 21) as i64 - 10).collect();
+            let n = (next(&mut rng) % (len as u64 + 3)) as i64;
+            let body = gen_i64_eligible(&mut rng, 3, &atoms);
+            let src = format!(
+                "a = {}\nb = {}\n(range(0, {n})).reduce(0.0, (acc, j) => ({body}))",
+                fmt_f64_arr(&a),
+                fmt_f64_arr(&b),
+            );
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(x), Ok(y)) => assert_eq!(x, y, "f64 dot-product JIT ≠ tree-walker on `{src}`"),
+                (Err(()), Err(())) => {}
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+    }
+
+    /// The `Floats`-array pre-check + fallback (v1b): an out-of-bounds `a[j]` on a `Float`
+    /// array must fall back to the bytecode loop and raise the exact tree-walker error; an
+    /// empty range yields the `f64` init on both engines.
+    #[test]
+    fn differential_f64_indexed_reduce_oob_fallback() {
+        let oob = "a = [1.0, 2.0, 3.0]\n(range(0, 5)).reduce(0.0, (acc, j) => acc + a[j])";
+        let vm = vm_jit_err_msg(oob).expect("VM must error (f64 OOB)");
+        let tw = tw_err_msg(oob).expect("tree-walker must error (f64 OOB)");
+        assert_eq!(vm, tw, "f64 OOB message must match across engines on `{oob}`");
+        assert!(vm.contains("out of bounds for length 3"), "unexpected f64 OOB message: {vm}");
+
+        // Empty range → just the f64 init (a is a non-`Floats` empty array → pre-check falls
+        // back, but the empty range folds zero elements, so both engines return the init).
+        let empty_ok = "a = []\n(range(0, 0)).reduce(2.5, (acc, j) => acc + a[j])";
+        assert_eq!(run_vm_jit(empty_ok), run_tw(empty_ok));
+        assert_eq!(run_vm_jit(empty_ok), Ok("2.5".to_string()), "empty range must yield the f64 init");
+    }
+
+    /// REGRESSION (adversarial-review find): a `let` inside the reduce body that REBINDS the
+    /// counter binder `j` must never let the kernel do an unchecked load at the let-bound
+    /// index. Before the fix, `let j = 100 in a[j]` slipped past the `idx == pb` gate (matched
+    /// syntactically) and the native kernel read `a[100]` — far out of bounds — returning heap
+    /// garbage while the VM/tree-walker correctly raised OOB. The fix rejects any counter-
+    /// shadowing `let` from the JIT (falls back to the exact-erroring bytecode loop).
+    #[test]
+    fn indexed_reduce_counter_shadow_is_safe() {
+        // Out-of-range shadow → both engines raise the identical OOB error (no wild native read).
+        let oob = "a = [10, 20, 30]\n(range(0, 3)).reduce(0, (acc, j) => acc + (let j = 100 in a[j]))";
+        let vm = vm_jit_err_msg(oob).expect("VM must error (shadowed OOB index)");
+        let tw = tw_err_msg(oob).expect("tree-walker must error (shadowed OOB index)");
+        assert_eq!(vm, tw, "shadowed-index OOB message must match across engines on `{oob}`");
+        assert!(vm.contains("out of bounds for length 3"), "unexpected shadowed OOB message: {vm}");
+
+        // In-range shadow → both engines read a[1] each step = 60 (fallback is correct, not just safe).
+        let inrange = "a = [10, 20, 30]\n(range(0, 3)).reduce(0, (acc, j) => acc + (let j = 1 in a[j]))";
+        assert_eq!(run_vm_jit(inrange), run_tw(inrange), "shadowed in-range JIT ≠ tree-walker");
+        assert_eq!(run_vm_jit(inrange), Ok("60".to_string()), "shadowed index must read a[1] each step");
+
+        // A NON-counter `let` (x doesn't shadow j) stays eligible AND correct: (10+5)+(20+5)+(30+5).
+        let ok = "a = [10, 20, 30]\n(range(0, 3)).reduce(0, (acc, j) => acc + a[j] + (let x = 5 in x))";
+        assert_eq!(run_vm_jit(ok), run_tw(ok), "non-counter let JIT ≠ tree-walker");
+        assert_eq!(run_vm_jit(ok), Ok("75".to_string()));
+    }
+
+    /// Format a `[i64]` array literal (`[1, 2, 3]`) for a fuzzed source program.
+    fn fmt_i64_arr(xs: &[i64]) -> String {
+        let inner: Vec<String> = xs.iter().map(|v| v.to_string()).collect();
+        format!("[{}]", inner.join(", "))
+    }
+
+    /// Format `[i64]` as an exact-valued `[f64]` literal (`[1.0, -2.0]`) — whole-number floats
+    /// parse identically in both engines and keep the fold bit-exact.
+    fn fmt_f64_arr(xs: &[i64]) -> String {
+        let inner: Vec<String> = xs.iter().map(|v| format!("{}.0", v)).collect();
+        format!("[{}]", inner.join(", "))
+    }
+
+    /// Run `src` on the JIT-enabled VM, returning the error *message* (not just `()`), so a
+    /// fallback path's exact diagnostic can be diffed against the tree-walker's.
+    fn vm_jit_err_msg(src: &str) -> Option<String> {
+        let toks = lexer::lex(src).ok()?;
+        let ast = parser::parse(toks).ok()?;
+        let mut prog = bytecode::compile_with_types(&ast, None).ok()?;
+        if matches!(prog.funcs[0].code.last(), Some(Op::Pop)) {
+            prog.funcs[0].code.pop();
+            prog.funcs[0].pos.pop();
+        }
+        let jit = crate::jit::build(
+            &ast,
+            &prog.reduce_loops,
+            &prog.map_kernels,
+            &prog.filter_kernels,
+            &prog.fused_kernels,
+        );
+        match exec(&prog, jit.as_ref()) {
+            Ok(_) => None,
+            Err(e) => Some(e.message),
+        }
+    }
+
+    /// Run `src` on the tree-walker, returning the first error *message* (companion to
+    /// [`vm_jit_err_msg`]).
+    fn tw_err_msg(src: &str) -> Option<String> {
+        let toks = lexer::lex(src).ok()?;
+        let ast = parser::parse(toks).ok()?;
+        let mut interp = Interp::new();
+        for stmt in &ast {
+            if let Err(e) = interp.exec(stmt) {
+                return Some(e.message);
+            }
+        }
+        None
+    }
+
     /// A JIT-**eligible** `i64` expression over `atoms`: only `+ - *`, the inline scalar
     /// builtins (`min`/`max`/`abs`), int literals, and the atoms — so a fold body built
     /// from it genuinely compiles to the native tuple kernel (no float/div/bitwise to make
@@ -1105,16 +1321,42 @@
             let elems: Vec<String> = (0..n).map(|_| ilit(rng)).collect();
             format!("[{}]", elems.join(", "))
         };
-        // Build a `{+,-,*}` chain over `it` and int/float operands, then force a `Float`
-        // root with a trailing `* <float>` so the map is mixed-eligible.
-        let mut body = "it".to_string();
-        for _ in 0..(1 + pick(rng, 3)) {
-            let op = ["+", "-", "*"][pick(rng, 3) as usize];
-            let opd = if pick(rng, 2) == 0 { ilit(rng) } else { flit(rng) };
-            body = format!("({} {} {})", body, op, opd);
+        // An Int-typed subexpression over `it` using the FULL i64-closed op set the mixed
+        // kernel now supports (`+ - * % // & | ^ << >>`), with valid right operands (a positive
+        // const for `%`/`//`, an in-range shift amount). Its integer subexpressions wrap as
+        // `i64`; only a trailing `* <float>` promotes to `f64` — so `(it % 97) * 1.0` and the
+        // like now JIT instead of falling to the VM.
+        fn int_body(rng: &mut u64) -> String {
+            let mut e = "it".to_string();
+            for _ in 0..(1 + pick(rng, 3)) {
+                e = match pick(rng, 9) {
+                    0 => format!("({} + {})", e, ilit(rng)),
+                    1 => format!("({} - {})", e, ilit(rng)),
+                    2 => format!("({} * {})", e, ilit(rng)),
+                    3 => format!("({} % {})", e, 1 + next(rng) % 40),
+                    4 => format!("({} // {})", e, 1 + next(rng) % 40),
+                    5 => format!("({} & {})", e, ilit(rng)),
+                    6 => format!("({} | {})", e, ilit(rng)),
+                    7 => format!("({} ^ {})", e, ilit(rng)),
+                    _ => format!("({} {} {})", e, if pick(rng, 2) == 0 { "<<" } else { ">>" }, next(rng) % 16),
+                };
+            }
+            e
         }
-        let core = format!("({} * {})", body, flit(rng)); // Float root
-        let int_core = format!("(it {} {})", ["+", "-", "*"][pick(rng, 3) as usize], ilit(rng)); // Int
+        // Force a `Float` root: either an int subexpression promoted by `* <float>` (exercises
+        // the new ops in a mixed body), or the original `{+,-,*}` mixed chain.
+        let core = if pick(rng, 2) == 0 {
+            format!("({} * {})", int_body(rng), flit(rng))
+        } else {
+            let mut body = "it".to_string();
+            for _ in 0..(1 + pick(rng, 3)) {
+                let op = ["+", "-", "*"][pick(rng, 3) as usize];
+                let opd = if pick(rng, 2) == 0 { ilit(rng) } else { flit(rng) };
+                body = format!("({} {} {})", body, op, opd);
+            }
+            format!("({} * {})", body, flit(rng))
+        };
+        let int_core = int_body(rng); // pure `Int` (for `sqrt(Int)` etc.)
         // Optionally wrap in a pure builtin — `sqrt`/`abs`/`min`/`max` — exercising the
         // mixed kernel's Int→Float promotion (`sqrt`/`min` of an `Int` subexpression too).
         let wrapped = match pick(rng, 7) {

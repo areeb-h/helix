@@ -291,6 +291,33 @@ const _: () = assert!(
     "Op grew past 2 words — box the offending variant (see DfColumnVerbData)",
 );
 
+/// What a reduce kernel's captured slot carries. Both kinds ride the same `caps: *const
+/// i64` slice (a pointer is 8 bytes, so it fits an i64 slot); the *kind* tells the codegen
+/// and the VM how to interpret slot `j` — a loop-invariant value vs a packed array base
+/// the body indexes by the loop counter. Codegen and VM MUST branch on the same ordered
+/// [`ReduceLoop::captures`], never infer the kind independently (see `define_reduce_loop`
+/// and `Op::TryJitReduce`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureKind {
+    /// A loop-invariant `i64` value read bare (`caps[j]` IS the value).
+    Scalar,
+    /// A packed `i64` array (`ArrayData::Ints`) read by the loop counter as `arr[counter]`;
+    /// `caps[j]` is the base pointer, the kernel loads `caps[j] + counter*8`. The VM
+    /// pre-checks the whole counter range is in bounds before passing the pointer.
+    ArrayI64,
+    /// A packed `f64` array (`ArrayData::Floats`), same as [`CaptureKind::ArrayI64`] but the
+    /// kernel loads `f64`. (Reserved for the f64 reduce variant; not emitted by v1a.)
+    ArrayF64,
+}
+
+/// One captured variable a reduce kernel references beyond `{pa, pb}`: its `name` (resolved
+/// to a value at the call site by the VM) and its [`CaptureKind`] (how the kernel reads it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capture {
+    pub name: String,
+    pub kind: CaptureKind,
+}
+
 /// A JIT-eligible `reduce` loop body the compiler asked the JIT to compile. The
 /// JIT lowers each to a native `extern "C" fn(i64 start, i64 end, i64 init)->i64`;
 /// the index into [`Program::reduce_loops`] is the `loop_idx` in [`Op::TryJitReduce`].
@@ -307,12 +334,14 @@ pub struct ReduceLoop {
     /// as `pb` — so the same `i64` codegen handles both (the slots are kept in N
     /// registers / marshalled through a pointer). See [`crate::jit::define_reduce_loop`].
     pub bodies: Vec<Expr>,
-    /// Free (captured) variable names the body references beyond `{pa, pb}`, in
-    /// first-appearance order — loop-invariant `i64` values the VM resolves at the call
-    /// site and passes to the kernel as a `caps` slice (the nested-fold case: an inner
-    /// reduce capturing the outer `map` variable). Empty for a self-contained body.
+    /// Free (captured) variables the body references beyond `{pa, pb}`, in first-appearance
+    /// order — each a loop-invariant [`Capture`] the VM resolves at the call site and passes
+    /// to the kernel as a `caps` slice. A [`CaptureKind::Scalar`] rides as its `i64` value
+    /// (the nested-fold case: an inner reduce capturing the outer `map` variable); a
+    /// [`CaptureKind::ArrayI64`] rides as a packed array base the body indexes by the loop
+    /// counter (`arr[pb]`, the dot-product case). Empty for a self-contained body.
     /// **Scalar accumulators only** (a tuple body that captures stays on the VM loop).
-    pub captures: Vec<String>,
+    pub captures: Vec<Capture>,
     /// `true` marks a **scalar `f64`** accumulator (a `Float` init) folded over the `i64`
     /// range counter `pb`: the body is MIXED — integer subexpressions of `pb` wrap as `i64`,
     /// promoting to `f64` at the first float operand, exactly like the interpreter's `arith`.

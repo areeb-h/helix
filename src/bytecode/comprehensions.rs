@@ -81,6 +81,12 @@ impl super::Compiler {
         } else if is_map {
             crate::jit::map_kernel_captures(body, &params[0], &fns)
                 .or_else(|| crate::jit::map_kernel_captures_f64(body, &params[0], &user_fns))
+                // A **mixed** `Int`-source → `Float` body the i64/f64 analyses both reject —
+                // e.g. `(it % 97) * 1.0` (integer `%`/`//`/bitwise/shift subexpression, float
+                // root). Capture-free; storing the kernel lets the JIT build the mixed
+                // specialization the VM dispatches for an `Int` source, instead of the whole
+                // map falling to the per-element bytecode loop.
+                .or_else(|| crate::jit::mixed_map_eligible(body, &params[0], &user_fns).then(Vec::new))
         } else if crate::jit::filter_kernel_eligible(body, &params[0], &fns) {
             Some(Vec::new())
         } else {
@@ -308,19 +314,26 @@ impl super::Compiler {
         // compete — `reduce_jit_bodies` keys only off body shape, so a `Float` init would
         // otherwise be claimed as a never-firing i64 kernel (the engagement-gate trap).
         let fns = self.jit_fn_set();
-        let (jit_bodies, captures, float): (Option<Vec<Expr>>, Vec<String>, bool) =
+        let (jit_bodies, captures, float): (Option<Vec<Expr>>, Vec<Capture>, bool) =
             if crate::jit::is_float_acc_init(init) {
                 // A `Float` init (scalar) or all-`Float` tuple/record init → an `f64`
-                // accumulator folded over the i64 counter (`pb_is_int = true`). Capture-free.
+                // accumulator folded over the i64 counter (`pb_is_int = true`). A scalar body
+                // may index captured `f64` arrays by the counter (the float dot-product,
+                // v1b) — try that first, then the capture-free scalar/tuple forms.
                 let user_fns = self.user_fn_set();
-                let fb = if matches!(init, Expr::Float(_)) {
-                    crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &user_fns).map(|b| vec![b])
+                if matches!(init, Expr::Float(_)) {
+                    match crate::jit::reduce_jit_f64_range_captures(init, body, pa, pb, &user_fns) {
+                        Some((b, caps)) => (Some(vec![b]), caps, true),
+                        None => match crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &user_fns) {
+                            Some(b) => (Some(vec![b]), Vec::new(), true),
+                            None => (None, Vec::new(), false),
+                        },
+                    }
                 } else {
-                    crate::jit::reduce_jit_f64_tuple_bodies(init, body, pa, pb, true, &user_fns)
-                };
-                match fb {
-                    Some(bodies) => (Some(bodies), Vec::new(), true),
-                    None => (None, Vec::new(), false),
+                    match crate::jit::reduce_jit_f64_tuple_bodies(init, body, pa, pb, true, &user_fns) {
+                        Some(bodies) => (Some(bodies), Vec::new(), true),
+                        None => (None, Vec::new(), false),
+                    }
                 }
             } else {
                 match crate::jit::reduce_jit_bodies(init, body, pa, pb, &fns) {
@@ -340,10 +353,12 @@ impl super::Compiler {
             x = b.declare_local(pb);
             b.emit(Op::StoreLocal(acc), line, col); // stack: [start, end]; acc=init
             // Push each captured value above `[start, end]` (resolved in the enclosing
-            // scope — captures are free vars, never `pa`/`pb`). The VM splits them off
-            // before `CompInitRange` whether or not it takes the native path.
+            // scope — captures are free vars, never `pa`/`pb`). A `Scalar` cap resolves to
+            // its `i64` value, an `ArrayI64` cap to its `Value::Array`; the VM marshals each
+            // by kind. The VM splits them off before `CompInitRange` whether or not it takes
+            // the native path.
             for cap in &captures {
-                self.compile_expr(b, &Expr::Ident { name: cap.clone(), line, col })?;
+                self.compile_expr(b, &Expr::Ident { name: cap.name.clone(), line, col })?;
             }
             let loop_idx = self.reduce_loops.len() as u32;
             self.reduce_loops.push(ReduceLoop {

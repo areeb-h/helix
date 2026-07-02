@@ -44,6 +44,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 
 use crate::ast::{BinOp, Expr, Stmt, TypeAnn};
+use crate::bytecode::{Capture, CaptureKind};
 
 // The JIT's only `unsafe`: the FFI trampolines that call finalized native code. Kept in
 // their own file so that boundary is a single auditable unit; re-exported so callers
@@ -546,20 +547,141 @@ pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>
 }
 
 /// Like [`reduce_loop_eligible`], but a **scalar** body referencing free (captured)
-/// variables is still eligible — each free `i64` variable is recorded (in first-appearance
-/// order) and passed to the kernel as a loop-invariant `caps[i]`. This is the nested-fold
-/// case: an inner `range(..).reduce(..)` whose body reads the outer `map` variable. Returns
-/// the ordered captures (possibly empty), or `None` if the body is ineligible or captures
-/// more than [`MAX_CAPTURES`]. Mirrors [`map_kernel_captures`]; same i64-closed rules.
-pub fn reduce_loop_captures(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>) -> Option<Vec<String>> {
+/// variables is still eligible — each free variable is recorded (in first-appearance
+/// order) as a [`Capture`] and passed to the kernel as a loop-invariant `caps[i]`. Two
+/// capture shapes: a bare free `i64` variable (the nested-fold case: an inner
+/// `range(..).reduce(..)` reading the outer `map` variable → [`CaptureKind::Scalar`]), and
+/// a free array indexed by the loop counter `pb` (`arr[pb]`, the dot-product case →
+/// [`CaptureKind::ArrayI64`]). Returns the ordered captures (possibly empty), or `None` if
+/// the body is ineligible, captures more than [`MAX_CAPTURES`], or uses a name both bare
+/// and indexed (a contradictory kind). Same i64-closed rules as `value_eligible(Int)`.
+pub fn reduce_loop_captures(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>) -> Option<Vec<Capture>> {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(pa);
     locals.insert(pb);
-    let mut caps: Vec<String> = Vec::new();
-    if value_eligible_cap(body, fns, &locals, &mut caps) && caps.len() <= MAX_CAPTURES {
+    let mut caps: Vec<Capture> = Vec::new();
+    if value_eligible_cap_indexed(body, fns, &locals, pb, &mut caps) && caps.len() <= MAX_CAPTURES {
         Some(caps)
     } else {
         None
+    }
+}
+
+/// Record capture `name` with `kind` in first-appearance order, deduping. Returns `false`
+/// if `name` was already recorded with a *different* kind — a body that reads `a` both bare
+/// and as `a[pb]` is contradictory (is it a scalar or an array?), so the whole reduce falls
+/// back to the VM loop rather than guess. Keeps the codegen's per-slot interpretation and
+/// the VM's per-slot marshalling driven by one unambiguous ordered list.
+fn record_cap(caps: &mut Vec<Capture>, name: &str, kind: CaptureKind) -> bool {
+    if let Some(existing) = caps.iter().find(|c| c.name == name) {
+        return existing.kind == kind;
+    }
+    caps.push(Capture { name: name.to_string(), kind });
+    true
+}
+
+/// Reduce-only twin of [`value_eligible_cap`] that additionally accepts `arr[pb]` — a free
+/// array indexed by exactly the loop counter — recording it as a [`CaptureKind::ArrayI64`].
+/// A bare free ident is a [`CaptureKind::Scalar`] cap (as before). `pb` is threaded so the
+/// index shape can be checked. NOT shared with the map kernel (whose `value_eligible_cap`
+/// still rejects `Index`), so array-indexing stays scoped to the reduce path until the map
+/// variant lands. i64-closed subset — identical operator rules to `value_eligible_cap`.
+fn value_eligible_cap_indexed(
+    e: &Expr,
+    eligible: &HashSet<&str>,
+    locals: &HashSet<&str>,
+    pb: &str,
+    caps: &mut Vec<Capture>,
+) -> bool {
+    match e {
+        Expr::Int(_) => true,
+        Expr::Float(_) => false,
+        Expr::Ident { name, .. } => {
+            if locals.contains(name.as_str()) {
+                true
+            } else {
+                record_cap(caps, name, CaptureKind::Scalar)
+            }
+        }
+        // `arr[pb]`: a free array (`recv` not local) read by exactly the loop counter. The
+        // VM pre-checks the counter range is in bounds before the kernel does raw loads, so
+        // only the counter binder — whose values are exactly `start..end` — is admitted here
+        // (affine/scalar indices are staged follow-ups with their own pre-checks).
+        Expr::Index { recv, index, .. } => match (&**recv, &**index) {
+            (Expr::Ident { name: arr, .. }, Expr::Ident { name: idx, .. })
+                if !locals.contains(arr.as_str()) && idx == pb =>
+            {
+                record_cap(caps, arr, CaptureKind::ArrayI64)
+            }
+            _ => false,
+        },
+        Expr::Binary { op, left, right, .. } => {
+            let op_ok = match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul => true,
+                BinOp::Mod => matches!(**right, Expr::Int(n) if n > 0),
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => true,
+                BinOp::Shl | BinOp::Shr => matches!(**right, Expr::Int(n) if (0..=63).contains(&n)),
+                BinOp::FloorDiv => matches!(**right, Expr::Int(n) if n > 0),
+                _ => false,
+            };
+            op_ok
+                && value_eligible_cap_indexed(left, eligible, locals, pb, caps)
+                && value_eligible_cap_indexed(right, eligible, locals, pb, caps)
+        }
+        Expr::Call { name, args, .. } => {
+            eligible.contains(name.as_str())
+                && jit_builtin_arity_ok(name, args.len())
+                && args.iter().all(|a| value_eligible_cap_indexed(a, eligible, locals, pb, caps))
+        }
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            cond_eligible_cap_indexed(cond, eligible, locals, pb, caps)
+                && value_eligible_cap_indexed(then_branch, eligible, locals, pb, caps)
+                && value_eligible_cap_indexed(else_branch, eligible, locals, pb, caps)
+        }
+        Expr::Let { bindings, body } => {
+            let mut locals2 = locals.clone();
+            for (n, v) in bindings {
+                // A `let` that REBINDS the loop counter `pb` breaks the invariant the `Index`
+                // arm relies on: `arr[pb]` no longer means `arr[counter]` — codegen would emit
+                // an UNCHECKED load at the let-bound index, past what the VM's counter-range
+                // pre-check (`0 <= s && e <= len`) validated → an out-of-bounds native read.
+                // Refuse to JIT such a body; the VM/tree-walker evaluate it correctly (raising
+                // the exact OOB if the shadowed index is out of range). Only the counter needs
+                // this guard — shadowing `pa` (the accumulator) can't reach the index path.
+                if n.as_str() == pb {
+                    return false;
+                }
+                if !value_eligible_cap_indexed(v, eligible, &locals2, pb, caps) {
+                    return false;
+                }
+                locals2.insert(n.as_str());
+            }
+            value_eligible_cap_indexed(body, eligible, &locals2, pb, caps)
+        }
+        _ => false,
+    }
+}
+
+/// Condition twin of [`value_eligible_cap_indexed`] — comparisons/`and`/`or` whose operands
+/// may index a captured array by the loop counter.
+fn cond_eligible_cap_indexed(
+    e: &Expr,
+    eligible: &HashSet<&str>,
+    locals: &HashSet<&str>,
+    pb: &str,
+    caps: &mut Vec<Capture>,
+) -> bool {
+    match e {
+        Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
+            cond_eligible_cap_indexed(left, eligible, locals, pb, caps)
+                && cond_eligible_cap_indexed(right, eligible, locals, pb, caps)
+        }
+        Expr::Binary { op, left, right, .. } => {
+            matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne)
+                && value_eligible_cap_indexed(left, eligible, locals, pb, caps)
+                && value_eligible_cap_indexed(right, eligible, locals, pb, caps)
+        }
+        _ => false,
     }
 }
 
@@ -661,6 +783,100 @@ pub fn reduce_jit_f64_range_body(init: &Expr, body: &Expr, pa: &str, pb: &str, u
     }
 }
 
+/// Bottom-up kind of a **scalar f64 reduce body that indexes captured `f64` arrays by the
+/// loop counter** (the float dot-product / weighted-sum case): `pa` is the `f64` accumulator,
+/// `pb` the `i64` counter, and `arr[pb]` for a free array `arr` is an `f64` element →
+/// records `arr` as a [`CaptureKind::ArrayF64`] capture (first-appearance order). A bare free
+/// var is still rejected (its runtime type is unknown — no scalar f64 captures in v1b). Same
+/// promotion rules as [`infer_reduce_f64_kind`]; the VM pre-checks each array's bounds before
+/// the kernel does raw `f64` loads. `None` outside the eligible shape.
+fn infer_f64_indexed(
+    e: &Expr,
+    pa: &str,
+    pb: &str,
+    caps: &mut Vec<Capture>,
+    user_fns: &HashSet<&str>,
+) -> Option<NumKind> {
+    match e {
+        Expr::Int(_) => Some(NumKind::Int),
+        Expr::Float(_) => Some(NumKind::Float),
+        Expr::Ident { name, .. } => {
+            if name == pa {
+                Some(NumKind::Float)
+            } else if name == pb {
+                Some(NumKind::Int)
+            } else {
+                None // bare free var: unknown runtime type (only indexed array caps allowed)
+            }
+        }
+        // `arr[pb]`: a free `f64` array read by exactly the counter → an `f64` element.
+        Expr::Index { recv, index, .. } => match (&**recv, &**index) {
+            (Expr::Ident { name: arr, .. }, Expr::Ident { name: idx, .. })
+                if arr != pa && arr != pb && idx == pb =>
+            {
+                if record_cap(caps, arr, CaptureKind::ArrayF64) {
+                    Some(NumKind::Float)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        },
+        Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
+            let lk = infer_f64_indexed(left, pa, pb, caps, user_fns)?;
+            let rk = infer_f64_indexed(right, pa, pb, caps, user_fns)?;
+            Some(if lk == NumKind::Float || rk == NumKind::Float {
+                NumKind::Float
+            } else {
+                NumKind::Int
+            })
+        }
+        Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
+            match (name.as_str(), args.len()) {
+                ("sqrt", 1) => {
+                    infer_f64_indexed(&args[0], pa, pb, caps, user_fns)?;
+                    Some(NumKind::Float)
+                }
+                ("abs", 1) => infer_f64_indexed(&args[0], pa, pb, caps, user_fns),
+                ("min" | "max", 2) => {
+                    let ka = infer_f64_indexed(&args[0], pa, pb, caps, user_fns)?;
+                    let kb = infer_f64_indexed(&args[1], pa, pb, caps, user_fns)?;
+                    if ka == kb { Some(ka) } else { None }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Decide whether `range(..).reduce(0.0, (pa, pb) => body)` can JIT as a **scalar `f64` fold
+/// that indexes captured `f64` arrays by the counter** — the float dot-product. A `Float`-
+/// literal init, a body whose root infers `Float`, and **at least one** `ArrayF64` capture
+/// (so this never competes with the capture-free [`reduce_jit_f64_range_body`]). Returns the
+/// body + the ordered captures, or `None`. (The VM confirms each capture is a `Floats` array
+/// and pre-checks its bounds at dispatch, falling back otherwise.)
+pub fn reduce_jit_f64_range_captures(
+    init: &Expr,
+    body: &Expr,
+    pa: &str,
+    pb: &str,
+    user_fns: &HashSet<&str>,
+) -> Option<(Expr, Vec<Capture>)> {
+    if !matches!(init, Expr::Float(_)) {
+        return None;
+    }
+    let mut caps: Vec<Capture> = Vec::new();
+    if infer_f64_indexed(body, pa, pb, &mut caps, user_fns) == Some(NumKind::Float)
+        && !caps.is_empty()
+        && caps.len() <= MAX_CAPTURES
+    {
+        Some((body.clone(), caps))
+    } else {
+        None
+    }
+}
+
 /// Bottom-up kind of a node in a **multi-binder f64** body, given each binder's kind in
 /// `binders` (the `f64` accumulator slots `$acc0…` plus the element/counter `pb`), or `None`
 /// if it falls outside the eligible shape. The N-binder generalization of
@@ -706,6 +922,7 @@ fn gen_f64_typed(
     b: &mut FunctionBuilder,
     e: &Expr,
     binders: &HashMap<&str, (Variable, NumKind)>,
+    arrays: &HashMap<&str, Variable>,
 ) -> (ClValue, NumKind) {
     match e {
         Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
@@ -714,9 +931,24 @@ fn gen_f64_typed(
             let (var, kind) = binders[name.as_str()];
             (b.use_var(var), kind)
         }
+        // `arr[counter]` reading a captured `f64` array (float dot-product): `recv` is bound in
+        // `arrays` to the packed base pointer, `index` is the i64 counter. The VM pre-checked
+        // the whole counter range is in bounds, so this raw `f64` load is safe. Only the
+        // scalar-with-`ArrayF64`-caps path populates `arrays` (empty for tuple/record reduces).
+        Expr::Index { recv, index, .. } => {
+            let name = match &**recv {
+                Expr::Ident { name, .. } => name.as_str(),
+                _ => unreachable!("ineligible f64 index receiver reached codegen"),
+            };
+            let base = b.use_var(arrays[name]);
+            let (idx, _) = gen_f64_typed(b, index, binders, arrays);
+            let off = b.ins().imul_imm(idx, 8);
+            let addr = b.ins().iadd(base, off);
+            (b.ins().load(F64, MemFlags::trusted(), addr, 0), NumKind::Float)
+        }
         Expr::Binary { op, left, right, .. } => {
-            let (lv, lk) = gen_f64_typed(b, left, binders);
-            let (rv, rk) = gen_f64_typed(b, right, binders);
+            let (lv, lk) = gen_f64_typed(b, left, binders, arrays);
+            let (rv, rk) = gen_f64_typed(b, right, binders, arrays);
             if lk == NumKind::Int && rk == NumKind::Int {
                 let v = match op {
                     BinOp::Add => b.ins().iadd(lv, rv),
@@ -739,20 +971,20 @@ fn gen_f64_typed(
         }
         Expr::Call { name, args, .. } => match name.as_str() {
             "sqrt" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
             }
             "abs" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays);
                 match ak {
                     NumKind::Int => (b.ins().iabs(av), NumKind::Int),
                     NumKind::Float => (b.ins().fabs(av), NumKind::Float),
                 }
             }
             "min" | "max" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders);
-                let (cv, _ck) = gen_f64_typed(b, &args[1], binders);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays);
+                let (cv, _ck) = gen_f64_typed(b, &args[1], binders, arrays);
                 let le = name == "min";
                 let cc = if le { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
                 match ak {
@@ -1025,8 +1257,20 @@ fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>,
     // exactly what `define_reduce_loop`'s float path lowers (via `gen_f64_typed`). Scalar (1
     // body over `{pa, pb}`) or tuple (N>1 substituted bodies over `{$acc0…, pb}`).
     if rl.float {
+        // v1b: a float SCALAR body indexing captured `f64` arrays by the counter (the float
+        // dot-product). Re-run the same indexed collector and require it reproduce `rl.captures`
+        // exactly — all `ArrayF64`, body root `Float` — so the build gate matches the compile
+        // gate (`define_reduce_loop` binds exactly these caps into its `arrays` map).
         if !rl.captures.is_empty() {
-            return false;
+            if rl.bodies.len() != 1 {
+                return false;
+            }
+            let mut caps: Vec<Capture> = Vec::new();
+            let root = infer_f64_indexed(&rl.bodies[0], &rl.pa, &rl.pb, &mut caps, user_fns);
+            return root == Some(NumKind::Float)
+                && caps == rl.captures
+                && caps.iter().all(|c| c.kind == CaptureKind::ArrayF64)
+                && caps.len() <= MAX_CAPTURES;
         }
         let n = rl.bodies.len();
         if n == 1 {
@@ -1042,18 +1286,23 @@ fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>,
         binders.insert(rl.pb.as_str(), NumKind::Int);
         return rl.bodies.iter().all(|c| infer_f64_typed(c, &binders, user_fns) == Some(NumKind::Float));
     }
-    // A scalar captured body is eligible over `{pa, pb} ∪ captures` — exactly what
-    // `define_reduce_loop` binds (the captures are loop-invariant `i64` locals loaded from
-    // the `caps` pointer). This must match the codegen's variable set, or the build would
-    // compile a loop the VM can't safely take (or skip one it could).
+    // A scalar captured body: re-run the SAME indexed collector the compiler used and
+    // require it reproduce `rl.captures` exactly — same names, kinds, and order. This keeps
+    // the build gate identical to the compile gate: `define_reduce_loop` binds exactly these
+    // captures (scalar values and array bases loaded from the `caps` pointer), so any drift
+    // (a body eligibility accepted but the build can't lower, or a different capture set)
+    // is caught here and the whole loop falls back to the VM. v1a lowers `Scalar` +
+    // `ArrayI64`; an `ArrayF64` cap belongs to the f64 variant, not yet lowered → reject.
     if rl.bodies.len() == 1 && !rl.captures.is_empty() {
+        if rl.captures.iter().any(|c| c.kind == CaptureKind::ArrayF64) {
+            return false;
+        }
         let mut locals: HashSet<&str> = HashSet::new();
         locals.insert(rl.pa.as_str());
         locals.insert(rl.pb.as_str());
-        for c in &rl.captures {
-            locals.insert(c.as_str());
-        }
-        return value_eligible(&rl.bodies[0], fns, &locals, NumKind::Int);
+        let mut caps: Vec<Capture> = Vec::new();
+        let ok = value_eligible_cap_indexed(&rl.bodies[0], fns, &locals, rl.pb.as_str(), &mut caps);
+        return ok && caps == rl.captures && caps.len() <= MAX_CAPTURES;
     }
     bodies_eligible(&rl.pa, &rl.pb, &rl.bodies, fns)
 }
@@ -1204,6 +1453,33 @@ fn infer_mixed_kind(
             } else {
                 NumKind::Int
             })
+        }
+        // The i64-closed integer ops (`%`, `//`, bitwise, shifts) — the SAME safe subset as
+        // `value_eligible`, so an integer subexpression like `j % 97` in a float-producing map
+        // body (`(j % 97) * 1.0`) stays `i64` and promotes at the first float operand, instead
+        // of forcing the whole map onto the VM. BOTH operands must be `Int` (these ops are
+        // meaningless on `f64`); the result is `Int`. Same const-restrictions as `value_eligible`.
+        Expr::Binary {
+            op: op @ (BinOp::Mod | BinOp::FloorDiv | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr),
+            left,
+            right,
+            ..
+        } => {
+            let op_ok = match op {
+                BinOp::Mod | BinOp::FloorDiv => matches!(**right, Expr::Int(n) if n > 0),
+                BinOp::Shl | BinOp::Shr => matches!(**right, Expr::Int(n) if (0..=63).contains(&n)),
+                _ => true, // bitwise: unconditionally i64-closed
+            };
+            if !op_ok {
+                return None;
+            }
+            let lk = infer_mixed_kind(left, binder, uses_binder, user_fns)?;
+            let rk = infer_mixed_kind(right, binder, uses_binder, user_fns)?;
+            if lk == NumKind::Int && rk == NumKind::Int {
+                Some(NumKind::Int)
+            } else {
+                None // an i64-only op with a Float operand is not a valid Helix expression
+            }
         }
         _ => None,
     }
@@ -1739,10 +2015,14 @@ fn define_reduce_loop(
         }
     }
     vars.insert(rl.pb.as_str(), x_var);
-    // Bind each captured variable to its (loop-invariant) loaded value.
-    for (j, capname) in rl.captures.iter().enumerate() {
+    // Bind each captured variable to its (loop-invariant) loaded `i64`. A `Scalar` cap's
+    // slot IS its value (read by a bare `Ident`); an `ArrayI64` cap's slot is the packed
+    // array base pointer (read by the `Index` arm of `gen_value` as `caps_slot + idx*8`).
+    // Both ride `vars` transparently — eligibility guarantees a name is used one way only,
+    // so the same map never confuses a value for a base.
+    for (j, cap) in rl.captures.iter().enumerate() {
         if let Some(&cv) = cap_vars.get(j) {
-            vars.insert(capname.as_str(), cv);
+            vars.insert(cap.name.as_str(), cv);
         }
     }
     // Compute every component from the OLD slot values, then assign — so a component that
@@ -1760,8 +2040,19 @@ fn define_reduce_loop(
             }
         }
         binders.insert(rl.pb.as_str(), (x_var, NumKind::Int));
+        // ArrayF64 captures (v1b float dot-product): each `cap_var` holds the packed f64-array
+        // base pointer; the `Index` arm reads `arr[pb]` from it. Scalar float reduces only;
+        // empty for the capture-free scalar/tuple float folds.
+        let mut arrays: HashMap<&str, Variable> = HashMap::new();
+        for (j, cap) in rl.captures.iter().enumerate() {
+            if cap.kind == CaptureKind::ArrayF64
+                && let Some(&cv) = cap_vars.get(j)
+            {
+                arrays.insert(cap.name.as_str(), cv);
+            }
+        }
         for body in &rl.bodies {
-            new_vals.push(gen_f64_typed(&mut b, body, &binders).0);
+            new_vals.push(gen_f64_typed(&mut b, body, &binders, &arrays).0);
         }
     } else {
         for body in &rl.bodies {
@@ -2133,8 +2424,9 @@ fn define_fused_kernel<'a>(
                     binders.insert(ACC_IDENTS[k2], (v, NumKind::Float));
                 }
                 binders.insert(pb.as_str(), (cur_var, NumKind::Float));
+                let no_arrays: HashMap<&str, Variable> = HashMap::new();
                 let new_vals: Vec<ClValue> =
-                    bodies.iter().map(|body| gen_f64_typed(&mut b, body, &binders).0).collect();
+                    bodies.iter().map(|body| gen_f64_typed(&mut b, body, &binders, &no_arrays).0).collect();
                 for (k2, &v) in acc_vars.iter().enumerate() {
                     b.def_var(v, new_vals[k2]);
                 }
@@ -2336,6 +2628,23 @@ fn gen_value<'a>(
             r
         }
         Expr::Match { scrutinee, arms, .. } => gen_match(b, scrutinee, arms, vars, fn_ids, module, kind),
+        // `arr[counter]` in a reduce kernel: `recv` is an array capture whose base pointer
+        // was loaded into `vars` (an i64 slot holding the pointer), `index` is the i64 loop
+        // counter. The VM pre-checked the whole counter range is in bounds, so this raw load
+        // is safe. Only the reduce-indexed path admits `Index` (map/filter eligibility rejects
+        // it), and that path is always `i64` today, so the element load is `I64` (the f64
+        // element variant lands with its own codegen). Address = base + idx*8.
+        Expr::Index { recv, index, .. } => {
+            let name = match &**recv {
+                Expr::Ident { name, .. } => name.as_str(),
+                _ => unreachable!("ineligible index receiver reached codegen"),
+            };
+            let base = b.use_var(vars[name]);
+            let idx = gen_value(b, index, vars, fn_ids, module, NumKind::Int);
+            let off = b.ins().imul_imm(idx, 8);
+            let addr = b.ins().iadd(base, off);
+            b.ins().load(I64, MemFlags::trusted(), addr, 0)
+        }
         _ => unreachable!("ineligible node reached codegen"),
     }
 }
@@ -2475,10 +2784,39 @@ fn gen_value_typed<'a>(
             let (lv, lk) = gen_value_typed(b, left, vars, binder);
             let (rv, rk) = gen_value_typed(b, right, vars, binder);
             if lk == NumKind::Int && rk == NumKind::Int {
+                // Integer subexpression — identical codegen to `gen_value`'s i64 arms (euclidean
+                // `%`/`//` by a positive const, bitwise, const shifts), so a mixed body's integer
+                // part is bit-exact to the interpreter, same as the i64 map/reduce.
                 let v = match op {
                     BinOp::Add => b.ins().iadd(lv, rv),
                     BinOp::Sub => b.ins().isub(lv, rv),
                     BinOp::Mul => b.ins().imul(lv, rv),
+                    BinOp::Mod => {
+                        let rem = b.ins().srem(lv, rv);
+                        let zero = b.ins().iconst(I64, 0);
+                        let fixed = b.ins().iadd(rem, rv);
+                        let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
+                        b.ins().select(is_neg, fixed, rem)
+                    }
+                    BinOp::FloorDiv => {
+                        let q = b.ins().sdiv(lv, rv);
+                        let rem = b.ins().srem(lv, rv);
+                        let zero = b.ins().iconst(I64, 0);
+                        let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
+                        let qm1 = b.ins().iadd_imm(q, -1);
+                        b.ins().select(is_neg, qm1, q)
+                    }
+                    BinOp::BitAnd => b.ins().band(lv, rv),
+                    BinOp::BitOr => b.ins().bor(lv, rv),
+                    BinOp::BitXor => b.ins().bxor(lv, rv),
+                    BinOp::Shl => {
+                        let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
+                        b.ins().ishl_imm(lv, n)
+                    }
+                    BinOp::Shr => {
+                        let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
+                        b.ins().sshr_imm(lv, n)
+                    }
                     _ => unreachable!("ineligible operator reached mixed codegen"),
                 };
                 (v, NumKind::Int)

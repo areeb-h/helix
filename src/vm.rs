@@ -1001,12 +1001,55 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 };
                 let took_native = if let Some((ptr, s, e)) = bounds {
                     if n_acc == 1 && program.reduce_loops[*loop_idx as usize].float {
-                        // A scalar f64 fold over the i64 counter (capture-free): a `Float`
-                        // init confirms the f64 ABI; anything else falls back to the VM loop.
+                        // A scalar f64 fold over the i64 counter: a `Float` init confirms the
+                        // f64 ABI; anything else falls back to the VM loop. With captures it is
+                        // the float dot-product — every cap is an `ArrayF64` base pointer, taken
+                        // only after the same bounds pre-check as the i64 path (out-of-range or
+                        // a non-`Floats` array falls back to the exact-erroring bytecode loop).
                         if let Value::Float(init) = locals[slot] {
-                            let r = unsafe { crate::jit::call_reduce_f64(ptr, s, e, init) };
-                            locals[slot] = Value::Float(r);
-                            true
+                            if n_caps == 0 {
+                                let r = unsafe { crate::jit::call_reduce_f64(ptr, s, e, init) };
+                                locals[slot] = Value::Float(r);
+                                true
+                            } else {
+                                use crate::bytecode::CaptureKind;
+                                use crate::value::ArrayData;
+                                let caps_meta =
+                                    &program.reduce_loops[*loop_idx as usize].captures;
+                                let mut caps: Vec<i64> = Vec::with_capacity(n_caps);
+                                let mut _keepalive: Vec<Value> = Vec::new();
+                                let mut ok = true;
+                                for (cap, val) in caps_meta.iter().zip(cap_vals.iter()) {
+                                    match (cap.kind, val) {
+                                        (CaptureKind::ArrayF64, Value::Array(a)) => {
+                                            if let ArrayData::Floats(v) = &**a {
+                                                if s < 0 || e > v.len() as i64 {
+                                                    ok = false;
+                                                    break;
+                                                }
+                                                caps.push(v.as_ptr() as i64);
+                                                _keepalive.push(val.clone());
+                                            } else {
+                                                ok = false;
+                                                break;
+                                            }
+                                        }
+                                        _ => {
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if ok {
+                                    let r = unsafe {
+                                        crate::jit::call_reduce_f64_caps(ptr, s, e, init, caps.as_ptr())
+                                    };
+                                    locals[slot] = Value::Float(r);
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
                         } else {
                             false
                         }
@@ -1017,21 +1060,54 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 locals[slot] = Value::Int(r);
                                 true
                             } else {
-                                // Every captured value must be an `Int` (else fall back to
-                                // the bytecode loop, which reads the captures by name).
-                                let caps: Option<Vec<i64>> = cap_vals
-                                    .iter()
-                                    .map(|v| if let Value::Int(i) = v { Some(*i) } else { None })
-                                    .collect();
-                                match caps {
-                                    Some(c) => {
-                                        let r = unsafe {
-                                            crate::jit::call_reduce_caps(ptr, s, e, init, c.as_ptr())
-                                        };
-                                        locals[slot] = Value::Int(r);
-                                        true
+                                // Marshal captures by kind — the ordered `captures` list drives
+                                // both this fill and the codegen's per-slot read, so neither
+                                // ever infers a kind independently. A `Scalar` cap rides as its
+                                // `i64` value; an `ArrayI64` cap rides as its packed base
+                                // pointer, but ONLY after a bounds pre-check proves the whole
+                                // counter range `[s, e)` is within `[0, len)` — the kernel does
+                                // unchecked loads, so an out-of-range access, a negative start
+                                // (which the interpreter would Python-wrap), or a non-`Int` /
+                                // unpacked array must all fall back to the bytecode loop, which
+                                // re-evaluates `arr[j]` via `Op::Index` and raises the exact OOB
+                                // error. `_keepalive` holds the array `Rc`s alive across the FFI
+                                // call (the base pointers alias into their buffers).
+                                use crate::bytecode::CaptureKind;
+                                use crate::value::ArrayData;
+                                let caps_meta = &program.reduce_loops[*loop_idx as usize].captures;
+                                let mut caps: Vec<i64> = Vec::with_capacity(n_caps);
+                                let mut _keepalive: Vec<Value> = Vec::new();
+                                let mut ok = true;
+                                for (cap, val) in caps_meta.iter().zip(cap_vals.iter()) {
+                                    match (cap.kind, val) {
+                                        (CaptureKind::Scalar, Value::Int(i)) => caps.push(*i),
+                                        (CaptureKind::ArrayI64, Value::Array(a)) => {
+                                            if let ArrayData::Ints(v) = &**a {
+                                                if s < 0 || e > v.len() as i64 {
+                                                    ok = false;
+                                                    break;
+                                                }
+                                                caps.push(v.as_ptr() as i64);
+                                                _keepalive.push(val.clone());
+                                            } else {
+                                                ok = false;
+                                                break;
+                                            }
+                                        }
+                                        _ => {
+                                            ok = false;
+                                            break;
+                                        }
                                     }
-                                    None => false,
+                                }
+                                if ok {
+                                    let r = unsafe {
+                                        crate::jit::call_reduce_caps(ptr, s, e, init, caps.as_ptr())
+                                    };
+                                    locals[slot] = Value::Int(r);
+                                    true
+                                } else {
+                                    false
                                 }
                             }
                         } else {
