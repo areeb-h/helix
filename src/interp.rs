@@ -1133,7 +1133,13 @@ fn apply_round_fn(
     use crate::value::ArrayData;
     match v {
         Value::Array(ad) => match &**ad {
-            ArrayData::Floats(xs) => Ok(Value::int_array(map_buf(xs, move |x| f(x) as i64))),
+            // Checked per element (same rule as `round_to_i64`): an out-of-range / non-finite
+            // element ERRORS rather than silently saturating the whole packed conversion.
+            ArrayData::Floats(xs) => xs
+                .iter()
+                .map(|&x| round_to_i64(name, f(x), line, col))
+                .collect::<Result<Vec<i64>, _>>()
+                .map(Value::int_array),
             ArrayData::Ints(xs) => Ok(Value::int_array(xs.clone())),
             ArrayData::Values(_) => round_box(name, f, v, line, col),
         },
@@ -1144,10 +1150,34 @@ fn apply_round_fn(
 }
 
 /// The per-element rounding closure for heterogeneous arrays, scalars, and `missing`.
+/// Convert a rounded float to `i64`, ERRORING (instead of silently saturating, which is what
+/// `as i64` does — `1e30 as i64` is `i64::MAX`, `NaN as i64` is `0`) when the result is not
+/// finite or lies outside the i64 range. `round`/`floor`/`ceil`/`trunc` all return `Int`, so a
+/// magnitude a 64-bit integer cannot hold has no honest answer — raising beats handing back
+/// `i64::MAX`/`i64::MIN`/`0` as if it were real data. The bounds are the exactly-representable
+/// f64 values `-(2^63)` (= `i64::MIN`) and `2^63` (= `i64::MAX + 1`); the upper bound is strict
+/// because `2^63` is not a valid `i64`, and every whole f64 below it casts without saturating.
+fn round_to_i64(name: &str, x: f64, line: usize, col: usize) -> Result<i64, HelixError> {
+    const MIN: f64 = -9_223_372_036_854_775_808.0; // i64::MIN, exact in f64
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0; // 2^63 = i64::MAX + 1, exact in f64
+    // The half-open range also rejects NaN and ±inf (all fall outside), so no separate
+    // `is_finite` check is needed.
+    if (MIN..LIMIT).contains(&x) {
+        Ok(x as i64)
+    } else {
+        Err(HelixError::new(
+            format!("`{name}` cannot produce an integer from {x}: the result is out of the 64-bit integer range"),
+            line,
+            col,
+        )
+        .hint("`round`/`floor`/`ceil`/`trunc` return an Int — keep the value within ±9.2e18, or use `round(x, digits)` to stay a Float."))
+    }
+}
+
 fn round_box(name: &str, f: fn(f64) -> f64, v: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
     broadcast_unary(v, &|s| match s {
         Value::Int(i) => Ok(Value::Int(*i)),
-        Value::Float(x) => Ok(Value::Int(f(*x) as i64)),
+        Value::Float(x) => Ok(Value::Int(round_to_i64(name, f(*x), line, col)?)),
         other => Err(type_err(name, "a number or array of numbers", other, line, col)),
     })
 }

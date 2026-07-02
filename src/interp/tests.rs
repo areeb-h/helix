@@ -1963,6 +1963,37 @@
         assert_eq!(r("round([2.4, 2.6])"), "[2, 3]");
     }
 
+    /// `round`/`floor`/`ceil`/`trunc` return `Int`, so a value beyond the i64 range must ERROR
+    /// rather than silently saturating (the old `f(x) as i64` gave `i64::MAX`/`i64::MIN` for
+    /// ±1e30 and `0` for NaN — silent data corruption). Normal-magnitude rounding is unchanged;
+    /// the two-arg `round(x, digits)` returns Float and is unaffected.
+    #[test]
+    fn round_family_errors_out_of_i64_range_not_saturates() {
+        // in-range: unchanged (scalar + packed-array fast path)
+        assert!(matches!(last("round(2.6)").unwrap(), Value::Int(3)));
+        assert!(matches!(last("floor(-2.1)").unwrap(), Value::Int(-3)));
+        assert_eq!(format!("{}", last("floor([2.9, -1.1])").unwrap()), "[2, -2]");
+        assert!(matches!(last("round(1.23456, 2)").unwrap(), Value::Float(f) if (f - 1.23).abs() < 1e-9));
+        // out of range → clean error (NOT saturation), across all four fns + both the scalar
+        // path, the `.map` per-element path, and the packed-`Floats`-array fast path.
+        for src in [
+            "round(1.0e30)",
+            "round(-1.0e30)",
+            "floor(1.0e30)",
+            "ceil(1.0e30)",
+            "trunc(-1.0e30)",
+            "[1.0, 1.0e30].map(x => floor(x))",
+            "floor([1.0, 1.0e30])",
+        ] {
+            let e = last(src).expect_err(&format!("`{src}` must error, not saturate"));
+            assert!(
+                e.message.contains("out of the 64-bit integer range"),
+                "unexpected message for `{src}`: {}",
+                e.message
+            );
+        }
+    }
+
     #[test]
     fn math_broadcasts_over_array() {
         match last("sqrt([1, 4, 9])").unwrap() {

@@ -127,7 +127,7 @@ pub(crate) fn eval_binary(
             let b = num_operand(op, &r, line, col)?;
             if b == 0.0 {
                 return Err(HelixError::new("division by zero", line, col)
-                    .hint("guard the denominator, e.g. `if d != 0` (coming soon) or check your data."));
+                    .hint("guard the denominator, e.g. `if d != 0` or check your data."));
             }
             Ok(Value::Float(a / b))
         }
