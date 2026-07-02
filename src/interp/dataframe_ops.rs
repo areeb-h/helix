@@ -200,99 +200,17 @@ impl super::Interp {
                 let (keys, how) = parse_join_spec(&args[1..], line, col)?;
                 Ok(Value::dataframe(lf.join(&right, &keys, &how, line, col)?))
             }
-            "head" => {
-                if args.len() != 1 {
-                    return Err(HelixError::new("`head` takes a row count", line, col)
-                        .hint("e.g. `df.head(5)`."));
-                }
-                let v = self.eval(&args[0])?;
-                let n = as_int(&v, "head", line, col)?.max(0) as usize;
-                Ok(Value::dataframe(lf.head(n)))
-            }
-            "vstack" => {
-                if args.len() != 1 {
-                    return Err(HelixError::new("`vstack` takes one DataFrame to append", line, col)
-                        .hint("e.g. `kb.vstack(new_rows)` to append rows."));
-                }
-                match self.eval(&args[0])? {
-                    Value::DataFrame(bottom) => Ok(Value::dataframe(lf.vstack(&bottom, line, col)?)),
-                    v => Err(HelixError::new(
-                        format!("`vstack` expects a DataFrame, found {}", v.type_name()),
-                        line,
-                        col,
-                    )),
-                }
-            }
-            "unique" => {
-                // `unique()` drops duplicate whole rows; `unique("k1", "k2")` keeps
-                // one row per key combination (newest wins — upsert).
-                let vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<_, _>>()?;
-                let names = crate::interp::access::column_args("unique", &vals, line, col)?;
-                if !names.is_empty() {
-                    crate::backend::validate_columns_exist(&lf, &names, line, col)?;
-                }
-                Ok(Value::dataframe(lf.unique_by(&names, line, col)?))
-            }
-            "count" => {
-                if !args.is_empty() {
-                    return Err(HelixError::new("`count` takes no arguments", line, col));
-                }
-                Ok(Value::Int(lf.row_count(line, col)? as i64))
-            }
-            "column" => {
-                // The column name is an evaluated string (unlike the column verbs,
-                // whose bare-ident args stay unevaluated). Evaluate, then share the
-                // VM path's extraction so the two engines never diverge.
-                let vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<_, _>>()?;
-                let name = column_arg(&vals, line, col)?;
-                Ok(Value::array_sniff(lf.column_values(&name, line, col)?))
-            }
-            "cache" => {
-                if !args.is_empty() {
-                    return Err(HelixError::new("`cache` takes no arguments", line, col)
-                        .hint("e.g. `big = read_csv(\"x.csv\").cache()` to reuse without re-scanning."));
-                }
-                Ok(Value::dataframe(lf.cache(line, col)?))
-            }
-            "columns" => {
-                if !args.is_empty() {
-                    return Err(HelixError::new("`columns` takes no arguments", line, col));
-                }
-                let names: Vec<Value> = lf
-                    .column_names(line, col)?
-                    .into_iter()
-                    .map(|c| Value::Str(Rc::new(c)))
-                    .collect();
-                Ok(Value::array(names))
-            }
-            // Serialize/write methods take *evaluated* args (a path string); share the
-            // VM path's dispatch so the two engines never diverge.
-            "to_json" | "write_csv" | "write_tsv" | "write_json" | "write_parquet" | "to_html"
-            | "to_markdown" | "to_table" => {
-                let vals: Vec<Value> =
-                    args.iter().map(|a| self.eval(a)).collect::<Result<_, _>>()?;
-                if name == "to_json" {
-                    if !vals.is_empty() {
-                        return Err(HelixError::new("`to_json` takes no arguments", line, col));
-                    }
-                    crate::writers::to_json(&[Value::dataframe(lf.clone())], line, col)
-                } else {
-                    crate::interp::export_method(Value::dataframe(lf.clone()), name, &vals, line, col)
-                }
-            }
+            // Every other DataFrame method takes plain *value* arguments (a row count,
+            // a DataFrame, column-name strings, a path) rather than unevaluated column
+            // refs. Evaluate them once and delegate to the shared `df_value_method` —
+            // the same dispatcher the VM calls — so count/columns/cache/head/vstack/
+            // unique/column/to_json/write_*/to_html/... and the unknown-method error are
+            // ONE implementation, not two hand-synced copies. (This also aligns the
+            // tree-walker to the VM on the edge where an arg is present but rejected on
+            // arity, e.g. `df.count(expr)`: both now evaluate `expr` before erroring.)
             _ => {
-                let methods = crate::registry::methods_of(crate::registry::DF_METHODS);
-                let mut err = HelixError::new(
-                    format!("a DataFrame has no method `{}`", name),
-                    line,
-                    col,
-                );
-                if let Some(s) = suggest(name, &methods) {
-                    err = err.hint(format!("did you mean `{}`?", s));
-                } else {
-                    err = err.hint(format!("DataFrame methods: {}", methods.join(", ")));
-                }
-                Err(err)
+                let vals: Vec<Value> = args.iter().map(|a| self.eval(a)).collect::<Result<_, _>>()?;
+                crate::interp::access::df_value_method(&lf, name, vals, line, col)
             }
         }
     }

@@ -396,6 +396,13 @@
             last("dataframe({k: [\"a\", \"a\"], v: [1, 9]}).unique(\"k\").column(\"v\")[0]").unwrap(),
             Value::Int(9)
         ));
+        // value-methods (here head(n) with an arg) now delegate through the one shared
+        // df_value_method dispatcher that the VM also uses — the tree-walker no longer
+        // keeps a second copy of these arms.
+        assert!(matches!(
+            last("dataframe({a: [1, 2, 3, 4]}).head(2).count()").unwrap(),
+            Value::Int(2)
+        ));
     }
 
     #[test]
