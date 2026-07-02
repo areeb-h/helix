@@ -683,12 +683,17 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let ret = stack.pop().unwrap();
                 let frame = frames.pop().unwrap();
                 locals.truncate(frame.base);
-                // A memoization miss: record the result so future calls with the
-                // same arguments return instantly (bounded for safety).
-                if let Some(key) = frame.memo_key
-                    && memo.len() < MEMO_MAX_ENTRIES {
-                        memo.insert(key, ret.clone());
+                // A memoization miss: record the result so future calls with the same
+                // arguments return instantly. Bounded for safety — but on overflow, CLEAR and
+                // start fresh rather than freezing: a frozen cache would pin 5M values in RAM
+                // forever *and* stop memoizing, so a long-running process would lose the
+                // speedup. A periodic reset keeps both memory and memoization healthy.
+                if let Some(key) = frame.memo_key {
+                    if memo.len() >= MEMO_MAX_ENTRIES {
+                        memo.clear();
                     }
+                    memo.insert(key, ret.clone());
+                }
                 stack.push(ret);
             }
             Op::MakeArray(n) => {
