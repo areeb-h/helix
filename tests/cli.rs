@@ -325,6 +325,103 @@ fn http_server_serves_a_request() {
 }
 
 #[test]
+fn event_loop_server_serves_keepalive() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    // The cooperative event-loop server: `wait` for readiness, `accept_poll` new connections,
+    // `poll_request`/`respond` each ready one, keep the open ones. The point is HTTP/1.1
+    // keep-alive — serving *two* requests over *one* connection — which the blocking
+    // accept/respond model can't do. Handler echoes the path.
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_evserve.helix");
+    std::fs::write(
+        &src,
+        "fn handle(req) = { status: 200, text: req.path }\n\
+         fn evloop(l, conns) = do {\n\
+           ready = l.wait(conns, 50)\n\
+           fresh = l.accept_poll()\n\
+           live = if fresh.is_missing() then conns else conns.concat([fresh])\n\
+           active = live.filter(c => do {\n\
+             req = c.poll_request()\n\
+             if req.is_missing() then c.is_open() else do {\n\
+               sent = c.respond(handle(req))\n\
+               c.is_open()\n\
+             }\n\
+           })\n\
+           evloop(l, active)\n\
+         }\n\
+         evloop(listen(8233), [])\n",
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn the event-loop server");
+
+    let mut stream = None;
+    for _ in 0..50 {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:8233") {
+            stream = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut stream = stream.expect("event-loop server never started listening on 8233");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+
+    // Read one full HTTP response: headers, then Content-Length body bytes. A single
+    // read() can return just the header segment (TCP splits headers from body), so loop
+    // until the whole framed message has arrived.
+    fn read_response(stream: &mut TcpStream) -> String {
+        let mut acc: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let head_end = acc.windows(4).position(|w| w == b"\r\n\r\n");
+            if let Some(he) = head_end {
+                let head = String::from_utf8_lossy(&acc[..he]).to_ascii_lowercase();
+                let clen = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if acc.len() >= he + 4 + clen {
+                    break;
+                }
+            }
+            let n = stream.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            acc.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8_lossy(&acc).to_string()
+    }
+
+    // Two requests on ONE connection — keep-alive reuse.
+    stream.write_all(b"GET /one HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let r1 = read_response(&mut stream);
+    stream.write_all(b"GET /two HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let r2 = read_response(&mut stream);
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&src);
+
+    // First reply: 200, keep-alive (socket stays open), echoes the path.
+    assert!(r1.contains("200 OK"), "resp1:\n{r1}");
+    assert!(r1.contains("keep-alive"), "resp1 should be keep-alive:\n{r1}");
+    assert!(r1.contains("/one"), "resp1 body echoes path:\n{r1}");
+    // Second reply on the SAME connection proves keep-alive reuse works.
+    assert!(r2.contains("200 OK"), "resp2 (keep-alive reuse):\n{r2}");
+    assert!(r2.contains("/two"), "resp2 body echoes path:\n{r2}");
+}
+
+#[test]
 fn http_server_sends_custom_headers_and_redirects() {
     use std::io::Read;
     use std::net::TcpStream;

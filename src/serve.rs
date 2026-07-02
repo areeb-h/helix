@@ -42,6 +42,16 @@ pub enum NetHandle {
         /// (`sse`) connection the socket is non-blocking, so a slow client backs bytes
         /// up here instead of freezing the event loop; they drain on later `send`s.
         pending: RefCell<Vec<u8>>,
+        /// Accumulated inbound request bytes for the cooperative event loop (used by
+        /// `accept_poll`/`poll_request`): a non-blocking read appends here, and a request is
+        /// parsed once the buffer holds a complete one. Empty/unused on the blocking `accept`
+        /// path.
+        inbuf: RefCell<Vec<u8>>,
+        /// Event-loop connection state: `open` is false once the peer closed (EOF); `event`
+        /// marks a keep-alive event-loop connection, so `respond` keeps the socket open and
+        /// sends `Connection: keep-alive` instead of closing.
+        open: Cell<bool>,
+        event: Cell<bool>,
     },
     /// An open HTTP response body being read incrementally (`http_stream`) — the pull-based
     /// streaming *client*. Holds the response `status` and a buffered reader consumed
@@ -392,6 +402,10 @@ fn finish_connection(stream: TcpStream, line: usize, col: usize) -> Result<Value
             request,
             stream: RefCell::new(Some(stream)),
             pending: RefCell::new(Vec::new()),
+            // Blocking one-shot connection: the event-loop fields are inert.
+            inbuf: RefCell::new(Vec::new()),
+            open: Cell::new(true),
+            event: Cell::new(false),
         }))),
         Err(e) => {
             // A malformed / oversized request (a header bomb, a bad request line, a client
@@ -547,8 +561,8 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
 /// - a **string** is sent as `text/plain`;
 /// - any other value is serialized as JSON.
 pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
-    let cell = match &**handle {
-        NetHandle::Conn { stream, .. } => stream,
+    let (cell, event, open) = match &**handle {
+        NetHandle::Conn { stream, event, open, .. } => (stream, event, open),
         _ => {
             return Err(HelixError::new(
                 "`respond` works on a connection from `accept()`, not a listener",
@@ -557,15 +571,6 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
             ));
         }
     };
-    let mut stream = match cell.borrow_mut().take() {
-        Some(s) => s,
-        None => {
-            return Err(HelixError::new("this connection has already been responded to", line, col));
-        }
-    };
-    // A slow reader must not hang the (single-threaded) shard mid-response: bound the
-    // write. On timeout the write errors and is swallowed below, like a disconnect.
-    stream.set_write_timeout(Some(WRITE_TIMEOUT)).ok();
 
     let (status, headers, body) = build_response(value, line, col)?;
     let mut head = format!("HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
@@ -576,20 +581,282 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
         head.push_str("\r\n");
     }
     // Content-Length and Connection are computed here (a custom `headers` value can't
-    // override them — see `merge_headers`), so they are appended after the user's.
-    head.push_str(&format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()));
+    // override them — see `merge_headers`), so they are appended after the user's. An
+    // event-loop connection (`accept_poll`) is kept alive for the next request; a plain
+    // blocking connection is closed after the reply.
+    let ka = event.get();
+    let conn_hdr = if ka { "keep-alive" } else { "close" };
+    head.push_str(&format!("Content-Length: {}\r\nConnection: {conn_hdr}\r\n\r\n", body.len()));
     let write = |s: &mut TcpStream| -> std::io::Result<()> {
         s.write_all(head.as_bytes())?;
         s.write_all(body.as_bytes())?;
         s.flush()
     };
+
+    if ka {
+        // Keep-alive event-loop connection: write via a borrow and leave the socket open for
+        // `poll_request` to read the next request. A write failure means the client left —
+        // close and mark it done so the event loop drops it.
+        let mut guard = cell.borrow_mut();
+        let Some(s) = guard.as_mut() else { return Ok(Value::Unit) };
+        if write(s).is_err() {
+            let _ = s.shutdown(Shutdown::Both);
+            *guard = None;
+            open.set(false);
+        }
+        return Ok(Value::Unit);
+    }
+
+    // Blocking one-shot connection: take the stream, write, and close.
+    let mut stream = match cell.borrow_mut().take() {
+        Some(s) => s,
+        None => {
+            return Err(HelixError::new("this connection has already been responded to", line, col));
+        }
+    };
+    stream.set_write_timeout(Some(WRITE_TIMEOUT)).ok();
     // A write failure means the client went away (broken pipe / connection reset) — a
     // routine event for a server, never the program's fault. Best-effort: drop the
-    // undeliverable response and keep the program's accept loop alive, the same
-    // philosophy as the SIGPIPE-for-stdout handling. A server that died because a
-    // browser tab closed would be unusable (and SSE clients disconnect constantly).
+    // undeliverable response and keep the program's accept loop alive.
     let _ = write(&mut stream);
     let _ = stream.shutdown(Shutdown::Both);
+    Ok(Value::Unit)
+}
+
+/// The result of trying to parse one request out of a connection's accumulated bytes.
+enum BufParse {
+    /// Not enough bytes yet — keep the buffer and read more later.
+    Incomplete,
+    /// A full request plus the number of bytes it consumed (drained from the buffer).
+    Complete(Box<Value>, usize),
+    /// The head is malformed or over its size limit — the connection should be closed.
+    Malformed,
+}
+
+/// Find the first occurrence of `needle` in `hay` (for locating the `\r\n\r\n` head end).
+fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
+}
+
+/// Parse one HTTP request out of accumulated bytes (the cooperative event loop's non-blocking
+/// path). Unlike [`parse_request`], it never reads/blocks — it works on what's buffered so far,
+/// returning [`BufParse::Incomplete`] until a whole request (head + `Content-Length` body) is
+/// present. The DoS caps ([`MAX_HEADER_LINE`]/[`MAX_HEADER_COUNT`]/[`MAX_BODY`]) apply here too.
+fn parse_request_buf(buf: &[u8]) -> BufParse {
+    let Some(head_end) = find_sub(buf, b"\r\n\r\n") else {
+        // No end-of-head yet. Refuse an unbounded head (slow-loris) before it grows forever.
+        return if buf.len() > MAX_HEADER_LINE * 8 {
+            BufParse::Malformed
+        } else {
+            BufParse::Incomplete
+        };
+    };
+    let head = String::from_utf8_lossy(&buf[..head_end]);
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next().unwrap_or("");
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("").to_string();
+    let target = parts.next().unwrap_or("/").to_string();
+    let (path, query) = match target.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (target, String::new()),
+    };
+    let mut headers = std::collections::BTreeMap::new();
+    let mut content_length = 0usize;
+    let mut count = 0usize;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        count += 1;
+        if count > MAX_HEADER_COUNT {
+            return BufParse::Malformed;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim().to_ascii_lowercase();
+            let val = v.trim().to_string();
+            if key == "content-length" {
+                content_length = val.parse().unwrap_or(0);
+            }
+            headers.insert(DictKey::Str(Rc::new(key)), Value::Str(Rc::new(val)));
+        }
+    }
+    let content_length = content_length.min(MAX_BODY);
+    let total = head_end + 4 + content_length;
+    if buf.len() < total {
+        return BufParse::Incomplete; // waiting for the body
+    }
+    let body = String::from_utf8_lossy(&buf[head_end + 4..total]).into_owned();
+    let record = vec![
+        (Symbol::intern("method"), Value::Str(Rc::new(method))),
+        (Symbol::intern("path"), Value::Str(Rc::new(path))),
+        (Symbol::intern("query"), Value::Str(Rc::new(query))),
+        (Symbol::intern("headers"), Value::Dict(Rc::new(headers))),
+        (Symbol::intern("body"), Value::Str(Rc::new(body))),
+    ];
+    BufParse::Complete(Box::new(Value::Record(Rc::new(record))), total)
+}
+
+/// `listener.accept_poll()` — the cooperative event loop's non-blocking accept: return a
+/// **persistent keep-alive connection** (its socket set non-blocking + `TCP_NODELAY`) if a
+/// client is waiting, else `missing`. Unlike `accept`/`poll`, the request is NOT parsed here —
+/// the program drives `poll_request`/`respond` across many connections in one loop, so a single
+/// thread serves many keep-alive clients interleaved (no per-connection blocking).
+pub fn accept_poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
+    let listener = match &**handle {
+        NetHandle::Listener(l) => l,
+        _ => {
+            return Err(HelixError::new(
+                "`accept_poll` works on a listener from `listen(port)`, not a connection",
+                line,
+                col,
+            ))
+        }
+    };
+    listener.set_nonblocking(true).ok();
+    let accepted = listener.accept();
+    listener.set_nonblocking(false).ok();
+    match accepted {
+        Ok((stream, _peer)) => {
+            stream.set_nonblocking(true).ok();
+            stream.set_nodelay(true).ok();
+            Ok(Value::Net(Rc::new(NetHandle::Conn {
+                request: Value::Missing,
+                stream: RefCell::new(Some(stream)),
+                pending: RefCell::new(Vec::new()),
+                inbuf: RefCell::new(Vec::new()),
+                open: Cell::new(true),
+                event: Cell::new(true),
+            })))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Value::Missing),
+        Err(e) => Err(HelixError::new(format!("accept_poll failed: {e}"), line, col)),
+    }
+}
+
+/// `conn.poll_request()` — the cooperative event loop's non-blocking read: drain whatever bytes
+/// are available (without blocking), and return the next request if a whole one has arrived,
+/// else `missing`. `missing` means either "not ready yet" (still open — check `is_open`) or
+/// "closed" (`is_open` is now false). A malformed/oversized request closes the connection.
+pub fn poll_request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
+    let (stream, inbuf, open) = match &**handle {
+        NetHandle::Conn { stream, inbuf, open, .. } => (stream, inbuf, open),
+        _ => {
+            return Err(HelixError::new(
+                "`poll_request` works on a connection from `accept_poll()`",
+                line,
+                col,
+            ))
+        }
+    };
+    if !open.get() {
+        return Ok(Value::Missing);
+    }
+    // Non-blocking drain of everything currently readable into the accumulation buffer.
+    {
+        let mut guard = stream.borrow_mut();
+        let Some(s) = guard.as_mut() else {
+            open.set(false);
+            return Ok(Value::Missing);
+        };
+        let mut buf = inbuf.borrow_mut();
+        let mut tmp = [0u8; 8192];
+        loop {
+            match s.read(&mut tmp) {
+                Ok(0) => {
+                    open.set(false); // EOF: peer closed
+                    break;
+                }
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.len() > MAX_HEADER_LINE * 8 + MAX_BODY {
+                        open.set(false); // runaway: drop it
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break, // nothing more now
+                Err(_) => {
+                    open.set(false);
+                    break;
+                }
+            }
+        }
+    }
+    // Try to carve a complete request out of the buffer.
+    let mut buf = inbuf.borrow_mut();
+    match parse_request_buf(&buf) {
+        BufParse::Complete(req, consumed) => {
+            buf.drain(..consumed);
+            Ok(*req)
+        }
+        BufParse::Incomplete => Ok(Value::Missing),
+        BufParse::Malformed => {
+            open.set(false);
+            Ok(Value::Missing)
+        }
+    }
+}
+
+/// `conn.is_open()` — whether a cooperative-event-loop connection is still open (the peer
+/// hasn't closed and it hasn't been dropped). The loop keeps open connections and discards
+/// closed ones.
+pub fn is_open(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
+    match &**handle {
+        NetHandle::Conn { open, .. } => Ok(Value::Bool(open.get())),
+        _ => Err(HelixError::new("`is_open` works on a connection", line, col)),
+    }
+}
+
+/// `listener.wait(conns, timeout_ms)` — block until the listener has a pending connection, OR
+/// any connection in `conns` has readable data, OR `timeout_ms` elapses. This is the readiness
+/// primitive (`poll(2)`) that turns the cooperative event loop from a busy-spin (100% CPU) into
+/// a sleep-until-ready loop: at full load `poll` returns immediately (work is waiting) so
+/// throughput is unaffected, but an idle server blocks here instead of spinning — ~0% CPU. The
+/// small timeout also bounds the rare case of an already-buffered pipelined request.
+pub fn wait(
+    handle: &Rc<NetHandle>,
+    conns: &Value,
+    timeout_ms: i64,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    if !matches!(&**handle, NetHandle::Listener(_)) {
+        return Err(HelixError::new("`wait` works on a listener from `listen(port)`", line, col));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let mut fds: Vec<libc::pollfd> = Vec::new();
+        let mut push_fd = |fd: std::os::fd::RawFd| {
+            fds.push(libc::pollfd { fd, events: libc::POLLIN, revents: 0 });
+        };
+        if let NetHandle::Listener(l) = &**handle {
+            push_fd(l.as_raw_fd());
+        }
+        if let Value::Array(arr) = conns {
+            for v in arr.to_values().iter() {
+                if let Value::Net(h) = v
+                    && let NetHandle::Conn { stream, .. } = &**h
+                    && let Some(s) = stream.borrow().as_ref()
+                {
+                    push_fd(s.as_raw_fd());
+                }
+            }
+        }
+        let t = timeout_ms.clamp(0, i32::MAX as i64) as i32;
+        // SAFETY: `fds` is a valid, correctly-sized slice of `pollfd` for the call's duration.
+        unsafe {
+            libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, t);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = conns;
+        std::thread::sleep(Duration::from_millis(timeout_ms.clamp(0, 1000) as u64));
+    }
     Ok(Value::Unit)
 }
 

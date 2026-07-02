@@ -69,17 +69,35 @@ on a persistent connection is *pinned* to that one client until it closes, so th
 request (conn-per-request) is actually **better** for concurrent load, because it cycles
 through all connections instead of pinning one per shard. So naive keep-alive was reverted.
 
-Keep-alive is only a win when connections are **interleaved**. Two ways to get that:
-- **Cooperative event loop, in-model (no deps):** the same pattern Helix already uses for
-  SSE (`poll()` + `send` to many). It needs a **non-blocking `request()`** — peek a
-  connection for a *ready* request (parse if bytes are buffered, else `missing`) — plus a
-  program that keeps a list of open connections and services whichever is ready each tick.
-  This multiplexes many keep-alive connections on one thread with no async runtime. This is
-  the real Stage 1, and it is a genuine new primitive + event-loop shape, not a small patch.
-- **Async runtime (Stage 2/3 stack):** falls out for free once on tokio+hyper (below).
+Keep-alive is only a win when connections are **interleaved**. That was then built as a
+**cooperative event loop, in-model, no new deps** — the same shape Helix already uses for SSE
+(`poll` + `send` to many), now for request/response. Four primitives were added:
+`listener.accept_poll()` (non-blocking accept → a persistent keep-alive connection),
+`conn.poll_request()` (non-blocking: parse the next request out of an accumulation buffer, or
+`missing`), `conn.is_open()`, and — crucially — `listener.wait(conns, timeout_ms)`, a
+`poll(2)`-based readiness primitive (`libc` was already a dependency) that blocks until any
+connection is ready. The server loops: `wait` → `accept_poll` → for each conn `poll_request`
+then `respond` (keep-alive) → drop closed ones (tail-recursive, so constant-space via TCO).
 
-Net for the blocking `std::net` server: **stay conn-per-request** (sharded ≈ 47–51k here —
-a fine floor), and pursue interleaved keep-alive via the cooperative loop or the async stack.
+**Measured (single core, localhost, this box):**
+
+| Server | req/s | failures | idle CPU |
+|---|---|---|---|
+| conn-per-request (6-shard) | 47–51k | 0 | low |
+| naive blocking keep-alive | 22–27k | starves | — |
+| **cooperative event loop** | **83k** | **0** | **0.3%** |
+
+The event loop does **83k on one core** — ~1.7× the 6-shard conn-per-request floor and 3–4×
+naive keep-alive — with **zero starvation** and, thanks to `wait`/`poll(2)`, **~0.3% CPU when
+idle** (a busy-spin without a readiness primitive pinned 100%; any coarse `sleep` instead
+crashed throughput to ~20k — `poll(2)` is what makes it both fast and idle-cheap). Memory is
+flat (16 MB) via TCO.
+
+Known ceiling: `poll(2)` is O(N) in the connection set, so this won't scale linearly across
+shards the way `epoll`/an async reactor would (sharded topped ~90k here) — that final step is
+the Stage 2/3 async stack. But as an in-model, no-new-deps Stage 1, the cooperative event loop
+is a real, shipped win: the blocking `serve_loop` (conn-per-request) stays the simple default,
+and `serve_events` (the cooperative loop) is the high-throughput option.
 
 ### Stage 2 — HTTP/2, and Stage 3 — HTTP/3, via an async stack
 
@@ -115,13 +133,14 @@ the parts that are the product, borrow the parts that are a decade of hardening.
 
 ## Consequences
 
-- **Now:** the blocking `std::net` server stays **conn-per-request** (sharded ≈ 47–51k
-  req/s here — a solid floor). Naive keep-alive was prototyped, measured to *regress*
-  concurrent load (serialization/starvation), and reverted.
-- **Next (in-model, no deps):** interleaved keep-alive via a **cooperative event loop** — a
-  non-blocking `request()` primitive + a poll-based multi-connection serve loop (the same
-  shape as SSE). This is the real path to higher concurrent throughput without an async
-  runtime; it's a new primitive, so its own focused change.
+- **Done:** two server models. The blocking `serve_loop` (conn-per-request, sharded ≈ 47–51k)
+  stays the simple default; the **cooperative event loop** (`accept_poll`/`poll_request`/
+  `is_open`/`wait`) is the high-throughput option — **83k on one core, zero starvation,
+  ~0.3% idle CPU**, in-model, no new deps. Naive blocking keep-alive (which regressed) was
+  reverted along the way.
+- **Ceiling:** `poll(2)` is O(N) in the connection set, so the cooperative loop doesn't scale
+  linearly across shards (topped ~90k here). Linear multi-core scaling + HTTP/2/3 is the async
+  stack below.
 - **Later, as a major version:** Stages 2–3 behind a feature flag, on Tokio + hyper +
   Quinn, TLS via rustls, sandbox-preserving. Never a hand-rolled QUIC/TLS/H2 core. The
   async stack gets HTTP/1.1 keep-alive, HTTP/2, and HTTP/3 all at once.

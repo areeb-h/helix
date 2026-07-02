@@ -102,6 +102,41 @@ fn net_method(
             }
             crate::serve::poll(h, line, col)
         }
+        // Cooperative event-loop server: non-blocking accept + per-connection non-blocking
+        // read, so one thread serves many keep-alive connections interleaved.
+        "accept_poll" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`accept_poll` takes no arguments", line, col));
+            }
+            crate::serve::accept_poll(h, line, col)
+        }
+        "poll_request" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`poll_request` takes no arguments", line, col));
+            }
+            crate::serve::poll_request(h, line, col)
+        }
+        "is_open" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`is_open` takes no arguments", line, col));
+            }
+            crate::serve::is_open(h, line, col)
+        }
+        "wait" => {
+            if args.len() != 2 {
+                return Err(HelixError::new(
+                    "`wait` takes (conns, timeout_ms)",
+                    line,
+                    col,
+                )
+                .hint("e.g. `l.wait(conns, 50)` — block until a connection is ready."));
+            }
+            let timeout = match &args[1] {
+                Value::Int(n) => *n,
+                other => return Err(type_err("wait", "a timeout in ms (integer)", other, line, col)),
+            };
+            crate::serve::wait(h, &args[0], timeout, line, col)
+        }
         "request" => {
             if !args.is_empty() {
                 return Err(HelixError::new("`request` takes no arguments", line, col));

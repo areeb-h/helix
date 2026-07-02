@@ -296,8 +296,11 @@ pub static RECORD_METHODS: &[&str] = &["get", "has", "keys", "values", "items"];
 /// Network-handle (`Net`) methods — the HTTP server surface (`src/serve.rs`). A
 /// listener (from `listen(port)`) has `accept`; a connection (from `accept()`) has
 /// `respond`. Effects, dispatched at runtime like the other opaque types.
-pub static NET_METHODS: &[&str] =
-    &["accept", "poll", "request", "respond", "sse", "send", "next", "status", "close"];
+pub static NET_METHODS: &[&str] = &[
+    "accept", "poll", "request", "respond", "sse", "send", "next", "status", "close",
+    // Cooperative event-loop server (keep-alive, one thread serves many connections):
+    "accept_poll", "poll_request", "is_open", "wait",
+];
 
 /// Look up a builtin by its dotted path.
 pub fn lookup(path: &str) -> Option<&'static BuiltinDef> {
