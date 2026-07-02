@@ -84,6 +84,20 @@ Selective imports validate against the dependency's exports at load time:
   test fixtures gain `export` on their public names; this is a deliberate breaking change,
   taken pre-1.0 with ~0 users (the right window).
 
+### Follow-up fixed — named args & defaults survive qualification
+
+Named arguments and default parameters ([ROADMAP](../ROADMAP.md) Phase 1) are resolved
+at **parse time** against a function's recorded signature. But a *qualified* call into
+an imported module — `dep.f(x, open: -10)` — was rewritten by the loader's namespacing
+pass into a flat mangled call **before** named-arg resolution ran, so the resolver no
+longer recognised `dep.f` as the function `f` and couldn't place the named argument or
+fill defaults: qualified calls silently only supported positional arguments. Fixed so
+the signature is carried through the rewrite and resolution happens against the
+qualified target — `dep.f(x, name: y)` and defaulted parameters now work identically
+whether the callee is local or imported (commit `795782e`). This keeps the "named args
+are table-stakes DX" promise from being quietly broken the moment code is split into
+modules.
+
 ### Known limitation (future work)
 Module-level globals still initialize **eagerly** in dependency order, so a binding whose
 initializer has a side effect (`TABLE = read_csv(...)`) *does* run at import. The

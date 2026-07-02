@@ -125,6 +125,15 @@ gap(3, open: -10)                          # override one parameter by name
   and methods (e.g. `read_csv(..., delimiter: ";")`, `seq.align(..., open: -10)`) still
   take positional arguments — supporting them needs per-builtin parameter-name metadata, a
   follow-up. Non-literal defaults (evaluated in function scope) are also deferred.
+- **Shipped follow-ups (parse-time, same zero-cost model):**
+  - **Through module qualification** — `dep.f(x, open: -10)` resolves named arguments and
+    fills defaults exactly like a local call. (The loader's namespacing rewrite used to
+    run first and hide the target from the resolver; fixed — see
+    [ADR 0019](adr/0019-module-system.md).)
+  - **Inside interpolation holes** — a call in a `"{ … }"` string
+    (`"gap={gap(3, open: -10)}"`) resolves named args and defaults like any other call
+    (the parser previously parsed interpolation-hole calls on a path that skipped
+    resolution).
 
 ---
 
@@ -177,16 +186,62 @@ summarize(normalize(clean(load("data.csv"))))
 
 ---
 
-## Proposal 6 — Multi-step expressions: `let … in` vs a block
+## Proposal 6 — Multi-step expressions: `do { … }` block ✅ *shipped*
 
-A multi-step function body today must nest `let … in` (a `{ … }` block is parsed as a
-*record*, so it's unavailable):
+A multi-step function body used to nest `let … in` (a `{ … }` alone parses as a
+*record*, so it was unavailable):
 ```helix
 fn risk(a, c) = let bmi = weight / (height * height) in let s = bmi * a in s + c
 ```
-This nests awkwardly. Options: a trailing-`where` form (`expr where { bmi = …, s = … }`,
-math-paper-like) or a dedicated `do { … }` block. **Lower priority**, but the `let…in`
-chain is the current weakest readability spot for non-trivial functions — worth revisiting.
+That nests awkwardly. **A `do { … }` block shipped** — a sequence of bindings and a
+final result expression, desugared at parse time into the `let … in` chain (so both
+engines and the type checker are unchanged, zero run-time cost):
+```helix
+fn risk(a, c) = do {
+  bmi = weight / (height * height)
+  s = bmi * a
+  s + c
+}
+```
+The last expression is the value; earlier lines are `name = expr` bindings. This is
+now the idiomatic form for a non-trivial body (and for a lambda body that needs steps,
+as in the event-loop server's `filter(c => do { … })`). The `let … in` form still works.
+
+---
+
+## Proposal 7 — Record update / spread `{ ...base, field: value }` ✅ *shipped*
+
+Building a modified copy of a record used to mean re-listing every field, which drops
+any field you forget and is pure viscosity (many edits per logical change). **Spread
+shipped** — `{ ...base, field: newValue }` copies `base` and overrides/adds the listed
+fields, producing a *new* record (Helix values are immutable):
+```helix
+updated = { ...patient, age: patient.age + 1 }          # one field changed, rest copied
+req2    = { ...req, headers: merged, query: parsed }     # add/replace several
+```
+- **Why:** closeness-of-mapping ("same as before, but …") and low viscosity — the exact
+  shape TypeScript/JS spread and Elm/OCaml record-update serve. It was also a real
+  correctness lever: a web-lib request object rebuilt field-by-field silently *dropped*
+  headers/query; `{ ...req, … }` fixed that class of bug by construction.
+- **Semantics:** later keys win; spread is evaluated left-to-right; the result is a
+  fresh immutable record. Type-checked structurally like any record literal.
+
+---
+
+## Proposal 8 — Function values are callable `(rec.handler)(x)` ✅ *shipped*
+
+A function stored in a record/array field, or a `=>` lambda in a variable, is a
+first-class value and is **called with ordinary call syntax**. When the callee is an
+expression rather than a bare name, parenthesise it so it isn't read as a method call:
+```helix
+route = { path: "/x", handler: req => { status: 200, text: req.path } }
+resp  = (route.handler)(req)          # call the function in the field …
+resp  = route.handler(req)            # … vs. this: a *method* `handler` on `route`
+```
+This is what makes record-of-handlers dispatch (a router, a plugin table, a strategy
+map) expressible in-model. Full rationale and the method-vs-value disambiguation are in
+[ADR 0005](adr/0005-syntax-conventions.md); the VM path (`Op::CallValue`,
+`Value::VmFunc`, no captured environment) is in [execution-engine.md](execution-engine.md).
 
 ---
 

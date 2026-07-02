@@ -1,7 +1,10 @@
 # ADR 0010 — Networking, privacy & security
 
-- **Status:** Proposed (no networking exists yet; this governs the first code that adds it)
-- **Date:** 2026-06-24
+- **Status:** Accepted — the client and a **minimal from-scratch HTTP *server*** now
+  exist (see the 2026-07 amendment at the end); the toolchain/privacy posture below
+  stands unchanged. The HTTP-version roadmap for the server is
+  [ADR 0022](0022-http-version-roadmap.md).
+- **Date:** 2026-06-24 (amended 2026-07-02)
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0009 — Distribution & installation](0009-distribution-and-install.md),
   [ADR 0008 — CPython interop](0008-cpython-interop.md),
@@ -154,3 +157,39 @@ access logs). The posture (already chosen in ADR 0009 §9):
   lands.
 - Whether self-update is desirable at all versus delegating to OS package managers
   (self-update is an attractive attack target; some tools deliberately omit it).
+
+## Amendment (2026-07-02) — the client completed, and a minimal HTTP server
+
+Two things changed since this ADR was written. Neither disturbs the toolchain/privacy
+posture (D1–D4); both are **program capabilities**, `Net`-gated by the capability
+sandbox ([ADR 0021](0021-capability-sandbox.md)).
+
+**The HTTP client is complete.** Beyond `http_get`, the core now ships:
+
+- `http_post(url, body[, headers])` — completing GET + POST.
+- `http_request(url, {method, headers, body})` — the general client: any method,
+  request headers, and access to the **response headers** as well as `{status, body}`.
+- `http_stream(url, …)` — a **pull-based streaming client**: consume a response
+  incrementally (token-by-token / chunk-by-chunk) instead of buffering the whole body,
+  for large downloads and streaming APIs (e.g. SSE/LLM token streams).
+
+**A minimal HTTP *server* was added — and it does not contradict D2a.** D2a said
+"serving APIs … are out of the core," meaning the *heavy web-backend* stack
+(protobuf/HTTP-2/async servers). What shipped is deliberately the opposite of heavy: a
+**from-scratch HTTP/1.x server on `std::net`**, synchronous, share-nothing, **no async
+runtime and no new dependency** — `listen`/`accept`/`respond`, non-blocking `poll` +
+SSE (`sse`/`send`), `SO_REUSEPORT` sharding, and (per ADR 0022) a cooperative
+event-loop keep-alive mode (`accept_poll`/`poll_request`/`is_open`/`wait`). Serving a
+result — a dashboard, an SSE metrics stream, a small local API in front of a data
+pipeline — turned out to be a genuine scientific-workflow need, and doing it in-model
+on `std::net` keeps the self-contained-binary property that the whole distribution
+strategy rests on.
+
+The **non-negotiable line is unchanged and now explicit in ADR 0022**: Helix
+implements HTTP *semantics and its own 1.x parsing*, but **never hand-rolls QUIC, TLS,
+or the HTTP/2 framing layer** — those, and the async runtime they require, are a
+deliberate future major-version step delegated to audited crates (hyper / rustls /
+Quinn), exactly as the rest of the language delegates bio formats and matmul. The
+untrusted-input surface the server introduces is bounded per the 2026-07 hardening
+round (request-head caps, SSE backlog budget, malformed-request resilience) — see
+[audit.md](../audit.md).

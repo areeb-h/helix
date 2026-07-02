@@ -87,6 +87,37 @@ Two features recently moved onto the VM:
   back). This is the only sound disambiguation, because `where`/`sort`/`min` have
   distinct meanings per receiver and column arguments cannot be compiled as values.
 
+### Tail-call optimization (constant-space recursion)
+
+The heap call stack bounds recursion by *memory* rather than the native stack, but a
+genuinely unbounded tail-recursive function — the idiomatic shape for a long-running
+loop (a server's `accept → serve → accept` loop, an event loop, an accumulating fold)
+— still pushed one `Frame` per call and grew the frame `Vec` until OOM. That makes the
+natural "run forever in constant space" program a slow memory leak.
+
+The VM therefore performs **tail-call optimization**. A `CallFn` in **tail position**
+(its result is returned directly, possibly through intervening `Jump`s from `if`/block
+arms) is rewritten to `Op::TailCallFn`, which **reuses the current frame** — it writes
+the new arguments into the existing slots and jumps to the function's entry instead of
+pushing a new frame. Tail recursion then runs in **genuinely constant stack space**.
+
+- **Where:** a `tco_peephole` pass in `src/bytecode.rs` rewrites eligible `CallFn`s
+  (run during `compile_func` and `compile_lambda`); the `Op::TailCallFn { idx, nargs }`
+  handler in `src/vm.rs` does the frame reuse.
+- **Consequence:** the cooperative event-loop server
+  ([ADR 0022](adr/0022-http-version-roadmap.md)) loops tail-recursively and holds at a
+  flat 16 MB indefinitely; before TCO the same loop grew without bound.
+- **Semantics unchanged:** TCO only elides a frame; it never changes a result. It does
+  turn one previously-diverging program from "grows memory then OOMs" into a genuine
+  infinite loop — an *unbounded* tail recursion with no base case (`fn f(n) = f(n+1)`)
+  now spins forever in constant space rather than eventually crashing, which is the
+  correct behaviour for an intentional loop and the standard TCO trade-off. (Test
+  fixtures that relied on such a function *erroring* were changed to a non-tail form,
+  `1 + f(n+1)`, which still hits the depth guard.)
+- **Parity:** verified constant-space by `deep_tail_recursion` and reconciled across
+  engines by `tail_calls_match_tree_walker_on_vm`; the tree-walker reaches the same
+  results (its own recursion is guarded at `MAX_CALL_DEPTH`).
+
 ### Collapse to one engine
 
 The VM is the engine for every valid, common program. The tree-walker survives

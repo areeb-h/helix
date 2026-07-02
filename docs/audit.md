@@ -100,3 +100,86 @@ specialization was **removed** — the i64 specialization is type-safe (all-`Int
 arguments always produce an `Int` result), f64 is not, and float functions run
 correctly on the VM. This eliminated the entire result-type divergence class. (110
 tests now.)
+
+---
+
+# Second hardening round (2026-07-02)
+
+A second adversarial pass, prompted by two new realities: the language now has a
+**networked surface** (an in-process HTTP server that accepts untrusted bytes from
+the network — see [ADR 0022](adr/0022-http-version-roadmap.md)), and the VM had grown
+long-running-process features (memoization, tail recursion) whose failure modes are
+memory growth rather than a wrong answer. The theme of this round is **resource
+bounds and liveness**, not just correctness: an attacker who cannot make Helix return
+the wrong value can still try to make it exhaust memory, spin a core, or wedge. Three
+agents swept the interner, the VM's caches and recursion, the network parser, and the
+differential oracle's blind spots. Every finding below is fixed and regression-tested.
+
+## Denial-of-service / resource exhaustion — fixed
+
+1. **Unbounded request head (network DoS).** The HTTP request parser read header
+   lines with no limit, so a client could stream an endless header line, or millions
+   of tiny headers, and force unbounded buffering per connection. Fix: a per-line cap
+   (`MAX_HEADER_LINE = 16 KiB`) enforced with a bounded `take()` on the reader, a
+   header-count cap (`MAX_HEADER_COUNT = 1000`), and the existing body cap
+   (`MAX_BODY`). The same caps apply on **both** server paths — the blocking
+   `request()` reader and the event loop's byte-buffer `parse_request_buf` — so
+   keep-alive connections are bounded too. (`9300968`)
+2. **Malformed request could kill the server loop.** A request that failed to parse
+   propagated an error out of `accept`/`poll`, tearing down the accept loop and
+   ending service for everyone. Fix: a malformed request is answered with a `400` and
+   the connection dropped, while the server **keeps serving** — a single bad client
+   can no longer take the process down. (`f4ce3ac`)
+3. **SSE backlog could grow without bound.** A slow or vanished SSE subscriber let
+   queued events accumulate in memory indefinitely (a classic slow-consumer leak).
+   Fix: a per-shard pending-bytes budget (`SSE_PENDING`) plus a global ceiling
+   (`SSE_GLOBAL_PENDING = 64 MiB`); once exceeded, the laggard's queue is shed rather
+   than growing until OOM. (`faa523c`)
+4. **Memoization cache could freeze memory.** The VM's memo table grew for the
+   lifetime of the process; a program that memoized over a very large or unbounded
+   key space would climb until OOM. Fix: an entry cap (`MEMO_MAX_ENTRIES`) that
+   **evicts** (clears and rebuilds) on overflow instead of freezing — bounded memory,
+   preserving the fast path for the common small-key case. (`a54aba1`)
+5. **Symbol interner growth from untrusted keys.** Interned symbols are never freed
+   (by design — they back fast identifier comparison), so interning attacker-supplied
+   strings (e.g. arbitrary JSON object keys) would be an unbounded leak. Two guards,
+   audited sound this round: the interner is **capped at 50M** symbols, and dynamic
+   key lookup uses `lookup` (read-only, no insertion) rather than `intern`, so parsing
+   untrusted JSON with novel keys on every request cannot grow the interner.
+
+## Correctness / liveness — fixed
+
+6. **Tail recursion leaked the call stack.** Deeply/unbounded tail-recursive functions
+   (the idiomatic shape for a server's accept loop or any long-running fold) pushed a
+   VM frame per call, so a program meant to run forever in constant space instead grew
+   the frame `Vec` until OOM. Fix: **tail-call optimization** — an `Op::TailCallFn`
+   plus a `tco_peephole` bytecode pass that rewrites a `CallFn` in tail position into a
+   frame **reuse** rather than a push, making tail recursion genuinely constant-space.
+   The event-loop server relies on this to run indefinitely at flat 16 MB. Verified by
+   `deep_tail_recursion` and reconciled on both engines by
+   `tail_calls_match_tree_walker_on_vm`. (`48f3359`; see also
+   [execution-engine.md](execution-engine.md).)
+7. **Silent `NaN` from rational modulo / fractional power.** Rational `%` and a
+   fractional `**` could overflow `f64` and yield a silent `NaN` (the exact class of
+   silent-wrong-answer this project rejects — `missing` and errors are first-class
+   precisely so nothing is silently wrong). Fix: both now **raise a clean error** on
+   overflow instead of producing `NaN`. (`078892a`)
+
+## Oracle blind spots — closed
+
+The differential oracle (VM vs tree-walker) is the project's core correctness
+guarantee, so a *gap in what it exercises* is itself a finding. This round added
+targeted parity coverage for surfaces the fuzzers under-sampled — **Dict** operations,
+**sorted iteration order**, **error propagation paths**, and **modulo** semantics —
+all confirmed bit-identical across engines (`audit_flagged_surfaces_match_tree_walker`,
+`481046e`). A known **by-design** engine difference is documented rather than
+"fixed": the tree-walker guards recursion at `MAX_CALL_DEPTH = 20,000` while the VM
+(heap frames) allows `VM_MAX_DEPTH = 1,000,000` — the VM legitimately runs deeper, so
+the oracle treats depth-limit divergence at that boundary as expected.
+
+**Result of this round: the networked surface is bounded against the standard
+resource-exhaustion attacks (oversized/over-many headers, slow SSE consumers,
+malformed requests), the two long-running caches (memo, interner) and tail recursion
+are memory-bounded, two silent-`NaN` paths became clean errors, and the oracle's
+coverage of Dict/ordering/errors/modulo is locked in — all regression-tested and
+parity-checked (`scripts/vmparity.sh` → `RESULT=0`).**

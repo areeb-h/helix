@@ -1,6 +1,8 @@
 # ADR 0022 — HTTP version roadmap: keep-alive now, HTTP/2 & HTTP/3 via established stacks
 
-- **Status:** Proposed
+- **Status:** Accepted — **Stage 1 implemented** (cooperative event-loop keep-alive
+  shipped: `accept_poll`/`poll_request`/`is_open`/`wait`, measured 83k/core; commit
+  `067e452`). Stages 2–3 (async stack for HTTP/2/3) remain proposed.
 - **Date:** 2026-07-02
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0010 — Networking, privacy, security](0010-networking-privacy-security.md),

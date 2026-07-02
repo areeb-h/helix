@@ -35,11 +35,19 @@ Add a first-class **`Dict`** value: an immutable key→value map.
   `.insert`. (`insert` currently clones the map — O(n) per call — so a build-in-a-loop
   should prefer `to_dict`; a copy-on-write fast path for the uniquely-owned case is a
   future optimization.)
-- **Surface:** `get(k)` / `d[k]` (absent → `missing`, the safe accessor), `contains(k)`,
+- **Surface:** `get(k)` / `d[k]` (absent → `missing`, the safe accessor), `contains(k)`
+  (alias `has(k)` — `contains` reads naturally on a collection, `has` on a keyed map;
+  both dispatch to the same lookup, no synonym cost since it's one word for one concept),
   `keys()`, `values()`, `items()` (sorted), `count()`/`length()`, `insert(k, v)`,
   `remove(k)`; the free function `dict()`, the array method `to_dict()`, and
   `frequencies().to_dict()` to turn a histogram into a count lookup. Displays as
   `{k => v}` (arrow notation, sorted) — visually distinct from a record's `{field: v}`.
+- **JSON:** `d.to_json()` serializes a `Dict` as a **JSON object** (`{"k": v, …}` in
+  sorted key order, so output stays byte-reproducible), the natural inverse of
+  `str.parse_json()` producing a keyed map. String keys emit directly; non-string
+  scalar keys (int/bool/DNA) render as their string form (JSON object keys are always
+  strings). This makes `Dict` a first-class member of the JSON round-trip alongside
+  records and arrays.
 
 ## Consequences
 

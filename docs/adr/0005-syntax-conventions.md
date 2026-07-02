@@ -106,10 +106,24 @@ because `where` is the data-query verb DataFrames reuse.
   accepts `it` or an optional named binder.
 - Tests and examples updated; 25 unit tests passing.
 
+## Resolved (first-class functions landed)
+
+- **Do callable values call, and with what syntax?** *Yes.* A function value — a
+  bare function name, a `=>` lambda stored in a variable, or a function held in a
+  record/array field — is invoked with ordinary call syntax. When the callee is a bare
+  identifier bound to a function, `f(x)` already parsed as a call and works unchanged.
+  When the callee is an arbitrary *expression* (a field lookup, an index, a
+  parenthesised value), it is invoked by parenthesising the callee:
+  `(rec.handler)(x)`, `(handlers[i])(x)`. This is the minimal, unambiguous rule —
+  `rec.handler(x)` still means "call the *method* `handler` on `rec`", so the parens
+  are what distinguish "call the function *stored in* the field" from "call a method".
+  On the VM this dispatches through `Op::CallValue` against a `Value::VmFunc`; there is
+  no captured environment (the checker rejects local capture; free variables resolve to
+  shared globals), so a function value is just a reference to a compiled chunk. See
+  [execution-engine.md](../execution-engine.md) ("First-class functions").
+
 ## Open questions
 
-- When first-class functions land, does a bare `=>` value become callable, and
-  what's the call syntax (`f(x)` already parses as a free call)?
 - Should `=>` ever be required (not merely allowed) — e.g. to forbid `it`
   entirely in deeply nested chains for readability? Current preference is to keep
   `it` always legal.

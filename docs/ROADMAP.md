@@ -86,6 +86,11 @@ Lexer → parser → AST → tree-walking interpreter.
 - [x] **Records** `{name: "Ada", age: 41}` with `.field` access (`.method()` keeps
       parens). Structurally typed; field typos are caught at compile time. Nested,
       arrays-of-records, function-returning-record. Trailing commas allowed.
+- [x] **Record update / spread** `{ ...base, field: value }` — copy a record with
+      fields overridden/added, producing a new immutable record (later keys win).
+      Low-viscosity "same but …" updates; also fixed a real bug class (field-by-field
+      rebuilds silently dropping fields). See
+      [syntax-and-dx.md](syntax-and-dx.md) Proposal 7.
 - [x] **Slicing** `xs[1:3]`, `xs[:n]`, `xs[::2]`, `xs[::-1]` (full Python
       semantics; negative indices/step; arrays, strings, DNA). Type-checked
       (preserves the collection type; a non-integer bound is a compile error).
@@ -105,7 +110,14 @@ Lexer → parser → AST → tree-walking interpreter.
 - [x] **`let a = x, b = y in body`** — local bindings as expressions (sequential,
       scoped). Selected over indented blocks because indentation collides
       with multi-line dot-chains (see [ADR-0004](adr/0004-functions-errors-mutability.md)).
-- [ ] Multi-statement function bodies beyond `let` (only if a concrete need emerges).
+- [x] **`do { … }` blocks** — a sequence of `name = expr` bindings and a final result
+      expression, desugared at parse time to the `let … in` chain (zero run-time cost).
+      The idiomatic multi-step body; also used for multi-step lambda bodies. See
+      [syntax-and-dx.md](syntax-and-dx.md) Proposal 6.
+- [x] **Callable function values** — a function held in a variable / record / array
+      field is invoked with call syntax; parenthesise an expression callee to
+      distinguish it from a method call: `(rec.handler)(x)`. Enables router / dispatch-
+      table patterns. See [ADR 0005](adr/0005-syntax-conventions.md).
 
 ### Next within Phase 1
 - [x] Control flow — **decided: method/comprehension style.** `if cond then a
@@ -124,6 +136,9 @@ Lexer → parser → AST → tree-walking interpreter.
       Resolved to positional form at parse time (zero run-time cost). Defaults are
       literal constants; builtins/methods stay positional (a follow-up). Demo:
       [examples/language/named-arguments.helix](../examples/language/named-arguments.helix).
+      Shipped follow-ups: named args + defaults now also resolve **through module
+      qualification** (`dep.f(x, open: -10)` — [ADR 0019](adr/0019-module-system.md))
+      and **inside interpolation holes** (`"{gap(3, open: -10)}"`).
 - [x] `missing` value (scalar part of [ADR 0001](adr/0001-missing-data.md)):
       Option-style absence, Julia-style propagation and three-valued logic,
       `.is_missing()`, `.drop_missing()`, propagating aggregations.
@@ -231,15 +246,38 @@ estimators they require.
 - [x] **JSON** — `str.parse_json()` (object→record, array→array, scalars, `null`→
       `missing`) and `value.to_json()`. Pure compute, always available. See
       [ADR 0010](adr/0010-networking-privacy-security.md).
-- [x] **HTTP client** — `http_get(url)` → `{status, body}` for fetching REST APIs;
-      body is typically fed to `parse_json`. Default-on (`http` feature;
+- [x] **HTTP client (complete)** — `http_get(url)` → `{status, body}`;
+      `http_post(url, body[, headers])`; `http_request(url, {method, headers, body})`
+      the general form exposing **response headers** too; and `http_stream(url, …)`, a
+      **pull-based streaming client** (consume a response chunk-by-chunk — large
+      downloads, token streams — instead of buffering). Default-on (`http` feature;
       `--no-default-features` for a network-free binary). Demo:
       [examples/api/fetch.helix](../examples/api/fetch.helix).
+- [x] **Native HTTP server (from-scratch, `std::net`, no async runtime, no new dep)** —
+      `listen`/`accept`/`respond` with custom headers/redirects/cookies/CORS; non-blocking
+      `poll` for cooperative multi-client; **Server-Sent Events** (`sse`/`send`);
+      `SO_REUSEPORT` share-nothing sharding across cores; and a **cooperative event-loop
+      keep-alive** mode (`accept_poll`/`poll_request`/`is_open`/`wait`) measured at **83k
+      req/s on one core**. Governed by [ADR 0022](adr/0022-http-version-roadmap.md);
+      untrusted-input surface bounded (request-head caps, SSE backlog budget) per
+      [audit.md](audit.md). Demo:
+      [examples/api/event_server.helix](../examples/api/event_server.helix).
+- [x] **Stream ergonomics** — `write`/`elog` sinks (no-newline stdout write; stderr log),
+      stream `.close()`, and a per-chunk timeout on streaming reads, so streaming servers
+      and clients are ergonomic in-model.
 - [x] **String-keyed record access `r["key"]`** — dynamic field access for JSON keys
       that aren't valid identifiers (e.g. `d["first-name"]`); an absent key is
-      `missing` (the safe/optional accessor; `.field` stays the typo-catching one).
-- [ ] `http_post`/headers/auth; reading CSV/Parquet/JSON straight from a URL.
-- [ ] Serving APIs / gRPC / websockets stay out of the core — via Python interop.
+      `missing` (the safe/optional accessor; `.field` stays the typo-catching one). Plus
+      `r.get(k)`/`r.has(k)`/`r.keys()` for unknown-shape (parsed-JSON) records.
+- [ ] Reading CSV/Parquet/JSON straight from a URL; client auth helpers.
+- [ ] **HTTP/2 & HTTP/3** and linear multi-core scaling — a deliberate future
+      major-version step on an async stack (Tokio + hyper + Quinn, TLS via rustls),
+      **never a hand-rolled QUIC/TLS/H2 core**. See
+      [ADR 0022](adr/0022-http-version-roadmap.md) Stages 2–3.
+- [ ] Heavy web-backend / gRPC / websockets / Kafka stay out of the core — via Python
+      interop. (The minimal `std::net` server above is the in-core exception: serving a
+      dashboard / SSE stream / small local API is a real scientific need and stays
+      dependency-free.)
 
 ## Phase 4 — Tensor engine (foundation shipped)
 - [x] Native `Tensor` type (ndarray-backed, `f64`, dynamic rank) — see
@@ -413,6 +451,15 @@ motivates this phase.
 - [x] **Deep recursion** — the interpreter runs on a 2 GiB-stack thread; a
       `MAX_CALL_DEPTH` guard converts runaway recursion into a clean error rather
       than a crash.
+- [x] **Tail-call optimization (VM)** — a `CallFn` in tail position compiles to
+      `Op::TailCallFn` (via a `tco_peephole` pass) that **reuses the current frame**
+      instead of pushing, so tail recursion runs in **constant stack space**. This is
+      what lets an intentional forever-loop (a server accept loop, an event loop, an
+      accumulating fold) hold flat memory instead of growing the frame `Vec` until OOM
+      — the event-loop server ([ADR 0022](adr/0022-http-version-roadmap.md)) relies on
+      it (flat 16 MB). Parity-tested (`deep_tail_recursion`,
+      `tail_calls_match_tree_walker_on_vm`). See
+      [execution-engine.md](execution-engine.md) and [audit.md](audit.md).
 - [ ] Iterative/trampolined evaluation to remove the native-stack recursion limit
       entirely (only if needed).
 

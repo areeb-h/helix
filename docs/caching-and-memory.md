@@ -59,9 +59,12 @@ mutable systems; there is no case in which the data changes underneath the cache
 
    At runtime the VM additionally gates on **all-`Int` arguments** (float keys are
    excluded, since NaN and precision make them unsafe hash keys) and **bounds the
-   table**. The effect: `fib(35)` is reduced from ~30M calls to ~35, *with an
-   identical result*, because the function is provably a pure function of its
-   inputs. It is observably transparent (only faster), requires no `.memoize()`
+   table**: an entry cap (`MEMO_MAX_ENTRIES`) that, on overflow, **evicts** (clears
+   and lets the table rebuild) rather than growing without limit — so memoizing over a
+   very large or unbounded key space stays memory-bounded instead of climbing to OOM
+   (2026-07 hardening round, see [audit.md](audit.md)). The effect: `fib(35)` is
+   reduced from ~30M calls to ~35, *with an identical result*, because the function is
+   provably a pure function of its inputs. It is observably transparent (only faster), requires no `.memoize()`
    annotation, and cannot become stale because its inputs are immutable. This is
    also why Helix can outperform C here: C cannot *prove* `fib` is side-effect-free,
    so it cannot auto-memoize.
