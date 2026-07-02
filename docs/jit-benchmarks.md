@@ -138,21 +138,31 @@ D = (range(0, 6000)).map(i => (range(0, 6000)).reduce(0, (acc, j) => acc + abs(c
 print(D.sum())
 ```
 
-| language | wall (best of 3) | note |
-|---|---|---|
-| C `-O3` / Rust `-O` | 0.00 s | **constant-folded** — see below |
-| Go (1 thread) | 0.01 s | real single-threaded baseline |
-| **Helix (JIT)** | **0.02 s** | serial outer, native inner — ~220× over the VM |
-| Helix (no-JIT, VM) | 4.49 s | interpreted |
+Measured at N=15000 (225M pairs), where the times actually resolve — at N=6000 everything
+finishes in a few milliseconds, below the 0.01 s timer grain (all print the same anchor):
 
-The native inner reduce takes this from **4.49 s → 0.02 s (~220×)**, bit-identical, landing at
-**single-threaded Go's level**. C and Rust report 0.00 s because this kernel is *fully
-deterministic* (`codes` derives from `i`; no runtime input), so LLVM/GCC evaluate the entire
-double loop at compile time — a benchmark artifact, not a real zero cost. The non-foldable XOR
-kernel in §3 is the honest per-core "vs C" comparison; here the point is that the **array-indexed
-all-pairs shape now runs native at all** (it fell to the interpreter before). Auto-parallelizing
-the outer loop over this shape (hoisting the inner bounds pre-check once) is the next lever — it
-would add the ~5–6× the pure-arithmetic §3 kernel already gets.
+| language | wall (best of 3) | vs C |
+|---|---|---|
+| **C `-O3` (SIMD, 1 thread)** | **0.04 s** | 1.0× |
+| Go (1 thread) | 0.11 s | 2.8× |
+| **Helix (JIT, serial outer)** | **0.14 s** | 3.5× |
+| Helix (no-JIT, VM) | ~28 s | ~700× |
+
+**This is a compute-bound kernel where C wins**, and the doc is honest about why. The array
+(`codes`, ~120 KB) is L2-resident, so it is *not* memory-bandwidth-bound like the dot products —
+it is limited by arithmetic throughput, and there C has two edges Helix lacks: (1) gcc/LLVM
+**auto-vectorize** the inner loop (AVX2 does ~4 `|codes[i]-codes[j]|` per instruction), while
+Helix's Cranelift JIT emits a **scalar** loop — it does not auto-vectorize; (2) Helix runs the
+outer map **serially** for this array-indexed shape (not parallelized yet). So Helix is ~3.5×
+slower than SIMD C and ~1.3× slower than Go here.
+
+The win is real but relative to the *interpreter*: the array-indexed all-pairs shape used to fall
+entirely to the bytecode VM (~28 s / ~700× slower); it now runs a native inner reduce. (An earlier
+draft of this doc reported C at "0.00 s, constant-folded" — that was wrong: feeding N from `argv`
+so the compiler cannot precompute still shows C finishing the real loop in ~2 ms at N=6000. It was
+too fast to measure, not folded.) Closing the gap to C is a known two-part lever: **SIMD in the JIT**
+(Cranelift does not auto-vectorize) and **parallelizing the outer loop** over this shape — the
+latter alone would add the ~5–6× the pure-arithmetic §3 kernel already gets from going multi-core.
 
 ## Caveats & honest boundaries
 

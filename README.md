@@ -42,9 +42,10 @@ totals by **auto-parallelizing** array construction and outer loops across cores
 an honest one: the C/Rust/Go baselines here are single-threaded, and Helix does not yet
 auto-vectorize (SIMD), which is why threaded+vectorized C-OpenMP is still faster on the last kernel.
 Array-indexed all-pairs — a genuine **distance matrix** over encoded data (`abs(codes[i]-codes[j])`,
-for phylogenetics / clustering) — also runs native: **~220× over the interpreter**, at
-single-threaded Go's level (its outer loop isn't auto-parallelized yet). Full methodology,
-per-language source, and the load-bearing caveats:
+for phylogenetics / clustering) — now runs a native inner reduce: **~700× over the interpreter**.
+This one is compute-bound and *honest about its limit* — a hand-tuned SIMD C loop is still ~3.5×
+faster, because Helix's JIT doesn't auto-vectorize and runs the outer loop serially (both closable).
+Full methodology, per-language source, and the load-bearing caveats:
 **[docs/jit-benchmarks.md](docs/jit-benchmarks.md)**. DataFrame throughput (a 50M-row
 filter→group→sort→head in ~0.2 s from Parquet) is measured separately in
 [docs/benchmarks.md](docs/benchmarks.md).
