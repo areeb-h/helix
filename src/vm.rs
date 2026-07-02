@@ -1312,33 +1312,35 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     builder: crate::value::ColumnBuilder::default(),
                 });
             }
-            Op::CompNext(binder, end_target) => {
-                let next = {
-                    let it = iters.last_mut().unwrap();
-                    match &mut it.source {
-                        CompSource::Array { arr, idx } => {
-                            if *idx < arr.len() {
-                                let el = arr.get(*idx);
-                                *idx += 1;
-                                Some(el)
-                            } else {
-                                None
-                            }
+            Op::CompNext(binder, end_target, keep_cur) => {
+                let li = iters.len() - 1;
+                let next = match &mut iters[li].source {
+                    CompSource::Array { arr, idx } => {
+                        if *idx < arr.len() {
+                            let el = arr.get(*idx);
+                            *idx += 1;
+                            Some(el)
+                        } else {
+                            None
                         }
-                        CompSource::Range { cur, end } => {
-                            if *cur < *end {
-                                let el = Value::Int(*cur);
-                                *cur += 1;
-                                Some(el)
-                            } else {
-                                None
-                            }
+                    }
+                    CompSource::Range { cur, end } => {
+                        if *cur < *end {
+                            let el = Value::Int(*cur);
+                            *cur += 1;
+                            Some(el)
+                        } else {
+                            None
                         }
                     }
                 };
                 match next {
                     Some(el) => {
-                        iters.last_mut().unwrap().cur_val = el.clone();
+                        // `cur_val` is read only by `CompFilterPush`, so only filter/where
+                        // (`keep_cur`) pay the clone; map/reduce/scan/any/all skip it.
+                        if *keep_cur {
+                            iters[li].cur_val = el.clone();
+                        }
                         let base = frames[fi].base;
                         locals[base + *binder as usize] = el;
                     }
@@ -1354,7 +1356,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let it = iters.last_mut().unwrap();
                 match keep {
                     Value::Bool(true) => {
-                        let el = it.cur_val.clone();
+                        // `cur_val` is dead after this (the next `CompNext` overwrites it),
+                        // so move it out — no refcount bump — leaving the `Unit` placeholder.
+                        let el = std::mem::replace(&mut it.cur_val, Value::Unit);
                         it.builder.push(el);
                     }
                     Value::Bool(false) => {}

@@ -114,7 +114,8 @@ impl super::Compiler {
         let (binder, destruct) = Self::declare_binder_pattern(b, &params);
 
         let loop_start = b.code.len() as u32;
-        let next_at = b.emit(Op::CompNext(binder, 0), line, col);
+        // Only `filter`/`where` (not `map`) read `cur_val` via `CompFilterPush`.
+        let next_at = b.emit(Op::CompNext(binder, 0, !is_map), line, col);
         if let Some(slots) = &destruct {
             b.emit(Op::LoadLocal(binder), line, col);
             b.emit(Op::DestructureBind(slots.clone()), line, col);
@@ -128,7 +129,7 @@ impl super::Compiler {
         b.emit(Op::Jump(loop_start), line, col);
 
         let end_at = b.code.len() as u32;
-        b.code[next_at] = Op::CompNext(binder, end_at);
+        b.code[next_at] = Op::CompNext(binder, end_at, !is_map);
         b.emit(Op::CompEnd, line, col);
         let jump_done = b.emit(Op::Jump(0), line, col);
 
@@ -205,7 +206,7 @@ impl super::Compiler {
         b.emit(Op::StoreLocal(sm), line, col);
 
         let loop_start = b.code.len() as u32;
-        let next_at = b.emit(Op::CompNext(binder, 0), line, col);
+        let next_at = b.emit(Op::CompNext(binder, 0, false), line, col);
         if let Some(slots) = &destruct {
             b.emit(Op::LoadLocal(binder), line, col);
             b.emit(Op::DestructureBind(slots.clone()), line, col);
@@ -217,7 +218,7 @@ impl super::Compiler {
         // exhausted without short-circuiting: `missing` if any element was missing,
         // else the default (`all` → true, `any` → false).
         let exhausted = b.code.len() as u32;
-        b.code[next_at] = Op::CompNext(binder, exhausted);
+        b.code[next_at] = Op::CompNext(binder, exhausted, false);
         b.emit(Op::CompEndDiscard, line, col);
         b.emit(Op::LoadLocal(sm), line, col);
         let jif = b.emit(Op::JumpIfFalse(0), line, col);
@@ -366,13 +367,13 @@ impl super::Compiler {
         }
 
         let loop_start = b.code.len() as u32;
-        let next_at = b.emit(Op::CompNext(x, 0), line, col);
+        let next_at = b.emit(Op::CompNext(x, 0, false), line, col);
         self.compile_expr(b, body)?;
         b.emit(Op::StoreLocal(acc), line, col);
         b.emit(Op::Jump(loop_start), line, col);
 
         let end_at = b.code.len() as u32;
-        b.code[next_at] = Op::CompNext(x, end_at);
+        b.code[next_at] = Op::CompNext(x, end_at, false);
         b.emit(Op::CompEndDiscard, line, col);
         let after_at = b.code.len() as u32;
         if let Some((at, loop_idx)) = guard {
@@ -455,13 +456,13 @@ impl super::Compiler {
         b.emit(Op::StoreLocal(acc), line, col);
 
         let loop_start = b.code.len() as u32;
-        let next_at = b.emit(Op::CompNext(x, 0), line, col);
+        let next_at = b.emit(Op::CompNext(x, 0, false), line, col);
         self.compile_expr(b, body)?;
         b.emit(Op::StoreLocal(acc), line, col);
         b.emit(Op::Jump(loop_start), line, col);
 
         let end_at = b.code.len() as u32;
-        b.code[next_at] = Op::CompNext(x, end_at);
+        b.code[next_at] = Op::CompNext(x, end_at, false);
         b.emit(Op::CompEndDiscard, line, col);
         b.emit(Op::LoadLocal(acc), line, col);
         let jump_done = b.emit(Op::Jump(0), line, col);
@@ -541,7 +542,7 @@ impl super::Compiler {
         b.emit(Op::StoreLocal(acc), line, col);
 
         let loop_start = b.code.len() as u32;
-        let next_at = b.emit(Op::CompNext(x, 0), line, col);
+        let next_at = b.emit(Op::CompNext(x, 0, false), line, col);
         self.compile_expr(b, body)?; // new accumulator on the stack
         b.emit(Op::StoreLocal(acc), line, col);
         b.emit(Op::LoadLocal(acc), line, col); // push it again …
@@ -549,7 +550,7 @@ impl super::Compiler {
         b.emit(Op::Jump(loop_start), line, col);
 
         let end_at = b.code.len() as u32;
-        b.code[next_at] = Op::CompNext(x, end_at);
+        b.code[next_at] = Op::CompNext(x, end_at, false);
         b.emit(Op::CompEnd, line, col); // result array on the stack
         let jump_done = b.emit(Op::Jump(0), line, col);
 
@@ -592,7 +593,13 @@ fn is_idempotent(e: &Expr) -> bool {
         Expr::Ident { .. } => true,
         Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().all(is_idempotent),
         Expr::Record(fields) => fields.iter().all(|(_, v)| is_idempotent(v)),
-        Expr::Call { name, args, .. } if name == "range" => args.iter().all(is_idempotent),
+        // NOTE: `range(...)` is deliberately NOT idempotent here. A top-level range
+        // *source* never reaches this fn (it's intercepted by `builtin_range_call`, which
+        // also handles a user shadow); this fn is only consulted for a reduce `init` or a
+        // nested Array/Tuple/Record element, where a `range(...)` yields an array that
+        // never matches the Int/Float-init kernel dispatch — so admitting it bought no
+        // fusion yet risked double-evaluating a side-effecting user `fn range` on the
+        // native-attempt + fall-through path (an oracle divergence).
         _ => false,
     }
 }

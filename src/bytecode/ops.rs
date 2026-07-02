@@ -139,8 +139,11 @@ pub enum Op {
     /// otherwise raise "no such method".
     CompInit(CompKind, u32),
     /// Advance the current iterator: if elements remain, bind the next one to the
-    /// given local slot and fall through; otherwise jump to the given target.
-    CompNext(u32, u32),
+    /// given local slot and fall through; otherwise jump to the given target. The
+    /// `bool` is `keep_cur`: whether to also stash the element in the iterator's
+    /// `cur_val` — only `filter`/`where` need it (for `CompFilterPush`), so `map`/
+    /// `reduce`/`scan`/`any`/`all` pass `false` and skip a per-element clone.
+    CompNext(u32, u32, bool),
     /// `map`: pop the body result and append it to the iterator's builder.
     CompMapPush,
     /// `filter`/`where`: pop a boolean; if true, append the current element.
