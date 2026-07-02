@@ -1,7 +1,8 @@
 //! Reading values out of collections: indexing (`eval_index`), slicing
 //! (`eval_slice`), record/tuple field access (`eval_field`), and destructuring
-//! (`destructure_parts`/`pattern_parts`). Also the no-arg DataFrame value-methods
-//! (`df_value_method`: count/columns/head/cache). Shared by both engines.
+//! (`destructure_parts`/`pattern_parts`). Also the DataFrame value-methods
+//! (`df_value_method`: count/columns/cache/head/vstack/unique/column/to_json plus the
+//! write_*/to_html/to_markdown/to_table export verbs). Shared by both engines.
 
 use super::*;
 use std::rc::Rc;
@@ -168,10 +169,6 @@ pub(crate) fn pattern_parts(
     Ok(parts)
 }
 
-/// DataFrame methods whose arguments are plain *values* (not column refs), so
-/// the VM can dispatch them after evaluating args. The column-argument verbs
-/// (`where`/`select`/`sort`/`group`) are not here — they take unevaluated ASTs
-/// and remain on the tree-walker. Mirrors the matching arms of `eval_df_method`.
 /// The single column-name argument of `df.column("age")` — an evaluated string.
 /// Shared by both engines (the tree-walker evaluates the AST arg first).
 pub(crate) fn column_arg(args: &[Value], line: usize, col: usize) -> Result<String, HelixError> {
@@ -200,6 +197,10 @@ pub(crate) fn column_args(
         .collect()
 }
 
+/// DataFrame methods whose arguments are plain *values* (not column refs), so
+/// the VM can dispatch them after evaluating args. The column-argument verbs
+/// (`where`/`select`/`sort`/`group`) are not here — they take unevaluated ASTs
+/// and remain on the tree-walker. Mirrors the matching arms of `eval_df_method`.
 pub(crate) fn df_value_method(
     lf: &Df,
     name: &str,

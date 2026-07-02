@@ -840,11 +840,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let result = if name.as_str() == "is_missing"
                     && matches!(recv, Value::DataFrame(_) | Value::GroupBy(_))
                 {
-                    if args.is_empty() {
-                        Ok(Value::Bool(false))
-                    } else {
-                        Err(HelixError::new("`is_missing` takes no arguments", line, col))
-                    }
+                    crate::interp::df_is_missing(args.is_empty(), line, col)
                 } else {
                     match &recv {
                         // Dispatch by receiver type, exactly as the tree-walker does.

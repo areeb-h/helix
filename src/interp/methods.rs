@@ -187,6 +187,19 @@ fn net_method(
     }
 }
 
+/// `is_missing` on a DataFrame/GroupBy receiver. Those receivers route to verb
+/// dispatch and never reach the universal handler in `call_method`, so both the VM and
+/// the tree-walker intercept `is_missing` themselves — a frame/group is never `missing`,
+/// so the answer is `false`. One definition keeps the two engines byte-identical here
+/// (same value, same arity-error wording).
+pub(crate) fn df_is_missing(args_empty: bool, line: usize, col: usize) -> Result<Value, HelixError> {
+    if args_empty {
+        Ok(Value::Bool(false))
+    } else {
+        Err(HelixError::new("`is_missing` takes no arguments", line, col))
+    }
+}
+
 pub(crate) fn call_method(
     recv: &Value,
     name: &str,

@@ -472,14 +472,7 @@ impl Interp {
                 if name == "is_missing"
                     && matches!(recv_v, Value::DataFrame(_) | Value::GroupBy(_))
                 {
-                    if !args.is_empty() {
-                        return Err(HelixError::new(
-                            "`is_missing` takes no arguments",
-                            *line,
-                            *col,
-                        ));
-                    }
-                    return Ok(Value::Bool(false));
+                    return df_is_missing(args.is_empty(), *line, *col);
                 }
                 // DataFrame / GroupBy verbs take their column arguments
                 // *unevaluated* (column names and predicates), so they're routed
