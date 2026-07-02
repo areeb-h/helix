@@ -54,6 +54,20 @@ pub enum NetHandle {
     },
 }
 
+impl Drop for NetHandle {
+    /// When a connection closes, release its still-buffered SSE backlog from the shard-wide
+    /// total ([`SSE_PENDING`]) so the accounting a dropped slow client leaves behind can't
+    /// permanently shrink the budget for the survivors.
+    fn drop(&mut self) {
+        if let NetHandle::Conn { pending, .. } = self {
+            let n = pending.borrow().len();
+            if n > 0 {
+                SSE_PENDING.with(|c| c.set(c.get().saturating_sub(n)));
+            }
+        }
+    }
+}
+
 /// Cap on a request body we will buffer (a larger `Content-Length` is truncated to
 /// this) — a single malicious/oversized request must not OOM the process.
 const MAX_BODY: usize = 64 << 20; // 64 MiB
@@ -100,7 +114,15 @@ thread_local! {
     /// True on a spawned shard worker, so its own `listen(port, shards)` call binds its
     /// socket but does NOT recursively spawn more shards.
     static IS_SHARD: Cell<bool> = const { Cell::new(false) };
+    /// Sum of un-drained SSE backlog across *all* this shard's connections. The per-connection
+    /// [`MAX_PENDING`] bounds one slow client; this bounds a *fleet* of them, so N slow SSE
+    /// clients can't each hold [`MAX_PENDING`] and add up to N × 4 MiB. A connection whose
+    /// `send` would push the shard total over [`SSE_GLOBAL_PENDING`] is dropped.
+    static SSE_PENDING: Cell<usize> = const { Cell::new(0) };
 }
+
+/// Per-shard cap on the *total* SSE backlog across all connections (see [`SSE_PENDING`]).
+const SSE_GLOBAL_PENDING: usize = 64 << 20; // 64 MiB per shard
 
 /// Stack size for a shard worker — matches the main interpreter thread (the front-end
 /// recurses over the AST); reserved address space, not resident memory.
@@ -392,6 +414,7 @@ fn finish_connection(stream: TcpStream, line: usize, col: usize) -> Result<Value
 /// sent, or partially sent with the remainder buffered for a later `send`). Never blocks
 /// and never splits a frame mid-write, so one slow client can't stall the shard.
 fn push_and_flush(stream: &mut TcpStream, pending: &mut Vec<u8>, bytes: &[u8]) -> bool {
+    let before = pending.len();
     pending.extend_from_slice(bytes);
     let mut written = 0;
     while written < pending.len() {
@@ -399,13 +422,28 @@ fn push_and_flush(stream: &mut TcpStream, pending: &mut Vec<u8>, bytes: &[u8]) -
             Ok(0) => break, // the send buffer is full right now
             Ok(n) => written += n,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break, // full — keep remainder
-            Err(_) => return false, // broken pipe / reset → the client is gone
+            Err(_) => {
+                // Peer gone: release this connection's whole backlog from the shard total,
+                // since the connection is about to be dropped.
+                SSE_PENDING.with(|c| c.set(c.get().saturating_sub(before)));
+                return false;
+            }
         }
     }
     if written > 0 {
         pending.drain(..written);
     }
-    pending.len() <= MAX_PENDING
+    // Keep the shard-wide total in step: replace this connection's old contribution with its
+    // new one (`total - before + now`). A drop later releases whatever remains (see NetHandle's
+    // Drop impl).
+    let now = pending.len();
+    let total = SSE_PENDING.with(|c| {
+        let t = c.get().saturating_sub(before) + now;
+        c.set(t);
+        t
+    });
+    // Usable unless this client alone is too far behind, or the whole shard's backlog is.
+    now <= MAX_PENDING && total <= SSE_GLOBAL_PENDING
 }
 
 /// `conn.request()` — the parsed request record for this connection.
