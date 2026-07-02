@@ -695,7 +695,13 @@ impl Interp {
             )
             .hint("is the recursion missing a base case, or should this be a loop/comprehension?"));
         }
-        let mut saved: Vec<(String, Option<Binding>)> =
+        // `saved` holds a *borrowed* name (from the function value's params/captured,
+        // which outlive this call) alongside the binding it shadowed. The insert key must
+        // still be owned (the env map owns its keys), but save/restore no longer clones
+        // each name a second time, and the common no-shadow restore is a plain
+        // `remove(&str)` with zero allocation — so a hot recursive call (e.g. `fib`) stops
+        // churning a fresh copy of each parameter name per call.
+        let mut saved: Vec<(&str, Option<Binding>)> =
             Vec::with_capacity(captured.len() + params.len());
         // Install the captured lexical environment (a closure's free variables)
         // first, then the parameters on top so they shadow on any name clash.
@@ -703,53 +709,27 @@ impl Interp {
             let prev = self
                 .env
                 .insert(n.clone(), Binding { value: v.clone(), mutable: false });
-            saved.push((n.clone(), prev));
+            saved.push((n.as_str(), prev));
         }
         for (p, a) in params.iter().zip(args) {
             let prev = self
                 .env
                 .insert(p.clone(), Binding { value: a, mutable: false });
-            saved.push((p.clone(), prev));
+            saved.push((p.as_str(), prev));
         }
         let result = self.eval(body);
         // Restore in reverse so shadowed names come back correctly.
         for (n, prev) in saved.into_iter().rev() {
             match prev {
                 Some(b) => {
-                    self.env.insert(n, b);
+                    self.env.insert(n.to_string(), b);
                 }
                 None => {
-                    self.env.remove(&n);
+                    self.env.remove(n);
                 }
             }
         }
         self.depth -= 1;
-        result
-    }
-
-    fn eval_with_two(
-        &mut self,
-        na: &str,
-        va: Value,
-        nb: &str,
-        vb: Value,
-        body: &Expr,
-    ) -> Result<Value, HelixError> {
-        let saved_a = self.env.remove(na);
-        let saved_b = self.env.remove(nb);
-        self.env
-            .insert(na.to_string(), Binding { value: va, mutable: false });
-        self.env
-            .insert(nb.to_string(), Binding { value: vb, mutable: false });
-        let result = self.eval(body);
-        self.env.remove(na);
-        self.env.remove(nb);
-        if let Some(b) = saved_a {
-            self.env.insert(na.to_string(), b);
-        }
-        if let Some(b) = saved_b {
-            self.env.insert(nb.to_string(), b);
-        }
         result
     }
 

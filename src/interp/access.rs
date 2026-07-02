@@ -135,7 +135,7 @@ pub(crate) fn destructure_parts(
 /// Split a comprehension element into `n` parts for a multi-binder pattern
 /// (`xs.map((a, b) => ...)`). Distinct from [`destructure_parts`] (the `a, b = …`
 /// statement form) in its wording — "parameters" / "lambda expects N values". The
-/// single source of truth for both the tree-walker ([`Interp::eval_with_pattern`])
+/// single source of truth for both the tree-walker (`Interp::eval_pattern_loop`)
 /// and the VM (`Op::DestructureBind`), so the two engines never diverge here.
 pub(crate) fn pattern_parts(
     v: &Value,

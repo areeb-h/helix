@@ -35,9 +35,10 @@ impl super::Interp {
                 }
                 let (params, body) = comprehension_params(&args[0]);
                 let mut out = Vec::with_capacity(items.len());
-                for el in items.to_values().iter() {
-                    out.push(self.eval_with_pattern(&params, el.clone(), body, line, col)?);
-                }
+                self.eval_pattern_loop(&params, &items, body, line, col, |_el, v| {
+                    out.push(v);
+                    Ok(None)
+                })?;
                 Ok(Value::array_sniff(out))
             }
             "filter" | "where" => {
@@ -46,25 +47,23 @@ impl super::Interp {
                 }
                 let (params, body) = comprehension_params(&args[0]);
                 let mut out = Vec::new();
-                for el in items.to_values().iter() {
-                    let keep = self.eval_with_pattern(&params, el.clone(), body, line, col)?;
-                    match keep {
-                        Value::Bool(true) => out.push(el.clone()),
-                        Value::Bool(false) => {}
-                        other => {
-                            return Err(HelixError::new(
-                                format!(
-                                    "`{}` expects a yes/no test, but the expression produced a {}",
-                                    name,
-                                    other.type_name()
-                                ),
-                                line,
-                                col,
-                            )
-                            .hint("write a comparison, e.g. `xs.filter(it > 50)`."))
-                        }
+                self.eval_pattern_loop(&params, &items, body, line, col, |el, keep| match keep {
+                    Value::Bool(true) => {
+                        out.push(el.clone());
+                        Ok(None)
                     }
-                }
+                    Value::Bool(false) => Ok(None),
+                    other => Err(HelixError::new(
+                        format!(
+                            "`{}` expects a yes/no test, but the expression produced a {}",
+                            name,
+                            other.type_name()
+                        ),
+                        line,
+                        col,
+                    )
+                    .hint("write a comparison, e.g. `xs.filter(it > 50)`.")),
+                })?;
                 Ok(Value::array_sniff(out))
             }
             "any" | "all" => {
@@ -72,39 +71,43 @@ impl super::Interp {
                     return Err(comp_arity(name, "(it > 0)", line, col));
                 }
                 let (params, body) = comprehension_params(&args[0]);
+                let is_all = name == "all";
                 let mut seen_missing = false;
-                for el in items.to_values().iter() {
-                    match self.eval_with_pattern(&params, el.clone(), body, line, col)? {
+                // `visit` short-circuits with Some(bool) the instant the answer is known.
+                let short = self.eval_pattern_loop(&params, &items, body, line, col, |_el, r| {
+                    match r {
                         Value::Bool(b) => {
-                            if name == "any" && b {
-                                return Ok(Value::Bool(true));
-                            }
-                            if name == "all" && !b {
-                                return Ok(Value::Bool(false));
+                            if !is_all && b {
+                                Ok(Some(Value::Bool(true)))
+                            } else if is_all && !b {
+                                Ok(Some(Value::Bool(false)))
+                            } else {
+                                Ok(None)
                             }
                         }
-                        Value::Missing => seen_missing = true,
-                        other => {
-                            return Err(HelixError::new(
-                                format!(
-                                    "`{}` expects a yes/no test, but the expression produced a {}",
-                                    name,
-                                    other.type_name()
-                                ),
-                                line,
-                                col,
-                            )
-                            .hint("write a comparison, e.g. `xs.any(it > 0)`."))
+                        Value::Missing => {
+                            seen_missing = true;
+                            Ok(None)
                         }
+                        other => Err(HelixError::new(
+                            format!(
+                                "`{}` expects a yes/no test, but the expression produced a {}",
+                                name,
+                                other.type_name()
+                            ),
+                            line,
+                            col,
+                        )
+                        .hint("write a comparison, e.g. `xs.any(it > 0)`.")),
                     }
-                }
-                // `any`: nothing was true; `all`: nothing was false. A missing
-                // in the undetermined position makes the answer missing.
-                if seen_missing {
-                    Ok(Value::Missing)
-                } else {
-                    Ok(Value::Bool(name == "all"))
-                }
+                })?;
+                // No short-circuit: `all` is true unless something was false, `any` false
+                // unless something was true; a `missing` in the deciding spot → missing.
+                Ok(match short {
+                    Some(v) => v,
+                    None if seen_missing => Value::Missing,
+                    None => Value::Bool(is_all),
+                })
             }
             "reduce" | "scan" => {
                 if args.len() != 2 {
@@ -142,80 +145,134 @@ impl super::Interp {
                         .hint("name both binders: `xs.reduce(0, (acc, x) => acc + x)`."))
                     }
                 };
-                let mut acc = self.eval(&args[0])?;
+                let mut acc = self.eval(&args[0])?; // init: evaluated in the OUTER scope
+                // Bind the accumulator and element names ONCE for the whole fold, then
+                // rewrite just their `.value` each step — instead of a remove/insert plus
+                // a fresh `String` key per element (the old per-call `eval_with_two`).
+                // Correctness mirrors that helper exactly: the init above is evaluated
+                // before the binders exist; both binders are restored on *every* exit,
+                // including an error mid-fold; and `pa` (acc) is written before `pb`
+                // (element) so last-write-wins holds if a user names both binders the same.
+                let saved_a = self.env.remove(pa);
+                let saved_b = self.env.remove(pb);
+                self.env
+                    .insert(pa.to_string(), Binding { value: Value::Unit, mutable: false });
+                self.env
+                    .insert(pb.to_string(), Binding { value: Value::Unit, mutable: false });
                 // `reduce` returns the final accumulator; `scan` returns the array of every
                 // intermediate accumulator (one per element — a generalized `cumsum`).
-                if name == "reduce" {
-                    for el in items.to_values().iter() {
-                        acc = self.eval_with_two(pa, acc, pb, el.clone(), body)?;
-                    }
-                    Ok(acc)
+                let want_scan = name == "scan";
+                let mut out: Vec<Value> = if want_scan {
+                    Vec::with_capacity(items.len())
                 } else {
-                    let mut out = Vec::with_capacity(items.len());
-                    for el in items.to_values().iter() {
-                        acc = self.eval_with_two(pa, acc, pb, el.clone(), body)?;
-                        out.push(acc.clone());
+                    Vec::new()
+                };
+                let mut err: Option<HelixError> = None;
+                for el in items.to_values().iter() {
+                    self.env.get_mut(pa).unwrap().value = acc;
+                    self.env.get_mut(pb).unwrap().value = el.clone();
+                    match self.eval(body) {
+                        Ok(v) => {
+                            acc = v;
+                            if want_scan {
+                                out.push(acc.clone());
+                            }
+                        }
+                        Err(e) => {
+                            acc = Value::Unit; // moved out above; keep it initialized
+                            err = Some(e);
+                            break;
+                        }
                     }
-                    Ok(Value::array(out))
+                }
+                // Restore the shadowed bindings (or clear ours) — always, even on error.
+                self.env.remove(pa);
+                if let Some(b) = saved_a {
+                    self.env.insert(pa.to_string(), b);
+                }
+                self.env.remove(pb);
+                if let Some(b) = saved_b {
+                    self.env.insert(pb.to_string(), b);
+                }
+                match err {
+                    Some(e) => Err(e),
+                    None if want_scan => Ok(Value::array(out)),
+                    None => Ok(acc),
                 }
             }
             _ => unreachable!(),
         }
     }
 
-    /// Bind one element to one name, or destructure it across several names
-    /// (`(a, b) => ...`), then evaluate the body.
-    fn eval_with_pattern(
+    /// Run `body` once per element of `items`, binding the comprehension pattern
+    /// `names` (a single `it`/`x`, or several for a destructuring `(a, b) => …`) to
+    /// each element. The binder slot(s) are installed **once** and only their `.value`
+    /// is rewritten each step — the allocation-free replacement for a per-element
+    /// bind/restore (no fresh `String` key or remove/insert churn per element). `visit`
+    /// receives `(element, body_result)` and returns `Ok(Some(v))` to short-circuit the
+    /// whole loop with `v` (for `any`/`all`) or `Ok(None)` to continue. The shadowed
+    /// binding(s) are restored on **every** exit — normal end, short-circuit, or error —
+    /// so nested comprehensions and the surrounding scope behave exactly as before.
+    fn eval_pattern_loop<F>(
         &mut self,
         names: &[String],
-        el: Value,
+        items: &crate::value::ArrayData,
         body: &Expr,
         line: usize,
         col: usize,
-    ) -> Result<Value, HelixError> {
-        if names.len() == 1 {
-            return self.eval_with_binder(&names[0], el, body);
-        }
-        let parts = pattern_parts(&el, names.len(), line, col)?;
-        let saved: Vec<(String, Option<Binding>)> = names
-            .iter()
-            .map(|n| (n.clone(), self.env.remove(n)))
-            .collect();
-        for (n, v) in names.iter().zip(parts) {
+        mut visit: F,
+    ) -> Result<Option<Value>, HelixError>
+    where
+        F: FnMut(&Value, Value) -> Result<Option<Value>, HelixError>,
+    {
+        let saved: Vec<Option<Binding>> = names.iter().map(|n| self.env.remove(n)).collect();
+        for n in names.iter() {
             self.env
-                .insert(n.clone(), Binding { value: v, mutable: false });
+                .insert(n.to_string(), Binding { value: Value::Unit, mutable: false });
         }
-        let result = self.eval(body);
-        for (n, old) in saved {
-            self.env.remove(&n);
-            if let Some(b) = old {
-                self.env.insert(n, b);
+        let mut outcome: Result<Option<Value>, HelixError> = Ok(None);
+        for el in items.to_values().iter() {
+            // Rewrite the binder value(s) for this element: a single binder takes it
+            // directly; several destructure it (identical to the old per-element path).
+            let bind_err = if names.len() == 1 {
+                self.env.get_mut(&names[0]).unwrap().value = el.clone();
+                None
+            } else {
+                match pattern_parts(el, names.len(), line, col) {
+                    Ok(parts) => {
+                        for (n, v) in names.iter().zip(parts) {
+                            self.env.get_mut(n).unwrap().value = v;
+                        }
+                        None
+                    }
+                    Err(e) => Some(e),
+                }
+            };
+            if let Some(e) = bind_err {
+                outcome = Err(e);
+                break;
+            }
+            match self.eval(body) {
+                Ok(v) => match visit(el, v) {
+                    Ok(None) => {}
+                    other => {
+                        outcome = other;
+                        break;
+                    }
+                },
+                Err(e) => {
+                    outcome = Err(e);
+                    break;
+                }
             }
         }
-        result
-    }
-
-    /// Evaluate `body` with `name` temporarily bound to `el`, restoring any
-    /// shadowed binding afterward (so nested comprehensions work).
-    fn eval_with_binder(
-        &mut self,
-        name: &str,
-        el: Value,
-        body: &Expr,
-    ) -> Result<Value, HelixError> {
-        let saved = self.env.remove(name);
-        self.env.insert(
-            name.to_string(),
-            Binding {
-                value: el,
-                mutable: false,
-            },
-        );
-        let result = self.eval(body);
-        self.env.remove(name);
-        if let Some(b) = saved {
-            self.env.insert(name.to_string(), b);
+        // Restore each shadowed binding (or clear ours), even on early exit / error.
+        for (n, b) in names.iter().zip(saved) {
+            self.env.remove(n);
+            if let Some(b) = b {
+                self.env.insert(n.to_string(), b);
+            }
         }
-        result
+        outcome
     }
 }
