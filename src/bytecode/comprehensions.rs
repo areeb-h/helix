@@ -333,24 +333,40 @@ impl super::Compiler {
         {
             return Ok(None);
         }
-        // The inner reduce must be a captured i64 reduce whose ONLY capture is the outer binder,
-        // with no array indexing (an inner that also indexes arrays carries bounds obligations —
-        // the parallel path doesn't hoist those pre-checks yet, so it stays serial via the
-        // ordinary captured-reduce kernel).
+        // The inner reduce must be a captured i64 reduce whose captures are exactly one Scalar —
+        // the outer binder `i`, which varies per outer iteration — plus zero or more i64 arrays
+        // (loop-invariant bases it indexes by `i` and/or the counter `j`; the all-pairs distance
+        // matrix). The arrays are evaluated ONCE below, in the outer scope (`i` is not yet bound),
+        // so their VALUE is `i`-independent even though they're indexed by `i` inside; they ride
+        // read-only across the parallel workers, and their bounds obligations (`bnds`) are hoisted
+        // and checked once by the VM before the parallel region. An f64 array cap is NOT
+        // parallelized yet — its non-associative fold needs the serial captured-reduce path — so
+        // it declines here (falls to the ordinary serial map-of-reduce).
         let fns = self.jit_fn_set();
         let (caps, bnds) = match crate::jit::reduce_loop_captures(rbody, pa, pb, &fns) {
             Some(cb) => cb,
             None => return Ok(None),
         };
-        if caps.len() != 1
-            || caps[0].name != outer_binder
-            || caps[0].kind != CaptureKind::Scalar
-            || !bnds.is_empty()
-        {
+        let one_scalar = caps.iter().filter(|c| c.kind == CaptureKind::Scalar).count() == 1;
+        let shape_ok = one_scalar
+            && caps.iter().all(|c| match c.kind {
+                CaptureKind::Scalar => c.name == outer_binder,
+                CaptureKind::ArrayI64 => true,
+                CaptureKind::ArrayF64 => false,
+            });
+        if !shape_ok {
             return Ok(None);
         }
 
-        // --- matched: push [os, oe, is, ie, init], register the inner loop, emit the guard ---
+        // --- matched: push [arr_1 .. arr_K, os, oe, is, ie, init] — the array bases go BELOW the
+        // five scalars so the VM reads the scalars at a fixed top-of-stack offset. Array caps are
+        // pushed in `captures` order (ArrayI64 only); the VM consumes them in that same order. Each
+        // is a bare free variable (recorded only when the index receiver is a free `Ident`), hence
+        // idempotent for the fallback's by-name re-read. Then register the inner loop + guard. ---
+        for c in caps.iter().filter(|c| c.kind == CaptureKind::ArrayI64) {
+            let ident = Expr::Ident { name: c.name.clone(), line, col };
+            self.compile_expr(b, &ident)?;
+        }
         self.push_or_zero(b, os, line, col)?;
         self.compile_expr(b, oe)?;
         self.push_or_zero(b, is, line, col)?;

@@ -193,15 +193,20 @@ pub enum Op {
     /// per-stage chain compilation (the oracle path).
     TryJitFused { kernel_idx: u32, after: u32 },
     /// Fast path for a **parallel nested reduce**: `range(os,oe).map(i =>
-    /// range(is,ie).reduce(init, (acc,j) => body))`, where the inner reduce captures exactly
-    /// the outer binder `i` (a scalar). At this point `[os, oe, is, ie, init]` are on the
-    /// stack (top is `init`) — the outer/inner range bounds and the inner init, all `i`-
-    /// independent. If a native captured-reduce kernel for `inner_loop_idx` exists AND all
-    /// five are `Int` within the 100M cap, the VM runs the outer range in parallel (rayon),
-    /// calling the inner kernel once per `i` (deterministic: independent `i`, order-preserving
-    /// collect, i64-only), pops the five, pushes the resulting `Int` array, and jumps to
-    /// `after`. Otherwise it pops the five and falls through to the identical ordinary
-    /// `map`-of-`reduce` bytecode (the oracle path). See [`crate::jit::run_nested_reduce`].
+    /// range(is,ie).reduce(init, (acc,j) => body))`, where the inner reduce captures the outer
+    /// binder `i` (a scalar) plus zero or more loop-invariant i64 arrays it indexes by `i` and/or
+    /// the counter `j` (the all-pairs distance-matrix shape). At this point `[os, oe, is, ie,
+    /// init]` are on the stack (top is `init`) — the outer/inner range bounds and the inner init,
+    /// all `i`-independent — with the `K` array bases pushed BELOW them (in `captures` order). If a
+    /// native captured-reduce kernel for `inner_loop_idx` exists, the five are `Int` within the
+    /// 100M cap, every array cap is a packed `Ints`, and the HOISTED bounds pre-check passes
+    /// (counter-indexed: `[is,ie) ⊆ [0,len)`; `i`-indexed: the whole outer `[os,oe) ⊆ [0,len)`),
+    /// the VM runs the outer range in parallel (rayon), calling the inner kernel once per `i`
+    /// (deterministic: independent `i`, order-preserving collect, i64-only, read-only shared array
+    /// bases), pops the `5 + K`, pushes the resulting `Int` array, and jumps to `after`. Otherwise
+    /// it pops the `5 + K` and falls through to the identical ordinary `map`-of-`reduce` bytecode
+    /// (the oracle path), which raises any exact OOB error. See
+    /// [`crate::jit::run_nested_reduce_arrays`].
     TryJitNestedReduce { inner_loop_idx: u32, after: u32 },
     /// Raise a runtime error with the given message and hint. Used where the
     /// program is statically known to be an error but the error should still fire

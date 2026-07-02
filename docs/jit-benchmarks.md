@@ -2,7 +2,7 @@
 
 **Summary:** Helix compiles pure-numeric `map`/`filter`/`reduce` kernels — including
 **array-indexed reductions** (`a[j]`) and **nested reductions** (`map` of `reduce`) — to
-native machine code via Cranelift. On three representative kernels it is **at or ahead of
+native machine code via Cranelift. On four representative kernels it is **at or ahead of
 single-threaded C**, beats NumPy, and runs ~20–700× over its own bytecode interpreter — every
 result **bit-identical** across all languages (and enforced bit-identical across Helix's own
 three engines by a differential oracle; see [execution-engine.md](execution-engine.md)).
@@ -12,6 +12,7 @@ three engines by a differential oracle; see [execution-engine.md](execution-engi
 | **i64 dot product** | 50M | ~0.34 s | 0.47 s | Go 0.46 s | memory-bandwidth-bound; ~C-parity |
 | **f64 dot product** | 50M | 0.36 s | 0.47 s | Go 0.48 s | beats 1-thread C (auto-parallel build) |
 | **nested all-pairs** `Σ(i^j)` | 900M | 0.06 s | 0.08 s | C-OpenMP 0.01 s | beats vectorized 1-thread C; only SIMD+threads is faster |
+| **all-pairs distance** `Σ|codes[i]−codes[j]|` | 225M | 0.03 s | 0.04 s (SIMD) | Go 0.09 s | array-indexed; parallel outer edges 1-thread SIMD C (§4) |
 
 These are **best-of-3 warm-cache wall-clock measurements on one WSL2 machine**, not a
 controlled benchmark — WSL scheduling gives ~±30% run-to-run variance, so read the *rankings*,
@@ -124,45 +125,50 @@ which combines *both* SIMD and threads; Helix has the threads but not the SIMD.
 
 ## 4. All-pairs distance matrix (array-indexed nested reduce)
 
-`S = Σ_{i,j<N} |codes[i] − codes[j]|`, `codes[i] = (i·C) % M`, N = 6000 (36M pairs) — the
+`S = Σ_{i,j<N} |codes[i] − codes[j]|`, `codes[i] = (i·C) % M`, N = 15000 (225M pairs) — the
 **distance-matrix / all-pairs-similarity** shape (phylogenetics, clustering, sequence
 comparison). Unlike the pure-arithmetic nested reduce above, the inner reduce **indexes an
 array by both the outer index `i` and the inner counter `j`** (`codes[i]` and `codes[j]`), so
-the inner kernel reads captured memory at a scalar index — the capability that makes this run
-native. The outer map runs serially (the inner captures arrays, so it isn't auto-parallelized
-yet); the inner reduce is native.
+the inner kernel reads captured memory at a scalar index — the capability that makes it run
+native. As of the parallel-outer landing, the **outer map is also parallelized**: the captured
+array bases are shared read-only across rayon workers, and the per-`i` bounds obligation is
+hoisted and checked ONCE before the parallel region (`codes[j]` needs `[0,N) ⊆ [0,len)`,
+`codes[i]` needs the whole outer `[0,N) ⊆ [0,len)`), so each worker does unchecked native loads.
 
 ```helix
-codes = (range(0, 6000)).map(i => (i * 2654435761) % 1000003)
-D = (range(0, 6000)).map(i => (range(0, 6000)).reduce(0, (acc, j) => acc + abs(codes[i] - codes[j])))
+codes = (range(0, 15000)).map(i => (i * 2654435761) % 1000003)
+D = (range(0, 15000)).map(i => (range(0, 15000)).reduce(0, (acc, j) => acc + abs(codes[i] - codes[j])))
 print(D.sum())
 ```
 
 Measured at N=15000 (225M pairs), where the times actually resolve — at N=6000 everything
-finishes in a few milliseconds, below the 0.01 s timer grain (all print the same anchor):
+finishes in a few milliseconds, below the 0.01 s timer grain (all print the same anchor
+`75002627576474`):
 
 | language | wall (best of 3) | vs C |
 |---|---|---|
-| **C `-O3` (SIMD, 1 thread)** | **0.04 s** | 1.0× |
-| Go (1 thread) | 0.11 s | 2.8× |
-| **Helix (JIT, serial outer)** | **0.14 s** | 3.5× |
+| **Helix (JIT, parallel outer)** | **0.03 s** | **0.75×** |
+| **C `-O3` (SIMD, 1 thread)** | 0.04 s | 1.0× |
+| Go (1 thread) | 0.09 s | 2.3× |
+| Helix (JIT, serial outer — prior) | 0.14 s | 3.5× |
 | Helix (no-JIT, VM) | ~28 s | ~700× |
 
-**This is a compute-bound kernel where C wins**, and the doc is honest about why. The array
-(`codes`, ~120 KB) is L2-resident, so it is *not* memory-bandwidth-bound like the dot products —
-it is limited by arithmetic throughput, and there C has two edges Helix lacks: (1) gcc/LLVM
-**auto-vectorize** the inner loop (AVX2 does ~4 `|codes[i]-codes[j]|` per instruction), while
-Helix's Cranelift JIT emits a **scalar** loop — it does not auto-vectorize; (2) Helix runs the
-outer map **serially** for this array-indexed shape (not parallelized yet). So Helix is ~3.5×
-slower than SIMD C and ~1.3× slower than Go here.
+**Read this honestly.** Helix now *edges out single-threaded SIMD C* — but by **using all cores**
+(measured ~450% CPU), not by winning per-core. This is a compute-bound kernel: the array (`codes`,
+~120 KB) is L2-resident, so it is limited by arithmetic throughput, and there C still has a per-core
+edge Helix lacks — gcc/LLVM **auto-vectorize** the inner loop (AVX2 does ~4 `|codes[i]-codes[j]|`
+per instruction) while Helix's Cranelift JIT emits a **scalar** loop. A fair fight *on equal
+hardware* (a C `+OpenMP` version = SIMD × threads) would still beat Helix. What changed here is the
+outer loop went from serial to parallel (0.14 s → 0.03 s, ~4.7×), which is enough to pass
+single-threaded C on this shape — the same kind of "auto-parallel across cores vs a single-threaded
+baseline" win as the dot products (§1–2) and the pure-arithmetic nested reduce (§3).
 
-The win is real but relative to the *interpreter*: the array-indexed all-pairs shape used to fall
-entirely to the bytecode VM (~28 s / ~700× slower); it now runs a native inner reduce. (An earlier
-draft of this doc reported C at "0.00 s, constant-folded" — that was wrong: feeding N from `argv`
-so the compiler cannot precompute still shows C finishing the real loop in ~2 ms at N=6000. It was
-too fast to measure, not folded.) Closing the gap to C is a known two-part lever: **SIMD in the JIT**
-(Cranelift does not auto-vectorize) and **parallelizing the outer loop** over this shape — the
-latter alone would add the ~5–6× the pure-arithmetic §3 kernel already gets from going multi-core.
+The remaining per-core gap to C is the one open lever: **SIMD in the JIT** (Cranelift emits scalar
+code; an i64 reduce is safe to vectorize because integer add is associative — bit-identical to the
+scalar fold — so it would not break the differential oracle). (An earlier draft of this doc reported
+C at "0.00 s, constant-folded" — that was wrong: feeding N from `argv` so the compiler cannot
+precompute still shows C finishing the real loop in ~2 ms at N=6000. It was too fast to measure, not
+folded.)
 
 ## Caveats & honest boundaries
 

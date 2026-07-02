@@ -1392,20 +1392,33 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 }
             }
             Op::TryJitNestedReduce { inner_loop_idx, after } => {
-                // Stack top: [os, oe, is, ie, init]. Run the outer range in PARALLEL over the
-                // native inner captured-reduce kernel (one call per `i`, order-preserving
-                // collect — deterministic and identical to the serial outer map) when a kernel
-                // exists, all five are `Int`, both spans are within the 100M cap, and the inner
-                // reduce is the expected single-body, single-scalar-capture i64 shape. Otherwise
-                // pop the five and fall through to the ordinary map-of-reduce (the oracle path).
-                use crate::bytecode::CaptureKind;
+                // Stack top: [os, oe, is, ie, init]; BELOW them sit the `K` loop-invariant array
+                // bases `[arr_1 .. arr_K]` the inner reduce indexes (pushed in `captures` order —
+                // empty for the scalar-only shape). Run the outer range in PARALLEL over the native
+                // inner captured-reduce kernel (one call per `i`, order-preserving collect —
+                // deterministic and identical to the serial outer map) when a kernel exists, the
+                // five range/init operands are `Int`, both spans are within the 100M cap, the inner
+                // is the single-body i64 shape (exactly one Scalar cap = the outer binder `i`, plus
+                // zero or more ArrayI64 bases), every array cap is a packed `Ints`, and the HOISTED
+                // bounds pre-check passes. Otherwise pop everything and fall through to the ordinary
+                // map-of-reduce (the oracle path), which raises any exact OOB error.
+                use crate::bytecode::{CaptureKind, IndexBound};
+                use crate::value::ArrayData;
                 let inner = &program.reduce_loops[*inner_loop_idx as usize];
+                let n_scalar =
+                    inner.captures.iter().filter(|c| c.kind == CaptureKind::Scalar).count();
+                let n_arrays =
+                    inner.captures.iter().filter(|c| c.kind == CaptureKind::ArrayI64).count();
+                let scalar_pos = inner.captures.iter().position(|c| c.kind == CaptureKind::Scalar);
+                // Only Scalar + ArrayI64 caps (no ArrayF64 / other): the counts must exhaust the
+                // list. A single Scalar (the outer `i`) drives `scalar_pos`.
                 let ok_shape = !inner.float
                     && inner.bodies.len() == 1
-                    && inner.captures.len() == 1
-                    && inner.captures[0].kind == CaptureKind::Scalar;
+                    && n_scalar == 1
+                    && n_scalar + n_arrays == inner.captures.len()
+                    && scalar_pos.is_some();
                 let len = stack.len();
-                let result: Option<Value> = if ok_shape {
+                let result: Option<Value> = if ok_shape && len >= 5 + n_arrays {
                     jit.and_then(|j| j.reduce_loop(*inner_loop_idx as usize)).and_then(|ptr| {
                         let ops = &stack[len - 5..];
                         let (
@@ -1418,22 +1431,73 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         else {
                             return None;
                         };
+                        let (os, oe, is, ie, init) = (*os, *oe, *is, *ie, *init);
                         // Match the fallback's caps: outer result size and inner span each within
                         // the 100M range cap (an over-cap outer/inner range would ERROR in the
                         // fallback, so declining here keeps the two paths identical).
-                        if (*oe as i128 - *os as i128) > 100_000_000
-                            || (*ie as i128 - *is as i128) > 100_000_000
+                        if (oe as i128 - os as i128) > 100_000_000
+                            || (ie as i128 - is as i128) > 100_000_000
                         {
                             return None;
                         }
-                        let results =
-                            unsafe { crate::jit::run_nested_reduce(ptr, *os, *oe, *is, *ie, *init) };
+                        // Resolve the `K` array bases (below the five scalars, in `captures` order)
+                        // into the caps `template`; the scalar slot stays a placeholder each worker
+                        // overwrites with its own `i`. `keepalive` holds the array `Rc`s alive
+                        // across the parallel region (the base pointers alias into their buffers).
+                        let arr_vals = &stack[len - 5 - n_arrays..len - 5];
+                        let scalar_pos = scalar_pos.unwrap();
+                        let n_caps = inner.captures.len();
+                        let mut template = vec![0i64; n_caps];
+                        let mut lens = vec![0i64; n_caps]; // array len per slot, 0 for the scalar
+                        let mut keepalive: Vec<Value> = Vec::new();
+                        let mut arr_iter = arr_vals.iter();
+                        for (pos, cap) in inner.captures.iter().enumerate() {
+                            match cap.kind {
+                                CaptureKind::Scalar => {} // filled per-worker with `i`
+                                CaptureKind::ArrayI64 => {
+                                    let val = arr_iter.next()?;
+                                    let Value::Array(a) = val else { return None };
+                                    let ArrayData::Ints(v) = &**a else { return None };
+                                    template[pos] = v.as_ptr() as i64;
+                                    lens[pos] = v.len() as i64;
+                                    keepalive.push(val.clone());
+                                }
+                                CaptureKind::ArrayF64 => return None,
+                            }
+                        }
+                        // HOISTED bounds pre-check (ONCE, before the parallel region): a
+                        // counter-indexed array needs the whole inner range `[is,ie) ⊆ [0,len)`;
+                        // a scalar(`i`)-indexed array needs EVERY outer `i` valid, i.e.
+                        // `[os,oe) ⊆ [0,len)` — exactly the serial per-`i` check `0 <= i < len`
+                        // taken over all i in `[os,oe)`. Any negative or over-range → decline (fall
+                        // back to the exact-erroring serial map-of-reduce, which Python-wraps a
+                        // negative index or raises the precise OOB error).
+                        for bnd in &inner.index_bounds {
+                            match *bnd {
+                                IndexBound::Counter { array } => {
+                                    if is < 0 || ie > lens[array as usize] {
+                                        return None;
+                                    }
+                                }
+                                IndexBound::Scalar { array, .. } => {
+                                    if os < 0 || oe > lens[array as usize] {
+                                        return None;
+                                    }
+                                }
+                            }
+                        }
+                        let results = unsafe {
+                            crate::jit::run_nested_reduce_arrays(
+                                ptr, os, oe, is, ie, init, &template, scalar_pos,
+                            )
+                        };
+                        drop(keepalive); // arrays no longer aliased (results is owned) — release
                         Some(Value::int_array(results))
                     })
                 } else {
                     None
                 };
-                stack.truncate(len - 5);
+                stack.truncate(len - 5 - n_arrays);
                 if let Some(v) = result {
                     stack.push(v);
                     frames[fi].ip = *after as usize;

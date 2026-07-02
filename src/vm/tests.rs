@@ -845,6 +845,79 @@
         }
     }
 
+    /// The **parallel array-indexed nested reduce** (this landing): the all-pairs distance-matrix
+    /// shape `range(n).map(i => range(m).reduce(0, (acc,j) => ...a[i]...a[j]...))` at a size that
+    /// CROSSES the parallel threshold (`n*m >= 1<<15`), so the outer map parallelizes over the
+    /// native inner captured-reduce kernel while it reads captured arrays by BOTH the scalar `i`
+    /// and the counter `j`. The array bases are shared read-only across rayon workers; the bounds
+    /// pre-check is hoisted ONCE over the whole outer/inner range. Must stay bit-identical to the
+    /// tree-walker — the v1c fuzzer uses tiny ranges that stay serial, so this pins the PARALLEL
+    /// array-cap path. Covers one array (`a[i]`,`a[j]`), two arrays (`a[i]*b[j]`, two bases in the
+    /// template), and a scalar-only array (`a[i]` never counter-indexed → only the point check).
+    #[test]
+    fn parallel_indexed_nested_reduce_matches_tree_walker() {
+        let a: Vec<i64> = (0..220).map(|k| (k * 13 + 7) % 100 - 50).collect();
+        let b: Vec<i64> = (0..220).map(|k| (k * 31 + 5) % 50 - 25).collect();
+        let (aa, bb) = (fmt_i64_arr(&a), fmt_i64_arr(&b));
+        // Deterministic all-pairs shapes, each 200x200 = 40000 >= 1<<15 (parallel), all in-bounds.
+        let fixed = [
+            format!("a = {aa}\n(range(0, 200)).map(i => (range(0, 200)).reduce(0, (acc, j) => acc + abs(a[i] - a[j]))).sum()"),
+            format!("a = {aa}\n(range(0, 200)).map(i => (range(0, 200)).reduce(0, (acc, j) => acc + (a[i] - a[j]) * (a[i] - a[j]))).sum()"),
+            format!("a = {aa}\nb = {bb}\n(range(0, 200)).map(i => (range(0, 200)).reduce(0, (acc, j) => acc + a[i] * b[j])).sum()"),
+            format!("a = {aa}\n(range(0, 200)).map(i => (range(0, 200)).reduce(0, (acc, j) => acc + max(a[i], a[j]))).sum()"),
+            // scalar-only array: `a[i]` never counter-indexed — only the point check applies to it.
+            format!("a = {aa}\n(range(0, 200)).map(i => (range(0, 200)).reduce(0, (acc, j) => acc + a[i] + j)).sum()"),
+        ];
+        for src in &fixed {
+            assert_eq!(run_vm_jit(src), run_tw(src), "parallel indexed nested reduce JIT ≠ tree-walker on `{src}`");
+        }
+        // Fuzzed `{acc, a[i], a[j]}` bodies at a parallel size (185x185 = 34225 >= 1<<15).
+        let mut rng = 0xA11_9A15_EED2_0263u64;
+        let atoms = vec!["acc".to_string(), "a[i]".to_string(), "a[j]".to_string()];
+        for _ in 0..25 {
+            let body = gen_i64_eligible(&mut rng, 3, &atoms);
+            let src = format!("a = {aa}\n(range(0, 185)).map(i => (range(0, 185)).reduce(0, (acc, j) => ({body}))).sum()");
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(x), Ok(y)) => assert_eq!(x, y, "parallel indexed nested reduce JIT ≠ tree-walker on `{src}`"),
+                (Err(()), Err(())) => {}
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+    }
+
+    /// Parallel array-indexed nested reduce — FALLBACK + edge coverage. (1) An outer range that
+    /// runs `a[i]` off the end at a PARALLEL size: the hoisted Scalar-bound pre-check
+    /// (`[os,oe) ⊆ [0,len)`) declines, falling back to the serial map-of-reduce, which raises the
+    /// EXACT interpreter OOB error — identical string on both engines. (2) A counter index `a[j]`
+    /// off the end (Counter bound `[is,ie) ⊆ [0,len)` declines) with `a[i]` still in-bounds. (3) A
+    /// reverse OUTER range WITH array caps → empty map → `[]` (the i128 span guard, now shared by
+    /// the array path, must neither overflow the base-pointer offset math nor deref an empty range).
+    #[test]
+    fn parallel_indexed_nested_reduce_fallback_and_edges() {
+        let a: Vec<i64> = (0..100).map(|k| (k * 7 + 1) % 40).collect();
+        let aa = fmt_i64_arr(&a);
+        // (1) outer 200 > len 100 → `a[i]` OOB for i >= 100 → both engines raise the identical error.
+        let oob_scalar = format!("a = {aa}\n(range(0, 200)).map(i => (range(0, 200)).reduce(0, (acc, j) => acc + a[i] + a[j])).sum()");
+        let vm = vm_jit_err_msg(&oob_scalar).expect("VM must error (scalar index OOB, parallel size)");
+        let tw = tw_err_msg(&oob_scalar).expect("tree-walker must error (scalar index OOB)");
+        assert_eq!(vm, tw, "parallel scalar-OOB message must match on `{oob_scalar}`");
+        assert!(vm.contains("out of bounds"), "unexpected: {vm}");
+
+        // (2) inner counter 200 > len 100 → `a[j]` OOB; a short outer keeps `a[i]` in-bounds so
+        // only the Counter bound trips. Identical error on both engines.
+        let oob_counter = format!("a = {aa}\n(range(0, 50)).map(i => (range(0, 200)).reduce(0, (acc, j) => acc + a[i] + a[j])).sum()");
+        let vmc = vm_jit_err_msg(&oob_counter).expect("VM must error (counter index OOB)");
+        let twc = tw_err_msg(&oob_counter).expect("tree-walker must error (counter index OOB)");
+        assert_eq!(vmc, twc, "parallel counter-OOB message must match on `{oob_counter}`");
+
+        // (3) reverse OUTER range with array caps, inner in-bounds → the parallel path runs with an
+        // empty `os..oe` (n = 0 via the i128 span guard) → `[]` → sum 0. The base pointer sits in
+        // the caps template but is never dereferenced (zero iterations).
+        let rev = format!("a = {aa}\nhi = 9223372036854775807\nlo = 0 - 9223372036854775807 - 1\n(range(hi, lo)).map(i => (range(0, 50)).reduce(0, (acc, j) => acc + a[i] + a[j])).sum()");
+        assert_eq!(run_vm_jit(&rev), run_tw(&rev), "reverse outer with array caps JIT ≠ tree-walker on `{rev}`");
+        assert_eq!(run_vm_jit(&rev), Ok("0".to_string()));
+    }
+
     /// The **array-indexed reduce kernel** (`arr[counter]`, the dot-product / weighted-sum
     /// pattern) must equal the tree-walker. The inner fold reads two captured `Int` arrays by
     /// the loop counter `j`; when the range is in-bounds the JIT engages the native kernel with
