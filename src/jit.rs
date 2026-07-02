@@ -1861,6 +1861,24 @@ fn define_array_kernel<'a>(
     b.def_var(dst_var, dst);
     b.def_var(len_var, len);
 
+    // Hoist the loop-invariant capture loads into the entry (pre-loop) block — read each
+    // once rather than re-loading it from `caps` on every iteration (mirrors the reduce
+    // kernel's entry-block capture loads). Immediate-offset load straight off `caps_ptr`.
+    let cap_vars: Vec<Variable> = if let Some(cp) = caps_ptr {
+        k.captures
+            .iter()
+            .enumerate()
+            .map(|(j, _)| {
+                let v = b.ins().load(elem_ty, MemFlags::trusted(), cp, (j * 8) as i32);
+                let cvar = b.declare_var(elem_ty);
+                b.def_var(cvar, v);
+                cvar
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let header = b.create_block();
     let body_blk = b.create_block();
     let exit_blk = b.create_block();
@@ -1886,21 +1904,10 @@ fn define_array_kernel<'a>(
 
     let mut vars: HashMap<&'a str, Variable> = HashMap::new();
     vars.insert(k.binder.as_str(), elem_var);
-    // Bind each captured variable to `caps[i]` — loop-invariant, so the loads are
-    // trivially hoistable; correctness only needs the right slot per name. (`caps[i]`
-    // is `i64` for an `Int` kernel, `f64` for a `Float` one — the VM coerces to match.)
-    if let Some(cp) = caps_ptr {
-        let caps_var = b.declare_var(I64);
-        b.def_var(caps_var, cp);
-        for (j, cname) in k.captures.iter().enumerate() {
-            let base = b.use_var(caps_var);
-            let off = b.ins().iconst(I64, (j * 8) as i64);
-            let addr = b.ins().iadd(base, off);
-            let v = b.ins().load(elem_ty, MemFlags::trusted(), addr, 0);
-            let cvar = b.declare_var(elem_ty);
-            b.def_var(cvar, v);
-            vars.insert(cname.as_str(), cvar);
-        }
+    // Bind each captured variable to its pre-hoisted entry-block load (loop-invariant;
+    // `caps[j]` is `i64` for an `Int` kernel, `f64` for a `Float` one — the VM coerces).
+    for (j, cname) in k.captures.iter().enumerate() {
+        vars.insert(cname.as_str(), cap_vars[j]);
     }
 
     if is_filter {
