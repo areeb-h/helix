@@ -14,7 +14,7 @@
 //! ops, boolean three-valued logic, and builtins all route through the very same
 //! functions the tree-walker uses, so the VM is observationally identical.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::ast::BinOp;
 use crate::bytecode::{Op, Program};
@@ -284,7 +284,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
     // Automatic memoization of pure, overlapping-recursive functions — the
     // "under the hood" cache. Safe because memoizable functions (per the
     // bytecode analysis) are pure functions of their integer arguments.
-    let mut memo: HashMap<MemoKey, Value> = HashMap::new();
+    let mut memo: FxHashMap<MemoKey, Value> = FxHashMap::default();
     let mut iters: Vec<CompIter> = Vec::new();
     // Active `try` handlers (LIFO). Empty in the overwhelmingly common case; an
     // error only consults it, so non-`try` programs pay nothing.
@@ -449,10 +449,6 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let idx = *idx as usize;
                 let nargs = *nargs as usize;
                 let start = stack.len() - nargs;
-                let all_int = stack[start..].iter().all(|v| matches!(v, Value::Int(_)));
-                let all_scalar = stack[start..]
-                    .iter()
-                    .all(|v| matches!(v, Value::Int(_) | Value::Float(_)));
 
                 // Memoization fast path (preferred over the JIT for the pure,
                 // overlapping-recursive functions the analysis flagged): a cache
@@ -460,7 +456,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // recursive calls also hit this path, then stores the result on
                 // return. This turns exponential recursion (e.g. `fib`) linear —
                 // for integer *and* float arguments.
-                if program.memoizable[idx] && all_scalar {
+                if program.memoizable[idx]
+                    && stack[start..]
+                        .iter()
+                        .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
+                {
                     let kargs = &stack[start..];
                     let key = match kargs.len() {
                         1 => MemoKey::A1(idx, memo_arg(&kargs[0])),
@@ -518,6 +518,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     // For MIXED Int/Float args the result type depends on what the
                     // function does (e.g. `f(a,b)=b` keeps an Int `b`), so those
                     // fall through to the VM, which handles type-mixing correctly.
+                    // These scans live here (not at the top of CallFn) so the
+                    // common non-JIT / memoized call pays nothing for them.
+                    let all_int = tail.iter().all(|v| matches!(v, Value::Int(_)));
                     let all_float = tail.iter().all(|v| matches!(v, Value::Float(_)));
                     if all_int && let Some(ptr) = nf.i64_ptr {
                         let iargs: Vec<i64> = tail
