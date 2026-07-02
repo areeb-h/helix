@@ -333,13 +333,20 @@ impl super::Compiler {
         {
             return Ok(None);
         }
-        // The inner reduce must be a captured i64 reduce whose ONLY capture is the outer binder.
+        // The inner reduce must be a captured i64 reduce whose ONLY capture is the outer binder,
+        // with no array indexing (an inner that also indexes arrays carries bounds obligations —
+        // the parallel path doesn't hoist those pre-checks yet, so it stays serial via the
+        // ordinary captured-reduce kernel).
         let fns = self.jit_fn_set();
-        let caps = match crate::jit::reduce_loop_captures(rbody, pa, pb, &fns) {
-            Some(c) => c,
+        let (caps, bnds) = match crate::jit::reduce_loop_captures(rbody, pa, pb, &fns) {
+            Some(cb) => cb,
             None => return Ok(None),
         };
-        if caps.len() != 1 || caps[0].name != outer_binder || caps[0].kind != CaptureKind::Scalar {
+        if caps.len() != 1
+            || caps[0].name != outer_binder
+            || caps[0].kind != CaptureKind::Scalar
+            || !bnds.is_empty()
+        {
             return Ok(None);
         }
 
@@ -355,6 +362,7 @@ impl super::Compiler {
             pb: pb.to_string(),
             bodies: vec![rbody.as_ref().clone()],
             captures: caps,
+            index_bounds: bnds,
             float: false,
         });
         let guard = b.emit(Op::TryJitNestedReduce { inner_loop_idx: inner_idx, after: 0 }, line, col);
@@ -426,33 +434,35 @@ impl super::Compiler {
         // compete — `reduce_jit_bodies` keys only off body shape, so a `Float` init would
         // otherwise be claimed as a never-firing i64 kernel (the engagement-gate trap).
         let fns = self.jit_fn_set();
-        let (jit_bodies, captures, float): (Option<Vec<Expr>>, Vec<Capture>, bool) =
+        #[allow(clippy::type_complexity)]
+        let (jit_bodies, captures, bounds, float): (Option<Vec<Expr>>, Vec<Capture>, Vec<IndexBound>, bool) =
             if crate::jit::is_float_acc_init(init) {
                 // A `Float` init (scalar) or all-`Float` tuple/record init → an `f64`
                 // accumulator folded over the i64 counter (`pb_is_int = true`). A scalar body
                 // may index captured `f64` arrays by the counter (the float dot-product,
-                // v1b) — try that first, then the capture-free scalar/tuple forms.
+                // v1b) — try that first, then the capture-free scalar/tuple forms. (The f64 VM
+                // path range-checks its array caps inline, so it carries no `IndexBound`s.)
                 let user_fns = self.user_fn_set();
                 if matches!(init, Expr::Float(_)) {
                     match crate::jit::reduce_jit_f64_range_captures(init, body, pa, pb, &user_fns) {
-                        Some((b, caps)) => (Some(vec![b]), caps, true),
+                        Some((b, caps)) => (Some(vec![b]), caps, Vec::new(), true),
                         None => match crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &user_fns) {
-                            Some(b) => (Some(vec![b]), Vec::new(), true),
-                            None => (None, Vec::new(), false),
+                            Some(b) => (Some(vec![b]), Vec::new(), Vec::new(), true),
+                            None => (None, Vec::new(), Vec::new(), false),
                         },
                     }
                 } else {
                     match crate::jit::reduce_jit_f64_tuple_bodies(init, body, pa, pb, true, &user_fns) {
-                        Some(bodies) => (Some(bodies), Vec::new(), true),
-                        None => (None, Vec::new(), false),
+                        Some(bodies) => (Some(bodies), Vec::new(), Vec::new(), true),
+                        None => (None, Vec::new(), Vec::new(), false),
                     }
                 }
             } else {
                 match crate::jit::reduce_jit_bodies(init, body, pa, pb, &fns) {
-                    Some(bodies) => (Some(bodies), Vec::new(), false),
+                    Some(bodies) => (Some(bodies), Vec::new(), Vec::new(), false),
                     None => match crate::jit::reduce_loop_captures(body, pa, pb, &fns) {
-                        Some(caps) if !caps.is_empty() => (Some(vec![body.clone()]), caps, false),
-                        _ => (None, Vec::new(), false),
+                        Some((caps, bnds)) if !caps.is_empty() => (Some(vec![body.clone()]), caps, bnds, false),
+                        _ => (None, Vec::new(), Vec::new(), false),
                     },
                 }
             };
@@ -478,6 +488,7 @@ impl super::Compiler {
                 pb: pb.to_string(),
                 bodies,
                 captures,
+                index_bounds: bounds,
                 float,
             });
             // `after` is patched once the trailing LoadLocal position is known.

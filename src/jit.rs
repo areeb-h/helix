@@ -44,7 +44,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 
 use crate::ast::{BinOp, Expr, Stmt, TypeAnn};
-use crate::bytecode::{Capture, CaptureKind};
+use crate::bytecode::{Capture, CaptureKind, IndexBound};
 
 // The JIT's only `unsafe`: the FFI trampolines that call finalized native code. Kept in
 // their own file so that boundary is a single auditable unit; re-exported so callers
@@ -555,29 +555,47 @@ pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>
 /// [`CaptureKind::ArrayI64`]). Returns the ordered captures (possibly empty), or `None` if
 /// the body is ineligible, captures more than [`MAX_CAPTURES`], or uses a name both bare
 /// and indexed (a contradictory kind). Same i64-closed rules as `value_eligible(Int)`.
-pub fn reduce_loop_captures(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>) -> Option<Vec<Capture>> {
+pub fn reduce_loop_captures(
+    body: &Expr,
+    pa: &str,
+    pb: &str,
+    fns: &HashSet<&str>,
+) -> Option<(Vec<Capture>, Vec<IndexBound>)> {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(pa);
     locals.insert(pb);
     let mut caps: Vec<Capture> = Vec::new();
-    if value_eligible_cap_indexed(body, fns, &locals, pb, &mut caps) && caps.len() <= MAX_CAPTURES {
-        Some(caps)
+    let mut bounds: Vec<IndexBound> = Vec::new();
+    if value_eligible_cap_indexed(body, fns, &locals, pb, &mut caps, &mut bounds) && caps.len() <= MAX_CAPTURES {
+        Some((caps, bounds))
     } else {
         None
     }
 }
 
-/// Record capture `name` with `kind` in first-appearance order, deduping. Returns `false`
-/// if `name` was already recorded with a *different* kind — a body that reads `a` both bare
-/// and as `a[pb]` is contradictory (is it a scalar or an array?), so the whole reduce falls
-/// back to the VM loop rather than guess. Keeps the codegen's per-slot interpretation and
-/// the VM's per-slot marshalling driven by one unambiguous ordered list.
-fn record_cap(caps: &mut Vec<Capture>, name: &str, kind: CaptureKind) -> bool {
-    if let Some(existing) = caps.iter().find(|c| c.name == name) {
-        return existing.kind == kind;
+/// Record capture `name` with `kind` in first-appearance order, deduping, returning its slot
+/// position — or `None` if `name` was already recorded with a *different* kind (a body that
+/// reads `a` both bare and as `a[…]` is contradictory: scalar or array? → fall back rather than
+/// guess). Positions are what [`IndexBound`] obligations reference, so codegen and the VM stay
+/// driven by one unambiguous ordered list.
+fn record_cap_pos(caps: &mut Vec<Capture>, name: &str, kind: CaptureKind) -> Option<usize> {
+    if let Some(pos) = caps.iter().position(|c| c.name == name) {
+        return if caps[pos].kind == kind { Some(pos) } else { None };
     }
     caps.push(Capture { name: name.to_string(), kind });
-    true
+    Some(caps.len() - 1)
+}
+
+/// `record_cap_pos`, discarding the position — for the bare-scalar case that needs no bound.
+fn record_cap(caps: &mut Vec<Capture>, name: &str, kind: CaptureKind) -> bool {
+    record_cap_pos(caps, name, kind).is_some()
+}
+
+/// Append a bounds obligation, deduping (a repeated `arr[j]` needs only one range check).
+fn push_bound(bounds: &mut Vec<IndexBound>, b: IndexBound) {
+    if !bounds.contains(&b) {
+        bounds.push(b);
+    }
 }
 
 /// Reduce-only twin of [`value_eligible_cap`] that additionally accepts `arr[pb]` — a free
@@ -592,6 +610,7 @@ fn value_eligible_cap_indexed(
     locals: &HashSet<&str>,
     pb: &str,
     caps: &mut Vec<Capture>,
+    bounds: &mut Vec<IndexBound>,
 ) -> bool {
     match e {
         Expr::Int(_) => true,
@@ -603,15 +622,39 @@ fn value_eligible_cap_indexed(
                 record_cap(caps, name, CaptureKind::Scalar)
             }
         }
-        // `arr[pb]`: a free array (`recv` not local) read by exactly the loop counter. The
-        // VM pre-checks the counter range is in bounds before the kernel does raw loads, so
-        // only the counter binder — whose values are exactly `start..end` — is admitted here
-        // (affine/scalar indices are staged follow-ups with their own pre-checks).
         Expr::Index { recv, index, .. } => match (&**recv, &**index) {
+            // `arr[pb]`: a free array read by exactly the loop counter → a Counter bound (the
+            // VM range-checks `[start,end) ⊆ [0,len)`; the counter's values are exactly that).
             (Expr::Ident { name: arr, .. }, Expr::Ident { name: idx, .. })
                 if !locals.contains(arr.as_str()) && idx == pb =>
             {
-                record_cap(caps, arr, CaptureKind::ArrayI64)
+                match record_cap_pos(caps, arr, CaptureKind::ArrayI64) {
+                    Some(ap) => {
+                        push_bound(bounds, IndexBound::Counter { array: ap as u32 });
+                        true
+                    }
+                    None => false,
+                }
+            }
+            // `arr[i]`: a free array indexed by a free SCALAR capture (not the counter, not a
+            // local) — the all-pairs shape (`codes[i]` with the outer binder `i`). Records `arr`
+            // as an array cap and `i` as a scalar cap, and a Scalar (point) bound the VM checks
+            // as `0 <= i < len(arr)`. `idx != arr` rules out `a[a]`.
+            (Expr::Ident { name: arr, .. }, Expr::Ident { name: idx, .. })
+                if !locals.contains(arr.as_str())
+                    && !locals.contains(idx.as_str())
+                    && idx != arr =>
+            {
+                let ap = match record_cap_pos(caps, arr, CaptureKind::ArrayI64) {
+                    Some(p) => p,
+                    None => return false,
+                };
+                let sp = match record_cap_pos(caps, idx, CaptureKind::Scalar) {
+                    Some(p) => p,
+                    None => return false,
+                };
+                push_bound(bounds, IndexBound::Scalar { array: ap as u32, scalar: sp as u32 });
+                true
             }
             _ => false,
         },
@@ -625,18 +668,18 @@ fn value_eligible_cap_indexed(
                 _ => false,
             };
             op_ok
-                && value_eligible_cap_indexed(left, eligible, locals, pb, caps)
-                && value_eligible_cap_indexed(right, eligible, locals, pb, caps)
+                && value_eligible_cap_indexed(left, eligible, locals, pb, caps, bounds)
+                && value_eligible_cap_indexed(right, eligible, locals, pb, caps, bounds)
         }
         Expr::Call { name, args, .. } => {
             eligible.contains(name.as_str())
                 && jit_builtin_arity_ok(name, args.len())
-                && args.iter().all(|a| value_eligible_cap_indexed(a, eligible, locals, pb, caps))
+                && args.iter().all(|a| value_eligible_cap_indexed(a, eligible, locals, pb, caps, bounds))
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
-            cond_eligible_cap_indexed(cond, eligible, locals, pb, caps)
-                && value_eligible_cap_indexed(then_branch, eligible, locals, pb, caps)
-                && value_eligible_cap_indexed(else_branch, eligible, locals, pb, caps)
+            cond_eligible_cap_indexed(cond, eligible, locals, pb, caps, bounds)
+                && value_eligible_cap_indexed(then_branch, eligible, locals, pb, caps, bounds)
+                && value_eligible_cap_indexed(else_branch, eligible, locals, pb, caps, bounds)
         }
         Expr::Let { bindings, body } => {
             let mut locals2 = locals.clone();
@@ -644,19 +687,24 @@ fn value_eligible_cap_indexed(
                 // A `let` that REBINDS the loop counter `pb` breaks the invariant the `Index`
                 // arm relies on: `arr[pb]` no longer means `arr[counter]` — codegen would emit
                 // an UNCHECKED load at the let-bound index, past what the VM's counter-range
-                // pre-check (`0 <= s && e <= len`) validated → an out-of-bounds native read.
-                // Refuse to JIT such a body; the VM/tree-walker evaluate it correctly (raising
-                // the exact OOB if the shadowed index is out of range). Only the counter needs
-                // this guard — shadowing `pa` (the accumulator) can't reach the index path.
-                if n.as_str() == pb {
+                // pre-check validated → an out-of-bounds native read. It also can't shadow a
+                // captured scalar index without changing what a `Scalar` bound refers to.
+                // Refuse to JIT any `let` that rebinds `pb` OR a name already used as a scalar
+                // index; the VM/tree-walker evaluate such a body correctly.
+                if n.as_str() == pb
+                    || bounds.iter().any(|b| {
+                        matches!(b, IndexBound::Scalar { scalar, .. }
+                            if caps.get(*scalar as usize).is_some_and(|c| c.name == *n))
+                    })
+                {
                     return false;
                 }
-                if !value_eligible_cap_indexed(v, eligible, &locals2, pb, caps) {
+                if !value_eligible_cap_indexed(v, eligible, &locals2, pb, caps, bounds) {
                     return false;
                 }
                 locals2.insert(n.as_str());
             }
-            value_eligible_cap_indexed(body, eligible, &locals2, pb, caps)
+            value_eligible_cap_indexed(body, eligible, &locals2, pb, caps, bounds)
         }
         _ => false,
     }
@@ -670,16 +718,17 @@ fn cond_eligible_cap_indexed(
     locals: &HashSet<&str>,
     pb: &str,
     caps: &mut Vec<Capture>,
+    bounds: &mut Vec<IndexBound>,
 ) -> bool {
     match e {
         Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
-            cond_eligible_cap_indexed(left, eligible, locals, pb, caps)
-                && cond_eligible_cap_indexed(right, eligible, locals, pb, caps)
+            cond_eligible_cap_indexed(left, eligible, locals, pb, caps, bounds)
+                && cond_eligible_cap_indexed(right, eligible, locals, pb, caps, bounds)
         }
         Expr::Binary { op, left, right, .. } => {
             matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne)
-                && value_eligible_cap_indexed(left, eligible, locals, pb, caps)
-                && value_eligible_cap_indexed(right, eligible, locals, pb, caps)
+                && value_eligible_cap_indexed(left, eligible, locals, pb, caps, bounds)
+                && value_eligible_cap_indexed(right, eligible, locals, pb, caps, bounds)
         }
         _ => false,
     }
@@ -1301,8 +1350,13 @@ fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>,
         locals.insert(rl.pa.as_str());
         locals.insert(rl.pb.as_str());
         let mut caps: Vec<Capture> = Vec::new();
-        let ok = value_eligible_cap_indexed(&rl.bodies[0], fns, &locals, rl.pb.as_str(), &mut caps);
-        return ok && caps == rl.captures && caps.len() <= MAX_CAPTURES;
+        let mut bounds: Vec<IndexBound> = Vec::new();
+        let ok =
+            value_eligible_cap_indexed(&rl.bodies[0], fns, &locals, rl.pb.as_str(), &mut caps, &mut bounds);
+        // The build gate must reproduce BOTH the capture set and the bounds obligations the VM
+        // will check — a drift in either would run the kernel with a pre-check that doesn't match
+        // its actual `arr[…]` accesses (an out-of-bounds hazard), so require an exact match.
+        return ok && caps == rl.captures && bounds == rl.index_bounds && caps.len() <= MAX_CAPTURES;
     }
     bodies_eligible(&rl.pa, &rl.pb, &rl.bodies, fns)
 }

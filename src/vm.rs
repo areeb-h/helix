@@ -1072,22 +1072,23 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 // re-evaluates `arr[j]` via `Op::Index` and raises the exact OOB
                                 // error. `_keepalive` holds the array `Rc`s alive across the FFI
                                 // call (the base pointers alias into their buffers).
-                                use crate::bytecode::CaptureKind;
+                                use crate::bytecode::{CaptureKind, IndexBound};
                                 use crate::value::ArrayData;
-                                let caps_meta = &program.reduce_loops[*loop_idx as usize].captures;
+                                let rl = &program.reduce_loops[*loop_idx as usize];
                                 let mut caps: Vec<i64> = Vec::with_capacity(n_caps);
+                                let mut lens: Vec<i64> = Vec::with_capacity(n_caps); // array len, 0 for scalars
                                 let mut _keepalive: Vec<Value> = Vec::new();
                                 let mut ok = true;
-                                for (cap, val) in caps_meta.iter().zip(cap_vals.iter()) {
+                                for (cap, val) in rl.captures.iter().zip(cap_vals.iter()) {
                                     match (cap.kind, val) {
-                                        (CaptureKind::Scalar, Value::Int(i)) => caps.push(*i),
+                                        (CaptureKind::Scalar, Value::Int(i)) => {
+                                            caps.push(*i);
+                                            lens.push(0);
+                                        }
                                         (CaptureKind::ArrayI64, Value::Array(a)) => {
                                             if let ArrayData::Ints(v) = &**a {
-                                                if s < 0 || e > v.len() as i64 {
-                                                    ok = false;
-                                                    break;
-                                                }
                                                 caps.push(v.as_ptr() as i64);
+                                                lens.push(v.len() as i64);
                                                 _keepalive.push(val.clone());
                                             } else {
                                                 ok = false;
@@ -1097,6 +1098,30 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         _ => {
                                             ok = false;
                                             break;
+                                        }
+                                    }
+                                }
+                                // Verify every array-index access is in bounds BEFORE the kernel's
+                                // unchecked loads: a counter-indexed array needs the whole range
+                                // `[s,e) ⊆ [0,len)`; a scalar-indexed array needs `0 <= i < len`.
+                                // A negative counter/scalar (which the interpreter Python-wraps) or
+                                // any over-range access → fall through to the exact-erroring loop.
+                                if ok {
+                                    for bnd in &rl.index_bounds {
+                                        match *bnd {
+                                            IndexBound::Counter { array } => {
+                                                if s < 0 || e > lens[array as usize] {
+                                                    ok = false;
+                                                    break;
+                                                }
+                                            }
+                                            IndexBound::Scalar { array, scalar } => {
+                                                let iv = caps[scalar as usize];
+                                                if iv < 0 || iv >= lens[array as usize] {
+                                                    ok = false;
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                 }

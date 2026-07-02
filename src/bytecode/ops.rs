@@ -329,6 +329,19 @@ pub struct Capture {
     pub kind: CaptureKind,
 }
 
+/// A bounds obligation the VM must verify before running an array-indexed reduce kernel. Every
+/// `arr[index]` in the body is lowered to an UNCHECKED native load, so the VM proves the access
+/// is in bounds first — otherwise it falls back to the checked interpreter loop (which raises the
+/// exact out-of-bounds error). `array`/`scalar` are positions in [`ReduceLoop::captures`]. An
+/// array indexed both by the counter and by a scalar carries one obligation of each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexBound {
+    /// `arr[counter]`: the whole counter range `[start, end)` must lie within `[0, len(arr))`.
+    Counter { array: u32 },
+    /// `arr[scalar]`: the scalar cap's value `v` must satisfy `0 <= v < len(arr)` (a point check).
+    Scalar { array: u32, scalar: u32 },
+}
+
 /// A JIT-eligible `reduce` loop body the compiler asked the JIT to compile. The
 /// JIT lowers each to a native `extern "C" fn(i64 start, i64 end, i64 init)->i64`;
 /// the index into [`Program::reduce_loops`] is the `loop_idx` in [`Op::TryJitReduce`].
@@ -353,6 +366,11 @@ pub struct ReduceLoop {
     /// counter (`arr[pb]`, the dot-product case). Empty for a self-contained body.
     /// **Scalar accumulators only** (a tuple body that captures stays on the VM loop).
     pub captures: Vec<Capture>,
+    /// Bounds obligations for the array-indexed reads in the body — one [`IndexBound`] per
+    /// distinct `arr[counter]` / `arr[scalar]` access the VM must verify before the kernel runs
+    /// its unchecked loads. Empty unless the body indexes a captured array (v1a onwards); only
+    /// meaningful for the i64 captured path (the f64 path range-checks inline).
+    pub index_bounds: Vec<IndexBound>,
     /// `true` marks a **scalar `f64`** accumulator (a `Float` init) folded over the `i64`
     /// range counter `pb`: the body is MIXED — integer subexpressions of `pb` wrap as `i64`,
     /// promoting to `f64` at the first float operand, exactly like the interpreter's `arith`.

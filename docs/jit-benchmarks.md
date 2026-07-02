@@ -122,6 +122,38 @@ single-threaded C (0.08 s) and Rust (0.07 s)** — its parallelism compensates f
 auto-vectorizing. It beats scalar Go ~3× and NumPy ~4×. The **only** faster result is C-OpenMP,
 which combines *both* SIMD and threads; Helix has the threads but not the SIMD.
 
+## 4. All-pairs distance matrix (array-indexed nested reduce)
+
+`S = Σ_{i,j<N} |codes[i] − codes[j]|`, `codes[i] = (i·C) % M`, N = 6000 (36M pairs) — the
+**distance-matrix / all-pairs-similarity** shape (phylogenetics, clustering, sequence
+comparison). Unlike the pure-arithmetic nested reduce above, the inner reduce **indexes an
+array by both the outer index `i` and the inner counter `j`** (`codes[i]` and `codes[j]`), so
+the inner kernel reads captured memory at a scalar index — the capability that makes this run
+native. The outer map runs serially (the inner captures arrays, so it isn't auto-parallelized
+yet); the inner reduce is native.
+
+```helix
+codes = (range(0, 6000)).map(i => (i * 2654435761) % 1000003)
+D = (range(0, 6000)).map(i => (range(0, 6000)).reduce(0, (acc, j) => acc + abs(codes[i] - codes[j])))
+print(D.sum())
+```
+
+| language | wall (best of 3) | note |
+|---|---|---|
+| C `-O3` / Rust `-O` | 0.00 s | **constant-folded** — see below |
+| Go (1 thread) | 0.01 s | real single-threaded baseline |
+| **Helix (JIT)** | **0.02 s** | serial outer, native inner — ~220× over the VM |
+| Helix (no-JIT, VM) | 4.49 s | interpreted |
+
+The native inner reduce takes this from **4.49 s → 0.02 s (~220×)**, bit-identical, landing at
+**single-threaded Go's level**. C and Rust report 0.00 s because this kernel is *fully
+deterministic* (`codes` derives from `i`; no runtime input), so LLVM/GCC evaluate the entire
+double loop at compile time — a benchmark artifact, not a real zero cost. The non-foldable XOR
+kernel in §3 is the honest per-core "vs C" comparison; here the point is that the **array-indexed
+all-pairs shape now runs native at all** (it fell to the interpreter before). Auto-parallelizing
+the outer loop over this shape (hoisting the inner bounds pre-check once) is the next lever — it
+would add the ~5–6× the pure-arithmetic §3 kernel already gets.
+
 ## Caveats & honest boundaries
 
 - **Not a controlled benchmark.** Single machine, WSL2, warm cache, best-of-3, ~±30% variance.

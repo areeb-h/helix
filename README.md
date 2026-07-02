@@ -41,7 +41,10 @@ The single-threaded reduction is memory-bandwidth-bound *at parity with C*; Heli
 totals by **auto-parallelizing** array construction and outer loops across cores — a real win, but
 an honest one: the C/Rust/Go baselines here are single-threaded, and Helix does not yet
 auto-vectorize (SIMD), which is why threaded+vectorized C-OpenMP is still faster on the last kernel.
-Full methodology, per-language source, and the load-bearing caveats:
+Array-indexed all-pairs — a genuine **distance matrix** over encoded data (`abs(codes[i]-codes[j])`,
+for phylogenetics / clustering) — also runs native: **~220× over the interpreter**, at
+single-threaded Go's level (its outer loop isn't auto-parallelized yet). Full methodology,
+per-language source, and the load-bearing caveats:
 **[docs/jit-benchmarks.md](docs/jit-benchmarks.md)**. DataFrame throughput (a 50M-row
 filter→group→sort→head in ~0.2 s from Parquet) is measured separately in
 [docs/benchmarks.md](docs/benchmarks.md).
@@ -134,9 +137,9 @@ More in [`examples/`](examples/) and the [language & DX guide](docs/syntax-and-d
   **Cranelift JIT**. The VM runs everything; the JIT accelerates the numeric hot paths it
   recognizes and transparently falls back for everything else.
 - **What compiles to native code:** scalar recursion; `map`/`filter`/`reduce`/`scan` over `i64`
-  and `f64` ranges and packed arrays; **array-indexed reductions** (`a[j]` — dot products,
-  weighted sums, N-body); **tuple/record accumulators** (mean+variance in one pass); and
-  **parallel nested reductions** (all-pairs / distance matrices, fanned out across cores).
+  and `f64` ranges and packed arrays; **array-indexed reductions** (`a[j]` and `a[i]` — dot
+  products, weighted sums, **all-pairs distance/Hamming matrices**); **tuple/record accumulators**
+  (mean+variance in one pass); and **parallel nested reductions** fanned out across cores.
 - **Auto-parallel & auto-memoized** — large maps/reductions split across cores (rayon,
   order-preserving); pure overlapping recursion (e.g. naive Fibonacci) is memoized `O(2ⁿ)→O(n)`.
 - **Tensors** — dense n-dimensional `f64` arrays with NumPy-style broadcasting, axis-wise
