@@ -192,6 +192,17 @@ pub enum Op {
     /// to `after`. Otherwise it pops the same operands and falls through to the ordinary
     /// per-stage chain compilation (the oracle path).
     TryJitFused { kernel_idx: u32, after: u32 },
+    /// Fast path for a **parallel nested reduce**: `range(os,oe).map(i =>
+    /// range(is,ie).reduce(init, (acc,j) => body))`, where the inner reduce captures exactly
+    /// the outer binder `i` (a scalar). At this point `[os, oe, is, ie, init]` are on the
+    /// stack (top is `init`) — the outer/inner range bounds and the inner init, all `i`-
+    /// independent. If a native captured-reduce kernel for `inner_loop_idx` exists AND all
+    /// five are `Int` within the 100M cap, the VM runs the outer range in parallel (rayon),
+    /// calling the inner kernel once per `i` (deterministic: independent `i`, order-preserving
+    /// collect, i64-only), pops the five, pushes the resulting `Int` array, and jumps to
+    /// `after`. Otherwise it pops the five and falls through to the identical ordinary
+    /// `map`-of-`reduce` bytecode (the oracle path). See [`crate::jit::run_nested_reduce`].
+    TryJitNestedReduce { inner_loop_idx: u32, after: u32 },
     /// Raise a runtime error with the given message and hint. Used where the
     /// program is statically known to be an error but the error should still fire
     /// at the point of execution (e.g. reassigning an immutable global, after its

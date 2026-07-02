@@ -60,6 +60,20 @@ impl super::Compiler {
         }
         let kind = if name == "map" { CompKind::Map } else { CompKind::Filter };
 
+        // #31 parallel nested-reduce: recognize `range(os,oe).map(i => range(is,ie).reduce(
+        // init, (acc,j) => rbody))` where the inner reduce captures exactly the outer binder
+        // `i` (a scalar). Emit the native operands `[os,oe,is,ie,init]` + a `TryJitNestedReduce`
+        // guard HERE — before the receiver is compiled — so at the guard the stack holds only
+        // those five. On success the VM runs the outer range in parallel (rayon over the native
+        // inner kernel) and jumps past the fallback; on failure it pops the five and falls
+        // through into the ordinary map-of-reduce below (the oracle path). The guard's `after`
+        // is patched to the convergence point once known.
+        let nested_guard: Option<(usize, u32)> = if matches!(kind, CompKind::Map) && params.len() == 1 {
+            self.emit_nested_reduce_attempt(b, recv, &params[0], body, line, col)?
+        } else {
+            None
+        };
+
         self.compile_expr(b, recv)?;
 
         // JIT fast path: a pure single-binder body over an `Int` array runs as a native
@@ -156,6 +170,11 @@ impl super::Compiler {
             } else {
                 Op::TryJitFilter { kernel_idx: idx, after: done_at }
             };
+        }
+        // #31: the nested-reduce guard converges at the SAME point (result on the stack) — on
+        // success the parallel path jumps here, skipping the fallback map it wraps.
+        if let Some((gpos, inner_idx)) = nested_guard {
+            b.code[gpos] = Op::TryJitNestedReduce { inner_loop_idx: inner_idx, after: done_at };
         }
 
         b.scopes.pop();
@@ -258,6 +277,99 @@ impl super::Compiler {
 
         b.scopes.pop();
         b.next_slot = saved_next;
+        Ok(())
+    }
+
+    /// Detect + emit the native attempt for a **parallel nested reduce** (#31):
+    /// `range(os,oe).map(i => range(is,ie).reduce(init, (acc,j) => rbody))` where the inner
+    /// reduce captures EXACTLY the outer binder `i` (a scalar). The inner bounds/init must be
+    /// `i`-independent and idempotent — they are evaluated once for the native attempt and
+    /// recompiled in the fallback, so a side effect would run twice. On a match this pushes the
+    /// five operands `[os,oe,is,ie,init]`, registers the inner reduce loop, and emits a
+    /// `TryJitNestedReduce` guard, returning `(guard_pos, inner_idx)` for the caller to patch
+    /// `after`. Emits nothing and returns `None` when the shape doesn't match (the ordinary
+    /// map-of-reduce then compiles as usual).
+    #[allow(clippy::too_many_arguments)]
+    fn emit_nested_reduce_attempt(
+        &mut self,
+        b: &mut Builder,
+        recv: &Expr,
+        outer_binder: &str,
+        body: &Expr,
+        line: usize,
+        col: usize,
+    ) -> R<Option<(usize, u32)>> {
+        // outer: `range(os, oe)`
+        let Some((os, oe)) = self.builtin_range_call(b, recv) else { return Ok(None) };
+        // body: `range(is, ie).reduce(init, (acc, j) => rbody)`
+        let Expr::Method { recv: inner_recv, name, args, .. } = body else { return Ok(None) };
+        if name.as_str() != "reduce" || args.len() != 2 {
+            return Ok(None);
+        }
+        let Expr::Lambda { params, body: rbody, .. } = &args[1] else { return Ok(None) };
+        if params.len() != 2 {
+            return Ok(None);
+        }
+        let init = &args[0];
+        let (pa, pb) = (params[0].as_str(), params[1].as_str());
+        let Some((is, ie)) = self.builtin_range_call(b, inner_recv) else { return Ok(None) };
+        // i64 inner only (a `Float` init is the f64 path — a follow-up).
+        if crate::jit::is_float_acc_init(init) {
+            return Ok(None);
+        }
+        // All five operands must be idempotent (evaluated for the native attempt AND recompiled
+        // in the fallback), and the inner bounds/init independent of the outer binder `i` (they
+        // are hoisted out of the parallel loop and evaluated once, in the outer scope).
+        for e in [Some(oe), os, Some(ie), is, Some(init)].into_iter().flatten() {
+            if !is_idempotent(e) {
+                return Ok(None);
+            }
+        }
+        if expr_mentions(oe, outer_binder)
+            || expr_mentions(ie, outer_binder)
+            || expr_mentions(init, outer_binder)
+            || os.is_some_and(|e| expr_mentions(e, outer_binder))
+            || is.is_some_and(|e| expr_mentions(e, outer_binder))
+        {
+            return Ok(None);
+        }
+        // The inner reduce must be a captured i64 reduce whose ONLY capture is the outer binder.
+        let fns = self.jit_fn_set();
+        let caps = match crate::jit::reduce_loop_captures(rbody, pa, pb, &fns) {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+        if caps.len() != 1 || caps[0].name != outer_binder || caps[0].kind != CaptureKind::Scalar {
+            return Ok(None);
+        }
+
+        // --- matched: push [os, oe, is, ie, init], register the inner loop, emit the guard ---
+        self.push_or_zero(b, os, line, col)?;
+        self.compile_expr(b, oe)?;
+        self.push_or_zero(b, is, line, col)?;
+        self.compile_expr(b, ie)?;
+        self.compile_expr(b, init)?;
+        let inner_idx = self.reduce_loops.len() as u32;
+        self.reduce_loops.push(ReduceLoop {
+            pa: pa.to_string(),
+            pb: pb.to_string(),
+            bodies: vec![rbody.as_ref().clone()],
+            captures: caps,
+            float: false,
+        });
+        let guard = b.emit(Op::TryJitNestedReduce { inner_loop_idx: inner_idx, after: 0 }, line, col);
+        Ok(Some((guard, inner_idx)))
+    }
+
+    /// Push a range start operand: the expression, or the literal `0` when omitted.
+    fn push_or_zero(&mut self, b: &mut Builder, start: Option<&Expr>, line: usize, col: usize) -> R<()> {
+        match start {
+            None => {
+                let c0 = b.add_const(Value::Int(0));
+                b.emit(Op::Const(c0), line, col);
+            }
+            Some(e) => self.compile_expr(b, e)?,
+        }
         Ok(())
     }
 
@@ -818,5 +930,30 @@ impl super::Compiler {
         let after = b.code.len() as u32;
         b.code[at] = Op::TryJitFused { kernel_idx, after };
         Ok(())
+    }
+}
+
+/// Conservative "does `name` appear as an identifier anywhere in `e`?" — used to keep the
+/// nested-reduce operands (`is`/`ie`/`init`/`oe`) independent of the outer binder, so they can
+/// be hoisted out of the parallel loop and evaluated once. Ignores shadowing (a shadowed
+/// occurrence still returns `true`) and treats any expression shape it doesn't walk into as a
+/// possible mention (`_ => true`) — both err toward declining the parallel path, never toward
+/// wrongly hoisting an `i`-dependent operand.
+fn expr_mentions(e: &Expr, name: &str) -> bool {
+    match e {
+        Expr::Int(_) | Expr::Float(_) => false,
+        Expr::Ident { name: n, .. } => n == name,
+        Expr::Binary { left, right, .. } => expr_mentions(left, name) || expr_mentions(right, name),
+        Expr::Unary { expr, .. } => expr_mentions(expr, name),
+        Expr::Call { args, .. } => args.iter().any(|a| expr_mentions(a, name)),
+        Expr::Method { recv, args, .. } => {
+            expr_mentions(recv, name) || args.iter().any(|a| expr_mentions(a, name))
+        }
+        Expr::Index { recv, index, .. } => expr_mentions(recv, name) || expr_mentions(index, name),
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            expr_mentions(cond, name) || expr_mentions(then_branch, name) || expr_mentions(else_branch, name)
+        }
+        // Any other shape: conservatively assume it might mention the binder → decline.
+        _ => true,
     }
 }

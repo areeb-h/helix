@@ -1366,6 +1366,54 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     frames[fi].ip = *after as usize;
                 }
             }
+            Op::TryJitNestedReduce { inner_loop_idx, after } => {
+                // Stack top: [os, oe, is, ie, init]. Run the outer range in PARALLEL over the
+                // native inner captured-reduce kernel (one call per `i`, order-preserving
+                // collect — deterministic and identical to the serial outer map) when a kernel
+                // exists, all five are `Int`, both spans are within the 100M cap, and the inner
+                // reduce is the expected single-body, single-scalar-capture i64 shape. Otherwise
+                // pop the five and fall through to the ordinary map-of-reduce (the oracle path).
+                use crate::bytecode::CaptureKind;
+                let inner = &program.reduce_loops[*inner_loop_idx as usize];
+                let ok_shape = !inner.float
+                    && inner.bodies.len() == 1
+                    && inner.captures.len() == 1
+                    && inner.captures[0].kind == CaptureKind::Scalar;
+                let len = stack.len();
+                let result: Option<Value> = if ok_shape {
+                    jit.and_then(|j| j.reduce_loop(*inner_loop_idx as usize)).and_then(|ptr| {
+                        let ops = &stack[len - 5..];
+                        let (
+                            Value::Int(os),
+                            Value::Int(oe),
+                            Value::Int(is),
+                            Value::Int(ie),
+                            Value::Int(init),
+                        ) = (&ops[0], &ops[1], &ops[2], &ops[3], &ops[4])
+                        else {
+                            return None;
+                        };
+                        // Match the fallback's caps: outer result size and inner span each within
+                        // the 100M range cap (an over-cap outer/inner range would ERROR in the
+                        // fallback, so declining here keeps the two paths identical).
+                        if (*oe as i128 - *os as i128) > 100_000_000
+                            || (*ie as i128 - *is as i128) > 100_000_000
+                        {
+                            return None;
+                        }
+                        let results =
+                            unsafe { crate::jit::run_nested_reduce(ptr, *os, *oe, *is, *ie, *init) };
+                        Some(Value::int_array(results))
+                    })
+                } else {
+                    None
+                };
+                stack.truncate(len - 5);
+                if let Some(v) = result {
+                    stack.push(v);
+                    frames[fi].ip = *after as usize;
+                }
+            }
             Op::CompInitRange => {
                 // Pop [start, end], validate as integers (matching `range`), and
                 // iterate lazily — no array. Validate start first (arg order).

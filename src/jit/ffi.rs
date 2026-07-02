@@ -87,6 +87,52 @@ pub unsafe fn call_tuple_reduce(ptr: *const u8, start: i64, end: i64, acc: *mut 
     }
 }
 
+/// Run a **parallel nested reduce**: for each `i` in `os..oe`, call the captured inner reduce
+/// kernel `f(is, ie, init, &[i]) -> i64`, collecting the results in order (the outer map's
+/// result array). Fully deterministic and identical to the sequential outer loop: each `i` is
+/// independent, `into_par_iter().map().collect()` preserves order, the inner kernel reads only
+/// its arguments + the read-only kernel code (no shared mutable state, no `Rc` crosses threads),
+/// and i64 folds carry no float non-associativity. Parallel past the shared threshold; below it
+/// a plain loop (byte-identical result).
+///
+/// # Safety
+/// `ptr` must be a finalized single-capture **scalar i64** reduce kernel from
+/// [`define_reduce_loop`] — `extern "C" fn(i64, i64, i64, *const i64) -> i64`, reading exactly
+/// one `i64` capture.
+pub unsafe fn run_nested_reduce(ptr: *const u8, os: i64, oe: i64, is: i64, ie: i64, init: i64) -> Vec<i64> {
+    // A finalized native fn pointer is `Send + Sync` (an address), so it may be shared across
+    // rayon workers; capture `f` (Copy), never the raw `*const u8`. Each worker builds its own
+    // one-element `caps` array on its stack, live for the duration of the call.
+    let f: extern "C" fn(i64, i64, i64, *const i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    // Spans in i128, clamped at 0 — the VM cap-check only bounds them from ABOVE, so a reverse
+    // (empty) range `os > oe` reaches here; an i64 `oe - os` would OVERFLOW (a debug-profile
+    // panic, diverging from the tree-walker's clean empty result). i128 + `.max(0)` yields
+    // `n = 0` for a reverse range → the empty `(os..oe)` iteration, matching `int_range`.
+    let n = ((oe as i128) - (os as i128)).max(0) as usize;
+    // Parallelize on TOTAL work (`outer × inner`), not the outer count alone — a small outer
+    // range over a large inner reduce (few points, long fold) is still worth splitting. Needs
+    // at least 2 outer iterations to distribute.
+    let inner_span = ((ie as i128) - (is as i128)).max(0) as usize;
+    let total = n.saturating_mul(inner_span);
+    if n >= 2 && total >= crate::interp::PAR_MATH_THRESHOLD {
+        use rayon::prelude::*;
+        (os..oe)
+            .into_par_iter()
+            .map(|i| {
+                let caps = [i];
+                f(is, ie, init, caps.as_ptr())
+            })
+            .collect()
+    } else {
+        (os..oe)
+            .map(|i| {
+                let caps = [i];
+                f(is, ie, init, caps.as_ptr())
+            })
+            .collect()
+    }
+}
+
 /// Run a native map kernel `f(src_ptr, dst_ptr, len, caps_ptr)` over `src`, producing a
 /// fresh `Vec<D>` of the same length and order. **At or above `PAR_MATH_THRESHOLD` the
 /// buffer is split into fixed chunks run on rayon workers.** This is safe *and* fully

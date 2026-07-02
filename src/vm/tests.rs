@@ -805,6 +805,46 @@
         }
     }
 
+    /// The **parallel nested-reduce** (#31) at a size that CROSSES the parallel threshold
+    /// (`outer * inner >= PAR_MATH_THRESHOLD`) must stay bit-identical to the tree-walker —
+    /// the order-preserving rayon collect over the native inner captured-reduce kernel. The
+    /// `differential_captured_reduce_jit` fuzzer uses tiny ranges that stay on the serial
+    /// path, so this pins the PARALLEL path specifically (negative starts, captured `i` in
+    /// `min`/`max`, wrapping arithmetic — each a distinct inner-kernel shape).
+    #[test]
+    fn parallel_nested_reduce_matches_tree_walker() {
+        let cases = [
+            "(range(0, 200)).map(i => (range(0, 200)).reduce(0, (acc, j) => acc + (i - j) * (i - j))).sum()",
+            "(range(0, 300)).map(i => (range(0, 150)).reduce(0, (acc, j) => acc + i * j)).sum()",
+            "(range(-50, 250)).map(i => (range(0, 200)).reduce(0, (acc, j) => acc + max(i, j))).sum()",
+            "(range(0, 250)).map(i => (range(0, 200)).reduce(1, (acc, j) => acc + (i * i - j))).sum()",
+        ];
+        for src in cases {
+            assert_eq!(run_vm_jit(src), run_tw(src), "parallel nested reduce JIT ≠ tree-walker on `{src}`");
+        }
+    }
+
+    /// REGRESSION (adversarial-review find): a reverse/empty nested range with EXTREME bounds
+    /// (`os = i64::MAX`, `oe = i64::MIN`) must not overflow the span computation. Before the fix
+    /// `run_nested_reduce` did `oe - os` in i64 → a debug-profile overflow PANIC while the
+    /// tree-walker returned a clean empty result (a JIT ≠ tree-walker divergence the fuzzers,
+    /// which emit `i64::MAX`/`i64::MIN`, could hit). Spans are now computed in i128.
+    #[test]
+    fn nested_reduce_reverse_and_extreme_ranges() {
+        let cases = [
+            // reverse OUTER range → empty map → sum 0 (would panic on i64 `oe - os`)
+            "hi = 9223372036854775807\nlo = 0 - 9223372036854775807 - 1\n(range(hi, lo)).map(i => (range(0, 4)).reduce(0, (acc, j) => acc + i + j)).sum()",
+            // reverse INNER range → each inner reduce returns its init → sum of inits (10 * 7)
+            "hi = 9223372036854775807\nlo = 0 - 9223372036854775807 - 1\n(range(0, 10)).map(i => (range(hi, lo)).reduce(7, (acc, j) => acc + i + j)).sum()",
+            // plain empty outer / empty inner ranges
+            "(range(5, 5)).map(i => (range(0, 3)).reduce(0, (acc, j) => acc + i * j)).sum()",
+            "(range(0, 5)).map(i => (range(3, 3)).reduce(9, (acc, j) => acc + i + j)).sum()",
+        ];
+        for src in cases {
+            assert_eq!(run_vm_jit(src), run_tw(src), "reverse/extreme nested range JIT ≠ tree-walker on `{src}`");
+        }
+    }
+
     /// The **array-indexed reduce kernel** (`arr[counter]`, the dot-product / weighted-sum
     /// pattern) must equal the tree-walker. The inner fold reads two captured `Int` arrays by
     /// the loop counter `j`; when the range is in-bounds the JIT engages the native kernel with
