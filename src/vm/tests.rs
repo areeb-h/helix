@@ -1011,6 +1011,53 @@
         assert_eq!(run_vm_jit(ok), Ok("75".to_string()));
     }
 
+    /// The **captured-scalar array index** (v1c): `a[i]` where `i` is a captured scalar (the
+    /// outer `map` binder), not the loop counter — the all-pairs shape (integer distance /
+    /// Hamming matrices: `abs(codes[i] - codes[j])`, where `codes[j]` is the v1a counter index
+    /// and `codes[i]` the new scalar index). The VM point-checks `0 <= i < len` before the
+    /// native load; an out-of-range `i` (outer range past the array) falls back to the exact
+    /// interpreter error. Random `{acc, a[i], a[j]}` bodies over in- and out-of-bounds outers.
+    #[test]
+    fn differential_scalar_indexed_reduce_jit() {
+        let mut rng = 0x5CA1_1DEA_BCD1_2345u64;
+        let atoms = vec!["acc".to_string(), "a[i]".to_string(), "a[j]".to_string()];
+        for _ in 0..4_000 {
+            let len = (1 + next(&mut rng) % 8) as i64; // 1..=8
+            let a: Vec<i64> = (0..len).map(|_| (next(&mut rng) % 21) as i64 - 10).collect();
+            let outer = (next(&mut rng) % (len as u64 + 2)) as i64; // sometimes i runs off `a`
+            let n = (next(&mut rng) % (len as u64 + 2)) as i64;
+            let body = gen_i64_eligible(&mut rng, 2, &atoms);
+            let src = format!(
+                "a = {}\n(range(0, {outer})).map(i => (range(0, {n})).reduce(0, (acc, j) => ({body}))).sum()",
+                fmt_i64_arr(&a),
+            );
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(x), Ok(y)) => assert_eq!(x, y, "scalar-indexed reduce JIT ≠ tree-walker on `{src}`"),
+                (Err(()), Err(())) => {}
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+    }
+
+    /// Focused v1c edges: a scalar-indexed array with `len < inner range` (an array read ONLY
+    /// by the scalar, never the counter — no range check applies, only the point check), and an
+    /// out-of-bounds scalar index that must fall back to the identical OOB error on both engines.
+    #[test]
+    fn scalar_indexed_reduce_edge_cases() {
+        // `a` (len 3) indexed only by the scalar `i`, inner range 100 (> len) — the point check
+        // `i < 3` passes, the range check must NOT apply. Sum over 100 of a[i] = 100 * a[i].
+        let only_scalar = "a = [10, 20, 30]\n(range(0, 3)).map(i => (range(0, 100)).reduce(0, (acc, j) => acc + a[i])).sum()";
+        assert_eq!(run_vm_jit(only_scalar), run_tw(only_scalar), "scalar-only index JIT ≠ tree-walker");
+        assert_eq!(run_vm_jit(only_scalar), Ok("6000".to_string())); // 100*(10+20+30)
+
+        // Outer range past `a` → `a[i]` OOB for i >= 3 → both engines raise the identical error.
+        let oob = "a = [10, 20, 30]\n(range(0, 5)).map(i => (range(0, 4)).reduce(0, (acc, j) => acc + a[i] + a[j])).sum()";
+        let vm = vm_jit_err_msg(oob).expect("VM must error (scalar index OOB)");
+        let tw = tw_err_msg(oob).expect("tree-walker must error (scalar index OOB)");
+        assert_eq!(vm, tw, "scalar-index OOB message must match on `{oob}`");
+        assert!(vm.contains("out of bounds"), "unexpected: {vm}");
+    }
+
     /// Format a `[i64]` array literal (`[1, 2, 3]`) for a fuzzed source program.
     fn fmt_i64_arr(xs: &[i64]) -> String {
         let inner: Vec<String> = xs.iter().map(|v| v.to_string()).collect();
