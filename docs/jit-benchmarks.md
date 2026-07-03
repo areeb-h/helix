@@ -267,19 +267,28 @@ suite is 593 (its own verified splitmix-style bucket, identical on all six langu
 | allpairs (225M) | **0.010** | 0.035 | 0.100 | 6.36 | 0.149 | 0.025 | 0.076 | loss 2.5× (AVX2) |
 | mandelbrot (1200²) | 0.174 | 0.156 | 0.153 | 5.88 | 3.24 | 0.534 | 0.530 | loss 3.1× (**was 110×**) |
 | basel (1e8) | **0.064** | 0.090 | 0.089 | 4.23 | 0.490 | 0.092 | 0.091 | loss 1.4× — ties Rust/Go |
-| montecarlo (1e8) | **0.250** | 0.257 | 0.282 | 36.4 | — | 41.2 † | 27.3 † | loss (**completes**; was >260 s) |
-| sieve (1e7) | **0.018** | 0.020 | 0.021 | 0.59 | 0.082 | 87.3 | — | loss (**completes, correct**) |
+| montecarlo (1e8) | **0.250** | 0.257 | 0.282 | 36.4 | — | 0.48 ‡ | — | loss 1.9× (**exact shared anchor**) |
+| sieve (1e7) | **0.018** | 0.020 | 0.021 | 0.59 | 0.082 | 0.01 ‡ | — | **tie at C** (native `primes()`) |
 | wordcount (5M) | 0.153 | 0.244 | 0.225 | 2.59 | **0.112** | 2.21 | 2.17 | loss ~14× |
 | matmul naive (512³) | 0.395 | 0.294 | 0.237 | 4.93 | 0.310 | 21.3 | 22.0 | loss (VM path) |
 | matmul tensor | — | — | — | — | 0.310 | **0.070** | — | **win** — 5.6× vs C loop, 4.4× vs NumPy |
 | fib(40) | 0.075 | 0.179 | 0.310 | 7.89 | — | **0.006** | 0.006 | **win** (auto-memo) |
 
-† Helix's own seeded RNG (documented — no u64/logical shift), value 78548037 by design;
-its parallel run (41.2 s) is *slower* than single-core (27.3 s) — the `enumerate`
-pipeline anti-scales under threads (memory-bound), same family as the wordcount finding.
+‡ Flipped right after this run (commit 058a2a4). **montecarlo** now runs the *faithful*
+xorshift64 — the "Helix cannot reproduce the unsigned stream" claim was false: a logical
+shift is an arithmetic shift plus a constant mask, all i64-closed, and the mask-0 mixed
+tail loop (i64 RNG state, f64 point test) runs it natively: **the exact shared anchor
+78537472 in 0.48 s** (was 41.2 s with a different-by-design RNG, whose parallel run was
+even slower than single-core — 41.2 s vs 27.3 s, the enumerate-pipeline anti-scaling;
+small-N byte-verified against the C reference, 100k → 78432 on both). **sieve** gained
+the native `primes(n)` builtin (byte-array sieve in Rust — the mutable algorithm the
+immutable surface delegates, like the tensor `.matmul()`): **664579 in 0.01 s, a dead
+tie with C**; the functional trial-division form remains available and honest at ~87 s.
 
-**Scorecard vs `-march=native` C: 4 wins · 6 losses** (counting matmul once, by its
-native-tensor idiom). What moved since the corrected 3 W/1 wash/6 L:
+**Scorecard vs `-march=native` C: 4 wins · 1 tie · 5 losses** (counting matmul once, by
+its native-tensor idiom) — and four of the five losses are now within ~3× (basel 1.4×,
+montecarlo 1.9×, allpairs 2.5×, mandelbrot 3.1×; wordcount ~14× is the outlier). What
+moved since the corrected 3 W/1 wash/6 L:
 
 - **mandelbrot 20.4 s → 0.534 s (~38×)** — the tail-recursion native loops (B1+B2 +
   `TailCallFn` dispatch). Now a ~3× loss on per-pixel dispatch + no SIMD, not a 110× rout.
