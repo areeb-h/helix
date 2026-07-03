@@ -328,7 +328,8 @@ pub fn build(
         let mut ctx = module.make_context();
         let mut bctx = FunctionBuilderContext::new();
         for f in &funcs {
-            let Some((mask, param_kinds, ret_kind)) = mixed_tail_sig(f, &tail_loop) else {
+            let Some((mask, param_kinds, ret_kind)) = mixed_tail_sig(f, &tail_loop, &int_eligible)
+            else {
                 continue;
             };
             // A body whose every path re-loops never returns; `Int` is a placeholder.
@@ -2247,12 +2248,17 @@ fn mixed_tail_ret_kind<'a>(
 /// The mixed-specialization signature of a tail-loopable function, or `None` if it has
 /// no such form: every parameter carries an explicit `Int`/`Float` annotation (the
 /// contract that makes one static specialization honest — the VM dispatches it only
-/// when the actual argument types match), at least one is `Float` (all-`Int` is the
-/// plain i64 path's job), and the body types consistently under those kinds. Returns
-/// (float bitmask, per-param kinds, result kind — `None` when every path re-loops).
+/// when the actual argument types match), and the body types consistently under those
+/// kinds. An ALL-`Int` signature is admitted too, when the plain i64 path did not
+/// already claim the function — that is the "Int state, float intermediates" shape
+/// (e.g. an xorshift Monte-Carlo loop: i64 RNG state threaded through the tail calls,
+/// f64 math inside each iteration, Int result), which `value_eligible` rejects for its
+/// float literals. Returns (float bitmask, per-param kinds, result kind — `None` when
+/// every path re-loops).
 fn mixed_tail_sig(
     f: &FnDef,
     tail_loop: &HashSet<&str>,
+    int_eligible: &HashSet<&str>,
 ) -> Option<(u16, Vec<NumKind>, Option<NumKind>)> {
     if !tail_loop.contains(f.name) || f.params.is_empty() || f.params.len() > MAX_ARITY {
         return None;
@@ -2269,7 +2275,9 @@ fn mixed_tail_sig(
             _ => return None,
         }
     }
-    if mask == 0 {
+    if mask == 0 && int_eligible.contains(f.name) {
+        // The plain i64 loop already covers an all-Int, i64-closed function — a mixed
+        // duplicate would never be dispatched (the all-Int arm wins first).
         return None;
     }
     let mut env: HashMap<&str, NumKind> =

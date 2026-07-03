@@ -514,6 +514,22 @@
     }
 
     #[test]
+    fn primes_native_sieve() {
+        // All primes below n as a packed Int array (native sieve — the mutable
+        // algorithm Helix's immutable surface delegates to Rust).
+        assert_eq!(format!("{}", last("primes(10)").unwrap()), "[2, 3, 5, 7]");
+        assert_eq!(format!("{}", last("primes(2)").unwrap()), "[]");
+        assert_eq!(format!("{}", last("primes(0 - 5)").unwrap()), "[]");
+        assert!(matches!(last("primes(100).count()").unwrap(), Value::Int(25)));
+        assert!(matches!(last("primes(1000000).count()").unwrap(), Value::Int(78498)));
+        assert!(matches!(last("primes(100).last()").unwrap(), Value::Int(97)));
+        // integral float accepted (like gcd/isqrt); fractional errors; cap enforced
+        assert!(matches!(last("primes(10.0).count()").unwrap(), Value::Int(4)));
+        assert!(last("primes(2.5)").is_err());
+        assert!(last("primes(100000001)").is_err());
+    }
+
+    #[test]
     fn isqrt_integer_square_root() {
         // floor(sqrt(n)); exact at and around perfect squares.
         assert!(matches!(last("isqrt(0)").unwrap(), Value::Int(0)));

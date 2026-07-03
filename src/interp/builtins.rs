@@ -1042,6 +1042,27 @@ impl super::Interp {
                     }
                 }
             }
+            "primes" => {
+                // All primes below n as a packed Int array — the native Sieve of
+                // Eratosthenes. The sieve is an inherently MUTABLE algorithm Helix's
+                // immutable surface cannot express efficiently (functional trial
+                // division is O(N√N)); like the tensor `.matmul()`, it delegates to
+                // Rust. `primes(10000000).count()` = 664579 in ~sieve time, not ~90 s.
+                arity(name, &args, 1, line, col)?;
+                if matches!(args[0], Value::Missing) {
+                    return Ok(Value::Missing);
+                }
+                let n = as_int(&args[0], "primes", line, col)?;
+                if n > 100_000_000 {
+                    return Err(HelixError::new(
+                        format!("`primes` supports n up to 100000000, got {n}"),
+                        line,
+                        col,
+                    )
+                    .hint("the sieve buffer grows with n; sieve in segments for larger bounds."));
+                }
+                Ok(Value::int_array(sieve_primes(n)))
+            }
             "isqrt" => {
                 arity(name, &args, 1, line, col)?;
                 if matches!(args[0], Value::Missing) {
@@ -1957,6 +1978,29 @@ fn gcd_i64(a: i64, b: i64) -> i64 {
         a = t;
     }
     a as i64
+}
+
+/// All primes below `n` (empty for `n <= 2`) via a byte-array Sieve of Eratosthenes —
+/// strikes start at `p*p` (no usize overflow: `p < n <= 1e8` keeps `p*p < 1e16`).
+/// O(n log log n) time, O(n) bytes for the composite flags.
+fn sieve_primes(n: i64) -> Vec<i64> {
+    if n <= 2 {
+        return Vec::new();
+    }
+    let n = n as usize;
+    let mut composite = vec![false; n];
+    let mut out = Vec::new();
+    for p in 2..n {
+        if !composite[p] {
+            out.push(p as i64);
+            let mut m = p * p;
+            while m < n {
+                composite[m] = true;
+                m += p;
+            }
+        }
+    }
+    out
 }
 
 /// Integer square root: the largest `x >= 0` with `x*x <= n`. Caller guarantees `n >= 0`.

@@ -383,6 +383,21 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Int)
         }
+        "primes" => {
+            if args.len() != 1 {
+                return Err(arity_err("primes", 1, args.len(), line, col));
+            }
+            if matches!(args[0], Type::Unknown) {
+                return Ok(Type::Unknown);
+            }
+            if matches!(args[0], Type::Missing) {
+                return Ok(Type::Missing);
+            }
+            if !matches!(args[0], Type::Int | Type::Num | Type::Float) {
+                return Err(type_err("primes", "an integer", &args[0], line, col));
+            }
+            Ok(Type::Array(Box::new(Type::Int)))
+        }
         "chr" => {
             if args.len() != 1 {
                 return Err(arity_err("chr", 1, args.len(), line, col));

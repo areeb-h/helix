@@ -427,6 +427,10 @@
             "range(2, isqrt(2) + 1).all(d => 2 % d != 0)",    // empty divisor range -> true
             // prime count below 100 via bounded trial division = 25
             "range(2, 100).filter(k => range(2, isqrt(k) + 1).all(d => k % d != 0)).count()",
+            // the native sieve agrees with trial division and across engines
+            "primes(1000).count()",
+            "primes(50).sum()",
+            "primes(2).count()",
         ];
         for src in cases {
             assert_eq!(run_tw(src), run_vm(src), "tw vs vm: {src}");
@@ -557,6 +561,21 @@
         }
         // pinned exact value for the halving case
         assert_eq!(run_vm_jit("fn geo(x: Float, n: Int) = if n <= 0 then x else geo(x * 0.5, n - 1)\ngeo(1.0, 3)").unwrap(), "0.125");
+        // ALL-Int-annotated params with FLOAT intermediates (mask = 0, admitted since the
+        // body is not i64-closed): the faithful-xorshift Monte-Carlo shape — i64 RNG
+        // state threaded through the loop (logical shifts = arithmetic shift + constant
+        // mask), f64 point test inside, Int result. Tri-engine at a tw-safe depth (the
+        // 8 nested lets make each tree-walker frame Rust-stack-heavy, so stay shallow)…
+        let xs = "fn mc(state: Int, n: Int, hits: Int) = if n <= 0 then hits else (let a1 = state ^ (state << 13) in let a2 = a1 ^ ((a1 >> 7) & 144115188075855871) in let s = a2 ^ (a2 << 17) in let b1 = s ^ (s << 13) in let b2 = b1 ^ ((b1 >> 7) & 144115188075855871) in let t = b2 ^ (b2 << 17) in let x = ((s >> 11) & 9007199254740991) * 0.00000000000000011102230246251565404236316680908203125 in let y = ((t >> 11) & 9007199254740991) * 0.00000000000000011102230246251565404236316680908203125 in if x * x + y * y <= 1.0 then mc(t, n - 1, hits + 1) else mc(t, n - 1, hits))\nmc(88172645463325252, 100, 0)";
+        assert_eq!(run_tw(xs), run_vm(xs), "xorshift: tw vs vm");
+        assert_eq!(run_tw(xs), run_vm_jit(xs), "xorshift: tw vs jit");
+        // …and the DEEP pin: 100k points of the shared uint64 xorshift64 stream count
+        // exactly 78432 in the unit quarter-circle — verified byte-identical against
+        // the C reference implementation (VM TailCallFn == JIT native loop; the
+        // tree-walker's ~20k depth guard exempts it here, as documented).
+        let xs100k = xs.replace("mc(88172645463325252, 100, 0)", "mc(88172645463325252, 100000, 0)");
+        assert_eq!(run_vm(&xs100k), run_vm_jit(&xs100k), "xorshift 100k: vm vs jit");
+        assert_eq!(run_vm_jit(&xs100k).unwrap(), "78432");
         // DEEP mixed loop — VM (TailCallFn) and JIT native loop, beyond the tw guard
         let deep = "fn p(x: Float, n: Int) = if n <= 0 then x else p(x + 1.0, n - 1)\np(0.0, 1000000)";
         assert_eq!(run_vm(deep), run_vm_jit(deep), "deep: vm vs jit");
