@@ -250,6 +250,48 @@ original "5 wins · 1 tie" was inflated by a scalar-C baseline. The reading:
   catastrophic timeouts and are now fixed to *completing* (42.9 s / 92 s — still interpreter-speed,
   but no longer `>260 s`).
 
+### §5.1 Fresh full-suite re-run (2026-07-04, post fix-wave)
+
+The suite was re-authored from scratch (fresh programs, small-N anchors cross-verified
+across all six languages **before** timing, uniform `-O3 -march=native` C, mandelbrot
+`+ -ffp-contract=off`) and re-run on the current binary — after `isqrt`+short-circuit,
+lazy `enumerate`, the tail-recursion native loops (B1+B2), and the `TailCallFn` dispatch.
+Baseline quality also improved: CPython uses typed `array` buffers (dot_i64 8.8 s, not
+71 s of boxed lists) and NumPy uses proper idioms throughout. Wordcount's anchor in this
+suite is 593 (its own verified splitmix-style bucket, identical on all six languages).
+
+| kernel | C¹ | Rust | Go | CPython | NumPy | Helix ∥ | Helix ·1 | verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| dot_i64 (50M) | 0.437 | 0.444 | 0.460 | 8.77 | 0.481 | **0.166** | 0.243 | **win** — even 1-core beats C |
+| dot_f64 (50M) | 0.461 | 0.474 | 0.477 | 8.10 | 0.507 | **0.170** | 0.260 | **win** |
+| allpairs (225M) | **0.010** | 0.035 | 0.100 | 6.36 | 0.149 | 0.025 | 0.076 | loss 2.5× (AVX2) |
+| mandelbrot (1200²) | 0.174 | 0.156 | 0.153 | 5.88 | 3.24 | 0.534 | 0.530 | loss 3.1× (**was 110×**) |
+| basel (1e8) | **0.064** | 0.090 | 0.089 | 4.23 | 0.490 | 0.092 | 0.091 | loss 1.4× — ties Rust/Go |
+| montecarlo (1e8) | **0.250** | 0.257 | 0.282 | 36.4 | — | 41.2 † | 27.3 † | loss (**completes**; was >260 s) |
+| sieve (1e7) | **0.018** | 0.020 | 0.021 | 0.59 | 0.082 | 87.3 | — | loss (**completes, correct**) |
+| wordcount (5M) | 0.153 | 0.244 | 0.225 | 2.59 | **0.112** | 2.21 | 2.17 | loss ~14× |
+| matmul naive (512³) | 0.395 | 0.294 | 0.237 | 4.93 | 0.310 | 21.3 | 22.0 | loss (VM path) |
+| matmul tensor | — | — | — | — | 0.310 | **0.070** | — | **win** — 5.6× vs C loop, 4.4× vs NumPy |
+| fib(40) | 0.075 | 0.179 | 0.310 | 7.89 | — | **0.006** | 0.006 | **win** (auto-memo) |
+
+† Helix's own seeded RNG (documented — no u64/logical shift), value 78548037 by design;
+its parallel run (41.2 s) is *slower* than single-core (27.3 s) — the `enumerate`
+pipeline anti-scales under threads (memory-bound), same family as the wordcount finding.
+
+**Scorecard vs `-march=native` C: 4 wins · 6 losses** (counting matmul once, by its
+native-tensor idiom). What moved since the corrected 3 W/1 wash/6 L:
+
+- **mandelbrot 20.4 s → 0.534 s (~38×)** — the tail-recursion native loops (B1+B2 +
+  `TailCallFn` dispatch). Now a ~3× loss on per-pixel dispatch + no SIMD, not a 110× rout.
+- **dot_i64 moved from wash to win**: on this fresh run even *single-core* Helix (0.243 s)
+  beats `-march=native` C (0.437 s) on the build+reduce total — both are
+  division-by-constant-limited in the fill, and Helix's native fill+reduce path is simply
+  tight; the parallel build adds the rest. (Bandwidth-bound; margins swing ±30% run to run.)
+- **montecarlo and sieve complete** instead of timing out (lazy `enumerate`;
+  `isqrt`+short-circuit `.all()` → O(N√N)) — still interpreter-class, honestly slow.
+- **basel** now reads as a 1.4× loss to this C build while tying Rust and Go exactly —
+  consistent with the deterministic-ceiling analysis (gcc pipelines the divisions).
+
 ### Two things the anchor-verify gate caught
 
 1. **A wrong reference value.** All five sieve implementations agreed on **664579**, disagreeing
