@@ -411,6 +411,61 @@
         }
     }
 
+    /// Tail-self-recursive scalar i64 functions now JIT as native LOOPS — the recursion
+    /// exclusion is lifted only for the tail shape (`tail_loopable_set`); each tail
+    /// self-call rebinds the parameters and jumps, growing no stack, exactly the VM's
+    /// `TailCallFn` frame reuse. All three engines must agree on every shape; non-tail
+    /// recursion must be untouched (still VM/memoized); the native path must actually
+    /// engage (a silent fallback would make the parity assertions vacuous).
+    #[test]
+    fn tail_recursive_fn_lowers_to_native_loop() {
+        let cases = [
+            // BARE final expressions, never print-wrapped: the harness formats the LAST
+            // value and `print` returns Unit, which would make value parity vacuous
+            // (the oracle-audit lesson). Depths stay modest in this tri-engine loop:
+            // the TREE-WALKER recurses on the Rust stack and cargo-test threads get
+            // ~2 MB — deep coverage is the VM-vs-JIT case below.
+            //
+            // plain accumulator countdown — the tail-call args read the SAME pre-call
+            // `n` twice (`go(n - 1, acc + n)`), pinning the evaluate-then-rebind order
+            "fn go(n, acc) = if n <= 0 then acc else go(n - 1, acc + n)\ngo(400, 0)",
+            // nontrivial arg expressions
+            "fn sq(n, acc) = if n <= 0 then acc else sq(n - 1, acc + n * n)\nsq(200, 0)",
+            // tail call under a `let` in the tail path (binder shadow/restore)
+            "fn lt(n, acc) = if n <= 0 then acc else (let m = n - 1 in lt(m, acc + n))\nlt(300, 0)",
+            // nested if-else chain with euclidean % and // — collatz step count
+            "fn c(n, k) = if n == 1 then k else if n % 2 == 0 then c(n // 2, k + 1) else c(3 * n + 1, k + 1)\nc(27, 0)",
+            // wrapping i64 multiply through the loop (3^80 mod 2^64 — bit parity)
+            "fn dbl(n, acc) = if n <= 0 then acc else dbl(n - 1, acc * 3)\ndbl(80, 1)",
+            // zero iterations: base case immediately
+            "fn z(n, acc) = if n <= 0 then acc else z(n - 1, acc + 1)\nz(0 - 5, 42)",
+            // NON-tail recursion untouched: fib still correct (VM/memoized, JIT-excluded)
+            "fn fib(n) = if n < 2 then n else fib(n - 1) + fib(n - 2)\nfib(20)",
+            // self-call in ARGUMENT position (not a tail shape) — stays on the VM
+            "fn g(n) = if n <= 0 then 0 else g(g(n - 1) - 1)\ng(3)",
+            // self-call inside a MATCH arm: `body_calls` now traverses match, so this
+            // is correctly detected as recursion and runs on the VM (previously it
+            // evaded `recursive_funcs` and was JIT'd as unguarded native recursion)
+            "fn ma(n, acc) = match n { 0 => acc, k => ma(k - 1, acc + k) }\nma(300, 0)",
+        ];
+        for src in cases {
+            assert_eq!(run_tw(src), run_vm(src), "tw vs vm: {src}");
+            assert_eq!(run_tw(src), run_vm_jit(src), "tw vs jit: {src}");
+        }
+        // DEEP loop — far beyond the tree-walker's ~20k call-depth guard (a known,
+        // by-design engine difference, so tw is not consulted here): the VM's
+        // TailCallFn frame-reuse loop and the JIT native loop must both complete
+        // and agree. sum 1..=3e6 = 4500001500000.
+        let deep = "fn go(n, acc) = if n <= 0 then acc else go(n - 1, acc + n)\ngo(3000000, 0)";
+        assert_eq!(run_vm(deep), run_vm_jit(deep), "deep: vm vs jit");
+        assert_eq!(run_vm_jit(deep).unwrap(), "4500001500000");
+        // ENGAGEMENT: the tail fn must actually run native (call_i64 bumps the counter).
+        crate::jit::reset_native_call_count();
+        let src = "fn go(n, acc) = if n <= 0 then acc else go(n - 1, acc + n)\ngo(10000, 0)";
+        assert_eq!(run_vm_jit(src).unwrap(), "50005000");
+        assert!(crate::jit::native_call_count() > 0, "tail fn did not engage the JIT");
+    }
+
     /// Lazy `enumerate()` (`ArrayData::Enumerate`) must (a) agree across tree-walker, VM,
     /// and JIT, and (b) be behaviourally IDENTICAL to the dense `(index, element)` tuple
     /// array — the lazy-vs-dense equivalence the cross-engine oracle alone cannot verify

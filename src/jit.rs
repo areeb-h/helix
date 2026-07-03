@@ -36,7 +36,7 @@ use std::collections::{HashMap, HashSet};
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{F64, I8, I64};
-use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Type, Value as ClValue};
+use cranelift_codegen::ir::{AbiParam, Block, InstBuilder, MemFlags, Type, Value as ClValue};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -195,6 +195,9 @@ pub fn build(
     // the VM instead (correct, and they're not hot after recursion is excluded).
     let kind = NumKind::Int;
     let int_eligible = eligible_set(&funcs, kind);
+    // Tail-self-recursive members of `int_eligible` compile as native loops (their
+    // recursion exclusion is lifted in `eligible_set` via this same pure predicate).
+    let tail_loop = tail_loopable_set(&funcs);
     // All user-function names — so the f64 kernel's inline builtins (`sqrt`/`abs`/`min`/
     // `max`) are recognized only when not shadowed by a user function of the same name.
     let user_fns: HashSet<&str> = funcs.iter().map(|f| f.name).collect();
@@ -244,8 +247,38 @@ pub fn build(
                 vars.insert(pname.as_str(), var);
             }
 
-            let ret = gen_value(&mut builder, f.body, &mut vars, &fn_ids, &mut module, kind);
-            builder.ins().return_(&[ret]);
+            if tail_loop.contains(f.name) {
+                // Tail-self-recursive: lower as a native LOOP. Every tail self-call
+                // rebinds the parameter Variables and jumps back to `hdr` — no native
+                // stack growth, exactly the VM's `TailCallFn` frame reuse. `hdr` stays
+                // unsealed until the body is generated (back-edges pending); Cranelift's
+                // seal-late Variable mechanism builds the loop phis.
+                let param_vars: Vec<Variable> =
+                    f.params.iter().map(|(p, _)| vars[p.as_str()]).collect();
+                let hdr = builder.create_block();
+                let exit = builder.create_block();
+                let ret = builder.declare_var(kind.cl_type());
+                // Dominating default so `exit`'s `use_var` is defined even for a body
+                // whose every path re-loops (`fn f(n) = f(n)` — which then spins exactly
+                // like the VM's TailCallFn would; this value is never read).
+                let zero = match kind {
+                    NumKind::Int => builder.ins().iconst(I64, 0),
+                    NumKind::Float => builder.ins().f64const(0.0),
+                };
+                builder.def_var(ret, zero);
+                builder.ins().jump(hdr, &[]);
+                builder.switch_to_block(hdr);
+                let tl = TailLoop { self_name: f.name, params: &param_vars, hdr, exit, ret };
+                gen_tail(&mut builder, f.body, &mut vars, &fn_ids, &mut module, kind, &tl);
+                builder.seal_block(hdr);
+                builder.switch_to_block(exit);
+                builder.seal_block(exit);
+                let rv = builder.use_var(ret);
+                builder.ins().return_(&[rv]);
+            } else {
+                let ret = gen_value(&mut builder, f.body, &mut vars, &fn_ids, &mut module, kind);
+                builder.ins().return_(&[ret]);
+            }
             builder.finalize();
 
             module.define_function(fn_ids[f.name], &mut ctx).ok()?;
@@ -1737,11 +1770,18 @@ fn eligible_set<'a>(funcs: &[FnDef<'a>], kind: NumKind) -> HashSet<&'a str> {
     // test: the JIT's memory safety must NOT silently depend on the front-end's
     // define-before-use rule (which makes mutual recursion unrepresentable today,
     // but is a front-end policy that could change — see `recursive_funcs`).
-    // Recursive functions run on the depth-guarded VM (or are memoized) instead.
+    // Recursive functions run on the depth-guarded VM (or are memoized) instead —
+    // EXCEPT directly tail-self-recursive ones (`tail_loopable_set`), which lower to
+    // native LOOPS (parameter rebind + jump, no stack growth), so the native-stack
+    // hazard above does not apply to them.
     let recursive = recursive_funcs(funcs);
+    let tail_loop = tail_loopable_set(funcs);
     let mut eligible: HashSet<&str> = funcs
         .iter()
-        .filter(|f| f.params.len() <= MAX_ARITY && !recursive.contains(f.name))
+        .filter(|f| {
+            f.params.len() <= MAX_ARITY
+                && (!recursive.contains(f.name) || tail_loop.contains(f.name))
+        })
         .map(|f| f.name)
         .collect();
     // Pure scalar builtins the kernel codegen can emit inline (`abs`/`min`/`max`) — usable
@@ -1830,8 +1870,88 @@ fn body_calls(e: &Expr, name: &str) -> bool {
             bindings.iter().any(|(_, v)| body_calls(v, name))
                 || body_calls(body, name)
         }
+        // A `match` is i64-eligible (`match_eligible`), so a call can hide in its
+        // scrutinee, a guard, or an arm body — all must be traversed. Without this arm a
+        // self-call inside a match evaded `recursive_funcs`, and the function was JIT'd
+        // with unguarded NATIVE recursion (deep input = native stack overflow = process
+        // crash, where the VM raises its clean depth error).
+        Expr::Match { scrutinee, arms, .. } => {
+            body_calls(scrutinee, name)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(|g| body_calls(g, name))
+                        || body_calls(&a.body, name)
+                })
+        }
         _ => false,
     }
+}
+
+/// True iff every call to `self_name` in `e` sits in **tail position** — reachable from
+/// the function root only through `if` branches and `let` bodies — and passes exactly
+/// `arity` arguments. Such a call is a loop back-edge, not real recursion: the JIT lowers
+/// it by rebinding the parameters and jumping to the loop header ([`gen_tail`]), growing
+/// no native stack — precisely the VM's `TailCallFn` frame-reuse semantics (the tail-call
+/// peephole in `bytecode.rs`). Conditions, `let` binding values, and the tail call's own
+/// arguments must be self-free: a self-call there needs a real activation record.
+fn self_calls_tail_only(e: &Expr, self_name: &str, arity: usize) -> bool {
+    match e {
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            !body_calls(cond, self_name)
+                && self_calls_tail_only(then_branch, self_name, arity)
+                && self_calls_tail_only(else_branch, self_name, arity)
+        }
+        Expr::Let { bindings, body } => {
+            bindings.iter().all(|(_, v)| !body_calls(v, self_name))
+                && self_calls_tail_only(body, self_name, arity)
+        }
+        Expr::Call { name, args, .. } if name == self_name => {
+            args.len() == arity && args.iter().all(|a| !body_calls(a, self_name))
+        }
+        other => !body_calls(other, self_name),
+    }
+}
+
+/// True iff `funcs[i]` lies on a call cycle of length ≥ 2 — it can reach itself through
+/// some *other* function. The direct self-edge is deliberately ignored: a purely
+/// tail-self-recursive function lowers to a native loop, but one on a mutual cycle would
+/// still recurse natively through its partner, so it must stay excluded. (Mutual
+/// recursion is unrepresentable under today's define-before-use rule; like
+/// `recursive_funcs`, this check refuses to depend on that front-end policy.)
+fn on_mutual_cycle(i: usize, funcs: &[FnDef]) -> bool {
+    let n = funcs.len();
+    let mut seen = vec![false; n];
+    // First hop: every callee EXCEPT the direct self-edge.
+    let mut stack: Vec<usize> =
+        (0..n).filter(|&j| j != i && body_calls(funcs[i].body, funcs[j].name)).collect();
+    while let Some(u) = stack.pop() {
+        if u == i {
+            return true;
+        }
+        if !seen[u] {
+            seen[u] = true;
+            stack.extend((0..n).filter(|&j| body_calls(funcs[u].body, funcs[j].name)));
+        }
+    }
+    false
+}
+
+/// The directly tail-self-recursive functions the JIT lowers as native **loops** instead
+/// of excluding for recursion: every self-call is in tail position with the right arity
+/// (`self_calls_tail_only`) and the function is on no mutual cycle (`on_mutual_cycle`).
+/// The back-edge grows no native stack, so the unguarded-recursion hazard that excludes
+/// recursive functions does not apply; a missing base case spins exactly like the VM's
+/// `TailCallFn` loop would (identical semantics), it does not overflow. Pure and
+/// deterministic — `eligible_set` (read by both the bytecode compiler and the JIT build)
+/// and `build`'s codegen branch call it identically, so all sites always agree.
+fn tail_loopable_set<'a>(funcs: &[FnDef<'a>]) -> HashSet<&'a str> {
+    funcs
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| body_calls(f.body, f.name))
+        .filter(|(i, _)| !on_mutual_cycle(*i, funcs))
+        .filter(|(_, f)| self_calls_tail_only(f.body, f.name, f.params.len()))
+        .map(|(_, f)| f.name)
+        .collect()
 }
 
 /// Pure scalar builtins the `i64` kernel codegen emits inline, matching the interpreter
@@ -2783,6 +2903,89 @@ fn define_fused_kernel<'a>(
     module.define_function(fid, ctx).ok()?;
     module.clear_context(ctx);
     Some(())
+}
+
+/// Loop context for a tail-self-recursive function body ([`build`]'s tail branch): the
+/// function's own name, its parameter `Variable`s in declaration order (captured BEFORE
+/// any `let` shadowing, so the back-edge rebinds the real parameters), the loop
+/// header/exit blocks, and the result variable the exit block returns.
+struct TailLoop<'p> {
+    self_name: &'p str,
+    params: &'p [Variable],
+    hdr: Block,
+    exit: Block,
+    ret: Variable,
+}
+
+/// Generate a tail-self-recursive function body as a native loop. Tail positions — `if`
+/// branches and `let` bodies, exactly what `self_calls_tail_only` admitted — recurse; a
+/// tail self-call evaluates ALL its argument values first (they must read the *current*
+/// parameters: `go(n - 1, acc + n)` reads the same `n` twice), then rebinds the parameter
+/// Variables and jumps back to the header; any other expression is a value position —
+/// compute it (self-free by eligibility), store the result, jump to the exit. Every path
+/// terminates its block, so there is no merge block: the CFG is exactly a `while` loop.
+fn gen_tail<'a>(
+    b: &mut FunctionBuilder,
+    e: &'a Expr,
+    vars: &mut HashMap<&'a str, Variable>,
+    fn_ids: &HashMap<&str, FuncId>,
+    module: &mut JITModule,
+    kind: NumKind,
+    tl: &TailLoop,
+) {
+    match e {
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            let then_b = b.create_block();
+            let else_b = b.create_block();
+            let cv = gen_cond(b, cond, vars, fn_ids, module, kind);
+            b.ins().brif(cv, then_b, &[], else_b, &[]);
+            b.switch_to_block(then_b);
+            b.seal_block(then_b);
+            gen_tail(b, then_branch, vars, fn_ids, module, kind, tl);
+            b.switch_to_block(else_b);
+            b.seal_block(else_b);
+            gen_tail(b, else_branch, vars, fn_ids, module, kind, tl);
+        }
+        Expr::Let { bindings, body } => {
+            // Same shadow/restore discipline as `gen_value`'s Let — the map mutation
+            // must be undone for a sibling `if` branch generated after this subtree.
+            let mut saved: Vec<(&'a str, Option<Variable>)> = Vec::new();
+            for (n, v) in bindings {
+                let vv = gen_value(b, v, vars, fn_ids, module, kind);
+                let var = b.declare_var(kind.cl_type());
+                b.def_var(var, vv);
+                saved.push((n.as_str(), vars.insert(n.as_str(), var)));
+            }
+            gen_tail(b, body, vars, fn_ids, module, kind, tl);
+            for (n, old) in saved.into_iter().rev() {
+                match old {
+                    Some(o) => {
+                        vars.insert(n, o);
+                    }
+                    None => {
+                        vars.remove(n);
+                    }
+                }
+            }
+        }
+        Expr::Call { name, args, .. } if name == tl.self_name => {
+            // The back-edge. Evaluate every argument BEFORE rebinding any parameter —
+            // later arguments read the pre-call parameter values, never a fresh rebind.
+            let argv: Vec<ClValue> = args
+                .iter()
+                .map(|a| gen_value(b, a, vars, fn_ids, module, kind))
+                .collect();
+            for (var, v) in tl.params.iter().zip(argv) {
+                b.def_var(*var, v);
+            }
+            b.ins().jump(tl.hdr, &[]);
+        }
+        other => {
+            let v = gen_value(b, other, vars, fn_ids, module, kind);
+            b.def_var(tl.ret, v);
+            b.ins().jump(tl.exit, &[]);
+        }
+    }
 }
 
 fn gen_value<'a>(
