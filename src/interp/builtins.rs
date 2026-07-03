@@ -1042,6 +1042,24 @@ impl super::Interp {
                     }
                 }
             }
+            "isqrt" => {
+                arity(name, &args, 1, line, col)?;
+                if matches!(args[0], Value::Missing) {
+                    return Ok(Value::Missing);
+                }
+                let n = as_int(&args[0], "isqrt", line, col)?;
+                if n < 0 {
+                    return Err(HelixError::new(
+                        format!(
+                            "`isqrt` got {n}, but the integer square root is undefined for a negative number"
+                        ),
+                        line,
+                        col,
+                    )
+                    .hint("isqrt(n) = floor(sqrt(n)) and needs n >= 0."));
+                }
+                Ok(Value::Int(isqrt_i64(n)))
+            }
             "chr" => {
                 arity(name, &args, 1, line, col)?;
                 if matches!(args[0], Value::Missing) {
@@ -1939,6 +1957,24 @@ fn gcd_i64(a: i64, b: i64) -> i64 {
         a = t;
     }
     a as i64
+}
+
+/// Integer square root: the largest `x >= 0` with `x*x <= n`. Caller guarantees `n >= 0`.
+/// An f64 seed corrected in i128 — exact even near `i64::MAX`, where `sqrt() as i64` can be
+/// off by one and the verification `x*x` would overflow i64.
+fn isqrt_i64(n: i64) -> i64 {
+    if n < 2 {
+        return n;
+    }
+    let n = n as i128;
+    let mut x = (n as f64).sqrt() as i128;
+    while x * x > n {
+        x -= 1;
+    }
+    while (x + 1) * (x + 1) <= n {
+        x += 1;
+    }
+    x as i64
 }
 
 /// Parse an even-length hex string (`0-9a-fA-F`) into its bytes; `None` on odd length or a

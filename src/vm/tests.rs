@@ -387,6 +387,30 @@
         }
     }
 
+    /// `isqrt` + short-circuit `.any()`/`.all()` over a bounded range — the sieve
+    /// quick-win idiom (`is_prime(k) = range(2, isqrt(k)+1).all(d => k%d != 0)`) — must
+    /// agree across tree-walker, VM, and JIT (value and error alike).
+    #[test]
+    fn isqrt_and_short_circuit_match_across_engines() {
+        let cases = [
+            "isqrt(0)",
+            "isqrt(15)",
+            "isqrt(16)",
+            "isqrt(10000000)",
+            "isqrt(9223372036854775807)",
+            "isqrt(0 - 4)",                                    // error on all engines
+            "range(2, isqrt(91) + 1).any(d => 91 % d == 0)",  // composite 7*13 -> true
+            "range(2, isqrt(97) + 1).all(d => 97 % d != 0)",  // prime -> true
+            "range(2, isqrt(2) + 1).all(d => 2 % d != 0)",    // empty divisor range -> true
+            // prime count below 100 via bounded trial division = 25
+            "range(2, 100).filter(k => range(2, isqrt(k) + 1).all(d => k % d != 0)).count()",
+        ];
+        for src in cases {
+            assert_eq!(run_tw(src), run_vm(src), "tw vs vm: {src}");
+            assert_eq!(run_tw(src), run_vm_jit(src), "tw vs jit: {src}");
+        }
+    }
+
     /// Type-directed routing: DataFrame column-verbs (`where`/`select`/`sort`/
     /// `group`) compile and run on the VM (not the tree-walker), matching the
     /// oracle. Locks in Phase 4 of the one-engine collapse.

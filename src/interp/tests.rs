@@ -514,6 +514,29 @@
     }
 
     #[test]
+    fn isqrt_integer_square_root() {
+        // floor(sqrt(n)); exact at and around perfect squares.
+        assert!(matches!(last("isqrt(0)").unwrap(), Value::Int(0)));
+        assert!(matches!(last("isqrt(1)").unwrap(), Value::Int(1)));
+        assert!(matches!(last("isqrt(15)").unwrap(), Value::Int(3)));
+        assert!(matches!(last("isqrt(16)").unwrap(), Value::Int(4)));
+        assert!(matches!(last("isqrt(17)").unwrap(), Value::Int(4)));
+        assert!(matches!(last("isqrt(9999999)").unwrap(), Value::Int(3162)));
+        assert!(matches!(last("isqrt(10000000)").unwrap(), Value::Int(3162)));
+        // exact near the top of i64 — the f64 seed is off by one here and x*x would overflow
+        // i64, so the i128 correction is load-bearing.
+        assert!(matches!(
+            last("isqrt(9223372036854775807)").unwrap(),
+            Value::Int(3037000499)
+        ));
+        // integer-valued float accepted (like gcd); fractional and negative are errors.
+        assert!(matches!(last("isqrt(49.0)").unwrap(), Value::Int(7)));
+        assert!(last("isqrt(2.5)").is_err());
+        assert!(last("isqrt(0 - 1)").is_err());
+        assert!(last("isqrt(4, 9)").is_err()); // arity
+    }
+
+    #[test]
     fn exact_rationals() {
         // construction reduces to lowest terms; integer-valued ratios print as integers
         assert!(matches!(last("rational(4, 8)").unwrap(), Value::Rational(r) if r.to_string() == "1/2"));

@@ -49,8 +49,8 @@ pub fn category_of(name: &str) -> &'static str {
         "sqrt" | "cbrt" | "abs" | "exp" | "ln" | "log10" | "log2" | "log" | "sin" | "cos"
         | "tan" | "asin" | "acos" | "atan" | "atan2" | "sinh" | "cosh" | "tanh" | "floor"
         | "ceil" | "round" | "trunc" | "sign" | "is_nan" | "is_finite" | "is_infinite"
-        | "degrees" | "radians" | "hypot" | "min" | "max" | "clamp" | "erf" | "gcd" | "argmax"
-        | "argmin" => "math",
+        | "degrees" | "radians" | "hypot" | "min" | "max" | "clamp" | "erf" | "gcd" | "isqrt"
+        | "argmax" | "argmin" => "math",
         // Neural-net activations.
         "relu" | "sigmoid" => "nn",
         // Cryptography.
@@ -162,6 +162,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "clamp", pure: true },
     BuiltinDef { path: "erf", pure: true },
     BuiltinDef { path: "gcd", pure: true },
+    BuiltinDef { path: "isqrt", pure: true },
     // codepoint <-> single-character string (URL/percent decoding, ANSI escapes, byte work)
     BuiltinDef { path: "chr", pure: true },
     BuiltinDef { path: "ord", pure: true },

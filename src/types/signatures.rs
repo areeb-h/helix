@@ -366,6 +366,23 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Int)
         }
+        "isqrt" => {
+            if args.len() != 1 {
+                return Err(arity_err("isqrt", 1, args.len(), line, col));
+            }
+            if matches!(args[0], Type::Unknown) {
+                return Ok(Type::Unknown);
+            }
+            if matches!(args[0], Type::Missing) {
+                return Ok(Type::Missing);
+            }
+            // Float is allowed at the type level (an integer-valued float is accepted at
+            // runtime; a fractional or negative one errors there).
+            if !matches!(args[0], Type::Int | Type::Num | Type::Float) {
+                return Err(type_err("isqrt", "an integer", &args[0], line, col));
+            }
+            Ok(Type::Int)
+        }
         "chr" => {
             if args.len() != 1 {
                 return Err(arity_err("chr", 1, args.len(), line, col));
