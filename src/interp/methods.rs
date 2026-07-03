@@ -509,6 +509,8 @@ fn array_numeric_fast(
                 ArrayData::Values(_) => None,
                 ArrayData::Ints(xs) => Some(Value::Int(xs.len() as i64)),
                 ArrayData::Floats(xs) => Some(Value::Int(xs.len() as i64)),
+                // O(1) on a lazy range — the whole point of the lazy representation.
+                ArrayData::Range { len, .. } => Some(Value::Int(*len as i64)),
             });
         }
         "first" | "last" => {
@@ -525,6 +527,9 @@ fn array_numeric_fast(
                 } else {
                     Value::Float(if first { xs[0] } else { xs[xs.len() - 1] })
                 }),
+                // O(1) — `range(20M).first()` computes one element, no 160 MB materialization.
+                ArrayData::Range { len, .. } if *len == 0 => Some(Value::Missing),
+                ArrayData::Range { .. } => Some(ad.get(if first { 0 } else { ad.len() - 1 })),
             });
         }
         _ => {}
@@ -538,6 +543,11 @@ fn array_numeric_fast(
     match ad {
         ArrayData::Values(_) => Ok(None),
         ArrayData::Ints(xs) => array_int_reduce(xs, name, line, col).map(Some),
+        // A reduction consumes every element, so materialize the range once (bit-identical to
+        // reducing the equivalent `Int` array); still lazy for the O(1) methods above.
+        ArrayData::Range { .. } => {
+            array_int_reduce(&ad.to_ints().unwrap(), name, line, col).map(Some)
+        }
         ArrayData::Floats(xs) => {
             // A `NaN` flips the answer to `missing` under ADR-0001; defer so the
             // general path matches the untyped result exactly.

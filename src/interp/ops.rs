@@ -444,6 +444,9 @@ fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
         match ad {
             ArrayData::Floats(v) => Some(std::borrow::Cow::Borrowed(v)),
             ArrayData::Ints(v) => Some(std::borrow::Cow::Owned(v.iter().map(|&n| n as f64).collect())),
+            ArrayData::Range { .. } => Some(std::borrow::Cow::Owned(
+                ad.to_ints().unwrap().iter().map(|&n| n as f64).collect(),
+            )),
             ArrayData::Values(_) => None,
         }
     }

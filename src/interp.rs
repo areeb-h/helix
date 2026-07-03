@@ -1099,6 +1099,10 @@ fn apply_float_fn(
                 ArrayData::Floats(xs) => Ok(Value::float_array(map_f64_buf(xs, f))),
                 // `i64 → f64` changes the element type, so it allocates a fresh buffer.
                 ArrayData::Ints(xs) => Ok(Value::float_array(map_buf(xs, move |x: i64| f(x as f64)))),
+                // A range maps its (materialized) i64 elements to `f64` — same as the `Ints` path.
+                ArrayData::Range { .. } => Ok(Value::float_array(
+                    a.to_ints().unwrap().iter().map(|&x| f(x as f64)).collect(),
+                )),
                 ArrayData::Values(_) => scalar_fallback(&Value::Array(a)),
             }
         }
@@ -1141,6 +1145,8 @@ fn apply_round_fn(
                 .collect::<Result<Vec<i64>, _>>()
                 .map(Value::int_array),
             ArrayData::Ints(xs) => Ok(Value::int_array(xs.clone())),
+            // Rounding whole numbers is a no-op — return the range unchanged (it is already `Int`).
+            ArrayData::Range { .. } => Ok(Value::Array(ad.clone())),
             ArrayData::Values(_) => round_box(name, f, v, line, col),
         },
         // Tensors and scalars keep the exact general path (a tensor stays a whole-valued
@@ -1212,6 +1218,9 @@ pub(crate) fn apply_abs(v: Value, line: usize, col: usize) -> Result<Value, Heli
             match &*a {
                 ArrayData::Floats(xs) => Ok(Value::float_array(map_buf(xs, |x: f64| x.abs()))),
                 ArrayData::Ints(xs) => Ok(Value::int_array(map_buf(xs, |x: i64| x.wrapping_abs()))),
+                ArrayData::Range { .. } => Ok(Value::int_array(
+                    a.to_ints().unwrap().iter().map(|&x| x.wrapping_abs()).collect(),
+                )),
                 ArrayData::Values(_) => boxed(&Value::Array(a)),
             }
         }
@@ -1236,6 +1245,11 @@ pub(crate) fn apply_sign(v: &Value, line: usize, col: usize) -> Result<Value, He
         match &**ad {
             ArrayData::Floats(xs) => return Ok(Value::int_array(map_buf(xs, fsign))),
             ArrayData::Ints(xs) => return Ok(Value::int_array(map_buf(xs, |x: i64| x.signum()))),
+            ArrayData::Range { .. } => {
+                return Ok(Value::int_array(
+                    ad.to_ints().unwrap().iter().map(|&x| x.signum()).collect(),
+                ));
+            }
             ArrayData::Values(_) => {}
         }
     }
@@ -1296,17 +1310,12 @@ fn int_range(a: i64, b: i64, line: usize, col: usize) -> Result<Value, HelixErro
             line,
             col,
         )
-        .hint("ranges are materialized eagerly — keep them under 100 million elements."));
+        .hint("keep ranges under 100 million elements."));
     }
-    // A packed `Int` column — half the memory of boxed `Value`s, and the typed
-    // fast paths below reduce/index it without ever materializing `Value`s.
-    let mut v: Vec<i64> = Vec::with_capacity(len.max(0) as usize);
-    let mut x = a;
-    while x < b {
-        v.push(x);
-        x += 1;
-    }
-    Ok(Value::int_array(v))
+    // LAZY: return an `ArrayData::Range` (O(1), no allocation) — consumers materialize on demand
+    // (see `ArrayData::to_ints`/`densify`), so `range(N).first()/.count()/.take()` never build the
+    // `Vec<i64>`. Behaviour is bit-identical to the materialized `Int` array.
+    Ok(Value::lazy_range(a, 1, len.max(0) as usize))
 }
 
 /// `range(start, stop, step)` — half-open, step may be negative for a descending
@@ -1334,31 +1343,10 @@ fn int_range_step(a: i64, b: i64, step: i64, line: usize, col: usize) -> Result<
         )
         .hint("ranges are materialized eagerly — keep them under 100 million elements."));
     }
-    let mut v: Vec<i64> = Vec::with_capacity(len.max(0) as usize);
-    let mut x = a;
-    // Advance with `checked_add`: after pushing the last in-range element the loop
-    // runs one more `x += step` before re-testing the guard, which can overflow i64
-    // for large `start`/`step` even though `len` (and thus the element count) is
-    // small. On overflow the next value is necessarily past `b`, so the range is
-    // already complete — break rather than panic (debug) or silently wrap (release).
-    if step > 0 {
-        while x < b {
-            v.push(x);
-            match x.checked_add(step) {
-                Some(nx) => x = nx,
-                None => break,
-            }
-        }
-    } else {
-        while x > b {
-            v.push(x);
-            match x.checked_add(step) {
-                Some(nx) => x = nx,
-                None => break,
-            }
-        }
-    }
-    Ok(Value::int_array(v))
+    // LAZY: `len` is exactly the element count computed above, and each element `a + step*i`
+    // (for `i` in `0..len`) is in `[a, b)` so it fits `i64` — the `ArrayData::Range` invariant.
+    // No `Vec` is built; consumers materialize on demand. Bit-identical to the eager array.
+    Ok(Value::lazy_range(a, step, len.max(0) as usize))
 }
 
 fn make_dna(s: &str, line: usize, col: usize) -> Result<Value, HelixError> {

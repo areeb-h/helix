@@ -164,10 +164,20 @@ impl DictKey {
 pub enum ArrayData {
     /// General case: heterogeneous, nested, or non-numeric elements.
     Values(Vec<Value>),
-    /// Homogeneous `Int` (e.g. `range(...)`, an all-int literal, an int column).
+    /// Homogeneous `Int` (an all-int literal, a materialized range, an int column).
     Ints(Vec<i64>),
     /// Homogeneous `Float`.
     Floats(Vec<f64>),
+    /// A **lazy** arithmetic integer range: element `i` is `start + step * i` for `i` in
+    /// `0..len` — the value `range(...)` returns, WITHOUT materializing the `Vec<i64>`. This
+    /// makes `range(N).first()/.last()/.count()/.length()/.take()/.drop()` O(1) (the eager-
+    /// materialization pain: `range(20M).first()` no longer allocates 160 MB). Behaviourally
+    /// IDENTICAL to the equivalent `Ints` array — `get`/`len`/`to_values` produce the same
+    /// elements — so any consumer without a lazy fast path reads it element-wise or materializes
+    /// via [`ArrayData::to_ints`]/[`ArrayData::densify`], staying bit-identical across all three
+    /// engines. Invariant (upheld by `int_range`/`int_range_step`): `start + step*(len-1)` fits
+    /// `i64`, so no element computation overflows.
+    Range { start: i64, step: i64, len: usize },
 }
 
 impl ArrayData {
@@ -176,6 +186,7 @@ impl ArrayData {
             ArrayData::Values(v) => v.len(),
             ArrayData::Ints(v) => v.len(),
             ArrayData::Floats(v) => v.len(),
+            ArrayData::Range { len, .. } => *len,
         }
     }
 
@@ -190,6 +201,31 @@ impl ArrayData {
             ArrayData::Values(v) => v[i].clone(),
             ArrayData::Ints(v) => Value::Int(v[i]),
             ArrayData::Floats(v) => Value::Float(v[i]),
+            // i128 intermediate so `step * i` can't overflow before the (in-range by the
+            // invariant) result is cast back to `i64`.
+            ArrayData::Range { start, step, .. } => {
+                Value::Int((*start as i128 + *step as i128 * i as i128) as i64)
+            }
+        }
+    }
+
+    /// The `i`-th element of a lazy range as a raw `i64` (helper for the typed fast paths).
+    #[inline]
+    fn range_at(start: i64, step: i64, i: usize) -> i64 {
+        (start as i128 + step as i128 * i as i128) as i64
+    }
+
+    /// View a lazy [`ArrayData::Range`] (or an already-`Ints` array) as packed `i64`s — the
+    /// `Ints` case borrows (zero-copy), the `Range` case materializes. `None` for `Floats`/
+    /// `Values`. The escape hatch a consumer without a lazy fast path uses to treat a range as
+    /// an ordinary `Int` array.
+    pub fn to_ints(&self) -> Option<Cow<'_, [i64]>> {
+        match self {
+            ArrayData::Ints(v) => Some(Cow::Borrowed(v)),
+            ArrayData::Range { start, step, len } => {
+                Some(Cow::Owned((0..*len).map(|i| Self::range_at(*start, *step, i)).collect()))
+            }
+            _ => None,
         }
     }
 
@@ -201,6 +237,7 @@ impl ArrayData {
             ArrayData::Values(v) => Cow::Borrowed(v),
             ArrayData::Ints(v) => Cow::Owned(v.iter().map(|&n| Value::Int(n)).collect()),
             ArrayData::Floats(v) => Cow::Owned(v.iter().map(|&f| Value::Float(f)).collect()),
+            ArrayData::Range { .. } => Cow::Owned((0..self.len()).map(|i| self.get(i)).collect()),
         }
     }
 
@@ -332,6 +369,12 @@ impl Value {
     /// A packed `Float` array.
     pub fn float_array(items: Vec<f64>) -> Value {
         Value::Array(Rc::new(ArrayData::Floats(items)))
+    }
+
+    /// A **lazy** integer range `[start, start+step, …]` of `len` elements — what `range(...)`
+    /// returns without materializing the `Vec<i64>`. See [`ArrayData::Range`].
+    pub fn lazy_range(start: i64, step: i64, len: usize) -> Value {
+        Value::Array(Rc::new(ArrayData::Range { start, step, len }))
     }
 
     /// Build an array, **packing** it into a typed `Int`/`Float` column when the

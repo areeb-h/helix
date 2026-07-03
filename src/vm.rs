@@ -135,6 +135,27 @@ enum CompSource {
     Range { cur: i64, end: i64 },
 }
 
+/// Materialize a lazy `range` value (`ArrayData::Range`) on the top of the stack into a packed
+/// `Ints` array. The JIT map/filter/fused kernels read `Ints`/`Floats` BUFFERS (via `as_ptr`), so
+/// a lazy range must be densified before they can engage — this restores JIT execution on a range
+/// value exactly as before ranges were lazy (the range's own O(1) methods — `first`/`count`/… —
+/// never reach these ops, so they stay lazy). No-op unless the top is a `Range`; the resulting
+/// `Ints` array is bit-identical to the elements the range represents, so both the native and the
+/// bytecode fall-through paths see the same values.
+fn densify_range_top(stack: &mut [Value]) {
+    use crate::value::ArrayData;
+    let ints = match stack.last() {
+        Some(Value::Array(a)) if matches!(&**a, ArrayData::Range { .. }) => {
+            Some(a.to_ints().expect("Range materializes to Ints").into_owned())
+        }
+        _ => None,
+    };
+    if let Some(ints) = ints {
+        // `last_mut()` is `Some` — the match above already matched a top-of-stack array.
+        *stack.last_mut().expect("stack top present") = Value::int_array(ints);
+    }
+}
+
 /// Active comprehension iterator state (a stack, so comprehensions nest).
 /// `cur_val` is the element just yielded (used by `filter`); `builder` collects
 /// results for `map`/`filter` and is ignored by `reduce`.
@@ -1203,6 +1224,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let n_caps = program.map_kernels[kidx].captures.len();
                 let split = stack.len() - n_caps;
                 let cap_vals = stack.split_off(split);
+                // A lazy `range` source has no buffer for the native map kernel; materialize it so
+                // the JIT engages (as before ranges were lazy). The receiver is now the stack top.
+                densify_range_top(&mut stack);
                 enum Pick {
                     I64(*const u8, Vec<i64>),
                     F64(*const u8, Vec<f64>),
@@ -1285,6 +1309,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 }
             }
             Op::TryJitFilter { kernel_idx, after } => {
+                densify_range_top(&mut stack); // materialize a lazy range so the native filter engages
                 let ptr = match (jit, stack.last()) {
                     (Some(j), Some(Value::Array(a)))
                         if matches!(&**a, crate::value::ArrayData::Ints(_)) =>
