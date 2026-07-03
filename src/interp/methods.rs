@@ -240,12 +240,24 @@ pub(crate) fn call_method(
         return crate::autodiff::method(&n, name, &args, line, col);
     }
     match recv {
-        Value::Array(items) => match array_numeric_fast(items, name, &args, line, col)? {
-            // A typed array's numeric reduction reads the packed buffer directly.
-            Some(v) => Ok(v),
-            // Everything else materializes to `Value`s and runs the general path.
-            None => array_method(&items.to_values(), name, &args, line, col),
-        },
+        Value::Array(items) => {
+            // `enumerate()` wraps the receiver LAZILY: element `i` is `(i, items[i])`,
+            // produced on demand by `ArrayData::Enumerate` (sharing the receiver's `Rc`),
+            // so `xs.enumerate().map(...)` never materializes the O(N)-tuple `Vec`. Handled
+            // here (not in `array_numeric_fast`, which only borrows `&ArrayData`) because we
+            // need the `Rc` to wrap without copying.
+            if name == "enumerate" && args.is_empty() {
+                return Ok(Value::Array(std::rc::Rc::new(crate::value::ArrayData::Enumerate {
+                    inner: items.clone(),
+                })));
+            }
+            match array_numeric_fast(items, name, &args, line, col)? {
+                // A typed array's numeric reduction reads the packed buffer directly.
+                Some(v) => Ok(v),
+                // Everything else materializes to `Value`s and runs the general path.
+                None => array_method(&items.to_values(), name, &args, line, col),
+            }
+        }
         Value::Str(s) => string_method(s, name, &args, line, col),
         Value::Dna(s) => dna_method(s, name, &args, line, col),
         Value::Node(n) => crate::autodiff::method(n, name, &args, line, col),
@@ -506,7 +518,7 @@ fn array_numeric_fast(
     match name {
         "count" | "length" => {
             return Ok(match ad {
-                ArrayData::Values(_) => None,
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
                 ArrayData::Ints(xs) => Some(Value::Int(xs.len() as i64)),
                 ArrayData::Floats(xs) => Some(Value::Int(xs.len() as i64)),
                 // O(1) on a lazy range — the whole point of the lazy representation.
@@ -516,7 +528,7 @@ fn array_numeric_fast(
         "first" | "last" => {
             let first = name == "first";
             return Ok(match ad {
-                ArrayData::Values(_) => None,
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
                 ArrayData::Ints(xs) => Some(if xs.is_empty() {
                     Value::Missing
                 } else {
@@ -541,7 +553,7 @@ fn array_numeric_fast(
         return Ok(None);
     }
     match ad {
-        ArrayData::Values(_) => Ok(None),
+        ArrayData::Values(_) | ArrayData::Enumerate { .. } => Ok(None),
         ArrayData::Ints(xs) => array_int_reduce(xs, name, line, col).map(Some),
         // A reduction consumes every element, so materialize the range once (bit-identical to
         // reducing the equivalent `Int` array); still lazy for the O(1) methods above.

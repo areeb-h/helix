@@ -469,7 +469,9 @@ fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
             // A range operand is densified to `Ints` before `typed_broadcast`, so it never reaches
             // here; decline (→ the accessor-based general path) rather than wrongly promote to Float.
             ArrayData::Range { .. } => None,
-            ArrayData::Values(_) => None,
+            // Tuple-yielding `enumerate` is not a float view either — the accessor-based
+            // general path handles it.
+            ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
         }
     }
     // `/` is always float; a zero divisor must raise the *same* error as the scalar

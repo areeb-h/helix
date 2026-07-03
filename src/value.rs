@@ -178,6 +178,16 @@ pub enum ArrayData {
     /// engines. Invariant (upheld by `int_range`/`int_range_step`): `start + step*(len-1)` fits
     /// `i64`, so no element computation overflows.
     Range { start: i64, step: i64, len: usize },
+    /// A **lazy** `enumerate()`: element `i` is the tuple `(i, inner[i])`, produced on
+    /// demand — the value `xs.enumerate()` returns WITHOUT materializing the `Vec` of
+    /// `Vec<Value>` tuples. `xs.enumerate().map((i, x) => …)` / `.filter(…)` iterate one
+    /// transient tuple at a time (the VM's `CompNext` and the tree-walker's `iter_values`
+    /// read element-wise), so a 100M-element enumerate no longer allocates ~5 GB of boxed
+    /// tuples. Behaviourally IDENTICAL to the materialized tuple array — `get`/`len`/
+    /// `to_values` yield the same `(index, element)` tuples — so any consumer without a
+    /// lazy fast path materializes via [`ArrayData::to_values`] and stays bit-identical
+    /// across all three engines. `inner` shares the receiver's `Rc` (no element copy).
+    Enumerate { inner: std::rc::Rc<ArrayData> },
 }
 
 impl ArrayData {
@@ -187,6 +197,7 @@ impl ArrayData {
             ArrayData::Ints(v) => v.len(),
             ArrayData::Floats(v) => v.len(),
             ArrayData::Range { len, .. } => *len,
+            ArrayData::Enumerate { inner } => inner.len(),
         }
     }
 
@@ -205,6 +216,11 @@ impl ArrayData {
             // invariant) result is cast back to `i64`.
             ArrayData::Range { start, step, .. } => {
                 Value::Int((*start as i128 + *step as i128 * i as i128) as i64)
+            }
+            // Lazy `enumerate`: the `(index, element)` tuple, built on demand — identical
+            // to the materialized `Value::Tuple([Int(i), inner[i]])`.
+            ArrayData::Enumerate { inner } => {
+                Value::Tuple(std::rc::Rc::new(vec![Value::Int(i as i64), inner.get(i)]))
             }
         }
     }
@@ -237,7 +253,9 @@ impl ArrayData {
             ArrayData::Values(v) => Cow::Borrowed(v),
             ArrayData::Ints(v) => Cow::Owned(v.iter().map(|&n| Value::Int(n)).collect()),
             ArrayData::Floats(v) => Cow::Owned(v.iter().map(|&f| Value::Float(f)).collect()),
-            ArrayData::Range { .. } => Cow::Owned((0..self.len()).map(|i| self.get(i)).collect()),
+            ArrayData::Range { .. } | ArrayData::Enumerate { .. } => {
+                Cow::Owned((0..self.len()).map(|i| self.get(i)).collect())
+            }
         }
     }
 

@@ -585,6 +585,15 @@ mod imp {
                         }
                         PyList::new(py, elems).map_err(|e| py_err(py, e, line, col))?.into_any()
                     }
+                    // A lazy `enumerate` materializes its `(index, element)` tuples to cross.
+                    ArrayData::Enumerate { .. } => {
+                        let vs = items.to_values();
+                        let mut elems = Vec::with_capacity(vs.len());
+                        for it in vs.iter() {
+                            elems.push(to_py(py, it, line, col)?);
+                        }
+                        PyList::new(py, elems).map_err(|e| py_err(py, e, line, col))?.into_any()
+                    }
                 }
             }
             // A Helix record becomes a Python dict (string keys) — so `json.dumps(rec)`,

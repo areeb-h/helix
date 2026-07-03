@@ -1103,7 +1103,7 @@ fn apply_float_fn(
                 ArrayData::Range { .. } => Ok(Value::float_array(
                     a.to_ints().unwrap().iter().map(|&x| f(x as f64)).collect(),
                 )),
-                ArrayData::Values(_) => scalar_fallback(&Value::Array(a)),
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } => scalar_fallback(&Value::Array(a)),
             }
         }
         Value::Tensor(t) => {
@@ -1147,7 +1147,7 @@ fn apply_round_fn(
             ArrayData::Ints(xs) => Ok(Value::int_array(xs.clone())),
             // Rounding whole numbers is a no-op — return the range unchanged (it is already `Int`).
             ArrayData::Range { .. } => Ok(Value::Array(ad.clone())),
-            ArrayData::Values(_) => round_box(name, f, v, line, col),
+            ArrayData::Values(_) | ArrayData::Enumerate { .. } => round_box(name, f, v, line, col),
         },
         // Tensors and scalars keep the exact general path (a tensor stays a whole-valued
         // `Float` tensor, with the same `as i64` saturation for out-of-range values).
@@ -1221,7 +1221,7 @@ pub(crate) fn apply_abs(v: Value, line: usize, col: usize) -> Result<Value, Heli
                 ArrayData::Range { .. } => Ok(Value::int_array(
                     a.to_ints().unwrap().iter().map(|&x| x.wrapping_abs()).collect(),
                 )),
-                ArrayData::Values(_) => boxed(&Value::Array(a)),
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } => boxed(&Value::Array(a)),
             }
         }
         other => boxed(&other),
@@ -1250,7 +1250,7 @@ pub(crate) fn apply_sign(v: &Value, line: usize, col: usize) -> Result<Value, He
                     ad.to_ints().unwrap().iter().map(|&x| x.signum()).collect(),
                 ));
             }
-            ArrayData::Values(_) => {}
+            ArrayData::Values(_) | ArrayData::Enumerate { .. } => {}
         }
     }
     broadcast_unary(v, &|s| match s {

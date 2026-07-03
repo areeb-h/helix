@@ -411,6 +411,45 @@
         }
     }
 
+    /// Lazy `enumerate()` (`ArrayData::Enumerate`) must (a) agree across tree-walker, VM,
+    /// and JIT, and (b) be behaviourally IDENTICAL to the dense `(index, element)` tuple
+    /// array — the lazy-vs-dense equivalence the cross-engine oracle alone cannot verify
+    /// (all three engines share the one lazy representation), the exact class of bug the
+    /// lazy-range work flagged.
+    #[test]
+    fn enumerate_lazy_matches_dense_and_across_engines() {
+        let cases = [
+            "[10, 20, 30].enumerate().map((i, x) => i + x).sum()",
+            "[5, 6, 7, 8].enumerate().filter((i, x) => i % 2 == 0).map((i, x) => x).sum()",
+            "[1.5, 2.5, 3.5].enumerate().map((i, x) => x * 1.0).sum()",
+            "[].enumerate().count()",
+            "[9].enumerate().first()",
+            "[9, 8].enumerate().last()",
+            "[3, 1, 2].enumerate().length()",
+            "[100, 200, 300, 400].enumerate().map((i, x) => i * x).sum()",
+        ];
+        for src in cases {
+            assert_eq!(run_tw(src), run_vm(src), "tw vs vm: {src}");
+            assert_eq!(run_tw(src), run_vm_jit(src), "tw vs jit: {src}");
+        }
+        // Lazy enumerate vs the DENSE tuple array literal — must be indistinguishable.
+        let pairs = [
+            (
+                "[10, 20, 30].enumerate().map((i, x) => i * 100 + x).sum()",
+                "[(0, 10), (1, 20), (2, 30)].map((i, x) => i * 100 + x).sum()",
+            ),
+            (
+                "[7, 8, 9, 10].enumerate().filter((i, x) => x > 8).map((i, x) => i).sum()",
+                "[(0, 7), (1, 8), (2, 9), (3, 10)].filter((i, x) => x > 8).map((i, x) => i).sum()",
+            ),
+            ("[9, 8].enumerate().last()", "[(0, 9), (1, 8)].last()"),
+        ];
+        for (lazy, dense) in pairs {
+            assert_eq!(run_vm(lazy), run_vm(dense), "lazy vs dense (vm): {lazy}");
+            assert_eq!(run_tw(lazy), run_tw(dense), "lazy vs dense (tw): {lazy}");
+        }
+    }
+
     /// Type-directed routing: DataFrame column-verbs (`where`/`select`/`sort`/
     /// `group`) compile and run on the VM (not the tree-walker), matching the
     /// oracle. Locks in Phase 4 of the one-engine collapse.
