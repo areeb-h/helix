@@ -871,6 +871,43 @@ pub fn reduce_body_divides(rl: &crate::bytecode::ReduceLoop) -> bool {
     rl.bodies.len() == 1 && expr_has_div(&rl.bodies[0])
 }
 
+/// Whether `e` reads the identifier `name` anywhere (covers the reduce-body node shapes).
+fn expr_uses_ident(e: &Expr, name: &str) -> bool {
+    match e {
+        Expr::Ident { name: n, .. } => n == name,
+        Expr::Binary { left, right, .. } => expr_uses_ident(left, name) || expr_uses_ident(right, name),
+        Expr::Unary { expr, .. } => expr_uses_ident(expr, name),
+        Expr::Index { recv, index, .. } => expr_uses_ident(recv, name) || expr_uses_ident(index, name),
+        Expr::Call { args, .. } => args.iter().any(|a| expr_uses_ident(a, name)),
+        _ => false,
+    }
+}
+
+/// The per-element `term` of a **multi-accumulator-eligible i64 SUM reduce**, or `None`. Eligible
+/// when the scalar body is `acc + term` (or `term + acc`) — a top-level `+` with the accumulator
+/// binder `pa` as EXACTLY one operand and `term` (the other operand) FREE of `pa`. The fold is then
+/// a plain associative sum `init + Σ term(pb)`, which K independent partial accumulators compute
+/// BIT-IDENTICALLY (integer add is associative + commutative) while breaking the single-accumulator
+/// latency-bound dependency chain (~2.3× per core). i64 ONLY — f64 reassociation changes rounding
+/// (non-associative), so a float reduce is never eligible.
+fn reduce_multiacc_term(rl: &crate::bytecode::ReduceLoop) -> Option<&Expr> {
+    if rl.float || rl.bodies.len() != 1 {
+        return None;
+    }
+    let pa = rl.pa.as_str();
+    if let Expr::Binary { op: BinOp::Add, left, right, .. } = &rl.bodies[0] {
+        let l_acc = matches!(&**left, Expr::Ident { name, .. } if name == pa);
+        let r_acc = matches!(&**right, Expr::Ident { name, .. } if name == pa);
+        if l_acc && !r_acc && !expr_uses_ident(right, pa) {
+            return Some(right);
+        }
+        if r_acc && !l_acc && !expr_uses_ident(left, pa) {
+            return Some(left);
+        }
+    }
+    None
+}
+
 /// Bottom-up kind of a **scalar f64 reduce body that indexes captured `f64` arrays by the
 /// loop counter** (the float dot-product / weighted-sum case): `pa` is the `f64` accumulator,
 /// `pb` the `i64` counter, and `arr[pb]` for a free array `arr` is an `f64` element →
@@ -2124,6 +2161,112 @@ fn define_reduce_loop(
     } else {
         Vec::new()
     };
+
+    // MULTI-ACCUMULATOR fast path (i64 scalar associative SUM `acc = acc + term(pb)`): the single
+    // accumulator serialises on the add-latency dependency chain, so split it into K independent
+    // partial accumulators over a K-strided main loop + a remainder tail, combined at exit. Integer
+    // add is associative + commutative, so `init + Σ term` is BIT-IDENTICAL regardless of grouping —
+    // ~2.3× per core (breaks the latency chain). The caps/index machinery rides `vars` unchanged; a
+    // range under the length K degrades gracefully to the tail (== the single-accumulator loop).
+    if let Some(term) = reduce_multiacc_term(rl) {
+        const K: i64 = 4;
+        // `main_end = start + (n/K)*K` — the largest K-multiple within `[start,end)`, computed once
+        // (i128-safe span is already VM-capped at 100M), so the strided loop never overflows `x+K`.
+        let n = b.ins().isub(end, start);
+        let kc = b.ins().iconst(I64, K);
+        let blocks = b.ins().sdiv(n, kc);
+        let main_len = b.ins().imul(blocks, kc);
+        let main_end = b.ins().iadd(start, main_len);
+
+        let macc: Vec<Variable> = (0..K).map(|_| b.declare_var(I64)).collect();
+        let zero = b.ins().iconst(I64, 0);
+        for &m in &macc {
+            b.def_var(m, zero); // partials start at the additive identity; `init` is added at exit
+        }
+        let pb_var = b.declare_var(I64); // rebound to `x+d` before lowering `term`
+        let mut vars: HashMap<&str, Variable> = HashMap::new();
+        vars.insert(rl.pb.as_str(), pb_var);
+        for (j, cap) in rl.captures.iter().enumerate() {
+            if let Some(&cv) = cap_vars.get(j) {
+                vars.insert(cap.name.as_str(), cv);
+            }
+        }
+
+        let main_hdr = b.create_block();
+        let main_body = b.create_block();
+        let tail_hdr = b.create_block();
+        let tail_body = b.create_block();
+        let done = b.create_block();
+
+        b.ins().jump(main_hdr, &[]);
+
+        // main_hdr: `x < main_end ?`
+        b.switch_to_block(main_hdr);
+        let xh = b.use_var(x_var);
+        let cmain = b.ins().icmp(IntCC::SignedLessThan, xh, main_end);
+        b.ins().brif(cmain, main_body, &[], tail_hdr, &[]);
+
+        // main_body: K independent partials at x+0..x+K-1
+        b.switch_to_block(main_body);
+        b.seal_block(main_body);
+        let xb = b.use_var(x_var);
+        for (d, &m) in macc.iter().enumerate() {
+            let xd = if d == 0 {
+                xb
+            } else {
+                let dc = b.ins().iconst(I64, d as i64);
+                b.ins().iadd(xb, dc)
+            };
+            b.def_var(pb_var, xd);
+            let t = gen_value(&mut b, term, &mut vars, fn_ids, module, NumKind::Int);
+            let a = b.use_var(m);
+            let na = b.ins().iadd(a, t);
+            b.def_var(m, na);
+        }
+        let kc2 = b.ins().iconst(I64, K);
+        let xbn = b.use_var(x_var);
+        let nx = b.ins().iadd(xbn, kc2);
+        b.def_var(x_var, nx);
+        b.ins().jump(main_hdr, &[]);
+        b.seal_block(main_hdr);
+
+        // tail_hdr: `x < end ?` (the final `(end-start) mod K` elements)
+        b.switch_to_block(tail_hdr);
+        let xt = b.use_var(x_var);
+        let et = b.use_var(end_var);
+        let ctail = b.ins().icmp(IntCC::SignedLessThan, xt, et);
+        b.ins().brif(ctail, tail_body, &[], done, &[]);
+
+        // tail_body: fold single-stride into macc[0]
+        b.switch_to_block(tail_body);
+        b.seal_block(tail_body);
+        let xtb = b.use_var(x_var);
+        b.def_var(pb_var, xtb);
+        let tt = gen_value(&mut b, term, &mut vars, fn_ids, module, NumKind::Int);
+        let a0 = b.use_var(macc[0]);
+        let na0 = b.ins().iadd(a0, tt);
+        b.def_var(macc[0], na0);
+        let one = b.ins().iconst(I64, 1);
+        let nxt = b.ins().iadd(xtb, one);
+        b.def_var(x_var, nxt);
+        b.ins().jump(tail_hdr, &[]);
+        b.seal_block(tail_hdr);
+
+        // done: `init + Σ macc` — the horizontal combine (acc_vars[0] was seeded to `init`)
+        b.switch_to_block(done);
+        b.seal_block(done);
+        let mut total = b.use_var(acc_vars[0]);
+        for &m in &macc {
+            let mv = b.use_var(m);
+            total = b.ins().iadd(total, mv);
+        }
+        b.ins().return_(&[total]);
+
+        b.finalize();
+        module.define_function(fid, ctx).ok()?;
+        module.clear_context(ctx);
+        return Some(());
+    }
 
     let header = b.create_block();
     let body_blk = b.create_block();

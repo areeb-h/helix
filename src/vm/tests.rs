@@ -1028,6 +1028,39 @@
         assert_eq!(run_vm_jit(&rev), Ok("0".to_string()));
     }
 
+    /// The **multi-accumulator i64 reduce** (K=4 partials over a K-strided main loop + a remainder
+    /// tail, combined at exit) must equal the single-accumulator fold BYTE-FOR-BYTE across the
+    /// K-boundary edges — empty, `len < K` (tail only), `len = K·m` (no tail), `len = K·m + r`
+    /// (main + tail), and reverse/extreme ranges. Integer add is associative + commutative, so the
+    /// partitioned sum is identical; this pins the main/tail split (an off-by-one there is the one
+    /// real risk of the transform) against BOTH the bytecode VM and the tree-walker, including the
+    /// array-indexed (captured) shape that rides the caps/index machinery.
+    #[test]
+    fn multiacc_reduce_matches_across_k_boundary() {
+        let mut cases: Vec<String> = Vec::new();
+        for n in [0, 1, 2, 3, 4, 5, 7, 8, 9, 12, 13, 16, 17, 100, 401] {
+            cases.push(format!("(range(0, {n})).reduce(0, (c, k) => c + k)"));
+            cases.push(format!("(range(0, {n})).reduce(3, (c, k) => c + k * k)"));
+            cases.push(format!("(range(0, {n})).reduce(0, (c, k) => c + abs(k - 7))"));
+        }
+        // array-indexed (captured) sums — multi-acc through the caps/index machinery, at K-edges.
+        for n in [0, 1, 4, 5, 7, 8, 11] {
+            cases.push(format!(
+                "a = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]\n(range(0, {n})).reduce(0, (c, j) => c + a[j]*a[j])"
+            ));
+        }
+        // empty + reverse/extreme ranges → the empty fold returns `init` on every engine.
+        cases.push("(range(5, 5)).reduce(7, (c, k) => c + k)".to_string());
+        cases.push(
+            "hi = 9223372036854775807\nlo = 0 - 9223372036854775807 - 1\n(range(hi, lo)).reduce(9, (c, k) => c + k)"
+                .to_string(),
+        );
+        for src in &cases {
+            assert_eq!(run_vm_jit(src), run_tw(src), "multi-acc reduce JIT ≠ tree-walker on `{src}`");
+            assert_eq!(run_vm_jit(src), run_vm_no_jit(src), "multi-acc JIT ≠ bytecode VM on `{src}`");
+        }
+    }
+
     /// The **array-indexed reduce kernel** (`arr[counter]`, the dot-product / weighted-sum
     /// pattern) must equal the tree-walker. The inner fold reads two captured `Int` arrays by
     /// the loop counter `j`; when the range is in-bounds the JIT engages the native kernel with
