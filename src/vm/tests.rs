@@ -1049,6 +1049,13 @@
                 "a = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]\n(range(0, {n})).reduce(0, (c, j) => c + a[j]*a[j])"
             ));
         }
+        // REGRESSION (adversarial-review find): a `term` that references the accumulator through a
+        // `let` body — `acc + (let d = 0 in acc)` — must NOT be treated as multi-acc-eligible (the
+        // term is not accumulator-free). Before the fix `expr_uses_ident` returned false for the
+        // `let` (unhandled node → `_ => false`), so multi-acc engaged and panicked (the accumulator
+        // is absent from the partials' vars). It must now fall back to the single-accumulator fold.
+        cases.push("(range(0, 6)).reduce(1, (acc, i) => acc + (let d = 0 in acc + i))".to_string());
+        cases.push("(range(0, 6)).reduce(2, (acc, i) => acc + (if i > 2 then i else 0))".to_string());
         // empty + reverse/extreme ranges → the empty fold returns `init` on every engine.
         cases.push("(range(5, 5)).reduce(7, (c, k) => c + k)".to_string());
         cases.push(

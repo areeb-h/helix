@@ -871,15 +871,22 @@ pub fn reduce_body_divides(rl: &crate::bytecode::ReduceLoop) -> bool {
     rl.bodies.len() == 1 && expr_has_div(&rl.bodies[0])
 }
 
-/// Whether `e` reads the identifier `name` anywhere (covers the reduce-body node shapes).
+/// Whether `e` reads the identifier `name` anywhere. Used to prove a multi-accumulator `term` is
+/// FREE of the accumulator. Literals plainly reference nothing; the arithmetic/index/call nodes
+/// recurse; and CRUCIALLY any OTHER node shape (`let`, `if`, `match`, …) is conservatively assumed
+/// to reference `name` — so a term built from an unrecognised shape declines the multi-acc transform
+/// (`_ => true`). Under-approximating here (returning `false` for a node that DOES use the
+/// accumulator, as a bare `_ => false` did for `let … in acc`) would wrongly enable multi-acc and
+/// then panic in codegen (the accumulator is intentionally absent from the partials' `vars`).
 fn expr_uses_ident(e: &Expr, name: &str) -> bool {
     match e {
         Expr::Ident { name: n, .. } => n == name,
+        Expr::Int(_) | Expr::Float(_) => false,
         Expr::Binary { left, right, .. } => expr_uses_ident(left, name) || expr_uses_ident(right, name),
         Expr::Unary { expr, .. } => expr_uses_ident(expr, name),
         Expr::Index { recv, index, .. } => expr_uses_ident(recv, name) || expr_uses_ident(index, name),
         Expr::Call { args, .. } => args.iter().any(|a| expr_uses_ident(a, name)),
-        _ => false,
+        _ => true,
     }
 }
 
