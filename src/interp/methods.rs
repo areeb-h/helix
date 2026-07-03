@@ -661,13 +661,21 @@ fn array_method(
             Ok(Value::Float(neumaier_sum(&xs) / xs.len() as f64))
         }
         "std" => {
-            no_args(name)?;
+            // Optional `ddof`: `std()` = population (÷n, default), `std(1)` = sample (÷n−1).
+            let ddof = parse_ddof(name, args, line, col)?;
             if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
             let xs = numeric_vec(items, "std", line, col)?;
             empty_guard(&xs, "std", line, col)?;
-            Ok(Value::Float(population_std(&xs)))
+            ddof_fits(&xs, ddof, "std", line, col)?;
+            // ddof == 0 keeps the exact existing population path (bit-identical to before).
+            let v = if ddof == 0 {
+                population_std(&xs)
+            } else {
+                crate::stats::variance_ddof(&xs, ddof).sqrt()
+            };
+            Ok(Value::Float(v))
         }
         "median" => {
             no_args(name)?;
@@ -679,13 +687,21 @@ fn array_method(
             Ok(Value::Float(crate::stats::median(&xs)))
         }
         "var" => {
-            no_args(name)?;
+            // Optional `ddof`: `var()` = population (÷n, default), `var(1)` = sample (÷n−1).
+            let ddof = parse_ddof(name, args, line, col)?;
             if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
             let xs = numeric_vec(items, "var", line, col)?;
             empty_guard(&xs, "var", line, col)?;
-            Ok(Value::Float(crate::stats::variance(&xs)))
+            ddof_fits(&xs, ddof, "var", line, col)?;
+            // ddof == 0 keeps the exact existing population path (bit-identical to before).
+            let v = if ddof == 0 {
+                crate::stats::variance(&xs)
+            } else {
+                crate::stats::variance_ddof(&xs, ddof)
+            };
+            Ok(Value::Float(v))
         }
         "quantile" => {
             // One argument: the probability `p` in [0, 1] (e.g. `xs.quantile(0.95)`).
@@ -1332,6 +1348,45 @@ fn empty_guard(xs: &[f64], who: &str, line: usize, col: usize) -> Result<(), Hel
             line,
             col,
         ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Parse the optional `ddof` (delta degrees of freedom) argument of `var`/`std`: no argument →
+/// `0` (population, the default), an integer → that `ddof` (`1` = sample / Bessel's correction).
+fn parse_ddof(name: &str, args: &[Value], line: usize, col: usize) -> Result<usize, HelixError> {
+    match args {
+        [] => Ok(0),
+        [Value::Int(d)] if *d >= 0 => Ok(*d as usize),
+        [Value::Int(d)] => Err(HelixError::new(
+            format!("`{name}` ddof must be >= 0, got {d}"),
+            line,
+            col,
+        )),
+        [_] => Err(HelixError::new(
+            format!("`{name}` ddof must be an integer (0 = population, 1 = sample)"),
+            line,
+            col,
+        )),
+        _ => Err(HelixError::new(
+            format!("`{name}` takes an optional ddof (0 = population, 1 = sample), got {} arguments", args.len()),
+            line,
+            col,
+        )),
+    }
+}
+
+/// A `var`/`std` with `ddof` needs strictly more than `ddof` values (else it would divide by a
+/// zero or negative count). Raises a precise error instead of returning `inf`/`NaN`.
+fn ddof_fits(xs: &[f64], ddof: usize, name: &str, line: usize, col: usize) -> Result<(), HelixError> {
+    if xs.len() <= ddof {
+        Err(HelixError::new(
+            format!("`{name}` with ddof = {ddof} needs more than {ddof} value(s), got {}", xs.len()),
+            line,
+            col,
+        )
+        .hint("ddof = 0 (population, the default) divides by n; ddof = 1 (sample) divides by n−1."))
     } else {
         Ok(())
     }

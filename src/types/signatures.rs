@@ -307,6 +307,24 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 Type::Float
             })
         }
+        // three-arg numeric: `clamp(x, lo, hi)` (scalar; the array form is the `.clamp` method)
+        "clamp" => {
+            if args.len() != 3 {
+                return Err(arity_err(name, 3, args.len(), line, col));
+            }
+            if any(args, |t| matches!(t, Type::Unknown)) {
+                return Ok(Type::Unknown);
+            }
+            if any(args, |t| matches!(t, Type::Missing)) {
+                return Ok(Type::Missing);
+            }
+            for a in args {
+                if !is_numeric(a) {
+                    return Err(type_err(name, "a number", a, line, col));
+                }
+            }
+            Ok(Type::Num)
+        }
         "log" => {
             // log(x) = natural log (1 arg) or log(x, base) (2 args). Broadcasts.
             if args.is_empty() || args.len() > 2 {

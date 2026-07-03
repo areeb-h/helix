@@ -1994,6 +1994,39 @@
         }
     }
 
+    /// `clamp(x, lo, hi)` — the scalar free function (companion to the array `.clamp(lo, hi)`
+    /// method): bounds x to [lo, hi], returns one of the three ORIGINAL values so an `Int` stays
+    /// `Int` (mirroring `min`/`max`), and errors on `lo > hi`. The array method is unaffected.
+    #[test]
+    fn clamp_free_function_scalar() {
+        assert!((float("clamp(5.0, 0.0, 1.0)") - 1.0).abs() < 1e-12);
+        assert!((float("clamp(-3.0, 0.0, 1.0)") - 0.0).abs() < 1e-12);
+        assert!((float("clamp(0.5, 0.0, 1.0)") - 0.5).abs() < 1e-12);
+        assert!(matches!(last("clamp(5, 2, 7)").unwrap(), Value::Int(5))); // in-range, Int kept
+        assert!(matches!(last("clamp(9, 2, 7)").unwrap(), Value::Int(7))); // to hi (Int kept)
+        assert!(matches!(last("clamp(-1, 2, 7)").unwrap(), Value::Int(2))); // to lo (Int kept)
+        assert!(last("clamp(5.0, 7.0, 2.0)").is_err()); // lo > hi
+        assert!(last("clamp(5.0)").is_err()); // arity
+        assert_eq!(format!("{}", last("[1, 5, 9].clamp(2, 7)").unwrap()), "[2, 5, 7]"); // method intact
+    }
+
+    /// `.var()`/`.std()` default to POPULATION statistics (÷n); an optional `ddof` gives sample
+    /// statistics (`.var(1)` divides by n−1, Bessel's correction). The default (ddof 0) path is
+    /// unchanged. `ddof` must be a non-negative integer strictly less than the element count.
+    #[test]
+    fn var_std_ddof_sample_option() {
+        // classic dataset: mean 5, SS 32 → population var 4 / std 2, sample var 32/7.
+        let d = "[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]";
+        assert!((float(&format!("{d}.var()")) - 4.0).abs() < 1e-12); // population default
+        assert!((float(&format!("{d}.std()")) - 2.0).abs() < 1e-12);
+        assert!((float(&format!("{d}.var(0)")) - 4.0).abs() < 1e-12); // ddof 0 == population
+        assert!((float(&format!("{d}.var(1)")) - 32.0 / 7.0).abs() < 1e-12); // sample
+        assert!((float(&format!("{d}.std(1)")) - (32.0_f64 / 7.0).sqrt()).abs() < 1e-12);
+        assert!(last("[3.0].var(1)").is_err()); // n <= ddof
+        assert!(last("[1.0, 2.0].var(-1)").is_err()); // negative ddof
+        assert!(last("[1.0, 2.0].std(2, 3)").is_err()); // too many args
+    }
+
     #[test]
     fn math_broadcasts_over_array() {
         match last("sqrt([1, 4, 9])").unwrap() {

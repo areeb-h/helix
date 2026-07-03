@@ -1397,6 +1397,33 @@ impl super::Interp {
                 let pick_first = if name == "min" { a <= b } else { a >= b };
                 Ok(if pick_first { args[0].clone() } else { args[1].clone() })
             }
+            "clamp" => {
+                // `clamp(x, lo, hi)` — the scalar companion to the array `.clamp(lo, hi)` method,
+                // mirroring `min`/`max`: it returns one of the three ORIGINAL values (so an `Int`
+                // stays `Int`), never coercing to `Float`. `lo > hi` is a caller error.
+                arity(name, &args, 3, line, col)?;
+                if args.iter().any(|a| matches!(a, Value::Missing)) {
+                    return Ok(Value::Missing);
+                }
+                let x = args[0].as_f64().ok_or_else(|| type_err(name, "a number", &args[0], line, col))?;
+                let lo = args[1].as_f64().ok_or_else(|| type_err(name, "a number", &args[1], line, col))?;
+                let hi = args[2].as_f64().ok_or_else(|| type_err(name, "a number", &args[2], line, col))?;
+                if lo > hi {
+                    return Err(HelixError::new(
+                        format!("`clamp` needs lo <= hi, got lo = {lo}, hi = {hi}"),
+                        line,
+                        col,
+                    )
+                    .hint("clamp(x, lo, hi) bounds x to [lo, hi]; pass the low bound before the high one."));
+                }
+                Ok(if x < lo {
+                    args[1].clone()
+                } else if x > hi {
+                    args[2].clone()
+                } else {
+                    args[0].clone()
+                })
+            }
             "correlation" => {
                 arity(name, &args, 2, line, col)?;
                 // `missing` in either series propagates (ADR-0001); a non-array, a

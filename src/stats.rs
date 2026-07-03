@@ -97,6 +97,16 @@ pub fn sample_variance(xs: &[f64]) -> f64 {
     neumaier_sum(&sq) / (xs.len() as f64 - 1.0)
 }
 
+/// Variance with an explicit **delta degrees of freedom** (`ddof`): the sum of squared deviations
+/// divided by `n - ddof`. `ddof = 0` is the population variance (Helix's default — see the module
+/// note); `ddof = 1` is the sample variance (Bessel's correction). Powers `var(ddof)` / `std(ddof)`.
+/// Precondition: `n > ddof` (the caller checks and raises a precise error otherwise).
+pub fn variance_ddof(xs: &[f64], ddof: usize) -> f64 {
+    let m = mean(xs);
+    let sq: Vec<f64> = xs.iter().map(|x| (x - m).powi(2)).collect();
+    neumaier_sum(&sq) / (xs.len() as f64 - ddof as f64)
+}
+
 // ---- Special functions -----------------------------------------------------
 // Standard numerical algorithms (Abramowitz & Stegun, Numerical Recipes) for the
 // error function, log-gamma, and the regularized incomplete beta — the machinery the
