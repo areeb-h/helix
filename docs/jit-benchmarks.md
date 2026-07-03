@@ -7,6 +7,10 @@ single-threaded C**, beats NumPy, and runs ~20–700× over its own bytecode int
 result **bit-identical** across all languages (and enforced bit-identical across Helix's own
 three engines by a differential oracle; see [execution-engine.md](execution-engine.md)).
 
+For the **full honest picture — a ten-kernel run that includes the workloads Helix *loses* at
+(mandelbrot, wordcount, montecarlo, sieve)** and the per-core (single-thread) numbers, jump to
+[§5 Full-spectrum run](#5-full-spectrum-run-2026-07-03-where-helix-wins-ties-and-loses).
+
 | kernel | size | Helix (JIT) | C `-O3` (1 thread) | best other | notes |
 |---|---|---|---|---|---|
 | **i64 dot product** | 50M | ~0.34 s | 0.47 s | Go 0.46 s | memory-bandwidth-bound; ~C-parity |
@@ -169,6 +173,78 @@ scalar fold — so it would not break the differential oracle). (An earlier draf
 C at "0.00 s, constant-folded" — that was wrong: feeding N from `argv` so the compiler cannot
 precompute still shows C finishing the real loop in ~2 ms at N=6000. It was too fast to measure, not
 folded.)
+
+## 5. Full-spectrum run (2026-07-03): where Helix wins, ties, **and loses**
+
+Sections 1–4 above are the numeric-kernel fast paths — Helix's home turf. This section is the
+opposite discipline: a **ten-kernel shootout that deliberately includes the workloads Helix is
+bad at**, so the wins are not read out of context. Ten kernels × six languages (C, Rust, Go,
+CPython, NumPy, Helix), same machine, best-of-3, every language verified to print the **identical
+anchor** before timing. An independent read-only audit confirmed no kernel hardcodes, skips work,
+or gets constant-folded (timings scale with N). A visual version of this table lives at the
+session artifact (cross-language benchmark report).
+
+Seconds, best-of-3 (lower is better). **∥** = Helix across all 6 cores; **·1** = Helix pinned to
+one core (`RAYON_NUM_THREADS=1`) — the honest per-core number. `>260` = exceeded the 260 s cap.
+
+| kernel | class | C | Rust | Go | CPython | NumPy | Helix ∥ | Helix ·1 | verdict |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| dot_i64 (50M) | memory | 0.518 | 0.476 | 0.443 | 71.6 | 16.45 | **0.155** | 0.257 | **win** |
+| dot_f64 (50M) | memory | 0.507 | 0.553 | 0.520 | 14.9 | 0.427 | **0.160** | 0.310 | **win** |
+| allpairs (225M) | compute | 0.081 | 0.034 | 0.096 | 6.76 | 0.139 | **0.020** | 0.081 | **win** |
+| fib(40) | recursion | 0.097 | 0.161 | 0.305 | 7.63 | — | **0.025** | 0.006 | **win** † |
+| matmul 512³ (tensor) | compute | 0.347 | 0.256 | 0.220 | 7.47 | 0.360 | **0.033** | 0.032 | **win** ‡ |
+| basel 1/k² (100M) | float-div | 0.094 | 0.096 | 0.087 | 7.59 | 23.2 | 0.095 | 0.089 | **tie** |
+| mandelbrot (1200²) | compute | 0.182 | 0.160 | 0.143 | 6.41 | 2.48 | 20.4 | — | **loss** |
+| wordcount (5M) | string | 0.172 | 0.267 | 0.237 | 3.32 | 0.165 | 6.27 | 2.15 | **loss** |
+| montecarlo (1e8) | rng | 0.235 | 0.240 | 0.265 | 35.5 | — | >260 | — | **loss** |
+| sieve (1e7) | memory | 0.013 | 0.016 | 0.019 | 0.628 | 0.097 | >260 | — | **loss** |
+
+† `fib` wins by **changing the complexity class** — Helix auto-memoizes pure recursion (O(n) vs
+O(2ⁿ)), a language feature, not faster codegen. ‡ `matmul` is the native tensor `.matmul()`
+(BLAS-like GEMM); the *naive triple-loop* Helix path is **21.9 s** (VM scalar — computed-offset
+indexing misses the parallel-JIT reduce fast path).
+
+**Scorecard: 5 wins · 1 tie · 4 losses.** The reading:
+
+- **Per-core, on its home turf, Helix is genuinely C-class.** Single-core Helix *beats* C on the
+  50M dot products (0.26 s vs 0.52 s) and *ties* C exactly on all-pairs (0.081 s) and basel
+  (~0.09 s). The parallel column adds a real 3–4× on top — an architectural win, disclosed, with
+  the single-core number printed alongside so it is never mistaken for per-core efficiency.
+- **NumPy is the array rival to respect** (vectorized dot_f64 0.43 s; C-level sieve/histogram) —
+  the comparison there is much closer than against scalar C.
+- **The losses are structural and honest** (they are the roadmap — see below): no native loop
+  (mandelbrot), a slow string/histogram path that even *anti-scales* under threads (wordcount),
+  huge intermediate materialization (montecarlo), and no mutable arrays (sieve → O(N²)).
+
+### Two things the anchor-verify gate caught
+
+1. **A wrong reference value.** All five sieve implementations agreed on **664579**, disagreeing
+   with the authored anchor 620420 — so the *programs* flagged the *reference*. 620420 is exactly
+   the Prime Number Theorem estimate `x/ln x` (a lower bound); the true π(10⁷) must exceed it:
+   `x/ln x = 620420 < π(10⁷) = 664579 < li(10⁷) ≈ 664918` (verified three independent ways).
+2. **A compiler rounding divergence.** gcc at `-O3 -march=native` printed **86452960** for
+   mandelbrot while Rust/Go/Python/NumPy — and Helix — all printed **86452986**. Cause: **FMA
+   contraction** fusing `2·zr·zi + c` into a single rounding on 26 of 86 M iterations.
+   `-ffp-contract=off` (or no `-march=native`) matches. Not a bug — FMA is *more* accurate — but
+   notably Helix's strict-IEEE f64 sided with the reference; gcc's aggressive default was the
+   outlier. (C timed with contraction off, so the number above matches the anchor.)
+
+### The tie + four losses are the standing perf roadmap
+
+- **basel (tie).** Serial, order-fixed f64 series; already at the optimal-serial ceiling. f64
+  reassociation is non-associative (forbidden by the oracle), so a "win" would require an *opt-in*
+  relaxed-order sum. Likely leave as-is.
+- **mandelbrot (loss).** No native loop — per-pixel escape iterates on the interpreter. The lever
+  is **JIT-compiling tail-recursive scalar functions into native loops** (also unlocks Newton /
+  fixed-point / ODE steppers, and montecarlo's scalar-RNG form). Highest leverage.
+- **wordcount (loss).** Per-element `String` allocation in the map + a parallel histogram that
+  regresses under threads (6.27 s ∥ vs 2.15 s ·1). Needs interned strings + a scalable merge.
+- **montecarlo (loss).** RNG-gen is fine (~7 s at 1e8); `enumerate()` over two 800 MB arrays
+  balloons to multi-GB → swap. Needs a **fused streaming `enumerate().map().sum()`**.
+- **sieve (loss).** Immutable model → functional trial division that is O(N²) because the lazy
+  `filter` does not short-circuit. Needs short-circuit `any`/`all` + a bounded divisor range
+  (→ O(N√N)); truly sieve-class mutable algorithms want a native builtin (delegate to a Rust crate).
 
 ## Caveats & honest boundaries
 
