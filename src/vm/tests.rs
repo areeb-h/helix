@@ -62,7 +62,19 @@
                 _ => format!("{}", (next(rng) % 4001) as i64 - 2000),
             };
         }
-        match pick(rng, 20) {
+        match pick(rng, 21) {
+            20 => {
+                // Stepped-range terminals: lazy `range(a, b, s)` first/last/count/sum
+                // are scalar-valued, so they compose as sub-expressions — continuous
+                // coverage for the lazy-Range representation across empty, reversed,
+                // and negative-step shapes (the arm deferred from the oracle audit).
+                let a = (next(rng) % 200) as i64 - 100;
+                let b = (next(rng) % 200) as i64 - 100;
+                let mag = (next(rng) % 7) as i64 + 1;
+                let s = if pick(rng, 2) == 0 { mag } else { -mag };
+                let term = ["first()", "last()", "count()", "sum()"][pick(rng, 4) as usize];
+                format!("((range({a}, {b}, {s})).{term})")
+            }
             19 => {
                 // Integer bitwise ops. Float/huge operands error identically on both
                 // engines; int operands exercise the success path. Shift amounts are
@@ -291,17 +303,23 @@
         }
     }
 
-    fn run_vm(src: &str) -> Result<String, ()> {
-        let toks = lexer::lex(src).map_err(|_| ())?;
-        let ast = parser::parse(toks).map_err(|_| ())?;
-        let mut prog = bytecode::compile_with_types(&ast, None).map_err(|_| ())?;
+    // The three run_* harnesses return `Result<String, String>` — the error side is the
+    // ERROR MESSAGE, so the differential fuzzers assert that engines agree not just on
+    // "an error happened" but on WHICH error (two different errors used to compare equal
+    // as `Err(())`, the trivially-passing arm the oracle audit flagged). Messages are
+    // position-free (`HelixError::message`), so identical failures at identical sites
+    // compare equal across engines.
+    fn run_vm(src: &str) -> Result<String, String> {
+        let toks = lexer::lex(src).map_err(|e| e.message.clone())?;
+        let ast = parser::parse(toks).map_err(|e| e.message.clone())?;
+        let mut prog = bytecode::compile_with_types(&ast, None).map_err(|_| String::from("unsupported by the bytecode compiler"))?;
         if matches!(prog.funcs[0].code.last(), Some(Op::Pop)) {
             prog.funcs[0].code.pop();
             prog.funcs[0].pos.pop();
         }
         match exec(&prog, None) {
             Ok(mut s) => Ok(format!("{}", s.pop().unwrap_or(Value::Unit))),
-            Err(_) => Err(()),
+            Err(e) => Err(e.message),
         }
     }
 
@@ -317,10 +335,10 @@
 
     /// Like `run_vm`, but *with* the JIT enabled — so eligible functions execute
     /// as native code and are diffed against the tree-walker.
-    fn run_vm_jit(src: &str) -> Result<String, ()> {
-        let toks = lexer::lex(src).map_err(|_| ())?;
-        let ast = parser::parse(toks).map_err(|_| ())?;
-        let mut prog = bytecode::compile_with_types(&ast, None).map_err(|_| ())?;
+    fn run_vm_jit(src: &str) -> Result<String, String> {
+        let toks = lexer::lex(src).map_err(|e| e.message.clone())?;
+        let ast = parser::parse(toks).map_err(|e| e.message.clone())?;
+        let mut prog = bytecode::compile_with_types(&ast, None).map_err(|_| String::from("unsupported by the bytecode compiler"))?;
         if matches!(prog.funcs[0].code.last(), Some(Op::Pop)) {
             prog.funcs[0].code.pop();
             prog.funcs[0].pos.pop();
@@ -334,19 +352,19 @@
         );
         match exec(&prog, jit.as_ref()) {
             Ok(mut s) => Ok(format!("{}", s.pop().unwrap_or(Value::Unit))),
-            Err(_) => Err(()),
+            Err(e) => Err(e.message),
         }
     }
 
-    fn run_tw(src: &str) -> Result<String, ()> {
-        let toks = lexer::lex(src).map_err(|_| ())?;
-        let ast = parser::parse(toks).map_err(|_| ())?;
+    fn run_tw(src: &str) -> Result<String, String> {
+        let toks = lexer::lex(src).map_err(|e| e.message.clone())?;
+        let ast = parser::parse(toks).map_err(|e| e.message.clone())?;
         let mut interp = Interp::new();
         let mut last = Value::Unit;
         for stmt in &ast {
             match interp.exec(stmt) {
                 Ok(o) => last = o.value,
-                Err(_) => return Err(()),
+                Err(e) => return Err(e.message),
             }
         }
         Ok(format!("{}", last))
@@ -372,18 +390,23 @@
     /// Full pipeline (type-check → *type-directed* compile → VM), so
     /// receiver-polymorphic methods (DataFrame/Tensor column-verbs) route by the
     /// receiver's inferred type rather than falling back to the tree-walker.
-    fn run_vm_typed(src: &str) -> Result<String, ()> {
-        let toks = lexer::lex(src).map_err(|_| ())?;
-        let ast = parser::parse(toks).map_err(|_| ())?;
-        let types = crate::types::check(&ast).map_err(|_| ())?;
-        let mut prog = bytecode::compile_with_types(&ast, Some(types)).map_err(|_| ())?;
+    fn run_vm_typed(src: &str) -> Result<String, String> {
+        let toks = lexer::lex(src).map_err(|e| e.message.clone())?;
+        let ast = parser::parse(toks).map_err(|e| e.message.clone())?;
+        // Static-checker rejections are TAGGED: they belong to a different failure
+        // taxonomy than dynamic errors (the checker reports the first STATIC error,
+        // the engines report the first DYNAMICALLY-REACHED one), so the typed fuzzer
+        // exempts them from message-parity while runtime errors stay strict.
+        let types = crate::types::check(&ast).map_err(|e| format!("typecheck: {}", e.message))?;
+        let mut prog =
+            bytecode::compile_with_types(&ast, Some(types)).map_err(|_| String::from("unsupported by the bytecode compiler"))?;
         if matches!(prog.funcs[0].code.last(), Some(Op::Pop)) {
             prog.funcs[0].code.pop();
             prog.funcs[0].pos.pop();
         }
         match exec(&prog, None) {
             Ok(mut s) => Ok(format!("{}", s.pop().unwrap_or(Value::Unit))),
-            Err(_) => Err(()),
+            Err(e) => Err(e.message),
         }
     }
 
@@ -925,13 +948,13 @@
                 // both succeed → values must be identical
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "VALUE divergence on `{src}`"),
                 // both reject → fine (we don't require identical messages)
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 // The one accepted asymmetry (B2): the VM keeps frames on the heap
                 // (1M-deep) while the tree-walker recurses on the native stack (20k),
                 // so recursion in (20k, 1M] is VM-ok / tree-walker-rejected — by design.
                 // gen_expr bounds depth well under 20k, so this is a defensive guard;
                 // see `recursion_depth_is_a_by_design_engine_difference`.
-                (Ok(_), Err(())) if tw_hit_recursion_limit(&src) => {}
+                (Ok(_), Err(_)) if tw_hit_recursion_limit(&src) => {}
                 // one accepts, the other rejects → a real divergence
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vm={v:?} tw={t:?}"),
             }
@@ -958,11 +981,11 @@
                     assert_eq!(a, b, "JIT ≠ tree-walker on `{src}`");
                     ok += 1;
                 }
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 // The one accepted asymmetry (B2): VM frames are heap-deep (1M), the
                 // tree-walker recurses on the native stack (20k). gen_expr stays well under,
                 // so this is a defensive guard, identical to the no-JIT fuzzer above.
-                (Ok(_), Err(())) if tw_hit_recursion_limit(&src) => {}
+                (Ok(_), Err(_)) if tw_hit_recursion_limit(&src) => {}
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
@@ -995,10 +1018,54 @@
             );
             match (run_vm_jit(&src), run_tw(&src)) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "JIT/VM ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
+    }
+
+    /// Continuous differential coverage for the tail-recursion native loops (B1 i64 +
+    /// B2 mixed): random tail-self-recursive functions whose base case, loop term, and
+    /// call arguments are full `gen_expr` trees over the parameters. The shape is
+    /// TERMINATION-SAFE by construction (the first argument of every tail call is a
+    /// literal decrement `n - 1..=3` and the condition is `n <= 0`), while everything
+    /// else — including error paths like float bitwise, `??`, `try`, `match` inside the
+    /// term — is free-form. A wrapper function is sometimes interposed so the
+    /// `TailCallFn` native dispatch is fuzzed too. Value AND error-message parity.
+    #[test]
+    fn differential_tail_recursive_fns() {
+        let mut rng = 0x7A11_CA11_F0F0_1234u64;
+        crate::jit::reset_native_call_count();
+        for i in 0..4_000 {
+            let params = vec!["n".to_string(), "acc".to_string()];
+            let base = gen_expr(&mut rng, 2, &params);
+            let term = gen_expr(&mut rng, 2, &params);
+            let dec = pick(&mut rng, 3) + 1;
+            let start_n = (next(&mut rng) % 120) as i64; // tw-stack-safe depth
+            let start_acc = gen_lit(&mut rng);
+            // Alternate the three dispatch shapes: plain i64 params, an annotated
+            // MIXED signature (Float acc), and a wrapper tail-calling the tail fn.
+            let src = match i % 3 {
+                0 => format!(
+                    "fn tf(n, acc) = if n <= 0 then ({base}) else tf(n - {dec}, ({term}))\ntf({start_n}, {start_acc})"
+                ),
+                1 => format!(
+                    "fn tf(acc: Float, n: Int) = if n <= 0 then ({base}) else tf(({term}) * 1.0, n - {dec})\ntf(1.5, {start_n})"
+                ),
+                _ => format!(
+                    "fn tf(n, acc) = if n <= 0 then ({base}) else tf(n - {dec}, ({term}))\nfn w(a, b) = tf(a, b)\nw({start_n}, {start_acc})"
+                ),
+            };
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "tail-fn JIT ≠ tree-walker on `{src}`"),
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "no tail fn ever engaged the JIT across 4000 programs — the fuzzer is testing only the interpreter"
+        );
     }
 
     /// The widened i64 JIT op set (bitwise, constant shifts, `//` by a positive constant,
@@ -1076,7 +1143,7 @@
             );
             match (run_vm_jit(&src), run_tw(&src)) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "reduce JIT ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
@@ -1106,7 +1173,7 @@
             );
             match (run_vm_jit(&src), run_tw(&src)) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "captured reduce JIT ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
@@ -1186,7 +1253,7 @@
             let src = format!("a = {aa}\n(range(0, 185)).map(i => (range(0, 185)).reduce(0, (acc, j) => ({body}))).sum()");
             match (run_vm_jit(&src), run_tw(&src)) {
                 (Ok(x), Ok(y)) => assert_eq!(x, y, "parallel indexed nested reduce JIT ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
@@ -1291,7 +1358,7 @@
             );
             match (run_vm_jit(&src), run_tw(&src)) {
                 (Ok(x), Ok(y)) => assert_eq!(x, y, "dot-product JIT ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
@@ -1335,10 +1402,12 @@
         assert_eq!(run_vm_jit(empty_ok), Ok("7".to_string()), "empty range must yield init");
         assert_eq!(run_vm_jit(empty_ok), run_tw(empty_ok));
 
-        // Empty array + a real range → `a[0]` is OOB on both (pre-check `e=1 > len=0`).
+        // Empty array + a real range → `a[0]` is OOB on both (pre-check `e=1 > len=0`),
+        // with the IDENTICAL error message.
         let empty_oob = "a = []\n(range(0, 1)).reduce(0, (acc, j) => acc + a[j])";
-        assert_eq!(run_vm_jit(empty_oob), Err(()), "index into empty array must error");
-        assert_eq!(run_tw(empty_oob), Err(()));
+        let (j, t) = (run_vm_jit(empty_oob), run_tw(empty_oob));
+        assert!(j.is_err(), "index into empty array must error");
+        assert_eq!(j, t, "empty-array OOB must raise the identical message");
     }
 
     /// The O(N²) flagship (all-pairs / N-body inner sum): an outer `map`'s scalar `k` AND an
@@ -1381,7 +1450,7 @@
             );
             match (run_vm_jit(&src), run_tw(&src)) {
                 (Ok(x), Ok(y)) => assert_eq!(x, y, "f64 dot-product JIT ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
@@ -1453,7 +1522,7 @@
             );
             match (run_vm_jit(&src), run_tw(&src)) {
                 (Ok(x), Ok(y)) => assert_eq!(x, y, "scalar-indexed reduce JIT ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
@@ -1574,7 +1643,7 @@
             );
             match (run_vm_jit(&src), run_tw(&src)) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "tuple reduce JIT ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
@@ -1608,7 +1677,7 @@
             );
             match (run_vm_jit(&src), run_tw(&src)) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "record reduce JIT ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
@@ -1641,7 +1710,7 @@
                 format!("({}).reduce(({}, {}), (a, x) => ({}, {}))", recv, i0, i1, e0, e1);
             match (run_vm_jit(&src), run_tw(&src)) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "fused tuple reduce JIT ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
@@ -1672,7 +1741,7 @@
             );
             match (run_vm_jit(&src), run_tw(&src)) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "tuple reduce VM ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vm={v:?} tw={t:?}"),
             }
         }
@@ -1681,7 +1750,7 @@
     /// Run `src` on the VM with the JIT *disabled* (no native kernels) — the pure
     /// bytecode-loop oracle that `run_vm_jit` is diffed against for the array/fused
     /// kernels (which only engage when a `Jit` is supplied).
-    fn run_vm_no_jit(src: &str) -> Result<String, ()> {
+    fn run_vm_no_jit(src: &str) -> Result<String, String> {
         run_vm(src)
     }
 
@@ -1895,7 +1964,10 @@
                     assert_eq!(a, b, "mixed map: JIT ≠ bytecode VM on `{src}`");
                     assert_eq!(b, c, "mixed map: bytecode VM ≠ tree-walker on `{src}`");
                 }
-                (Err(()), Err(()), Err(())) => {}
+                (Err(ea), Err(eb), Err(ec)) => {
+                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
+                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
+                }
                 (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
             }
         }
@@ -1917,7 +1989,10 @@
                     assert_eq!(a, b, "f64 map: JIT ≠ bytecode VM on `{src}`");
                     assert_eq!(b, c, "f64 map: bytecode VM ≠ tree-walker on `{src}`");
                 }
-                (Err(()), Err(()), Err(())) => {}
+                (Err(ea), Err(eb), Err(ec)) => {
+                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
+                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
+                }
                 (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
             }
         }
@@ -1976,7 +2051,10 @@
                     assert_eq!(a, b, "f64 reduce: JIT ≠ bytecode VM on `{src}`");
                     assert_eq!(b, c, "f64 reduce: bytecode VM ≠ tree-walker on `{src}`");
                 }
-                (Err(()), Err(()), Err(())) => {}
+                (Err(ea), Err(eb), Err(ec)) => {
+                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
+                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
+                }
                 (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
             }
         }
@@ -2035,7 +2113,10 @@
                     assert_eq!(a, b, "range f64 reduce: JIT ≠ bytecode VM on `{src}`");
                     assert_eq!(b, c, "range f64 reduce: bytecode VM ≠ tree-walker on `{src}`");
                 }
-                (Err(()), Err(()), Err(())) => {}
+                (Err(ea), Err(eb), Err(ec)) => {
+                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
+                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
+                }
                 (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
             }
         }
@@ -2097,7 +2178,10 @@
                     assert_eq!(a, b, "div range f64 reduce: JIT ≠ bytecode VM on `{src}`");
                     assert_eq!(b, c, "div range f64 reduce: bytecode VM ≠ tree-walker on `{src}`");
                 }
-                (Err(()), Err(()), Err(())) => {}
+                (Err(ea), Err(eb), Err(ec)) => {
+                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
+                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
+                }
                 (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
             }
         }
@@ -2193,7 +2277,10 @@
                     assert_eq!(a, b, "f64 tuple reduce: JIT ≠ bytecode VM on `{src}`");
                     assert_eq!(b, c, "f64 tuple reduce: bytecode VM ≠ tree-walker on `{src}`");
                 }
-                (Err(()), Err(()), Err(())) => {}
+                (Err(ea), Err(eb), Err(ec)) => {
+                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
+                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
+                }
                 (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
             }
         }
@@ -2286,7 +2373,10 @@
                     assert_eq!(a, b, "f64 reduce composition: JIT ≠ bytecode VM on `{src}`");
                     assert_eq!(b, c, "f64 reduce composition: bytecode VM ≠ tree-walker on `{src}`");
                 }
-                (Err(()), Err(()), Err(())) => {}
+                (Err(ea), Err(eb), Err(ec)) => {
+                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
+                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
+                }
                 (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
             }
         }
@@ -2438,7 +2528,10 @@
                     assert_eq!(a, b, "match: JIT ≠ bytecode VM on `{src}`");
                     assert_eq!(b, c, "match: bytecode VM ≠ tree-walker on `{src}`");
                 }
-                (Err(()), Err(()), Err(())) => {}
+                (Err(ea), Err(eb), Err(ec)) => {
+                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
+                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
+                }
                 (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
             }
         }
@@ -2552,7 +2645,10 @@
                     assert_eq!(a, b, "JIT ≠ bytecode VM on `{src}`");
                     assert_eq!(b, c, "bytecode VM ≠ tree-walker on `{src}`");
                 }
-                (Err(()), Err(()), Err(())) => {}
+                (Err(ea), Err(eb), Err(ec)) => {
+                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
+                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
+                }
                 (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
             }
         }
@@ -2573,13 +2669,22 @@
             match (run_vm_typed(&src), run_tw(&src)) {
                 // both run → values must agree
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "typed VM ≠ tree-walker on `{src}`"),
-                // both reject → fine
-                (Err(()), Err(())) => {}
+                // Both reject: a STATIC-checker rejection (tagged `typecheck:`) belongs
+                // to a different failure taxonomy — the checker reports the first
+                // static error, the tree-walker the first dynamically-REACHED one, so
+                // their messages legitimately differ (found by the message-parity
+                // upgrade: `… | 186.0` rejected statically while the tw hit an OOB in
+                // an earlier-evaluated condition). RUNTIME errors must match exactly.
+                (Err(ea), Err(eb)) => {
+                    if !ea.starts_with("typecheck: ") {
+                        assert_eq!(ea, eb, "error-message divergence on `{src}`");
+                    }
+                }
                 // checker stricter than the dynamic tree-walker → allowed
-                (Err(()), Ok(_)) => {}
+                (Err(_), Ok(_)) => {}
                 // typed VM ran but tree-walker rejected: only legitimate via the B2
                 // recursion-depth difference; anything else is a real divergence.
-                (Ok(_), Err(())) if tw_hit_recursion_limit(&src) => {}
+                (Ok(_), Err(_)) if tw_hit_recursion_limit(&src) => {}
                 (v, t) => panic!("OUTCOME divergence on `{src}`: typed={v:?} tw={t:?}"),
             }
         }
@@ -2606,7 +2711,7 @@
         for src in cases {
             match (run_vm(src), run_tw(src)) {
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "VM ≠ tree-walker on `{src}`"),
-                (Err(()), Err(())) => {}
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
                 (v, t) => panic!("divergence on `{src}`: vm={v:?} tw={t:?}"),
             }
         }
