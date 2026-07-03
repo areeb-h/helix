@@ -51,7 +51,19 @@ pub unsafe fn call_i64(ptr: *const u8, args: &[i64]) -> i64 {
             4 => std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64, i64) -> i64>(ptr)(
                 args[0], args[1], args[2], args[3],
             ),
-            _ => unreachable!("JIT arity is capped at {MAX_ARITY}"),
+            5 => std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64, i64, i64) -> i64>(
+                ptr,
+            )(args[0], args[1], args[2], args[3], args[4]),
+            6 => std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64>(
+                ptr,
+            )(args[0], args[1], args[2], args[3], args[4], args[5]),
+            // MAX_ARITY user args + the mixed specialization's trailing poison-pointer
+            // slot (see `MixedFn`) — the only way a 7-slot call arises.
+            7 => std::mem::transmute::<
+                *const u8,
+                extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64,
+            >(ptr)(args[0], args[1], args[2], args[3], args[4], args[5], args[6]),
+            _ => unreachable!("JIT arity is capped at {MAX_ARITY} (+1 poison slot)"),
         }
     }
 }
@@ -350,6 +362,7 @@ pub unsafe fn run_fused_count(ptr: *const u8, src: &[i64]) -> i64 {
 /// Call an `f64`-specialized JIT function. SAFETY: as [`call_i64`], with an
 /// `extern "C" fn(f64×n)->f64` contract.
 pub unsafe fn call_f64(ptr: *const u8, args: &[f64]) -> f64 {
+    note_native_call();
     unsafe {
         match args.len() {
             0 => std::mem::transmute::<*const u8, extern "C" fn() -> f64>(ptr)(),
@@ -361,6 +374,12 @@ pub unsafe fn call_f64(ptr: *const u8, args: &[f64]) -> f64 {
             4 => std::mem::transmute::<*const u8, extern "C" fn(f64, f64, f64, f64) -> f64>(ptr)(
                 args[0], args[1], args[2], args[3],
             ),
+            5 => std::mem::transmute::<*const u8, extern "C" fn(f64, f64, f64, f64, f64) -> f64>(
+                ptr,
+            )(args[0], args[1], args[2], args[3], args[4]),
+            6 => std::mem::transmute::<*const u8, extern "C" fn(f64, f64, f64, f64, f64, f64) -> f64>(
+                ptr,
+            )(args[0], args[1], args[2], args[3], args[4], args[5]),
             _ => unreachable!("JIT arity is capped at {MAX_ARITY}"),
         }
     }

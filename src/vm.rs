@@ -560,6 +560,47 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         stack.push(Value::Float(r));
                         return Ok(());
                     }
+                    // MIXED per-parameter specialization (annotation-typed tail-loop
+                    // fns): taken only when every argument's RUNTIME type matches the
+                    // compiled pattern — Float params cross the FFI as raw f64 bits in
+                    // i64 slots, and a Float result comes back as bits (pure bit moves,
+                    // bit-exact). Any other type pattern falls through to the VM, which
+                    // handles dynamic mixing (and ignores annotations) as always. The
+                    // trailing slot is the NaN-poison out-param (see `MixedFn`): the
+                    // native code bails there on an unordered float compare, in which
+                    // case the result is DISCARDED (stack untouched) and the ordinary
+                    // bytecode call below re-runs and raises the interpreter's exact
+                    // "cannot compare these values (NaN?)" error.
+                    if let Some(m) = nf.mixed
+                        && tail.iter().enumerate().all(|(j, v)| {
+                            if m.float_mask >> j & 1 == 1 {
+                                matches!(v, Value::Float(_))
+                            } else {
+                                matches!(v, Value::Int(_))
+                            }
+                        })
+                    {
+                        let mut iargs: Vec<i64> = tail
+                            .iter()
+                            .map(|v| match v {
+                                Value::Int(n) => *n,
+                                Value::Float(x) => x.to_bits() as i64,
+                                _ => unreachable!("pattern checked above"),
+                            })
+                            .collect();
+                        let mut poison: i8 = 0;
+                        iargs.push(&raw mut poison as i64);
+                        let r = unsafe { crate::jit::call_i64(m.ptr, &iargs) };
+                        if poison == 0 {
+                            stack.truncate(start);
+                            stack.push(if m.ret_float {
+                                Value::Float(f64::from_bits(r as u64))
+                            } else {
+                                Value::Int(r)
+                            });
+                            return Ok(());
+                        }
+                    }
                 }
                 let callee = &program.funcs[idx];
                 if nargs != callee.n_params as usize {
@@ -608,6 +649,76 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         line,
                         col,
                     ));
+                }
+                // Native fast path — the same specialization dispatch as `CallFn`.
+                // Without it, a tail call INTO a JIT-compiled function (`fn escape(..) =
+                // step(..)`, the natural wrapper idiom) silently ran the callee on the
+                // interpreter. The current frame is dead (tail position), so a native
+                // result is delivered exactly as `Op::Return` would deliver it: pop the
+                // frame, truncate its locals, push the value — the caller resumes at its
+                // already-advanced ip. (`TailCallFn` can never appear in `main`: the
+                // peephole requires a `Return` successor and `main` has none, so the pop
+                // always leaves the caller frame.) Like the frame-reuse path below, the
+                // dead frame's `memo_key` obligation is dropped — memoization is a
+                // pure-function cache, unobservable in values.
+                if let Some(nf) = jit_for_idx[idx]
+                    && nargs == nf.arity
+                {
+                    let start = stack.len() - nargs;
+                    let tail = &stack[start..];
+                    let all_int = tail.iter().all(|v| matches!(v, Value::Int(_)));
+                    let all_float = tail.iter().all(|v| matches!(v, Value::Float(_)));
+                    let native: Option<Value> = if all_int && let Some(ptr) = nf.i64_ptr {
+                        let iargs: Vec<i64> = tail
+                            .iter()
+                            .map(|v| if let Value::Int(n) = v { *n } else { 0 })
+                            .collect();
+                        Some(Value::Int(unsafe { crate::jit::call_i64(ptr, &iargs) }))
+                    } else if all_float && let Some(ptr) = nf.f64_ptr {
+                        let fargs: Vec<f64> = tail.iter().map(|v| v.as_f64().unwrap()).collect();
+                        Some(Value::Float(unsafe { crate::jit::call_f64(ptr, &fargs) }))
+                    } else if let Some(m) = nf.mixed
+                        && tail.iter().enumerate().all(|(j, v)| {
+                            if m.float_mask >> j & 1 == 1 {
+                                matches!(v, Value::Float(_))
+                            } else {
+                                matches!(v, Value::Int(_))
+                            }
+                        })
+                    {
+                        let mut iargs: Vec<i64> = tail
+                            .iter()
+                            .map(|v| match v {
+                                Value::Int(n) => *n,
+                                Value::Float(x) => x.to_bits() as i64,
+                                _ => unreachable!("pattern checked above"),
+                            })
+                            .collect();
+                        // NaN-poison slot (see `MixedFn`): a poisoned result is
+                        // discarded (`None`) so the frame-reuse path below re-runs the
+                        // call on bytecode and raises the interpreter's exact error.
+                        let mut poison: i8 = 0;
+                        iargs.push(&raw mut poison as i64);
+                        let r = unsafe { crate::jit::call_i64(m.ptr, &iargs) };
+                        if poison == 0 {
+                            Some(if m.ret_float {
+                                Value::Float(f64::from_bits(r as u64))
+                            } else {
+                                Value::Int(r)
+                            })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(ret) = native {
+                        stack.truncate(start);
+                        let frame = frames.pop().unwrap();
+                        locals.truncate(frame.base);
+                        stack.push(ret);
+                        return Ok(());
+                    }
                 }
                 // Reuse the CURRENT frame (`fi`) rather than pushing a new one — the call is
                 // in tail position, so this frame is dead. Discard its locals, move the

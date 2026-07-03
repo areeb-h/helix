@@ -52,7 +52,7 @@ use crate::bytecode::{Capture, CaptureKind, IndexBound};
 mod ffi;
 pub use ffi::*;
 
-const MAX_ARITY: usize = 4;
+const MAX_ARITY: usize = 6;
 
 /// The two scalar specializations.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -76,12 +76,40 @@ impl NumKind {
     }
 }
 
+/// The **mixed** (per-parameter `Int`/`Float`, from explicit annotations) tail-loop
+/// specialization of a user function. Everything crosses the FFI boundary as `i64` BIT
+/// PATTERNS so the existing [`call_i64`] trampolines work for any parameter mix: a
+/// `Float` parameter is passed as `f64::to_bits` and bitcast back in the prologue; a
+/// `Float` result is bitcast to bits in the epilogue and `f64::from_bits` at the VM.
+/// Pure bit moves — no numeric conversion, bit-exact.
+///
+/// The native signature carries ONE extra trailing slot: a `*mut i8` POISON pointer.
+/// The interpreter RAISES on a NaN comparison ("cannot compare these values"), where
+/// native `fcmp` would silently order it — so every float comparison in the loop first
+/// checks `fcmp Unordered` and, on NaN, bails immediately to a poison block (store 1,
+/// return). The VM then DISCARDS the native result and falls through to the bytecode
+/// path, which re-runs the call and raises the exact interpreter error. The bail must
+/// be immediate (not accumulate-and-store like the fdiv poison in bounded reduce
+/// loops): a tail loop can be infinite, and a NaN inside one must error like the
+/// interpreter, not spin natively.
+#[derive(Clone, Copy)]
+pub struct MixedFn {
+    pub ptr: *const u8,
+    /// Bit `j` set ⇔ parameter `j` is `Float` (arity ≤ [`MAX_ARITY`] ≤ 16 bits). The VM
+    /// dispatches this specialization only when every argument's runtime type matches.
+    pub float_mask: u16,
+    /// Whether the result is `Float` (returned as raw bits).
+    pub ret_float: bool,
+}
+
 /// The native entry points for one user function (whichever specializations
 /// compiled), plus its arity. `Copy` so the VM can pull it out cheaply.
 #[derive(Clone, Copy)]
 pub struct NativeFn {
     pub i64_ptr: Option<*const u8>,
     pub f64_ptr: Option<*const u8>,
+    /// The annotated mixed-parameter tail-loop specialization, if one compiled.
+    pub mixed: Option<MixedFn>,
     pub arity: usize,
 }
 
@@ -288,6 +316,126 @@ pub fn build(
         }
     }
 
+    // MIXED (per-parameter Int/Float, from explicit annotations) tail-loop
+    // specializations — the mandelbrot-class scalar loops whose state is f64 but whose
+    // counter/result is i64, dispatched ONLY from the VM's `CallFn` (never from kernels
+    // or other natives, so they live outside `fn_ids` / `int_eligible` and cannot
+    // interfere with any existing path). The external signature is uniformly all-`i64`
+    // (bits ABI — see [`MixedFn`]); the prologue bitcasts Float params, the epilogue
+    // bitcasts a Float result.
+    let mut compiled_mixed: Vec<(String, FuncId, u16, bool, usize)> = Vec::new();
+    {
+        let mut ctx = module.make_context();
+        let mut bctx = FunctionBuilderContext::new();
+        for f in &funcs {
+            let Some((mask, param_kinds, ret_kind)) = mixed_tail_sig(f, &tail_loop) else {
+                continue;
+            };
+            // A body whose every path re-loops never returns; `Int` is a placeholder.
+            let ret_kind = ret_kind.unwrap_or(NumKind::Int);
+            // arity user slots + the trailing poison-pointer slot (see [`MixedFn`]).
+            let n_slots = f.params.len() + 1;
+            let mut sig = module.make_signature();
+            sig.call_conv = CallConv::SystemV;
+            for _ in 0..n_slots {
+                sig.params.push(AbiParam::new(I64));
+            }
+            sig.returns.push(AbiParam::new(I64));
+            let Ok(id) =
+                module.declare_function(&format!("{}$mixed", f.name), Linkage::Local, &sig)
+            else {
+                continue;
+            };
+            ctx.func.signature.call_conv = CallConv::SystemV;
+            for _ in 0..n_slots {
+                ctx.func.signature.params.push(AbiParam::new(I64));
+            }
+            ctx.func.signature.returns.push(AbiParam::new(I64));
+
+            let mut builder = FunctionBuilder::new(&mut ctx.func, &mut bctx);
+            let entry = builder.create_block();
+            builder.append_block_params_for_function_params(entry);
+            builder.switch_to_block(entry);
+            builder.seal_block(entry);
+
+            // Params: raw i64 slots; Float ones are bitcast back to f64 (pure bit move).
+            let mut vars: HashMap<&str, Variable> = HashMap::new();
+            let mut env: HashMap<&str, NumKind> = HashMap::new();
+            let mut param_vars: Vec<Variable> = Vec::with_capacity(f.params.len());
+            for (j, (pname, _)) in f.params.iter().enumerate() {
+                let raw = builder.block_params(entry)[j];
+                let k = param_kinds[j];
+                let var = builder.declare_var(k.cl_type());
+                let val = match k {
+                    NumKind::Int => raw,
+                    NumKind::Float => builder.ins().bitcast(F64, MemFlags::new(), raw),
+                };
+                builder.def_var(var, val);
+                vars.insert(pname.as_str(), var);
+                env.insert(pname.as_str(), k);
+                param_vars.push(var);
+            }
+
+            // Same loop skeleton as the i64 tail branch (see `gen_tail`): unsealed
+            // header, dominating ret default, back-edges rebind the param Variables.
+            // Plus the poison machinery: the trailing param is the `*mut i8` poison
+            // pointer; every float comparison bails to `poison_blk` on an unordered
+            // (NaN) operand, which stores 1 and returns — the VM then discards the
+            // result and re-runs on bytecode, raising the interpreter's exact error.
+            let poison_ptr = builder.block_params(entry)[f.params.len()];
+            let hdr = builder.create_block();
+            let exit = builder.create_block();
+            let poison_blk = builder.create_block();
+            let ret = builder.declare_var(ret_kind.cl_type());
+            let zero = match ret_kind {
+                NumKind::Int => builder.ins().iconst(I64, 0),
+                NumKind::Float => builder.ins().f64const(0.0),
+            };
+            builder.def_var(ret, zero);
+            builder.ins().jump(hdr, &[]);
+            builder.switch_to_block(hdr);
+            let tl = MixedTail {
+                self_name: f.name,
+                params: &param_vars,
+                param_kinds: &param_kinds,
+                hdr,
+                exit,
+                ret,
+                poison_blk,
+            };
+            gen_tail_mixed(&mut builder, f.body, &mut vars, &mut env, &tl);
+            builder.seal_block(hdr);
+            // poison_blk: unreachable when the body has no float comparisons — filled
+            // regardless (Cranelift accepts filled unreachable blocks, as with the
+            // all-paths-loop exit in the i64 tail branch).
+            builder.switch_to_block(poison_blk);
+            builder.seal_block(poison_blk);
+            let one8 = builder.ins().iconst(I8, 1);
+            builder.ins().store(MemFlags::trusted(), one8, poison_ptr, 0);
+            let z64 = builder.ins().iconst(I64, 0);
+            builder.ins().return_(&[z64]);
+            builder.switch_to_block(exit);
+            builder.seal_block(exit);
+            let rv = builder.use_var(ret);
+            let out = match ret_kind {
+                NumKind::Int => rv,
+                NumKind::Float => builder.ins().bitcast(I64, MemFlags::new(), rv),
+            };
+            builder.ins().return_(&[out]);
+            builder.finalize();
+
+            module.define_function(id, &mut ctx).ok()?;
+            module.clear_context(&mut ctx);
+            compiled_mixed.push((
+                f.name.to_string(),
+                id,
+                mask,
+                ret_kind == NumKind::Float,
+                f.params.len(),
+            ));
+        }
+    }
+
     // Compile each flagged `reduce` loop into a native `fn(i64,i64,i64)->i64`. We
     // re-check eligibility defensively: if a site somehow isn't compilable, its
     // slot stays `None` and the VM keeps running the bytecode loop for it.
@@ -349,6 +497,7 @@ pub fn build(
     let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns);
 
     if compiled.is_empty()
+        && compiled_mixed.is_empty()
         && reduce_ids.iter().all(|r| r.is_none())
         && map_ids.iter().all(|r| r.is_none())
         && map_f64_ids.iter().all(|r| r.is_none())
@@ -365,11 +514,18 @@ pub fn build(
         let ptr = module.get_finalized_function(id);
         let entry = by_name
             .entry(name)
-            .or_insert(NativeFn { i64_ptr: None, f64_ptr: None, arity });
+            .or_insert(NativeFn { i64_ptr: None, f64_ptr: None, mixed: None, arity });
         match kind {
             NumKind::Int => entry.i64_ptr = Some(ptr),
             NumKind::Float => entry.f64_ptr = Some(ptr),
         }
+    }
+    for (name, id, float_mask, ret_float, arity) in compiled_mixed {
+        let ptr = module.get_finalized_function(id);
+        let entry = by_name
+            .entry(name)
+            .or_insert(NativeFn { i64_ptr: None, f64_ptr: None, mixed: None, arity });
+        entry.mixed = Some(MixedFn { ptr, float_mask, ret_float });
     }
 
     let finalize = |ids: Vec<Option<FuncId>>, module: &JITModule| -> Vec<Option<*const u8>> {
@@ -1954,6 +2110,174 @@ fn tail_loopable_set<'a>(funcs: &[FnDef<'a>]) -> HashSet<&'a str> {
         .collect()
 }
 
+/// Bottom-up kind of an expression over a **typed environment** (parameter and `let`
+/// binder kinds), or `None` if anything falls outside the mixed-eligible shape. The
+/// env-generalization of [`infer_mixed_kind`] (same operator/builtin/promotion rules,
+/// mirrored EXACTLY by [`gen_value_env`]): `+`/`-`/`*` promote `Int` operands to `f64`
+/// when the other side is `Float` (the interpreter's numeric promotion); `%`/`//`/
+/// bitwise/const-shifts stay `Int`-only under `value_eligible`'s constant constraints;
+/// `sqrt` is always `Float`, `abs` preserves, `min`/`max` need same-kind operands. No
+/// `let`/`if`/user-calls in VALUE position (tail positions handle `let`/`if`), and
+/// crucially NO division — native `fdiv` diverges from the interpreter on /0.
+fn infer_typed_env(e: &Expr, env: &HashMap<&str, NumKind>) -> Option<NumKind> {
+    match e {
+        Expr::Int(_) => Some(NumKind::Int),
+        Expr::Float(_) => Some(NumKind::Float),
+        Expr::Ident { name, .. } => env.get(name.as_str()).copied(),
+        Expr::Binary { op, left, right, .. } => {
+            let lk = infer_typed_env(left, env)?;
+            let rk = infer_typed_env(right, env)?;
+            match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul => {
+                    Some(if lk == NumKind::Float || rk == NumKind::Float {
+                        NumKind::Float
+                    } else {
+                        NumKind::Int
+                    })
+                }
+                BinOp::Mod | BinOp::FloorDiv => (lk == NumKind::Int
+                    && rk == NumKind::Int
+                    && matches!(**right, Expr::Int(n) if n > 0))
+                .then_some(NumKind::Int),
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+                    (lk == NumKind::Int && rk == NumKind::Int).then_some(NumKind::Int)
+                }
+                BinOp::Shl | BinOp::Shr => (lk == NumKind::Int
+                    && matches!(**right, Expr::Int(n) if (0..=63).contains(&n)))
+                .then_some(NumKind::Int),
+                _ => None,
+            }
+        }
+        Expr::Call { name, args, .. } => match (name.as_str(), args.len()) {
+            ("sqrt", 1) => {
+                infer_typed_env(&args[0], env)?;
+                Some(NumKind::Float)
+            }
+            ("abs", 1) => infer_typed_env(&args[0], env),
+            ("min" | "max", 2) => {
+                let ka = infer_typed_env(&args[0], env)?;
+                let kb = infer_typed_env(&args[1], env)?;
+                (ka == kb).then_some(ka)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// True iff `e` is a mixed-eligible condition: `and`/`or` over comparisons whose two
+/// sides infer to the SAME kind (an `Int`-vs-`Float` comparison is rejected — its
+/// promotion semantics past 2^53 are not provably identical to the interpreter's).
+/// Mirrored exactly by [`gen_cond_env`].
+fn cond_typed_ok(e: &Expr, env: &HashMap<&str, NumKind>) -> bool {
+    match e {
+        Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
+            cond_typed_ok(left, env) && cond_typed_ok(right, env)
+        }
+        Expr::Binary { op, left, right, .. } => {
+            matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne)
+                && match (infer_typed_env(left, env), infer_typed_env(right, env)) {
+                    (Some(lk), Some(rk)) => lk == rk,
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+/// The result kind of a mixed tail-recursive body, walking exactly the tail structure
+/// [`self_calls_tail_only`] admitted. Returns `None` = ineligible; `Some(None)` = every
+/// path re-loops (the body never returns a value); `Some(Some(k))` = all value positions
+/// agree on kind `k`. Each tail self-call's argument kinds must EQUAL the annotated
+/// parameter kinds — the loop then preserves every parameter's type by induction, which
+/// is what makes one static specialization faithful to the dynamically-typed interpreter.
+fn mixed_tail_ret_kind<'a>(
+    e: &'a Expr,
+    env: &mut HashMap<&'a str, NumKind>,
+    self_name: &str,
+    param_kinds: &[NumKind],
+) -> Option<Option<NumKind>> {
+    match e {
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            if !cond_typed_ok(cond, env) {
+                return None;
+            }
+            let a = mixed_tail_ret_kind(then_branch, env, self_name, param_kinds)?;
+            let b = mixed_tail_ret_kind(else_branch, env, self_name, param_kinds)?;
+            match (a, b) {
+                (None, x) | (x, None) => Some(x),
+                (Some(k1), Some(k2)) if k1 == k2 => Some(Some(k1)),
+                _ => None,
+            }
+        }
+        Expr::Let { bindings, body } => {
+            let mut saved: Vec<(&'a str, Option<NumKind>)> = Vec::new();
+            for (n, v) in bindings {
+                let k = infer_typed_env(v, env)?;
+                saved.push((n.as_str(), env.insert(n.as_str(), k)));
+            }
+            let r = mixed_tail_ret_kind(body, env, self_name, param_kinds);
+            for (n, old) in saved.into_iter().rev() {
+                match old {
+                    Some(o) => {
+                        env.insert(n, o);
+                    }
+                    None => {
+                        env.remove(n);
+                    }
+                }
+            }
+            r
+        }
+        Expr::Call { name, args, .. } if name == self_name => {
+            if args.len() != param_kinds.len() {
+                return None;
+            }
+            for (a, &k) in args.iter().zip(param_kinds) {
+                if infer_typed_env(a, env)? != k {
+                    return None;
+                }
+            }
+            Some(None)
+        }
+        other => infer_typed_env(other, env).map(Some),
+    }
+}
+
+/// The mixed-specialization signature of a tail-loopable function, or `None` if it has
+/// no such form: every parameter carries an explicit `Int`/`Float` annotation (the
+/// contract that makes one static specialization honest — the VM dispatches it only
+/// when the actual argument types match), at least one is `Float` (all-`Int` is the
+/// plain i64 path's job), and the body types consistently under those kinds. Returns
+/// (float bitmask, per-param kinds, result kind — `None` when every path re-loops).
+fn mixed_tail_sig(
+    f: &FnDef,
+    tail_loop: &HashSet<&str>,
+) -> Option<(u16, Vec<NumKind>, Option<NumKind>)> {
+    if !tail_loop.contains(f.name) || f.params.is_empty() || f.params.len() > MAX_ARITY {
+        return None;
+    }
+    let mut kinds = Vec::with_capacity(f.params.len());
+    let mut mask: u16 = 0;
+    for (j, (_, ann)) in f.params.iter().enumerate() {
+        match ann {
+            Some(TypeAnn::Int) => kinds.push(NumKind::Int),
+            Some(TypeAnn::Float) => {
+                kinds.push(NumKind::Float);
+                mask |= 1 << j;
+            }
+            _ => return None,
+        }
+    }
+    if mask == 0 {
+        return None;
+    }
+    let mut env: HashMap<&str, NumKind> =
+        f.params.iter().zip(&kinds).map(|((n, _), &k)| (n.as_str(), k)).collect();
+    let ret = mixed_tail_ret_kind(f.body, &mut env, f.name, &kinds)?;
+    Some((mask, kinds, ret))
+}
+
 /// Pure scalar builtins the `i64` kernel codegen emits inline, matching the interpreter
 /// bit-for-bit: `abs` is `wrapping_abs` (Cranelift `iabs`, which wraps `i64::MIN` to
 /// itself); `min`/`max` reproduce the interpreter's `as_f64()`-compare-then-return-the-
@@ -2982,6 +3306,279 @@ fn gen_tail<'a>(
         }
         other => {
             let v = gen_value(b, other, vars, fn_ids, module, kind);
+            b.def_var(tl.ret, v);
+            b.ins().jump(tl.exit, &[]);
+        }
+    }
+}
+
+/// Generate a mixed-eligible VALUE expression over a typed environment, returning the
+/// value and its kind. The env-generalization of [`gen_value_typed`], mirroring
+/// [`infer_typed_env`] node for node: Int⊗Int arms are byte-identical to `gen_value`'s
+/// i64 codegen; a Float side promotes the Int side via `fcvt_from_sint` (the
+/// interpreter's numeric promotion); builtins follow the interpreter's kinds exactly.
+fn gen_value_env<'a>(
+    b: &mut FunctionBuilder,
+    e: &'a Expr,
+    vars: &HashMap<&'a str, Variable>,
+    env: &HashMap<&'a str, NumKind>,
+) -> (ClValue, NumKind) {
+    match e {
+        Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
+        Expr::Float(f) => (b.ins().f64const(*f), NumKind::Float),
+        Expr::Ident { name, .. } => (b.use_var(vars[name.as_str()]), env[name.as_str()]),
+        Expr::Binary { op, left, right, .. } => {
+            let (lv, lk) = gen_value_env(b, left, vars, env);
+            let (rv, rk) = gen_value_env(b, right, vars, env);
+            if lk == NumKind::Int && rk == NumKind::Int {
+                let v = match op {
+                    BinOp::Add => b.ins().iadd(lv, rv),
+                    BinOp::Sub => b.ins().isub(lv, rv),
+                    BinOp::Mul => b.ins().imul(lv, rv),
+                    BinOp::Mod => {
+                        let rem = b.ins().srem(lv, rv);
+                        let zero = b.ins().iconst(I64, 0);
+                        let fixed = b.ins().iadd(rem, rv);
+                        let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
+                        b.ins().select(is_neg, fixed, rem)
+                    }
+                    BinOp::FloorDiv => {
+                        let q = b.ins().sdiv(lv, rv);
+                        let rem = b.ins().srem(lv, rv);
+                        let zero = b.ins().iconst(I64, 0);
+                        let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
+                        let qm1 = b.ins().iadd_imm(q, -1);
+                        b.ins().select(is_neg, qm1, q)
+                    }
+                    BinOp::BitAnd => b.ins().band(lv, rv),
+                    BinOp::BitOr => b.ins().bor(lv, rv),
+                    BinOp::BitXor => b.ins().bxor(lv, rv),
+                    BinOp::Shl => {
+                        let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
+                        b.ins().ishl_imm(lv, n)
+                    }
+                    BinOp::Shr => {
+                        let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
+                        b.ins().sshr_imm(lv, n)
+                    }
+                    _ => unreachable!("ineligible operator reached mixed-env codegen"),
+                };
+                (v, NumKind::Int)
+            } else {
+                let lf = if lk == NumKind::Int { b.ins().fcvt_from_sint(F64, lv) } else { lv };
+                let rf = if rk == NumKind::Int { b.ins().fcvt_from_sint(F64, rv) } else { rv };
+                let v = match op {
+                    BinOp::Add => b.ins().fadd(lf, rf),
+                    BinOp::Sub => b.ins().fsub(lf, rf),
+                    BinOp::Mul => b.ins().fmul(lf, rf),
+                    _ => unreachable!("ineligible operator reached mixed-env codegen"),
+                };
+                (v, NumKind::Float)
+            }
+        }
+        Expr::Call { name, args, .. } => match name.as_str() {
+            "sqrt" => {
+                let (av, ak) = gen_value_env(b, &args[0], vars, env);
+                let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
+                (b.ins().sqrt(af), NumKind::Float)
+            }
+            "abs" => {
+                let (av, ak) = gen_value_env(b, &args[0], vars, env);
+                match ak {
+                    NumKind::Int => (b.ins().iabs(av), NumKind::Int),
+                    NumKind::Float => (b.ins().fabs(av), NumKind::Float),
+                }
+            }
+            "min" | "max" => {
+                let (av, ak) = gen_value_env(b, &args[0], vars, env);
+                let (cv, _ck) = gen_value_env(b, &args[1], vars, env);
+                let le = name == "min";
+                let cc = if le { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
+                match ak {
+                    NumKind::Int => {
+                        let af = b.ins().fcvt_from_sint(F64, av);
+                        let cf = b.ins().fcvt_from_sint(F64, cv);
+                        let keep = b.ins().fcmp(cc, af, cf);
+                        (b.ins().select(keep, av, cv), NumKind::Int)
+                    }
+                    NumKind::Float => {
+                        let keep = b.ins().fcmp(cc, av, cv);
+                        (b.ins().select(keep, av, cv), NumKind::Float)
+                    }
+                }
+            }
+            _ => unreachable!("ineligible call reached mixed-env codegen"),
+        },
+        _ => unreachable!("ineligible mixed-env expr reached codegen"),
+    }
+}
+
+/// Generate a mixed-eligible condition (see [`cond_typed_ok`]): `and`/`or` as
+/// `band`/`bor` of sub-conditions (both sides pure, so eager evaluation is
+/// observationally identical to short-circuiting for VALUES — and a NaN in an eagerly-
+/// evaluated side that the interpreter would have short-circuited past just triggers
+/// the poison FALLBACK, which re-runs on bytecode and short-circuits correctly);
+/// comparisons pick `icmp`/`fcmp` by their (same-kind, per eligibility) operand kind.
+///
+/// Every FLOAT comparison is NaN-guarded: the interpreter RAISES on an unordered
+/// compare, so `fcmp Unordered` branches to the poison block FIRST — the ordered
+/// compare only runs on ordered operands. The bail must be immediate: a tail loop can
+/// be infinite, and a NaN inside one must error like the interpreter, not spin.
+fn gen_cond_env<'a>(
+    b: &mut FunctionBuilder,
+    e: &'a Expr,
+    vars: &HashMap<&'a str, Variable>,
+    env: &HashMap<&'a str, NumKind>,
+    tl: &MixedTail,
+) -> ClValue {
+    match e {
+        Expr::Binary { op: BinOp::And, left, right, .. } => {
+            let l = gen_cond_env(b, left, vars, env, tl);
+            let r = gen_cond_env(b, right, vars, env, tl);
+            b.ins().band(l, r)
+        }
+        Expr::Binary { op: BinOp::Or, left, right, .. } => {
+            let l = gen_cond_env(b, left, vars, env, tl);
+            let r = gen_cond_env(b, right, vars, env, tl);
+            b.ins().bor(l, r)
+        }
+        Expr::Binary { op, left, right, .. } => {
+            let (l, lk) = gen_value_env(b, left, vars, env);
+            let (r, _rk) = gen_value_env(b, right, vars, env);
+            match lk {
+                NumKind::Int => {
+                    let cc = match op {
+                        BinOp::Lt => IntCC::SignedLessThan,
+                        BinOp::Gt => IntCC::SignedGreaterThan,
+                        BinOp::Le => IntCC::SignedLessThanOrEqual,
+                        BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
+                        BinOp::Eq => IntCC::Equal,
+                        BinOp::Ne => IntCC::NotEqual,
+                        _ => unreachable!("only comparisons reach mixed cond codegen"),
+                    };
+                    b.ins().icmp(cc, l, r)
+                }
+                NumKind::Float => {
+                    // NaN bail: unordered operands → poison block (→ VM fallback →
+                    // the interpreter's "cannot compare these values (NaN?)" error).
+                    let uno = b.ins().fcmp(FloatCC::Unordered, l, r);
+                    let ordered = b.create_block();
+                    b.ins().brif(uno, tl.poison_blk, &[], ordered, &[]);
+                    b.switch_to_block(ordered);
+                    b.seal_block(ordered);
+                    let cc = match op {
+                        BinOp::Lt => FloatCC::LessThan,
+                        BinOp::Gt => FloatCC::GreaterThan,
+                        BinOp::Le => FloatCC::LessThanOrEqual,
+                        BinOp::Ge => FloatCC::GreaterThanOrEqual,
+                        BinOp::Eq => FloatCC::Equal,
+                        BinOp::Ne => FloatCC::NotEqual,
+                        _ => unreachable!("only comparisons reach mixed cond codegen"),
+                    };
+                    b.ins().fcmp(cc, l, r)
+                }
+            }
+        }
+        _ => unreachable!("ineligible condition reached mixed cond codegen"),
+    }
+}
+
+/// Loop context for a MIXED tail-recursive body ([`build`]'s mixed pass) — the typed
+/// sibling of [`TailLoop`]: parameter Variables AND their kinds in declaration order,
+/// plus the NaN-poison machinery (see [`MixedFn`]): float comparisons bail to
+/// `poison_blk` on an unordered operand, mirroring the interpreter's NaN-compare error.
+struct MixedTail<'p> {
+    self_name: &'p str,
+    params: &'p [Variable],
+    param_kinds: &'p [NumKind],
+    hdr: Block,
+    exit: Block,
+    ret: Variable,
+    /// Target of the NaN-compare bail; it stores 1 through the poison pointer and
+    /// returns (the pointer itself is only needed where the block is FILLED, in
+    /// [`build`]'s mixed pass).
+    poison_blk: Block,
+}
+
+/// Generate a mixed tail-recursive body as a native loop — [`gen_tail`]'s typed sibling,
+/// with the SAME structure (if branches / let bodies recurse; a tail self-call evaluates
+/// ALL argument values before rebinding any parameter Variable; a value position stores
+/// the result and jumps to the exit) but per-node kinds via [`gen_value_env`] /
+/// [`gen_cond_env`], and `let` threading BOTH the Variable map and the kind env.
+fn gen_tail_mixed<'a>(
+    b: &mut FunctionBuilder,
+    e: &'a Expr,
+    vars: &mut HashMap<&'a str, Variable>,
+    env: &mut HashMap<&'a str, NumKind>,
+    tl: &MixedTail,
+) {
+    match e {
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            let then_b = b.create_block();
+            let else_b = b.create_block();
+            let cv = gen_cond_env(b, cond, vars, env, tl);
+            b.ins().brif(cv, then_b, &[], else_b, &[]);
+            b.switch_to_block(then_b);
+            b.seal_block(then_b);
+            gen_tail_mixed(b, then_branch, vars, env, tl);
+            b.switch_to_block(else_b);
+            b.seal_block(else_b);
+            gen_tail_mixed(b, else_branch, vars, env, tl);
+        }
+        Expr::Let { bindings, body } => {
+            let mut saved: Vec<(&'a str, Option<Variable>, Option<NumKind>)> = Vec::new();
+            for (n, v) in bindings {
+                let (vv, vk) = gen_value_env(b, v, vars, env);
+                let var = b.declare_var(vk.cl_type());
+                b.def_var(var, vv);
+                saved.push((
+                    n.as_str(),
+                    vars.insert(n.as_str(), var),
+                    env.insert(n.as_str(), vk),
+                ));
+            }
+            gen_tail_mixed(b, body, vars, env, tl);
+            for (n, old_var, old_kind) in saved.into_iter().rev() {
+                match old_var {
+                    Some(o) => {
+                        vars.insert(n, o);
+                    }
+                    None => {
+                        vars.remove(n);
+                    }
+                }
+                match old_kind {
+                    Some(o) => {
+                        env.insert(n, o);
+                    }
+                    None => {
+                        env.remove(n);
+                    }
+                }
+            }
+        }
+        Expr::Call { name, args, .. } if name == tl.self_name => {
+            // Evaluate every argument BEFORE rebinding any parameter (same discipline as
+            // `gen_tail`); eligibility (`mixed_tail_ret_kind`) proved each arg's kind
+            // equals the annotated param kind — re-asserted here so any drift between
+            // the two walkers fails fast instead of emitting a wrongly-typed rebind.
+            let argv: Vec<ClValue> = args
+                .iter()
+                .zip(tl.param_kinds)
+                .map(|(a, &k)| {
+                    let (v, ak) = gen_value_env(b, a, vars, env);
+                    debug_assert!(ak == k, "tail-call arg kind drifted from the param kind");
+                    let _ = k;
+                    v
+                })
+                .collect();
+            for (var, v) in tl.params.iter().zip(argv) {
+                b.def_var(*var, v);
+            }
+            b.ins().jump(tl.hdr, &[]);
+        }
+        other => {
+            let (v, _k) = gen_value_env(b, other, vars, env);
             b.def_var(tl.ret, v);
             b.ins().jump(tl.exit, &[]);
         }

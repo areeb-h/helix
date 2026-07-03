@@ -466,6 +466,85 @@
         assert!(crate::jit::native_call_count() > 0, "tail fn did not engage the JIT");
     }
 
+    /// MIXED (per-parameter `Int`/`Float`, annotation-typed) tail-recursive functions now
+    /// JIT as native loops over the bits ABI (`MixedFn`): Float params cross the FFI as
+    /// raw f64 bits, a Float result returns as bits — pure bit moves, so all three
+    /// engines must agree bit-exactly. Dispatch fires only when every argument's RUNTIME
+    /// type matches the annotations; anything else falls back to the VM (which ignores
+    /// annotations), so mismatched calls stay engine-identical too.
+    #[test]
+    fn mixed_tail_recursive_fn_lowers_to_native_loop() {
+        let cases = [
+            // the mandelbrot escape-time shape: 4 Float params + an Int counter/result,
+            // an or-condition mixing an i64 compare with an f64 compare
+            "fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) = if i >= 60 or zr * zr + zi * zi > 4.0 then i else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)\nstep(0.0, 0.0, 0.25, 0.35, 0)",
+            "fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) = if i >= 60 or zr * zr + zi * zi > 4.0 then i else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)\nstep(0.0, 0.0, 0.0 - 1.5, 0.02, 0)",
+            // Float RESULT, pinned value: 1.0 * 0.5^3 = 0.125 (bit-exact halving)
+            "fn geo(x: Float, n: Int) = if n <= 0 then x else geo(x * 0.5, n - 1)\ngeo(1.0, 3)",
+            // deeper Float result — engines must agree on the exact f64 bits
+            "fn geo(x: Float, n: Int) = if n <= 0 then x else geo(x * 0.5, n - 1)\ngeo(1.0, 30)",
+            // Int→Float PROMOTION inside the loop body (x + n mixes kinds via fcvt)
+            "fn p(x: Float, n: Int) = if n <= 0 then x else p(x + n, n - 1)\np(0.5, 100)",
+            // let with a Float binding in the tail path (typed shadow/restore)
+            "fn h(x: Float, n: Int) = if n <= 0 then x else (let y = x * 0.25 in h(y + x, n - 1))\nh(1.0, 40)",
+            // sqrt in the loop body (always-Float builtin)
+            "fn s(x: Float, n: Int) = if n <= 0 then x else s(sqrt(x + 2.0), n - 1)\ns(9.0, 25)",
+            // MAX_ARITY boundary: 6 params
+            "fn m6(a: Float, b: Float, c: Float, d: Float, e: Float, n: Int) = if n <= 0 then a + b + c + d + e else m6(b, c, d, e, a + 1.0, n - 1)\nm6(1.0, 2.0, 3.0, 4.0, 5.0, 50)",
+            // DISPATCH DECLINE: Int passed where Float is annotated — the native pattern
+            // does not match, all engines take the interpreter path (which ignores
+            // annotations) and must agree on its dynamic result
+            "fn f(x: Float, n: Int) = if n <= 0 then x else f(x * 0.5, n - 1)\nf(1, 3)",
+            // all-Int annotations (mask 0): no mixed form, the plain i64 loop covers it
+            "fn g(n: Int, acc: Int) = if n <= 0 then acc else g(n - 1, acc + n)\ng(300, 0)",
+            // WRAPPER shape (the mandelbrot idiom): an unannotated interpreter fn whose
+            // body TAIL-CALLS the native fn — `TailCallFn` now runs the same native
+            // dispatch as `CallFn` and delivers the result as `Return` would (this was
+            // the silent 40× hole: the wrapper's tail call previously always
+            // frame-reused into bytecode)
+            "fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) = if i >= 60 or zr * zr + zi * zi > 4.0 then i else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)\nfn esc(a, b) = step(0.0, 0.0, a, b, 0)\nesc(0.25, 0.35)",
+            // wrapper whose tail call's args DON'T match the pattern (Int where Float
+            // is annotated) — dispatch declines, bytecode frame-reuse as before
+            "fn geo(x: Float, n: Int) = if n <= 0 then x else geo(x * 0.5, n - 1)\nfn w(k) = geo(k, 3)\nw(1)",
+            // NaN POISON (the review-confirmed divergence): the interpreter RAISES on a
+            // NaN comparison, so the native loop must bail (unordered fcmp → poison →
+            // bytecode fallback → identical error), never silently order the NaN
+            "fn bad(x: Float, n: Int) = if sqrt(x) > 0.0 then n else bad(x, n + 1)\nbad(0.0 - 1.0, 0)",
+            // NaN appearing mid-loop (x goes negative → sqrt(x) is NaN on a later
+            // iteration): first iterations run native, the NaN one poisons + re-runs
+            // on bytecode → same error as the interpreter
+            "fn drift(x: Float, n: Int) = if sqrt(x) > 100.0 or n >= 5 then n else drift(x - 1.0, n + 1)\ndrift(2.0, 0)",
+            // eager `and` with a NaN comparison the interpreter SHORT-CIRCUITS past:
+            // native evaluates it eagerly → poison → fallback short-circuits → same
+            // VALUE (not an error) on every engine
+            "fn sc(x: Float, n: Int) = if n > 0 and sqrt(x) > 0.0 then n else sc(x, n + 1)\nsc(4.0, 0)",
+            // inf stays ORDERED (no poison): x*x overflows to inf, inf > 1e10 is a
+            // well-ordered comparison on every engine
+            "fn ovf(x: Float, n: Int) = if n <= 0 or x * x > 10000000000.0 then x else ovf(x * x, n - 1)\novf(100000.0, 8)",
+            // NaN in VALUE position (never compared): produced, bit-round-tripped
+            // through the bits ABI, and printed identically
+            "fn nv(x: Float, n: Int) = if n <= 0 then sqrt(x) else nv(x, n - 1)\nnv(0.0 - 4.0, 2)",
+            // Int→Float promotion with a HUGE i64 (beyond 2^53): fcvt_from_sint must
+            // round exactly like the interpreter's `as f64`
+            "fn hp(x: Float, n: Int) = if n <= 0 then x else hp(x + 4611686018427387905, n - 1)\nhp(0.5, 2)",
+        ];
+        for src in cases {
+            assert_eq!(run_tw(src), run_vm(src), "tw vs vm: {src}");
+            assert_eq!(run_tw(src), run_vm_jit(src), "tw vs jit: {src}");
+        }
+        // pinned exact value for the halving case
+        assert_eq!(run_vm_jit("fn geo(x: Float, n: Int) = if n <= 0 then x else geo(x * 0.5, n - 1)\ngeo(1.0, 3)").unwrap(), "0.125");
+        // DEEP mixed loop — VM (TailCallFn) and JIT native loop, beyond the tw guard
+        let deep = "fn p(x: Float, n: Int) = if n <= 0 then x else p(x + 1.0, n - 1)\np(0.0, 1000000)";
+        assert_eq!(run_vm(deep), run_vm_jit(deep), "deep: vm vs jit");
+        assert_eq!(run_vm_jit(deep).unwrap(), "1000000.0");
+        // ENGAGEMENT: the mixed fn must actually run native (bits cross via call_i64).
+        crate::jit::reset_native_call_count();
+        let src = "fn geo(x: Float, n: Int) = if n <= 0 then x else geo(x * 0.5, n - 1)\ngeo(1.0, 30)";
+        assert!(run_vm_jit(src).is_ok());
+        assert!(crate::jit::native_call_count() > 0, "mixed tail fn did not engage the JIT");
+    }
+
     /// Lazy `enumerate()` (`ArrayData::Enumerate`) must (a) agree across tree-walker, VM,
     /// and JIT, and (b) be behaviourally IDENTICAL to the dense `(index, element)` tuple
     /// array — the lazy-vs-dense equivalence the cross-engine oracle alone cannot verify
