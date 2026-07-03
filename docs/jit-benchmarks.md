@@ -216,7 +216,7 @@ one core (`RAYON_NUM_THREADS=1`) — the honest per-core number.
 | fib(40) | recursion | 0.102 | 0.161 | 0.305 | 7.63 | — | **0.025** | 0.006 | **win** † |
 | matmul 512³ (tensor) | compute | 0.345 | 0.256 | 0.220 | 7.47 | 0.360 | **0.033** | 0.032 | **win** ‡ |
 | basel 1/k² (100M) | float-div | **0.06** | 0.096 | 0.087 | 7.59 | 23.2 | 0.09 | 0.089 | **loss** |
-| mandelbrot (1200²) | compute | 0.186 | 0.160 | 0.143 | 6.41 | 2.48 | 20.4 | — | **loss** |
+| mandelbrot (1200²) | compute | 0.186 | 0.160 | 0.143 | 6.41 | 2.48 | 0.54 § | — | **loss** |
 | wordcount (5M) | string | 0.167 | 0.267 | 0.237 | 3.32 | 0.165 | 6.27 | 2.15 | **loss** |
 | montecarlo (1e8) | rng | 0.264 | 0.240 | 0.265 | 35.5 | — | 42.9 § | — | **loss** |
 | sieve (1e7) | memory | 0.014 | 0.016 | 0.019 | 0.628 | 0.097 | 92 § | — | **loss** |
@@ -224,8 +224,10 @@ one core (`RAYON_NUM_THREADS=1`) — the honest per-core number.
 ¹ C uniform `-O3 -march=native` (mandelbrot `+ -ffp-contract=off`). † `fib` wins by **changing the
 complexity class** — Helix auto-memoizes pure recursion (O(n) vs O(2ⁿ)), a language feature, not
 faster codegen. ‡ `matmul` is the native tensor `.matmul()` (BLAS-like GEMM); the *naive
-triple-loop* Helix path is **21.9 s** (VM scalar). § now **completes** — fixed this session
-(lazy-`enumerate`, `isqrt`+short-circuit); was `>260 s`.
+triple-loop* Helix path is **21.9 s** (VM scalar). § fixed after the original run:
+montecarlo/sieve now **complete** (lazy-`enumerate`, `isqrt`+short-circuit; were `>260 s`), and
+mandelbrot dropped **20.4 s → 0.54 s** (tail-recursive scalar fns → native loops; see the
+roadmap below).
 
 **Scorecard vs `-march=native` C: 3 wins · 1 wash · 6 losses** — the honest, humbler picture; the
 original "5 wins · 1 tie" was inflated by a scalar-C baseline. The reading:
@@ -266,9 +268,14 @@ original "5 wins · 1 tie" was inflated by a scalar-C baseline. The reading:
 - **basel (tie).** Serial, order-fixed f64 series; already at the optimal-serial ceiling. f64
   reassociation is non-associative (forbidden by the oracle), so a "win" would require an *opt-in*
   relaxed-order sum. Likely leave as-is.
-- **mandelbrot (loss).** No native loop — per-pixel escape iterates on the interpreter. The lever
-  is **JIT-compiling tail-recursive scalar functions into native loops** (also unlocks Newton /
-  fixed-point / ODE steppers, and montecarlo's scalar-RNG form). Highest leverage.
+- **mandelbrot — FIXED to a respectable loss (2026-07-04).** The "native scalar loops" lever
+  landed in two slices: tail-recursive i64 functions compile to native loops, and mixed
+  (`Int`/`Float`-annotated) ones do too — `fn step(zr: Float, zi: Float, cr: Float, ci: Float,
+  i: Int)` now runs as one native loop per pixel, and a tail call *into* a native function
+  (`fn escape(..) = step(..)`) dispatches natively as well. **20.4 s → 0.54 s (~38×), anchor
+  86452986 unchanged** — from ~110× behind `-march=native` C to **~3×** (the rest is per-pixel
+  VM dispatch of the unannotated wrapper + no SIMD). Float comparisons carry a NaN poison
+  guard so a NaN still raises the interpreter's exact error instead of being silently ordered.
 - **wordcount (loss).** Per-element `String` allocation in the map + a parallel histogram that
   regresses under threads (6.27 s ∥ vs 2.15 s ·1). Needs interned strings + a scalable merge.
 - **montecarlo (loss).** RNG-gen is fine (~7 s at 1e8); `enumerate()` over two 800 MB arrays
