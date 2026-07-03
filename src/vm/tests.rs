@@ -532,6 +532,61 @@
         }
     }
 
+    /// `range` operations across ALL THREE engines, compared BY VALUE — bare expressions, NOT
+    /// `print`-wrapped (a `print(x)` returns `Unit`, so `run_*` would compare `unit == unit` and
+    /// check only error-parity, never the value). Covers terminal/short-circuit methods (`first`,
+    /// `last`, `count`, `length`, `take`, `drop`, `sum`), `map`/`filter`/`reduce`, the empty /
+    /// reverse / negative / stepped shapes, LARGE ranges, and chains — precisely the surface a
+    /// lazy-`range` refactor changes. It passes today (eager `range`) and must keep passing when
+    /// `range` goes lazy: any divergence a lazy rewrite introduces (short-circuit, span/`count`
+    /// off-by-one, reverse-step, large-range materialization) fails this on VM/JIT vs tree-walker.
+    #[test]
+    fn differential_range_operations_all_engines() {
+        let cases = [
+            // terminal / short-circuit (small)
+            "range(0, 5).first()", "range(0, 5).last()", "range(0, 5).count()", "range(0, 5).length()",
+            "range(0, 5).sum()", "range(0, 10).take(3).sum()", "range(0, 10).drop(3).sum()",
+            "range(0, 10).map(it => it * it).sum()", "range(0, 10).filter(it => it % 2 == 0).count()",
+            "range(0, 10).reduce(0, (a, x) => a + x)",
+            // empty ranges (start >= end)
+            "range(5, 5).count()", "range(5, 5).sum()", "range(5, 5).first()", "range(7, 3).count()",
+            // negative bounds
+            "range(-5, 5).sum()", "range(-5, 5).count()", "range(-5, 5).first()", "range(-5, 5).last()",
+            // stepped (ascending + descending)
+            "range(0, 10, 2).sum()", "range(0, 10, 3).count()", "range(10, 0, -1).sum()",
+            "range(10, 0, -2).first()", "range(10, 0, -2).last()", "range(0, 10, 5).count()",
+            // large ranges — the value is identical regardless of eager/lazy materialization
+            "range(0, 1000000).sum()", "range(0, 1000000).count()",
+            "range(0, 20000000).first()", "range(0, 20000000).last()", "range(0, 20000000).length()",
+            // chains
+            "range(0, 100).filter(it => it > 50).map(it => it * 2).sum()",
+            "range(0, 100).take(10).drop(3).count()",
+        ];
+        for src in cases {
+            let (vm, jit, tw) = (run_vm(src), run_vm_jit(src), run_tw(src));
+            assert_eq!(vm, tw, "VM ≠ tree-walker on `{src}`");
+            assert_eq!(jit, tw, "JIT ≠ tree-walker on `{src}`");
+            // Every case is a valid program; if one starts ERRORING on all engines the test would
+            // still pass the equality checks — so require a real value (guards the parse-error trap).
+            assert!(vm.is_ok(), "range op unexpectedly errored on `{src}`: {vm:?}");
+        }
+    }
+
+    /// The JIT engagement counter — used by the differential fuzzers to prove native code actually
+    /// RAN (not a silent bytecode fallback, the "engagement ≠ correctness" trap) — is wired: a
+    /// JIT-eligible numeric kernel bumps it, and it is observable + resettable.
+    #[test]
+    fn jit_engagement_counter_is_wired() {
+        crate::jit::reset_native_call_count();
+        assert_eq!(crate::jit::native_call_count(), 0, "counter did not reset");
+        // A large i64 map is JIT-eligible → the native kernel runs → the counter bumps.
+        let _ = run_vm_jit("(range(0, 100000)).map(it => it * 2).sum()");
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "a JIT-eligible kernel did not bump the native-call counter — the engagement probe is broken"
+        );
+    }
+
     /// Calling a first-class function *value* produced by an expression —
     /// `(rec.handler)(x)`, `(fns[i])(x)` — runs natively on both engines. These pin
     /// the VM's `CallValue` opcode path (and its error text) to the tree-walker:
@@ -657,10 +712,15 @@
     #[test]
     fn differential_vm_jit_vs_tree_walker() {
         let mut rng = 0x0123_4567_89AB_CDEFu64; // distinct seed from the no-JIT fuzzer
+        crate::jit::reset_native_call_count();
+        let mut ok = 0u32;
         for _ in 0..30_000 {
             let src = gen_expr(&mut rng, 5, &[]);
             match (run_vm_jit(&src), run_tw(&src)) {
-                (Ok(a), Ok(b)) => assert_eq!(a, b, "JIT ≠ tree-walker on `{src}`"),
+                (Ok(a), Ok(b)) => {
+                    assert_eq!(a, b, "JIT ≠ tree-walker on `{src}`");
+                    ok += 1;
+                }
                 (Err(()), Err(())) => {}
                 // The one accepted asymmetry (B2): VM frames are heap-deep (1M), the
                 // tree-walker recurses on the native stack (20k). gen_expr stays well under,
@@ -669,6 +729,16 @@
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
+        // The oracle is only meaningful if programs actually SUCCEED (else the `(Err,Err)` arm
+        // passes trivially — the `let a=[…]` parse-error trap) AND the JIT actually ENGAGES (else
+        // `run_vm_jit` silently == the bytecode VM and this tests nothing about native code — the
+        // "engagement ≠ correctness" trap). Both are asserted, so a regression that stops the
+        // fuzzer generating runnable/JIT-eligible programs fails loudly instead of going green.
+        assert!(ok > 3_000, "differential fuzzer had too few successful programs: {ok}/30000");
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "JIT never engaged across 30000 programs — the oracle was silently testing the bytecode VM, not native code"
+        );
     }
 
     #[test]

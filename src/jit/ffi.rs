@@ -6,9 +6,40 @@
 
 use super::MAX_ARITY;
 
+// ---- test-only JIT engagement counter ------------------------------------------------
+// Every native trampoline below bumps this. The differential fuzzers reset it before a run
+// and assert it grew afterward, so a fuzzer can never pass by SILENTLY falling back to the
+// bytecode VM (the "engagement ≠ correctness" trap): if the JIT stopped engaging, the
+// assertion fails loudly instead of trivially comparing VM == tree-walker. Test-only, so
+// there is zero release overhead; incremented once per kernel INVOCATION (not per element).
+#[cfg(test)]
+thread_local! {
+    static NATIVE_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+#[inline]
+fn note_native_call() {
+    NATIVE_CALLS.with(|c| c.set(c.get() + 1));
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn note_native_call() {}
+
+/// Number of native JIT trampoline invocations since the last reset (test-only engagement probe).
+#[cfg(test)]
+pub fn native_call_count() -> u64 {
+    NATIVE_CALLS.with(|c| c.get())
+}
+/// Reset the engagement counter before a fuzzer run (test-only).
+#[cfg(test)]
+pub fn reset_native_call_count() {
+    NATIVE_CALLS.with(|c| c.set(0));
+}
+
 /// Call an `i64`-specialized JIT function. SAFETY: see module docs; the VM
 /// guarantees `ptr` is a finalized `extern "C" fn(i64×n)->i64` and `args.len()==n`.
 pub unsafe fn call_i64(ptr: *const u8, args: &[i64]) -> i64 {
+    note_native_call();
     unsafe {
         match args.len() {
             0 => std::mem::transmute::<*const u8, extern "C" fn() -> i64>(ptr)(),
@@ -28,6 +59,7 @@ pub unsafe fn call_i64(ptr: *const u8, args: &[i64]) -> i64 {
 /// Call a native reduce loop. SAFETY: the VM guarantees `ptr` is a finalized
 /// `extern "C" fn(i64,i64,i64)->i64` produced by [`define_reduce_loop`].
 pub unsafe fn call_reduce(ptr: *const u8, start: i64, end: i64, init: i64) -> i64 {
+    note_native_call();
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64) -> i64>(ptr)(start, end, init)
     }
@@ -38,6 +70,7 @@ pub unsafe fn call_reduce(ptr: *const u8, start: i64, end: i64, init: i64) -> i6
 /// accumulator folded left-to-right — bit-exact to the interpreter (mixed promotion).
 /// SAFETY: the VM guarantees `ptr` is a finalized `float` [`define_reduce_loop`] kernel.
 pub unsafe fn call_reduce_f64(ptr: *const u8, start: i64, end: i64, init: f64) -> f64 {
+    note_native_call();
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, f64) -> f64>(ptr)(start, end, init)
     }
@@ -50,6 +83,7 @@ pub unsafe fn call_reduce_f64(ptr: *const u8, start: i64, end: i64, init: f64) -
 /// SAFETY: the VM guarantees `ptr` is a finalized dividing `float` scalar [`define_reduce_loop`]
 /// kernel and `poison` points to a writable `i8`.
 pub unsafe fn call_reduce_f64_div(ptr: *const u8, start: i64, end: i64, init: f64, poison: *mut i8) -> f64 {
+    note_native_call();
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, f64, *mut i8) -> f64>(ptr)(
             start, end, init, poison,
@@ -65,6 +99,7 @@ pub unsafe fn call_reduce_f64_div(ptr: *const u8, start: i64, end: i64, init: f6
 /// and for every array the whole counter range `[start, end)` is within its bounds (the VM's
 /// pre-check) so the kernel's unchecked `f64` loads stay in-bounds.
 pub unsafe fn call_reduce_f64_caps(ptr: *const u8, start: i64, end: i64, init: f64, caps: *const i64) -> f64 {
+    note_native_call();
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, f64, *const i64) -> f64>(ptr)(
             start, end, init, caps,
@@ -81,6 +116,7 @@ pub unsafe fn call_reduce_f64_caps(ptr: *const u8, start: i64, end: i64, init: f
 /// array slot the whole counter range `[start, end)` is within that array's bounds (the VM's
 /// pre-check) so the kernel's unchecked element loads stay in-bounds.
 pub unsafe fn call_reduce_caps(ptr: *const u8, start: i64, end: i64, init: i64, caps: *const i64) -> i64 {
+    note_native_call();
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, i64, *const i64) -> i64>(ptr)(
             start, end, init, caps,
@@ -96,6 +132,7 @@ pub unsafe fn call_reduce_caps(ptr: *const u8, start: i64, end: i64, init: i64, 
 /// `ptr` must be a tuple reduce kernel and `acc` must point to at least that kernel's slot
 /// count of writable `i64`s.
 pub unsafe fn call_tuple_reduce(ptr: *const u8, start: i64, end: i64, acc: *mut i64) {
+    note_native_call();
     unsafe {
         std::mem::transmute::<*const u8, extern "C" fn(i64, i64, *mut i64)>(ptr)(start, end, acc)
     }
@@ -133,6 +170,7 @@ pub unsafe fn run_nested_reduce_arrays(
     template: &[i64],
     scalar_pos: usize,
 ) -> Vec<i64> {
+    note_native_call();
     // A finalized native fn pointer is `Send + Sync` (an address), so it may be shared across
     // rayon workers; capture `f` (Copy), never the raw `*const u8`. `template` is a read-only
     // `&[i64]` (Sync) shared by reference; each worker copies it into its own stack buffer.
@@ -187,6 +225,7 @@ where
     if n == 0 {
         return dst;
     }
+    note_native_call();
     // A finalized native fn pointer is `Send + Sync` (it's an address), so it may be
     // shared across rayon workers; the raw data pointers are re-derived per chunk INSIDE
     // the closure from the (Sync) slices, never captured across threads.
@@ -232,6 +271,7 @@ pub unsafe fn run_map_kernel_mixed(ptr: *const u8, src: &[i64]) -> Vec<f64> {
 /// `ptr` is a finalized `extern "C" fn(*const i64,*mut i64,i64)->i64` (kept count) from
 /// [`define_array_kernel`].
 pub unsafe fn run_filter_kernel(ptr: *const u8, src: &[i64]) -> Vec<i64> {
+    note_native_call();
     let mut dst = vec![0i64; src.len()];
     if src.is_empty() {
         return dst;
@@ -246,6 +286,7 @@ pub unsafe fn run_filter_kernel(ptr: *const u8, src: &[i64]) -> Vec<i64> {
 /// surviving elements in order. SAFETY: `ptr` is the matching kernel from
 /// [`define_fused_kernel`].
 pub unsafe fn run_fused_collect(ptr: *const u8, src: &[i64]) -> Vec<i64> {
+    note_native_call();
     let mut dst = vec![0i64; src.len()];
     if src.is_empty() {
         return dst;
@@ -259,6 +300,7 @@ pub unsafe fn run_fused_collect(ptr: *const u8, src: &[i64]) -> Vec<i64> {
 /// Run a fused array→`Reduce` pipeline over `src` (`fn(src,len,init)->acc`). SAFETY: as
 /// [`run_fused_collect`].
 pub unsafe fn run_fused_reduce(ptr: *const u8, src: &[i64], init: i64) -> i64 {
+    note_native_call();
     let f: extern "C" fn(*const i64, i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, init)
 }
@@ -269,6 +311,7 @@ pub unsafe fn run_fused_reduce(ptr: *const u8, src: &[i64], init: i64) -> i64 {
 /// `float`-flagged `define_fused_kernel`, guaranteed by the VM's `Floats` source + `Float`
 /// init check.
 pub unsafe fn run_fused_reduce_f64(ptr: *const u8, src: &[f64], init: f64) -> f64 {
+    note_native_call();
     let f: extern "C" fn(*const f64, i64, f64) -> f64 = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, init)
 }
@@ -280,6 +323,7 @@ pub unsafe fn run_fused_reduce_f64(ptr: *const u8, src: &[f64], init: f64) -> f6
 /// `ptr` must be a tuple fused-reduce kernel and `acc` must point to its slot count of
 /// writable `i64`s.
 pub unsafe fn run_fused_tuple_reduce(ptr: *const u8, src: &[i64], acc: *mut i64) {
+    note_native_call();
     let f: extern "C" fn(*const i64, i64, *mut i64) = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, acc)
 }
@@ -290,6 +334,7 @@ pub unsafe fn run_fused_tuple_reduce(ptr: *const u8, src: &[i64], acc: *mut i64)
 /// `acc_to_slots_f64`/`rebuild_acc_f64`). SAFETY: as [`run_fused_tuple_reduce`], but the
 /// element pointer is `*const f64` and `ptr` is a `float`-flagged tuple kernel.
 pub unsafe fn run_fused_tuple_reduce_f64(ptr: *const u8, src: &[f64], acc: *mut i64) {
+    note_native_call();
     let f: extern "C" fn(*const f64, i64, *mut i64) = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, acc)
 }
@@ -297,6 +342,7 @@ pub unsafe fn run_fused_tuple_reduce_f64(ptr: *const u8, src: &[f64], acc: *mut 
 /// Run a fused array→`Count` pipeline over `src` (`fn(src,len,_)->count`). SAFETY: as
 /// [`run_fused_collect`].
 pub unsafe fn run_fused_count(ptr: *const u8, src: &[i64]) -> i64 {
+    note_native_call();
     let f: extern "C" fn(*const i64, i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
     f(src.as_ptr(), src.len() as i64, 0)
 }
