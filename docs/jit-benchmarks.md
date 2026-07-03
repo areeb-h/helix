@@ -2,10 +2,13 @@
 
 **Summary:** Helix compiles pure-numeric `map`/`filter`/`reduce` kernels — including
 **array-indexed reductions** (`a[j]`) and **nested reductions** (`map` of `reduce`) — to
-native machine code via Cranelift. On four representative kernels it is **at or ahead of
-single-threaded C**, beats NumPy, and runs ~20–700× over its own bytecode interpreter — every
-result **bit-identical** across all languages (and enforced bit-identical across Helix's own
-three engines by a differential oracle; see [execution-engine.md](execution-engine.md)).
+native machine code via Cranelift. On memory-bandwidth-bound kernels it is **~C-class**, beats
+NumPy, and runs ~20–700× over its own bytecode interpreter — every result **bit-identical** across
+all languages (and enforced bit-identical across Helix's own three engines by a differential oracle;
+see [execution-engine.md](execution-engine.md)). On **compute-bound SIMD-friendly** kernels it
+*loses* to properly-vectorized (`-march=native`) C, because Cranelift emits scalar code — see the
+§5 correction. The tables in §1–4 below use each kernel's original flags (some scalar `C -O3`); §5
+is the honest reckoning against uniform `-march=native` C.
 
 For the **full honest picture — a ten-kernel run that includes the workloads Helix *loses* at
 (mandelbrot, wordcount, montecarlo, sieve)** and the per-core (single-thread) numbers, jump to
@@ -157,8 +160,12 @@ finishes in a few milliseconds, below the 0.01 s timer grain (all print the same
 | Helix (JIT, serial outer — prior) | 0.14 s | 3.5× |
 | Helix (no-JIT, VM) | ~28 s | ~700× |
 
-**Read this honestly.** Helix now *edges out single-threaded SIMD C* — but by **using all cores**
-(measured ~450% CPU), not by winning per-core. This is a compute-bound kernel: the array (`codes`,
+**Read this honestly** — and see the [§5 correction](#5-full-spectrum-run-2026-07-03-where-helix-wins-ties-and-loses):
+the "SIMD C" in the table above is `-O3` (baseline SSE2). At `-O3 -march=native` gcc auto-vectorizes
+this to **AVX2** and runs it in **~0.010 s**, so Helix does **not** actually beat properly-vectorized
+C here — it *loses* to it (0.03 s vs 0.010 s), exactly the SIMD-in-the-JIT gap named below. Against
+the SSE2 single-thread baseline shown, Helix's parallel outer loop pulls ahead, but by **using all
+cores** (~450% CPU), not by winning per-core. This is a compute-bound kernel: the array (`codes`,
 ~120 KB) is L2-resident, so it is limited by arithmetic throughput, and there C still has a per-core
 edge Helix lacks — gcc/LLVM **auto-vectorize** the inner loop (AVX2 does ~4 `|codes[i]-codes[j]|`
 per instruction) while Helix's Cranelift JIT emits a **scalar** loop. A fair fight *on equal
@@ -185,37 +192,61 @@ or gets constant-folded (timings scale with N). A visual version of this table l
 session artifact (cross-language benchmark report).
 
 Seconds, best-of-3 (lower is better). **∥** = Helix across all 6 cores; **·1** = Helix pinned to
-one core (`RAYON_NUM_THREADS=1`) — the honest per-core number. `>260` = exceeded the 260 s cap.
+one core (`RAYON_NUM_THREADS=1`) — the honest per-core number.
 
-| kernel | class | C | Rust | Go | CPython | NumPy | Helix ∥ | Helix ·1 | verdict |
+> **Correction (2026-07-03) — the C baseline is now uniform `-O3 -march=native`** (with
+> `-ffp-contract=off` on mandelbrot to stay anchor-matching), the *fair, strong* baseline. The
+> first version of this table used each kernel's manifest flags, several of which were plain `-O2`
+> (scalar) — which scored the compute-bound kernels **too generously**. Re-measured against
+> properly-vectorized C, **`allpairs` flips from a win to a loss and `basel` from a tie to a loss**:
+> gcc AVX2-vectorizes those inner loops while Helix's Cranelift JIT emits scalar code (the standing
+> "SIMD in the JIT" gap). Rust/Go stay at `-O`/default, so a `target-cpu=native` Rust would also
+> gain on the SIMD-friendly kernels — those Helix-vs-Rust margins are soft too. Separately,
+> `montecarlo` and `sieve` now **complete** (were `>260 s`) thanks to this session's lazy-`enumerate`
+> and `isqrt`+short-circuit work. The two memory-bandwidth-bound dots show Helix `∥` as a *range*:
+> the kernel faults ~1.2 GB fresh per run, so the wall swings with machine memory state (0.155 s
+> fresh → 0.55 s under sustained load) while genuinely parallelizing (~4.7 cores) — bandwidth-bound,
+> roughly C-class, not a clean multi-× win.
+
+| kernel | class | C¹ | Rust | Go | CPython | NumPy | Helix ∥ | Helix ·1 | verdict |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| dot_i64 (50M) | memory | 0.518 | 0.476 | 0.443 | 71.6 | 16.45 | **0.155** | 0.257 | **win** |
-| dot_f64 (50M) | memory | 0.507 | 0.553 | 0.520 | 14.9 | 0.427 | **0.160** | 0.310 | **win** |
-| allpairs (225M) | compute | 0.081 | 0.034 | 0.096 | 6.76 | 0.139 | **0.020** | 0.081 | **win** |
-| fib(40) | recursion | 0.097 | 0.161 | 0.305 | 7.63 | — | **0.025** | 0.006 | **win** † |
-| matmul 512³ (tensor) | compute | 0.347 | 0.256 | 0.220 | 7.47 | 0.360 | **0.033** | 0.032 | **win** ‡ |
-| basel 1/k² (100M) | float-div | 0.094 | 0.096 | 0.087 | 7.59 | 23.2 | 0.095 | 0.089 | **tie** |
-| mandelbrot (1200²) | compute | 0.182 | 0.160 | 0.143 | 6.41 | 2.48 | 20.4 | — | **loss** |
-| wordcount (5M) | string | 0.172 | 0.267 | 0.237 | 3.32 | 0.165 | 6.27 | 2.15 | **loss** |
-| montecarlo (1e8) | rng | 0.235 | 0.240 | 0.265 | 35.5 | — | >260 | — | **loss** |
-| sieve (1e7) | memory | 0.013 | 0.016 | 0.019 | 0.628 | 0.097 | >260 | — | **loss** |
+| dot_i64 (50M) | memory-BW | 0.46 | 0.476 | 0.443 | 71.6 | 16.45 | 0.155–0.55 | 0.257 | **≈ C** |
+| dot_f64 (50M) | memory-BW | 0.51 | 0.553 | 0.520 | 14.9 | 0.427 | 0.16–0.37 | 0.310 | **win** |
+| allpairs (225M) | compute | **0.010** | 0.034 | 0.096 | 6.76 | 0.139 | 0.020 | 0.081 | **loss** |
+| fib(40) | recursion | 0.102 | 0.161 | 0.305 | 7.63 | — | **0.025** | 0.006 | **win** † |
+| matmul 512³ (tensor) | compute | 0.345 | 0.256 | 0.220 | 7.47 | 0.360 | **0.033** | 0.032 | **win** ‡ |
+| basel 1/k² (100M) | float-div | **0.06** | 0.096 | 0.087 | 7.59 | 23.2 | 0.09 | 0.089 | **loss** |
+| mandelbrot (1200²) | compute | 0.186 | 0.160 | 0.143 | 6.41 | 2.48 | 20.4 | — | **loss** |
+| wordcount (5M) | string | 0.167 | 0.267 | 0.237 | 3.32 | 0.165 | 6.27 | 2.15 | **loss** |
+| montecarlo (1e8) | rng | 0.264 | 0.240 | 0.265 | 35.5 | — | 42.9 § | — | **loss** |
+| sieve (1e7) | memory | 0.014 | 0.016 | 0.019 | 0.628 | 0.097 | 92 § | — | **loss** |
 
-† `fib` wins by **changing the complexity class** — Helix auto-memoizes pure recursion (O(n) vs
-O(2ⁿ)), a language feature, not faster codegen. ‡ `matmul` is the native tensor `.matmul()`
-(BLAS-like GEMM); the *naive triple-loop* Helix path is **21.9 s** (VM scalar — computed-offset
-indexing misses the parallel-JIT reduce fast path).
+¹ C uniform `-O3 -march=native` (mandelbrot `+ -ffp-contract=off`). † `fib` wins by **changing the
+complexity class** — Helix auto-memoizes pure recursion (O(n) vs O(2ⁿ)), a language feature, not
+faster codegen. ‡ `matmul` is the native tensor `.matmul()` (BLAS-like GEMM); the *naive
+triple-loop* Helix path is **21.9 s** (VM scalar). § now **completes** — fixed this session
+(lazy-`enumerate`, `isqrt`+short-circuit); was `>260 s`.
 
-**Scorecard: 5 wins · 1 tie · 4 losses.** The reading:
+**Scorecard vs `-march=native` C: 3 wins · 1 wash · 6 losses** — the honest, humbler picture; the
+original "5 wins · 1 tie" was inflated by a scalar-C baseline. The reading:
 
-- **Per-core, on its home turf, Helix is genuinely C-class.** Single-core Helix *beats* C on the
-  50M dot products (0.26 s vs 0.52 s) and *ties* C exactly on all-pairs (0.081 s) and basel
-  (~0.09 s). The parallel column adds a real 3–4× on top — an architectural win, disclosed, with
-  the single-core number printed alongside so it is never mistaken for per-core efficiency.
-- **NumPy is the array rival to respect** (vectorized dot_f64 0.43 s; C-level sieve/histogram) —
-  the comparison there is much closer than against scalar C.
-- **The losses are structural and honest** (they are the roadmap — see below): no native loop
-  (mandelbrot), a slow string/histogram path that even *anti-scales* under threads (wordcount),
-  huge intermediate materialization (montecarlo), and no mutable arrays (sieve → O(N²)).
+- **Helix's clear, durable wins are ALGORITHMIC / library, not codegen:** `fib` (auto-memoization,
+  O(n) vs O(2ⁿ)) and `matmul` (native BLAS-like tensor GEMM) — ~4× and ~10× over C because Helix
+  does *different, better-asymptotic* work, disclosed as such, not a loop-for-loop win.
+- **On memory-bandwidth-bound streaming (the dots) it is ~C-class:** Helix parallelizes the build
+  and hits the DDR ceiling, roughly where `-march=native` C lands (SIMD doesn't help a
+  bandwidth-bound loop); the absolute margin swings with machine memory state — a wash, not a win.
+- **On compute-bound SIMD-friendly kernels it LOSES to C:** `allpairs` (0.020 vs 0.010) and `basel`
+  (0.09 vs 0.06) — gcc auto-vectorizes (AVX2), Cranelift emits scalar. The standing "SIMD in the
+  JIT" gap. For i64 (`allpairs`) it is closable (integer add is associative → oracle-safe to
+  vectorize); for f64 (`basel`) it is a **deterministic ceiling** — SIMD-reassociating the sum
+  changes rounding and would break bit-identity across Helix's three engines, so Helix ties *scalar*
+  C there by design.
+- **NumPy is the array rival to respect** (vectorized dot_f64 0.43 s; C-level sieve/histogram).
+- **The remaining losses are structural** (the roadmap): no native loop (mandelbrot), a slow
+  string/histogram path that *anti-scales* under threads (wordcount); `montecarlo`/`sieve` were the
+  catastrophic timeouts and are now fixed to *completing* (42.9 s / 92 s — still interpreter-speed,
+  but no longer `>260 s`).
 
 ### Two things the anchor-verify gate caught
 
