@@ -96,8 +96,17 @@ fn arity(who: &str, args: &[Value], n: usize, line: usize, col: usize) -> Result
 }
 
 // ---- free functions (constructors) ----
+//
+// SEED-THREADED, NOT AMBIENT. Every generator takes an explicit `seed` as its LAST argument and is
+// a pure, deterministic function of `(shape…, seed)` — the SAME seed always yields the SAME draw,
+// on every run and across all three engines (tree-walker / VM / JIT). This is deliberate: Helix's
+// correctness guarantee is bit-identical results across engines, which an ambient-entropy RNG would
+// break. It is the JAX split-key / NumPy `Generator(seed)` model. To get *independent* samples,
+// thread DIFFERENT seeds — e.g. `random(n, 1)`, `random(n, 2)`, or in a loop `random(n, base + i)` —
+// rather than calling `random(n, seed)` twice with the same seed and expecting different values.
 
-/// `random(n, seed)` → `n` uniform doubles in `[0, 1)`.
+/// `random(n, seed)` → `n` uniform doubles in `[0, 1)`. Deterministic in `seed` (see the module
+/// note): vary `seed` for independent draws; two calls with the same `seed` return the same array.
 pub fn random(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     arity("random", args, 2, line, col)?;
     let n = count(&args[0], "random", line, col)?;
@@ -105,7 +114,8 @@ pub fn random(args: &[Value], line: usize, col: usize) -> Result<Value, HelixErr
     Ok(Value::float_array((0..n as u64).map(|i| u01(seed, S_UNIFORM, i)).collect()))
 }
 
-/// `randn(n, seed)` → `n` standard-normal `N(0, 1)` doubles.
+/// `randn(n, seed)` → `n` standard-normal `N(0, 1)` doubles. Deterministic in `seed` — vary it for
+/// independent draws (see the module note on seed threading).
 pub fn randn(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     arity("randn", args, 2, line, col)?;
     let n = count(&args[0], "randn", line, col)?;
@@ -113,7 +123,9 @@ pub fn randn(args: &[Value], line: usize, col: usize) -> Result<Value, HelixErro
     Ok(Value::float_array((0..n as u64).map(|i| std_normal(seed, i)).collect()))
 }
 
-/// `random_int(n, lo, hi, seed)` → `n` integers uniform in `[lo, hi)`.
+/// `random_int(n, lo, hi, seed)` → `n` integers uniform in `[lo, hi)`. NOTE the argument order: the
+/// LAST argument is the `seed` (not a column count) — deterministic in `seed`, so vary it for
+/// independent draws (see the module note on seed threading).
 pub fn random_int(args: &[Value], line: usize, col: usize) -> Result<Value, HelixError> {
     arity("random_int", args, 4, line, col)?;
     let n = count(&args[0], "random_int", line, col)?;
