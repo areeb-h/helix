@@ -43,6 +43,20 @@ pub unsafe fn call_reduce_f64(ptr: *const u8, start: i64, end: i64, init: f64) -
     }
 }
 
+/// Call a scalar `f64` range reduce whose body **divides** — `fn(start, end, init, *mut i8) -> f64`.
+/// `*poison` is set non-zero iff some iteration divided by zero (where the interpreter raises), so
+/// the VM discards the result and falls back to the exact-erroring bytecode loop. When it stays
+/// zero the fold is bit-exact to the interpreter (no `/0` occurred).
+/// SAFETY: the VM guarantees `ptr` is a finalized dividing `float` scalar [`define_reduce_loop`]
+/// kernel and `poison` points to a writable `i8`.
+pub unsafe fn call_reduce_f64_div(ptr: *const u8, start: i64, end: i64, init: f64, poison: *mut i8) -> f64 {
+    unsafe {
+        std::mem::transmute::<*const u8, extern "C" fn(i64, i64, f64, *mut i8) -> f64>(ptr)(
+            start, end, init, poison,
+        )
+    }
+}
+
 /// Call a **captured** scalar `f64` range reduce `fn(start, end, init, caps) -> f64` (the
 /// float dot-product kernel). Each `caps` slot is a packed `f64`-array BASE pointer the
 /// kernel indexes by the loop counter (`CaptureKind::ArrayF64`), loading `f64` elements.

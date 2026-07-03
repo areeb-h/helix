@@ -1694,6 +1694,82 @@
         }
     }
 
+    /// **Division** in a range-source f64 reduce (`c + 1.0/g(k)` — the series-sum shape). Native
+    /// `fdiv` yields inf/nan on a zero divisor where the interpreter RAISES, so the dividing kernel
+    /// carries a **poison** out-param the codegen sets on ANY zero divisor (every division, every
+    /// iteration); a set flag makes the VM fall back to the exact-erroring bytecode loop, and an
+    /// unset flag guarantees no `/0` occurred so the fold is bit-exact. Because the flag is set at
+    /// the division site — not inferred from the final result — it is sound even when a later op or
+    /// iteration would "rescue" the inf (`min(inf, 5)`, `finite/inf`, or a body that overwrites the
+    /// accumulator), so NO min/max or nested-division restriction is needed. This fuzzes
+    /// division-heavy bodies — including natural `/0`, min/max, and nested/acc-ignoring shapes —
+    /// and asserts JIT == bytecode VM == tree-walker across finite / erroring / fallback outcomes.
+    /// (Engagement is proven by benchmark — basel 20M at 0.02s vs ~3.6s interpreted; this oracle
+    /// proves CORRECTNESS. A regression seed here — `x - sqrt(abs(x))/x`, whose body ignores `acc`
+    /// so a `/0` at x=0 was overwritten — is exactly what retired the earlier is-finite approach.)
+    #[test]
+    fn differential_range_float_reduce_division_oracle() {
+        fn flit(rng: &mut u64) -> String {
+            format!("{}.{:03}", (next(rng) % 11) as i64 - 5, next(rng) % 1000)
+        }
+        fn atom(rng: &mut u64) -> String {
+            match pick(rng, 4) {
+                0 => "acc".to_string(),
+                1 | 2 => "x".to_string(), // the i64 counter (0 in some ranges → /0 coverage)
+                _ => flit(rng),
+            }
+        }
+        fn expr(rng: &mut u64, depth: u32) -> String {
+            if depth == 0 || pick(rng, 2) == 0 {
+                return atom(rng);
+            }
+            match pick(rng, 8) {
+                0 => format!("(({}) + ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                1 => format!("(({}) - ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                2 => format!("(({}) * ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                3 => format!("sqrt(abs({}))", expr(rng, depth - 1)),
+                4 => format!("min(({}), ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                5 => format!("max(({}), ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+                // division (dividend + divisor) — biased 2/8 so many bodies actually divide.
+                _ => format!("(({}) / ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
+            }
+        }
+        let mut rng = 0xD1F5_00D5_EED2_0271u64;
+        for _ in 0..15_000 {
+            let s = (next(&mut rng) % 4) as i64; // 0..3 → sometimes starts at 0 (x = 0 → /0)
+            let e = s + (next(&mut rng) % 12) as i64;
+            let src = format!(
+                "range({}, {}).reduce({}, (acc, x) => ({}))",
+                s,
+                e,
+                flit(&mut rng),
+                expr(&mut rng, 3)
+            );
+            match (run_vm_jit(&src), run_vm_no_jit(&src), run_tw(&src)) {
+                (Ok(a), Ok(b), Ok(c)) => {
+                    assert_eq!(a, b, "div range f64 reduce: JIT ≠ bytecode VM on `{src}`");
+                    assert_eq!(b, c, "div range f64 reduce: bytecode VM ≠ tree-walker on `{src}`");
+                }
+                (Err(()), Err(()), Err(())) => {}
+                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
+            }
+        }
+        // Focused: series sums JIT to the right value; a `/0` errors on all engines; the excluded
+        // rescue shapes (nested division / min-of-a-division) fall back but stay correct.
+        let basel = "(range(0, 2000)).reduce(0.0, (c, k) => c + 1.0/((k+1)*(k+1)))";
+        assert_eq!(run_vm_jit(basel), run_tw(basel), "basel JIT ≠ tree-walker");
+        assert_eq!(run_vm_jit(basel), run_vm_no_jit(basel), "basel JIT ≠ bytecode VM");
+        for div0 in [
+            "(range(0, 5)).reduce(0.0, (c, k) => c + 1.0/k)", // divisor counter hits 0
+            "(range(0, 5)).reduce(0.0, (c, k) => c + 1.0/(1.0/k))", // nested-division rescue shape
+            "(range(0, 5)).reduce(0.0, (c, k) => c + min(1.0/k, 0.5))", // min rescue shape
+            "range(0, 4).reduce(4.925, (acc, x) => (x - sqrt(abs(x))/x))", // acc-ignoring overwrite
+        ] {
+            assert!(run_vm_jit(div0).is_err(), "expected /0 error on `{div0}`");
+            assert!(run_tw(div0).is_err(), "tree-walker must also error on `{div0}`");
+        }
+    }
+
     /// An **f64 tuple/record** accumulator fold — multi-statistic one-pass reductions
     /// (`(sum, sum_sq)`, `(min, max)`): every slot is `f64`, over either a `Float`-array
     /// element (pure f64) or the `i64` range counter (mixed per slot). Covers tuple AND record

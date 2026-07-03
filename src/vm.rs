@@ -1008,9 +1008,32 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         // a non-`Floats` array falls back to the exact-erroring bytecode loop).
                         if let Value::Float(init) = locals[slot] {
                             if n_caps == 0 {
-                                let r = unsafe { crate::jit::call_reduce_f64(ptr, s, e, init) };
-                                locals[slot] = Value::Float(r);
-                                true
+                                // A body containing `/` may divide by zero, where native `fdiv`
+                                // yields inf/nan but the interpreter RAISES. Such a kernel carries
+                                // a poison out-param the codegen sets on ANY zero divisor (every
+                                // iteration, every division — regardless of whether a later op or
+                                // iteration would rescue the inf); a set flag means fall back to
+                                // the exact-erroring bytecode loop, while an unset flag guarantees
+                                // no `/0` occurred so `r` is bit-exact to the interpreter. A
+                                // non-dividing reduce uses the plain, poison-free kernel.
+                                if crate::jit::reduce_body_divides(
+                                    &program.reduce_loops[*loop_idx as usize],
+                                ) {
+                                    let mut poison: i8 = 0;
+                                    let r = unsafe {
+                                        crate::jit::call_reduce_f64_div(ptr, s, e, init, &mut poison)
+                                    };
+                                    if poison != 0 {
+                                        false
+                                    } else {
+                                        locals[slot] = Value::Float(r);
+                                        true
+                                    }
+                                } else {
+                                    let r = unsafe { crate::jit::call_reduce_f64(ptr, s, e, init) };
+                                    locals[slot] = Value::Float(r);
+                                    true
+                                }
                             } else {
                                 use crate::bytecode::CaptureKind;
                                 use crate::value::ArrayData;

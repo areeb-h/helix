@@ -35,7 +35,7 @@
 use std::collections::{HashMap, HashSet};
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::types::{F64, I64};
+use cranelift_codegen::ir::types::{F64, I8, I64};
 use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Type, Value as ClValue};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable};
@@ -798,6 +798,16 @@ fn infer_reduce_f64_kind(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>)
                 NumKind::Int
             })
         }
+        // `/` is ALWAYS float division in Helix (even `Int / Int`), matching the interpreter's
+        // `Div`. Both operands must be eligible; the result is `f64`. The interpreter RAISES on a
+        // zero divisor while native `fdiv` yields inf/nan — so this only JITs under the caller's
+        // `min`/`max` exclusion (see `f64_range_body_eligible`) + the VM's `is_finite` guard, which
+        // together make a division-by-zero fall back to the exact-erroring bytecode loop.
+        Expr::Binary { op: BinOp::Div, left, right, .. } => {
+            infer_reduce_f64_kind(left, pa, pb, user_fns)?;
+            infer_reduce_f64_kind(right, pa, pb, user_fns)?;
+            Some(NumKind::Float)
+        }
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
@@ -823,13 +833,42 @@ fn infer_reduce_f64_kind(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>)
 /// Returns the body, or `None`. (Unlike the array f64 reduce — where the element is itself
 /// `f64` — here `pb` is the `i64` counter, so the body is lowered per-node, not pure-`f64`.)
 pub fn reduce_jit_f64_range_body(init: &Expr, body: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>) -> Option<Expr> {
-    if matches!(init, Expr::Float(_))
-        && infer_reduce_f64_kind(body, pa, pb, user_fns) == Some(NumKind::Float)
-    {
+    if matches!(init, Expr::Float(_)) && f64_range_body_eligible(body, pa, pb, user_fns) {
         Some(body.clone())
     } else {
         None
     }
+}
+
+/// Whether a scalar `f64` range-reduce body is JIT-eligible: root type `Float` (per
+/// [`infer_reduce_f64_kind`], which now admits `/`). No restriction on `min`/`max` or nested
+/// division is needed — the codegen threads a **poison flag** that records a zero divisor at the
+/// division site itself (see [`gen_f64_typed`]), so the VM falls back on the exact `/0` the
+/// interpreter raises on, regardless of whether a later op or iteration would "rescue" the inf.
+/// Shared by the compile gate and the build re-gate so the two never drift.
+fn f64_range_body_eligible(body: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>) -> bool {
+    infer_reduce_f64_kind(body, pa, pb, user_fns) == Some(NumKind::Float)
+}
+
+/// Whether `e` contains a `/` (float division) anywhere — a dividing reduce kernel carries a
+/// poison out-param (see [`reduce_body_divides`] / [`gen_f64_typed`]).
+pub fn expr_has_div(e: &Expr) -> bool {
+    match e {
+        Expr::Binary { op: BinOp::Div, .. } => true,
+        Expr::Binary { left, right, .. } => expr_has_div(left) || expr_has_div(right),
+        Expr::Unary { expr, .. } => expr_has_div(expr),
+        Expr::Index { recv, index, .. } => expr_has_div(recv) || expr_has_div(index),
+        Expr::Call { args, .. } => args.iter().any(expr_has_div),
+        _ => false,
+    }
+}
+
+/// Whether a reduce loop's (single) body contains a float division. A dividing scalar f64 reduce
+/// kernel takes an extra `*mut i8` **poison** out-param that the codegen sets on any zero divisor;
+/// the VM passes a poison cell, and on a set flag falls back to the exact-erroring bytecode loop
+/// (native `fdiv` yields inf/nan where the interpreter raises on `/0`).
+pub fn reduce_body_divides(rl: &crate::bytecode::ReduceLoop) -> bool {
+    rl.bodies.len() == 1 && expr_has_div(&rl.bodies[0])
 }
 
 /// Bottom-up kind of a **scalar f64 reduce body that indexes captured `f64` arrays by the
@@ -972,6 +1011,7 @@ fn gen_f64_typed(
     e: &Expr,
     binders: &HashMap<&str, (Variable, NumKind)>,
     arrays: &HashMap<&str, Variable>,
+    poison: Option<Variable>,
 ) -> (ClValue, NumKind) {
     match e {
         Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
@@ -990,15 +1030,17 @@ fn gen_f64_typed(
                 _ => unreachable!("ineligible f64 index receiver reached codegen"),
             };
             let base = b.use_var(arrays[name]);
-            let (idx, _) = gen_f64_typed(b, index, binders, arrays);
+            let (idx, _) = gen_f64_typed(b, index, binders, arrays, poison);
             let off = b.ins().imul_imm(idx, 8);
             let addr = b.ins().iadd(base, off);
             (b.ins().load(F64, MemFlags::trusted(), addr, 0), NumKind::Float)
         }
         Expr::Binary { op, left, right, .. } => {
-            let (lv, lk) = gen_f64_typed(b, left, binders, arrays);
-            let (rv, rk) = gen_f64_typed(b, right, binders, arrays);
-            if lk == NumKind::Int && rk == NumKind::Int {
+            let (lv, lk) = gen_f64_typed(b, left, binders, arrays, poison);
+            let (rv, rk) = gen_f64_typed(b, right, binders, arrays, poison);
+            // `/` is always float division in Helix, so it forces the f64 path even for `Int/Int`
+            // (matching the interpreter); `+ - *` stay `i64` when both operands are `Int`.
+            if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div) {
                 let v = match op {
                     BinOp::Add => b.ins().iadd(lv, rv),
                     BinOp::Sub => b.ins().isub(lv, rv),
@@ -1013,6 +1055,23 @@ fn gen_f64_typed(
                     BinOp::Add => b.ins().fadd(lf, rf),
                     BinOp::Sub => b.ins().fsub(lf, rf),
                     BinOp::Mul => b.ins().fmul(lf, rf),
+                    // Native `fdiv` yields inf/nan on a zero divisor where the interpreter RAISES.
+                    // Record it: OR `divisor == 0.0` into the poison flag (accumulated across all
+                    // iterations), which the VM checks after the loop and, if set, falls back to
+                    // the exact-erroring bytecode loop. `rf == 0.0` is bit-identical to the
+                    // interpreter's `b == 0.0` divisor check (and catches −0.0 too), so the
+                    // fallback fires on exactly the `/0` the interpreter reports — regardless of
+                    // whether a later op or iteration would "rescue" the resulting inf/nan.
+                    BinOp::Div => {
+                        if let Some(p) = poison {
+                            let zero = b.ins().f64const(0.0);
+                            let is_zero = b.ins().fcmp(FloatCC::Equal, rf, zero);
+                            let cur = b.use_var(p);
+                            let next = b.ins().bor(cur, is_zero);
+                            b.def_var(p, next);
+                        }
+                        b.ins().fdiv(lf, rf)
+                    }
                     _ => unreachable!("ineligible operator reached f64 tuple codegen"),
                 };
                 (v, NumKind::Float)
@@ -1020,20 +1079,20 @@ fn gen_f64_typed(
         }
         Expr::Call { name, args, .. } => match name.as_str() {
             "sqrt" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
             }
             "abs" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
                 match ak {
                     NumKind::Int => (b.ins().iabs(av), NumKind::Int),
                     NumKind::Float => (b.ins().fabs(av), NumKind::Float),
                 }
             }
             "min" | "max" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays);
-                let (cv, _ck) = gen_f64_typed(b, &args[1], binders, arrays);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
+                let (cv, _ck) = gen_f64_typed(b, &args[1], binders, arrays, poison);
                 let le = name == "min";
                 let cc = if le { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
                 match ak {
@@ -1323,7 +1382,10 @@ fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>,
         }
         let n = rl.bodies.len();
         if n == 1 {
-            return infer_reduce_f64_kind(&rl.bodies[0], &rl.pa, &rl.pb, user_fns) == Some(NumKind::Float);
+            // Identical gate to the compiler's `reduce_jit_f64_range_body` (root `Float`, and the
+            // division/min-max soundness rule) so the build never lowers a body the compiler
+            // rejected — or vice versa.
+            return f64_range_body_eligible(&rl.bodies[0], &rl.pa, &rl.pb, user_fns);
         }
         if !(2..=MAX_ACC_SLOTS).contains(&n) {
             return false;
@@ -1989,12 +2051,19 @@ fn define_reduce_loop(
     // A scalar body may capture loop-invariant outer `i64` values, passed via a 4th
     // pointer param `caps` (the nested-fold case). Tuple/float accumulators don't capture.
     let has_caps = scalar && !rl.captures.is_empty();
+    // A dividing scalar f64 reduce takes an extra `*mut i8` **poison** out-param: the codegen ORs
+    // `divisor == 0` into it (a `/0` where the interpreter raises), and the VM falls back if set.
+    // Mutually exclusive with `has_caps` — a caps body (the float dot-product) never divides.
+    let needs_poison = float_scalar && !has_caps && reduce_body_divides(rl);
     ctx.func.signature.call_conv = CallConv::SystemV;
     ctx.func.signature.params.push(AbiParam::new(I64)); // start
     ctx.func.signature.params.push(AbiParam::new(I64)); // end
     ctx.func.signature.params.push(AbiParam::new(third_ty)); // scalar: init; tuple: acc_ptr (i64)
     if has_caps {
         ctx.func.signature.params.push(AbiParam::new(I64)); // caps: *const i64
+    }
+    if needs_poison {
+        ctx.func.signature.params.push(AbiParam::new(I64)); // poison: *mut i8 (dividing scalar f64)
     }
     if scalar {
         ctx.func.signature.returns.push(AbiParam::new(third_ty));
@@ -2008,6 +2077,18 @@ fn define_reduce_loop(
     let start = b.block_params(entry)[0];
     let end = b.block_params(entry)[1];
     let third = b.block_params(entry)[2]; // scalar: init value; tuple: acc slot pointer
+    // The poison out-param (dividing scalar f64 only) is the block param right after `third`
+    // (no caps in that case). An `i8` poison var, seeded to 0, is OR'd by the Div arm and stored
+    // back through this pointer at loop exit.
+    let poison_ptr = if needs_poison { Some(b.block_params(entry)[3]) } else { None };
+    let poison_var: Option<Variable> = if needs_poison {
+        let v = b.declare_var(I8);
+        let zero = b.ins().iconst(I8, 0);
+        b.def_var(v, zero);
+        Some(v)
+    } else {
+        None
+    };
 
     let x_var = b.declare_var(I64);
     let end_var = b.declare_var(I64);
@@ -2106,7 +2187,7 @@ fn define_reduce_loop(
             }
         }
         for body in &rl.bodies {
-            new_vals.push(gen_f64_typed(&mut b, body, &binders, &arrays).0);
+            new_vals.push(gen_f64_typed(&mut b, body, &binders, &arrays, poison_var).0);
         }
     } else {
         for body in &rl.bodies {
@@ -2127,6 +2208,13 @@ fn define_reduce_loop(
 
     b.switch_to_block(exit_blk);
     b.seal_block(exit_blk);
+    // Write the accumulated poison flag back through the out-param before returning (dividing
+    // scalar f64 only). Non-zero ⇒ some iteration divided by zero ⇒ the VM discards this result
+    // and falls back to the exact-erroring bytecode loop.
+    if let (Some(pv), Some(pp)) = (poison_var, poison_ptr) {
+        let pval = b.use_var(pv);
+        b.ins().store(MemFlags::trusted(), pval, pp, 0);
+    }
     if scalar {
         let result = b.use_var(acc_vars[0]);
         b.ins().return_(&[result]);
@@ -2480,7 +2568,7 @@ fn define_fused_kernel<'a>(
                 binders.insert(pb.as_str(), (cur_var, NumKind::Float));
                 let no_arrays: HashMap<&str, Variable> = HashMap::new();
                 let new_vals: Vec<ClValue> =
-                    bodies.iter().map(|body| gen_f64_typed(&mut b, body, &binders, &no_arrays).0).collect();
+                    bodies.iter().map(|body| gen_f64_typed(&mut b, body, &binders, &no_arrays, None).0).collect();
                 for (k2, &v) in acc_vars.iter().enumerate() {
                     b.def_var(v, new_vals[k2]);
                 }
