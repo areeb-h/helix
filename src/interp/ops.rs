@@ -43,6 +43,13 @@ pub(crate) fn eval_binary(
     // broadcast — `==` is whole-value, avoiding NumPy's "ambiguous truth value"
     // trap; use `.map`/`.where` for elementwise predicates.
     if matches!(op, Add | Sub | Mul | Div | FloorDiv | Mod | Pow) {
+        // A lazy `range` operand must behave EXACTLY like the equivalent `Int` array — e.g.
+        // `range(0,5) + 1` is the `Int` array `[1,2,3,4,5]`, NOT `[1.0,…]`. The typed fast paths
+        // below match `ArrayData::Ints` specifically (an unmatched `Range` would fall to the f64
+        // path and wrongly promote to `Float`), so materialize a range operand to `Ints` first.
+        // Arithmetic consumes every element anyway, so laziness buys nothing here.
+        densify_range(&mut l);
+        densify_range(&mut r);
         // Memory fast path: when an array operand is a unique temporary (`Rc` count 1, as
         // every intermediate in a chain like `(a+b)*c` is), reuse its buffer in place
         // instead of allocating a new one. Falls through untouched (`l`/`r` intact) when
@@ -435,6 +442,21 @@ fn try_inplace_broadcast(op: &BinOp, l: &mut Value, r: &mut Value) -> Option<Val
     None
 }
 
+/// Materialize a lazy `range` value into its packed `Ints` array so it behaves IDENTICALLY to the
+/// equivalent `Int` array in the typed arithmetic fast paths (which match `ArrayData::Ints`). A
+/// no-op for every non-range value.
+fn densify_range(v: &mut Value) {
+    let ints = match v {
+        Value::Array(a) if matches!(&**a, crate::value::ArrayData::Range { .. }) => {
+            Some(a.to_ints().expect("Range → Ints").into_owned())
+        }
+        _ => None,
+    };
+    if let Some(ints) = ints {
+        *v = Value::int_array(ints);
+    }
+}
+
 fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
     use crate::value::ArrayData;
     if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Pow) {
@@ -444,9 +466,9 @@ fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
         match ad {
             ArrayData::Floats(v) => Some(std::borrow::Cow::Borrowed(v)),
             ArrayData::Ints(v) => Some(std::borrow::Cow::Owned(v.iter().map(|&n| n as f64).collect())),
-            ArrayData::Range { .. } => Some(std::borrow::Cow::Owned(
-                ad.to_ints().unwrap().iter().map(|&n| n as f64).collect(),
-            )),
+            // A range operand is densified to `Ints` before `typed_broadcast`, so it never reaches
+            // here; decline (→ the accessor-based general path) rather than wrongly promote to Float.
+            ArrayData::Range { .. } => None,
             ArrayData::Values(_) => None,
         }
     }

@@ -572,6 +572,46 @@
         }
     }
 
+    /// A lazy `range(...)` must behave BYTE-IDENTICALLY to the equivalent dense `Int` array. The
+    /// cross-engine oracle can't catch a `Range`-vs-`Ints` divergence — all three engines would
+    /// AGREE on a wrong answer (e.g. all say `range+1` is `Float`) — so this compares `range(…).OP`
+    /// directly against `[…ints…].OP`. It caught a real regression: `range(0,5)+1` promoted to
+    /// `Float` while `[0,…]+1` stayed `Int`, because the typed arithmetic fast path matched
+    /// `ArrayData::Ints` specifically and the unmatched `Range` fell to the f64 path.
+    #[test]
+    fn range_behaves_identically_to_ints_array() {
+        let pairs = [
+            ("range(0, 5)", "[0, 1, 2, 3, 4]"),
+            ("range(-2, 3)", "[-2, -1, 0, 1, 2]"),
+            ("range(10, 0, -2)", "[10, 8, 6, 4, 2]"),
+        ];
+        let ops = [
+            " + 1", " - 2", " * 3", " * 2.0", " / 2", " // 2", " % 2", ".sum()", ".mean()",
+            ".max()", ".min()", ".map(it => it + 10)", ".filter(it => it > 1)", ".reverse()",
+            ".sort()", ".to_json()", ".count()", ".length()", ".first()", ".last()", "[1]",
+        ];
+        for (r, ints) in pairs {
+            for op in ops {
+                let rsrc = format!("{r}{op}");
+                let isrc = format!("{ints}{op}");
+                assert_eq!(
+                    run_vm(&rsrc),
+                    run_vm(&isrc),
+                    "range `{rsrc}` != equivalent ints `{isrc}` — Range diverges from the Int array"
+                );
+                assert_eq!(run_vm(&rsrc), run_tw(&rsrc), "range VM != tree-walker on `{rsrc}`");
+            }
+            // broadcast math functions over a range must match the array too
+            for f in ["sqrt", "abs"] {
+                assert_eq!(
+                    run_vm(&format!("{f}({r})")),
+                    run_vm(&format!("{f}({ints})")),
+                    "{f}(range) != {f}(ints array)"
+                );
+            }
+        }
+    }
+
     /// The JIT engagement counter — used by the differential fuzzers to prove native code actually
     /// RAN (not a silent bytecode fallback, the "engagement ≠ correctness" trap) — is wired: a
     /// JIT-eligible numeric kernel bumps it, and it is observable + resettable.
