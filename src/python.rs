@@ -574,6 +574,10 @@ mod imp {
                     ArrayData::Ints(xs) => {
                         PyList::new(py, xs.iter().copied()).map_err(|e| py_err(py, e, line, col))?.into_any()
                     }
+                    // A lazy range crosses as its i64 elements — identical to the `Ints` arm.
+                    ArrayData::Range { .. } => PyList::new(py, items.to_ints().unwrap().iter().copied())
+                        .map_err(|e| py_err(py, e, line, col))?
+                        .into_any(),
                     ArrayData::Values(vs) => {
                         let mut elems = Vec::with_capacity(vs.len());
                         for it in vs.iter() {
