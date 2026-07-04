@@ -533,6 +533,24 @@
             // wrapper whose tail call's args DON'T match the pattern (Int where Float
             // is annotated) — dispatch declines, bytecode frame-reuse as before
             "fn geo(x: Float, n: Int) = if n <= 0 then x else geo(x * 0.5, n - 1)\nfn w(k) = geo(k, 3)\nw(1)",
+            // NON-RECURSIVE annotated mixed fn (straight-line, same walker/codegen)
+            "fn h(x: Float, n: Int) = x * n + 0.5\nh(2.5, 3)",
+            // division by a NONZERO Float literal — bit-exact fdiv, no poison needed
+            "fn d(x: Float, n: Int) = if n <= 0 then x else d(x / 2.0 + 1.0 / 4.0, n - 1)\nd(3.0, 5)",
+            // Int / Float-literal promotes exactly like the interpreter
+            "fn q(x: Float, n: Int) = if n <= 0 then x else q(x + n / 2.0, n - 1)\nq(0.0, 6)",
+            // division by a ZERO literal is mixed-INELIGIBLE → all engines take the
+            // interpreter path and raise its /0 error identically
+            "fn dz(x: Float, n: Int) = if n <= 0 then x else dz(x / 0.0, n - 1)\ndz(1.0, 2)",
+            // MIXED-CALLS-MIXED: a non-recursive mixed fn calling a mixed tail loop
+            // natively (bits ABI + threaded poison pointer)
+            "fn inner(x: Float, n: Int) = if n <= 0 then x else inner(x * 0.5, n - 1)\nfn outer(a: Float, k: Int) = inner(a, k) + inner(a, k)\nouter(1.0, 3)",
+            // POISON THROUGH A CALLEE: the inner fn NaN-poisons; the caller's post-call
+            // check must bail the whole chain to bytecode → the interpreter's exact
+            // NaN-compare error on every engine (not a garbage-0 result)
+            "fn nn(x: Float, n: Int) = if sqrt(x) > 0.0 then x else nn(x, n - 1)\nfn w2(a: Float, k: Int) = nn(a, k) + 1.0\nw2(0.0 - 1.0, 2)",
+            // the mandelbrot escape shape end-to-end at a small max_iter
+            "fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) = if i >= 40 or zr * zr + zi * zi > 4.0 then i else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)\nfn esc2(px: Int, py: Int) = step(0.0, 0.0, 0.0 - 2.5 + 3.5 * px / 60.0, 0.0 - 1.0 + 2.0 * py / 60.0, 0)\nrange(0, 60).map(py => range(0, 60).map(px => esc2(px, py)).sum()).sum()",
             // NaN POISON (the review-confirmed divergence): the interpreter RAISES on a
             // NaN comparison, so the native loop must bail (unordered fcmp → poison →
             // bytecode fallback → identical error), never silently order the NaN
