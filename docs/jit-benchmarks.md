@@ -265,16 +265,23 @@ suite is 593 (its own verified splitmix-style bucket, identical on all six langu
 | dot_i64 (50M) | 0.437 | 0.444 | 0.460 | 8.77 | 0.481 | **0.166** | 0.243 | **win** — even 1-core beats C |
 | dot_f64 (50M) | 0.461 | 0.474 | 0.477 | 8.10 | 0.507 | **0.170** | 0.260 | **win** |
 | allpairs (225M) | **0.010** | 0.035 | 0.100 | 6.36 | 0.149 | 0.025 | 0.076 | loss 2.5× (AVX2) |
-| mandelbrot (1200²) | 0.174 | 0.156 | 0.153 | 5.88 | 3.24 | 0.534 | 0.530 | loss 3.1× (**was 110×**) |
+| mandelbrot (1200²) | 0.174 | 0.156 | 0.153 | 5.88 | 3.24 | 0.26 ‡ | — | loss 1.5× (**was 110×**) |
 | basel (1e8) | **0.064** | 0.090 | 0.089 | 4.23 | 0.490 | 0.092 | 0.091 | loss 1.4× — ties Rust/Go |
 | montecarlo (1e8) | **0.250** | 0.257 | 0.282 | 36.4 | — | 0.48 ‡ | — | loss 1.9× (**exact shared anchor**) |
 | sieve (1e7) | **0.018** | 0.020 | 0.021 | 0.59 | 0.082 | 0.01 ‡ | — | **tie at C** (native `primes()`) |
-| wordcount (5M) | 0.153 | 0.244 | 0.225 | 2.59 | **0.112** | 2.21 | 2.17 | loss ~14× |
+| wordcount (5M) | 0.153 | 0.244 | 0.225 | 2.59 | **0.112** | 1.0 ‡ | — | loss ~6.5× |
 | matmul naive (512³) | 0.395 | 0.294 | 0.237 | 4.93 | 0.310 | 21.3 | 22.0 | loss (VM path) |
 | matmul tensor | — | — | — | — | 0.310 | **0.070** | — | **win** — 5.6× vs C loop, 4.4× vs NumPy |
 | fib(40) | 0.075 | 0.179 | 0.310 | 7.89 | — | **0.006** | 0.006 | **win** (auto-memo) |
 
-‡ Flipped right after this run (commit 058a2a4). **montecarlo** now runs the *faithful*
+‡ Improved right after this run. **mandelbrot** (commit b506409): the annotated
+`escape` wrapper now compiles too (non-recursive mixed fns + mixed-calls-mixed with a
+shared poison flag + `/` by a nonzero float literal) — 0.534 s → **0.26 s**, ~1.5×
+behind C. **wordcount** (commit f46b812 + idiomatic tuning): the cost was never the
+strings — the bucket math was JIT-ineligible (variable shift counts by design, and
+negative LITERALS parsed as unary negation, which eligibility didn't admit; the Neg arm
+is now native `ineg`/`fneg`) — 2.21 s → **~1.0 s**, the remainder being the VM
+string-interpolation loop + `frequencies()`. **montecarlo** (commit 058a2a4) runs the *faithful*
 xorshift64 — the "Helix cannot reproduce the unsigned stream" claim was false: a logical
 shift is an arithmetic shift plus a constant mask, all i64-closed, and the mask-0 mixed
 tail loop (i64 RNG state, f64 point test) runs it natively: **the exact shared anchor
