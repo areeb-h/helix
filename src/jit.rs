@@ -43,7 +43,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 
-use crate::ast::{BinOp, Expr, Stmt, TypeAnn};
+use crate::ast::{BinOp, Expr, Stmt, TypeAnn, UnOp};
 use crate::bytecode::{Capture, CaptureKind, IndexBound};
 
 // The JIT's only `unsafe`: the FFI trampolines that call finalized native code. Kept in
@@ -2193,6 +2193,7 @@ fn infer_typed_env(
                 _ => None,
             }
         }
+        Expr::Unary { op: UnOp::Neg, expr, .. } => infer_typed_env(expr, env, sigs, user_fns),
         Expr::Call { name, args, .. } => {
             if let Some(sig) = sigs.get(name.as_str()) {
                 // A mixed sibling: strict per-param kind equality (no promotion — the
@@ -2506,6 +2507,10 @@ fn value_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, ki
                 && value_eligible(left, eligible, locals, kind)
                 && value_eligible(right, eligible, locals, kind)
         }
+        // Unary negation: the interpreter is `wrapping_neg` on Int / `-f` on Float —
+        // exactly native `ineg`/`fneg`. (Without this arm every NEGATIVE LITERAL, which
+        // parses as `Neg(lit)`, silently disqualified its whole kernel.)
+        Expr::Unary { op: UnOp::Neg, expr, .. } => value_eligible(expr, eligible, locals, kind),
         Expr::Call { name, args, .. } => {
             eligible.contains(name.as_str())
                 && jit_builtin_arity_ok(name, args.len())
@@ -3473,6 +3478,13 @@ fn gen_value_env<'a>(
                 (v, NumKind::Float)
             }
         }
+        Expr::Unary { op: UnOp::Neg, expr, .. } => {
+            let (v, k) = gen_value_env(b, expr, vars, env, module, tl);
+            match k {
+                NumKind::Int => (b.ins().ineg(v), NumKind::Int),
+                NumKind::Float => (b.ins().fneg(v), NumKind::Float),
+            }
+        }
         Expr::Call { name, args, .. } => {
             if let Some(sig) = tl.sigs.get(name.as_str()) {
                 // A mixed sibling: marshal args to the bits ABI (Float → raw bits in
@@ -3857,6 +3869,15 @@ fn gen_value<'a>(
                 }
             }
             r
+        }
+        // Unary negation: `ineg` wraps like the interpreter's `wrapping_neg`; `fneg`
+        // is the exact IEEE sign flip of the interpreter's `-f`.
+        Expr::Unary { op: UnOp::Neg, expr, .. } => {
+            let v = gen_value(b, expr, vars, fn_ids, module, kind);
+            match kind {
+                NumKind::Int => b.ins().ineg(v),
+                NumKind::Float => b.ins().fneg(v),
+            }
         }
         Expr::Match { scrutinee, arms, .. } => gen_match(b, scrutinee, arms, vars, fn_ids, module, kind),
         // `arr[counter]` in a reduce kernel: `recv` is an array capture whose base pointer
