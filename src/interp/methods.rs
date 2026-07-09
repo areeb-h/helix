@@ -507,6 +507,31 @@ fn array_numeric_fast(
     col: usize,
 ) -> Result<Option<Value>, HelixError> {
     use crate::value::ArrayData;
+    // Lazy-Range `take`/`drop`: O(1) re-slicing of the arithmetic progression — the
+    // whole point of the lazy representation (`range(100000000).take(1)` previously
+    // materialized ~1.6 GB of boxed Values to keep one element, contradicting the
+    // documented O(1)). Int counts only, mirroring the general path exactly (negative
+    // clamps to 0, over-take/-drop clamps to the length); float/missing counts defer
+    // so the general path's errors stay identical. A fully-dropped range keeps an
+    // empty representation rather than computing `start + step*len`, which the Range
+    // invariant does not guarantee to fit i64.
+    if let ("take" | "drop", [Value::Int(n)], ArrayData::Range { start, step, len }) =
+        (name, args, ad)
+    {
+        let k = (*n).max(0).min(*len as i64) as usize;
+        return Ok(Some(if name == "take" {
+            Value::lazy_range(*start, *step, k)
+        } else if k >= *len {
+            Value::lazy_range(0, 1, 0)
+        } else {
+            // Element k is in range by the Range invariant, so the i128 math fits i64.
+            Value::lazy_range(
+                (*start as i128 + *step as i128 * k as i128) as i64,
+                *step,
+                *len - k,
+            )
+        }));
+    }
     if !args.is_empty() {
         return Ok(None);
     }
@@ -518,17 +543,27 @@ fn array_numeric_fast(
     match name {
         "count" | "length" => {
             return Ok(match ad {
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
+                ArrayData::Values(_) => None,
                 ArrayData::Ints(xs) => Some(Value::Int(xs.len() as i64)),
                 ArrayData::Floats(xs) => Some(Value::Int(xs.len() as i64)),
-                // O(1) on a lazy range — the whole point of the lazy representation.
+                // O(1) on the lazy representations — a lazy enumerate's count is its
+                // inner length (previously it materialized every (index, element)
+                // tuple: ~1 GB for `range(10000000).enumerate().count()`).
                 ArrayData::Range { len, .. } => Some(Value::Int(*len as i64)),
+                ArrayData::Enumerate { inner } => Some(Value::Int(inner.len() as i64)),
             });
         }
         "first" | "last" => {
             let first = name == "first";
             return Ok(match ad {
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
+                ArrayData::Values(_) => None,
+                // O(1): one (index, element) tuple on demand; Missing on empty like
+                // the general path.
+                ArrayData::Enumerate { inner } => Some(if inner.is_empty() {
+                    Value::Missing
+                } else {
+                    ad.get(if first { 0 } else { inner.len() - 1 })
+                }),
                 ArrayData::Ints(xs) => Some(if xs.is_empty() {
                     Value::Missing
                 } else {

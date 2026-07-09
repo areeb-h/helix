@@ -46,17 +46,35 @@ pub fn memoizable_fns(program: &[Stmt]) -> HashSet<String> {
     }
 
     // Purity fixpoint: impure if it reaches an impure builtin, an impure user fn,
-    // or *any method call* — methods are assumed potentially side-effecting
-    // (fail-closed), so the analysis stays sound even as the VM widens to compile
-    // method calls rather than relying on the compiler rejecting them today.
+    // *any method call*, or *any first-class call* `(expr)(args)`. Methods and
+    // first-class calls are assumed potentially side-effecting (fail-closed): the
+    // callee of a `CallValue` is a runtime VALUE, so the static analysis cannot bound
+    // what it reaches — `fn f(n) = … (let g = peek in (g)()) …` read a mutable global
+    // through `peek` with no `Expr::Call` ever naming it, and the memoized VM served a
+    // stale cache where the tree-walker recomputed (a real engine divergence found by
+    // the stability sweep). Both fixpoints below share the same blind spot, so the
+    // fail-close participates in the transitive closure here.
+    // Names a `Call` can safely resolve to STATICALLY: top-level `fn`s (whose purity
+    // and mutable-global reads the fixpoints track) and registry builtins (whose
+    // purity `is_impure_builtin` declares). A call to ANY other name — a parameter, a
+    // `let`/lambda binding, a top-level lambda value — invokes a runtime VALUE the
+    // analysis cannot see through; note the parser folds `(g)()` into a plain
+    // `Call { name: "g" }`, so this is how dynamic calls most often appear.
+    let known_fns: HashSet<&str> = funcs.iter().map(|&(n, _, _)| n).collect();
+    let dynamic_call = |n: &str| -> bool {
+        !known_fns.contains(n) && crate::registry::lookup(n).is_none()
+    };
     let mut impure: HashSet<&str> = HashSet::new();
     loop {
         let mut changed = false;
         for &(name, _, body) in &funcs {
             if !impure.contains(name)
                 && (has_method(body)
+                    || has_call_value(body)
                     || any_call(body, &|n| {
-                        crate::registry::is_impure_builtin(n) || impure.contains(n)
+                        dynamic_call(n)
+                            || crate::registry::is_impure_builtin(n)
+                            || impure.contains(n)
                     }))
             {
                 impure.insert(name);
@@ -107,6 +125,15 @@ pub fn memoizable_fns(program: &[Stmt]) -> HashSet<String> {
 /// True if any method call appears anywhere in the tree.
 fn has_method(e: &Expr) -> bool {
     matches!(e, Expr::Method { .. }) || children(e).into_iter().any(has_method)
+}
+
+/// True if any first-class call `(expr)(args)` appears anywhere in the tree. Its
+/// callee is a runtime value, so purity/reads-mutable cannot be established
+/// statically — fail-closed, like methods. (Merely REFERENCING a function as a value
+/// is fine: a returned closure is an immutable value; only *invoking* one inside the
+/// candidate's reachable bodies is unanalyzable.)
+fn has_call_value(e: &Expr) -> bool {
+    matches!(e, Expr::CallValue { .. }) || children(e).into_iter().any(has_call_value)
 }
 
 /// True if any free-function call in the tree satisfies `pred` on its name.

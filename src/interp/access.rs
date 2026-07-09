@@ -38,15 +38,26 @@ fn slice_indices(len: i64, start: Option<i64>, stop: Option<i64>, step: i64) -> 
     };
     let mut out = Vec::new();
     let mut i = start;
+    // The cursor advance is CHECKED: `step` is raw user input bounded only by != 0, so
+    // `1 + i64::MAX` must END the slice, not wrap the cursor — the wrapped value's
+    // `as usize` became a 2^63 index and aborted the process on `items.get(...)`
+    // (found by the stability sweep: `[10,20,30,40,50][1::9223372036854775807]`).
+    // Overflow can only happen PAST the last in-range index, so breaking is exact.
     if step > 0 {
         while i < stop {
             out.push(i as usize);
-            i += step;
+            match i.checked_add(step) {
+                Some(n) => i = n,
+                None => break,
+            }
         }
     } else {
         while i > stop {
             out.push(i as usize);
-            i += step;
+            match i.checked_add(step) {
+                Some(n) => i = n,
+                None => break,
+            }
         }
     }
     out

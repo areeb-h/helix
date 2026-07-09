@@ -605,6 +605,48 @@
         assert!(crate::jit::native_call_count() > 0, "mixed tail fn did not engage the JIT");
     }
 
+    /// Regression pins for the 2026-07 stability sweep — each of these was a CONFIRMED
+    /// bug: (1) a slice step near i64::MAX wrapped the cursor into a 2^63 index and
+    /// ABORTED the process; (2) the memo purity analysis missed a mutable-global read
+    /// through a function VALUE (`let g = peek in (g)()` — the parser folds it into a
+    /// plain call to the local name), so the VM served a stale cache where the
+    /// tree-walker recomputed; (3) `range(N).take/drop` materialized the whole range
+    /// (~1.6 GB at 1e8) despite the documented O(1).
+    #[test]
+    fn stability_sweep_regressions() {
+        let cases = [
+            // (1) extreme positive and negative slice steps: clean results, no abort
+            "[10, 20, 30, 40, 50][1::9223372036854775807]",
+            "[10, 20, 30, 40, 50][3::(0 - 9223372036854775807)]",
+            "\"abcde\"[1::9223372036854775807]",
+            // (2) the stale-memo shape, folded into one comparable value:
+            // p (pre-mutation) * 10000 + the post-mutation recompute = 120705
+            "mut k = 1\nfn peek() = k\nfn f(n) = if n < 2 then n else (let g = peek in (g)() + f(n - 1) + f(n - 2))\np = f(5)\nk = 100\np * 10000 + f(5)",
+            // …and the direct-call variant of the same hazard
+            "mut k = 1\nfn peek() = k\nfn f(n) = if n < 2 then n else peek() + f(n - 1) + f(n - 2)\np = f(5)\nk = 100\np * 10000 + f(5)",
+            // (3) lazy take/drop must MATCH the dense equivalents exactly
+            "range(0, 10).take(3).sum()",
+            "range(0, 10).drop(7).sum()",
+            "range(0, 10).take(0 - 5).count()",
+            "range(0, 10).take(99).sum()",
+            "range(0, 10).drop(99).count()",
+            "range(5, 50, 7).drop(2).first()",
+            "range(0, 10).drop(3).take(4).sum()",
+        ];
+        for src in cases {
+            assert_eq!(run_tw(src), run_vm(src), "tw vs vm: {src}");
+            assert_eq!(run_tw(src), run_vm_jit(src), "tw vs jit: {src}");
+        }
+        // pinned values: the memo shape must show the RECOMPUTED result (705), and the
+        // lazy take/drop re-slices must equal their dense counterparts
+        assert_eq!(
+            run_vm("mut k = 1\nfn peek() = k\nfn f(n) = if n < 2 then n else (let g = peek in (g)() + f(n - 1) + f(n - 2))\np = f(5)\nk = 100\np * 10000 + f(5)").unwrap(),
+            "120705"
+        );
+        assert_eq!(run_vm("range(0, 10).take(3).sum()"), run_vm("[0, 1, 2].sum()"));
+        assert_eq!(run_vm("range(5, 50, 7).drop(2).first()"), run_vm("[5, 12, 19, 26, 33, 40, 47].drop(2).first()"));
+    }
+
     /// Lazy `enumerate()` (`ArrayData::Enumerate`) must (a) agree across tree-walker, VM,
     /// and JIT, and (b) be behaviourally IDENTICAL to the dense `(index, element)` tuple
     /// array — the lazy-vs-dense equivalence the cross-engine oracle alone cannot verify
@@ -1059,6 +1101,69 @@
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
+    }
+
+    /// On-demand SOAK fuzzer — ignored by default; run during stabilization passes:
+    /// `HELIX_SOAK_SEED=<n> HELIX_SOAK_ITERS=<n> cargo test --profile gate
+    /// soak_differential -- --ignored --nocapture`. Same tri-engine value AND
+    /// error-message parity as the standing fuzzers, but the seed and iteration count
+    /// come from the environment, so repeated runs explore FRESH program space instead
+    /// of re-walking the fixed seeds. Mixes free expressions, two-parameter functions,
+    /// and the tail-recursive family in one stream.
+    #[test]
+    #[ignore = "on-demand soak — seed via HELIX_SOAK_SEED, iterations via HELIX_SOAK_ITERS"]
+    fn soak_differential() {
+        let seed: u64 = std::env::var("HELIX_SOAK_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0xD1CE);
+        let iters: u32 = std::env::var("HELIX_SOAK_ITERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100_000);
+        let mut rng = seed ^ 0x9E37_79B9_7F4A_7C15;
+        crate::jit::reset_native_call_count();
+        let mut ok = 0u32;
+        for i in 0..iters {
+            let src = match i % 4 {
+                0 | 1 => gen_expr(&mut rng, 5, &[]),
+                2 => {
+                    let params = vec!["a".to_string(), "b".to_string()];
+                    let body = gen_expr(&mut rng, 4, &params);
+                    format!(
+                        "fn f(a, b) = {}\nf({}, {})",
+                        body,
+                        gen_lit(&mut rng),
+                        gen_lit(&mut rng)
+                    )
+                }
+                _ => {
+                    let params = vec!["n".to_string(), "acc".to_string()];
+                    let base = gen_expr(&mut rng, 2, &params);
+                    let term = gen_expr(&mut rng, 2, &params);
+                    let dec = pick(&mut rng, 3) + 1;
+                    let start_n = (next(&mut rng) % 120) as i64;
+                    let start_acc = gen_lit(&mut rng);
+                    format!(
+                        "fn tf(n, acc) = if n <= 0 then ({base}) else tf(n - {dec}, ({term}))\ntf({start_n}, {start_acc})"
+                    )
+                }
+            };
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(a), Ok(b)) => {
+                    assert_eq!(a, b, "soak: JIT ≠ tree-walker on `{src}`");
+                    ok += 1;
+                }
+                (Err(ea), Err(eb)) => {
+                    assert_eq!(ea, eb, "soak: error-message divergence on `{src}`")
+                }
+                (Ok(_), Err(_)) if tw_hit_recursion_limit(&src) => {}
+                (v, t) => panic!("soak: OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+        assert!(ok > iters / 10, "soak: too few successful programs: {ok}/{iters}");
+        assert!(crate::jit::native_call_count() > 0, "soak: the JIT never engaged");
+        println!("soak seed={seed:#x} iters={iters}: {ok} successful, all engine-identical");
     }
 
     /// Continuous differential coverage for the tail-recursion native loops (B1 i64 +
@@ -1791,6 +1896,41 @@
         run_vm(src)
     }
 
+    /// Drive `n` generated programs through the JIT / bytecode-VM / tree-walker triple and
+    /// assert all three agree: `Ok` values equal, `Err` messages equal, outcomes never
+    /// diverge. Crucially it ALSO asserts the JIT actually *engaged* (native trampolines
+    /// fired at least once). Without that check a per-kernel oracle passes VACUOUSLY the
+    /// moment its kernel stops being JIT-compiled: the native path silently falls back to
+    /// the bytecode VM, so `jit == no_jit` holds trivially and the "oracle" proves nothing
+    /// about native code — the "engagement ≠ correctness" trap the counter exists to close.
+    /// `label` names the kernel in failure messages. The engagement counter is thread-local,
+    /// so oracles running in parallel never clobber each other's count.
+    fn triple_oracle(label: &str, seed: u64, n: usize, mut generate: impl FnMut(&mut u64) -> String) {
+        let mut rng = seed;
+        crate::jit::reset_native_call_count();
+        for _ in 0..n {
+            let src = generate(&mut rng);
+            match (run_vm_jit(&src), run_vm_no_jit(&src), run_tw(&src)) {
+                (Ok(a), Ok(b), Ok(c)) => {
+                    assert_eq!(a, b, "{label}: JIT ≠ bytecode VM on `{src}`");
+                    assert_eq!(b, c, "{label}: bytecode VM ≠ tree-walker on `{src}`");
+                }
+                (Err(ea), Err(eb), Err(ec)) => {
+                    assert_eq!(ea, eb, "{label}: error-message divergence on `{src}`");
+                    assert_eq!(eb, ec, "{label}: error-message divergence on `{src}`");
+                }
+                (j, nj, t) => {
+                    panic!("{label}: OUTCOME divergence on `{src}`: jit={j:?} nojit={nj:?} tw={t:?}")
+                }
+            }
+        }
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "{label}: the JIT never engaged across {n} programs — the oracle was silently \
+             testing only the bytecode VM, not native code"
+        );
+    }
+
     /// A random JIT-eligible `Int`-array pipeline: an `Int` source (`range(s,e)` or a
     /// small int-array literal) followed by 0–3 `.map(it OP k)` / `.filter(it CMP k)`
     /// stages and a scalar terminal (`.reduce` / `.sum()` / `.count()`). The body ops
@@ -1990,24 +2130,7 @@
     /// `i64` wrap) would diverge here.
     #[test]
     fn differential_mixed_map_kernel_oracle() {
-        let mut rng = 0x3117_C0DE_BEEF_2026u64;
-        for _ in 0..15_000 {
-            let src = gen_mixed_map_pipeline(&mut rng);
-            let jit = run_vm_jit(&src);
-            let no_jit = run_vm_no_jit(&src);
-            let tw = run_tw(&src);
-            match (jit, no_jit, tw) {
-                (Ok(a), Ok(b), Ok(c)) => {
-                    assert_eq!(a, b, "mixed map: JIT ≠ bytecode VM on `{src}`");
-                    assert_eq!(b, c, "mixed map: bytecode VM ≠ tree-walker on `{src}`");
-                }
-                (Err(ea), Err(eb), Err(ec)) => {
-                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
-                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
-                }
-                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
-            }
-        }
+        triple_oracle("mixed map", 0x3117_C0DE_BEEF_2026, 15_000, gen_mixed_map_pipeline);
     }
 
     /// Triple oracle for the `f64` map kernel: a random `Float`-array map pipeline must
@@ -2015,24 +2138,7 @@
     /// tree-walker. Guards the monomorphized `f64` kernel + its `f64`-capture passing.
     #[test]
     fn differential_float_map_kernel_oracle() {
-        let mut rng = 0xF10A_7C0D_E5EE_9001u64;
-        for _ in 0..15_000 {
-            let src = gen_float_map_pipeline(&mut rng);
-            let jit = run_vm_jit(&src);
-            let no_jit = run_vm_no_jit(&src);
-            let tw = run_tw(&src);
-            match (jit, no_jit, tw) {
-                (Ok(a), Ok(b), Ok(c)) => {
-                    assert_eq!(a, b, "f64 map: JIT ≠ bytecode VM on `{src}`");
-                    assert_eq!(b, c, "f64 map: bytecode VM ≠ tree-walker on `{src}`");
-                }
-                (Err(ea), Err(eb), Err(ec)) => {
-                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
-                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
-                }
-                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
-            }
-        }
+        triple_oracle("f64 map", 0xF10A_7C0D_E5EE_9001, 15_000, gen_float_map_pipeline);
     }
 
     /// A random pure-`f64` fold over a `Float` array: `[…].reduce(<float>, (acc, x) => body)`
@@ -2077,24 +2183,7 @@
     /// tree-walker bit-for-bit. (Engagement is confirmed by a benchmark, not a green oracle.)
     #[test]
     fn differential_float_reduce_oracle() {
-        let mut rng = 0xF01D_F10A_7C0D_2026u64;
-        for _ in 0..15_000 {
-            let src = gen_float_reduce(&mut rng);
-            let jit = run_vm_jit(&src);
-            let no_jit = run_vm_no_jit(&src);
-            let tw = run_tw(&src);
-            match (jit, no_jit, tw) {
-                (Ok(a), Ok(b), Ok(c)) => {
-                    assert_eq!(a, b, "f64 reduce: JIT ≠ bytecode VM on `{src}`");
-                    assert_eq!(b, c, "f64 reduce: bytecode VM ≠ tree-walker on `{src}`");
-                }
-                (Err(ea), Err(eb), Err(ec)) => {
-                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
-                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
-                }
-                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
-            }
-        }
+        triple_oracle("f64 reduce", 0xF01D_F10A_7C0D_2026, 15_000, gen_float_reduce);
     }
 
     /// A **range-source** f64 reduce: `range(s, e).reduce(flit, (acc, x) => body)` where the
@@ -2132,31 +2221,14 @@
         format!("range({}, {}).reduce({}, (acc, x) => ({}))", s, e, flit(rng), expr(rng, 3))
     }
 
-    /// Triple oracle for the **range-source f64 reduce** kernel. Pre-codegen the fold runs on
-    /// the bytecode VM (Float init → `TryJitReduce` falls back), so this asserts VM ==
-    /// tree-walker; once the typed reduce loop lands, `run_vm_jit` engages it with no change
-    /// here and the assertion becomes JIT == VM == tree-walker. (Engagement: benchmark, not
-    /// a green oracle — `reduce_jit_bodies` would otherwise claim it as a never-firing i64.)
+    /// Triple oracle for the **range-source f64 reduce** kernel: JIT == bytecode VM ==
+    /// tree-walker over a fuzzed range-fold. The typed reduce loop has landed, so `triple_oracle`
+    /// confirms the native path actually engages (≈600 native calls / 3000 programs measured);
+    /// if it ever regressed to a VM fall-back this stops being a green-but-vacuous VM==tw check
+    /// and fails loudly instead.
     #[test]
     fn differential_range_float_reduce_oracle() {
-        let mut rng = 0x2A3D_F00D_5EED_2026u64;
-        for _ in 0..15_000 {
-            let src = gen_range_float_reduce(&mut rng);
-            let jit = run_vm_jit(&src);
-            let no_jit = run_vm_no_jit(&src);
-            let tw = run_tw(&src);
-            match (jit, no_jit, tw) {
-                (Ok(a), Ok(b), Ok(c)) => {
-                    assert_eq!(a, b, "range f64 reduce: JIT ≠ bytecode VM on `{src}`");
-                    assert_eq!(b, c, "range f64 reduce: bytecode VM ≠ tree-walker on `{src}`");
-                }
-                (Err(ea), Err(eb), Err(ec)) => {
-                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
-                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
-                }
-                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
-            }
-        }
+        triple_oracle("range f64 reduce", 0x2A3D_F00D_5EED_2026, 15_000, gen_range_float_reduce);
     }
 
     /// **Division** in a range-source f64 reduce (`c + 1.0/g(k)` — the series-sum shape). Native
@@ -2199,29 +2271,11 @@
                 _ => format!("(({}) / ({}))", expr(rng, depth - 1), expr(rng, depth - 1)),
             }
         }
-        let mut rng = 0xD1F5_00D5_EED2_0271u64;
-        for _ in 0..15_000 {
-            let s = (next(&mut rng) % 4) as i64; // 0..3 → sometimes starts at 0 (x = 0 → /0)
-            let e = s + (next(&mut rng) % 12) as i64;
-            let src = format!(
-                "range({}, {}).reduce({}, (acc, x) => ({}))",
-                s,
-                e,
-                flit(&mut rng),
-                expr(&mut rng, 3)
-            );
-            match (run_vm_jit(&src), run_vm_no_jit(&src), run_tw(&src)) {
-                (Ok(a), Ok(b), Ok(c)) => {
-                    assert_eq!(a, b, "div range f64 reduce: JIT ≠ bytecode VM on `{src}`");
-                    assert_eq!(b, c, "div range f64 reduce: bytecode VM ≠ tree-walker on `{src}`");
-                }
-                (Err(ea), Err(eb), Err(ec)) => {
-                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
-                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
-                }
-                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
-            }
-        }
+        triple_oracle("div range f64 reduce", 0xD1F5_00D5_EED2_0271, 15_000, |rng| {
+            let s = (next(rng) % 4) as i64; // 0..3 → sometimes starts at 0 (x = 0 → /0)
+            let e = s + (next(rng) % 12) as i64;
+            format!("range({}, {}).reduce({}, (acc, x) => ({}))", s, e, flit(rng), expr(rng, 3))
+        });
         // Focused: series sums JIT to the right value; a `/0` errors on all engines; the excluded
         // rescue shapes (nested division / min-of-a-division) fall back but stay correct.
         let basel = "(range(0, 2000)).reduce(0.0, (c, k) => c + 1.0/((k+1)*(k+1)))";
@@ -2296,31 +2350,14 @@
         format!("{src}.reduce({init_s}, (a, x) => {body_s})")
     }
 
-    /// Triple oracle for the **f64 tuple/record reduce** kernel (range + array). Pre-codegen
-    /// the fold runs on the bytecode VM (a `Float`-tuple init → fall back); once the f64 tuple
-    /// kernel lands, `run_vm_jit` engages it (array literals are idempotent → fused) with no
-    /// change here, and the assertion becomes JIT == VM == tree-walker. (Engagement is a
-    /// benchmark, not a green oracle.)
+    /// Triple oracle for the **f64 tuple/record reduce** kernel (range + array): JIT == bytecode
+    /// VM == tree-walker. The kernel has landed (array literals are idempotent → fused), so
+    /// `triple_oracle` confirms the native path engages (≈140 native calls / 3000 programs
+    /// measured) rather than trusting it — a regression to VM fall-back fails the test instead
+    /// of passing as a vacuous VM==tw check.
     #[test]
     fn differential_f64_tuple_reduce_oracle() {
-        let mut rng = 0x7AB1_E5F0_0DED_2026u64;
-        for _ in 0..15_000 {
-            let src = gen_f64_tuple_reduce(&mut rng);
-            let jit = run_vm_jit(&src);
-            let no_jit = run_vm_no_jit(&src);
-            let tw = run_tw(&src);
-            match (jit, no_jit, tw) {
-                (Ok(a), Ok(b), Ok(c)) => {
-                    assert_eq!(a, b, "f64 tuple reduce: JIT ≠ bytecode VM on `{src}`");
-                    assert_eq!(b, c, "f64 tuple reduce: bytecode VM ≠ tree-walker on `{src}`");
-                }
-                (Err(ea), Err(eb), Err(ec)) => {
-                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
-                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
-                }
-                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
-            }
-        }
+        triple_oracle("f64 tuple reduce", 0x7AB1_E5F0_0DED_2026, 15_000, gen_f64_tuple_reduce);
     }
 
     /// A JIT-eligible `f64` reduce (range/array scalar, tuple, or record — the kernels from
@@ -2399,24 +2436,12 @@
     /// Triple oracle for the f64 reduce kernels **in composition** (see `gen_f64_reduce_composed`).
     #[test]
     fn differential_f64_reduce_composition_oracle() {
-        let mut rng = 0x5EED_F64C_0FFE_2026u64;
-        for _ in 0..15_000 {
-            let src = gen_f64_reduce_composed(&mut rng);
-            let jit = run_vm_jit(&src);
-            let no_jit = run_vm_no_jit(&src);
-            let tw = run_tw(&src);
-            match (jit, no_jit, tw) {
-                (Ok(a), Ok(b), Ok(c)) => {
-                    assert_eq!(a, b, "f64 reduce composition: JIT ≠ bytecode VM on `{src}`");
-                    assert_eq!(b, c, "f64 reduce composition: bytecode VM ≠ tree-walker on `{src}`");
-                }
-                (Err(ea), Err(eb), Err(ec)) => {
-                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
-                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
-                }
-                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
-            }
-        }
+        triple_oracle(
+            "f64 reduce composition",
+            0x5EED_F64C_0FFE_2026,
+            15_000,
+            gen_f64_reduce_composed,
+        );
     }
 
     /// A curated battery of pathological / edge-case programs — the inputs a fuzzer rarely
@@ -2554,24 +2579,7 @@
 
     #[test]
     fn differential_match_kernel_oracle() {
-        let mut rng = 0x6A7C_4ECD_0FF1_CE42u64;
-        for _ in 0..15_000 {
-            let src = gen_match_pipeline(&mut rng);
-            let jit = run_vm_jit(&src);
-            let no_jit = run_vm_no_jit(&src);
-            let tw = run_tw(&src);
-            match (jit, no_jit, tw) {
-                (Ok(a), Ok(b), Ok(c)) => {
-                    assert_eq!(a, b, "match: JIT ≠ bytecode VM on `{src}`");
-                    assert_eq!(b, c, "match: bytecode VM ≠ tree-walker on `{src}`");
-                }
-                (Err(ea), Err(eb), Err(ec)) => {
-                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
-                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
-                }
-                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
-            }
-        }
+        triple_oracle("match", 0x6A7C_4ECD_0FF1_CE42, 15_000, gen_match_pipeline);
     }
 
     /// Triple oracle for the JIT array/fused kernels: every random `Int`-array
@@ -2671,24 +2679,7 @@
 
     #[test]
     fn differential_array_kernels_triple_oracle() {
-        let mut rng = 0xA11C_E0FF_EE00_1234u64;
-        for _ in 0..15_000 {
-            let src = gen_int_pipeline(&mut rng);
-            let jit = run_vm_jit(&src);
-            let no_jit = run_vm_no_jit(&src);
-            let tw = run_tw(&src);
-            match (jit, no_jit, tw) {
-                (Ok(a), Ok(b), Ok(c)) => {
-                    assert_eq!(a, b, "JIT ≠ bytecode VM on `{src}`");
-                    assert_eq!(b, c, "bytecode VM ≠ tree-walker on `{src}`");
-                }
-                (Err(ea), Err(eb), Err(ec)) => {
-                    assert_eq!(ea, eb, "error-message divergence on `{src}`");
-                    assert_eq!(eb, ec, "error-message divergence on `{src}`");
-                }
-                (j, n, t) => panic!("OUTCOME divergence on `{src}`: jit={j:?} nojit={n:?} tw={t:?}"),
-            }
-        }
+        triple_oracle("int array kernels", 0xA11C_E0FF_EE00_1234, 15_000, gen_int_pipeline);
     }
 
     /// Run the random `gen_expr` programs through the *full* typed pipeline
