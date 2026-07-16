@@ -74,6 +74,24 @@ def gen_vcf(v: int) -> None:
     print(f"  wrote {path} ({v} variants)")
 
 
+def gen_align(ref_len: int, n: int, qlen: int = 50) -> None:
+    """A reference gene + `n` query reads (substrings of it with ~3 point
+    mutations each), for the pairwise-alignment workload (S7)."""
+    g = lcg(0xA11760)
+    ref = "".join(BASES[next(g) >> 62] for _ in range(ref_len))
+    with open(os.path.join(DATA, "ref.fa"), "w") as f:
+        f.write(f">ref\n{ref}\n")
+    with open(os.path.join(DATA, "queries.fa"), "w") as f:
+        for i in range(n):
+            start = (next(g) >> 40) % (ref_len - qlen)
+            q = list(ref[start:start + qlen])
+            for _ in range(3):                       # 3 deterministic point mutations
+                pos = (next(g) >> 40) % qlen
+                q[pos] = BASES[next(g) >> 62]
+            f.write(f">q{i}\n{''.join(q)}\n")
+    print(f"  wrote ref.fa ({ref_len} bp) + queries.fa ({n} x {qlen} bp)")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scale", type=float, default=1.0)
@@ -84,6 +102,7 @@ def main() -> None:
     gen_genome(max(1, int(10_000_000 * s)))
     gen_reads(max(1, int(200_000 * s)))
     gen_vcf(max(1, int(200_000 * s)))
+    gen_align(300, max(1, int(100 * s)), 50)
 
 
 if __name__ == "__main__":

@@ -39,7 +39,7 @@ echo "go:     $(go version)"
 
 # --- compile the Rust + Go binaries once (timed runs use the built binary) -----
 echo "compiling rust + go…"
-for s in s1_kmers s2_fastq s3_vcf s4_match s5_fused; do
+for s in s1_kmers s2_fastq s3_vcf s4_match s5_fused s7_align s8_canonical; do
   rustc -O "$s.rs" -o "$TMP/${s}_rs" 2>/dev/null
   go build -o "$TMP/${s}_go" "$s.go" 2>/dev/null
 done
@@ -94,6 +94,18 @@ line cpython       "$(cpy s5_fused_cpython.py)"
 line numpy         "$(py  s5_fused_numpy.py)"
 line rust          "$(bin s5_fused_rs)"
 line go            "$(bin s5_fused_go)"
+
+echo "S7  local alignment  (100 reads vs a gene)  [native Gotoh affine-gap DP]"
+line helix         "$(hx  s7_align.helix)"
+line cpython       "$(cpy s7_align_cpython.py)"
+line rust          "$(bin s7_align_rs)"
+line go            "$(bin s7_align_go)"
+
+echo "S8  canonical k-mers k=10  (10 Mbp)  [strand-agnostic canonical_kmer_counts]"
+line helix         "$(hx  s8_canonical.helix)"
+line cpython       "$(cpy s8_canonical_cpython.py)"
+line rust          "$(bin s8_canonical_rs)"
+line go            "$(bin s8_canonical_go)"
 
 rm -f "$TMP/.t"
 echo

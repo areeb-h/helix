@@ -1,0 +1,10 @@
+# S8 — strand-agnostic (canonical) k-mer spectrum, k=10, over the 10 Mbp genome.
+# A k-mer and its reverse complement collapse to one entry (the lexicographically
+# smaller). `canonical_kmer_counts` does it natively on the 2-bit-packed code
+# (complement = bits XOR 3, then reversed) — one method vs everyone else's loop.
+seq = bio.read_fasta("data/genome.fa")[0].seq
+counts = seq.canonical_kmer_counts(10)
+vals = counts.map((kmer, c) => c)
+print("distinct={counts.count()}")
+print("total={vals.sum()}")
+print("max={vals.reduce(0, (a, x) => if x > a then x else a)}")
