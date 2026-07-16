@@ -15,22 +15,17 @@ use crate::value::Value;
 struct Binding {
     value: Value,
     mutable: bool,
-    /// Is this the *top-level* binding of the name (a global or seeded constant),
-    /// as opposed to a local (param, `let`, binder, or captured upvalue) that
-    /// shadows one? Drives lambda capture: a closure snapshots exactly the
-    /// non-global bindings — globals (mutable OR immutable) resolve live at call
-    /// time, matching the VM's local→upvalue→`LoadGlobal` resolution. Mutability
-    /// alone can't decide this: `mut x = …` legally re-declares an *immutable*
-    /// global, so an immutable-global snapshot would go stale where the VM reads
-    /// the new value.
-    global: bool,
 }
 
-/// Guards against runaway recursion with a graceful error well before the
-/// dedicated 2 GiB eval thread's stack overflows. Calibrated conservatively: a
-/// debug build costs ~25 KB of native stack per Helix call, so even a complex
+/// Guards against runaway NON-TAIL recursion with a graceful error well before
+/// the dedicated 2 GiB eval thread's stack overflows. Calibrated conservatively:
+/// a debug build costs ~25 KB of native stack per Helix call, so even a complex
 /// function body stays comfortably inside the stack at this depth. See `main.rs`.
-const MAX_CALL_DEPTH: usize = 20_000;
+/// SHARED with the bytecode VM (whose heap frames could go far deeper) so both
+/// engines exhaust recursion at the same depth with the identical error — the
+/// bit-identical mandate. Tail calls don't count: both engines reuse the frame
+/// (the walker's trampoline in `call_function`, the VM's `TailCallFn`).
+pub(crate) const MAX_CALL_DEPTH: usize = 20_000;
 
 /// Ceiling on a single interpolated string's byte length. Interpolation nests, so
 /// a doubling loop could otherwise grow a string until the allocator aborts; 1 GiB
@@ -38,13 +33,24 @@ const MAX_CALL_DEPTH: usize = 20_000;
 pub(crate) const MAX_STRING_LEN: usize = 1 << 30;
 
 pub struct Interp {
+    /// The current frame's LOCALS: parameters, captured upvalues, `let`/binder/
+    /// match bindings. Swapped out wholesale at every function-call boundary
+    /// (`call_function` `mem::take`s it), so a callee can never see its
+    /// caller's locals — name resolution is locals-then-globals, exactly the
+    /// VM's local→upvalue→`LoadGlobal`. (A single flat map here used to give
+    /// callees DYNAMIC scoping: a callee reading a global saw the caller's
+    /// shadowing `let`/param — a verified walker/VM divergence.)
     env: FxHashMap<String, Binding>,
+    /// Top-level bindings (globals + the seeded constants), resolved live —
+    /// never captured, never hidden by the call-boundary swap.
+    globals: FxHashMap<String, Binding>,
+    /// Names declared by a top-level `fn` whose binding is the function itself
+    /// (not the `mut`-collision case, where the mutable global keeps ownership).
+    /// Reassigning or `mut`-re-declaring one is an error on BOTH engines: the
+    /// VM binds `CallFn` targets at compile time, so late rebinding could never
+    /// be honored there — forbidding it keeps the engines bit-identical.
+    fn_decls: std::collections::HashSet<String>,
     depth: usize,
-    /// Names bound at the top level (plus the seeded constants). A lambda captures
-    /// only its *non-global* free variables — globals persist in `env` and resolve
-    /// at call time, so capturing them would be wasteful and (for `mut` globals)
-    /// wrong. Populated by `bind` while `depth == 0`.
-    globals: std::collections::HashSet<String>,
 }
 
 /// Result of running a statement: the value (for REPL auto-printing) and
@@ -52,6 +58,38 @@ pub struct Interp {
 pub struct StmtOutcome {
     pub value: Value,
     pub is_expr: bool,
+}
+
+/// Outcome of evaluating a function body in tail position — either a final
+/// value, or a tail call to an unshadowed top-level `fn` that
+/// `call_function`'s trampoline runs in the SAME frame (the walker's TCO;
+/// mirrors `bytecode::tco_peephole`'s `CallFn`→`TailCallFn` rewrite exactly).
+enum TailFlow {
+    Value(Value),
+    Call {
+        /// The callee's declared name (an `Rc` clone — tail hops allocate
+        /// nothing for diagnostics that almost never fire).
+        name: std::rc::Rc<str>,
+        func: std::rc::Rc<crate::value::FuncVal>,
+        args: Vec<Value>,
+        line: usize,
+        col: usize,
+    },
+}
+
+/// The call-arity error, worded identically to the VM's `CallFn`/`TailCallFn`.
+fn arity_err(name: &str, want: usize, got: usize, line: usize, col: usize) -> HelixError {
+    HelixError::new(
+        format!(
+            "`{}` expects {} argument{}, got {}",
+            name,
+            want,
+            if want == 1 { "" } else { "s" },
+            got
+        ),
+        line,
+        col,
+    )
 }
 
 /// Check a `match` arm guard's value. Shared by the walker and the VM's
@@ -85,33 +123,42 @@ impl Default for Interp {
 
 impl Interp {
     pub fn new() -> Self {
-        let mut env = FxHashMap::default();
+        let mut globals = FxHashMap::default();
         // Math constants are predefined immutable bindings.
-        env.insert(
+        globals.insert(
             "pi".to_string(),
-            Binding { value: Value::Float(std::f64::consts::PI), mutable: false, global: true },
+            Binding { value: Value::Float(std::f64::consts::PI), mutable: false },
         );
-        env.insert(
+        globals.insert(
             "e".to_string(),
-            Binding { value: Value::Float(std::f64::consts::E), mutable: false, global: true },
+            Binding { value: Value::Float(std::f64::consts::E), mutable: false },
         );
-        env.insert(
+        globals.insert(
             "inf".to_string(),
-            Binding { value: Value::Float(f64::INFINITY), mutable: false, global: true },
+            Binding { value: Value::Float(f64::INFINITY), mutable: false },
         );
         // The `python` interop entry point — an opaque namespace handle. Always
         // present; without the `python` build feature its methods return a clean
         // "rebuild with --features python" error (see `crate::python`).
-        env.insert(
+        globals.insert(
             "python".to_string(),
             Binding {
                 value: Value::PyObject(std::rc::Rc::new(crate::python::PyHandle::namespace())),
                 mutable: false,
-                global: true,
             },
         );
-        let globals = env.keys().cloned().collect();
-        Interp { env, depth: 0, globals }
+        Interp {
+            env: FxHashMap::default(),
+            globals,
+            fn_decls: std::collections::HashSet::new(),
+            depth: 0,
+        }
+    }
+
+    /// Resolve a name: the current frame's locals first, then the globals —
+    /// the VM's local→upvalue→`LoadGlobal` order.
+    fn lookup(&self, name: &str) -> Option<&Binding> {
+        self.env.get(name).or_else(|| self.globals.get(name))
     }
 
     pub fn run(&mut self, program: &[Stmt]) -> Result<(), HelixError> {
@@ -170,8 +217,16 @@ impl Interp {
                     params: Rc::new(param_names),
                     body: Rc::new(body.clone()),
                     captured: Rc::new(Vec::new()), // top-level fn: free names are globals
+                    decl_name: Some(std::rc::Rc::from(name.as_str())),
                 }));
+                // A `fn` over an existing MUTABLE global reassigns it (the VM stores
+                // the function value into the global the same way) — that binding
+                // stays reassignable, so it is NOT recorded as a fn declaration.
+                let over_mut_global = matches!(self.globals.get(name), Some(b) if b.mutable);
                 self.bind(name, f, false, *line, *col)?;
+                if !over_mut_global {
+                    self.fn_decls.insert(name.clone());
+                }
                 Ok(StmtOutcome {
                     value: Value::Unit,
                     is_expr: false,
@@ -204,44 +259,40 @@ impl Interp {
         line: usize,
         col: usize,
     ) -> Result<(), HelixError> {
-        // Top-level bindings are globals (a lambda never captures these).
-        if self.depth == 0 {
-            self.globals.insert(name.to_string());
-        }
-        match self.env.get(name) {
+        let immutable_err = || {
+            Err(HelixError::new(
+                format!("`{}` is immutable and cannot be reassigned", name),
+                line,
+                col,
+            )
+            .hint(format!(
+                "declare it as mutable up front with `mut {} = ...` if it needs to change.",
+                name
+            )))
+        };
+        // Statements only execute at the top level, so `bind` writes globals.
+        match self.globals.get(name) {
             None => {
-                self.env.insert(
-                    name.to_string(),
-                    Binding {
-                        value: v,
-                        mutable,
-                        global: self.depth == 0,
-                    },
-                );
+                self.globals.insert(name.to_string(), Binding { value: v, mutable });
                 Ok(())
             }
             Some(existing) => {
                 if mutable {
-                    // `mut x = ...` on an existing name re-declares it as mutable.
-                    self.env.insert(
-                        name.to_string(),
-                        Binding { value: v, mutable: true, global: self.depth == 0 },
-                    );
+                    // `mut x = ...` on an existing name re-declares it as mutable —
+                    // EXCEPT over a `fn` declaration: the VM binds `CallFn` targets
+                    // at compile time and could never honor the rebinding, so it is
+                    // an error on both engines.
+                    if self.fn_decls.contains(name) {
+                        return immutable_err();
+                    }
+                    self.globals.insert(name.to_string(), Binding { value: v, mutable: true });
                     Ok(())
                 } else if existing.mutable {
                     // plain reassignment to a mutable binding
-                    self.env.get_mut(name).unwrap().value = v;
+                    self.globals.get_mut(name).unwrap().value = v;
                     Ok(())
                 } else {
-                    Err(HelixError::new(
-                        format!("`{}` is immutable and cannot be reassigned", name),
-                        line,
-                        col,
-                    )
-                    .hint(format!(
-                        "declare it as mutable up front with `mut {} = ...` if it needs to change.",
-                        name
-                    )))
+                    immutable_err()
                 }
             }
         }
@@ -294,10 +345,15 @@ impl Interp {
                 }
                 Ok(Value::Str(Rc::new(s)))
             }
-            Expr::Ident { name, line, col } => match self.env.get(name) {
+            Expr::Ident { name, line, col } => match self.lookup(name) {
                 Some(b) => Ok(b.value.clone()),
                 None => {
-                    let names: Vec<&str> = self.env.keys().map(|s| s.as_str()).collect();
+                    let names: Vec<&str> = self
+                        .env
+                        .keys()
+                        .chain(self.globals.keys())
+                        .map(|s| s.as_str())
+                        .collect();
                     let mut err = HelixError::new(
                         format!("`{}` is not defined", name),
                         *line,
@@ -432,7 +488,7 @@ impl Interp {
                 }
                 // A user binding of this name shadows a builtin of the same name —
                 // defining `fn sign(..)` calls *your* function, not the math builtin.
-                if let Some(b) = self.env.get(name) {
+                if let Some(b) = self.lookup(name) {
                     return match &b.value {
                         Value::Function(g) => {
                             let g = g.clone();
@@ -456,6 +512,7 @@ impl Interp {
                 cands.extend(
                     self.env
                         .iter()
+                        .chain(self.globals.iter())
                         .filter(|(_, b)| matches!(b.value, Value::Function(_)))
                         .map(|(k, _)| k.clone()),
                 );
@@ -583,40 +640,51 @@ impl Interp {
                 // Capture the lambda's free *local* variables by value — its
                 // lexical environment — so a returned or stored closure still sees
                 // them after the defining call has returned.
-                // Capture a free name iff its current binding is a LOCAL (a binder,
-                // param, `let`, or captured upvalue), including one that SHADOWS a
-                // same-named global — exactly the VM's local→upvalue→`LoadGlobal`
-                // resolution. The old `!globals.contains(n)` test was purely
-                // name-based, so a `map` binder `x` over a top-level `x` was wrongly
-                // skipped (the escaped closure read the restored global). An interim
-                // mutability test snapshotted *immutable* globals, which goes stale
-                // when `mut x = …` legally re-declares one; `Binding::global` records
-                // the actual resolution, so globals — mutable or not — read live.
+                // Capture a free name iff it is bound in the current frame's
+                // LOCALS (a binder, param, `let`, or captured upvalue) —
+                // including one that SHADOWS a same-named global. Globals,
+                // mutable or not, are never captured: they resolve live at
+                // call time, exactly the VM's local→upvalue→`LoadGlobal`.
                 let captured: Vec<(String, Value)> = crate::bytecode::free_names(params, body)
                     .into_iter()
-                    .filter_map(|n| match self.env.get(&n) {
-                        Some(b) if !b.global => Some((n.clone(), b.value.clone())),
-                        _ => None,
+                    .filter_map(|n| {
+                        self.env.get(&n).map(|b| (n.clone(), b.value.clone()))
                     })
                     .collect();
                 Ok(Value::Function(Rc::new(crate::value::FuncVal {
                     params: Rc::new(params.clone()),
                     body: Rc::new((**body).clone()),
                     captured: Rc::new(captured),
+                    decl_name: None,
                 })))
             }
             Expr::Let { bindings, body } => {
                 // Bind sequentially (later bindings see earlier ones), evaluate
-                // the body, then restore the outer scope.
+                // the body, then restore the outer scope. A FAILING initializer
+                // must restore too (`bind_err`, not `?`): an early return here
+                // used to leak the already-installed bindings — a caught error
+                // then left a `let` shadow permanently visible, diverging from
+                // the VM's slot locals (and from tail-position lets).
                 let mut saved: Vec<(String, Option<Binding>)> = Vec::with_capacity(bindings.len());
+                let mut bind_err: Option<HelixError> = None;
                 for (name, expr) in bindings {
-                    let v = self.eval(expr)?;
-                    let prev = self
-                        .env
-                        .insert(name.clone(), Binding { value: v, mutable: false, global: false });
-                    saved.push((name.clone(), prev));
+                    match self.eval(expr) {
+                        Ok(v) => {
+                            let prev = self
+                                .env
+                                .insert(name.clone(), Binding { value: v, mutable: false });
+                            saved.push((name.clone(), prev));
+                        }
+                        Err(e) => {
+                            bind_err = Some(e);
+                            break;
+                        }
+                    }
                 }
-                let result = self.eval(body);
+                let result = match bind_err {
+                    Some(e) => Err(e),
+                    None => self.eval(body),
+                };
                 for (name, prev) in saved.into_iter().rev() {
                     match prev {
                         Some(b) => {
@@ -669,7 +737,7 @@ impl Interp {
                         for (name, val) in binds {
                             let prev = self
                                 .env
-                                .insert(name.clone(), Binding { value: val, mutable: false, global: false });
+                                .insert(name.clone(), Binding { value: val, mutable: false });
                             saved.push((name, prev));
                         }
                         // `Some(result)` takes this arm; `None` means the guard failed,
@@ -706,29 +774,28 @@ impl Interp {
     /// Apply a function: bind its parameters over the current scope, evaluate
     /// the body, then restore. Because the function's own name stays bound
     /// throughout, recursion works.
+    ///
+    /// A tail call to an unshadowed top-level `fn` REUSES this frame: the body
+    /// is evaluated through [`Self::eval_tail`], and a `TailFlow::Call` restores
+    /// the current bindings, rebinds the callee's, and loops — the walker's
+    /// equivalent of the VM's `CallFn`→`TailCallFn` peephole and the JIT's
+    /// native tail loops. Tail recursion is therefore constant-depth on every
+    /// engine, and an *infinite* tail recursion spins (like `while true`)
+    /// everywhere, instead of erroring at a depth only this engine had.
+    /// Non-tail recursion still counts against the shared `MAX_CALL_DEPTH`.
     fn call_function(
         &mut self,
         name: &str,
-        f: &crate::value::FuncVal,
+        f: &Rc<crate::value::FuncVal>,
         args: Vec<Value>,
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
-        let params = &f.params;
-        let body = &f.body;
-        let captured = &f.captured;
-        if params.len() != args.len() {
-            return Err(HelixError::new(
-                format!(
-                    "`{}` expects {} argument{}, got {}",
-                    name,
-                    params.len(),
-                    if params.len() == 1 { "" } else { "s" },
-                    args.len()
-                ),
-                line,
-                col,
-            ));
+        // Arity BEFORE the depth guard — the VM checks arity first at every
+        // call op, so a wrong-arity call sitting exactly at the depth boundary
+        // must report the arity error on both engines.
+        if f.params.len() != args.len() {
+            return Err(arity_err(name, f.params.len(), args.len(), line, col));
         }
         self.depth += 1;
         if self.depth > MAX_CALL_DEPTH {
@@ -740,42 +807,211 @@ impl Interp {
             )
             .hint("is the recursion missing a base case, or should this be a loop/comprehension?"));
         }
-        // `saved` holds a *borrowed* name (from the function value's params/captured,
-        // which outlive this call) alongside the binding it shadowed. The insert key must
-        // still be owned (the env map owns its keys), but save/restore no longer clones
-        // each name a second time, and the common no-shadow restore is a plain
-        // `remove(&str)` with zero allocation — so a hot recursive call (e.g. `fib`) stops
-        // churning a fresh copy of each parameter name per call.
-        let mut saved: Vec<(&str, Option<Binding>)> =
-            Vec::with_capacity(captured.len() + params.len());
-        // Install the captured lexical environment (a closure's free variables)
-        // first, then the parameters on top so they shadow on any name clash.
-        for (n, v) in captured.iter() {
-            let prev = self
-                .env
-                .insert(n.clone(), Binding { value: v.clone(), mutable: false, global: false });
-            saved.push((n.as_str(), prev));
-        }
-        for (p, a) in params.iter().zip(args) {
-            let prev = self
-                .env
-                .insert(p.clone(), Binding { value: a, mutable: false, global: false });
-            saved.push((p.as_str(), prev));
-        }
-        let result = self.eval(body);
-        // Restore in reverse so shadowed names come back correctly.
-        for (n, prev) in saved.into_iter().rev() {
-            match prev {
-                Some(b) => {
-                    self.env.insert(n.to_string(), b);
-                }
-                None => {
-                    self.env.remove(n);
-                }
+        // THE FRAME BOUNDARY: swap the caller's locals out wholesale, so the
+        // callee resolves names against ITS OWN params/captured, then globals —
+        // never the caller's locals (a flat shared map used to give callees
+        // dynamic scoping, a verified walker/VM divergence).
+        let caller_locals = std::mem::take(&mut self.env);
+        let mut cur_f: Rc<crate::value::FuncVal> = f.clone();
+        let mut cur_args = args;
+        // Set only by a tail transfer (an Rc clone of the callee's declared
+        // name — no allocation); entry-call errors use the borrowed `name`.
+        let mut hop_name: Option<std::rc::Rc<str>> = None;
+        let (mut cur_line, mut cur_col) = (line, col);
+        let result = loop {
+            // Entry arity was checked above; tail transfers re-check here —
+            // mirroring `TailCallFn`'s arity-only (no depth) check.
+            if cur_f.params.len() != cur_args.len() {
+                break Err(arity_err(
+                    hop_name.as_deref().unwrap_or(name),
+                    cur_f.params.len(),
+                    cur_args.len(),
+                    cur_line,
+                    cur_col,
+                ));
             }
-        }
+            // Fresh frame: any leftover locals belong to the frame a tail
+            // transfer just ended (its lets/matches restored themselves; this
+            // drops its params/captured). Captured lexical environment first,
+            // then the parameters on top so they shadow on any name clash.
+            self.env.clear();
+            for (n, v) in cur_f.captured.iter() {
+                self.env.insert(n.clone(), Binding { value: v.clone(), mutable: false });
+            }
+            for (p, a) in cur_f.params.iter().zip(std::mem::take(&mut cur_args)) {
+                self.env.insert(p.clone(), Binding { value: a, mutable: false });
+            }
+            let body = cur_f.body.clone();
+            match self.eval_tail(&body) {
+                Ok(TailFlow::Value(v)) => break Ok(v),
+                Ok(TailFlow::Call { name: n, func, args: a, line: l, col: c }) => {
+                    hop_name = Some(n);
+                    cur_f = func;
+                    cur_args = a;
+                    cur_line = l;
+                    cur_col = c;
+                }
+                Err(e) => break Err(e),
+            }
+        };
+        // Frame over — the caller's locals come back exactly as they were.
+        self.env = caller_locals;
         self.depth -= 1;
         result
+    }
+
+    /// Evaluate a function-body expression in TAIL position: a tail call to an
+    /// unshadowed top-level `fn` returns as [`TailFlow::Call`] for
+    /// `call_function`'s trampoline instead of recursing. Tail positions mirror
+    /// the VM peephole exactly — the body itself, `if` branches, `let` bodies,
+    /// and `match` arm bodies (a `try` body is NOT tail: its result must be
+    /// wrapped in this frame; guards, conditions, bindings, and arguments are
+    /// operands, not results). Every non-tail shape defers to [`Self::eval`],
+    /// so semantics stay in one place.
+    fn eval_tail(&mut self, e: &Expr) -> Result<TailFlow, HelixError> {
+        match e {
+            Expr::If { cond, then_branch, else_branch, line, col } => {
+                // Condition handling mirrors `eval`'s `If` arm byte-for-byte.
+                let c = self.eval(cond)?;
+                if matches!(c, Value::Missing) {
+                    return Err(HelixError::new(
+                        "`if` condition is `missing` — cannot choose a branch",
+                        *line,
+                        *col,
+                    )
+                    .hint("handle the missing case first, e.g. `if x.is_missing() then ... else ...`."));
+                }
+                let taken = as_bool(&c, *line, *col).map_err(|e| {
+                    e.hint("an `if` condition must be a boolean, e.g. `if x > 0 then ... else ...`.")
+                })?;
+                if taken {
+                    self.eval_tail(then_branch)
+                } else {
+                    self.eval_tail(else_branch)
+                }
+            }
+            Expr::Let { bindings, body } => {
+                // Mirrors `eval`'s `Let` arm; only the body is tail.
+                let mut saved: Vec<(String, Option<Binding>)> = Vec::with_capacity(bindings.len());
+                let mut bind_err: Option<HelixError> = None;
+                for (name, expr) in bindings {
+                    match self.eval(expr) {
+                        Ok(v) => {
+                            let prev = self.env.insert(
+                                name.clone(),
+                                Binding { value: v, mutable: false },
+                            );
+                            saved.push((name.clone(), prev));
+                        }
+                        Err(e) => {
+                            bind_err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                let result = match bind_err {
+                    Some(e) => Err(e),
+                    None => self.eval_tail(body),
+                };
+                for (name, prev) in saved.into_iter().rev() {
+                    match prev {
+                        Some(b) => {
+                            self.env.insert(name, b);
+                        }
+                        None => {
+                            self.env.remove(&name);
+                        }
+                    }
+                }
+                result
+            }
+            Expr::Match { scrutinee, arms, line, col } => {
+                // Mirrors `eval`'s `Match` arm; only the arm BODY is tail (the
+                // scrutinee and guards are operands).
+                let v = self.eval(scrutinee)?;
+                for arm in arms {
+                    if let Some(binds) = pattern_match(&arm.pattern, &v) {
+                        let mut saved: Vec<(String, Option<Binding>)> =
+                            Vec::with_capacity(binds.len());
+                        for (name, val) in binds {
+                            let prev = self.env.insert(
+                                name.clone(),
+                                Binding { value: val, mutable: false },
+                            );
+                            saved.push((name, prev));
+                        }
+                        let outcome: Option<Result<TailFlow, HelixError>> = match &arm.guard {
+                            None => Some(self.eval_tail(&arm.body)),
+                            Some(g) => match self.eval(g).and_then(|gv| guard_bool(&gv, *line, *col)) {
+                                Ok(true) => Some(self.eval_tail(&arm.body)),
+                                Ok(false) => None,
+                                Err(e) => Some(Err(e)),
+                            },
+                        };
+                        for (name, prev) in saved.into_iter().rev() {
+                            match prev {
+                                Some(b) => {
+                                    self.env.insert(name, b);
+                                }
+                                None => {
+                                    self.env.remove(&name);
+                                }
+                            }
+                        }
+                        if let Some(r) = outcome {
+                            return r;
+                        }
+                    }
+                }
+                Err(HelixError::new("no `match` arm matched the value", *line, *col)
+                    .hint("add a `_ => ...` arm to handle any remaining case."))
+            }
+            Expr::Call { name, args, line, col } => {
+                // A tail call is frame-reused only for an unshadowed top-level
+                // `fn` CALLED BY ITS DECLARED NAME — exactly the shape the VM
+                // peephole rewrites to `TailCallFn`. A shadowing frame local, a
+                // mutable global, an ALIAS (`h = id` — same value, but the VM's
+                // `resolve` prefers globals and dispatches `h(..)` via
+                // `CallValue`, never peepholed), and `CallValue` itself all
+                // recurse here too. The lookup is pure (bindings cannot change
+                // during an expression), so checking it before argument
+                // evaluation is unobservable and lets the non-tail path defer
+                // to `eval` without double-evaluating arguments.
+                let target = if self.env.contains_key(name) {
+                    None
+                } else {
+                    match self.globals.get(name) {
+                        Some(b) if !b.mutable => match &b.value {
+                            Value::Function(g) => match &g.decl_name {
+                                Some(d) if d.as_ref() == name.as_str() => {
+                                    Some((g.clone(), d.clone()))
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                };
+                match target {
+                    Some((g, decl)) => {
+                        let mut vals = Vec::with_capacity(args.len());
+                        for a in args {
+                            vals.push(self.eval(a)?);
+                        }
+                        Ok(TailFlow::Call {
+                            name: decl,
+                            func: g,
+                            args: vals,
+                            line: *line,
+                            col: *col,
+                        })
+                    }
+                    None => Ok(TailFlow::Value(self.eval(e)?)),
+                }
+            }
+            _ => Ok(TailFlow::Value(self.eval(e)?)),
+        }
     }
 
     /// Unary negation / logical-not. `pub(crate)` so the bytecode VM can reuse

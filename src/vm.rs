@@ -92,7 +92,7 @@ fn binary(op: &BinOp, a: Value, b: Value, line: usize, col: usize) -> Result<Val
 /// Heap-frame recursion guard. Far higher than the tree-walker's stack-bound
 /// limit (frames are small heap allocations), yet still catches infinite
 /// recursion long before it can exhaust memory.
-const VM_MAX_DEPTH: usize = 1_000_000;
+const VM_MAX_DEPTH: usize = crate::interp::MAX_CALL_DEPTH;
 
 /// Upper bound on the memoization table, so a pathological program can't grow it
 /// without limit; beyond this we simply stop caching (results stay correct, just
@@ -520,7 +520,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             col,
                         ));
                     }
-                    if frames.len() >= VM_MAX_DEPTH {
+                    if frames.len() > VM_MAX_DEPTH {
                         return Err(HelixError::new(
                             format!("maximum recursion depth ({}) exceeded", VM_MAX_DEPTH),
                             line,
@@ -628,7 +628,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         col,
                     ));
                 }
-                if frames.len() >= VM_MAX_DEPTH {
+                if frames.len() > VM_MAX_DEPTH {
                     return Err(HelixError::new(
                         format!("maximum recursion depth ({}) exceeded", VM_MAX_DEPTH),
                         line,
@@ -811,7 +811,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         col,
                     ));
                 }
-                if frames.len() >= VM_MAX_DEPTH {
+                if frames.len() > VM_MAX_DEPTH {
                     return Err(HelixError::new(
                         format!("maximum recursion depth ({}) exceeded", VM_MAX_DEPTH),
                         line,

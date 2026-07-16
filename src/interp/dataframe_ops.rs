@@ -169,8 +169,10 @@ impl super::Interp {
     ) -> Result<Value, HelixError> {
         match name {
             "where" | "filter" | "select" | "sort" | "group" | "with" => {
-                let env = &self.env;
-                let resolve = |n: &str| env.get(n).map(|b| b.value.clone());
+                // A bare name in a predicate resolves like any other name:
+                // frame locals first, then globals (`df.where(@a > threshold)`
+                // with a top-level `threshold`).
+                let resolve = |n: &str| self.lookup(n).map(|b| b.value.clone());
                 df_column_verb(&lf, name, args, &resolve, line, col)
             }
             "join" => {

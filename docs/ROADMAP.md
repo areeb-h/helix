@@ -527,8 +527,32 @@ motivates this phase.
       (interp/tests.rs) now run on a 2 GiB thread, matching production's
       `run_on_big_stack`; `cargo test --bin helix` passes 342/342 with no env-var
       workaround.
-- [ ] Iterative/trampolined evaluation to remove the native-stack recursion limit
-      entirely (only if needed).
+- [x] **Recursion parity across engines** (2026-07-16/17, #81) — one shared
+      `MAX_CALL_DEPTH = 20_000` (the VM's old 1M heap-frame budget made
+      `s(50000)` print on the VM and error on the walker; off-by-one from the
+      `<main>` frame corrected so both trip at the same activation), and the
+      walker gained **tail-call optimization** (a trampoline in
+      `call_function` + `eval_tail`) for exactly the shapes the VM's
+      `CallFn`→`TailCallFn` peephole optimizes — keyed on the callee's
+      *declared* name, so immutable-global aliases dispatch dynamically on
+      both engines. Deep tail recursion is constant-depth everywhere;
+      non-tail recursion errors identically at 20k; an infinite tail
+      recursion spins (`while true` semantics) everywhere.
+- [x] **Walker lexical scoping — the flat-env dynamic-scope divergence**
+      (2026-07-17, found by #81's adversarial review) — the walker's single
+      flat env let a CALLEE resolve free names to its CALLER's params/lets
+      (`x = 10; fn callee() = x; fn caller(x) = callee() + 0` → walker 42,
+      VM 10 — dynamic scoping, wrong values on legal programs). Locals now
+      live in a per-frame map swapped wholesale at each call boundary
+      (`mem::take`, cheaper than the old per-name save/restore); globals in
+      their own map; resolution is locals-then-globals, the VM's
+      local→upvalue→`LoadGlobal` order. Also fixed on the way: `let`
+      initializer errors leaking installed bindings past `try`, and
+      rebinding a `fn`-declared name (now an error on both engines — the
+      VM binds `CallFn` targets at compile time and could never honor it).
+- [ ] Iterative/trampolined evaluation of *non-tail* recursion to remove the
+      native-stack depth limit entirely (only if needed — the shared 20k budget
+      is the language contract now).
 
 ### Future work — correctness backlog
 - [x] **Extend the differential fuzzer's literal pool** (2026-07-10) — `gen_expr`'s

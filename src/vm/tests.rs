@@ -410,11 +410,12 @@
         })
     }
 
-    /// True iff the tree-walker rejects `src` specifically by exhausting its native
-    /// call stack (the 20k `MAX_CALL_DEPTH` guard). The VM keeps call frames on the
-    /// heap and accepts far deeper recursion, so a program recursing in (20k, 1M]
-    /// succeeds on the VM and is rejected here — a by-design engine difference (B2),
-    /// not a parity violation.
+    /// True iff the tree-walker rejects `src` specifically by exhausting the
+    /// shared `MAX_CALL_DEPTH` guard. Since #81 aligned the engines (one shared
+    /// depth constant + walker TCO), the VM exhausts at the same depth with the
+    /// identical message, so the fuzzer arms guarded by this are believed
+    /// unreachable — kept as a defensive escape hatch that names the failure
+    /// class precisely if a depth-related asymmetry ever reappears.
     fn tw_hit_recursion_limit(src: &str) -> bool {
         let Ok(toks) = lexer::lex(src) else { return false };
         let Ok(ast) = parser::parse(toks) else { return false };
@@ -1068,11 +1069,9 @@
                 (Ok(a), Ok(b)) => assert_eq!(a, b, "VALUE divergence on `{src}`"),
                 // both reject → fine (we don't require identical messages)
                 (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
-                // The one accepted asymmetry (B2): the VM keeps frames on the heap
-                // (1M-deep) while the tree-walker recurses on the native stack (20k),
-                // so recursion in (20k, 1M] is VM-ok / tree-walker-rejected — by design.
-                // gen_expr bounds depth well under 20k, so this is a defensive guard;
-                // see `recursion_depth_is_a_by_design_engine_difference`.
+                // Depths are aligned since #81 (shared constant + walker TCO), so
+                // this arm should be unreachable — a named defensive guard; see
+                // `recursion_depth_is_aligned_across_engines`.
                 (Ok(_), Err(_)) if tw_hit_recursion_limit(&src) => {}
                 // one accepts, the other rejects → a real divergence
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vm={v:?} tw={t:?}"),
@@ -1101,9 +1100,7 @@
                     ok += 1;
                 }
                 (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
-                // The one accepted asymmetry (B2): VM frames are heap-deep (1M), the
-                // tree-walker recurses on the native stack (20k). gen_expr stays well under,
-                // so this is a defensive guard, identical to the no-JIT fuzzer above.
+                // Aligned since #81 — defensive guard, identical to the no-JIT fuzzer above.
                 (Ok(_), Err(_)) if tw_hit_recursion_limit(&src) => {}
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
@@ -2972,35 +2969,49 @@
         assert_parity("fn cd(n, acc = 0) = if n <= 0 then acc else cd(n - 1, acc + n)\ncd(5)");
     }
 
-    /// The tree-walker recurses on the native stack (the 20k `MAX_CALL_DEPTH` guard)
-    /// while the VM keeps frames on the heap (1M-deep), so a function recursing in that
-    /// gap succeeds on the VM and is rejected by the tree-walker. This is a documented,
-    /// by-design engine difference — NOT a parity violation — and the differential
-    /// oracle treats it as agreement (B2). Pinned here in both shapes.
+    /// Recursion behavior is ALIGNED across engines (#81, 2026-07): a tail call
+    /// to a top-level `fn` reuses the frame on every engine (the walker's
+    /// `call_function` trampoline, the VM's `TailCallFn`, the JIT's native
+    /// loops), so deep TAIL recursion succeeds everywhere at constant depth;
+    /// NON-tail recursion counts against the one shared `MAX_CALL_DEPTH` and
+    /// errors with the identical message everywhere. The old (20k, 1M]
+    /// walker/VM gap — one engine printing where the other errored — is gone.
     #[test]
-    fn recursion_depth_is_a_by_design_engine_difference() {
+    fn recursion_depth_is_aligned_across_engines() {
+        // TAIL: 50k-deep succeeds on both engines (frame reuse, constant depth).
         let deep = "fn deep(n) = if n <= 0 then 0 else deep(n - 1)\n";
         let plain = format!("{deep}deep(50000)");
-        let caught = format!("{deep}r = try deep(50000)\nr.ok");
+        assert_eq!(run_vm(&plain), Ok("0".to_string()));
+        assert_eq!(run_tw(&plain), Ok("0".to_string()));
 
-        // The VM keeps frames on the heap, so 50k deep is fine on this small test stack.
-        // Uncaught it returns a value; caught by `try` it caught nothing (ok: true).
-        assert!(run_vm(&plain).is_ok(), "VM should recurse 50k deep on the heap");
-        assert_eq!(run_vm(&caught), Ok("true".to_string()));
+        // NON-tail: both exhaust the shared depth with the identical error,
+        // and `try` observes it identically.
+        let nontail = "fn s(n) = if n == 0 then 0 else n + s(n - 1)\n";
+        let plain_nt = format!("{nontail}s(50000)");
+        let tw = run_tw(&plain_nt).unwrap_err();
+        let vm = run_vm(&plain_nt).unwrap_err();
+        assert_eq!(tw, vm, "depth-exhaustion error text must match");
+        assert!(tw.contains("maximum recursion depth (20000) exceeded"), "got: {tw}");
+        let caught = format!("{nontail}r = try s(50000)\nr.ok");
+        assert_eq!(run_vm(&caught), Ok("false".to_string()));
+        assert_eq!(run_tw(&caught), Ok("false".to_string()));
 
-        // The tree-walker recurses on the NATIVE stack, so reaching its 20k guard needs
-        // the 2 GiB stack the real binary gives it (a test thread is only ~2 MiB).
-        // Uncaught it rejects on recursion depth; caught by `try` the record is ok: false.
-        std::thread::Builder::new()
-            .stack_size(2 << 30)
-            .spawn(move || {
-                assert!(run_tw(&plain).is_err(), "tree-walker should hit its native-stack limit");
-                assert!(tw_hit_recursion_limit(&plain), "rejected specifically on recursion depth");
-                assert_eq!(run_tw(&caught), Ok("false".to_string()));
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+        // In-budget non-tail recursion still returns identical values.
+        let ok_nt = format!("{nontail}s(1000)");
+        assert_eq!(run_vm(&ok_nt), Ok("500500".to_string()));
+        assert_eq!(run_tw(&ok_nt), Ok("500500".to_string()));
+
+        // The walker's trampoline also frame-reuses tails through `let` and
+        // `match` bodies, and a tail call to a DIFFERENT top-level fn.
+        for src in [
+            "fn g2(n, a) = let m = n - 1 in if n == 0 then a else g2(m, a + 1)\ng2(100000, 0)",
+            "fn g3(n) = match n { 0 => 7, _ => g3(n - 1) }\ng3(100000)",
+            "fn base(n) = n + 1\nfn g4(n) = if n == 0 then base(0) else g4(n - 1)\ng4(100000)",
+        ] {
+            let vm = run_vm(src);
+            assert_eq!(vm, run_tw(src), "engines disagree on `{src}`");
+            assert!(vm.is_ok(), "`{src}` should succeed: {vm:?}");
+        }
     }
 
     /// The VM keeps its call stack on the heap, so recursion far deeper than the
@@ -3151,4 +3162,62 @@
         let fall = "match 0 { x if x > 1 => 10, _ => 20 }";
         assert_eq!(run_vm(fall).unwrap(), "20");
         assert_eq!(run_tw(fall).unwrap(), "20");
+    }
+
+    /// #81 round 2 (adversarial review): lexical scoping, boundary parity, and
+    /// fn-name rebinding. The walker's call boundary now swaps its locals map
+    /// wholesale, so a callee resolves free names against ITS OWN frame and
+    /// then globals — never the caller's locals (the flat shared env used to
+    /// give callees DYNAMIC scoping, a verified walker/VM divergence).
+    #[test]
+    fn walker_scoping_matches_vm_lexically() {
+        // A callee reading a global is immune to the caller's shadowing
+        // param/let (walker used to print 42/99 here where the VM prints 10).
+        for src in [
+            "x = 10\nfn callee() = x\nfn caller(x) = callee() + 0\ncaller(42)",
+            "x = 10\nfn callee() = x\nfn caller(n) = let x = 99 in callee() + n\ncaller(0)",
+        ] {
+            assert_eq!(run_vm(src), Ok("10".to_string()), "vm on `{src}`");
+            assert_eq!(run_tw(src), Ok("10".to_string()), "tw on `{src}`");
+        }
+        // A failing `let` initializer restores already-installed bindings — in
+        // value position too (the leak survived `try` and clobbered a global).
+        let leak = "marker = 1\nidx = 5\n\
+fn valpos() = (let marker = 99, boom = [1, 2][idx] in 0) + 0\n\
+b = try valpos()\nmarker";
+        assert_eq!(run_vm(leak), Ok("1".to_string()));
+        assert_eq!(run_tw(leak), Ok("1".to_string()));
+        // The depth budget trips at the SAME activation on both engines (the
+        // VM's frames vec includes `<main>`, which must not eat a user frame).
+        let down = "fn down(n) = if n == 0 then 0 else 1 + down(n - 1)\n";
+        for (n, ok) in [(19999, true), (20000, false)] {
+            let src = format!("{down}down({n})");
+            let vm = run_vm(&src);
+            assert_eq!(vm, run_tw(&src), "boundary disagreement at {n}");
+            assert_eq!(vm.is_ok(), ok, "unexpected outcome at {n}: {vm:?}");
+        }
+        // TCO fires even when the CALLER shadows the callee's name with a
+        // param (two-map env: the callee's self-call resolves the global fn,
+        // not the caller's local — the walker used to depth-error here).
+        let dyn_shadow = "fn g(n) = if n == 0 then 0 else g(n - 1)\n\
+fn caller(g2, n) = g2(n)\ncaller(g, 30000)";
+        assert_eq!(run_vm(dyn_shadow), Ok("0".to_string()));
+        assert_eq!(run_tw(dyn_shadow), Ok("0".to_string()));
+        // An immutable-global ALIAS of a fn is frame-reused on NEITHER engine
+        // (the VM's `resolve` prefers globals → CallValue, never peepholed;
+        // the walker's gate keys on the DECLARED name). One frame each — this
+        // sits exactly at the budget and must agree.
+        let alias = "fn id(x) = x\nh = id\n\
+fn probe(d) = if d == 0 then h(42) else 0 + probe(d - 1)\nprobe(19998)";
+        let vm = run_vm(alias);
+        assert_eq!(vm, run_tw(alias), "alias-call disagreement");
+        assert_eq!(vm, Ok("42".to_string()));
+        // Rebinding a `fn`-declared name is an error on both engines, `mut` or
+        // plain: the VM binds CallFn targets at compile time, so a late
+        // rebinding could never be honored there.
+        for src in ["fn f(x) = x\nf = 5\n1", "fn f(x) = x\nmut f = 5\n1"] {
+            let tw = run_tw(src).unwrap_err();
+            assert_eq!(tw, run_vm(src).unwrap_err(), "rebind error mismatch on `{src}`");
+            assert!(tw.contains("immutable and cannot be reassigned"), "got: {tw}");
+        }
     }

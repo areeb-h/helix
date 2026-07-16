@@ -618,6 +618,31 @@ impl Compiler {
                         );
                     }
                 } else {
+                    // A name declared by a top-level `fn` (and not owned by a
+                    // mutable global) cannot be (re)assigned — `mut` or plain:
+                    // compiled `CallFn` targets bind at compile time, so a late
+                    // rebinding could never be honored here; the walker's env
+                    // rejects it with this same error. Without this, the
+                    // assignment silently created a global that shadowed the fn
+                    // in `resolve` while previously compiled calls kept hitting
+                    // the original — an engine divergence.
+                    if self.func_names.iter().any(|f| f == name) {
+                        b.emit(
+                            Op::raise(
+                                std::rc::Rc::new(format!(
+                                    "`{}` is immutable and cannot be reassigned",
+                                    name
+                                )),
+                                std::rc::Rc::new(format!(
+                                    "declare it as mutable up front with `mut {} = ...` if it needs to change.",
+                                    name
+                                )),
+                            ),
+                            *line,
+                            *col,
+                        );
+                        return Ok(());
+                    }
                     let i = self.globals.len() as u32;
                     self.globals.push(name.clone());
                     self.global_mut.push(*mutable);
@@ -672,6 +697,30 @@ impl Compiler {
             }
             Stmt::Destructure { names, mutable, value, line, col, .. } => {
                 self.compile_expr(b, value)?;
+                // Same fn-declaration rule as `Assign`: a destructure target that
+                // names a top-level `fn` (not owned by a mutable global) rejects,
+                // `mut` or plain — see the Assign arm for why.
+                for name in names {
+                    if !self.globals.iter().any(|g| g == name)
+                        && self.func_names.iter().any(|f| f == name)
+                    {
+                        b.emit(
+                            Op::raise(
+                                std::rc::Rc::new(format!(
+                                    "`{}` is immutable and cannot be reassigned",
+                                    name
+                                )),
+                                std::rc::Rc::new(format!(
+                                    "declare it as mutable up front with `mut {} = ...` if it needs to change.",
+                                    name
+                                )),
+                            ),
+                            *line,
+                            *col,
+                        );
+                        return Ok(());
+                    }
+                }
                 // Same mutability rule as `Assign`: `mut a, b = …` (re)declares each
                 // as mutable; a plain destructure reassigning an *immutable* global
                 // is an error. (The tree-walker checks arity first, then mutability;

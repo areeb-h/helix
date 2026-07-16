@@ -344,6 +344,15 @@ pub struct FuncVal {
     /// free names are globals resolved at call time. Installed under the parameters
     /// when the function is applied, so a returned/stored closure still sees them.
     pub captured: Rc<Vec<(String, Value)>>,
+    /// The name this was DECLARED under by a top-level `fn` statement (`None`
+    /// for a `=>` lambda). Drives the walker's tail-call optimization: a tail
+    /// call is frame-reused only when it targets an unshadowed top-level `fn`
+    /// **called by its declared name** — the exact shape the VM's
+    /// `CallFn`→`TailCallFn` peephole optimizes. The name (not a bool) matters
+    /// because an immutable-global ALIAS (`h = id`) shares this value, and the
+    /// VM dispatches `h(..)` dynamically (`resolve` prefers globals), never
+    /// frame-reusing it — the walker must refuse the same call.
+    pub decl_name: Option<std::rc::Rc<str>>,
 }
 
 /// The payload of a [`Value::Closure`] — a compiled-chunk index plus the values it

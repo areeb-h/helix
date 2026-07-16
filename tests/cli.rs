@@ -288,7 +288,7 @@ fn http_server_serves_a_request() {
     let src = dir.join("helix_serve.helix");
     std::fs::write(
         &src,
-        "conn = listen(8231).accept()\n\
+        "conn = listen(18231).accept()\n\
          conn.respond({ status: 200, json: { ok: true, echo: conn.request().path } })\n",
     )
     .unwrap();
@@ -303,13 +303,13 @@ fn http_server_serves_a_request() {
     // Wait for the listener to come up (retry the connect for ~2.5s).
     let mut stream = None;
     for _ in 0..50 {
-        if let Ok(s) = TcpStream::connect("127.0.0.1:8231") {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:18231") {
             stream = Some(s);
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let mut stream = stream.expect("server never started listening on 8231");
+    let mut stream = stream.expect("server never started listening on 18231");
     stream.write_all(b"GET /ping HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
     let mut resp = String::new();
@@ -352,7 +352,7 @@ fn event_loop_server_serves_keepalive() {
            })\n\
            evloop(l, active)\n\
          }\n\
-         evloop(listen(8233), [])\n",
+         evloop(listen(18233), [])\n",
     )
     .unwrap();
 
@@ -365,13 +365,13 @@ fn event_loop_server_serves_keepalive() {
 
     let mut stream = None;
     for _ in 0..50 {
-        if let Ok(s) = TcpStream::connect("127.0.0.1:8233") {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:18233") {
             stream = Some(s);
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let mut stream = stream.expect("event-loop server never started listening on 8233");
+    let mut stream = stream.expect("event-loop server never started listening on 18233");
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
     // Read one full HTTP response: headers, then Content-Length body bytes. A single
@@ -433,7 +433,7 @@ fn http_server_sends_custom_headers_and_redirects() {
     let src = dir.join("helix_serve_hdr.helix");
     std::fs::write(
         &src,
-        "conn = listen(8235).accept()\n\
+        "conn = listen(18235).accept()\n\
          conn.respond({ status: 302, headers: { Location: \"/new\" } })\n",
     )
     .unwrap();
@@ -446,7 +446,7 @@ fn http_server_sends_custom_headers_and_redirects() {
 
     let mut stream = None;
     for _ in 0..50 {
-        if let Ok(s) = TcpStream::connect("127.0.0.1:8235") {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:18235") {
             stream = Some(s);
             break;
         }
@@ -479,7 +479,7 @@ fn http_server_streams_sse_events() {
         &src,
         // `send` JSON-encodes a record, so we avoid a literal `{` inside a Helix string
         // (which would be parsed as an interpolation hole).
-        "conn = listen(8236).accept()\n\
+        "conn = listen(18236).accept()\n\
          conn.sse()\n\
          a = conn.send({ n: 1 })\n\
          b = conn.send(\"tick\")\n\
@@ -495,7 +495,7 @@ fn http_server_streams_sse_events() {
 
     let mut stream = None;
     for _ in 0..50 {
-        if let Ok(s) = TcpStream::connect("127.0.0.1:8236") {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:18236") {
             stream = Some(s);
             break;
         }
@@ -532,7 +532,7 @@ fn http_server_shards_across_workers() {
          \x20 c.respond({ status: 200, text: \"sharded\" })\n\
          \x20 srv(l)\n\
          }\n\
-         srv(listen(8238, 2))\n",
+         srv(listen(18238, 2))\n",
     )
     .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
@@ -544,7 +544,7 @@ fn http_server_shards_across_workers() {
 
     let mut stream = None;
     for _ in 0..60 {
-        if let Ok(s) = TcpStream::connect("127.0.0.1:8238") {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:18238") {
             stream = Some(s);
             break;
         }
@@ -588,7 +588,7 @@ fn http_server_poll_serves_cooperatively() {
          \x20   0\n\
          \x20 }\n\
          }\n\
-         tick(listen(8237))\n",
+         tick(listen(18237))\n",
     )
     .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
@@ -600,7 +600,7 @@ fn http_server_poll_serves_cooperatively() {
 
     let mut stream = None;
     for _ in 0..50 {
-        if let Ok(s) = TcpStream::connect("127.0.0.1:8237") {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:18237") {
             stream = Some(s);
             break;
         }
@@ -631,7 +631,7 @@ fn http_server_survives_a_client_disconnect() {
     let src = dir.join("helix_serve_robust.helix");
     std::fs::write(
         &src,
-        "fn srv(l) = do {\n  c = l.accept()\n  c.respond({ status: 200, text: \"alive\" })\n  srv(l)\n}\nsrv(listen(8232))\n",
+        "fn srv(l) = do {\n  c = l.accept()\n  c.respond({ status: 200, text: \"alive\" })\n  srv(l)\n}\nsrv(listen(18232))\n",
     )
     .unwrap();
 
@@ -644,7 +644,7 @@ fn http_server_survives_a_client_disconnect() {
 
     let connect = || -> Option<TcpStream> {
         for _ in 0..50 {
-            if let Ok(s) = TcpStream::connect("127.0.0.1:8232") {
+            if let Ok(s) = TcpStream::connect("127.0.0.1:18232") {
                 return Some(s);
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -2204,7 +2204,7 @@ fn http_post_round_trips_to_a_helix_server() {
     let srv = dir.join("helix_post_srv.helix");
     std::fs::write(
         &srv,
-        "l = listen(8251)\n\
+        "l = listen(18251)\n\
          served = range(0, 100).map(i => do {\n\
            c = l.accept()\n\
            r = c.request()\n\
@@ -2223,7 +2223,7 @@ fn http_post_round_trips_to_a_helix_server() {
     let cli = dir.join("helix_post_cli.helix");
     std::fs::write(
         &cli,
-        "r = http_post(\"http://127.0.0.1:8251/\", \"hello-post\")\nprint(r.status)\nprint(r.body)\n",
+        "r = http_post(\"http://127.0.0.1:18251/\", \"hello-post\")\nprint(r.status)\nprint(r.body)\n",
     )
     .unwrap();
 
@@ -2258,7 +2258,7 @@ fn http_request_general_method_headers_and_response_headers() {
     let srv = dir.join("helix_req_srv.helix");
     std::fs::write(
         &srv,
-        "l = listen(8252)\n\
+        "l = listen(18252)\n\
          served = range(0, 100).map(i => do {\n\
            c = l.accept()\n\
            r = c.request()\n\
@@ -2278,7 +2278,7 @@ fn http_request_general_method_headers_and_response_headers() {
     let cli = dir.join("helix_req_cli.helix");
     std::fs::write(
         &cli,
-        "resp = http_request({ method: \"PUT\", url: \"http://127.0.0.1:8252/\", body: \"req-body\", headers: [[\"X-Test\", \"hi\"]] })\n\
+        "resp = http_request({ method: \"PUT\", url: \"http://127.0.0.1:18252/\", body: \"req-body\", headers: [[\"X-Test\", \"hi\"]] })\n\
          print(resp.status)\n\
          print(resp.body)\n\
          print(resp.headers.count() > 0)\n",
@@ -2316,7 +2316,7 @@ fn http_stream_pulls_chunks_line_by_line() {
     let srv = dir.join("helix_stream_srv.helix");
     std::fs::write(
         &srv,
-        "l = listen(8255)\n\
+        "l = listen(18255)\n\
          served = range(0, 100).map(i => do {\n\
            c = l.accept()\n\
            x = c.request()\n\
@@ -2336,7 +2336,7 @@ fn http_stream_pulls_chunks_line_by_line() {
     let cli = dir.join("helix_stream_cli.helix");
     std::fs::write(
         &cli,
-        "s = http_stream({ method: \"GET\", url: \"http://127.0.0.1:8255/\" })\n\
+        "s = http_stream({ method: \"GET\", url: \"http://127.0.0.1:18255/\" })\n\
          print(s.status())\n\
          print(s.next())\n\
          print(s.next())\n\
@@ -2379,7 +2379,7 @@ fn http_stream_close_cancels_early() {
     let srv = dir.join("helix_stream_close_srv.helix");
     std::fs::write(
         &srv,
-        "l = listen(8256)\n\
+        "l = listen(18256)\n\
          served = range(0, 100).map(i => do {\n\
            c = l.accept()\n\
            x = c.request()\n\
@@ -2398,7 +2398,7 @@ fn http_stream_close_cancels_early() {
     let cli = dir.join("helix_stream_close_cli.helix");
     std::fs::write(
         &cli,
-        "s = http_stream({ method: \"GET\", url: \"http://127.0.0.1:8256/\" })\n\
+        "s = http_stream({ method: \"GET\", url: \"http://127.0.0.1:18256/\" })\n\
          print(s.status())\n\
          print(s.next())\n\
          print(s.close().is_missing())\n\

@@ -156,9 +156,9 @@ impl super::Interp {
                 let saved_a = self.env.remove(pa);
                 let saved_b = self.env.remove(pb);
                 self.env
-                    .insert(pa.to_string(), Binding { value: Value::Unit, mutable: false, global: false });
+                    .insert(pa.to_string(), Binding { value: Value::Unit, mutable: false });
                 self.env
-                    .insert(pb.to_string(), Binding { value: Value::Unit, mutable: false, global: false });
+                    .insert(pb.to_string(), Binding { value: Value::Unit, mutable: false });
                 // `reduce` returns the final accumulator; `scan` returns the array of every
                 // intermediate accumulator (one per element — a generalized `cumsum`).
                 let want_scan = name == "scan";
@@ -236,7 +236,7 @@ impl super::Interp {
         let saved: Vec<Option<Binding>> = names.iter().map(|n| self.env.remove(n)).collect();
         for n in names.iter() {
             self.env
-                .insert(n.to_string(), Binding { value: Value::Unit, mutable: false, global: false });
+                .insert(n.to_string(), Binding { value: Value::Unit, mutable: false });
         }
         let mut outcome: Result<Option<Value>, HelixError> = Ok(None);
         for el in items.to_values().iter() {

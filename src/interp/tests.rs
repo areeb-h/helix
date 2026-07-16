@@ -279,8 +279,13 @@
                 )
                 .unwrap();
                 assert!(matches!(n, Value::Int(112507500)));
-                // runaway recursion is caught as a clean error before any overflow
-                let err = last("fn boom(n) = boom(n + 1)\nboom(0)").unwrap_err();
+                // Runaway NON-TAIL recursion is caught as a clean error before any
+                // overflow (the `1 +` keeps the self-call non-tail: its result is
+                // consumed by the add, so frames pile up to the shared limit). A
+                // *tail* runaway like `boom(n) = boom(n + 1)` is constant-space
+                // under the walker's TCO — an intentional infinite loop (`while
+                // true`), matching the VM's TailCallFn and the JIT's native loops.
+                let err = last("fn boom(n) = 1 + boom(n + 1)\nboom(0)").unwrap_err();
                 assert!(err.message.contains("maximum recursion depth"));
             })
             .unwrap()
