@@ -485,11 +485,16 @@ fn missing_or_nan(items: &[Value]) -> bool {
 fn numeric_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
-        _ => a
-            .as_f64()
-            .unwrap_or(f64::NAN)
-            .partial_cmp(&b.as_f64().unwrap_or(f64::NAN))
-            .unwrap_or(std::cmp::Ordering::Equal),
+        // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)`: the old fallback made a
+        // `NaN` compare *Equal* to every other value, which is intransitive (`3 == NaN`,
+        // `NaN == 1`, yet `3 > 1`). Rust's sort detects such a non-total comparator and
+        // *panics* ("comparison function does not implement a total order"), aborting the
+        // interpreter on a valid array like `[1.0, sqrt(-1.0), 3.0].sort()`. `total_cmp`
+        // is a genuine total order that places `NaN` at a consistent extreme (after
+        // `+inf`, as numpy does), so `sort`/`argsort` are total and never abort. Reductions
+        // (`min`/`max`/`median`) filter `NaN` to `missing` before comparing, so they are
+        // unaffected; this only changes where a `NaN` lands in a *sorted* result.
+        _ => a.as_f64().unwrap_or(f64::NAN).total_cmp(&b.as_f64().unwrap_or(f64::NAN)),
     }
 }
 

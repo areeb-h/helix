@@ -143,7 +143,11 @@ pub(crate) fn eval_binary(
                 if *b == 0 {
                     Err(HelixError::new("modulo by zero", line, col))
                 } else {
-                    Ok(Value::Int(a.rem_euclid(*b)))
+                    // `wrapping_rem_euclid` (not `rem_euclid`) so `i64::MIN % -1`
+                    // yields 0 instead of aborting the process: plain `%`/`rem_euclid`
+                    // treat `MIN % -1` as an always-checked overflow and panic even in
+                    // release. Matches the `wrapping_*` policy the `arith` path uses.
+                    Ok(Value::Int(a.wrapping_rem_euclid(*b)))
                 }
             }
             _ => {
@@ -158,7 +162,12 @@ pub(crate) fn eval_binary(
                     Err(HelixError::new("integer division by zero", line, col)
                         .hint("guard the divisor, e.g. `if d != 0`."))
                 } else {
-                    Ok(Value::Int(a.div_euclid(*b)))
+                    // `wrapping_div_euclid` (not `div_euclid`) so `i64::MIN // -1`
+                    // wraps to `i64::MIN` instead of aborting the process: the true
+                    // quotient 2^63 is unrepresentable, and plain `/`/`div_euclid`
+                    // treat it as an always-checked overflow and panic even in release.
+                    // Wrapping matches the `arith` path's overflow policy.
+                    Ok(Value::Int(a.wrapping_div_euclid(*b)))
                 }
             }
             _ => {

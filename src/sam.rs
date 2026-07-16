@@ -210,19 +210,42 @@ fn render_sequence(seq: &sam::alignment::record_buf::Sequence) -> Option<String>
 }
 
 /// Render base qualities as the SAM Phred+33 ASCII string, or `None` when absent
-/// (SAM `*`). Scores are stored raw (0..=93), so each maps to a printable character.
+/// (SAM `*`). SAM Phred scores are `0..=93`, so each maps to a printable character
+/// `!`..`~`. A **BAM** stores scores as raw bytes and noodles does not range-check
+/// them, so a malformed/garbage file can carry any byte `0..=255`; the score is
+/// clamped to the valid `0..=93` before the `+ 33`, which keeps the sum in `u8`
+/// range (max `126`) instead of overflowing — `s + 33` for `s >= 223` would panic
+/// under overflow checks (and silently wrap in release), aborting on a bad file.
 fn render_quality(quality: &sam::alignment::record_buf::QualityScores) -> Option<String> {
     let scores = quality.as_ref();
     if scores.is_empty() {
         None
     } else {
-        Some(scores.iter().map(|&s| (s + 33) as char).collect())
+        Some(scores.iter().map(|&s| (s.min(93) + 33) as char).collect())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A malformed BAM can carry a raw quality byte outside SAM's `0..=93` range
+    /// (noodles does not range-check them). `render_quality` must clamp rather than
+    /// overflow `u8` on `s + 33` — a byte `>= 223` used to panic under overflow
+    /// checks (and wrap to a wrong char in release), aborting `read_bam` on a bad file.
+    #[test]
+    fn render_quality_clamps_out_of_range_bam_bytes() {
+        use sam::alignment::record_buf::QualityScores;
+        let q = QualityScores::from(vec![0u8, 30, 93, 200, 250, 255]);
+        let rendered = render_quality(&q).expect("non-empty quality string");
+        // Every rendered byte is printable ASCII `!`..`~`; the out-of-range bytes
+        // (200/250/255) clamp to the max score 93 → `~`.
+        assert!(
+            rendered.chars().all(|c| ('!'..='~').contains(&c)),
+            "non-printable char in {rendered:?}"
+        );
+        assert!(rendered.ends_with("~~~"), "200/250/255 must clamp to '~': {rendered:?}");
+    }
 
     /// Regenerate `examples/data/alignments.bam` (and its `.bai` index) from the text
     /// `alignments.sam` using noodles' BAM writer and the `bam::fs::index` helper (no

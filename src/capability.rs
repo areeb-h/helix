@@ -241,13 +241,16 @@ mod tests {
     #[test]
     fn every_effectful_builtin_is_categorised() {
         // Drift guard: every `pure: false` builtin is either capability-gated (fs/net
-        // authority) or in this known-harmless allowlist (output / time / randomness /
-        // assertions — effects, but not authority). A NEW effectful builtin that is neither
-        // fails here, forcing the capability decision at review time instead of silently
-        // shipping an ungated authority (ADR 0021).
+        // authority) or in this known-harmless allowlist (console I/O / time / randomness /
+        // assertions — effects, but not fs/net authority). A NEW effectful builtin that is
+        // neither fails here, forcing the capability decision at review time instead of
+        // silently shipping an ungated authority (ADR 0021). (`read_int` reads the process's
+        // own stdin — a console effect, not an fs/net authority — so it sits here alongside
+        // the output builtins; ctype's finer capability model additionally gates it on
+        // `CAP_GETKEY`, see ctype ADR 0011.)
         let harmless: &[&str] = &[
-            "print", "emit", "write", "elog", "sleep", "clock_monotonic", "aes_keygen",
-            "aes_encrypt", "ed25519_keygen", "assert", "assert_eq", "assert_close",
+            "print", "emit", "write", "elog", "read_int", "sleep", "clock_monotonic",
+            "aes_keygen", "aes_encrypt", "ed25519_keygen", "assert", "assert_eq", "assert_close",
         ];
         for b in crate::registry::BUILTINS {
             if b.pure || effect_of(b.path).gated() {

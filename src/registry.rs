@@ -38,6 +38,8 @@ pub fn category_of(name: &str) -> &'static str {
         "listen" | "http_get" | "http_post" | "http_request" | "http_stream" => "net",
         // Program output / streaming sinks.
         "print" | "emit" | "write" | "elog" => "output",
+        // Console input.
+        "read_int" => "input",
         // Time / pacing.
         "sleep" | "clock_monotonic" => "time",
         // Constructors — make a value of a given type.
@@ -154,6 +156,9 @@ pub static BUILTINS: &[BuiltinDef] = &[
     // Monotonic seconds (f64) since the process started — for in-language timing.
     // Impure: the value is non-deterministic, so never use it in a computed result.
     BuiltinDef { path: "clock_monotonic", pure: false },
+    // Read one integer from stdin (a line). Impure (non-deterministic input), so it
+    // never appears in a computed/memoized result.
+    BuiltinDef { path: "read_int", pure: false },
     BuiltinDef { path: "degrees", pure: true },
     BuiltinDef { path: "radians", pure: true },
     BuiltinDef { path: "hypot", pure: true },

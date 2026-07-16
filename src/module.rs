@@ -49,7 +49,13 @@ pub fn locate(spans: &[Span], line: usize) -> (&str, &str, usize) {
         .rev()
         .find(|s| s.start_line <= line)
         .unwrap_or(&spans[0]);
-    (&span.source, &span.filename, line - span.start_line + 1)
+    // Saturate: a position-free error can carry line 0 (e.g. a format-spec failure
+    // stamped before a source line is known). It matches no span, falls back to
+    // `spans[0]` (start_line 1), and a plain `line - start_line` would UNDERFLOW —
+    // a host panic under overflow checks, a garbage location in release. Report it at
+    // the first line rather than aborting.
+    let local = line.saturating_sub(span.start_line).saturating_add(1).max(1);
+    (&span.source, &span.filename, local)
 }
 
 /// The directories searched for a non-local import (`import std.stats`), in priority

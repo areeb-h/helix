@@ -15,6 +15,15 @@ use crate::value::Value;
 struct Binding {
     value: Value,
     mutable: bool,
+    /// Is this the *top-level* binding of the name (a global or seeded constant),
+    /// as opposed to a local (param, `let`, binder, or captured upvalue) that
+    /// shadows one? Drives lambda capture: a closure snapshots exactly the
+    /// non-global bindings — globals (mutable OR immutable) resolve live at call
+    /// time, matching the VM's local→upvalue→`LoadGlobal` resolution. Mutability
+    /// alone can't decide this: `mut x = …` legally re-declares an *immutable*
+    /// global, so an immutable-global snapshot would go stale where the VM reads
+    /// the new value.
+    global: bool,
 }
 
 /// Guards against runaway recursion with a graceful error well before the
@@ -57,15 +66,15 @@ impl Interp {
         // Math constants are predefined immutable bindings.
         env.insert(
             "pi".to_string(),
-            Binding { value: Value::Float(std::f64::consts::PI), mutable: false },
+            Binding { value: Value::Float(std::f64::consts::PI), mutable: false, global: true },
         );
         env.insert(
             "e".to_string(),
-            Binding { value: Value::Float(std::f64::consts::E), mutable: false },
+            Binding { value: Value::Float(std::f64::consts::E), mutable: false, global: true },
         );
         env.insert(
             "inf".to_string(),
-            Binding { value: Value::Float(f64::INFINITY), mutable: false },
+            Binding { value: Value::Float(f64::INFINITY), mutable: false, global: true },
         );
         // The `python` interop entry point — an opaque namespace handle. Always
         // present; without the `python` build feature its methods return a clean
@@ -75,6 +84,7 @@ impl Interp {
             Binding {
                 value: Value::PyObject(std::rc::Rc::new(crate::python::PyHandle::namespace())),
                 mutable: false,
+                global: true,
             },
         );
         let globals = env.keys().cloned().collect();
@@ -182,6 +192,7 @@ impl Interp {
                     Binding {
                         value: v,
                         mutable,
+                        global: self.depth == 0,
                     },
                 );
                 Ok(())
@@ -191,7 +202,7 @@ impl Interp {
                     // `mut x = ...` on an existing name re-declares it as mutable.
                     self.env.insert(
                         name.to_string(),
-                        Binding { value: v, mutable: true },
+                        Binding { value: v, mutable: true, global: self.depth == 0 },
                     );
                     Ok(())
                 } else if existing.mutable {
@@ -546,13 +557,24 @@ impl Interp {
                 eval_slice(&recv_v, s, e, st, *line, *col)
             }
             Expr::Lambda { params, body, .. } => {
-                // Capture the lambda's free, non-global variables by value — its
+                // Capture the lambda's free *local* variables by value — its
                 // lexical environment — so a returned or stored closure still sees
                 // them after the defining call has returned.
+                // Capture a free name iff its current binding is a LOCAL (a binder,
+                // param, `let`, or captured upvalue), including one that SHADOWS a
+                // same-named global — exactly the VM's local→upvalue→`LoadGlobal`
+                // resolution. The old `!globals.contains(n)` test was purely
+                // name-based, so a `map` binder `x` over a top-level `x` was wrongly
+                // skipped (the escaped closure read the restored global). An interim
+                // mutability test snapshotted *immutable* globals, which goes stale
+                // when `mut x = …` legally re-declares one; `Binding::global` records
+                // the actual resolution, so globals — mutable or not — read live.
                 let captured: Vec<(String, Value)> = crate::bytecode::free_names(params, body)
                     .into_iter()
-                    .filter(|n| !self.globals.contains(n))
-                    .filter_map(|n| self.env.get(&n).map(|b| (n.clone(), b.value.clone())))
+                    .filter_map(|n| match self.env.get(&n) {
+                        Some(b) if !b.global => Some((n.clone(), b.value.clone())),
+                        _ => None,
+                    })
                     .collect();
                 Ok(Value::Function(Rc::new(crate::value::FuncVal {
                     params: Rc::new(params.clone()),
@@ -568,7 +590,7 @@ impl Interp {
                     let v = self.eval(expr)?;
                     let prev = self
                         .env
-                        .insert(name.clone(), Binding { value: v, mutable: false });
+                        .insert(name.clone(), Binding { value: v, mutable: false, global: false });
                     saved.push((name.clone(), prev));
                 }
                 let result = self.eval(body);
@@ -624,7 +646,7 @@ impl Interp {
                         for (name, val) in binds {
                             let prev = self
                                 .env
-                                .insert(name.clone(), Binding { value: val, mutable: false });
+                                .insert(name.clone(), Binding { value: val, mutable: false, global: false });
                             saved.push((name, prev));
                         }
                         // `Some(result)` takes this arm; `None` means the guard failed,
@@ -708,13 +730,13 @@ impl Interp {
         for (n, v) in captured.iter() {
             let prev = self
                 .env
-                .insert(n.clone(), Binding { value: v.clone(), mutable: false });
+                .insert(n.clone(), Binding { value: v.clone(), mutable: false, global: false });
             saved.push((n.as_str(), prev));
         }
         for (p, a) in params.iter().zip(args) {
             let prev = self
                 .env
-                .insert(p.clone(), Binding { value: a, mutable: false });
+                .insert(p.clone(), Binding { value: a, mutable: false, global: false });
             saved.push((p.as_str(), prev));
         }
         let result = self.eval(body);

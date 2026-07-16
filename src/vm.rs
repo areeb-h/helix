@@ -48,10 +48,13 @@ fn binary(op: &BinOp, a: Value, b: Value, line: usize, col: usize) -> Result<Val
                 Eq => return Ok(Value::Bool(x == y)),
                 Ne => return Ok(Value::Bool(x != y)),
                 // Mod/Div with a nonzero divisor match `arith`/`eval_binary`
-                // exactly (Int `%` stays Int via rem_euclid; `/` is always Float);
-                // a zero divisor falls through to the error-raising full path.
-                Mod if y != 0 => return Ok(Value::Int(x.rem_euclid(y))),
-                FloorDiv if y != 0 => return Ok(Value::Int(x.div_euclid(y))),
+                // exactly (Int `%` stays Int; `/` is always Float); a zero divisor
+                // falls through to the error-raising full path. `wrapping_*_euclid`
+                // (not `*_euclid`) so `i64::MIN % -1` / `i64::MIN // -1` wrap (to 0 /
+                // i64::MIN) instead of the always-checked overflow panic — matching
+                // the tree-walker (ops.rs) so the differential oracle stays green.
+                Mod if y != 0 => return Ok(Value::Int(x.wrapping_rem_euclid(y))),
+                FloorDiv if y != 0 => return Ok(Value::Int(x.wrapping_div_euclid(y))),
                 Div if y != 0 => return Ok(Value::Float(x as f64 / y as f64)),
                 // Integer bitwise — identical to `bitwise()` in ops.rs. Shifts only
                 // shortcut for an in-range amount; an out-of-range shift falls to the

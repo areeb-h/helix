@@ -146,6 +146,17 @@ impl FormatSpec {
                 _ => Err(format!("cannot format a {} with an integer format spec", v.type_name())),
             }
         };
+        // Render a radix (x/X/b/o) sign-magnitude, like Python's format mini-language:
+        // a negative prints `-` then the magnitude, NOT Rust's raw 64-bit two's-
+        // complement (`format(-255,'x')` is `-ff`, not `ffffffffffffff01`).
+        // `unsigned_abs` yields the magnitude correctly even for `i64::MIN`.
+        let radix = |n: i64, f: &dyn Fn(u64) -> String| -> String {
+            if n < 0 {
+                format!("-{}", f(n.unsigned_abs()))
+            } else {
+                f(n as u64)
+            }
+        };
         match self.ty {
             Some('f') => Ok(format!("{:.*}", self.precision.unwrap_or(6), as_f(v)?)),
             Some('e') => Ok(format!("{:.*e}", self.precision.unwrap_or(6), as_f(v)?)),
@@ -155,15 +166,18 @@ impl FormatSpec {
             },
             Some('%') => Ok(format!("{:.*}%", self.precision.unwrap_or(2), as_f(v)? * 100.0)),
             Some('d') => Ok(format!("{}", as_i(v)?)),
-            Some('x') => Ok(format!("{:x}", as_i(v)?)),
-            Some('X') => Ok(format!("{:X}", as_i(v)?)),
-            Some('b') => Ok(format!("{:b}", as_i(v)?)),
-            Some('o') => Ok(format!("{:o}", as_i(v)?)),
+            Some('x') => Ok(radix(as_i(v)?, &|m| format!("{m:x}"))),
+            Some('X') => Ok(radix(as_i(v)?, &|m| format!("{m:X}"))),
+            Some('b') => Ok(radix(as_i(v)?, &|m| format!("{m:b}"))),
+            Some('o') => Ok(radix(as_i(v)?, &|m| format!("{m:o}"))),
             Some('s') | None => match (self.precision, v) {
                 // A bare precision on a number means fixed decimals, like `:.2f`.
                 (Some(p), Value::Int(_)) | (Some(p), Value::Float(_)) if self.ty.is_none() => {
                     Ok(format!("{:.*}", p, as_f(v)?))
                 }
+                // A precision on a string truncates it to that many characters
+                // (Python: `format("hello", ".3s")` is `"hel"`).
+                (Some(p), Value::Str(s)) => Ok(s.chars().take(p).collect()),
                 _ => crate::value::display_value(v, 0, 0).map_err(|e| e.message),
             },
             Some(other) => Err(format!("unknown format type `{other}`")),

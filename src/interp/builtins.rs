@@ -68,6 +68,21 @@ impl super::Interp {
                 let _ = err.flush();
                 Ok(Value::Unit)
             }
+            // `read_int()` — read one line from stdin and parse it as an integer. The
+            // console-input primitive (the companion to `print`/`emit`). Returns
+            // `missing` on end-of-input or a non-numeric line, so a program can detect
+            // "no more input" without crashing (ADR 0001). Non-deterministic, so it is
+            // outside the differential oracle.
+            "read_int" => {
+                arity(name, &args, 0, line, col)?;
+                use std::io::BufRead;
+                let mut buf = String::new();
+                match std::io::stdin().lock().read_line(&mut buf) {
+                    Ok(0) => Ok(Value::Missing), // EOF
+                    Ok(_) => Ok(buf.trim().parse::<i64>().map(Value::Int).unwrap_or(Value::Missing)),
+                    Err(_) => Ok(Value::Missing),
+                }
+            }
             // `sleep(ms)` — pause the program for `ms` milliseconds (wall clock). The
             // pacing primitive for a paced loop (`emit(frame)` then `sleep(16)` ≈ 60 fps);
             // pairs with `clock_monotonic()`. A non-deterministic effect, so (like `print`/
@@ -907,6 +922,16 @@ impl super::Interp {
                 let vals: Vec<f64> = match &args[0] {
                     Value::Array(items) => {
                         let vs = items.to_values();
+                        // Three-valued propagation (ADR 0001): a `missing` or `NaN`
+                        // element makes the arg-extreme undefined, so return `missing`
+                        // — matching sum/mean/min/max/median — instead of raising a
+                        // type error on `missing` or silently skipping a `NaN`.
+                        if vs
+                            .iter()
+                            .any(|v| matches!(v, Value::Missing) || matches!(v, Value::Float(f) if f.is_nan()))
+                        {
+                            return Ok(Value::Missing);
+                        }
                         let mut out = Vec::with_capacity(vs.len());
                         for v in vs.iter() {
                             out.push(
@@ -916,7 +941,12 @@ impl super::Interp {
                         }
                         out
                     }
-                    Value::Tensor(t) => t.iter().copied().collect(),
+                    Value::Tensor(t) => {
+                        if t.iter().any(|f| f.is_nan()) {
+                            return Ok(Value::Missing);
+                        }
+                        t.iter().copied().collect()
+                    }
                     other => {
                         return Err(type_err(name, "an array or tensor of numbers", other, line, col))
                     }
@@ -960,10 +990,20 @@ impl super::Interp {
                     return apply_round_fn("round", f64::round, &args[0], line, col);
                 }
                 let d = as_int(&args[1], "round", line, col)?;
-                let scale = 10f64.powi(d as i32);
+                // Clamp the digit count into f64's decimal-exponent span before the
+                // `as i32` narrowing. Without the clamp, a large `d` like `2^31` wraps
+                // to `i32::MIN`, so `10^d` underflows to 0 and every result is `0/0`
+                // = NaN. Beyond ~10^±308 the scale is inf/0 anyway, so nothing is lost.
+                let scale = 10f64.powi(d.clamp(-308, 308) as i32);
                 broadcast_unary(&args[0], &|s| match s {
                     Value::Int(i) => Ok(Value::Float(*i as f64)),
-                    Value::Float(x) => Ok(Value::Float((x * scale).round() / scale)),
+                    Value::Float(x) => {
+                        // Rounding to more precision than the scaled value can hold (so
+                        // `x * scale` overflows to ±inf) is a no-op — return `x`
+                        // unchanged rather than the inf/inf = NaN the formula would give.
+                        let r = (x * scale).round() / scale;
+                        Ok(Value::Float(if r.is_finite() { r } else { *x }))
+                    }
                     other => Err(type_err("round", "a number or array of numbers", other, line, col)),
                 })
             }

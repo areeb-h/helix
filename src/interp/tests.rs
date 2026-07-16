@@ -229,26 +229,39 @@
     /// interpreter is leak-free across all value-producing paths.
     #[test]
     fn no_reference_leaks() {
-        fn sole_owner(src: &str) {
-            let count = match last(src).unwrap() {
-                Value::Array(rc) => Rc::strong_count(&rc),
-                Value::Tuple(rc) => Rc::strong_count(&rc),
-                Value::Record(rc) => Rc::strong_count(&rc),
-                Value::Str(rc) => Rc::strong_count(&rc),
-                other => panic!("test expects a reference-counted result, got {:?}", other),
-            };
-            assert_eq!(count, 1, "interpreter leaked a reference in: `{}`", src);
-        }
-        sole_owner("xs = [1, 2, 3]\nxs"); // plain binding
-        sole_owner("fn f(n) = if n <= 0 then [0] else f(n - 1)\nf(50)"); // recursion
-        sole_owner("[1, 2, 3, 4, 5].map(it * 2).where(it > 4)"); // comprehensions
-        sole_owner("let a = [1, 2], b = a in b"); // let bindings + aliasing
-        sole_owner("p, q = ([1], [2])\np"); // destructuring
-        sole_owner("{name: \"x\", tags: [1, 2]}"); // record
-        sole_owner("(1, [2, 3])"); // tuple
-        sole_owner("\"hello {1 + 1}\""); // interpolation
-        sole_owner("[1, 2].zip([3, 4]).map((a, b) => a + b)"); // zip + param destructure
-        sole_owner("[1, 2, 3, 4, 5, 6][1:5:2]"); // slicing
+        // The tree-walker recurses on the native stack (~140 KB per Helix frame),
+        // and the recursion case below goes 50 deep — well past cargo's default
+        // ~2 MiB test-thread stack. Run on the same large stack `main` uses (exactly
+        // like `deep_recursion_is_safe` below) so a genuine reference leak fails the
+        // assertion, instead of the thread overflowing and SIGABRT-ing the whole
+        // test binary (which also aborts every test scheduled after it).
+        let outcome = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024 * 1024)
+            .spawn(|| {
+                fn sole_owner(src: &str) {
+                    let count = match last(src).unwrap() {
+                        Value::Array(rc) => Rc::strong_count(&rc),
+                        Value::Tuple(rc) => Rc::strong_count(&rc),
+                        Value::Record(rc) => Rc::strong_count(&rc),
+                        Value::Str(rc) => Rc::strong_count(&rc),
+                        other => panic!("test expects a reference-counted result, got {:?}", other),
+                    };
+                    assert_eq!(count, 1, "interpreter leaked a reference in: `{}`", src);
+                }
+                sole_owner("xs = [1, 2, 3]\nxs"); // plain binding
+                sole_owner("fn f(n) = if n <= 0 then [0] else f(n - 1)\nf(50)"); // recursion
+                sole_owner("[1, 2, 3, 4, 5].map(it * 2).where(it > 4)"); // comprehensions
+                sole_owner("let a = [1, 2], b = a in b"); // let bindings + aliasing
+                sole_owner("p, q = ([1], [2])\np"); // destructuring
+                sole_owner("{name: \"x\", tags: [1, 2]}"); // record
+                sole_owner("(1, [2, 3])"); // tuple
+                sole_owner("\"hello {1 + 1}\""); // interpolation
+                sole_owner("[1, 2].zip([3, 4]).map((a, b) => a + b)"); // zip + param destructure
+                sole_owner("[1, 2, 3, 4, 5, 6][1:5:2]"); // slicing
+            })
+            .unwrap()
+            .join();
+        assert!(outcome.is_ok(), "no_reference_leaks thread crashed (stack overflow?)");
     }
 
     /// Deep recursion must work, and runaway recursion must fail *gracefully*
@@ -1304,6 +1317,94 @@
             last("fn fact(n) = if n <= 1 then 1 else n * fact(n - 1)\nfact(5)").unwrap(),
             Value::Int(120)
         ));
+    }
+
+    /// `i64::MIN // -1` overflows the i64 range (the true quotient 2^63 is
+    /// unrepresentable). `div_euclid`/`rem_euclid` treat it as an always-checked
+    /// overflow and PANIC — even in release — aborting the interpreter. It must
+    /// instead wrap (matching the `arith` path): `//` → `i64::MIN`, `%` → 0.
+    #[test]
+    fn int_min_floordiv_mod_do_not_overflow_panic() {
+        assert_eq!(int("(0 - 9223372036854775807 - 1) // (0 - 1)"), i64::MIN);
+        assert_eq!(int("(0 - 9223372036854775807 - 1) % (0 - 1)"), 0);
+    }
+
+    /// A `NaN` element must not abort the interpreter. The old `sort` comparator
+    /// treated `NaN` as `Equal` to everything (intransitive), so Rust's sort panicked
+    /// with "comparison function does not implement a total order". `sort` must now be
+    /// total and return an array.
+    #[test]
+    fn sort_with_nan_does_not_panic() {
+        let v = last("[3.0, sqrt(0.0 - 1.0), 1.0, 2.0].sort()").unwrap();
+        assert!(matches!(v, Value::Array(_)));
+    }
+
+    /// A digit count beyond f64's exponent range must not wrap through `as i32`
+    /// (which turned `2^31` into `i32::MIN`, underflowing the scale to 0 → `0/0` = NaN).
+    /// Rounding to that many places leaves the value unchanged.
+    #[test]
+    #[allow(clippy::approx_constant)] // the value is arbitrary, not a stand-in for π
+    fn round_to_huge_digit_count_is_a_noop() {
+        assert_eq!(float("round(3.14159, 2147483648)"), 3.14159);
+    }
+
+    /// `argmax`/`argmin` propagate `missing` like every other aggregation (ADR 0001),
+    /// rather than raising a type error on `missing` or silently skipping a `NaN`.
+    #[test]
+    fn argmax_argmin_propagate_missing() {
+        assert!(matches!(last("argmax([1, missing, 3])").unwrap(), Value::Missing));
+        assert!(matches!(last("argmin([1, missing, 3])").unwrap(), Value::Missing));
+        assert!(matches!(last("argmax([3.0, sqrt(0.0 - 1.0), 5.0])").unwrap(), Value::Missing));
+    }
+
+    /// A `reduce`/`scan` binder that reuses a name (`(a, a)` — explicitly legal,
+    /// last-write-wins) must not destroy an outer binding of the same name. The
+    /// restore used to `remove` the shared entry twice, leaving the outer name
+    /// undefined; the VM keeps it (this was a tree-walker-only divergence).
+    #[test]
+    fn duplicate_reduce_binder_keeps_outer_binding() {
+        assert!(matches!(
+            last("a = 5\nr = [1, 2, 3].reduce(0, (a, a) => a + 1)\na").unwrap(),
+            Value::Int(5)
+        ));
+    }
+
+    /// A closure that captures a binder which *shadows a same-named global* must
+    /// snapshot the binder (lexical scoping), not fall back to the restored global
+    /// after the comprehension ends. Was a tree-walker-only divergence (VM correct).
+    #[test]
+    fn closure_captures_shadowing_binder_not_global() {
+        assert!(matches!(
+            last("x = 10\nfs = [1, 2, 3].map(x => (y => x + y))\nfs[0](0)").unwrap(),
+            Value::Int(1)
+        ));
+    }
+
+    /// A closure over an *unshadowed* global — mutable OR immutable — reads it live
+    /// (the VM's `LoadGlobal`), never a creation-time snapshot: `mut n = …` legally
+    /// re-declares an immutable global, so a snapshot would go stale where the VM
+    /// sees the new value. `Binding::global` (not mutability) decides the capture.
+    #[test]
+    fn closure_reads_globals_live_across_mut_redeclare() {
+        assert!(matches!(
+            last("n = 1\nf = (x => x + n)\na = f(0)\nmut n = 100\na * 1000 + f(0)").unwrap(),
+            Value::Int(1100)
+        ));
+    }
+
+    /// Radix format specs are sign-magnitude (Python's mini-language), not Rust's
+    /// raw 64-bit two's-complement; string precision truncates.
+    #[test]
+    fn format_spec_radix_and_string_precision() {
+        fn s(src: &str) -> String {
+            match last(src).unwrap() {
+                Value::Str(rc) => (*rc).clone(),
+                other => panic!("expected a string, got {:?}", other),
+            }
+        }
+        assert_eq!(s("x = 0 - 255\n\"{x:x}\""), "-ff");
+        assert_eq!(s("x = 0 - 2\n\"{x:b}\""), "-10");
+        assert_eq!(s("s = \"hello\"\n\"{s:.3s}\""), "hel");
     }
 
     #[test]

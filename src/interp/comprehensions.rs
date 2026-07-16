@@ -156,9 +156,9 @@ impl super::Interp {
                 let saved_a = self.env.remove(pa);
                 let saved_b = self.env.remove(pb);
                 self.env
-                    .insert(pa.to_string(), Binding { value: Value::Unit, mutable: false });
+                    .insert(pa.to_string(), Binding { value: Value::Unit, mutable: false, global: false });
                 self.env
-                    .insert(pb.to_string(), Binding { value: Value::Unit, mutable: false });
+                    .insert(pb.to_string(), Binding { value: Value::Unit, mutable: false, global: false });
                 // `reduce` returns the final accumulator; `scan` returns the array of every
                 // intermediate accumulator (one per element — a generalized `cumsum`).
                 let want_scan = name == "scan";
@@ -190,9 +190,17 @@ impl super::Interp {
                 if let Some(b) = saved_a {
                     self.env.insert(pa.to_string(), b);
                 }
-                self.env.remove(pb);
-                if let Some(b) = saved_b {
-                    self.env.insert(pb.to_string(), b);
+                // Only touch `pb` when it is a DISTINCT name. When a user names both
+                // binders the same (`(a, a)` — explicitly legal, last-write-wins), `pa`
+                // and `pb` are one environment entry: `saved_b` was already `None`
+                // (removed by the `pa` line), and an unconditional `remove(pb)` here
+                // would delete the outer binding we JUST restored from `saved_a`,
+                // leaving the name undefined after the fold (the VM keeps it). Skip it.
+                if pb != pa {
+                    self.env.remove(pb);
+                    if let Some(b) = saved_b {
+                        self.env.insert(pb.to_string(), b);
+                    }
                 }
                 match err {
                     Some(e) => Err(e),
@@ -228,7 +236,7 @@ impl super::Interp {
         let saved: Vec<Option<Binding>> = names.iter().map(|n| self.env.remove(n)).collect();
         for n in names.iter() {
             self.env
-                .insert(n.to_string(), Binding { value: Value::Unit, mutable: false });
+                .insert(n.to_string(), Binding { value: Value::Unit, mutable: false, global: false });
         }
         let mut outcome: Result<Option<Value>, HelixError> = Ok(None);
         for el in items.to_values().iter() {

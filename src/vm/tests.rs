@@ -274,6 +274,29 @@
             0 => {
                 // includes %, /, // (zero divisors error identically on both engines)
                 let op = ["+", "-", "*", "%", "/", "//"][pick(rng, 6) as usize];
+                // With probability 1/4, draw BOTH operands from an adversarial pool
+                // of i64 edge values instead of the recursive grammar. As grammar
+                // coincidences these pairings have ~1e-9 joint probability — 40k
+                // fuzzed programs never produced `i64::MIN // -1`, the always-checked
+                // overflow that aborted the host until 2026-07-10 (ADR 0024). Pairing
+                // them deliberately makes MIN//-1, MIN%-1, MAX*MAX, and 2^53-boundary
+                // comparisons routine fuzzer traffic. MIN is spelled as an expression
+                // (`0 - MAX - 1`) so it can't trip literal-overflow handling.
+                if pick(rng, 4) == 0 {
+                    const EDGE: [&str; 8] = [
+                        "(0 - 9223372036854775807 - 1)", // i64::MIN
+                        "9223372036854775807",           // i64::MAX
+                        "(0 - 1)",
+                        "0",
+                        "1",
+                        "2",
+                        "9007199254740993",              // 2^53 + 1
+                        "(0 - 9007199254740993)",
+                    ];
+                    let a = EDGE[pick(rng, EDGE.len() as u64) as usize];
+                    let b = EDGE[pick(rng, EDGE.len() as u64) as usize];
+                    return format!("(({a}) {op} ({b}))");
+                }
                 format!("({} {} {})", gen_expr(rng, depth - 1, vars), op, gen_expr(rng, depth - 1, vars))
             }
             1 => format!("(-{})", gen_expr(rng, depth - 1, vars)),
@@ -357,17 +380,34 @@
     }
 
     fn run_tw(src: &str) -> Result<String, String> {
-        let toks = lexer::lex(src).map_err(|e| e.message.clone())?;
-        let ast = parser::parse(toks).map_err(|e| e.message.clone())?;
-        let mut interp = Interp::new();
-        let mut last = Value::Unit;
-        for stmt in &ast {
-            match interp.exec(stmt) {
-                Ok(o) => last = o.value,
-                Err(e) => return Err(e.message),
-            }
-        }
-        Ok(format!("{}", last))
+        // The tree-walker recurses on the native stack (~tens of KB per Helix frame),
+        // and several tests here drive it 100–300 deep — far past cargo's default
+        // ~2 MiB test-thread stack, which would SIGABRT the whole test binary (and
+        // every test scheduled after it). Run it on a large stack, matching
+        // production's `run_on_big_stack`. The result is a `String` (Send), so it
+        // crosses the scoped-thread boundary cleanly (a `Value` would not — it holds
+        // `Rc`s, which is why the recursion-depth guard is what bounds these, not the
+        // stack).
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(2 << 30)
+                .spawn_scoped(scope, || {
+                    let toks = lexer::lex(src).map_err(|e| e.message.clone())?;
+                    let ast = parser::parse(toks).map_err(|e| e.message.clone())?;
+                    let mut interp = Interp::new();
+                    let mut last = Value::Unit;
+                    for stmt in &ast {
+                        match interp.exec(stmt) {
+                            Ok(o) => last = o.value,
+                            Err(e) => return Err(e.message),
+                        }
+                    }
+                    Ok(format!("{}", last))
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        })
     }
 
     /// True iff the tree-walker rejects `src` specifically by exhausting its native
@@ -1101,6 +1141,22 @@
                 (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
             }
         }
+    }
+
+    /// `i64::MIN // -1` and `i64::MIN % -1` are an always-checked i64 overflow that
+    /// `div_euclid`/`rem_euclid` panic on (even in release). Both the tree-walker and
+    /// the VM must WRAP identically (`//` → `i64::MIN`, `%` → 0), never abort — a case
+    /// the expression fuzzer never generates (it doesn't emit `i64::MIN` with a `-1`
+    /// divisor). The JIT only compiles `//`/`%` by a positive constant, so it cannot
+    /// reach this case.
+    #[test]
+    fn int_min_floordiv_mod_wrap_on_all_engines() {
+        let d = "(0 - 9223372036854775807 - 1) // (0 - 1)";
+        let m = "(0 - 9223372036854775807 - 1) % (0 - 1)";
+        assert_eq!(run_tw(d).unwrap(), "-9223372036854775808");
+        assert_eq!(run_vm(d).unwrap(), "-9223372036854775808");
+        assert_eq!(run_tw(m).unwrap(), "0");
+        assert_eq!(run_vm(m).unwrap(), "0");
     }
 
     /// On-demand SOAK fuzzer — ignored by default; run during stabilization passes:

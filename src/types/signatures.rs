@@ -209,6 +209,15 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Float)
         }
+        // `read_int()` → read one integer from stdin (a line), or `missing` on EOF /
+        // non-numeric input. The console-input primitive; non-deterministic, so (like
+        // `print`/`sleep`) it lives outside the differential oracle.
+        "read_int" => {
+            if !args.is_empty() {
+                return Err(arity_err(name, 0, args.len(), line, col));
+            }
+            Ok(Type::Int)
+        }
         // generic readers + hashing + fs ops: one string argument each
         "read_text" | "read_json" | "read_dir" | "file_exists" | "sha256" | "remove_file"
         | "mkdir" => {
