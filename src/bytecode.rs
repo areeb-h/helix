@@ -130,7 +130,18 @@ impl Builder {
         let mut out: Vec<(String, CaptureSrc)> = Vec::new();
         for scope in &self.scopes {
             for (n, slot) in scope {
-                out.push((n.clone(), CaptureSrc::Local(*slot)));
+                // Innermost/latest binding wins on a duplicate name, exactly like
+                // `resolve_local`'s reverse scan. `resolve_upvalue` matches with a
+                // forward `.find()`, so a kept duplicate would hand a nested lambda
+                // the OUTERMOST shadowed binding (`fn f(x) = let x = x + 1 in
+                // (y => x + y)` captured the param, diverging from the walker).
+                // Deduping here also keeps `enclosing` duplicate-free for the
+                // shadow-skip and grandchild chains below.
+                if let Some(entry) = out.iter_mut().find(|(m, _)| m == n) {
+                    entry.1 = CaptureSrc::Local(*slot);
+                } else {
+                    out.push((n.clone(), CaptureSrc::Local(*slot)));
+                }
             }
         }
         let enclosing_names: Vec<String> =
@@ -194,6 +205,65 @@ impl Builder {
             }
         }
         out
+    }
+}
+
+/// Does this expression mention a `@column` reference anywhere in its tree?
+/// Drives the Unknown-receiver routing of DataFrame column verbs: a column
+/// reference can never evaluate as a value (it always raises), so its presence
+/// in an argument list unambiguously marks the call as a DataFrame/GroupBy
+/// operation even when the checker couldn't pin the receiver down — matching
+/// the tree-walker, which dispatches on the receiver's *runtime* type.
+/// Exhaustive on purpose: a new `Expr` variant must decide its answer here.
+fn mentions_column(e: &Expr) -> bool {
+    match e {
+        Expr::Column { .. } => true,
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Bool(_)
+        | Expr::Missing
+        | Expr::Ident { .. } => false,
+        Expr::Interp(parts) => parts.iter().any(|p| match p {
+            crate::ast::InterpPart::Expr(e, _) => mentions_column(e),
+            crate::ast::InterpPart::Lit(_) => false,
+        }),
+        Expr::Array(items) | Expr::Tuple(items) => items.iter().any(mentions_column),
+        Expr::Record(fields) => fields.iter().any(|(_, v)| mentions_column(v)),
+        Expr::RecordUpdate { base, fields, .. } => {
+            mentions_column(base) || fields.iter().any(|(_, v)| mentions_column(v))
+        }
+        Expr::Field { recv, .. } => mentions_column(recv),
+        Expr::Unary { expr, .. } => mentions_column(expr),
+        Expr::Binary { left, right, .. } => mentions_column(left) || mentions_column(right),
+        Expr::Call { args, .. } => args.iter().any(mentions_column),
+        Expr::Method { recv, args, named, .. } => {
+            mentions_column(recv)
+                || args.iter().any(mentions_column)
+                || named.iter().any(|(_, v)| mentions_column(v))
+        }
+        Expr::CallValue { callee, args, .. } => {
+            mentions_column(callee) || args.iter().any(mentions_column)
+        }
+        Expr::Index { recv, index, .. } => mentions_column(recv) || mentions_column(index),
+        Expr::Slice { recv, start, stop, step, .. } => {
+            mentions_column(recv)
+                || [start, stop, step].iter().any(|o| o.as_deref().is_some_and(mentions_column))
+        }
+        Expr::Lambda { body, .. } => mentions_column(body),
+        Expr::Let { bindings, body } => {
+            bindings.iter().any(|(_, v)| mentions_column(v)) || mentions_column(body)
+        }
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            mentions_column(cond) || mentions_column(then_branch) || mentions_column(else_branch)
+        }
+        Expr::Try { expr, .. } => mentions_column(expr),
+        Expr::Match { scrutinee, arms, .. } => {
+            mentions_column(scrutinee)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(mentions_column) || mentions_column(&a.body)
+                })
+        }
     }
 }
 
@@ -360,6 +430,88 @@ impl Compiler {
         self.types.as_ref().and_then(|m| m.get(&(recv as *const Expr)))
     }
 
+    /// Emit a DataFrame column verb (or, with `group_agg`, a GroupBy
+    /// aggregation) whose receiver's type is only proven at runtime: the
+    /// receiver, then an ADR-0001 missing-propagation guard, then the
+    /// unevaluated-args op. The guard matters because the verb ops raise on a
+    /// non-DataFrame receiver, while the walker propagates a `missing` one;
+    /// without it the engines diverge on a `missing` fed through a
+    /// dynamically-typed helper. `is_missing` is universal in `Op::Method`
+    /// (DataFrame/GroupBy included), so the guard is total.
+    ///
+    /// `eval_args_on_missing` mirrors the walker's two dispatch routes:
+    /// `where`/`filter` are comprehension-shaped — the receiver is checked
+    /// FIRST and a `missing` one propagates with the predicate untouched —
+    /// while every other verb goes through the value-method path, which
+    /// evaluates arguments BEFORE dispatch, so `missing.sort(@a)` raises the
+    /// column-reference error from evaluating `@a` and only an arg-clean call
+    /// propagates.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_df_verb_guarded(
+        &mut self,
+        b: &mut Builder,
+        recv: &Expr,
+        name: &str,
+        args: &[Expr],
+        group_agg: bool,
+        eval_args_on_missing: bool,
+        line: usize,
+        col: usize,
+    ) -> R<()> {
+        self.compile_expr(b, recv)?;
+        let slot = b.declare_local("$dfrecv");
+        b.emit(Op::StoreLocal(slot), line, col);
+        b.emit(Op::LoadLocal(slot), line, col);
+        b.emit(
+            Op::Method(std::rc::Rc::new(MethodData {
+                name: std::rc::Rc::new("is_missing".to_string()),
+                nargs: 0,
+            })),
+            line,
+            col,
+        );
+        // Not missing (the common case) → jump ahead to the verb itself.
+        let jverb = b.emit(Op::JumpIfFalse(0), line, col);
+        // Missing receiver: evaluate the args first when the walker would
+        // (a `@col` raises the column-reference error here, exactly like the
+        // walker's value-method path), then the receiver is the result.
+        if eval_args_on_missing {
+            for a in args {
+                self.compile_expr(b, a)?;
+                b.emit(Op::Pop, line, col);
+            }
+        }
+        b.emit(Op::LoadLocal(slot), line, col);
+        let jend = b.emit(Op::Jump(0), line, col);
+        let verb_at = b.code.len() as u32;
+        b.code[jverb] = Op::JumpIfFalse(verb_at);
+        b.emit(Op::LoadLocal(slot), line, col);
+        if group_agg {
+            b.emit(
+                Op::GroupByAgg(std::rc::Rc::new(GroupByAggData {
+                    name: std::rc::Rc::new(name.to_string()),
+                    args: std::rc::Rc::new(args.to_vec()),
+                })),
+                line,
+                col,
+            );
+        } else {
+            let locals = std::rc::Rc::new(b.in_scope_locals());
+            b.emit(
+                Op::DfColumnVerb(std::rc::Rc::new(DfColumnVerbData {
+                    name: std::rc::Rc::new(name.to_string()),
+                    args: std::rc::Rc::new(args.to_vec()),
+                    locals,
+                })),
+                line,
+                col,
+            );
+        }
+        let end = b.code.len() as u32;
+        b.code[jend] = Op::Jump(end);
+        Ok(())
+    }
+
     /// Compile `recv` (for its side effects — the tree-walker evaluates the receiver
     /// before validating a malformed method call), then emit a runtime [`Op::Raise`].
     /// Keeps `compile` total for malformed comprehensions/reductions that the
@@ -471,7 +623,43 @@ impl Compiler {
             }
             // Stripped by the module loader before compilation (see `Stmt::Import`).
             Stmt::Import { .. } => Ok(()),
-            Stmt::Func { name, params, body, .. } => self.compile_func(name, params, body),
+            Stmt::Func { name, params, body, line, col, .. } => {
+                // A top-level `fn` binds its name exactly like the walker's env
+                // bind: over an *immutable* global (the seeded constants
+                // `pi`/`e`/`inf`/`python`, or an earlier `x = …`) it raises at
+                // the definition point; over a *mutable* global it reassigns —
+                // the global then holds the function value. Without this the fn
+                // registered silently and later calls resolved to the stale
+                // global (globals win `resolve`), so VM/JIT printed the old
+                // value or "`inf` is a Float, not a function" where the walker
+                // errored (immutable) or called the fn (mutable).
+                if let Some(i) = self.globals.iter().position(|g| g == name) {
+                    if !self.global_mut[i] {
+                        b.emit(
+                            Op::raise(
+                                std::rc::Rc::new(format!(
+                                    "`{}` is immutable and cannot be reassigned",
+                                    name
+                                )),
+                                std::rc::Rc::new(format!(
+                                    "declare it as mutable up front with `mut {} = ...` if it needs to change.",
+                                    name
+                                )),
+                            ),
+                            *line,
+                            *col,
+                        );
+                        return Ok(());
+                    }
+                    let arity = params.len() as u32;
+                    let idx = self.funcs.len() as u32; // compile_func pushes here
+                    self.compile_func(name, params, body)?;
+                    b.emit(Op::MakeFunc { idx, arity }, *line, *col);
+                    b.emit(Op::StoreGlobal(i as u32), *line, *col);
+                    return Ok(());
+                }
+                self.compile_func(name, params, body)
+            }
             Stmt::Expr(e) => {
                 self.compile_expr(b, e)?;
                 b.emit(Op::Pop, 0, 0);
@@ -1014,21 +1202,21 @@ impl Compiler {
                 // (not values), so route to the unevaluated-AST ops. This is the
                 // only correct disambiguation — `where`/`sort`/`min` mean different
                 // things per receiver type, and column args can't compile as values.
-                if matches!(self.recv_type(recv), Some(Type::DataFrame))
-                    && matches!(n, "where" | "filter" | "select" | "sort" | "group" | "with")
+                //
+                // An *Unknown* receiver (a DataFrame from a dynamic source, e.g. an
+                // untyped helper-fn parameter) routes here too whenever an argument
+                // mentions a `@column`: that syntax can only mean a column verb (a
+                // column reference never evaluates as a value), so this matches the
+                // walker's runtime dispatch instead of mis-compiling the call as an
+                // array comprehension (`where`/`filter`) or a value method (`sort`).
+                if matches!(n, "where" | "filter" | "select" | "sort" | "group" | "with")
+                    && (matches!(self.recv_type(recv), Some(Type::DataFrame))
+                        || (matches!(self.recv_type(recv), Some(Type::Unknown) | None)
+                            && args.iter().any(mentions_column)))
                 {
-                    self.compile_expr(b, recv)?;
-                    let locals = std::rc::Rc::new(b.in_scope_locals());
-                    b.emit(
-                        Op::DfColumnVerb(std::rc::Rc::new(DfColumnVerbData {
-                            name: std::rc::Rc::new(name.clone()),
-                            args: std::rc::Rc::new(args.to_vec()),
-                            locals,
-                        })),
-                        *line,
-                        *col,
-                    );
-                    return Ok(());
+                    let eval_args = !matches!(n, "where" | "filter");
+                    return self
+                        .compile_df_verb_guarded(b, recv, name, args, false, eval_args, *line, *col);
                 }
                 // `join` mixes an evaluated DataFrame operand with by-name key columns,
                 // so it can't ride the column-verb op. Compile the receiver and the
@@ -1069,19 +1257,17 @@ impl Compiler {
                     }
                     return Ok(());
                 }
-                if matches!(self.recv_type(recv), Some(Type::GroupBy))
-                    && matches!(n, "mean" | "sum" | "min" | "max" | "count" | "std")
+                // Same Unknown-receiver rule as step 1: `g.mean(@v)` through an
+                // untyped parameter is unambiguously a GroupBy aggregation (the
+                // `@column` can't be a value), so don't let it fall to the
+                // value-method path, whose arg compile raises at runtime.
+                if matches!(n, "mean" | "sum" | "min" | "max" | "count" | "std")
+                    && (matches!(self.recv_type(recv), Some(Type::GroupBy))
+                        || (matches!(self.recv_type(recv), Some(Type::Unknown) | None)
+                            && args.iter().any(mentions_column)))
                 {
-                    self.compile_expr(b, recv)?;
-                    b.emit(
-                        Op::GroupByAgg(std::rc::Rc::new(GroupByAggData {
-                            name: std::rc::Rc::new(name.clone()),
-                            args: std::rc::Rc::new(args.to_vec()),
-                        })),
-                        *line,
-                        *col,
-                    );
-                    return Ok(());
+                    return self
+                        .compile_df_verb_guarded(b, recv, name, args, true, true, *line, *col);
                 }
 
                 // 2. Comprehensions compile to inline bytecode loops (no closures).
@@ -1113,18 +1299,8 @@ impl Compiler {
                 // works; anything else raises). The type checker already rejects
                 // `array.select(...)`, so a wrong concrete type can't reach here.
                 if matches!(n, "select" | "group" | "with") {
-                    self.compile_expr(b, recv)?;
-                    let locals = std::rc::Rc::new(b.in_scope_locals());
-                    b.emit(
-                        Op::DfColumnVerb(std::rc::Rc::new(DfColumnVerbData {
-                            name: std::rc::Rc::new(name.clone()),
-                            args: std::rc::Rc::new(args.to_vec()),
-                            locals,
-                        })),
-                        *line,
-                        *col,
-                    );
-                    return Ok(());
+                    return self
+                        .compile_df_verb_guarded(b, recv, name, args, false, true, *line, *col);
                 }
 
                 // 4. Everything else is a value-method with evaluated args —

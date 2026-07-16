@@ -13,7 +13,7 @@
 
 use std::fmt;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast::{BinOp, Expr, Stmt, TypeAnn, UnOp};
 use crate::error::{suggest, HelixError};
@@ -271,6 +271,15 @@ pub struct Checker {
     env: FxHashMap<String, Type>,
     /// Accumulated receiver types (see [`TypeMap`]).
     types: TypeMap,
+    /// Names ever declared `mut` at the top level. Top-level statement flow
+    /// keeps their precise types (rebinds update `env` in order), but inside a
+    /// *deferred* body — a `fn` or a lambda, checked once at definition yet run
+    /// at call time — a mutable global types as `Unknown`: it may hold a value
+    /// of a different type by the time the body runs, so a frozen
+    /// definition-time type would mis-route type-directed dispatch (e.g.
+    /// compile `d.where(…)` as a DataFrame verb after `d` was rebound to an
+    /// array, diverging from the walker's runtime dispatch).
+    mut_globals: FxHashSet<String>,
 }
 
 impl Default for Checker {
@@ -289,23 +298,32 @@ impl Checker {
         // and any method/attribute chain off a Python value never errors (Python
         // values ride the same permissive boundary as DataFrame columns).
         env.insert("python".to_string(), Type::Unknown);
-        Checker { env, types: FxHashMap::default() }
+        Checker { env, types: FxHashMap::default(), mut_globals: FxHashSet::default() }
     }
 
     pub fn exec_stmt(&mut self, s: &Stmt) -> Result<(), HelixError> {
         match s {
-            Stmt::Assign { name, value, .. } => {
+            Stmt::Assign { name, mutable, value, .. } => {
                 let t = self.synth(value)?;
+                if *mutable {
+                    self.mut_globals.insert(name.clone());
+                }
                 self.env.insert(name.clone(), t);
                 Ok(())
             }
             Stmt::Destructure {
                 names,
+                mutable,
                 value,
                 line,
                 col,
                 ..
             } => {
+                if *mutable {
+                    for n in names {
+                        self.mut_globals.insert(n.clone());
+                    }
+                }
                 let t = self.synth(value)?;
                 match &t {
                     Type::Tuple(els) => {
@@ -393,6 +411,22 @@ impl Checker {
             },
         );
 
+        // A `mut` global types as Unknown inside the deferred body (see
+        // `mut_globals`): the body runs at call time, by which the global may
+        // hold a different type. The fn's own name is exempt — the definition
+        // rebinds it, and self-calls should see the provisional signature.
+        // Snapshot BEFORE the param save so a same-named param restores the
+        // Unknown we set here, and our restore below puts the real type back.
+        let saved_muts: Vec<(String, Type)> = self
+            .mut_globals
+            .iter()
+            .filter(|n| n.as_str() != name)
+            .filter_map(|n| self.env.get(n).map(|t| (n.clone(), t.clone())))
+            .collect();
+        for (n, _) in &saved_muts {
+            self.env.insert(n.clone(), Type::Unknown);
+        }
+
         // Bind params, snapshot/restore like the interpreter's call_function.
         let saved: Vec<(String, Option<Type>)> = params
             .iter()
@@ -411,6 +445,9 @@ impl Checker {
                     self.env.remove(&n);
                 }
             }
+        }
+        for (n, t) in saved_muts {
+            self.env.insert(n, t);
         }
         let body_t = body_result?;
 
@@ -717,7 +754,18 @@ impl Checker {
                 })
             }
             Expr::Lambda { params, body } => {
-                // Standalone lambda: params default to Unknown.
+                // Standalone lambda: params default to Unknown. Like a `fn`
+                // body (see `check_func`), the lambda body is deferred — a
+                // `mut` global read inside it types as Unknown, since the
+                // global may be rebound before the lambda is called.
+                let saved_muts: Vec<(String, Type)> = self
+                    .mut_globals
+                    .iter()
+                    .filter_map(|n| self.env.get(n).map(|t| (n.clone(), t.clone())))
+                    .collect();
+                for (n, _) in &saved_muts {
+                    self.env.insert(n.clone(), Type::Unknown);
+                }
                 let saved: Vec<(String, Option<Type>)> = params
                     .iter()
                     .map(|n| (n.clone(), self.env.get(n).cloned()))
@@ -735,6 +783,9 @@ impl Checker {
                             self.env.remove(&n);
                         }
                     }
+                }
+                for (n, t) in saved_muts {
+                    self.env.insert(n, t);
                 }
                 let body_t = body_result?;
                 Ok(Type::Function {

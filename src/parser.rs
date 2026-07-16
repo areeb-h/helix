@@ -787,7 +787,13 @@ impl Parser {
             if matches!(self.peek_at(1), Tok::FatArrow) {
                 self.advance(); // IDENT
                 self.advance(); // =>
+                // A lambda body is the one expr() recursion that skips unary(),
+                // so it must count a structural level itself — an unbounded
+                // `x => x => …` chain would otherwise overflow the native stack.
+                let saved = self.depth;
+                self.deepen()?;
                 let body = self.expr()?;
+                self.depth = saved;
                 return Ok(Some(Expr::Lambda {
                     params: vec![name],
                     body: Box::new(body),
@@ -833,7 +839,11 @@ impl Parser {
             while self.pos <= k {
                 self.advance();
             }
+            // Same depth accounting as the single-param arm above.
+            let saved = self.depth;
+            self.deepen()?;
             let body = self.expr()?;
+            self.depth = saved;
             return Ok(Some(Expr::Lambda {
                 params,
                 body: Box::new(body),

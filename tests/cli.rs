@@ -2451,3 +2451,139 @@ fn record_dynamic_field_access() {
         "record dynamic access: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Full-breadth sweep regressions (2026-07): closure capture shadowing, Unknown-
+// receiver DataFrame dispatch, fn/global name collisions, parser depth guard.
+// Each pins a verified tri-engine divergence or crash found by the sweep.
+// ---------------------------------------------------------------------------
+
+/// A nested lambda must capture the INNERMOST shadowed binding. The bytecode
+/// builder kept duplicate names outer-first in `capturable_env` while
+/// `resolve_upvalue` takes the first match, so VM/JIT captured the OUTERMOST
+/// binding (`(f(10))(0)` = 10) where the walker read the innermost (11).
+#[test]
+fn closure_captures_innermost_shadowed_binding() {
+    let src = "fn f(x) = let x = x + 1 in (y => x + y)\n\
+print((f(10))(0))\n\
+fn g(x) = match x + 1 { x => (z => x + z) }\n\
+print((g(10))(0))\n\
+fn h(x) = let y = 1 in let y = 2 in (z => y + z)\n\
+print((h(0))(0))\n\
+fn k(a) = let x = 1, x = 2 in (y => x + y)\n\
+print((k(0))(0))\n\
+fn m() = let x = 1, g = (u => x + u), x = 2, h = (u => x + u) in g(0) * 10 + h(0)\n\
+print(m())\n";
+    let mut outs = Vec::new();
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "cap_innermost");
+        assert_eq!(code, Some(0), "stderr: {err}");
+        outs.push(out);
+    }
+    assert_eq!(outs[0], outs[1], "JIT vs VM");
+    assert_eq!(outs[1], outs[2], "VM vs tree-walker");
+    let lines: Vec<&str> = outs[0].lines().collect();
+    assert_eq!(lines, vec!["11", "11", "2", "2", "12"]);
+}
+
+/// DataFrame column verbs reached through an *untyped* helper parameter
+/// (static type Unknown) must dispatch like the walker: a `@column` argument
+/// can only mean a column verb, so it routes to the runtime-validated ops
+/// instead of mis-compiling as an array comprehension (`where`) or a value
+/// method (`sort`, grouped `mean`). On a `missing` receiver the walker's two
+/// routes differ: `where`/`filter` propagate with the predicate untouched,
+/// while `sort`/aggregations evaluate arguments first — so their `@col` raises
+/// the column-reference error. Both must match exactly.
+#[test]
+fn unknown_receiver_dataframe_verbs_match_walker() {
+    let col_err = "`@a` is a column reference, only valid inside a DataFrame operation";
+    let src = "fn w(d) = d.where(@a > 1)\n\
+fn s(x) = x.sort(@a)\n\
+fn m(g) = g.mean(@a)\n\
+df = dataframe({k: [1, 1, 2], a: [3.0, 1.0, 2.0]})\n\
+print(w(df).count())\n\
+print(s(df).count())\n\
+print(m(df.group(@k)).count())\n\
+print(w(missing))\n\
+print((try s(missing)).error)\n\
+print((try m(missing)).error)\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "unk_df_verbs");
+        assert_eq!(code, Some(0), "stderr: {err}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines, vec!["2", "3", "2", "missing", col_err, col_err], "env {env:?}");
+    }
+}
+
+/// A `DataFrame`-annotated parameter fed `missing` at runtime propagates
+/// missing (ADR-0001) instead of raising — annotations are advisory, and the
+/// walker checks the receiver before dispatch.
+#[test]
+fn annotated_dataframe_verb_propagates_missing() {
+    let src = "fn g(df: DataFrame) = df.where(@a > 1)\nprint(g(missing))\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "annot_missing");
+        assert_eq!(code, Some(0), "stderr: {err}");
+        assert_eq!(out.trim(), "missing");
+    }
+}
+
+/// A `mut` global read inside a fn body types as Unknown: the checker must not
+/// freeze the definition-time type, because the global can be rebound to a
+/// different type before the call (here DataFrame -> Array; the frozen type
+/// mis-routed `where` to the DataFrame verb, which raised on the array).
+#[test]
+fn mut_global_rebound_type_matches_walker() {
+    let src = "mut d = dataframe({a: [3, 1, 2]})\n\
+fn g() = d.where(it > 1)\n\
+d = [5, 1, 2]\n\
+print(g())\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "mut_rebound");
+        assert_eq!(code, Some(0), "stderr: {err}");
+        assert_eq!(out.trim(), "[5, 2]");
+    }
+}
+
+/// A top-level `fn` binds its name like any other definition: colliding with
+/// an *immutable* global (seeded constant or user binding) raises at the
+/// definition point on every engine; colliding with a *mutable* global
+/// reassigns it — the function value wins and calls dispatch to it.
+#[test]
+fn fn_name_collision_with_global_matches_walker() {
+    for (src, tag) in [
+        ("fn inf(x) = x + 1\nprint(inf(1))\n", "fn_inf"),
+        ("x = 5\nfn x(n) = n\nprint(x)\n", "fn_user"),
+    ] {
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (_, err, code) = run_source(src, env, tag);
+            assert_eq!(code, Some(1), "env {env:?} src {tag}");
+            assert!(
+                err.contains("is immutable and cannot be reassigned"),
+                "env {env:?} stderr: {err}"
+            );
+        }
+    }
+    let ok = "mut f = 5\nfn f(x) = x * 2\nprint(f(3))\nf = 7\nprint(f)\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(ok, env, "fn_mut_global");
+        assert_eq!(code, Some(0), "stderr: {err}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines, vec!["6", "7"], "env {env:?}");
+    }
+}
+
+/// A deep `x => x => ...` lambda chain must hit the parser depth cap with a
+/// clean error — lambda bodies were the one expr() recursion that skipped the
+/// depth counter, so 2000 nestings overflowed the native stack (SIGABRT).
+#[test]
+fn deep_lambda_chain_errors_cleanly() {
+    let deep = format!("f = {}1\nprint(1)\n", "x => ".repeat(2000));
+    let (_, err, code) = run_source(&deep, &[], "deep_lambda");
+    assert_eq!(code, Some(1), "expected a clean parse error, stderr: {err}");
+    assert!(err.contains("nested or chained too deeply"), "stderr: {err}");
+    let ok = "f = x => x => 1\nprint((f(0))(0))\n";
+    let (out, err, code) = run_source(ok, &[], "shallow_lambda");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "1");
+}
