@@ -1,0 +1,14 @@
+# K3 — Basel series: Σ 1/k² for k in 1..=100M, accumulated in f64 STRICTLY IN ORDER
+# (naive left-to-right; NOT Kahan-compensated, NOT reassociated). This is a serial,
+# order-fixed float kernel: SIMD reassociation would change the last ulps, so NOBODY
+# may vectorize it — every language here sums one term at a time, in the same order.
+#
+# The reduce is a dividing scalar-f64 kernel: the JIT compiles it to one native loop
+# threading a poison flag for /0 (see src/jit.rs `reduce_body_divides`), and keeps the
+# accumulation serial — exactly the C loop, no vectorization.
+#
+# Anchor = the sum at %.17f (17 decimals uniquely pins the f64, so any 1-ulp drift
+# from reassociation shows up). N is hardcoded — Helix scripts have no argv, unlike
+# the other languages here, which take N as argv[1]. Same convention as bench/stress.
+n = read_int() ?? 100000000    # N on stdin; run.sh pipes it
+print("{(1..n + 1).reduce(0.0, (a, k) => a + 1.0 / (k * k)):.17f}")

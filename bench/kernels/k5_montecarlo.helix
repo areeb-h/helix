@@ -1,0 +1,38 @@
+# K5 — Monte Carlo pi over a bit-exact xorshift64 stream shared by every language.
+# Anchor = the raw HIT COUNT (an integer), so no float formatting is up for debate.
+#
+# Helix integers are SIGNED i64 and `>>` is ARITHMETIC, so the reference stream's
+# UNSIGNED shifts are emulated by masking off the sign extension:
+#   (s >> 7)  & (1<<57)-1 = 144115188075855871   -- C's `s >> 7`  on uint64
+#   (s >> 11) & (1<<53)-1 =   9007199254740991   -- C's `s >> 11` on uint64
+# `<<` wraps like uint64 already (two's complement), so it needs no mask. This
+# reproduces the C stream state-for-state and bit-for-bit (verified).
+#
+# One annotated tail-recursive fn = a loop in constant space, and the shape the
+# JIT compiles (scalar i64/f64, division by a nonzero literal).
+#
+# Note the LAST line: the `if` picks between two tail self-calls rather than
+# sitting inside one call's argument (`mc(sy, n-1, if hit then hits+1 else hits)`).
+# Both are correct and print the same anchor, but only this shape is JIT-eligible:
+# the JIT's mixed Int/Float type inference has no case for a conditional in VALUE
+# position, so an `if` used as an argument makes the whole fn fall back to the
+# bytecode VM -- measured here as 5.11s vs 0.067s at N=1e7 (~76x). This is
+# ordinary tail-recursive style, not a benchmark contortion.
+fn mc(state: Int, n: Int, hits: Int) =
+  if n == 0 then hits
+  else do {
+    a  = state ^ (state << 13)
+    b  = a ^ ((a >> 7) & 144115188075855871)
+    sx = b ^ (b << 17)
+    x  = ((sx >> 11) & 9007199254740991) / 9007199254740992.0
+    c  = sx ^ (sx << 13)
+    d  = c ^ ((c >> 7) & 144115188075855871)
+    sy = d ^ (d << 17)
+    y  = ((sy >> 11) & 9007199254740991) / 9007199254740992.0
+    if x * x + y * y < 1.0 then mc(sy, n - 1, hits + 1) else mc(sy, n - 1, hits)
+  }
+
+# N is fixed here: `helix run <file>` takes no program arguments (house style —
+# see bench/stress/s4_match.helix). Every other language defaults to this same N.
+n = read_int() ?? 100000000    # N on stdin; run.sh pipes it
+print(mc(88172645463325252, n, 0))

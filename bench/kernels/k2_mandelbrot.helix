@@ -1,0 +1,30 @@
+# K2 — escape-time Mandelbrot, 1200x1200 grid, max 100 iterations, over
+# x in [-2.1, 0.6] and y in [-1.2, 1.2]. Anchor = Σ of every pixel's iteration
+# count. Helix has no loops, so the escape loop is a tail-recursive fn — and
+# because every param is annotated (`Float`/`Int`), the JIT compiles `step` to a
+# native f64 loop. Compare against HELIX_NOJIT=1 to see it.
+#
+# Helix has no argv, so the grid dimension comes from stdin — `??` supplies the
+# default when read_int() hits EOF. ALWAYS redirect stdin, or a bare `helix run` on
+# a terminal blocks forever waiting for a line:
+#
+#   helix run k2_mandelbrot.helix < /dev/null   # default 1200 grid
+#   echo 100 | helix run k2_mandelbrot.helix    # 100x100, for anchor verification
+#
+# Every other language in this kernel takes the same number as argv[1].
+g = read_int() ?? 1200
+
+fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) =
+  if i >= 100 then 100
+  else if zr * zr + zi * zi > 4.0 then i
+  else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)
+
+fn row(x: Int, ci: Float, g: Int, acc: Int) =
+  if x >= g then acc
+  else row(x + 1, ci, g, acc + step(0.0, 0.0, -2.1 + to_float(x) * 2.7 / to_float(g), ci, 0))
+
+fn grid(y: Int, g: Int, acc: Int) =
+  if y >= g then acc
+  else grid(y + 1, g, acc + row(0, -1.2 + to_float(y) * 2.4 / to_float(g), g, 0))
+
+print(grid(0, g, 0))

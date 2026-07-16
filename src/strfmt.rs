@@ -42,6 +42,16 @@ pub struct FormatSpec {
 const MAX_WIDTH: usize = 1 << 16;
 const MAX_PRECISION: usize = 512;
 
+/// Drop the trailing zeros (and a bare trailing `.`) from a fixed-decimal
+/// rendering — what `%g` does after choosing its digit count.
+fn trim_g(s: &str) -> String {
+    if !s.contains('.') {
+        return s.to_string();
+    }
+    let t = s.trim_end_matches('0');
+    t.strip_suffix('.').unwrap_or(t).to_string()
+}
+
 pub fn parse_spec(s: &str) -> Result<FormatSpec, String> {
     // Tolerate surrounding whitespace (`"{x:.2f }"`, `"{ x :.2f}"`) — the expression
     // side already does, and a space is never meaningful in a spec (no fill char).
@@ -160,10 +170,36 @@ impl FormatSpec {
         match self.ty {
             Some('f') => Ok(format!("{:.*}", self.precision.unwrap_or(6), as_f(v)?)),
             Some('e') => Ok(format!("{:.*e}", self.precision.unwrap_or(6), as_f(v)?)),
-            Some('g') => match self.precision {
-                Some(p) => Ok(format!("{:.*}", p, as_f(v)?)),
-                None => Ok(format!("{}", as_f(v)?)),
-            },
+            // `g` — SIGNIFICANT digits (C's `%g`, Python's `g`), not decimals.
+            // `{:.*}` would have given `p` DECIMAL places: `{x:.15g}` on
+            // 1.5497677311665408 printed 1.549767731166541 (15 decimals) where
+            // C's `%.15g` prints 1.54976773116654 (15 significant digits).
+            // Rust has no `%g`, so pick fixed-vs-exponential the way C does —
+            // exponential when the decimal exponent is < -4 or >= p — then trim
+            // the trailing zeros (and any bare `.`) that `%g` drops.
+            Some('g') => {
+                let x = as_f(v)?;
+                let p = self.precision.unwrap_or(6).max(1);
+                if x == 0.0 || !x.is_finite() {
+                    return Ok(format!("{x}"));
+                }
+                let exp = x.abs().log10().floor() as i32;
+                let s = if exp < -4 || exp >= p as i32 {
+                    let mant = format!("{:.*e}", p - 1, x);
+                    // Rust renders `1.5e2`; C renders `1.5e+02`.
+                    match mant.split_once('e') {
+                        Some((m, e)) => {
+                            let ev: i32 = e.parse().unwrap_or(0);
+                            format!("{}e{}{:02}", trim_g(m), if ev < 0 { '-' } else { '+' }, ev.abs())
+                        }
+                        None => mant,
+                    }
+                } else {
+                    let decimals = (p as i32 - 1 - exp).max(0) as usize;
+                    trim_g(&format!("{:.*}", decimals, x))
+                };
+                Ok(s)
+            }
             Some('%') => Ok(format!("{:.*}%", self.precision.unwrap_or(2), as_f(v)? * 100.0)),
             Some('d') => Ok(format!("{}", as_i(v)?)),
             Some('x') => Ok(radix(as_i(v)?, &|m| format!("{m:x}"))),

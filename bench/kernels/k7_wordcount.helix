@@ -1,0 +1,64 @@
+# K7 — word frequency over a generated corpus. Anchor = the count of the most frequent
+# word. `frequencies()` is the histogram idiom (returns (value, count)); the max reduce
+# mirrors the s1/s8 house form, and its `0` init is also the N=0 answer.
+#
+# N comes from STDIN via read_int(); `??` supplies the default on EOF. Helix has no argv,
+# so bench/kernels/run.sh pipes N in (`echo $N | helix run k7_wordcount.helix`). ALWAYS
+# redirect — a bare `helix run` on a terminal blocks forever waiting for a line:
+#
+#   helix run k7_wordcount.helix < /dev/null   # default 5000000
+#   echo 100000 | helix run k7_wordcount.helix # 100000, for anchor verification
+#
+# Every other language in this kernel takes the same number as argv[1].
+#
+# THE CORPUS IS THE k5 XORSHIFT64 STREAM, one draw per word. This replaced a generator,
+# `word i = "w" + str((i*2654435761) % 10000)`, that made the whole kernel a non-test:
+# 2654435761 % 10000 = 5761 and gcd(5761, 10000) = 1, so i -> 5761*i is a BIJECTION on
+# Z/10000 and every count was flat to within 1. The anchor was then identically
+# ceil(N/10000) — a 3-line program that counts nothing and prints ceil(N/10000) passed
+# the cross-language gate at every N, including the default. Under this stream the
+# distribution is genuinely uneven and the anchor is not a closed form of N. Measured at
+# N=5e6: 10000 distinct words, max 585, min 418, exactly one word attains the max.
+#
+# `scan` (not `map`) because the stream is sequential: each state depends on the previous
+# one, so there is no closed form to map over a range. `scan` returns every intermediate
+# accumulator — here, one xorshift state per word.
+#
+# Helix ints are SIGNED i64 and `>>` is ARITHMETIC, so the reference stream's UNSIGNED
+# shifts are emulated by masking off the sign extension, exactly as k5_montecarlo.helix
+# does:
+#   (s >> 7)  & (1<<57)-1 = 144115188075855871   -- C's `s >> 7`  on uint64
+#   (s >> 11) & (1<<53)-1 =   9007199254740991   -- C's `s >> 11` on uint64
+# `<<` wraps like uint64 already (two's complement), so it needs no mask. Verified
+# state-for-state against C: the 4th state is negative (-2015011221783540763), so this is
+# not a theoretical concern — it bites within the first 5 draws.
+#
+# The id MUST be derived from the masked 53-bit value, never as `s % 10000` on the raw
+# state: Helix's `%` is FLOORED, not truncated, so at that 4th state `s % 10000` is 9237
+# in Helix and CPython but -763 in C — a silent divergence. Masking the state to 63 bits
+# does not fix it either (2^63 mod 10000 = 5808 != 0, so it is not congruent). Masking
+# AFTER the shift is what makes the value non-negative by construction, which is what
+# makes floored and truncated `%` agree in all six languages.
+#
+# MEMORY — READ THIS BEFORE COMPARING TIMES. For Helix and NumPy this kernel is ALSO an
+# allocator/bandwidth benchmark, which is NOT true of the other four. `scan` and `map` are
+# eager, so Helix materializes the states array AND all N word strings; NumPy materializes
+# its arrays too. C/Rust/Go/CPython hold one word at a time plus a <=10k-entry map, so
+# their live set does not depend on N. Measured peak RSS at N=5e6 (median of 5,
+# GLIBC_TUNABLES as run.sh sets it):
+#   C 2.2 MB | Rust 3.1 MB | Go 7.9 MB | CPython 11.8 MB | NumPy 265 MB | Helix 467 MB
+# And for Helix/NumPy that is residency, not a constant: growing N from 1e6 to 5e6 moves
+# Helix 127 -> 476 MB and NumPy 75 -> 266 MB (~87 and ~48 marginal bytes per word), while
+# C/Rust/CPython stay flat to within 5%. (Go drifts 7.6 -> 10.0 MB over the same range —
+# GC heap slack, not corpus residency: 2.4 MB of drift for 4M extra words.) Within Helix's
+# 467 MB the states array alone is 89 MB and the word strings take it to 407 MB.
+# No claim is made here about WHY Helix's wall time lands where it does: stage timings on
+# this box were too noisy to attribute (the same stage varied 2.4-11.2s across runs), so
+# the honest statement is the memory structure above, which reproduces to within ~7%.
+n = read_int() ?? 5000000
+words = (0..n).scan(88172645463325252, (s, i) => do {
+    a = s ^ (s << 13)
+    b = a ^ ((a >> 7) & 144115188075855871)
+    b ^ (b << 17)
+  }).map(s => "w{((s >> 11) & 9007199254740991) % 10000}")
+print(words.frequencies().map((w, c) => c).reduce(0, (a, x) => if x > a then x else a))

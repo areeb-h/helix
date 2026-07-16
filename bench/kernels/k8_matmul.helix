@@ -1,0 +1,103 @@
+# K8 — dense f64 matmul, the TENSOR path. `tensor(...)` + `.matmul()` routes to faer's
+# SIMD-blocked GEMM (zero-copy in both directions, see `faer_matmul` in src/tensor.rs).
+# This is a DELEGATION story, not a codegen story: Helix does not compile this loop
+# nest, it hands the problem to a real GEMM. Its only peer here is k8_matmul_numpy.py,
+# which also calls a real GEMM (OpenBLAS). Timing it against the naive triple loop in
+# C/Rust/Go measures "who calls a BLAS" and nothing else. Its honest counterpart is
+# k8_matmul_naive.helix (the same triple loop everyone else runs).
+#
+# NUMPY WINS THIS KERNEL. Helix does not have a delegation win here to report; an
+# earlier version of this header claimed one, and it was an artifact of measuring at
+# too small an n. Whole-process wall, min of 5, idle 6-core box:
+#
+#     n      helix    numpy    ratio
+#     512    0.087s   0.057s   1.5x  numpy
+#     1024   0.320s   0.069s   4.6x  numpy   <- default
+#     2048   1.179s   0.136s   8.7x  numpy
+#
+# and with the GEMM itself isolated from startup and construction (method below):
+#
+#     n      faer      OpenBLAS   result
+#     512    0.0059s   0.0010s    faer 5.9x SLOWER
+#     1024   0.0198s   0.0050s    faer 4.0x SLOWER
+#     2048   0.0594s   0.0398s    faer 1.5x SLOWER
+#
+# So Helix's GEMM is the slower GEMM at every size measured, and the whole-process
+# wall loses by more than the GEMM does. faer closes the gap as n grows; it does not
+# cross over anywhere that was tested.
+#
+# WHAT THIS FILE ACTUALLY TIMES — mostly not the GEMM. Isolated, the GEMM is only
+# 6.7% / 6.2% / 5.0% of the wall at n=512/1024/2048. The other ~94% is interpreter
+# startup (`helix run print(1)` = 0.004s) plus the O(n²) `tensor((0..n).map(...))`
+# construction, which builds n² boxed values before faer ever sees them. Deleting
+# `.matmul(b)` outright moves the n=512 wall from 0.087s to only 0.085s. NumPy's wall
+# is startup too, from the other end: `import numpy` alone is 0.049s — 83% of its
+# 0.057s wall at n=512, where its GEMM is 1.0ms. At these sizes both files are
+# benchmarks of process startup and O(n²) setup wearing a matmul as a hat.
+#
+# WHY THE DEFAULT IS 1024 AND NOT 512. Below n≈384 the helix wall is the smaller one
+# (n=64: 0.009s vs numpy's 0.048s) — but numpy's 0.048s there is its import and
+# nothing else: subtract the 0.049s import floor and its remaining work is ~0.000s.
+# That region is a Python-startup race with no arithmetic in it, and any "Helix beats
+# NumPy at matmul" claim comes from picking an n inside it. The measured crossover is
+# n≈384 (helix 0.055s, numpy 0.054s). 1024 is the smallest size tested where the
+# ranking is stable, unambiguous, and about the GEMM rather than about `import numpy`.
+#
+# THREAD COUNTS — this header used to conclude something from them; it should not
+# have. At n=1024 this path reads 114% CPU and numpy/OpenBLAS 500%. The 114% is NOT a
+# GEMM measurement: with `.matmul` deleted the same file still reads 103%, so what is
+# being timed is the single-threaded construction, not faer. (faer is not sequential
+# here — src/tensor.rs picks `Par::rayon` once m*k*n >= 64e6, i.e. n >= 400.) No claim
+# about either library's core usage survives a whole-process CPU%, in either direction.
+#
+# HOW THE ISOLATED GEMM NUMBERS ABOVE WERE TAKEN (gemm_isolate.py / final_k8.py):
+# Helix has no in-process timer, and subtracting two ~1.2s process walls to estimate a
+# ~0.06s GEMM has more noise than signal (the same quantity came out anywhere from
+# 0.03s to 0.10s that way). Instead the identical script is run with K=1 and K=11
+# matmuls: construction is bit-identical in both and cancels, so (t11-t1)/10 is one
+# GEMM, 10x above the noise floor — and (t6-t1)/5 agrees with it, which also rules out
+# the repeats being folded away. NumPy's side is perf_counter around `a @ b`, min of 20.
+#
+#   A[i][j] = ((i*j) % 100) * 0.5      B[i][j] = ((i+j) % 100) * 0.25
+#   anchor  = C[0][0] + C[n-1][n-1] + C[n/2][n/2]   printed as C's %.6f
+#
+# Why the anchor is accumulation-order-independent: every A entry is a multiple of
+# 1/2, every B entry a multiple of 1/4, so every product is a multiple of 1/8, and
+# every partial sum is a multiple of 1/8 bounded by n*99*99 eighths — at n=1024 that
+# is 10036224 eighths, 24 bits, far inside f64's 53-bit mantissa. So every intermediate
+# is EXACT and a blocked/SIMD/FMA GEMM and a naive ijk loop agree to the last bit.
+# (Checked against an exact integer oracle, oracle_k8.py: n=8 → 420, n=64 → 44696,
+# n=512 → 305545.5, n=1024 → 606023.5, n=2048 → 1229887.5. And verified end-to-end:
+# all 7 programs print the identical anchor at n=4/8/16/64/512 — bash verify_k8.sh N.)
+#
+# Helix has no argv, so n comes from stdin — `??` supplies the default at EOF. ALWAYS
+# redirect stdin, or a bare `helix run` on a terminal blocks forever waiting on a line:
+#
+#   helix run k8_matmul.helix < /dev/null   # default n=1024
+#   echo 512 | helix run k8_matmul.helix    # n=512, e.g. to match the naive pair
+#
+# k8_matmul_numpy.py — the other half of this pair — defaults to 1024 to match. The
+# naive files (c/rust/go/cpython/helix-naive) default to 512, which is where a triple
+# loop still finishes.
+n = read_int() ?? 1024
+
+# floor division — Helix's `/` is float division, so integer division is explicit.
+fn idiv(x, m) = round((x - (x % m)) / m)
+
+a = tensor((0..n).map(i => (0..n).map(j => ((i * j) % 100) * 0.5)))
+b = tensor((0..n).map(i => (0..n).map(j => ((i + j) % 100) * 0.25)))
+c = a.matmul(b)
+
+h = idiv(n, 2)
+v = c[0][0] + c[n - 1][n - 1] + c[h][h]
+
+# Emit `v` as C's %.6f. Helix prints floats shortest-repr ("305545.5"), which would
+# not diff against printf's "305545.500000", so the fixed-point string is hand-rolled.
+# `v` is an exact multiple of 1/8 (see above), so its decimal expansion terminates at
+# 3 places and 6 places is exact — there is no rounding decision to get wrong. The
+# eight possible fractions (0, .125 … .875) are 6-digit microseconds except zero.
+eighths = round(v * 8)
+ip = idiv(eighths, 8)
+micros = (eighths % 8) * 125000
+frac = if micros == 0 then "000000" else "{micros}"
+print("{ip}.{frac}")

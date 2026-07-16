@@ -1,0 +1,95 @@
+# K1 — 50M-element i64 dot product. Build a[j]=j%97 and b[j]=j%89, then sum
+# a[j]*b[j].
+#
+# ############################################################################
+# ### HELIX'S MARGIN OVER C/RUST/GO ON THIS KERNEL IS AN ALLOCATOR ARTIFACT ###
+# ### — NOT A CODEGEN OR LANGUAGE WIN. READ THIS BEFORE QUOTING ANY NUMBER. ###
+# ############################################################################
+#
+# WHAT IT ACTUALLY MEASURES. The kernel is named for the dot product, but the dot
+# is ~4-5% of the C ref's runtime (0.017-0.022 s of 0.44 s) and ~9% of this
+# file's own (~20 ms of 0.22 s). The other ~91-95% is building the two 400 MB
+# arrays, and most of THAT is the kernel faulting in and zeroing fresh anonymous
+# pages — not arithmetic, and NOT DRAM bandwidth. The old claim in this header
+# ("MEMORY-BOUND: measures memory bandwidth, not codegen") was FALSE and has been
+# removed: in the C ref, system time is 81% of CPU time (sys 0.39 s vs user
+# 0.09 s), a warm rewrite of the same bytes runs at 11-13 GB/s and the reduce
+# reads at 37-48 GB/s, while the cold first-touch build of those same bytes
+# manages only 1.4-2.1 GB/s — 82-88% of the build is fault + zeroing. This kernel
+# ranks page-fault behaviour, i.e. ALLOCATORS. See k1_dot.c for the full writeup.
+#
+# WHY HELIX LOOKS FAST HERE. THP policy on the reference box is madvise-only
+# (/sys/kernel/mm/transparent_hugepage/enabled = "always [madvise] never"), so a
+# region gets huge pages ONLY if its allocator asks. Helix ships mimalloc
+# (Cargo.toml:153, src/main.rs:62-63), whose arenas ask. The C/Rust/CPython refs
+# use glibc malloc and Go uses its own allocator; none of them ask. Measured at
+# N=50M — peak AnonHugePages: Helix 643-778 MB, C 0 MB, Rust 0 MB, Go 0 MB.
+# Minor faults: Helix 117,527-133,000 vs C 195,389, Rust 195,400, Go 196,005.
+# Helix is winning a page-size contest the other languages were not entered in.
+#
+# EQUALIZE THE PAGE SIZE AND HELIX LOSES. GLIBC_TUNABLES=glibc.malloc.hugetlb=1
+# gives glibc's malloc the same huge pages, with NO source change to any ref:
+#     C      0.44 s -> 0.10 s   (sys 0.39 -> 0.05 s; minor faults 195,389 -> 1,211)
+#     Rust   0.44 s -> 0.12 s
+#     Go     0.43 s -> 0.48 s   (unchanged — Go's allocator has no such knob)
+#     Helix  0.22 s at 267% CPU (unchanged — it already had huge pages)
+# As published this kernel shows Helix 2.0x FASTER than C. Page-size-equalized it
+# shows C 2.2x FASTER than Helix — and C does it on ~1/6 the CPU (C 0.10 s x 103%
+# = 0.10 core-s; Helix 0.22 s x 267% = 0.59 core-s), i.e. C is ~5.7x better per
+# core. Same for Rust: 0.12 s and ~4.5x better per core. The published form
+# overstates Helix-vs-C by ~4.4x. run.sh MUST export that tunable (it does today
+# — keep it); Go has NO equivalent knob and stays small-page, so the Go column is
+# not page-size-comparable to the others and that must be disclosed wherever it
+# is shown. See k1_dot.c item 5 for the measured per-ref effect.
+#
+# THE ONE PAGE-SIZE-FAIR WIN HERE IS OVER NUMPY, AND IT IS SMALL. NumPy madvises
+# its own huge pages, so it is already in Helix's page-size class with no tunable:
+# measured 776 MB AnonHugePages, 5,285 minor faults, 0.29 s at 190% CPU vs Helix's
+# 0.22 s at 267%. That ~1.3x is a real result. Helix's margin over C/Rust/Go is
+# not. (Sanity check that NumPy's huge pages are doing the work: setting
+# NUMPY_MADVISE_HUGEPAGE=0 drops it to 0 huge pages, 198,957 minor faults and
+# 0.67 s — 2.3x slower, purely from page size.)
+#
+# WHAT HELIX'S PARALLELISM ACTUALLY BUYS HERE — it parallelizes the ~91%, not the
+# ~9%. The two maps run parallel (measured 238-280% CPU for a maps-only script,
+# 0.14 s), but the reduce is SERIAL: appending 10 sequential reduces to one build
+# drops whole-run CPU from 238-280% to 168-170%, and each reduce costs ~20 ms wall
+# for ~24 ms of core time (~100% CPU = one thread). So Helix spends ~2-3 cores
+# accelerating array construction — the part that is mostly kernel page-zeroing —
+# and runs the named operation single-threaded, at a cost comparable to C's
+# 0.017-0.022 s serial reduce. The reduce does JIT-compile to a native loop
+# reading both captured arrays by the loop counter (arr[j] reduce kernel); that
+# part of the old header was accurate and is retained.
+#
+# MEMORY: Helix is the HEAVIEST implementation here, not the leanest. Measured
+# maxRSS at N=50M: Helix 1,195,128-1,196,032 kB vs C 782,848, Rust 783,104, Go
+# 784,256 kB (= the 800 MB the arrays actually need). Helix carries ~400 MB over
+# the two-array footprint. The NumPy and CPython refs used to carry a comparable
+# ~1.18-1.20 GB and were fixed to reach parity (807,452 and 791,552 kB), which
+# leaves Helix as the only implementation still ~1.5x over. That is a real cost of
+# this kernel's execution model and is not charged to it anywhere in the score.
+#
+# METHOD/BOX: AMD Ryzen 7 7700X, 6 cores visible, 12 GB, Linux
+# 6.6.87.2-microsoft-standard-WSL2, THP=madvise, helix target/gate build, gcc
+# 13.3.0, rustc 1.97.0, go 1.26.1. Wall times are MIN-of-9 interleaved runs at
+# N=50M on an otherwise-idle box. Treat them as approximate: this kernel is
+# fault-bound, so wall time tracks the kernel's free-page supply and is genuinely
+# noisy. Fault counts, AnonHugePages and RSS are load-insensitive and are the
+# load-bearing evidence.
+#
+# N COMES FROM STDIN via read_int(), defaulting to 50000000 on EOF. `helix run`
+# takes no script argv, so unlike the C/Rust/Go/Python refs (which take N as
+# argv[1]) this kernel reads it from stdin — which is exactly what run.sh pipes:
+#     echo "$n" | helix run k1_dot.helix
+# ALWAYS REDIRECT STDIN. A bare `helix run k1_dot.helix` from a terminal leaves
+# stdin open and BLOCKS waiting for input; `helix run k1_dot.helix < /dev/null`
+# hits EOF and takes the 50000000 default.
+# The arrays are NOT folded away — they are really materialized and streamed, and
+# taking N from stdin rather than a source literal changes neither that nor the
+# timing (measured, 5 reps each: read_int form 0.15-0.16 s at 246-256% CPU vs
+# literal form 0.15-0.22 s at 241-256% — identical within noise).
+# Anchor at N=50000000: 105599878134. At N=1000: 1996904.
+n = read_int() ?? 50000000
+a = (0..n).map(j => j % 97)
+b = (0..n).map(j => j % 89)
+print((0..n).reduce(0, (acc, j) => acc + a[j] * b[j]))

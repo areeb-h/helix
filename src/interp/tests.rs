@@ -1412,6 +1412,30 @@
         assert_eq!(s("s = \"hello\"\n\"{s:.3s}\""), "hel");
     }
 
+    /// `g` means SIGNIFICANT digits, like C's `%g` and Python's `g` — not
+    /// decimal places. It used to map to Rust's `{:.*}` (fixed decimals), so
+    /// `{x:.15g}` printed 15 decimals where `%.15g` prints 15 significant
+    /// digits. Every case here was diffed against a C `printf` of the same
+    /// spec and matches byte-for-byte, including the fixed/exponential switch
+    /// (exp < -4 or >= precision), zero-trimming, and the two-digit exponent.
+    #[test]
+    fn format_spec_g_matches_c_percent_g() {
+        fn s(src: &str) -> String {
+            match last(src).unwrap() {
+                Value::Str(rc) => (*rc).clone(),
+                other => panic!("expected a string, got {:?}", other),
+            }
+        }
+        assert_eq!(s("x = 1.5497677311665408\n\"{x:.15g}\""), "1.54976773116654");
+        assert_eq!(s("x = 1.5497677311665408\n\"{x:.3g}\""), "1.55");
+        assert_eq!(s("x = 1.5497677311665408\n\"{x:g}\""), "1.54977"); // default p=6
+        assert_eq!(s("y = 1234567.0\n\"{y:.3g}\""), "1.23e+06"); // exp >= p
+        assert_eq!(s("y = 1234567.0\n\"{y:.10g}\""), "1234567"); // trims .000
+        assert_eq!(s("z = 0.000012345\n\"{z:.3g}\""), "1.23e-05"); // exp < -4
+        assert_eq!(s("w = 100.0\n\"{w:.3g}\""), "100");
+        assert_eq!(s("v = 0.0\n\"{v:.3g}\""), "0");
+    }
+
     #[test]
     fn first_class_lambda_value() {
         assert!(matches!(last("double = x => x + x\ndouble(21)").unwrap(), Value::Int(42)));

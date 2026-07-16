@@ -1,0 +1,46 @@
+# K4 — all-pairs Manhattan distance sum over N points on a line:
+#   pts[i] = (i * 2654435761) % 1000,  S = Σ_{i<j} |pts[i] − pts[j]|
+# Triangular (`range(i + 1, n)`) — each unordered pair counted once.
+# Anchor at the default N=15000: 37499962500  (~112M inner iterations).
+#
+# WHAT THIS MEASURES — read before quoting the number. Scalar i64 codegen, and
+# nothing else. This is NOT a realistic distance-matrix workload: the points lie
+# on a LINE, and for 1-D points Σ_{i<j}|x_i−x_j| collapses to an O(N log N)
+# closed form (sort, then Σ_j j*x_j − prefix_j). Measured: that closed form
+# prints this same anchor in 2.11 ms of PURE CPYTHON — 2.9x faster than the
+# 6.1 ms AVX-512 C loop below. Every language here runs a deliberately worse
+# algorithm so that the O(N^2) inner loop is what gets timed. Read this as a
+# codegen/vectorization microbenchmark; it is not evidence about anybody's
+# clustering, phylogenetics, or distance matrices.
+#
+# THREADS — SINGLE-THREADED. Measured 97% CPU (one core), and `taskset -c 0`
+# changes nothing: 0.0431s pinned vs 0.0433s free. Helix does have a parallel
+# nested-reduce path, but this kernel cannot reach it: src/bytecode/
+# comprehensions.rs declines the parallel path when the inner range bounds
+# mention the outer binder, and the triangular `range(i + 1, n)` always mentions
+# `i`. Measured proof — the same kernel with a rectangular `range(0, n)`, which
+# is eligible and does 2x the work: 0.0214s at 386% CPU, versus 0.0429s at 103%
+# for this triangular one. So this row is like-for-like against the
+# single-threaded C/Rust/Go refs: one core each, no thread edge to discount.
+#
+# MEASURED, best of 7 at N=15000, quiet box (Ryzen 7 7700X, WSL2, 6 cores):
+#   helix 0.0433s | C 0.0061s | Rust 0.0063s | Go 0.0546s | CPython 4.98s
+# A second run reproduced these within noise (helix 0.0427, C 0.0061, Go 0.0554),
+# so treat the ratios as ~1 significant figure, not as exact constants.
+# Helix beats single-threaded Go by ~1.3x on one core, and is ~7x off C — C
+# vectorizes this loop (AVX-512, 8 i64 per instruction; see k4_allpairs.c) where
+# Helix's JIT emits a scalar loop. ~0.004s of the Helix number is fixed runtime
+# startup (measured: `print(0)` = 0.0041s). The JIT is what produces the number:
+# HELIX_NOJIT=1 takes 14.14s.
+#
+# The inner `reduce` indexes the captured `pts` by BOTH the outer index `i` and
+# the inner counter `j` — the array-capture reduce shape the JIT compiles.
+#
+# N: `helix run` takes no script argv, so N is read from STDIN via read_int();
+# run.sh pipes it in. Run it by hand with a redirect — `echo 15000 | helix run
+# k4_allpairs.helix` — because an open stdin BLOCKS. Falls back to 15000 on EOF.
+n = read_int() ?? 15000
+pts = (range(0, n)).map(i => (i * 2654435761) % 1000)
+print((range(0, n)).map(i =>
+  (range(i + 1, n)).reduce(0, (acc, j) => acc + abs(pts[i] - pts[j]))
+).sum())

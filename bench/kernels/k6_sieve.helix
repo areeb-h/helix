@@ -1,0 +1,34 @@
+# K6 — count the primes below 10,000,000. Anchor 664579 = pi(10^7).
+#
+# READ THIS BEFORE QUOTING THE TIMING. This is a DELEGATION kernel. Helix ships the
+# Sieve of Eratosthenes as a native builtin (`primes(n)` — the byte-array sieve in
+# Rust at src/interp/builtins.rs::sieve_primes), so this line measures ONE thing:
+# *does the language ship the right primitive?* It says NOTHING about Helix's codegen
+# — it is the same kind of result NumPy gets on a matmul by calling BLAS. The sieve is
+# an inherently MUTABLE algorithm that Helix's immutable surface cannot express
+# efficiently, which is exactly why it is a builtin.
+#
+# DO NOT read this as beating C. All four native columns run the same byte-array
+# Eratosthenes, so they tie. Measured on one (contended) WSL2 box, N=1e7, min of 25
+# full-process runs:
+#     C 0.017 s | Helix 0.020 s | Rust 0.020 s | Go 0.023 s
+# That spread is the noise floor, not a ranking; ~0.004 s of the Helix number is
+# interpreter startup. Where Helix does pay is memory, not time: 44 MB peak RSS
+# against C's 11 MB, because `primes()` materializes all 664579 primes as an i64
+# array that `.count()` then merely measures, where C counts inline.
+#
+# The one honest win here is CPython (0.63 s, 31x — best of 6). Helix also "beats"
+# NumPy's ~0.08 s total, but that is an artifact of process startup: ~0.065 s of that
+# total is `import numpy`, and NumPy's sieve alone is ~0.013 s — the fastest sieve in
+# this kernel, since it bounds its outer loop at isqrt(n) and counts vectorized.
+#
+# The honest pure-Helix count of the same quantity is k6_sieve_trial.helix: 97 s
+# against this file's 0.020 s (~4800x, measured). Read BOTH or you have misread this.
+#
+# `primes(n)` yields the primes strictly BELOW n — the same 2 <= p < n boundary
+# every other language in this kernel uses. N is a source literal because `helix run`
+# gives a script no argv (house style: see bench/stress/s5_fused.helix). The literal
+# is NOT const-folded: the same kernel taking N from read_int() runs at the same speed
+# (ratio 1.008, min of 25), so the sieve really executes at run time.
+n = read_int() ?? 10000000    # N on stdin; run.sh pipes it
+print(primes(n).count())

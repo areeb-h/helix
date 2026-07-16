@@ -1,0 +1,27 @@
+# K6 (trial division) — the HONEST pure-Helix count of the primes below 10,000,000,
+# with no native sieve. Same anchor (664579) as k6_sieve.helix.
+#
+# Measured on one (contended) WSL2 box, N=1e7, full-process wall clock, best run of
+# 3 for this file / 25 for `primes()` / 6 for CPython. This file is single-threaded
+# (99% CPU), as is the CPython column it is compared against:
+#     this file 97 s | k6_sieve.helix (native `primes()`) 0.020 s | CPython 0.63 s
+#
+# BOTH ratios are the story, and neither flatters Helix:
+#   * ~4800x slower than Helix's own builtin, and
+#   * ~150x slower than CPYTHON, which counts the same 664579 using the sieve this
+#     file cannot express. Pure Helix loses this kernel to the slowest interpreter in
+#     the suite by two orders of magnitude.
+#
+# That is a story about the language's limits, not its strengths — and most of the gap
+# is the ALGORITHM, not interpreter speed: a sieve mutates a shared array in place,
+# which Helix's immutable surface cannot express efficiently, so the honest functional
+# fallback is trial division at O(N*sqrt(N)) against the sieve's O(N log log N).
+# Helix survives this kernel by SHIPPING the primitive (k6_sieve.helix), not by
+# compiling it well.
+#
+# `all()` short-circuits, so composites bail on their first divisor; only the
+# 664579 primes pay the full sqrt(k) scan. Boundary matches every other language:
+# primes p with 2 <= p < n. N is a source literal (`helix run` gives a script no argv).
+fn is_prime(k) = k > 1 and (2..isqrt(k) + 1).all(d => k % d != 0)
+n = read_int() ?? 10000000    # N on stdin; run.sh pipes it
+print((2..n).filter(k => is_prime(k)).count())

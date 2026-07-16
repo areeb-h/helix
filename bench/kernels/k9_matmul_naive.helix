@@ -1,0 +1,78 @@
+# K8 — dense f64 matmul, NAIVE path: the triple loop written in comprehensions, with
+# no tensor and no GEMM. This is the file to compare against naive C/Rust/Go: same
+# arithmetic, same ijk order, same materialized row-major A and B, same strided
+# B[k*n+j] read in the inner loop, and single-threaded like them (measured: 98% CPU,
+# i.e. one core, same as the CPython sibling).
+#
+# "Same algorithm" needs one narrowing, and it cuts against Helix. C/Rust/Go accumulate
+# the inner product into a scalar register; the `(0..n).map(k => ...).reduce(...)` on
+# the line marked below instead MATERIALIZES an n-element array for every (i,j) pair
+# and then reduces it — 262144 temporary arrays of 512 f64 at n=512, which no sibling
+# allocates. Measured cost of those temps: rewriting just that line as a direct
+# `(0..n).reduce(0.0, (s, k) => s + a[i*n+k] * b[k*n+j])`, which allocates nothing,
+# takes n=512 from 25.2s to 21.2s (1.19x). The map/reduce spelling is kept anyway: it
+# is the natural way to write this in Helix, and the handicap is Helix's own.
+#
+# READ THIS BEFORE QUOTING THE NUMBER. This shape does NOT reach the JIT today —
+# `HELIX_NOJIT=1` costs the same as the default engine (1.325s vs 1.308s at n=192,
+# 1.01x). That A/B is only meaningful with a positive control, so: the JIT is live in
+# this binary, and on a shape it does accept — an f64 reduce indexing captured arrays,
+# `(0..n).reduce(0.0, (s, k) => s + a[k] * b[k])` — the same flag shows a 69x gap
+# (0.011s vs 0.754s). The triple loop here gets none of that, in either spelling: the
+# direct-reduce variant above is also unJITted (NOJIT 1.01x), so its 1.19x edge is the
+# temp allocations alone and not codegen. So this file measures the BYTECODE VM
+# interpreting a triple loop. It is NOT a datapoint about Helix's code generation and
+# should not be read as "Helix compiles matmul badly" — this loop nest never gets
+# compiled at all. The honest headline, min of 3 at n=512 on an idle 6-core box: 25.4s
+# against C's 0.369s (69x), and it LOSES to naive CPython (15.2s) by 1.7x.
+#
+#   A[i][j] = ((i*j) % 100) * 0.5      B[i][j] = ((i+j) % 100) * 0.25
+#   anchor  = C[0][0] + C[n-1][n-1] + C[n/2][n/2]   printed as C's %.6f
+#
+# A and B are materialized as flat row-major arrays and INDEXED (not recomputed) in
+# the inner loop, exactly as the C/Rust/Go siblings do. Recomputing ((i*k)%100)*0.5 on
+# the fly would be a different benchmark (it skips the cache-missing strided load that
+# dominates a naive ijk matmul), so it is not done here. Note that indexing is the
+# fair choice but NOT the favourable one — measured, recomputing on the fly is FASTER
+# on the VM (1.19s vs 1.33s at n=192), so matching the siblings costs Helix ~12% here.
+# (An earlier version of this header had that comparison backwards.)
+#
+# The anchor is bit-exact for any accumulation order; see k8_matmul.helix for why.
+# (Verified: all 7 programs print the identical anchor at n=4/8/16/64/512.)
+#
+# Helix has no argv, so n comes from stdin — `??` supplies the default at EOF. ALWAYS
+# redirect stdin, or a bare `helix run` blocks forever waiting on a line:
+#
+#   helix run k8_matmul_naive.helix < /dev/null   # default n=512 (~25s)
+#   echo 64 | helix run k8_matmul_naive.helix     # n=64, for anchor verification
+#
+# The default is 512, matching the other naive files — it is the largest size where an
+# interpreted O(n³) loop still finishes in a reasonable time. (The tensor/GEMM pair,
+# k8_matmul.helix and k8_matmul_numpy.py, defaults to 1024 instead; see that header.)
+n = read_int() ?? 512
+
+# floor division — Helix's `/` is float division, so integer division is explicit.
+fn idiv(x, m) = round((x - (x % m)) / m)
+
+# flat row-major A and B: index t = row*n + col
+a = (0..(n * n)).map(t => ((idiv(t, n) * (t % n)) % 100) * 0.5)
+b = (0..(n * n)).map(t => ((idiv(t, n) + (t % n)) % 100) * 0.25)
+
+# the triple loop: for each (i, j), reduce over k. C is fully materialized (all n²
+# cells are computed) — the anchor reads three of them afterwards, so the O(n³) work
+# is real and cannot be folded away.
+c = (0..n).map(i =>
+  (0..n).map(j =>
+    # THE MARKED LINE: `map(...).reduce(...)` builds an n-element temp for this (i,j)
+    # before reducing it — the n² extra allocations described in the header.
+    (0..n).map(k => a[i * n + k] * b[k * n + j]).reduce(0.0, (s, x) => s + x)))
+
+h = idiv(n, 2)
+v = c[0][0] + c[n - 1][n - 1] + c[h][h]
+
+# emit as C's %.6f — see k8_matmul.helix for the rationale.
+eighths = round(v * 8)
+ip = idiv(eighths, 8)
+micros = (eighths % 8) * 125000
+frac = if micros == 0 then "000000" else "{micros}"
+print("{ip}.{frac}")
