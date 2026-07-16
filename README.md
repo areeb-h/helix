@@ -71,6 +71,7 @@ helix run script.helix       # run a script
 helix eval "print(1 + 2)"    # a one-liner
 helix repl                   # interactive session
 helix build script.helix     # compile to a standalone executable (no toolchain needed)
+helix emit-hbc script.helix  # compile to a .hbc bytecode container (portable core-bytecode artifact)
 helix help                   # all commands
 ```
 
@@ -194,6 +195,9 @@ end-to-end in pure Helix.
 ### Packaging & interop
 - **`helix build`** copies the interpreter and appends your program as an overlay → a standalone
   executable that runs with no toolchain and no Helix on `PATH`.
+- **`.hbc` (Helix Bytecode Container)** — `helix emit-hbc` lowers a program's core subset to a
+  portable core-bytecode artifact that runs on ctype's `no_std`, ring-0 `hvm` VM. It's the first
+  artifact format Helix emits beyond the bundled executable.
 - **CPython interop** (feature-gated) calls into NumPy, Polars, and friends — see
   [docs/python-interop.md](docs/python-interop.md).
 

@@ -28,6 +28,9 @@ they are made deliberately and in the open.
 | [0019](0019-module-system.md) | Module system (`import`, path resolution) | Accepted — implemented |
 | [0020](0020-dict-type.md) | `Dict`: keyed map with O(log n) lookup | Accepted — implemented |
 | [0021](0021-capability-sandbox.md) | Capability sandbox: deny-by-default authority | Proposed — phase 1 in progress |
+| [0022](0022-http-version-roadmap.md) | HTTP version roadmap (keep-alive now, HTTP/2 & HTTP/3 via established stacks) | Accepted — Stage 1 (keep-alive) implemented; HTTP/2 & HTTP/3 proposed |
+| [0023](0023-hbc-emitter-artifact-format.md) | `.hbc` emitter & portable core-bytecode artifact format (`helix emit-hbc`) | Accepted — implemented; runs in ctype ring 0, cross-producer verified |
+| [0024](0024-total-runtime-no-host-panics.md) | Total runtime: user input never aborts the host | Accepted — implemented + regression-tested; CI lint gate pending |
 
 ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
 (23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a

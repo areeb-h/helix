@@ -311,6 +311,28 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       DataFrames, lambdas) falls back to the tree-walker per program. **~3× faster
       on `fib(30)` (debug); 100k-deep recursion runs on an ordinary stack.** Parity
       is regression-gated: VM-vs-tree-walker unit tests and an all-examples diff.
+- [x] **Stage 1c — `.hbc` serializable core-bytecode container + emitter
+      (`helix emit-hbc`).** Lowers a compiled bytecode `Program` (the dependency-free
+      scalar core — Int/Float/Bool `+ - *` and comparisons, frame locals, if/while,
+      direct and tail calls; `/` is deliberately excluded — Helix `/` float-promotes,
+      hvm's DIV does not, see ADR 0023's amendment) to the byte-exact `.hbc` (Helix
+      Bytecode Container) format, reconciling
+      Helix's instruction-index jump targets and per-chunk constant pools with hvm's
+      byte-offset targets and one program-global scalar pool. Anything outside the core
+      is rejected with a source-attributed error. This is **ctype's ring-0 execution
+      substrate (V2.5)**: `helix emit-hbc` produces `.hbc` that ctype's embedded no_std,
+      zero-allocation VM runs in kernel ring 0 — verified end-to-end in QEMU (a
+      Helix-compiled `fib(25)=75025` matching the hand-assembled demo). The byte format
+      is specified authoritatively in [ADR 0023](adr/0023-hbc-emitter-artifact-format.md).
+      **Host calls (2026-07-10):** the emitter lowers `print`/`emit`/`elog` to hvm's
+      `CALL_HOST 0`, `sleep` to `CALL_HOST 1`, and `read_int` to `CALL_HOST 2`, so a `.hbc`
+      program can print, pace itself, and **read console input** through host-mediated
+      capabilities — ctype gates them on `CAP_PRINT`/`CAP_SLEEP`/`CAP_GETKEY`. `read_int()`
+      is also a new first-class Helix builtin (0-arg → `Int`; reads a line from stdin,
+      `missing` on EOF). Interactive Helix *system programs* now compile and run in ring 0:
+      `greet(n)=print(fib(n))`, a `fibseq` streaming via `emit`, a `paced` `sleep`-countdown,
+      and `add2()=print(read_int()+read_int())` reading two typed numbers. More
+      builtins/capabilities follow as the host ABI grows (ADR 0023's Host ABI section).
 - [~] **Stage 1b — widen the VM to handle all constructs (the single-engine goal).**
       The end state: the bytecode VM is the *sole* executor; the tree-walker is
       removed; the JIT and memoization are optimization *tiers* on the one bytecode
@@ -414,8 +436,8 @@ motivates this phase.
       Helix from Python on hot paths.
 
 ### Distribution and install — see [ADR 0009](adr/0009-distribution-and-install.md)
-- [x] **A `helix` CLI** — `helix run` / `eval` / `repl` / `version` / `help`
-      (plus the `helix <script.helix>` shorthand), replacing `cargo run`.
+- [x] **A `helix` CLI** — `helix run` / `eval` / `repl` / `build` / `emit-hbc` /
+      `version` / `help` (plus the `helix <script.helix>` shorthand), replacing `cargo run`.
 - [x] **`cargo install --path .`** plus **`install.sh`** (the eventual `curl | sh`
       one-liner: downloads a prebuilt binary, falls back to a source build) plus
       **`.github/workflows/release.yml`** (cross-builds the self-contained core for
@@ -460,8 +482,92 @@ motivates this phase.
       it (flat 16 MB). Parity-tested (`deep_tail_recursion`,
       `tail_calls_match_tree_walker_on_vm`). See
       [execution-engine.md](execution-engine.md) and [audit.md](audit.md).
+- [x] **Adversarial audit, round 2** (2026-07-10) — a second hunt (strings/format,
+      comprehensions/closures, DataFrame, genomics, module system) found and fixed
+      five more issues, each verified under both engines with regression tests:
+      - **`module::locate` line-0 underflow** — a position-free error (e.g. a
+        format-spec failure carrying line 0) hit `line - start_line` and **panicked
+        the host** under overflow checks (garbage location in release). Now saturates
+        (ADR 0024's "no host panics" property; the actual format error now renders).
+      - **`reduce`/`scan` with a duplicate binder `(a, a)`** deleted a same-named
+        *outer* binding in the tree-walker (double `remove` on the shared entry); the
+        outer name is now preserved (VM was already correct).
+      - **A closure capturing a binder that shadows a same-named global** read the
+        *global* in the tree-walker instead of the lexical binder; capture is now by
+        current binding (immutable globals snapshot, mutable globals stay live —
+        matching the VM's local→upvalue→global resolution).
+      - **Radix format specs (`{x:x}`/`b`/`o`) on negatives** printed Rust's 64-bit
+        two's-complement (`ffffffffffffff01`) instead of Python-style sign-magnitude
+        (`-ff`); a **string precision** (`{s:.3s}`) was ignored. Both now match the
+        documented Python mini-language.
+      Deferred (need a design decision or are by-design — see backlog below):
+      zero-param comprehension lambdas (`[].map(() => 5)`), the `where`-vs-`filter`
+      error wording, and DataFrame `@a / 0` → `inf` / `@a % 0` → `missing`.
+- [x] **Total runtime: user input never aborts the host** (2026-07-10, [ADR 0024](adr/0024-total-runtime-no-host-panics.md)) —
+      an adversarial audit found and fixed four reachable aborts/wrong answers, each
+      with a regression test and verified across engines (differential oracle green):
+      - `i64::MIN // -1` / `i64::MIN % -1` **panicked the host in every build mode**
+        (`div_euclid`/`rem_euclid` are always-checked overflow). Now wrap
+        (`wrapping_*_euclid`) in **both** the tree-walker (`interp/ops.rs`) and the VM
+        (`vm.rs`), matching the `arith` path's wrapping policy. The JIT was already
+        safe (it compiles `//`/`%` only by a positive constant divisor).
+      - `.sort()`/`.argsort()` with a `NaN` element **aborted** (the comparator
+        returned `Equal` for NaN — intransitive, and Rust's sort panics on a
+        non-total order). `numeric_cmp` now uses `f64::total_cmp` (NaN sorts to a
+        consistent extreme, as numpy does).
+      - `round(x, d)` with `d ≥ 2^31` silently returned `NaN` (`as i32` wrap
+        underflowed the scale to 0). Digit count now clamped to f64's exponent span;
+        a scaled overflow is a no-op.
+      - `argmax`/`argmin` raised a type error on `missing` and silently skipped
+        `NaN`; they now propagate `missing` like every other aggregation (ADR 0001).
+- [x] **Test suite runs on a stock environment** (2026-07-10) — the tree-walker
+      recurses on the *native* stack, and three recursion-heavy tests overflowed
+      cargo's default ~2 MiB test-thread stack, SIGABRT-ing the whole binary and
+      masking every later test. `run_tw` (vm/tests.rs) and `no_reference_leaks`
+      (interp/tests.rs) now run on a 2 GiB thread, matching production's
+      `run_on_big_stack`; `cargo test --bin helix` passes 342/342 with no env-var
+      workaround.
 - [ ] Iterative/trampolined evaluation to remove the native-stack recursion limit
       entirely (only if needed).
+
+### Future work — correctness backlog
+- [x] **Extend the differential fuzzer's literal pool** (2026-07-10) — `gen_expr`'s
+      binary-op arm now draws both operands from an adversarial i64 edge pool
+      (`i64::MIN`, `i64::MAX`, `-1`, `±(2^53+1)`, small consts) 1/4 of the time, so
+      `MIN // -1`, `MIN % -1`, and 2^53-boundary comparisons are routine fuzzer
+      traffic (they had ~1e-9 grammar probability before). Differential oracle green.
+- [ ] **Decide zero-parameter comprehension lambdas** — `[].map(() => 5)` (a thunk
+      that ignores the element): the VM raises "needs at least one parameter" while
+      the tree-walker evaluates it (returns `[]`/`[5, 5]`). The parser accepts the
+      syntax, so one engine must change. Pick a semantics (reject as a likely bug, or
+      accept as a constant-map) and align both engines + a regression test.
+- [ ] **Thread the invoked method name into `where`/`filter` runtime errors** — a
+      non-bool `where` predicate reports "`filter` expects a yes/no test" in the VM
+      (`Op::CompFilterPush` hard-codes `filter`; the compiler routes `where` through
+      `CompKind::Filter`). Both engines correctly *error*; only the name in the
+      message diverges. Carry the surface method name into the op/error.
+- [ ] **Decide DataFrame divide/modulo-by-zero semantics** — inside a column
+      expression, `@a / 0` yields `inf` and `@a % 0` yields `missing` (Polars/IEEE
+      columnar semantics), whereas scalar Helix *raises* "division by zero". Both
+      engines agree (it's the backend), so it's not an oracle bug — but it's a
+      scalar-vs-columnar inconsistency to either document as intended (SQL-like) or
+      intercept in the verb lowering.
+- [x] **BAM quality-byte overflow fixed** (2026-07-10) — `render_quality`
+      (`src/sam.rs`) did `(s + 33) as char` on a raw `u8`; a malformed BAM with a
+      quality byte `>= 223` overflowed `u8` (panic in debug, wrong char in release).
+      The score is now clamped to the SAM-valid `0..=93` before the `+ 33` (the doc
+      comment already assumed that range). Text SAM couldn't reach it; only `read_bam`.
+- [ ] **Panic-free audit of the remaining surfaces** — Dict operations, the other
+      genomics parsers (VCF/GFF/BED) on malformed files, unicode byte-vs-char
+      slicing, module-system cycles. (Rounds 1–2 done 2026-07-10.)
+- [ ] **A `#![deny]` gate for new `unwrap`/`expect` in interpreter paths** (or a
+      clippy `disallowed_methods` config scoped to `src/interp`/`src/vm`) so the
+      never-abort property is enforced by CI, not re-audited by hand.
+- [ ] **Document NaN ordering** in the language docs (`sort` places NaN after
+      `+inf`; reductions propagate `missing`) so the behavior is a contract, not an
+      implementation detail.
+- [ ] **`try`-on-VM error-recovery soak** — `TryBegin`/`TryOk`/`TryErr` unwinding
+      under the fuzzer, composed with JIT bailouts mid-`try`.
 
 ## Cross-cutting principles to uphold at every phase
 - Prefer dots over pipes; minimize operator symbols.

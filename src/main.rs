@@ -19,6 +19,7 @@ mod chart;
 mod dataframe;
 mod error;
 mod gff;
+mod hbc;
 mod http;
 mod interp;
 mod jit;
@@ -164,6 +165,9 @@ fn run() -> ExitCode {
         },
         // `helix build <script> [-o name]` — bundle a program into a standalone exe.
         Some("build") => run_build(&args),
+        // `helix emit-hbc <script> [--entry NAME] [-o out.hbc]` — compile to a `.hbc`
+        // Helix Bytecode Container for ctype's ring-0 `hvm` (ADR 0023).
+        Some("emit-hbc") => run_emit_hbc(&args),
         // `helix python <…>` — manage CPython runtimes for interop.
         Some("python") => run_python_cli(&args),
         // `helix new <name>` — initialize a `helix.toml`.
@@ -456,6 +460,149 @@ fn run_build(args: &[String]) -> ExitCode {
     })
 }
 
+/// `helix emit-hbc <script> [--entry NAME] [-o out.hbc] [--dump]` — compile a program
+/// and emit a `.hbc` (Helix Bytecode Container) for ctype's ring-0 `hvm` interpreter
+/// (ADR 0023). Only the dependency-free core subset (Int/Float/Bool arithmetic, frame
+/// locals, `if`/`while`, direct + tail calls) lowers; anything else is a precise,
+/// source-attributed error. Runs on the big stack (the front-end recurses over the AST).
+fn run_emit_hbc(args: &[String]) -> ExitCode {
+    let entry = match args.get(2) {
+        Some(p) if !p.starts_with('-') => p.clone(),
+        _ => {
+            eprintln!(
+                "error: `helix emit-hbc` needs a script path, e.g. `helix emit-hbc main.helix --entry compute -o main.hbc`"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    // Optional `-o <out>`, `--entry <fn>`, `--dump`.
+    let mut out: Option<String> = None;
+    let mut entry_fn: Option<String> = None;
+    let mut dump = false;
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => match args.get(i + 1) {
+                Some(name) => {
+                    out = Some(name.clone());
+                    i += 2;
+                }
+                None => {
+                    eprintln!("error: `{}` needs an output name", args[i]);
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--entry" => match args.get(i + 1) {
+                Some(name) => {
+                    entry_fn = Some(name.clone());
+                    i += 2;
+                }
+                None => {
+                    eprintln!("error: `--entry` needs a function name");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--dump" => {
+                dump = true;
+                i += 1;
+            }
+            other => {
+                eprintln!("error: unknown option `{other}` for `helix emit-hbc`");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    run_on_big_stack(move || {
+        let entry_path = std::path::PathBuf::from(&entry);
+        // Load (read + lex + parse + namespace-resolve the import graph).
+        let loaded = match module::load(&entry_path) {
+            Ok(l) => l,
+            Err(rendered) => {
+                eprint!("{rendered}");
+                return ExitCode::FAILURE;
+            }
+        };
+        // Type-check so the compiler routes receiver-polymorphic methods correctly.
+        let types = match types::check(&loaded.stmts) {
+            Ok(t) => t,
+            Err(e) => {
+                eprint!("{}", render_err(e, &loaded.spans, loaded.multi_module));
+                return ExitCode::FAILURE;
+            }
+        };
+        // Compile to bytecode (total for any type-checked program).
+        let program = match bytecode::compile_with_types(&loaded.stmts, Some(types)) {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!(
+                    "internal error: the compiler could not lower a type-checked program (please report)"
+                );
+                return ExitCode::FAILURE;
+            }
+        };
+        // `--dump`: print the compiled instruction stream (to stderr) — a debugging aid.
+        if dump {
+            eprintln!("— compiled program ({} functions) —", program.funcs.len());
+            for (fi, ch) in program.funcs.iter().enumerate() {
+                let name = program.func_names.get(fi).map(|s| s.as_str()).unwrap_or("?");
+                eprintln!(
+                    "[{fi}] {name}  n_params={} n_locals={} consts={:?}",
+                    ch.n_params, ch.n_locals, ch.consts
+                );
+                for (j, opx) in ch.code.iter().enumerate() {
+                    eprintln!("    {j:3}: {opx:?}");
+                }
+            }
+        }
+        // Default entry: the last non-`<main>` top-level function (else `<main>`).
+        let entry_name = match &entry_fn {
+            Some(n) => n.clone(),
+            None => program
+                .func_names
+                .iter()
+                .rev()
+                .find(|n| n.as_str() != "<main>")
+                .cloned()
+                .unwrap_or_else(|| "<main>".to_string()),
+        };
+        let emitted = match hbc::emit(&program, &entry_name) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("error: cannot emit `.hbc`: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let out_path = match &out {
+            Some(o) => std::path::PathBuf::from(o),
+            None => entry_path.with_extension("hbc"),
+        };
+        if let Err(e) = std::fs::write(&out_path, &emitted.bytes) {
+            eprintln!("error: could not write {}: {e}", out_path.display());
+            return ExitCode::FAILURE;
+        }
+        println!(
+            "wrote {} ({} bytes, {} function(s), {} constant(s)); entry `{}` is index 0",
+            out_path.display(),
+            emitted.bytes.len(),
+            emitted.funcs.len(),
+            emitted.nconsts,
+            entry_name,
+        );
+        // hvm addresses functions by index (no name table in `.hbc`), so print the map.
+        for f in &emitted.funcs {
+            println!(
+                "  [{}] {}  nargs={} nlocals={}{}",
+                f.index,
+                f.name,
+                f.nargs,
+                f.nlocals,
+                if f.index == 0 { "   <- entry" } else { "" }
+            );
+        }
+        ExitCode::SUCCESS
+    })
+}
+
 /// Run `f` on a thread with a 2 GiB stack. The **entire** front-end (parse,
 /// namespace-resolve, type-check, compile) and the tree-walker all recurse on the
 /// native stack over the AST, so they run here — and the parser's `MAX_PARSE_DEPTH`
@@ -492,6 +639,7 @@ fn print_help() {
          helix run <script>       run a script\n    \
          helix eval \"<code>\"       run a one-liner\n    \
          helix build <script>     bundle a program into a standalone executable\n    \
+         helix emit-hbc <script>  compile to a .hbc bytecode container (for ctype's hvm)\n    \
          helix repl               start an interactive session\n    \
          helix new <name>         create a helix.toml in the current directory\n    \
          helix add <name> ...     add a dependency (--path <dir> | --url <tarball>)\n    \
