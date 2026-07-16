@@ -1,0 +1,7 @@
+fn g(n) = if n == 0 then 0 else g(n - 1)
+fn caller2(g2, n) = g2(n)
+print(caller2(g, 30000))
+fn id(x) = x
+h = id
+fn probe(d) = if d == 0 then h(42) else 0 + probe(d - 1)
+print(probe(100))

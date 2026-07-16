@@ -1,0 +1,5 @@
+x = {a: 1, a: 2}
+y = {a: 2, a: 1}
+print(x == y)
+print(x.a)
+print(y.a)

@@ -2688,3 +2688,57 @@ fn capability_enforce_gates_net_class() {
         "grant should open the gate (transport error instead): {out2}"
     );
 }
+
+/// THE ANTI-DRIFT CORPUS: every Helix program under `tests/corpus/` runs on
+/// all three engines; the outputs must be (a) byte-identical across engines
+/// and (b) equal to the checked-in `.expected` golden (exit code + stdout +
+/// stderr, with the absolute source path normalized to `<src>`). Every
+/// verified fix from the 2026-07 sweeps lives here as a runnable program, so
+/// a future change that re-breaks one fails THIS test with the program name.
+/// After an INTENTIONAL behavior change, regenerate goldens with
+/// `UPDATE_CORPUS=1 cargo test corpus_is_engine_identical_and_pinned`.
+#[test]
+fn corpus_is_engine_identical_and_pinned() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
+    let update = std::env::var("UPDATE_CORPUS").is_ok();
+    let mut programs: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .expect("tests/corpus exists")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "helix"))
+        .collect();
+    programs.sort();
+    assert!(programs.len() >= 40, "corpus unexpectedly small: {}", programs.len());
+    for path in programs {
+        let rel = path.to_str().unwrap();
+        let name = path.file_stem().unwrap().to_str().unwrap();
+        let render = |env: &[(&str, &str)]| -> String {
+            let (out, err, code) = run(&[rel], env, "");
+            format!(
+                "exit: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+                out.trim_end_matches('\n'),
+                err.replace(rel, "<src>").trim_end_matches('\n'),
+            )
+            .trim_end()
+            .to_string()
+        };
+        let jit = render(&[]);
+        let vm = render(&[("HELIX_NOJIT", "1")]);
+        let tw = render(&[("HELIX_NOVM", "1")]);
+        assert_eq!(jit, vm, "corpus `{name}`: JIT vs VM diverge");
+        assert_eq!(vm, tw, "corpus `{name}`: VM vs tree-walker diverge");
+        let golden_path = path.with_extension("expected");
+        if update {
+            std::fs::write(&golden_path, format!("{jit}\n")).unwrap();
+            continue;
+        }
+        let golden = std::fs::read_to_string(&golden_path)
+            .unwrap_or_else(|_| panic!("missing golden for corpus `{name}`"));
+        assert_eq!(
+            jit,
+            golden.trim_end_matches('\n'),
+            "corpus `{name}` drifted from its golden — if the change is \
+             intentional, regenerate with UPDATE_CORPUS=1"
+        );
+    }
+}

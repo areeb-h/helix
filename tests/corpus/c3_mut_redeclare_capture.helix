@@ -1,0 +1,5 @@
+n = 1
+f = (x => x + n)
+print(f(0))
+mut n = 100
+print(f(0))

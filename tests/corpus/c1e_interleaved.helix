@@ -1,0 +1,2 @@
+fn f() = let x = 1, g = (u => x + u), x = 2, h = (u => x + u) in g(0) * 10 + h(0)
+print(f())

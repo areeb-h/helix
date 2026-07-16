@@ -1,0 +1,21 @@
+exit: 0
+--- stdout ---
+missing
+false
+missing
+[missing]
+[(missing, 2), (1, 1)]
+missing
+true
+false
+true
+true
+false
+true
+missing
+true
+cannot order String and Int — `<` compares two numbers, two strings, or two DNA sequences
+true
+1
+--- stderr ---
+

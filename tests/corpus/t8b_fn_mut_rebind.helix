@@ -1,0 +1,3 @@
+fn f(x) = x
+mut f = 5
+print(1)

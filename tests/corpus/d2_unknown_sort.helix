@@ -1,0 +1,2 @@
+fn g(x) = x.sort(@a)
+print(g(dataframe({a: [3, 1, 2]})).count())

@@ -1,0 +1,56 @@
+# Missing data — Helix has ONE marker for absent data, `missing`, and it works the
+# same way in a scalar, an array, and a DataFrame column (ADR 0001). It is NOT an
+# error and NOT a NaN: it means "no value here", and the language keeps track of
+# that fact instead of letting it silently become a wrong answer.
+#   helix run examples/language/missing-data.helix
+
+# --- Propagation: an unknown input makes an unknown output ---
+print(missing + 1)          # missing
+print(missing * 0)          # missing (0 * unknown is still unknown)
+print(-missing)             # missing
+print(missing.is_missing()) # true — the one way to ask
+
+# --- Three-valued comparison: the answer is `missing`, not a guess ---
+print(missing == missing)   # missing — two unknowns may or may not be equal
+print(missing > 5)          # missing
+
+# ...and that holds INSIDE structures, at any depth:
+print({a: missing} == {a: missing})       # missing
+print([1, missing] == [1, 2])             # missing
+# ...unless a definite difference decides it first (Kleene logic):
+print({a: 1, b: missing} == {a: 2, b: missing})  # false — `a` differs, so it is
+                                                 # certainly not equal
+
+# --- Kleene boolean logic: `and`/`or` short-circuit on a DETERMINED answer ---
+print(missing and false)    # false — false wins regardless of the unknown
+print(missing and true)     # missing — could be either
+print(true or missing)      # true — true wins regardless
+print(not missing)          # missing
+
+# --- Aggregations propagate: a hole makes the summary unknown ---
+xs = [3.0, missing, 5.0]
+print(xs.count())           # 3 — the hole is still an element
+print(xs.sum())             # missing
+print(xs.mean())            # missing
+
+# --- Dropping is an explicit, visible step — never silent ---
+clean = xs.drop_missing()
+print(clean)                # [3.0, 5.0]
+print(clean.mean())         # 4.0
+
+# --- `??` supplies a default for a missing value (and only for missing) ---
+print(missing ?? 0)         # 0
+print(7 ?? 0)               # 7
+print(missing ?? missing ?? "last resort")
+
+# --- Set-like operations treat every missing as ONE identity ---
+# (`unique`, `frequencies`, `contains` must answer definitely — a filter can't
+# act on a "maybe". This is the deliberate counterpart to three-valued `==`.)
+print([missing, 1, missing].unique())       # [missing, 1]
+print([missing, 1, missing].frequencies())  # [(missing, 2), (1, 1)]
+print([1, missing].contains(missing))       # true
+
+# --- Sorting refuses rather than inventing an order ---
+r = try [3, missing, 1].sort()
+print(r.error)              # cannot sort: the array has missing values
+print([3, missing, 1].drop_missing().sort())

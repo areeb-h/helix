@@ -1,0 +1,2 @@
+fn f(x) = let y = 1 in let y = 2 in (z => y + z)
+print((f(0))(0))

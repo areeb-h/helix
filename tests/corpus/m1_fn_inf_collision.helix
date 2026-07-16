@@ -1,0 +1,2 @@
+fn inf(x) = x + 1
+print(inf(1))

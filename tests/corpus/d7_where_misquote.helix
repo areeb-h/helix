@@ -1,0 +1,2 @@
+fn g(x) = x.where(it > 1)
+print(g(5))

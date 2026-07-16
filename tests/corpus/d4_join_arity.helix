@@ -1,0 +1,2 @@
+fn j(x) = x.join("-", "zzz")
+print(j(["a", "b"]))

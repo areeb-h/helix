@@ -1,0 +1,8 @@
+fn down(n) = if n == 0 then 0 else 1 + down(n - 1)
+a = try down(19998)
+print(a.ok)
+b = try down(19999)
+print(b.ok)
+c = try down(20000)
+print(c.ok)
+print(c.error)

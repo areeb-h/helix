@@ -1,0 +1,8 @@
+e1 = try 0
+print((try ((1, "a") < (1, 2))).error)
+print(round(tensor([1.0e30]))[0])
+r = try [3, missing, 1].sort()
+print(r.error)
+fs = [(x => x)]
+a2 = try (fs[0])(1, 2)
+print(a2.error)

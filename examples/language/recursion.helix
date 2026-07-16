@@ -1,0 +1,60 @@
+# Recursion — Helix has no loop statement: repetition is a comprehension over a
+# collection, or a recursive function. Two properties make recursion practical
+# rather than a footgun, and both hold identically on every engine.
+#   helix run examples/language/recursion.helix
+
+# --- 1. TAIL recursion is a loop: constant space, no depth limit ---
+# A call in TAIL position (the function's result IS the call) reuses the frame,
+# so this "loop" runs a million times without growing any stack:
+fn count_down(n, acc) = if n == 0 then acc else count_down(n - 1, acc + n)
+print(count_down(1000000, 0))       # 500000500000
+
+# Tail position includes `if` branches, `let` bodies, and `match` arms:
+fn collatz_len(n, steps) =
+  if n == 1 then steps
+  else let next = if n % 2 == 0 then n // 2 else 3 * n + 1 in
+       collatz_len(next, steps + 1)
+print(collatz_len(27, 0))           # 111
+
+fn parity(n) = match n {
+  0 => "even",
+  1 => "odd",
+  _ => parity(n - 2),
+}
+print(parity(100000))               # even — 50k tail hops, constant space
+
+# --- 2. NON-tail recursion is bounded by a shared depth budget ---
+# Here the call's result feeds an addition, so each level must be remembered:
+fn sum_to(n) = if n == 0 then 0 else n + sum_to(n - 1)
+print(sum_to(1000))                 # 500500 — comfortably inside the budget
+
+# Past the budget (20,000 nested calls) you get a clean error, never a crash —
+# and `try` can catch it like any other error:
+deep = try sum_to(50000)
+print(deep.ok)                      # false
+print(deep.error)                   # maximum recursion depth (20000) exceeded
+
+# The fix is usually to make the call a TAIL call by carrying an accumulator:
+fn sum_to_tail(n, acc) = if n == 0 then acc else sum_to_tail(n - 1, acc + n)
+print(sum_to_tail(50000, 0))        # 1250025000 — no limit, it's a loop
+
+# --- Memoization: the VM caches pure functions automatically ---
+# `fib` calls itself twice per level — exponentially many calls if taken
+# literally. Because `fib` is PURE (its result depends only on its arguments),
+# the bytecode VM caches results by argument, turning the exponential tree into
+# a linear walk. `fib(90)` would take longer than the age of the universe to
+# compute naively; here it is instant:
+fn fib(n) = if n < 2 then n else fib(n - 1) + fib(n - 2)
+print(fib(27))                      # 196418
+# (Memoization is an OPTIMIZATION, not a semantic: the reference tree-walker
+# `HELIX_NOVM=1` computes the same answer the slow way. Every engine agrees on
+# the value — they differ only in how much work they do to get it. Try
+# `fib(60)` under the VM for the real demonstration; it stays instant.)
+
+# Purity is what makes that safe: a function that reads mutable state is never
+# cached, so it always sees the current value.
+mut rate = 2
+fn scaled(n) = n * rate             # reads a `mut` global → never cached
+print(scaled(10))                   # 20
+rate = 5
+print(scaled(10))                   # 50 — recomputed, not stale

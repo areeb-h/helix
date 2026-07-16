@@ -1,0 +1,9 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `join` takes 1 argument, got 2
+  --> <src>:1:12
+  |
+1 | fn j(x) = x.join("-", "zzz")
+  |            ^

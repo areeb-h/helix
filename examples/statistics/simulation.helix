@@ -1,0 +1,57 @@
+# Monte Carlo simulation — reproducible randomness two ways: a seeded builtin
+# stream for convenience, and a hand-written PRNG when you need a stream that is
+# byte-identical to another implementation (a reference paper, a C program, a
+# regression baseline). Both run as native code.
+#   helix run examples/statistics/simulation.helix
+
+# --- 1. Seeded builtin RNG: same seed, same numbers, every run ---
+xs = random(1000000, 1)          # 1M uniforms in [0,1), seed 1
+ys = random(1000000, 2)          # a second, independent stream
+inside = range(0, 1000000)
+    .filter(j => xs[j] * xs[j] + ys[j] * ys[j] < 1.0)
+    .count()
+print("pi (builtin RNG): {(4.0 * inside) / 1000000.0:.4f}")
+
+# --- 2. A hand-written xorshift64: bit-exact with any other implementation ---
+# Helix integers are 64-bit two's complement, so a `>>` is arithmetic (sign-
+# filling). Masking after the shift reproduces C's UNSIGNED shift exactly:
+#   (s >> 7) & ((1 << 57) - 1)   ==   (uint64)s >> 7
+# The whole simulation below is one tail-recursive function, which the JIT turns
+# into a native loop — no arrays, no allocation.
+fn mc(state: Int, n: Int, hits: Int) =
+  if n == 0 then hits
+  else
+    let s1 = state ^ (state << 13) in
+    let s2 = s1 ^ ((s1 >> 7) & 144115188075855871) in     # (1<<57)-1
+    let s3 = s2 ^ (s2 << 17) in
+    let x = (s3 >> 11) & 9007199254740991 in              # 53 significant bits
+    let t1 = x ^ (x << 13) in
+    let t2 = t1 ^ ((t1 >> 7) & 144115188075855871) in
+    let t3 = t2 ^ (t2 << 17) in
+    let y = (t3 >> 11) & 9007199254740991 in
+    let fx = (x * 1.0) * 0.00000000000000011102230246251565 in   # 2^-53
+    let fy = (y * 1.0) * 0.00000000000000011102230246251565 in
+    if fx * fx + fy * fy < 1.0 then mc(t3, n - 1, hits + 1)
+    else mc(t3, n - 1, hits)
+
+hits = mc(88172645463325252, 2000000, 0)
+print("pi (xorshift64):  {(4.0 * (hits * 1.0)) / 2000000.0:.4f}")
+print("raw hit count:    {hits}")   # a stable anchor: compare against a C port
+
+# --- 3. Bootstrap: resampling to get a confidence interval ---
+sample = [12.1, 14.8, 9.7, 15.2, 11.3, 13.9, 10.5, 16.1, 12.8, 13.2]
+# random_int(count, lo, hi, seed) — `count` draws from [lo, hi).
+fn resample_mean(seed) =
+  let idx = random_int(sample.count(), 0, sample.count(), seed) in
+  idx.map(i => sample[i]).mean()
+
+means = range(0, 2000).map(s => resample_mean(s)).sort()
+print("bootstrap mean:   {sample.mean():.3f}")
+print("95% CI:           [{means[50]:.3f}, {means[1949]:.3f}]")
+
+# --- 4. A random walk, and how often it returns to the origin ---
+steps = random_int(100000, 0, 2, 7).map(b => b * 2 - 1)   # ±1 each step
+walk = steps.scan(0, (pos, s) => pos + s)
+print("final position:   {walk[-1]}")
+print("max excursion:    {walk.map(abs(it)).max()}")
+print("zero crossings:   {walk.filter(it == 0).count()}")

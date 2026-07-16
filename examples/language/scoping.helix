@@ -1,0 +1,50 @@
+# Scoping — Helix is lexically scoped: a name means whatever it meant WHERE it was
+# written, not wherever it happens to be called from. Every engine (tree-walker,
+# bytecode VM, JIT) resolves names identically: the current frame's locals first,
+# then the top-level globals.
+#   helix run examples/language/scoping.helix
+
+# --- A function's free names are its own globals, never the caller's locals ---
+factor = 10
+fn scale(n) = n * factor        # `factor` here means the global, always
+
+fn tricky(factor) = scale(2)    # this `factor` is a LOCAL of `tricky`...
+print(tricky(999))              # 20 — ...so `scale` still uses the global 10.
+                                # (Dynamic scoping would print 1998 — a classic
+                                # source of action-at-a-distance bugs.)
+
+# --- Locals shadow globals within their own scope, and only there ---
+x = "global"
+fn shadow_demo() = let x = "local" in x
+print(shadow_demo())            # local
+print(x)                        # global — untouched
+
+# --- Closures capture LOCALS by value, at creation time ---
+fn make_adder(n) = (y => y + n) # `n` is captured — it outlives the call
+add5 = make_adder(5)
+add9 = make_adder(9)
+print(add5(1), add9(1))         # 6 10 — each closure kept its own `n`
+
+# Each comprehension binder is its own local, so closures made in a loop are
+# independent (the "loop variable capture" trap in many languages):
+adders = range(0, 3).map(i => (v => v + i))
+print((adders[0])(100), (adders[1])(100), (adders[2])(100))   # 100 101 102
+
+# The innermost binding wins when a name is shadowed at creation:
+fn innermost(v) = let v = v + 1 in (w => v + w)
+print((innermost(10))(0))       # 11 — the `let`, not the parameter
+
+# --- Mutable globals are read LIVE, not snapshotted ---
+mut budget = 100
+spend = (amount => budget - amount)
+print(spend(30))                # 70
+budget = 50
+print(spend(30))                # 20 — the closure sees the new value
+
+# --- Immutability is the default; reassigning needs `mut` up front ---
+frozen = "set once"
+# `frozen = "again"` would be an error: "`frozen` is immutable and cannot be
+# reassigned". A top-level `fn` name is likewise a permanent definition — call
+# targets are bound when the program is compiled, so a later `fn f = ...` or
+# `mut f = ...` over it is rejected rather than silently ignored by one engine.
+print(frozen)

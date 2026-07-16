@@ -1,0 +1,2 @@
+fn g(df) = df.where(@a > 1)
+print(g(dataframe({a: [1, 2, 3]})).count())

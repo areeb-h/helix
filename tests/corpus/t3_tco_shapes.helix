@@ -1,0 +1,9 @@
+fn go(n, acc) = if n == 0 then acc else go(n - 1, acc + n)
+print(go(100000, 0))
+fn go2(n, acc) = let m = n - 1 in if n == 0 then acc else go2(m, acc + 1)
+print(go2(100000, 0))
+fn go3(n) = match n { 0 => 7, _ => go3(n - 1) }
+print(go3(100000))
+fn base(n) = n + 1
+fn go4(n) = if n == 0 then base(0) else go4(n - 1)
+print(go4(100000))

@@ -1,0 +1,9 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: cannot format a String with a numeric format spec
+  --> <src>:2:7
+  |
+2 | print("val is {s:.2f} ok")
+  |       ^

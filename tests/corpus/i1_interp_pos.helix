@@ -1,0 +1,2 @@
+s = "hi"
+print("val is {s:.2f} ok")

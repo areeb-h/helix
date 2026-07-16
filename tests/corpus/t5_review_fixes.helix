@@ -1,0 +1,16 @@
+marker = 1
+idx = 5
+fn tailpos() = let marker = 99, boom = [1, 2][idx] in 0
+fn valpos() = (let marker = 99, boom = [1, 2][idx] in 0) + 0
+a = try tailpos()
+print(marker)
+b = try valpos()
+print(marker)
+x = 10
+fn callee() = x
+fn caller(x) = callee() + 0
+print(caller(42))
+fn tailshadow(n) = let x = 99 in callee()
+print(tailshadow(0))
+r = try (let marker = 5, boom2 = [1][9] in 0)
+print(marker)
