@@ -2606,3 +2606,85 @@ fn interp_hole_errors_point_at_the_string_on_all_engines() {
     assert!(errs[0].contains("cannot format a String"), "stderr: {}", errs[0]);
     assert!(errs[0].contains(":2:7"), "should point at the string on line 2: {}", errs[0]);
 }
+
+/// `helix emit-hbc` end-to-end (ADR 0023): the subcommand had unit tests for
+/// serialization but zero CLI coverage — arg parsing, file emission, `--dump`,
+/// and the failure paths were unexercised.
+#[test]
+fn emit_hbc_writes_container_and_reports_errors() {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join("helix_hbc_cli.helix");
+    std::fs::write(
+        &src_path,
+        "fn compute(n) = if n <= 1 then n else compute(n - 1) + compute(n - 2)\nprint(compute(10))\n",
+    )
+    .unwrap();
+    let out_path = dir.join("helix_hbc_cli.hbc");
+    // `-o` writes a non-empty container and reports the entry mapping.
+    let (out, err, code) = run(
+        &[
+            "emit-hbc",
+            src_path.to_str().unwrap(),
+            "--entry",
+            "compute",
+            "-o",
+            out_path.to_str().unwrap(),
+        ],
+        &[],
+        "",
+    );
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert!(out.contains("wrote"), "stdout: {out}");
+    assert!(out.contains("compute"), "entry map should name the entry: {out}");
+    assert!(!std::fs::read(&out_path).unwrap().is_empty());
+    // `--dump` prints the compiled instruction stream (a debugging aid).
+    let (_, err2, code2) = run(
+        &[
+            "emit-hbc",
+            src_path.to_str().unwrap(),
+            "--entry",
+            "compute",
+            "--dump",
+            "-o",
+            out_path.to_str().unwrap(),
+        ],
+        &[],
+        "",
+    );
+    assert_eq!(code2, Some(0), "stderr: {err2}");
+    assert!(err2.contains("compiled program"), "stderr: {err2}");
+    // Unknown flags and a missing script path fail cleanly.
+    let (_, err3, code3) = run(&["emit-hbc", src_path.to_str().unwrap(), "--frobnicate"], &[], "");
+    assert_eq!(code3, Some(1));
+    assert!(err3.contains("unknown option"), "stderr: {err3}");
+    let (_, err4, code4) = run(&["emit-hbc"], &[], "");
+    assert_eq!(code4, Some(1));
+    assert!(err4.contains("needs a script path"), "stderr: {err4}");
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&out_path);
+}
+
+/// The `net` effect class is really gated under `HELIX_CAP=enforce` — the
+/// existing capability matrix only exercised fs-read/-write, so a regression
+/// ungating a whole class would have passed CI. Denial happens BEFORE any
+/// connection attempt (no live endpoint needed); with the grant, the same call
+/// proceeds to a plain transport error (nothing listens on the discard port).
+#[test]
+fn capability_enforce_gates_net_class() {
+    let src = "r = try http_get(\"http://127.0.0.1:9/nope\")\nprint(r.ok)\nprint(r.error)\n";
+    let (out, err, code) = run_source(src, &[("HELIX_CAP", "enforce")], "cap_net_deny");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert!(out.contains("false"), "stdout: {out}");
+    assert!(out.contains("capability denied"), "expected the deny message: {out}");
+    let (out2, err2, code2) = run_source(
+        src,
+        &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_NET", "on")],
+        "cap_net_grant",
+    );
+    assert_eq!(code2, Some(0), "stderr: {err2}");
+    assert!(out2.contains("false"), "stdout: {out2}");
+    assert!(
+        !out2.contains("capability denied"),
+        "grant should open the gate (transport error instead): {out2}"
+    );
+}

@@ -62,7 +62,95 @@
                 _ => format!("{}", (next(rng) % 4001) as i64 - 2000),
             };
         }
-        match pick(rng, 21) {
+        match pick(rng, 24) {
+            21 => {
+                // Short-circuit boolean ops with three-valued `missing` — the
+                // and/or/not opcodes (AndCheck/OrCheck/Kleene tables) were never
+                // fuzzed. Operands come from a Bool-or-missing sub-grammar, with
+                // an occasional would-error operand so short-circuit-past-error
+                // is exercised (engines must agree on whether the RHS ran).
+                let boolish = |rng: &mut u64, vars: &[String]| -> String {
+                    match pick(rng, 5) {
+                        0 => "true".to_string(),
+                        1 => "false".to_string(),
+                        2 => "missing".to_string(),
+                        3 => {
+                            let cop = ["<", ">", "<=", ">=", "==", "!="][pick(rng, 6) as usize];
+                            format!(
+                                "(({}) {} ({}))",
+                                gen_expr(rng, 0, vars),
+                                cop,
+                                gen_expr(rng, 0, vars)
+                            )
+                        }
+                        _ => "((1 / 0) > 0)".to_string(),
+                    }
+                };
+                let l = boolish(rng, vars);
+                let r = boolish(rng, vars);
+                match pick(rng, 3) {
+                    0 => format!("(({l}) and ({r}))"),
+                    1 => format!("(({l}) or ({r}))"),
+                    _ => format!("(not ({l}))"),
+                }
+            }
+            22 => {
+                // Strings and dicts as first-class fuzz values (never generated
+                // before): string ordering/equality/length/indexing, and dict
+                // construction with BTreeMap-ordered terminals. Confined to
+                // scalar-composing shapes whose errors are engine-identical.
+                const POOL: [&str; 5] = ["\"a\"", "\"b\"", "\"ab\"", "\"\"", "\"z\""];
+                let s1 = POOL[pick(rng, 5) as usize];
+                let s2 = POOL[pick(rng, 5) as usize];
+                match pick(rng, 5) {
+                    0 => {
+                        let cop = ["<", ">", "<=", ">=", "==", "!="][pick(rng, 6) as usize];
+                        format!("(({s1}) {cop} ({s2}))")
+                    }
+                    1 => format!("((({s1}).length()) + ({}))", gen_expr(rng, 0, vars)),
+                    // In- and out-of-bounds indexing both compose (OOB errors
+                    // identically); the char compares back to a pool string.
+                    2 => format!("((({s1})[({})]) == ({s2}))", gen_expr(rng, 0, vars)),
+                    3 => {
+                        let k1 = (next(rng) % 3) as i64;
+                        let k2 = (next(rng) % 3) as i64;
+                        let probe = (next(rng) % 4) as i64;
+                        format!(
+                            "(([({k1}, ({})), ({k2}, ({}))].to_dict()).get({probe}) ?? ({}))",
+                            gen_expr(rng, 0, vars),
+                            gen_expr(rng, 0, vars),
+                            gen_expr(rng, 0, vars)
+                        )
+                    }
+                    _ => format!(
+                        "(([(true, ({})), (false, ({}))].to_dict()).values().sum())",
+                        gen_expr(rng, 0, vars),
+                        gen_expr(rng, 0, vars)
+                    ),
+                }
+            }
+            23 => {
+                // Destructuring `match` patterns over tuple/record scrutinees —
+                // previously only int-literal arms were fuzzed; the binder
+                // install/restore path (DestructureBind vs eval_with_pattern)
+                // gets continuous coverage. Wildcard stays last.
+                if pick(rng, 2) == 0 {
+                    let op = ["+", "-", "*"][pick(rng, 3) as usize];
+                    format!(
+                        "(match (({}), ({})) {{ (p, q) => (p {op} q), _ => ({}) }})",
+                        gen_expr(rng, depth - 1, vars),
+                        gen_expr(rng, depth - 1, vars),
+                        gen_expr(rng, 0, vars)
+                    )
+                } else {
+                    format!(
+                        "(match {{a: ({}), b: ({})}} {{ {{a: p, b: q}} => (p - q), _ => ({}) }})",
+                        gen_expr(rng, depth - 1, vars),
+                        gen_expr(rng, depth - 1, vars),
+                        gen_expr(rng, 0, vars)
+                    )
+                }
+            }
             20 => {
                 // Stepped-range terminals: lazy `range(a, b, s)` first/last/count/sum
                 // are scalar-valued, so they compose as sub-expressions — continuous
@@ -3267,5 +3355,35 @@ fn probe(d) = if d == 0 then h(42) else 0 + probe(d - 1)\nprobe(19998)";
             let tw = run_tw(src).unwrap_err();
             assert_eq!(tw, run_vm(src).unwrap_err(), "on `{src}`");
             assert!(tw.contains("duplicate field"), "got: {tw}");
+        }
+    }
+
+    /// #83: continuous protection for the {memoized fn × mutable-global read ×
+    /// mutation-between-calls} class — the 2026-07 stale-memo bug hid exactly
+    /// here, invisible to gen_expr (which emits no `mut` statements and no
+    /// fn-reads-global shapes). Four read-indirections (bare, match-arm,
+    /// `??`-coalesce, `try`), a fib-shaped memoization candidate, a rebind, and
+    /// a re-call: the VM must recompute, never serve the stale cache. Walker
+    /// (never memoizes across the rebind) is the reference.
+    #[test]
+    fn differential_memo_mut_globals() {
+        let mut rng = 0x00C0_FFEE_D00D_5EEDu64;
+        for i in 0..2000u32 {
+            let g0 = (next(&mut rng) % 1000) as i64;
+            let g1 = (next(&mut rng) % 1000) as i64 + 1000;
+            let k = 3 + (next(&mut rng) % 10); // fib depth 3..=12 — walker-stack-safe
+            let read = match pick(&mut rng, 4) {
+                0 => "fn rd() = g",
+                1 => "fn rd() = match 0 { 0 => g, _ => 0 }",
+                2 => "fn rd() = (missing ?? g)",
+                _ => "fn rd() = (try g).value",
+            };
+            let src = format!(
+                "mut g = {g0}\n{read}\nfn f(n) = if n < 2 then rd() else f(n - 1) + f(n - 2)\n\
+a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
+            );
+            let vm = run_vm(&src);
+            let tw = run_tw(&src);
+            assert_eq!(vm, tw, "memo x mut-global divergence (iter {i}) on:\n{src}");
         }
     }
