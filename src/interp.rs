@@ -54,6 +54,29 @@ pub struct StmtOutcome {
     pub is_expr: bool,
 }
 
+/// Check a `match` arm guard's value. Shared by the walker and the VM's
+/// `Op::GuardCheck` so the wording is byte-identical (the differential oracle
+/// compares error messages) — and guard-specific, instead of borrowing the
+/// `if`-condition or generic-boolean wording, which misled ("`if` condition…")
+/// for a construct the user never wrote.
+pub(crate) fn guard_bool(v: &Value, line: usize, col: usize) -> Result<bool, HelixError> {
+    match v {
+        Value::Bool(b) => Ok(*b),
+        Value::Missing => Err(HelixError::new(
+            "`match` guard is `missing` — cannot decide the arm",
+            line,
+            col,
+        )
+        .hint("handle the missing case first, e.g. `x if x.is_missing() => ...`.")),
+        other => Err(HelixError::new(
+            format!("a `match` guard must be a boolean, found a value of type {}", other.type_name()),
+            line,
+            col,
+        )
+        .hint("write a condition, e.g. `x if x > 0 => ...`.")),
+    }
+}
+
 impl Default for Interp {
     fn default() -> Self {
         Self::new()
@@ -653,7 +676,7 @@ impl Interp {
                         // so fall through to the next arm. A guard error propagates.
                         let outcome: Option<Result<Value, HelixError>> = match &arm.guard {
                             None => Some(self.eval(&arm.body)),
-                            Some(g) => match self.eval(g).and_then(|gv| as_bool(&gv, *line, *col)) {
+                            Some(g) => match self.eval(g).and_then(|gv| guard_bool(&gv, *line, *col)) {
                                 Ok(true) => Some(self.eval(&arm.body)),
                                 Ok(false) => None,
                                 Err(e) => Some(Err(e)),

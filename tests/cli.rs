@@ -2587,3 +2587,22 @@ fn deep_lambda_chain_errors_cleanly() {
     assert_eq!(code, Some(0), "stderr: {err}");
     assert_eq!(out.trim(), "1");
 }
+
+/// A runtime error inside an interpolation hole reports the interpolated
+/// string's real source position — identically on every engine. Holes are
+/// parsed as standalone snippets; before the parse-time relocation the walker
+/// pointed at the snippet's line 1 and the VM at the op's 0:0.
+#[test]
+fn interp_hole_errors_point_at_the_string_on_all_engines() {
+    let src = "s = \"hi\"\nprint(\"val is {s:.2f} ok\")\n";
+    let mut errs = Vec::new();
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (_, err, code) = run_source(src, env, "hole_pos");
+        assert_eq!(code, Some(1), "env {env:?}");
+        errs.push(err);
+    }
+    assert_eq!(errs[0], errs[1], "JIT vs VM");
+    assert_eq!(errs[1], errs[2], "VM vs tree-walker");
+    assert!(errs[0].contains("cannot format a String"), "stderr: {}", errs[0]);
+    assert!(errs[0].contains(":2:7"), "should point at the string on line 2: {}", errs[0]);
+}

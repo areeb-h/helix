@@ -1690,6 +1690,133 @@ impl Parser {
         }
     }
 
+    /// Stamp every positioned node of a parsed interpolation-hole fragment with
+    /// the interpolated string's real source position. Fragments are lexed and
+    /// parsed as standalone snippets, so their nodes carry snippet-relative
+    /// positions (line 1, column within the hole); this makes both engines'
+    /// runtime errors point at the interpolated string itself. Exhaustive on
+    /// purpose — a new `Expr` variant must decide its treatment here.
+    fn relocate(e: &mut Expr, l: usize, c: usize) {
+        match e {
+            Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing => {}
+            Expr::Interp(parts) => {
+                for p in parts.iter_mut() {
+                    if let InterpPart::Expr(inner, _) = p {
+                        Self::relocate(inner, l, c);
+                    }
+                }
+            }
+            Expr::Ident { line, col, .. } | Expr::Column { line, col, .. } => {
+                *line = l;
+                *col = c;
+            }
+            Expr::Array(items) | Expr::Tuple(items) => {
+                for i in items {
+                    Self::relocate(i, l, c);
+                }
+            }
+            Expr::Record(fields) => {
+                for (_, v) in fields {
+                    Self::relocate(v, l, c);
+                }
+            }
+            Expr::RecordUpdate { base, fields, line, col } => {
+                *line = l;
+                *col = c;
+                Self::relocate(base, l, c);
+                for (_, v) in fields {
+                    Self::relocate(v, l, c);
+                }
+            }
+            Expr::Field { recv, line, col, .. } => {
+                *line = l;
+                *col = c;
+                Self::relocate(recv, l, c);
+            }
+            Expr::Unary { expr, line, col, .. } => {
+                *line = l;
+                *col = c;
+                Self::relocate(expr, l, c);
+            }
+            Expr::Binary { left, right, line, col, .. } => {
+                *line = l;
+                *col = c;
+                Self::relocate(left, l, c);
+                Self::relocate(right, l, c);
+            }
+            Expr::Call { args, line, col, .. } => {
+                *line = l;
+                *col = c;
+                for a in args {
+                    Self::relocate(a, l, c);
+                }
+            }
+            Expr::Method { recv, args, named, line, col, .. } => {
+                *line = l;
+                *col = c;
+                Self::relocate(recv, l, c);
+                for a in args {
+                    Self::relocate(a, l, c);
+                }
+                for (_, v) in named {
+                    Self::relocate(v, l, c);
+                }
+            }
+            Expr::CallValue { callee, args, line, col } => {
+                *line = l;
+                *col = c;
+                Self::relocate(callee, l, c);
+                for a in args {
+                    Self::relocate(a, l, c);
+                }
+            }
+            Expr::Index { recv, index, line, col } => {
+                *line = l;
+                *col = c;
+                Self::relocate(recv, l, c);
+                Self::relocate(index, l, c);
+            }
+            Expr::Slice { recv, start, stop, step, line, col } => {
+                *line = l;
+                *col = c;
+                Self::relocate(recv, l, c);
+                for o in [start, stop, step].into_iter().flatten() {
+                    Self::relocate(o, l, c);
+                }
+            }
+            Expr::Lambda { body, .. } => Self::relocate(body, l, c),
+            Expr::Let { bindings, body } => {
+                for (_, v) in bindings {
+                    Self::relocate(v, l, c);
+                }
+                Self::relocate(body, l, c);
+            }
+            Expr::If { cond, then_branch, else_branch, line, col } => {
+                *line = l;
+                *col = c;
+                Self::relocate(cond, l, c);
+                Self::relocate(then_branch, l, c);
+                Self::relocate(else_branch, l, c);
+            }
+            Expr::Try { expr, line, col } => {
+                *line = l;
+                *col = c;
+                Self::relocate(expr, l, c);
+            }
+            Expr::Match { scrutinee, arms, line, col } => {
+                *line = l;
+                *col = c;
+                Self::relocate(scrutinee, l, c);
+                for a in arms {
+                    if let Some(g) = &mut a.guard {
+                        Self::relocate(g, l, c);
+                    }
+                    Self::relocate(&mut a.body, l, c);
+                }
+            }
+        }
+    }
+
     fn primary(&mut self) -> Result<Expr, HelixError> {
         let (l, c) = self.pos();
         match self.peek().clone() {
@@ -1716,8 +1843,15 @@ impl Parser {
                             // error inside it carries snippet-relative positions (line 1).
                             // Relocate it to the interpolated string's real position so
                             // the caret points at the user's actual source, not line 1.
-                            let e = parse_expression(&src, self.depth, &self.fn_sigs)
+                            let mut e = parse_expression(&src, self.depth, &self.fn_sigs)
                                 .map_err(|err| HelixError { line: l, col: c, ..err })?;
+                            // Relocate the *retained AST* too, not just the parse error:
+                            // a RUNTIME error inside a hole (div-by-zero, format-spec
+                            // mismatch, missing method) reports the hole expression's
+                            // position, which would otherwise be the snippet's line 1 —
+                            // a caret into unrelated early source, and a walker/VM
+                            // position mismatch.
+                            Self::relocate(&mut e, l, c);
                             // Parse the format spec now, so a malformed spec is a parse
                             // error pointing at the string (never a runtime surprise).
                             let spec = match spec_src {

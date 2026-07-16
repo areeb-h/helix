@@ -41,6 +41,10 @@ pub struct Unsupported;
 pub enum CompKind {
     Map,
     Filter,
+    /// `where` — semantically identical to [`CompKind::Filter`] everywhere;
+    /// a separate variant only so runtime errors quote the method the user
+    /// actually wrote (the walker threads the surface name the same way).
+    Where,
     Reduce,
     Any,
     All,
@@ -51,6 +55,7 @@ impl CompKind {
         match self {
             CompKind::Map => "map",
             CompKind::Filter => "filter",
+            CompKind::Where => "where",
             CompKind::Reduce => "reduce",
             CompKind::Any => "any",
             CompKind::All => "all",
@@ -994,11 +999,13 @@ impl Compiler {
                         b.emit(Op::StoreLocal(*slot), *line, *col);
                     }
                     // A guard (with the bindings in scope) must also hold; if it's
-                    // false, fall through to the next arm.
+                    // false, fall through to the next arm. `GuardCheck`, not
+                    // `JumpIfFalse`: same control flow, guard-specific error wording
+                    // (shared with the walker via `interp::guard_bool`).
                     let jguard = match &arm.guard {
                         Some(g) => {
                             self.compile_expr(b, g)?;
-                            Some(b.emit(Op::JumpIfFalse(0), *line, *col))
+                            Some(b.emit(Op::GuardCheck(0), *line, *col))
                         }
                         None => None,
                     };
@@ -1009,7 +1016,7 @@ impl Compiler {
                     let next_at = b.code.len() as u32;
                     b.code[jpat] = Op::JumpIfFalse(next_at);
                     if let Some(jg) = jguard {
-                        b.code[jg] = Op::JumpIfFalse(next_at);
+                        b.code[jg] = Op::GuardCheck(next_at);
                     }
                 }
                 // Fell through every arm: no match (the tree-walker's error).

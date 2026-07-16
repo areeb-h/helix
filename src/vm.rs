@@ -416,6 +416,14 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     frames[fi].ip = *t as usize;
                 }
             }
+            // `JumpIfFalse` for a `match` guard: same control flow, but the
+            // guard-specific error wording, shared with the walker.
+            Op::GuardCheck(t) => {
+                let c = stack.pop().unwrap();
+                if !crate::interp::guard_bool(&c, line, col)? {
+                    frames[fi].ip = *t as usize;
+                }
+            }
             // Three-valued `and`: short-circuit on a determined `false`.
             Op::AndCheck(end) => {
                 let ta = tri(stack.last().unwrap(), line, col)?;
@@ -855,13 +863,17 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 for part in parts.iter() {
                     match part {
                         crate::ast::InterpPart::Lit(t) => s.push_str(t),
-                        crate::ast::InterpPart::Expr(_, spec) => {
+                        crate::ast::InterpPart::Expr(e, spec) => {
+                            // Report at the hole expression's position, exactly like
+                            // the walker (the parser relocates hole positions to the
+                            // interpolated string's real source coordinates).
+                            let (el, ec) = e.position();
                             match spec {
                                 Some(fs) => s.push_str(
-                                    &fs.apply(&vals[vi]).map_err(|m| HelixError::new(m, line, col))?,
+                                    &fs.apply(&vals[vi]).map_err(|m| HelixError::new(m, el, ec))?,
                                 ),
                                 // Hot path: format scalars straight into `s`, no throwaway String.
-                                None => crate::value::write_value(&mut s, &vals[vi], line, col)?,
+                                None => crate::value::write_value(&mut s, &vals[vi], el, ec)?,
                             }
                             vi += 1;
                         }
@@ -1052,9 +1064,20 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     }
                     // The receiver's static type was `Unknown` and turned out NOT to be a
                     // DataFrame — this is the value `xs.join(sep)` (an array of strings).
-                    // Dispatch by runtime type exactly as the tree-walker does; `spec`
-                    // (extra by-name keys) is empty for the array form.
-                    _ => crate::interp::call_method(&left, "join", vec![right], line, col)?,
+                    // Dispatch by runtime type exactly as the tree-walker does. `spec`
+                    // (extra by-name key args) can't ride the value form: the walker
+                    // evaluates every argument and hits `join`'s 1-arg arity check, so
+                    // raise that same error instead of silently dropping the extras.
+                    _ => {
+                        if !spec.is_empty() {
+                            return Err(HelixError::new(
+                                format!("`join` takes 1 argument, got {}", 1 + spec.len()),
+                                line,
+                                col,
+                            ));
+                        }
+                        crate::interp::call_method(&left, "join", vec![right], line, col)?
+                    }
                 };
                 stack.push(result);
             }
@@ -1726,7 +1749,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let v = stack.pop().unwrap();
                 iters.last_mut().unwrap().builder.push(v);
             }
-            Op::CompFilterPush => {
+            Op::CompFilterPush(kind) => {
                 let keep = stack.pop().unwrap();
                 let it = iters.last_mut().unwrap();
                 match keep {
@@ -1740,7 +1763,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     other => {
                         return Err(HelixError::new(
                             format!(
-                                "`filter` expects a yes/no test, but the expression produced a {}",
+                                "`{}` expects a yes/no test, but the expression produced a {}",
+                                kind.method_name(),
                                 other.type_name()
                             ),
                             line,

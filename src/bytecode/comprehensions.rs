@@ -58,7 +58,13 @@ impl super::Compiler {
                 col,
             );
         }
-        let kind = if name == "map" { CompKind::Map } else { CompKind::Filter };
+        // `where` gets its own kind purely so runtime errors quote the method
+        // the user wrote (the walker threads the surface name identically).
+        let kind = match name {
+            "map" => CompKind::Map,
+            "where" => CompKind::Where,
+            _ => CompKind::Filter,
+        };
 
         // #31 parallel nested-reduce: recognize `range(os,oe).map(i => range(is,ie).reduce(
         // init, (acc,j) => rbody))` where the inner reduce captures exactly the outer binder
@@ -142,7 +148,11 @@ impl super::Compiler {
         }
         self.compile_expr(b, body)?;
         b.emit(
-            if matches!(kind, CompKind::Map) { Op::CompMapPush } else { Op::CompFilterPush },
+            if matches!(kind, CompKind::Map) {
+                Op::CompMapPush
+            } else {
+                Op::CompFilterPush(kind)
+            },
             line,
             col,
         );

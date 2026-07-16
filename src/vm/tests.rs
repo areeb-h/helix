@@ -3118,3 +3118,37 @@
             assert_eq!(format!("{}", jit_val(src)), format!("{}", vm_val(src)), "JIT≠VM on: {src}");
         }
     }
+
+    /// Sweep follow-ups (#80): the VM's error TEXT must match the walker's for
+    /// where-vs-filter naming, match-guard wording, and `join` arity through an
+    /// Unknown receiver (the DfJoin value fallback used to silently drop the
+    /// extra argument and print a value the walker rejects).
+    #[test]
+    fn vm_error_text_matches_walker_on_sweep_followups() {
+        for src in [
+            // `where` quoted as written (was: "type Int has no method `filter`").
+            "fn g(x) = x.where(it > 1)\ng(5)",
+            // A non-bool `where` predicate names `where` (was: "`filter` expects…").
+            "[1, 2].where(it * 2)",
+            // Guard wording: `missing` and non-boolean guards get the shared
+            // `match`-guard message, not the `if`-condition or generic one.
+            "match 1 { x if missing => 1, _ => 2 }",
+            "match 1 { x if 1 => 1, _ => 2 }",
+            // `join` arity through an Unknown receiver.
+            "fn j(x) = x.join(\"-\", \"z\")\nj([\"a\", \"b\"])",
+        ] {
+            let tw = run_tw(src).unwrap_err();
+            let vm = run_vm(src).unwrap_err();
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+        }
+        assert!(run_vm("fn j(x) = x.join(\"-\", \"z\")\nj([\"a\", \"b\"])")
+            .unwrap_err()
+            .contains("takes 1 argument, got 2"));
+        // Guards still pass/fail correctly after the op change.
+        let ok = "match 2 { x if x > 1 => 10, _ => 20 }";
+        assert_eq!(run_vm(ok).unwrap(), "10");
+        assert_eq!(run_tw(ok).unwrap(), "10");
+        let fall = "match 0 { x if x > 1 => 10, _ => 20 }";
+        assert_eq!(run_vm(fall).unwrap(), "20");
+        assert_eq!(run_tw(fall).unwrap(), "20");
+    }

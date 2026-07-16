@@ -44,6 +44,10 @@ pub enum Op {
     /// Pop a boolean condition; jump if it is `false`. Used only for `if`, so it
     /// owns the "`if` condition is `missing`" / non-boolean error wording.
     JumpIfFalse(u32),
+    /// [`Op::JumpIfFalse`] for a `match` arm's guard: identical control flow,
+    /// but a `missing`/non-boolean guard raises the guard-specific wording
+    /// (shared with the walker via `interp::guard_bool`), not the `if` one.
+    GuardCheck(u32),
     /// Three-valued `and` short-circuit. Peeks the left value: if it's a
     /// determined `false`, replaces it with `Bool(false)` and jumps to the end;
     /// otherwise leaves it and falls through to the right operand.
@@ -147,7 +151,9 @@ pub enum Op {
     /// `map`: pop the body result and append it to the iterator's builder.
     CompMapPush,
     /// `filter`/`where`: pop a boolean; if true, append the current element.
-    CompFilterPush,
+    /// Carries the kind so a non-boolean test quotes the method the user
+    /// actually wrote (`where` vs `filter`), matching the walker's error.
+    CompFilterPush(CompKind),
     /// Finish a `map`/`filter`: pop the iterator and push its built array.
     CompEnd,
     /// Finish a `reduce`: pop the iterator (its result, the accumulator, is loaded
