@@ -1600,7 +1600,19 @@ impl Parser {
                 self.advance();
                 let mut fields = Vec::new();
                 while !matches!(self.peek(), Tok::RBrace) {
+                    let (kl, kc) = self.pos();
                     let key = self.ident_name("as a record-pattern field")?;
+                    // Same rule as a record literal: one entry per field (a
+                    // duplicate here could only re-test or re-bind the same
+                    // field — always a mistake).
+                    if fields.iter().any(|(k, _): &(String, Pattern)| k == &key) {
+                        return Err(HelixError::new(
+                            format!("duplicate field `{}` in record pattern", key),
+                            kl,
+                            kc,
+                        )
+                        .hint("each field may appear once in a pattern."));
+                    }
                     let subpat = if matches!(self.peek(), Tok::Colon) {
                         self.advance();
                         self.parse_pattern()?
@@ -2057,7 +2069,20 @@ impl Parser {
                         }
                         // Field names may be keywords (`match`, `in`, `if`, …) — they
                         // are contextual here, never ambiguous before a `:`.
+                        let (kl, kc) = self.pos();
                         let key = self.member_name("as a record field name")?;
+                        // A duplicate field would break `==`'s substitutability
+                        // (order-independent equality assumes one entry per key:
+                        // two "equal" records could disagree on `.a`), so reject
+                        // it here — the one place all engines share.
+                        if fields.iter().any(|(k, _)| k == &key) {
+                            return Err(HelixError::new(
+                                format!("duplicate field `{}` in record literal", key),
+                                kl,
+                                kc,
+                            )
+                            .hint("each field may appear once; derive a changed record with `{ ...base, field: value }`."));
+                        }
                         self.eat(&Tok::Colon, &format!("after field `{}`", key))
                             .map_err(|e| {
                                 e.hint("records look like `{name: \"Ada\", age: 41}`.")

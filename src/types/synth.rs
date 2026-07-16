@@ -71,7 +71,10 @@ impl super::Checker {
                 }
                 let both_str = matches!(lt, Type::String) && matches!(rt, Type::String);
                 let both_dna = matches!(lt, Type::Dna) && matches!(rt, Type::Dna);
-                if both_str || both_dna || (is_numeric(lt) && is_numeric(rt)) {
+                // Tuples order lexicographically (element pairs are checked at
+                // runtime — an unorderable PAIR errors there like a scalar would).
+                let both_tuple = matches!(lt, Type::Tuple(_)) && matches!(rt, Type::Tuple(_));
+                if both_str || both_dna || both_tuple || (is_numeric(lt) && is_numeric(rt)) {
                     Ok(Type::Bool)
                 } else {
                     Err(HelixError::new(

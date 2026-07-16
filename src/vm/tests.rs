@@ -3221,3 +3221,51 @@ fn probe(d) = if d == 0 then h(42) else 0 + probe(d - 1)\nprobe(19998)";
             assert!(tw.contains("immutable and cannot be reassigned"), "got: {tw}");
         }
     }
+
+    /// #82: ADR-0001 equality semantics. `==`/`!=` are THREE-VALUED at any
+    /// depth (a compared `missing` makes the answer `missing`, unless a
+    /// definite structural difference decides first — Kleene); set-like
+    /// operations (`unique`, `frequencies`, `contains`, `index_of`) use the
+    /// total IDENTITY equality where `missing` matches `missing`. Tuples
+    /// order lexicographically. All shared code (`ops::eq3`/`values_equal`/
+    /// `compare`), so tri-engine parity is by construction — pinned anyway.
+    #[test]
+    fn three_valued_equality_and_tuple_ordering() {
+        for (src, want) in [
+            // three-valued structural equality
+            ("{a: missing} == {a: missing}", "missing"),
+            ("{a: 1, b: missing} == {a: 2, b: missing}", "false"), // definite diff wins
+            ("{a: 1, b: missing} != {a: 2, b: missing}", "true"),
+            ("(try 5) == (try 5)", "missing"), // ok-records carry error: missing
+            ("missing == missing", "missing"),
+            ("[1, missing] == [1, 2]", "missing"),
+            ("[1, missing] == [2, missing]", "false"),
+            // identity equality for set-like operations
+            ("[missing, missing].unique()", "[missing]"),
+            ("[missing, 1, missing].frequencies()", "[(missing, 2), (1, 1)]"),
+            ("[1, missing].contains(missing)", "true"),
+            ("[1, missing].index_of(missing)", "1"),
+            // unchanged: numeric coercion and IEEE NaN
+            ("1 == 1.0", "true"),
+            ("[1.0, sqrt(0.0 - 1.0)] == [1.0, sqrt(0.0 - 1.0)]", "false"),
+            // lexicographic tuple ordering
+            ("(1, 2) < (1, 3)", "true"),
+            ("(1, 2) < (1, 2, 3)", "true"), // equal prefix -> length decides
+            ("(1, 2) <= (1, 2)", "true"),
+            ("(2, 0) <= (1, 9)", "false"),
+            ("(5, 1) > (4, 99)", "true"),
+            ("(1, missing) < (1, 2)", "missing"),
+            // an unorderable PAIR errors like the scalars would
+            ("(try ((1, \"a\") < (1, 2))).ok", "false"),
+        ] {
+            let vm = run_vm(src);
+            assert_eq!(vm, run_tw(src), "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // Duplicate record fields reject at parse time — literals and patterns.
+        for src in ["{a: 1, a: 2}", "match {a: 1} { {a: x, a: y} => x, _ => 0 }"] {
+            let tw = run_tw(src).unwrap_err();
+            assert_eq!(tw, run_vm(src).unwrap_err(), "on `{src}`");
+            assert!(tw.contains("duplicate field"), "got: {tw}");
+        }
+    }

@@ -202,8 +202,16 @@ pub(crate) fn eval_binary(
                 Ok(Value::Float(v))
             }
         },
-        Eq => Ok(Value::Bool(values_equal(&l, &r))),
-        Ne => Ok(Value::Bool(!values_equal(&l, &r))),
+        // `==`/`!=` are THREE-VALUED at any depth (ADR 0001): a `missing`
+        // compared against anything — including inside an array/tuple/record/
+        // dict — makes the answer unknown, so the whole comparison is
+        // `missing` unless a definite structural difference decides it first
+        // (`{a: 1, b: missing} == {a: 2, b: missing}` is `false`; swap the 1
+        // for a 2 and it is `missing`). Set-like operations (`unique`,
+        // `frequencies`, `contains`, `index_of`) use the total IDENTITY
+        // equality `values_equal` instead, where `missing` matches `missing`.
+        Eq => Ok(eq3(&l, &r).map(Value::Bool).unwrap_or(Value::Missing)),
+        Ne => Ok(eq3(&l, &r).map(|b| Value::Bool(!b)).unwrap_or(Value::Missing)),
         Lt | Gt | Le | Ge => compare(op, &l, &r, line, col),
         BitAnd | BitOr | BitXor | Shl | Shr => bitwise(op, &l, &r, line, col),
         And | Or | Coalesce => unreachable!("handled with short-circuit in eval"),
@@ -614,8 +622,86 @@ fn num_operand(op: &BinOp, v: &Value, line: usize, col: usize) -> Result<f64, He
     })
 }
 
+/// THREE-VALUED structural equality for the `==`/`!=` operators (ADR 0001):
+/// `None` means "unknown because a `missing` was compared" — at any depth.
+/// Kleene combination for containers: a definite structural difference
+/// (length, key set, an unequal pair) decides `Some(false)` even when other
+/// pairs are unknown; otherwise any unknown pair makes the whole answer
+/// `None`; all-equal is `Some(true)`. Cross-type pairs stay definite `false`
+/// (they can never be equal, missing or not).
+pub(crate) fn eq3(l: &Value, r: &Value) -> Option<bool> {
+    match (l, r) {
+        (Value::Missing, _) | (_, Value::Missing) => None,
+        (Value::Array(a), Value::Array(b)) => {
+            use crate::value::ArrayData::{Floats, Ints};
+            match (&**a, &**b) {
+                // Packed columns hold no `missing`, so the total fast path is exact.
+                (Ints(xa), Ints(xb)) => Some(xa == xb),
+                (Floats(fa), Floats(fb)) => Some(fa == fb),
+                _ => {
+                    if a.len() != b.len() {
+                        return Some(false);
+                    }
+                    eq3_all(a.to_values().iter().zip(b.to_values().iter()).map(|(x, y)| eq3(x, y)))
+                }
+            }
+        }
+        (Value::Tuple(a), Value::Tuple(b)) => {
+            if a.len() != b.len() {
+                return Some(false);
+            }
+            eq3_all(a.iter().zip(b.iter()).map(|(x, y)| eq3(x, y)))
+        }
+        (Value::Record(a), Value::Record(b)) => {
+            if a.len() != b.len() {
+                return Some(false);
+            }
+            eq3_all(a.iter().map(|(k, v)| match b.iter().find(|(k2, _)| k == k2) {
+                Some((_, v2)) => eq3(v, v2),
+                None => Some(false),
+            }))
+        }
+        (Value::Dict(a), Value::Dict(b)) => {
+            if a.len() != b.len() {
+                return Some(false);
+            }
+            eq3_all(a.iter().map(|(k, v)| match b.get(k) {
+                Some(v2) => eq3(v, v2),
+                None => Some(false),
+            }))
+        }
+        // Scalars (and cross-type pairs) are total — no `missing` can hide here.
+        _ => Some(values_equal(l, r)),
+    }
+}
+
+/// Kleene "all equal": any definite `false` wins (short-circuit); else any
+/// unknown poisons the result; else all pairs were definitely equal.
+fn eq3_all(pairs: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+    let mut saw_unknown = false;
+    for p in pairs {
+        match p {
+            Some(false) => return Some(false),
+            None => saw_unknown = true,
+            Some(true) => {}
+        }
+    }
+    if saw_unknown {
+        None
+    } else {
+        Some(true)
+    }
+}
+
 pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
     match (l, r) {
+        // IDENTITY equality: `missing` matches `missing`, so the set-like
+        // operations built on this (`unique`, `frequencies`, `contains`,
+        // `index_of`, alignment) treat all missings as one identity — Julia's
+        // `isequal` convention (ADR 0001). The `==` OPERATOR does not use this
+        // pair: it is three-valued via `eq3`. (`NaN != NaN` stays — floats
+        // keep IEEE semantics in both equalities.)
+        (Value::Missing, Value::Missing) => true,
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::Float(a), Value::Float(b)) => a == b,
         (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => (*a as f64) == *b,
@@ -678,6 +764,24 @@ fn compare(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<
         // Compare integers exactly as i64 — a prior `as f64` cast lost precision
         // above 2^53 and disagreed with the JIT. Now all engines agree.
         (Value::Int(a), Value::Int(b)) => a.cmp(b),
+        // Tuples order LEXICOGRAPHICALLY, element by element (the Python/Rust
+        // convention): the first unequal pair decides via this same comparison
+        // (so an unorderable pair — Int vs Str, NaN — errors exactly like the
+        // scalars would); an all-equal prefix falls to length. A `missing`
+        // anywhere in the deciding prefix makes the answer unknown (ADR 0001).
+        (Value::Tuple(a), Value::Tuple(b)) => {
+            for (x, y) in a.iter().zip(b.iter()) {
+                match eq3(x, y) {
+                    None => return Ok(Value::Missing),
+                    Some(true) => continue,
+                    // x != y definitely — this pair decides. Since they differ,
+                    // `<=` ≡ `<` and `>=` ≡ `>`, so the original op's result on
+                    // the pair IS the tuple's result.
+                    Some(false) => return compare(op, x, y, line, col),
+                }
+            }
+            a.len().cmp(&b.len())
+        }
         _ => {
             let a = num_operand(op, l, line, col)?;
             let b = num_operand(op, r, line, col)?;
