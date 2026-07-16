@@ -517,6 +517,24 @@ impl Checker {
                      are now free functions (e.g. `read_csv`) or methods (e.g. `value.to_json()`). \
                      If you meant a module named `{name}`, import it first: `import {name}`."
                 ))),
+                // A registry builtin used as a bare VALUE (`f = print`): the old
+                // message said "not defined … assign it first, e.g. `print = ...`"
+                // — circular advice for a name that IS defined as a callable.
+                None if crate::registry::lookup(name).is_some() => Err(HelixError::new(
+                    format!("built-in `{name}` cannot be used as a value"),
+                    *line,
+                    *col,
+                )
+                .hint(format!("wrap it in a function instead: `f = (x => {name}(x))`."))),
+                // `it` outside a comprehension body (e.g. inside a nested `=>`
+                // lambda, which binds the element to its own parameter): the
+                // Levenshtein pass used to suggest the math constant `e`.
+                None if name == "it" => Err(HelixError::new(
+                    "`it` is not defined here",
+                    *line,
+                    *col,
+                )
+                .hint("`it` is the implicit element inside a comprehension body; a `=>` function receives the element as its own parameter — write `.map(x => ...)`.")),
                 None => {
                     let names: Vec<&str> = self.env.keys().map(|s| s.as_str()).collect();
                     let mut err =

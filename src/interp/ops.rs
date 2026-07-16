@@ -783,6 +783,23 @@ fn compare(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<
             a.len().cmp(&b.len())
         }
         _ => {
+            // A mixed pair involving an orderable non-number gets a message
+            // naming BOTH sides — the old "needs numbers" was wrong advice,
+            // since `"a" < "b"` (and DNA vs DNA) is perfectly legal.
+            if matches!(l, Value::Str(_) | Value::Dna(_))
+                || matches!(r, Value::Str(_) | Value::Dna(_))
+            {
+                return Err(HelixError::new(
+                    format!(
+                        "cannot order {} and {} — `{}` compares two numbers, two strings, or two DNA sequences",
+                        l.type_name(),
+                        r.type_name(),
+                        op.symbol()
+                    ),
+                    line,
+                    col,
+                ));
+            }
             let a = num_operand(op, l, line, col)?;
             let b = num_operand(op, r, line, col)?;
             a.partial_cmp(&b).ok_or_else(|| {

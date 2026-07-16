@@ -921,6 +921,16 @@ fn array_method(
                     (Value::Dna(x), Value::Dna(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 });
+            } else if items.iter().any(|v| matches!(v, Value::Missing)) {
+                // Name the actual blocker: every present value may well be
+                // sortable — it's the `missing` that has no order (ADR 0001
+                // makes dropping them an explicit, visible step).
+                return Err(HelixError::new(
+                    "cannot sort: the array has missing values",
+                    line,
+                    col,
+                )
+                .hint("drop them explicitly first: `xs.drop_missing().sort()`."));
             } else {
                 return Err(HelixError::new(
                     "`sort` needs an array of all numbers, all strings, or all DNA",

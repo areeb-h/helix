@@ -61,6 +61,15 @@ making the snapshot sound). Must be resolved before that stream lands.
 
 ## Error-message polish (tri-engine consistent, catalogued for one batch)
 
+**STATUS (#84, 2026-07-17): twelve of the fifteen items below are FIXED** (unknown
+escapes now error; chained comparisons reject; 0x/`_` literals get targeted
+messages; `;` hint; BOM skipped; ASCII hint reworded; builtin-as-value; `it`
+hint; mixed-ordering names both types in checker + runtime; sort-missing hint;
+`call_label` renders Index/Ident; walker CallValue hint matches the VM; tensor
+`round` is elementwise-f64). **Deferred**: the trailing-dot line-glue hint, the
+exact-`i64::MIN` literal, and the polars `//`-position threading — grammar/
+plumbing changes that deserve their own pass.
+
 - Unknown string escapes silently swallowed: `"\u{0041}"` prints `u41`, `"a\qb"` → `aqb` (lexer `other => other`). Should error with the supported-escape list.
 - `1 == 1 == 1` silently prints `false` (`(1==1)==1`); `1 < 2 < 3` at least errors. Reject comparison chaining with a hint.
 - `x = 0x10` → "expected end of line … found `x10`" + irrelevant `;` hint; `1_000` splits the same way. Targeted "no hex literals / no `_` separators" errors.

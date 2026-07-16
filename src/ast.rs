@@ -311,6 +311,16 @@ impl Expr {
     pub fn call_label(&self) -> String {
         match self {
             Expr::Field { name, .. } => name.clone(),
+            Expr::Ident { name, .. } => name.clone(),
+            // `(fs[0])(…)` errors used to say "`this value` expects …" — render
+            // the indexing the user actually wrote when it's simple enough.
+            Expr::Index { recv, index, .. } => match (recv.as_ref(), index.as_ref()) {
+                (Expr::Ident { name, .. }, Expr::Int(i)) => format!("{name}[{i}]"),
+                (Expr::Ident { name, .. }, Expr::Ident { name: i, .. }) => {
+                    format!("{name}[{i}]")
+                }
+                _ => "this value".to_string(),
+            },
             _ => "this value".to_string(),
         }
     }

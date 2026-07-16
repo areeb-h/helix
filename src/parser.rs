@@ -896,12 +896,8 @@ impl Parser {
     fn equality(&mut self) -> Result<Expr, HelixError> {
         let saved = self.depth;
         let mut left = self.comparison()?;
-        loop {
-            let op = match self.peek() {
-                Tok::EqEq => BinOp::Eq,
-                Tok::Ne => BinOp::Ne,
-                _ => break,
-            };
+        if matches!(self.peek(), Tok::EqEq | Tok::Ne) {
+            let op = if matches!(self.peek(), Tok::EqEq) { BinOp::Eq } else { BinOp::Ne };
             let (l, c) = self.pos();
             self.advance();
             self.deepen()?;
@@ -913,6 +909,16 @@ impl Parser {
                 line: l,
                 col: c,
             };
+            // A chained equality doesn't mean what it reads as — `1 == 1 == 1`
+            // silently evaluated `(1 == 1) == 1` → `true == 1` → `false`.
+            // Reject the chain (parentheses make the grouping explicit and are
+            // still accepted), mirroring range chaining's rejection.
+            if matches!(self.peek(), Tok::EqEq | Tok::Ne) {
+                let (l2, c2) = self.pos();
+                self.depth = saved;
+                return Err(HelixError::new("comparisons cannot be chained", l2, c2)
+                    .hint("split it with `and`, e.g. `a == b and b == c`."));
+            }
         }
         self.depth = saved;
         Ok(left)
@@ -921,14 +927,13 @@ impl Parser {
     fn comparison(&mut self) -> Result<Expr, HelixError> {
         let saved = self.depth;
         let mut left = self.bit_or()?;
-        loop {
-            let op = match self.peek() {
-                Tok::Lt => BinOp::Lt,
-                Tok::Gt => BinOp::Gt,
-                Tok::Le => BinOp::Le,
-                Tok::Ge => BinOp::Ge,
-                _ => break,
-            };
+        if let Some(op) = match self.peek() {
+            Tok::Lt => Some(BinOp::Lt),
+            Tok::Gt => Some(BinOp::Gt),
+            Tok::Le => Some(BinOp::Le),
+            Tok::Ge => Some(BinOp::Ge),
+            _ => None,
+        } {
             let (l, c) = self.pos();
             self.advance();
             self.deepen()?;
@@ -940,6 +945,14 @@ impl Parser {
                 line: l,
                 col: c,
             };
+            // Same chain rejection as `equality` — `a < b < c` compared a Bool
+            // to `c` (a type error at best, a silent wrong answer with bools).
+            if matches!(self.peek(), Tok::Lt | Tok::Gt | Tok::Le | Tok::Ge) {
+                let (l2, c2) = self.pos();
+                self.depth = saved;
+                return Err(HelixError::new("comparisons cannot be chained", l2, c2)
+                    .hint("split it with `and`, e.g. `a < b and b < c`."));
+            }
         }
         self.depth = saved;
         Ok(left)

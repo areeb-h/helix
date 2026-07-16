@@ -539,12 +539,14 @@ impl Interp {
                 match callee_v {
                     Value::Function(g) => self.call_function(&label, &g, vals, *line, *col),
                     // The expression evaluated to something that isn't callable.
+                    // ONE hint string with the VM's CallValue arm — the engines'
+                    // errors are compared byte-for-byte.
                     other => Err(HelixError::new(
                         format!("`{}` is a {}, not a function", label, other.type_name()),
                         *line,
                         *col,
                     )
-                    .hint("only functions can be called this way, e.g. `(rec.handler)(x)`.")),
+                    .hint("only functions and the built-ins `print`/`dna`/`range` can be called.")),
                 }
             }
             Expr::Method {
@@ -1430,8 +1432,20 @@ fn apply_round_fn(
             ArrayData::Range { .. } => Ok(Value::Array(ad.clone())),
             ArrayData::Values(_) | ArrayData::Enumerate { .. } => round_box(name, f, v, line, col),
         },
-        // Tensors and scalars keep the exact general path (a tensor stays a whole-valued
-        // `Float` tensor, with the same `as i64` saturation for out-of-range values).
+        // A tensor stays a whole-valued FLOAT tensor, so apply the f64 rounding
+        // function directly — no i64 conversion, meaning `round(tensor([1e30]))`
+        // rounds to itself instead of raising the spurious Int-range error the
+        // scalar path (whose result really is an `Int`) correctly raises.
+        Value::Tensor(t) => {
+            let mut data = Vec::with_capacity(t.len());
+            for &x in t.iter() {
+                data.push(f(x));
+            }
+            let out = ndarray::ArrayD::from_shape_vec(t.raw_dim(), data)
+                .expect("same length as source tensor");
+            Ok(Value::Tensor(Rc::new(out)))
+        }
+        // Scalars keep the exact general path.
         _ => round_box(name, f, v, line, col),
     }
 }

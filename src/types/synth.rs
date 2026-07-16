@@ -76,6 +76,22 @@ impl super::Checker {
                 let both_tuple = matches!(lt, Type::Tuple(_)) && matches!(rt, Type::Tuple(_));
                 if both_str || both_dna || both_tuple || (is_numeric(lt) && is_numeric(rt)) {
                     Ok(Type::Bool)
+                } else if matches!(lt, Type::String | Type::Dna)
+                    || matches!(rt, Type::String | Type::Dna)
+                {
+                    // Same wording as the runtime (`ops::compare`) for the
+                    // mixed-orderable case, so static and dynamic rejections of
+                    // one program read identically.
+                    Err(HelixError::new(
+                        format!(
+                            "cannot order {} and {} — `{}` compares two numbers, two strings, or two DNA sequences",
+                            lt,
+                            rt,
+                            op.symbol()
+                        ),
+                        line,
+                        col,
+                    ))
                 } else {
                     Err(HelixError::new(
                         format!(

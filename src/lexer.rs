@@ -94,6 +94,33 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
             }
             c if c.is_ascii_digit() => {
                 let (tok, used) = lex_number(&chars, i);
+                // Two classic literal traps that used to split into two tokens
+                // and die later with a baffling statement-boundary error:
+                // `0x10` (no hex/binary/octal literals) and `1_000` (no digit
+                // separators). Catch them here with a targeted message.
+                let after = i + used;
+                if after < n {
+                    let nx = chars[after];
+                    if used == 1 && c == '0' && matches!(nx, 'x' | 'X' | 'b' | 'B' | 'o' | 'O')
+                        && after + 1 < n
+                        && chars[after + 1].is_ascii_alphanumeric()
+                    {
+                        return Err(HelixError::new(
+                            format!("Helix has no `0{}…` literals", nx),
+                            line,
+                            start_col,
+                        )
+                        .hint("write the plain decimal value (e.g. `16` instead of `0x10`)."));
+                    }
+                    if nx == '_' && after + 1 < n && chars[after + 1].is_ascii_digit() {
+                        return Err(HelixError::new(
+                            "digits cannot contain `_` separators",
+                            line,
+                            start_col,
+                        )
+                        .hint("write the digits without separators (e.g. `1000`)."));
+                    }
+                }
                 push!(tok, start_col);
                 i += used;
                 col += used;
@@ -242,15 +269,31 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                         .hint("did you mean `??` (use a default when a value is `missing`)?"));
                 }
             }
+            // A UTF-8 byte-order mark (what Windows Notepad / PowerShell `Out-File`
+            // prepend) is invisible — skip a leading one instead of failing every
+            // line-1 program with an "unexpected character" whose caret renders
+            // nothing.
+            // Invisible, so the column does not advance: the first real token
+            // still reports column 1.
+            '\u{FEFF}' if i == 0 => {
+                i += 1;
+            }
+            ';' => {
+                // The parser's statement-boundary error carries this hint, but a
+                // typed `;` dies here at lex time and never reaches it.
+                return Err(HelixError::new("unexpected character `;`", line, col)
+                    .hint("each statement goes on its own line; Helix has no `;`."));
+            }
             other => {
                 let mut err =
                     HelixError::new(format!("unexpected character `{}`", other), line, col);
                 if !other.is_ascii() {
-                    // Non-ASCII is fine inside strings and comments — only identifiers
-                    // and operators are ASCII. (A common cause is an editor/shell
+                    // Non-ASCII is fine inside strings, comments, and identifiers
+                    // (identifiers are Unicode-alphabetic: `π = 3.14` lexes) — only
+                    // OPERATORS are ASCII. (A common cause is an editor/shell
                     // turning `-`/`+-` into a fancy `—`/`±`.)
                     err = err.hint(
-                        "Helix identifiers and operators are ASCII; put non-ASCII text inside a string or comment.",
+                        "Helix operators are ASCII; identifiers may use letters, but symbols belong inside a string or comment.",
                     );
                 }
                 return Err(err);
@@ -434,7 +477,17 @@ fn lex_string(
                     '0' => '\0',
                     '{' => '{',
                     '}' => '}',
-                    other => other,
+                    // An unknown escape used to be silently swallowed (`\q` → `q`;
+                    // `\u{0041}` degraded to a literal `u` plus an interpolated
+                    // `{0041}`) — a silent-mangling trap. Reject it instead.
+                    other => {
+                        return Err(HelixError::new(
+                            format!("unknown string escape `\\{}`", other),
+                            line,
+                            col,
+                        )
+                        .hint("supported escapes: \\n \\t \\r \\\\ \\\" \\0 \\{ \\} — strings are UTF-8, paste unicode directly; for literal backslashes use a raw \"\"\"...\"\"\" string."));
+                    }
                 });
                 j += 1;
                 end_col += 1;
@@ -494,7 +547,15 @@ fn lex_string(
                             '0' => '\0',
                             '{' => '{',
                             '}' => '}',
-                            other => other,
+                            // Same rejection as the outer-string scanner above.
+                            other => {
+                                return Err(HelixError::new(
+                                    format!("unknown string escape `\\{}`", other),
+                                    line,
+                                    col,
+                                )
+                                .hint("supported escapes: \\n \\t \\r \\\\ \\\" \\0 \\{ \\} — strings are UTF-8, paste unicode directly; for literal backslashes use a raw \"\"\"...\"\"\" string."));
+                            }
                         };
                         if nx == '"' {
                             in_str = !in_str;
