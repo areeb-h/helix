@@ -1151,6 +1151,35 @@ fn comp_arity(name: &str, example: &str, line: usize, col: usize) -> HelixError 
     .hint(format!("e.g. `xs.{}{}`.", name, example))
 }
 
+/// A comprehension's function must bind the element. `xs.map(() => 5)` ignores
+/// every element, which is a bug, not a constant-map — so BOTH engines reject it
+/// BEFORE iterating, with the identical message.
+///
+/// This exists because the walker used to have no such check: it only noticed
+/// when the destructure failed, so `xs.map(() => 5)` SUCCEEDED on an empty `xs`
+/// (the lambda is never invoked → `[]`) and failed with a different message
+/// ("cannot destructure a value of type Int into 0 parameters") once `xs` had
+/// data. That is the worst possible shape for a bug — it ships green and
+/// detonates on real input — and it diverged from the VM, which rejects up
+/// front. The rejection must not depend on whether any element exists.
+pub(crate) fn comp_needs_binder(
+    params: &[String],
+    name: &str,
+    hint: &str,
+    line: usize,
+    col: usize,
+) -> Result<(), HelixError> {
+    if params.is_empty() {
+        return Err(HelixError::new(
+            format!("`{}`'s function needs at least one parameter", name),
+            line,
+            col,
+        )
+        .hint(hint.to_string()));
+    }
+    Ok(())
+}
+
 /// Match `pat` against `v`. `None` means no match; `Some(binds)` means it matched,
 /// binding the listed names (left-to-right; empty for a pure literal or `_`).
 /// Recursive for tuple/record patterns. Shared by the tree-walker AND the VM (whose

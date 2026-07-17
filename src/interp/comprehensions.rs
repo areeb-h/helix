@@ -34,6 +34,7 @@ impl super::Interp {
                     return Err(comp_arity(name, "(it * 2)", line, col));
                 }
                 let (params, body) = comprehension_params(&args[0]);
+                comp_needs_binder(&params, name, "e.g. `xs.map(it * 2)` or `xs.map((a, b) => ...)`.", line, col)?;
                 let mut out = Vec::with_capacity(items.len());
                 self.eval_pattern_loop(&params, &items, body, line, col, |_el, v| {
                     out.push(v);
@@ -46,6 +47,7 @@ impl super::Interp {
                     return Err(comp_arity(name, "(it > 0)", line, col));
                 }
                 let (params, body) = comprehension_params(&args[0]);
+                comp_needs_binder(&params, name, "e.g. `xs.map(it * 2)` or `xs.map((a, b) => ...)`.", line, col)?;
                 let mut out = Vec::new();
                 self.eval_pattern_loop(&params, &items, body, line, col, |el, keep| match keep {
                     Value::Bool(true) => {
@@ -71,6 +73,7 @@ impl super::Interp {
                     return Err(comp_arity(name, "(it > 0)", line, col));
                 }
                 let (params, body) = comprehension_params(&args[0]);
+                comp_needs_binder(&params, name, "e.g. `xs.any(it > 0)` or `xs.all((a, b) => a < b)`.", line, col)?;
                 let is_all = name == "all";
                 let mut seen_missing = false;
                 // `visit` short-circuits with Some(bool) the instant the answer is known.

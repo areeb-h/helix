@@ -560,11 +560,20 @@ motivates this phase.
       (`i64::MIN`, `i64::MAX`, `-1`, `±(2^53+1)`, small consts) 1/4 of the time, so
       `MIN // -1`, `MIN % -1`, and 2^53-boundary comparisons are routine fuzzer
       traffic (they had ~1e-9 grammar probability before). Differential oracle green.
-- [ ] **Decide zero-parameter comprehension lambdas** — `[].map(() => 5)` (a thunk
-      that ignores the element): the VM raises "needs at least one parameter" while
-      the tree-walker evaluates it (returns `[]`/`[5, 5]`). The parser accepts the
-      syntax, so one engine must change. Pick a semantics (reject as a likely bug, or
-      accept as a constant-map) and align both engines + a regression test.
+- [x] **Zero-parameter comprehension lambdas — DECIDED: reject** (2026-07-17).
+      `xs.map(() => 5)` ignores every element, which is a bug rather than a
+      constant-map, so both engines now reject it **before iterating** with the
+      identical message (`comp_needs_binder`, shared by the walker's map /
+      filter / where / any / all; `reduce` already had its own exact-two check).
+      The walker previously had no check at all and only noticed when the
+      *destructure* failed — so `xs.map(() => 5)` **succeeded on an empty `xs`**
+      (returning `[]`, the lambda never invoked) and failed with a different
+      message once `xs` had data: a value-vs-error divergence from the VM, and a
+      bug that ships green and detonates on real input. The decision follows from
+      that asymmetry — a rejection must not depend on whether any element exists.
+      Pinned tri-engine (`zero_param_comprehension_lambda_rejects_on_both_engines`,
+      plus `tests/corpus/z1_zeroparam`). The differential fuzzers never generated
+      `() =>` inside a comprehension, which is why this survived so long.
 - [ ] **Thread the invoked method name into `where`/`filter` runtime errors** — a
       non-bool `where` predicate reports "`filter` expects a yes/no test" in the VM
       (`Op::CompFilterPush` hard-codes `filter`; the compiler routes `where` through

@@ -18,4 +18,3 @@ cannot order String and Int — `<` compares two numbers, two strings, or two DN
 true
 1
 --- stderr ---
-

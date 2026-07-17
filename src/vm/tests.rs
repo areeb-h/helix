@@ -256,6 +256,22 @@
                 }
             }
             13 => {
+                // Occasionally emit a ZERO-PARAMETER comprehension lambda over an
+                // array that may be EMPTY or not. Both engines must reject it
+                // identically and BEFORE iterating — the walker used to have no
+                // check and so succeeded on `[]` while erroring on `[x]`, a
+                // value-vs-error divergence this grammar could never generate
+                // (it emits no `() =>` inside a comprehension). The empty/non-empty
+                // pair is the whole point: the rejection must not depend on data.
+                if pick(rng, 12) == 0 {
+                    let m = ["map", "filter", "any", "all"][pick(rng, 4) as usize];
+                    let src = if pick(rng, 2) == 0 {
+                        "[]".to_string()
+                    } else {
+                        format!("[{}, {}]", gen_expr(rng, 0, vars), gen_expr(rng, 0, vars))
+                    };
+                    return format!("(try ({src}).{m}(() => ({}))).ok", gen_expr(rng, 0, vars));
+                }
                 // any/all over a small array → Bool (exercises short-circuit loop)
                 let m = if pick(rng, 2) == 0 { "any" } else { "all" };
                 let cop = ["<", ">", "<=", ">=", "==", "!="][pick(rng, 6) as usize];
@@ -3530,5 +3546,43 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             let vm = run_vm(&src);
             let tw = run_tw(&src);
             assert_eq!(vm, tw, "memo x mut-global divergence (iter {i}) on:\n{src}");
+        }
+    }
+
+    /// A comprehension's function must bind the element: `xs.map(() => 5)`
+    /// ignores every element, so BOTH engines reject it BEFORE iterating, with
+    /// the identical message. The walker used to have no such check — it only
+    /// noticed when the destructure failed, so this SUCCEEDED on an empty `xs`
+    /// (the lambda is never invoked → `[]`) and failed with a different message
+    /// once `xs` had data. A bug that ships green and detonates on real input,
+    /// and a value-vs-error divergence from the VM. The empty-vs-non-empty pair
+    /// is the point of this test: the rejection must not depend on the data.
+    #[test]
+    fn zero_param_comprehension_lambda_rejects_on_both_engines() {
+        for (src, want) in [
+            ("[].map(() => 5)", "`map`'s function needs at least one parameter"),
+            ("[1, 2].map(() => 5)", "`map`'s function needs at least one parameter"),
+            ("[].filter(() => true)", "`filter`'s function needs at least one parameter"),
+            ("[1, 2].filter(() => true)", "`filter`'s function needs at least one parameter"),
+            ("[1, 2].where(() => true)", "`where`'s function needs at least one parameter"),
+            ("[].any(() => true)", "`any`'s function needs at least one parameter"),
+            ("[1, 2].all(() => true)", "`all`'s function needs at least one parameter"),
+            // reduce already agreed — it has its own exact-two-params check.
+            ("[1, 2].reduce(0, () => 9)", "`reduce`'s function needs exactly two parameters, but got 0"),
+        ] {
+            let tw = run_tw(src).unwrap_err();
+            let vm = run_vm(src).unwrap_err();
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(tw, want, "`{src}`");
+        }
+        // The one-parameter forms still work, on both engines.
+        for (src, want) in [
+            ("[1, 2].map(it * 2)", "[2, 4]"),
+            ("[1, 2, 3].filter(it > 1)", "[2, 3]"),
+            ("[1, 2].any(it > 1)", "true"),
+            ("[].map(it * 2)", "[]"),
+        ] {
+            assert_eq!(run_vm(src), run_tw(src), "engines disagree on `{src}`");
+            assert_eq!(run_vm(src), Ok(want.to_string()), "`{src}`");
         }
     }
