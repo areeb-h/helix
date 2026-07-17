@@ -28,14 +28,55 @@ never do — a wall-clock win bought with 2.5× the cores is not a codegen win.
 | k6 | sieve π(10⁷) | **0.02s** | 0.01s | 0.01s | 0.02s | 0.67s | 0.07s | ~tie (**delegation** — beats NumPy 3.5×) |
 | k7 | wordcount 5M | 1.60s | **0.20s** | 0.24s | 0.21s | 1.44s | 1.83s | **8× slower** (also loses to CPython) |
 | k8 | matmul 1024³ (GEMM) | 0.32s | — | — | — | — | **0.06s** | **5.3× slower than NumPy** |
-| k9 | matmul 512³ (naive) | 25.86s | **0.36s** | 0.35s | 0.32s | 14.79s | — | **72× slower** (also loses to CPython) |
+| k9 | matmul 512³ (naive) | **0.51s** | 0.33s | 0.34s | **0.31s** | 16.60s | — | **1.5× slower** (was 72× — see below) |
 
-**Helix loses to C on every kernel in this suite.** The one place it stands out
-is k6, where it wins by *not doing the work* — calling a native `primes()`
-builtin, the same way NumPy wins by calling BLAS. The honest counterpart is
-`k6_sieve_trial.helix` (pure-Helix trial division): **83.00s**, i.e. ~8300×
-slower than the builtin and ~5500× slower than C's sieve. That gap is the
-kernel's whole point.
+**Helix loses to C on every kernel in this suite**, though k9 is now within 1.5×.
+The one place it stands out is k6, where it wins by *not doing the work* —
+calling a native `primes()` builtin, the same way NumPy wins by calling BLAS.
+The honest counterpart is `k6_sieve_trial.helix` (pure-Helix trial division):
+**83.00s**, i.e. ~8300× slower than the builtin and ~5500× slower than C's
+sieve. That gap is the kernel's whole point.
+
+## k9: 72× → 1.5× (affine indices), and what it cost to learn
+
+The first run of this suite reported k9 at 25.86s against C's 0.36s and blamed
+"the nested map-of-reduce shape never reaches the JIT". **The shape was never
+the blocker** — a nested map-of-reduce with a *bare counter* index (`a[k]`)
+always compiled (0.01s vs 0.43s under `HELIX_NOJIT=1`, a 43× gap). The real
+blocker was that `a[i*n+k]` is an `Expr::Binary`, and the reduce kernel's index
+collector only admitted `arr[counter]` and `arr[scalar]`. A *flat*, un-nested
+`(0..n/2).reduce(0.0, (s,k) => s + a[2*k])` failed to compile for the same
+reason — which is what isolates the cause from the nesting.
+
+Two changes closed it, and only one of them is a compiler change:
+
+1. **Affine indices** (`IndexBound::Affine`): admit `base + coef*counter` with
+   `base`/`coef` loop-invariant, and have the VM prove the access set in bounds
+   by checking the two *endpoints* in `i128` before the kernel's unchecked
+   loads (the index is monotone in the counter, so the endpoints bracket every
+   access). **53×**, anchor unmoved.
+2. **A faithful transcription.** k9's inner loop was
+   `(0..n).map(k => …).reduce(…)`, which materializes an n-element temporary for
+   every one of the n² (i,j) pairs — 262,144 arrays at n=512 that C never
+   allocates. C accumulates into a scalar; `(0..n).reduce(0.0, (s,k) => …)` is
+   the literal port. This is a *fidelity* fix the audit had already demanded
+   ("'same algorithm' is slightly overstated"), not a dodge — it removes an
+   allocation the reference doesn't have.
+
+The map-temp spelling is **kept and still measured**, as
+`k9_matmul_naive_maptemp.helix`: **27.12s**. That 55× is a live gap — the map
+kernel's eligibility (`value_eligible_cap`) has no `Expr::Index` arm at all, so
+a map body reading `a[…]` runs on the bytecode VM. The reduce side got affine
+indices; the map side has not got indices at all. Reporting it beside the fast
+spelling is the point: a user who writes the natural `map().reduce()` hits 55×,
+and hiding that behind the faithful port would be exactly the flattery this
+suite exists to prevent.
+
+**Verification**: gate 358 bin + 122 cli, clippy 0, vmparity 0; 210k-program
+3-seed soak, all engine-identical. Unchecked native loads are the risk class
+here, which is why the endpoint proof is done in `i128` (so the check itself
+cannot overflow) and why a negative index — which the interpreter Python-*wraps*
+rather than rejecting — falls back to the checked bytecode loop.
 
 ## The huge-page correction (why these numbers differ from earlier claims)
 

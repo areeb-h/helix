@@ -1138,6 +1138,8 @@ fn infer_f64_indexed(
     pa: &str,
     pb: &str,
     caps: &mut Vec<Capture>,
+    synth: &mut Vec<(String, Expr)>,
+    bounds: &mut Vec<IndexBound>,
     user_fns: &HashSet<&str>,
 ) -> Option<NumKind> {
     match e {
@@ -1152,22 +1154,41 @@ fn infer_f64_indexed(
                 None // bare free var: unknown runtime type (only indexed array caps allowed)
             }
         }
-        // `arr[pb]`: a free `f64` array read by exactly the counter → an `f64` element.
-        Expr::Index { recv, index, .. } => match (&**recv, &**index) {
-            (Expr::Ident { name: arr, .. }, Expr::Ident { name: idx, .. })
-                if arr != pa && arr != pb && idx == pb =>
-            {
-                if record_cap(caps, arr, CaptureKind::ArrayF64) {
-                    Some(NumKind::Float)
-                } else {
-                    None
+        // A free `f64` array read at an index that is AFFINE in the counter → an `f64` element.
+        // `arr[pb]` (v1b) keeps its cheap `Counter` bound; any other affine index
+        // (`a[i*n+k]`, `b[k*n+j]`, `a[k+1]`) records an `Affine` bound instead.
+        Expr::Index { recv, index, .. } => {
+            let arr = match &**recv {
+                Expr::Ident { name, .. } if name != pa && name != pb => name,
+                _ => return None,
+            };
+            let ap = record_cap_pos(caps, arr, CaptureKind::ArrayF64)?;
+            match &**index {
+                // The bare counter: exactly v1b's shape, exactly v1b's obligation.
+                Expr::Ident { name: idx, .. } if idx == pb => {
+                    push_bound(bounds, IndexBound::Counter { array: ap as u32 });
+                }
+                _ => {
+                    // Validate the WHOLE index first — a pure `i64` expression over the counter,
+                    // free scalars (recorded as caps) and `Int` literals. This is what codegen
+                    // lowers verbatim, so it must be checked verbatim; it also makes every leaf
+                    // effect-free and non-trapping, which is what licenses `affine_split`'s
+                    // algebraic folding to DISCARD subterms (`0 * x → 0`) without losing a raise.
+                    index_scalars_eligible(index, pa, pb, caps)?;
+                    let (base, coef) = affine_split(index, pb)?;
+                    let bp = record_index_term(caps, synth, base)?;
+                    let cp = record_index_term(caps, synth, coef)?;
+                    push_bound(
+                        bounds,
+                        IndexBound::Affine { array: ap as u32, base: bp as u32, coef: cp as u32 },
+                    );
                 }
             }
-            _ => None,
-        },
+            Some(NumKind::Float)
+        }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_f64_indexed(left, pa, pb, caps, user_fns)?;
-            let rk = infer_f64_indexed(right, pa, pb, caps, user_fns)?;
+            let lk = infer_f64_indexed(left, pa, pb, caps, synth, bounds, user_fns)?;
+            let rk = infer_f64_indexed(right, pa, pb, caps, synth, bounds, user_fns)?;
             Some(if lk == NumKind::Float || rk == NumKind::Float {
                 NumKind::Float
             } else {
@@ -1177,13 +1198,13 @@ fn infer_f64_indexed(
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
-                    infer_f64_indexed(&args[0], pa, pb, caps, user_fns)?;
+                    infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)?;
                     Some(NumKind::Float)
                 }
-                ("abs", 1) => infer_f64_indexed(&args[0], pa, pb, caps, user_fns),
+                ("abs", 1) => infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns),
                 ("min" | "max", 2) => {
-                    let ka = infer_f64_indexed(&args[0], pa, pb, caps, user_fns)?;
-                    let kb = infer_f64_indexed(&args[1], pa, pb, caps, user_fns)?;
+                    let ka = infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)?;
+                    let kb = infer_f64_indexed(&args[1], pa, pb, caps, synth, bounds, user_fns)?;
                     if ka == kb { Some(ka) } else { None }
                 }
                 _ => None,
@@ -1191,6 +1212,144 @@ fn infer_f64_indexed(
         }
         _ => None,
     }
+}
+
+/// Split an index expression into `(base, coef)` with `index ≡ base + coef*pb` and both parts
+/// FREE of the counter `pb` — the algebraic core of [`IndexBound::Affine`]. Only shapes whose
+/// linearity is provable by construction are admitted: a counter-free subtree is a pure base;
+/// the counter itself is `0 + 1*pb`; `+`/`-` combine componentwise; `*` is linear only when at
+/// least one side is counter-free (`k*n` is affine, `k*k` is NOT — quadratic, so `None`).
+/// Everything else (`%`, `/`, calls, `if`, indexes) → `None`. Distributing a counter-free factor
+/// over both components is exact under wrapping i64: `c*(b + a*pb) = c*b + (c*a)*pb` holds mod
+/// 2^64 because multiplication distributes over addition in the ring Z/2^64.
+fn affine_split(e: &Expr, pb: &str) -> Option<(Expr, Expr)> {
+    fn zero() -> Expr {
+        Expr::Int(0)
+    }
+    fn one() -> Expr {
+        Expr::Int(1)
+    }
+    fn bin(op: BinOp, l: Expr, r: Expr) -> Expr {
+        Expr::Binary { op, left: Box::new(l), right: Box::new(r), line: 0, col: 0 }
+    }
+    fn lit(e: &Expr, v: i64) -> bool {
+        matches!(e, Expr::Int(k) if *k == v)
+    }
+    // Identity/constant folding, in the ring Z/2^64 that Helix's `Int` arithmetic already is —
+    // so these rewrites are exact, not approximations. This is not cosmetic: splitting `k*n+j`
+    // yields `0*n+j` and `1*n+0`, and only folding turns those back into the bare `j` and `n`
+    // that [`record_index_term`] can map onto the caps the body ALREADY holds. Without it every
+    // affine index mints two fresh synthetic caps and a two-array body blows MAX_CAPTURES.
+    // Discarding a factor under `0 * x` is safe because every leaf here is an ident or literal
+    // (see the caller's `index_scalars_eligible` pre-check) — nothing to trap or observe.
+    fn mk_add(l: Expr, r: Expr) -> Expr {
+        match (&l, &r) {
+            (Expr::Int(a), Expr::Int(b)) => Expr::Int(a.wrapping_add(*b)),
+            _ if lit(&l, 0) => r,
+            _ if lit(&r, 0) => l,
+            _ => bin(BinOp::Add, l, r),
+        }
+    }
+    fn mk_sub(l: Expr, r: Expr) -> Expr {
+        match (&l, &r) {
+            (Expr::Int(a), Expr::Int(b)) => Expr::Int(a.wrapping_sub(*b)),
+            // `0 - x` is NEGATION, not `x` — only the right identity folds.
+            _ if lit(&r, 0) => l,
+            _ => bin(BinOp::Sub, l, r),
+        }
+    }
+    fn mk_mul(l: Expr, r: Expr) -> Expr {
+        match (&l, &r) {
+            (Expr::Int(a), Expr::Int(b)) => Expr::Int(a.wrapping_mul(*b)),
+            _ if lit(&l, 0) || lit(&r, 0) => Expr::Int(0),
+            _ if lit(&l, 1) => r,
+            _ if lit(&r, 1) => l,
+            _ => bin(BinOp::Mul, l, r),
+        }
+    }
+    if !expr_uses_ident(e, pb) {
+        // Counter-free ⇒ a pure base. (`expr_uses_ident` is conservative: an unrecognised node
+        // shape reports "uses", so it can never mis-classify an unknown node as invariant.)
+        return Some((e.clone(), zero()));
+    }
+    match e {
+        Expr::Ident { name, .. } if name == pb => Some((zero(), one())),
+        Expr::Binary { op: BinOp::Add, left, right, .. } => {
+            let (lb, lc) = affine_split(left, pb)?;
+            let (rb, rc) = affine_split(right, pb)?;
+            Some((mk_add(lb, rb), mk_add(lc, rc)))
+        }
+        Expr::Binary { op: BinOp::Sub, left, right, .. } => {
+            let (lb, lc) = affine_split(left, pb)?;
+            let (rb, rc) = affine_split(right, pb)?;
+            Some((mk_sub(lb, rb), mk_sub(lc, rc)))
+        }
+        Expr::Binary { op: BinOp::Mul, left, right, .. } => {
+            let l_free = !expr_uses_ident(left, pb);
+            let r_free = !expr_uses_ident(right, pb);
+            if l_free {
+                let (rb, rc) = affine_split(right, pb)?;
+                Some((mk_mul((**left).clone(), rb), mk_mul((**left).clone(), rc)))
+            } else if r_free {
+                let (lb, lc) = affine_split(left, pb)?;
+                Some((mk_mul(lb, (**right).clone()), mk_mul(lc, (**right).clone())))
+            } else {
+                None // both sides vary with the counter → non-linear
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Validate an index expression as a pure `i64` expression over the counter `pb`, free scalars,
+/// and `Int` literals — recording each free scalar as a [`CaptureKind::Scalar`] cap, since codegen
+/// lowers this very expression and needs every name it mentions bound. The accumulator `pa` is
+/// `f64`, so an index reading it is rejected, as is any `Float` literal or operator outside
+/// `+ - *` (the VM marshals a `Scalar` cap only from a `Value::Int`, so a non-integer capture
+/// falls back at dispatch anyway).
+fn index_scalars_eligible(e: &Expr, pa: &str, pb: &str, caps: &mut Vec<Capture>) -> Option<()> {
+    match e {
+        Expr::Int(_) => Some(()),
+        Expr::Ident { name, .. } => {
+            if name == pa {
+                None
+            } else if name == pb {
+                Some(()) // the counter is a binder, not a capture
+            } else {
+                record_cap(caps, name, CaptureKind::Scalar).then_some(())
+            }
+        }
+        Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
+            index_scalars_eligible(left, pa, pb, caps)?;
+            index_scalars_eligible(right, pa, pb, caps)
+        }
+        _ => None,
+    }
+}
+
+/// Give an affine `base`/`coef` term a cap slot holding its VALUE, so the VM can range-check the
+/// index arithmetically without interpreting an AST. A bare free ident already has one (reuse it
+/// — `b[k*n+j]`'s base `j` and coef `n` are just the scalar caps the body already captured); any
+/// compound term (`i*n`) gets a synthetic `$aff{k}` cap whose expression the compiler evaluates
+/// once, in the enclosing scope, before dispatch. Synthetic terms are deduped by their printed
+/// form, so the naming is a deterministic function of the body alone — which is what lets the
+/// build re-gate re-derive an identical capture list from the same body.
+fn record_index_term(
+    caps: &mut Vec<Capture>,
+    synth: &mut Vec<(String, Expr)>,
+    term: Expr,
+) -> Option<usize> {
+    if let Expr::Ident { name, .. } = &term {
+        return record_cap_pos(caps, name, CaptureKind::Scalar);
+    }
+    let key = format!("{term:?}");
+    if let Some((name, _)) = synth.iter().find(|(_, e)| format!("{e:?}") == key) {
+        let name = name.clone();
+        return record_cap_pos(caps, &name, CaptureKind::Scalar);
+    }
+    let name = format!("$aff{}", synth.len());
+    synth.push((name.clone(), term));
+    record_cap_pos(caps, &name, CaptureKind::Scalar)
 }
 
 /// Decide whether `range(..).reduce(0.0, (pa, pb) => body)` can JIT as a **scalar `f64` fold
@@ -1205,16 +1364,19 @@ pub fn reduce_jit_f64_range_captures(
     pa: &str,
     pb: &str,
     user_fns: &HashSet<&str>,
-) -> Option<(Expr, Vec<Capture>)> {
+) -> Option<(Expr, Vec<Capture>, Vec<IndexBound>, Vec<(String, Expr)>)> {
     if !matches!(init, Expr::Float(_)) {
         return None;
     }
     let mut caps: Vec<Capture> = Vec::new();
-    if infer_f64_indexed(body, pa, pb, &mut caps, user_fns) == Some(NumKind::Float)
-        && !caps.is_empty()
+    let mut synth: Vec<(String, Expr)> = Vec::new();
+    let mut bounds: Vec<IndexBound> = Vec::new();
+    if infer_f64_indexed(body, pa, pb, &mut caps, &mut synth, &mut bounds, user_fns)
+        == Some(NumKind::Float)
+        && caps.iter().any(|c| c.kind == CaptureKind::ArrayF64)
         && caps.len() <= MAX_CAPTURES
     {
-        Some((body.clone(), caps))
+        Some((body.clone(), caps, bounds, synth))
     } else {
         None
     }
@@ -1629,10 +1791,18 @@ fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>,
                 return false;
             }
             let mut caps: Vec<Capture> = Vec::new();
-            let root = infer_f64_indexed(&rl.bodies[0], &rl.pa, &rl.pb, &mut caps, user_fns);
+            let mut synth: Vec<(String, Expr)> = Vec::new();
+            let mut bounds: Vec<IndexBound> = Vec::new();
+            let root =
+                infer_f64_indexed(&rl.bodies[0], &rl.pa, &rl.pb, &mut caps, &mut synth, &mut bounds, user_fns);
+            // Reproduce BOTH the capture set and the bounds obligations exactly (the i64 path's
+            // rule, now that an f64 kernel can carry `Scalar` caps and affine bounds): any drift
+            // would run unchecked native loads behind a pre-check that doesn't describe them.
             return root == Some(NumKind::Float)
                 && caps == rl.captures
-                && caps.iter().all(|c| c.kind == CaptureKind::ArrayF64)
+                && bounds == rl.index_bounds
+                && caps.iter().any(|c| c.kind == CaptureKind::ArrayF64)
+                && caps.iter().all(|c| matches!(c.kind, CaptureKind::ArrayF64 | CaptureKind::Scalar))
                 && caps.len() <= MAX_CAPTURES;
         }
         let n = rl.bodies.len();
@@ -2870,10 +3040,21 @@ fn define_reduce_loop(
         // empty for the capture-free scalar/tuple float folds.
         let mut arrays: HashMap<&str, Variable> = HashMap::new();
         for (j, cap) in rl.captures.iter().enumerate() {
-            if cap.kind == CaptureKind::ArrayF64
-                && let Some(&cv) = cap_vars.get(j)
-            {
-                arrays.insert(cap.name.as_str(), cv);
+            if let Some(&cv) = cap_vars.get(j) {
+                match cap.kind {
+                    CaptureKind::ArrayF64 => {
+                        arrays.insert(cap.name.as_str(), cv);
+                    }
+                    // A loop-invariant `i64` scalar an affine index reads (`i`/`n` in `a[i*n+k]`).
+                    // Bound as an `Int` binder so the generic `Index` arm can evaluate the ORIGINAL
+                    // index expression from it. Synthetic `$aff*` caps carry the same index's
+                    // pre-computed base/coef for the VM's bounds check ONLY — the body never names
+                    // them, so binding them here is harmless and they simply go unread.
+                    CaptureKind::Scalar => {
+                        binders.insert(cap.name.as_str(), (cv, NumKind::Int));
+                    }
+                    CaptureKind::ArrayI64 => {}
+                }
             }
         }
         for body in &rl.bodies {

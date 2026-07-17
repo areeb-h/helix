@@ -151,12 +151,17 @@ pub unsafe fn call_tuple_reduce(ptr: *const u8, start: i64, end: i64, acc: *mut 
 }
 
 /// Run a **parallel nested reduce**: for each `i` in `os..oe`, call the captured inner reduce
-/// kernel `f(is, ie, init, caps) -> i64`, collecting the results in order (the outer map's result
-/// array). `template` is the kernel's caps buffer with the loop-invariant array-base pointers
-/// already in place and a placeholder at `scalar_pos`; each worker copies it and overwrites ONLY
-/// `scalar_pos` with its own `i`, so no two workers share a mutable caps buffer. The all-pairs
-/// shape `range(n).map(i => range(n).reduce(0,(acc,j)=>...codes[i]...codes[j]...))` lands here
-/// with `template = [codes_ptr, <placeholder>]`, `scalar_pos = 1`.
+/// kernel `f(start(i), end(i), init, caps) -> i64`, collecting the results in order (the outer
+/// map's result array). `template` is the kernel's caps buffer with the loop-invariant array-base
+/// pointers already in place and a placeholder at `scalar_pos`; each worker copies it and
+/// overwrites ONLY `scalar_pos` with its own `i`, so no two workers share a mutable caps buffer.
+/// The all-pairs shape `range(n).map(i => range(n).reduce(0,(acc,j)=>...codes[i]...codes[j]...))`
+/// lands here with `template = [codes_ptr, <placeholder>]`, `scalar_pos = 1`.
+///
+/// The inner bounds are AFFINE in the outer index: `start(i) = sc * i + is`, `end(i) = ec * i + ie`
+/// (the pushed `is`/`ie` are the bases). Each worker computes its OWN bounds from its OWN `i` —
+/// nothing is hoisted — which is what admits a TRIANGULAR `range(i + 1, n)` (`sc = 1`, `ec = 0`).
+/// A rectangular range has `sc = ec = 0`, giving `is`/`ie` verbatim for every `i`.
 ///
 /// Fully deterministic and identical to the sequential outer loop: each `i` is independent,
 /// `into_par_iter().map().collect()` preserves order, every worker reads the SAME read-only array
@@ -170,14 +175,19 @@ pub unsafe fn call_tuple_reduce(ptr: *const u8, start: i64, end: i64, acc: *mut 
 /// `extern "C" fn(i64, i64, i64, *const i64) -> i64` — whose caps arity equals `template.len()`
 /// (`<= MAX_CAPTURES`); the array-base pointers in `template` must stay valid for the whole call
 /// (the caller holds their `Rc`s), `scalar_pos < template.len()`, and every `i` in `os..oe` must
-/// be a valid index into any scalar-indexed array (the VM's hoisted pre-check guarantees this).
-#[allow(clippy::too_many_arguments)] // ptr + the 5 range/init scalars + caps template + scalar slot
+/// be a valid index into any scalar-indexed array. For every `i` in `os..oe` the VM's pre-check
+/// must also guarantee that `sc*i + is` and `ec*i + ie` do not overflow `i64` and that each
+/// counter-indexed array covers the WHOLE per-`i` range `[start(i), end(i))` — the union of those
+/// ranges is what the pre-check bounds, since each worker's range now differs.
+#[allow(clippy::too_many_arguments)] // ptr + the 5 range/init scalars + 2 affine coeffs + caps
 pub unsafe fn run_nested_reduce_arrays(
     ptr: *const u8,
     os: i64,
     oe: i64,
     is: i64,
     ie: i64,
+    sc: i64,
+    ec: i64,
     init: i64,
     template: &[i64],
     scalar_pos: usize,
@@ -194,16 +204,29 @@ pub unsafe fn run_nested_reduce_arrays(
     let n = ((oe as i128) - (os as i128)).max(0) as usize;
     // Parallelize on TOTAL work (`outer × inner`), not the outer count alone — a small outer
     // range over a large inner reduce (few points, long fold) is still worth splitting. Needs
-    // at least 2 outer iterations to distribute.
-    let inner_span = ((ie as i128) - (is as i128)).max(0) as usize;
-    let total = n.saturating_mul(inner_span);
+    // at least 2 outer iterations to distribute. The per-`i` span is itself affine now, so the
+    // total is the TRAPEZOID over the clamped endpoint spans (exact for a rectangular range, and
+    // for a triangular one it correctly gives ~n²/2 rather than the peak n²). This only picks
+    // the parallel-vs-serial route — it can never change the RESULT.
+    let span_at = |i: i128| {
+        (((ec as i128) * i + (ie as i128)) - ((sc as i128) * i + (is as i128))).max(0)
+    };
+    let total = if n == 0 {
+        0
+    } else {
+        let avg = (span_at(os as i128) + span_at(oe as i128 - 1)) / 2;
+        (avg.saturating_mul(n as i128)).min(usize::MAX as i128) as usize
+    };
     let k = template.len();
     let run_one = |i: i64| -> i64 {
         // Per-worker caps buffer: array bases from `template`, `i` at the scalar slot.
         let mut buf = [0i64; crate::jit::MAX_CAPTURES];
         buf[..k].copy_from_slice(template);
         buf[scalar_pos] = i;
-        f(is, ie, init, buf.as_ptr())
+        // This worker's OWN inner bounds, from its OWN `i` — the triangular case. The VM's
+        // pre-check proved these fit `i64` for every `i` in `os..oe` (affine ⇒ monotone ⇒ the
+        // endpoints bound the range), so the arithmetic is exact and cannot wrap.
+        f(sc * i + is, ec * i + ie, init, buf.as_ptr())
     };
     if n >= 2 && total >= crate::interp::PAR_MATH_THRESHOLD {
         use rayon::prelude::*;

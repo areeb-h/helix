@@ -1389,13 +1389,31 @@ fn array_method(
 fn value_histogram(items: &[Value]) -> Vec<(Value, i64)> {
     let mut counts: Vec<(Value, i64)> = Vec::new();
     if items.iter().all(|v| matches!(v, Value::Str(_) | Value::Dna(_))) {
-        let mut idx: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::with_capacity(items.len());
+        // Key by the string's own bytes, BORROWED from `items`. The previous
+        // `HashMap<String, _>` minted a fresh `String` for every element just to probe
+        // the table — 5M allocations to build a 10k-key histogram. This changes no key:
+        // the old key was `v.to_string()`, which for both `Str(s)` and `Dna(s)` is
+        // exactly `s`, so the same elements collide into the same entry (a `Str` and a
+        // `Dna` with equal text shared one bucket before and still do), insertion order
+        // is unchanged, and the sort below is untouched — same output, same order.
+        //
+        // No `with_capacity(items.len())` either: distinct keys are usually FAR fewer
+        // than elements (a k-mer spectrum is the design centre), and reserving one
+        // bucket per element built a 5M-bucket table — whose control bytes alone are
+        // memset — to hold 10k entries. Growth is amortized O(1), and dropping the
+        // reserve measured faster in BOTH regimes: 0.33s -> 0.068s at 10k-distinct/5M,
+        // and 1.83s -> 1.75s (-200 MB) even when every element is distinct, which is
+        // the only case the reserve could have helped.
+        let mut idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for v in items.iter() {
-            match idx.get(&v.to_string()) {
+            let k: &str = match v {
+                Value::Str(s) | Value::Dna(s) => s.as_str(),
+                _ => unreachable!("guarded by the `all` above"),
+            };
+            match idx.get(k) {
                 Some(&i) => counts[i].1 += 1,
                 None => {
-                    idx.insert(v.to_string(), counts.len());
+                    idx.insert(k, counts.len());
                     counts.push((v.clone(), 1));
                 }
             }

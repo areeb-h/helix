@@ -351,6 +351,24 @@ pub enum IndexBound {
     Counter { array: u32 },
     /// `arr[scalar]`: the scalar cap's value `v` must satisfy `0 <= v < len(arr)` (a point check).
     Scalar { array: u32, scalar: u32 },
+    /// `arr[base + coef*counter]` — an AFFINE index (`a[i*n+k]`, `b[k*n+j]`). `base` and `coef`
+    /// are positions of loop-invariant `Scalar` caps the compiler evaluates ONCE before dispatch
+    /// (they may be whole expressions like `i*n`; the counter-free requirement is what makes them
+    /// hoistable at all).
+    ///
+    /// SOUNDNESS. The index is monotone in the counter, so over `k ∈ [start, end)` every accessed
+    /// index lies in the closed interval between its two ENDPOINT values — `base + coef*start` and
+    /// `base + coef*(end-1)` — whichever order `coef`'s sign puts them in. The VM therefore proves
+    /// the whole access set in bounds by checking only those two endpoints against `[0, len)`
+    /// (see `Op::TryJitReduce`), exactly as [`IndexBound::Counter`] checks the range's two ends.
+    /// The endpoints are evaluated in `i128` so the CHECK itself cannot overflow; the kernel then
+    /// computes `base + coef*k` in wrapping `i64`, which is exact mod 2^64 and therefore equals
+    /// the true value whenever that value is in `[0, len) ⊂ [0, 2^63)` — so a wrapped intermediate
+    /// `coef*k` cannot produce an in-bounds-looking-but-wrong address. An empty range accesses
+    /// nothing and is vacuously in bounds. Anything outside this (negative index — which the
+    /// interpreter Python-WRAPS rather than rejecting — or an over-range endpoint) falls back to
+    /// the checked bytecode loop, which raises the exact error.
+    Affine { array: u32, base: u32, coef: u32 },
 }
 
 /// A JIT-eligible `reduce` loop body the compiler asked the JIT to compile. The
@@ -389,6 +407,23 @@ pub struct ReduceLoop {
     /// capture-free body whose inferred root type is `Float`. (Tuple/captured float reduces
     /// stay on the VM loop.)
     pub float: bool,
+    /// **#31 parallel nested-reduce call site only.** The inner range bounds as AFFINE functions
+    /// of the outer binder `i`: `start(i) = inner_start_coeff * i + <the pushed `is` operand>`,
+    /// and likewise `end(i)` with `inner_end_coeff` over the pushed `ie`. The pushed operands are
+    /// the affine BASES (each free of `i`, hence evaluable once in the outer scope at the push
+    /// site — which is what makes them pushable at all); the coefficients carry the `i`-dependent
+    /// part the base cannot.
+    ///
+    /// A `0` coefficient means that bound does not mention `i` — the pushed operand IS the bound,
+    /// i.e. the loop-invariant rectangular case and the exact prior behavior. The triangular
+    /// `range(i + 1, n)` is `inner_start_coeff = 1` over base `1`, `inner_end_coeff = 0` over base
+    /// `n`. Both `0` for every other path (the plain `TryJitReduce` loops never read these).
+    ///
+    /// The native kernel is UNAFFECTED: [`crate::jit::define_reduce_loop`] already takes `start`
+    /// and `end` as runtime `i64` params, so each parallel worker simply passes its OWN bounds
+    /// computed from its OWN `i` — no ABI change, no hoisting.
+    pub inner_start_coeff: i64,
+    pub inner_end_coeff: i64,
 }
 
 /// A JIT-eligible `map`/`filter` body the compiler asked the JIT to compile into a

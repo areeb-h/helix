@@ -1193,31 +1193,77 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     true
                                 }
                             } else {
-                                use crate::bytecode::CaptureKind;
+                                use crate::bytecode::{CaptureKind, IndexBound};
                                 use crate::value::ArrayData;
-                                let caps_meta =
-                                    &program.reduce_loops[*loop_idx as usize].captures;
+                                let rl = &program.reduce_loops[*loop_idx as usize];
+                                let caps_meta = &rl.captures;
                                 let mut caps: Vec<i64> = Vec::with_capacity(n_caps);
+                                let mut lens: Vec<i64> = Vec::with_capacity(n_caps); // array len, 0 for scalars
                                 let mut _keepalive: Vec<Value> = Vec::new();
                                 let mut ok = true;
                                 for (cap, val) in caps_meta.iter().zip(cap_vals.iter()) {
                                     match (cap.kind, val) {
                                         (CaptureKind::ArrayF64, Value::Array(a)) => {
                                             if let ArrayData::Floats(v) = &**a {
-                                                if s < 0 || e > v.len() as i64 {
-                                                    ok = false;
-                                                    break;
-                                                }
                                                 caps.push(v.as_ptr() as i64);
+                                                lens.push(v.len() as i64);
                                                 _keepalive.push(val.clone());
                                             } else {
                                                 ok = false;
                                                 break;
                                             }
                                         }
+                                        // A loop-invariant `i64` an affine index reads (or its
+                                        // pre-computed base/coef). A non-`Int` value means the
+                                        // body's index arithmetic wouldn't be i64 at all → fall
+                                        // back to the bytecode loop rather than guess.
+                                        (CaptureKind::Scalar, Value::Int(i)) => {
+                                            caps.push(*i);
+                                            lens.push(0);
+                                        }
                                         _ => {
                                             ok = false;
                                             break;
+                                        }
+                                    }
+                                }
+                                // Prove every `arr[…]` access is in bounds BEFORE the kernel's
+                                // unchecked loads — the f64 twin of the i64 path's obligations.
+                                if ok {
+                                    for bnd in &rl.index_bounds {
+                                        match *bnd {
+                                            IndexBound::Counter { array } => {
+                                                if s < 0 || e > lens[array as usize] {
+                                                    ok = false;
+                                                    break;
+                                                }
+                                            }
+                                            IndexBound::Scalar { array, scalar } => {
+                                                let iv = caps[scalar as usize];
+                                                if iv < 0 || iv >= lens[array as usize] {
+                                                    ok = false;
+                                                    break;
+                                                }
+                                            }
+                                            // `arr[base + coef*k]` for k in [s,e): the index is
+                                            // monotone in k, so the two ENDPOINTS bracket every
+                                            // access. Evaluated in i128 so the check cannot itself
+                                            // overflow; an empty range accesses nothing.
+                                            IndexBound::Affine { array, base, coef } => {
+                                                if s >= e {
+                                                    continue;
+                                                }
+                                                let bv = caps[base as usize] as i128;
+                                                let cv = caps[coef as usize] as i128;
+                                                let first = bv + cv * (s as i128);
+                                                let last = bv + cv * ((e - 1) as i128);
+                                                let (lo, hi) =
+                                                    if first <= last { (first, last) } else { (last, first) };
+                                                if lo < 0 || hi >= lens[array as usize] as i128 {
+                                                    ok = false;
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1302,6 +1348,14 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                                     ok = false;
                                                     break;
                                                 }
+                                            }
+                                            // The i64 collector (`value_eligible_cap_indexed`) only
+                                            // admits `arr[counter]` / `arr[scalar]`, so it never
+                                            // emits an affine obligation. Decline rather than run
+                                            // unchecked loads if that ever changes.
+                                            IndexBound::Affine { .. } => {
+                                                ok = false;
+                                                break;
                                             }
                                         }
                                     }
@@ -1617,13 +1671,41 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             return None;
                         };
                         let (os, oe, is, ie, init) = (*os, *oe, *is, *ie, *init);
-                        // Match the fallback's caps: outer result size and inner span each within
-                        // the 100M range cap (an over-cap outer/inner range would ERROR in the
-                        // fallback, so declining here keeps the two paths identical).
-                        if (oe as i128 - os as i128) > 100_000_000
-                            || (ie as i128 - is as i128) > 100_000_000
-                        {
+                        // The inner bounds are AFFINE in the outer index: `start(i) = sc*i + is`,
+                        // `end(i) = ec*i + ie`, where the `is`/`ie` operands are the BASES. Both
+                        // coeffs `0` ⇒ the rectangular case ⇒ the bounds are `is`/`ie` for every
+                        // `i`, exactly as before. Affine ⇒ MONOTONE in `i`, so the extremes over
+                        // the iterated `i` sit at the two endpoints — which is what keeps these
+                        // obligations checkable ONCE, here, instead of per worker.
+                        let (sc, ec) = (inner.inner_start_coeff, inner.inner_end_coeff);
+                        // Match the fallback's cap: an over-cap outer range ERRORs in the
+                        // fallback, so declining here keeps the two paths identical.
+                        if (oe as i128 - os as i128) > 100_000_000 {
                             return None;
+                        }
+                        // Union `[inner_lo, inner_hi)` of every per-`i` inner range.
+                        let (mut inner_lo, mut inner_hi) = (0i128, 0i128);
+                        if oe > os {
+                            let (i_lo, i_hi) = (os as i128, oe as i128 - 1);
+                            let start_at = |i: i128| (sc as i128) * i + (is as i128);
+                            let end_at = |i: i128| (ec as i128) * i + (ie as i128);
+                            let (sa, sb) = (start_at(i_lo), start_at(i_hi));
+                            let (ea, eb) = (end_at(i_lo), end_at(i_hi));
+                            // Every per-`i` bound must fit `i64`: the workers compute them in i64,
+                            // where an overflow would WRAP (diverging from the fallback, which
+                            // evaluates `i + 1` on the bytecode loop). Declining keeps them equal.
+                            let fits = |v: i128| v >= i64::MIN as i128 && v <= i64::MAX as i128;
+                            if !fits(sa) || !fits(sb) || !fits(ea) || !fits(eb) {
+                                return None;
+                            }
+                            // The per-`i` SPAN is affine in `i` as well, so its maximum is at an
+                            // endpoint. Every span must be within the 100M cap — an over-cap span
+                            // at ANY `i` would ERROR in the fallback at that `i`.
+                            if (ea - sa).max(eb - sb) > 100_000_000 {
+                                return None;
+                            }
+                            inner_lo = sa.min(sb);
+                            inner_hi = ea.max(eb);
                         }
                         // Resolve the `K` array bases (below the five scalars, in `captures` order)
                         // into the caps `template`; the scalar slot stays a placeholder each worker
@@ -1650,17 +1732,25 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 CaptureKind::ArrayF64 => return None,
                             }
                         }
-                        // HOISTED bounds pre-check (ONCE, before the parallel region): a
-                        // counter-indexed array needs the whole inner range `[is,ie) ⊆ [0,len)`;
-                        // a scalar(`i`)-indexed array needs EVERY outer `i` valid, i.e.
-                        // `[os,oe) ⊆ [0,len)` — exactly the serial per-`i` check `0 <= i < len`
-                        // taken over all i in `[os,oe)`. Any negative or over-range → decline (fall
-                        // back to the exact-erroring serial map-of-reduce, which Python-wraps a
-                        // negative index or raises the precise OOB error).
+                        // Bounds pre-check (ONCE, before the parallel region): a counter-indexed
+                        // array must cover the whole inner range of EVERY worker. The per-`i`
+                        // ranges now differ (the triangular case), so the obligation is on their
+                        // UNION: `[min_i start(i), max_i end(i)) ⊆ [0, len)`. That union is a
+                        // conservative superset — it ignores that an EMPTY per-`i` range loads
+                        // nothing — so it can only ever decline a safe shape to the serial path,
+                        // never admit an out-of-bounds load. The triangular `range(i+1, n)` over
+                        // `i in [0,n)` gives `[1, n) ⊆ [0, n)`: it passes. A scalar(`i`)-indexed
+                        // array needs EVERY outer `i` valid, i.e. `[os,oe) ⊆ [0,len)` — exactly
+                        // the serial per-`i` check `0 <= i < len` taken over all i in `[os,oe)`.
+                        // Any negative or over-range → decline (fall back to the exact-erroring
+                        // serial map-of-reduce, which Python-wraps a negative index or raises the
+                        // precise OOB error).
                         for bnd in &inner.index_bounds {
                             match *bnd {
                                 IndexBound::Counter { array } => {
-                                    if is < 0 || ie > lens[array as usize] {
+                                    if oe > os
+                                        && (inner_lo < 0 || inner_hi > lens[array as usize] as i128)
+                                    {
                                         return None;
                                     }
                                 }
@@ -1669,11 +1759,16 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         return None;
                                     }
                                 }
+                                // #31's parallel nested reduce is driven by the i64 collector, which
+                                // never emits an affine obligation; and its outer binder sweeps the
+                                // scalar cap, so an affine bound's endpoints would have to be
+                                // re-proved per outer index. Decline until that is designed.
+                                IndexBound::Affine { .. } => return None,
                             }
                         }
                         let results = unsafe {
                             crate::jit::run_nested_reduce_arrays(
-                                ptr, os, oe, is, ie, init, &template, scalar_pos,
+                                ptr, os, oe, is, ie, sc, ec, init, &template, scalar_pos,
                             )
                         };
                         drop(keepalive); // arrays no longer aliased (results is owned) — release

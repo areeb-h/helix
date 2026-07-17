@@ -327,19 +327,35 @@ impl super::Compiler {
         if crate::jit::is_float_acc_init(init) {
             return Ok(None);
         }
-        // All five operands must be idempotent (evaluated for the native attempt AND recompiled
-        // in the fallback), and the inner bounds/init independent of the outer binder `i` (they
-        // are hoisted out of the parallel loop and evaluated once, in the outer scope).
-        for e in [Some(oe), os, Some(ie), is, Some(init)].into_iter().flatten() {
+        // The inner bounds may be AFFINE in the outer binder — the TRIANGULAR `range(i + 1, n)`
+        // of an all-pairs loop. Split each into `coeff * i + base`: the `i`-free `base` is pushed
+        // as the operand (evaluated once in the outer scope, exactly as before), and `coeff` rides
+        // in the `ReduceLoop` so each parallel worker can compute its OWN bounds from its OWN `i`.
+        // A bound with no `i` in it yields `coeff = 0` / `base = <the bound>` — the rectangular
+        // case, unchanged. A non-affine bound (`i * i`, `arr[i]`) declines here as it does today.
+        let Some((sc, is_base)) = (match is {
+            None => Some((0, None)),
+            Some(e) => affine_in(e, outer_binder),
+        }) else {
+            return Ok(None);
+        };
+        let Some((ec, ie_base)) = affine_in(ie, outer_binder) else { return Ok(None) };
+        // Every pushed operand must be idempotent (evaluated for the native attempt AND recompiled
+        // in the fallback). Note this gates the affine BASES, not the raw bounds: `range(i + 1, n)`
+        // pushes the base `1`, not the non-idempotent `Binary` `i + 1` — which is why the bases
+        // must be existing subexpressions and never synthesized nodes.
+        for e in [Some(oe), os, ie_base, is_base, Some(init)].into_iter().flatten() {
             if !is_idempotent(e) {
                 return Ok(None);
             }
         }
+        // The outer bounds and the `init` must still be free of `i`: they are evaluated ONCE at the
+        // push site and cannot vary per outer iteration (an `init` mentioning `i` is genuinely
+        // per-iteration, so hoisting it would be wrong). `affine_in` already guarantees the inner
+        // BASES are `i`-free, so the inner bounds are no longer part of this gate.
         if expr_mentions(oe, outer_binder)
-            || expr_mentions(ie, outer_binder)
             || expr_mentions(init, outer_binder)
             || os.is_some_and(|e| expr_mentions(e, outer_binder))
-            || is.is_some_and(|e| expr_mentions(e, outer_binder))
         {
             return Ok(None);
         }
@@ -379,8 +395,10 @@ impl super::Compiler {
         }
         self.push_or_zero(b, os, line, col)?;
         self.compile_expr(b, oe)?;
-        self.push_or_zero(b, is, line, col)?;
-        self.compile_expr(b, ie)?;
+        // The inner bounds push their affine BASES (each `i`-free); the VM adds `coeff * i` per
+        // worker. For a rectangular range the base IS the bound, so this is the previous push.
+        self.push_or_zero(b, is_base, line, col)?;
+        self.push_or_zero(b, ie_base, line, col)?;
         self.compile_expr(b, init)?;
         let inner_idx = self.reduce_loops.len() as u32;
         self.reduce_loops.push(ReduceLoop {
@@ -390,6 +408,8 @@ impl super::Compiler {
             captures: caps,
             index_bounds: bnds,
             float: false,
+            inner_start_coeff: sc,
+            inner_end_coeff: ec,
         });
         let guard = b.emit(Op::TryJitNestedReduce { inner_loop_idx: inner_idx, after: 0 }, line, col);
         Ok(Some((guard, inner_idx)))
@@ -460,6 +480,12 @@ impl super::Compiler {
         // compete — `reduce_jit_bodies` keys only off body shape, so a `Float` init would
         // otherwise be claimed as a never-firing i64 kernel (the engagement-gate trap).
         let fns = self.jit_fn_set();
+        // Synthetic `$aff*` captures: an affine index's pre-computed `base`/`coef` (`i*n` in
+        // `a[i*n+k]`). Each is a counter-free `+ - *` expression over names already in scope, so
+        // evaluating it ONCE here is both cheap and side-effect-free — which matters because the
+        // fall-through bytecode loop re-evaluates the original index itself, and a double
+        // evaluation of anything effectful would diverge from the oracle.
+        let mut synth_exprs: Vec<(String, Expr)> = Vec::new();
         #[allow(clippy::type_complexity)]
         let (jit_bodies, captures, bounds, float): (Option<Vec<Expr>>, Vec<Capture>, Vec<IndexBound>, bool) =
             if crate::jit::is_float_acc_init(init) {
@@ -471,7 +497,10 @@ impl super::Compiler {
                 let user_fns = self.user_fn_set();
                 if matches!(init, Expr::Float(_)) {
                     match crate::jit::reduce_jit_f64_range_captures(init, body, pa, pb, &user_fns) {
-                        Some((b, caps)) => (Some(vec![b]), caps, Vec::new(), true),
+                        Some((b, caps, bnds, synth)) => {
+                            synth_exprs = synth;
+                            (Some(vec![b]), caps, bnds, true)
+                        }
                         None => match crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &user_fns) {
                             Some(b) => (Some(vec![b]), Vec::new(), Vec::new(), true),
                             None => (None, Vec::new(), Vec::new(), false),
@@ -506,7 +535,12 @@ impl super::Compiler {
             // by kind. The VM splits them off before `CompInitRange` whether or not it takes
             // the native path.
             for cap in &captures {
-                self.compile_expr(b, &Expr::Ident { name: cap.name.clone(), line, col })?;
+                // A synthetic affine `base`/`coef` slot pushes its EXPRESSION's value; every other
+                // cap pushes the value of the name it captured.
+                match synth_exprs.iter().find(|(n, _)| *n == cap.name) {
+                    Some((_, e)) => self.compile_expr(b, &e.clone())?,
+                    None => self.compile_expr(b, &Expr::Ident { name: cap.name.clone(), line, col })?,
+                }
             }
             let loop_idx = self.reduce_loops.len() as u32;
             self.reduce_loops.push(ReduceLoop {
@@ -516,6 +550,10 @@ impl super::Compiler {
                 captures,
                 index_bounds: bounds,
                 float,
+                // Not a nested-reduce call site: this loop's bounds are ordinary stack operands,
+                // never affine in an outer binder. The VM reads these only via `TryJitNestedReduce`.
+                inner_start_coeff: 0,
+                inner_end_coeff: 0,
             });
             // `after` is patched once the trailing LoadLocal position is known.
             let at = b.emit(Op::TryJitReduce { loop_idx, acc_slot: acc, after: 0 }, line, col);
@@ -751,6 +789,59 @@ pub(super) struct FusionPlan<'a> {
 /// the source/init for its native attempt and, on fall-through, the per-stage chain
 /// recompiles them. Restricting fusion to such sources keeps that double-evaluation
 /// unobservable.
+/// Decompose `e` into an AFFINE function of `binder`: `e == coeff * binder + base`, returning
+/// `(coeff, base)` where `base` NEVER mentions `binder` (`None` = the literal `0`, matching
+/// [`super::Compiler::push_or_zero`]'s convention). `None` when `e` is not affine in `binder`.
+///
+/// This is what lets the #31 parallel nested-reduce accept a TRIANGULAR inner range. The inner
+/// bounds are pushed as operands BEFORE the outer map's receiver is compiled — in the outer scope,
+/// where `binder` is NOT yet bound — so a bound mentioning `binder` cannot be compiled there at
+/// all (it would resolve to an unrelated outer `i`, or fail). Splitting it into an `i`-free `base`
+/// (pushed, as before) plus a constant `coeff` (carried in the [`ReduceLoop`] and applied per
+/// worker to its own `i`) sidesteps that entirely.
+///
+/// Deliberately narrow: only the forms whose base is an EXISTING subexpression, so the base is
+/// still checked by the same [`is_idempotent`] gate as before and no expression is synthesized
+/// (a synthesized `Binary` base would fail `is_idempotent` anyway). `i * i`, `arr[i]`, `i / 2`,
+/// and `i - k` are not affine here and decline exactly as they do today.
+fn affine_in<'e>(e: &'e Expr, binder: &str) -> Option<(i64, Option<&'e Expr>)> {
+    // The common case: no mention of the binder at all → a constant (in `i`) bound. This is the
+    // rectangular range, and it keeps the previous behavior bit-for-bit.
+    if !expr_mentions(e, binder) {
+        return Some((0, Some(e)));
+    }
+    match e {
+        // `i` alone → 1*i + 0.
+        Expr::Ident { name, .. } if name == binder => Some((1, None)),
+        Expr::Binary { op, left, right, .. } => match op {
+            // `<affine> + <i-free>` / `<i-free> + <affine>`. Exactly one side may mention the
+            // binder — otherwise the base would have to fuse two subexpressions (a synthesized
+            // node), which `is_idempotent` rejects regardless.
+            BinOp::Add => {
+                if !expr_mentions(right, binder) {
+                    let (c, base) = affine_in(left, binder)?;
+                    // The inner base must be the empty `0` for the outer base to be `right`.
+                    base.is_none().then_some((c, Some(right.as_ref())))
+                } else if !expr_mentions(left, binder) {
+                    let (c, base) = affine_in(right, binder)?;
+                    base.is_none().then_some((c, Some(left.as_ref())))
+                } else {
+                    None
+                }
+            }
+            // `k * i` / `i * k` for a literal `k` → k*i + 0. A non-literal (runtime) coefficient
+            // would have to ride as an operand; not worth it until a kernel needs it.
+            BinOp::Mul => match (left.as_ref(), right.as_ref()) {
+                (Expr::Int(k), Expr::Ident { name, .. }) if name == binder => Some((*k, None)),
+                (Expr::Ident { name, .. }, Expr::Int(k)) if name == binder => Some((*k, None)),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn is_idempotent(e: &Expr) -> bool {
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Missing => true,

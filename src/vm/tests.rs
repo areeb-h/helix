@@ -1575,6 +1575,151 @@
         assert_eq!(run_vm_jit(&rev), Ok("0".to_string()));
     }
 
+    /// The **parallel TRIANGULAR nested reduce**: an inner range whose bounds are AFFINE in the
+    /// outer binder (`range(i + 1, n)` — the all-pairs shape where each unordered pair is counted
+    /// once). Each worker computes its OWN inner bounds from its OWN `i`; nothing is hoisted. Sizes
+    /// cross the parallel threshold (the per-`i` span is ~n/2, so the trapezoid `n²/2 >= 1<<15`
+    /// needs n >= 256 — 300 here), so this pins the PARALLEL affine path, not the serial one.
+    /// Covers: upper-triangular start (`i + 1`, `i`), lower-triangular END (`range(0, i)`), a
+    /// strided start (`2 * i`) whose per-`i` range goes EMPTY for large `i`, and a both-affine
+    /// range (`range(i, 2 * i)`) — each against the tree-walker.
+    #[test]
+    fn parallel_triangular_nested_reduce_matches_tree_walker() {
+        let a: Vec<i64> = (0..640).map(|k| (k * 13 + 7) % 100 - 50).collect();
+        let b: Vec<i64> = (0..640).map(|k| (k * 31 + 5) % 50 - 25).collect();
+        let (aa, bb) = (fmt_i64_arr(&a), fmt_i64_arr(&b));
+        let fixed = [
+            // the k4 all-pairs shape itself: `sc = 1` (base `1`), `ec = 0` (base `300`).
+            format!("a = {aa}\n(range(0, 300)).map(i => (range(i + 1, 300)).reduce(0, (acc, j) => acc + abs(a[i] - a[j]))).sum()"),
+            // start `i` exactly → `sc = 1` over the synthesized `0` base.
+            format!("a = {aa}\n(range(0, 300)).map(i => (range(i, 300)).reduce(0, (acc, j) => acc + (a[i] - a[j]) * (a[i] - a[j]))).sum()"),
+            // LOWER-triangular: the END is affine (`ec = 1`, base `0`), the start constant.
+            format!("a = {aa}\n(range(0, 300)).map(i => (range(0, i)).reduce(0, (acc, j) => acc + abs(a[i] - a[j]))).sum()"),
+            // `1 + i` — the binder on the RIGHT of the `+`.
+            format!("a = {aa}\n(range(0, 300)).map(i => (range(1 + i, 300)).reduce(0, (acc, j) => acc + max(a[i], a[j]))).sum()"),
+            // strided start `2 * i`: the per-`i` range EMPTIES once `2i >= 300`, while the union
+            // pre-check bounds only `[min start, max end) = [0, 300)`. Pins that an empty per-`i`
+            // range loads nothing even though its start sits outside the checked union.
+            format!("a = {aa}\n(range(0, 300)).map(i => (range(2 * i, 300)).reduce(0, (acc, j) => acc + a[i] * b[j])).sum()"),
+            // BOTH bounds affine: `range(i, 2 * i)` → `sc = 1`, `ec = 2`; union `[0, 598) ⊆ [0, 640)`.
+            format!("a = {aa}\nb = {bb}\n(range(0, 300)).map(i => (range(i, 2 * i)).reduce(0, (acc, j) => acc + a[i] + b[j])).sum()"),
+            // two arrays, triangular.
+            format!("a = {aa}\nb = {bb}\n(range(0, 300)).map(i => (range(i + 1, 300)).reduce(0, (acc, j) => acc + a[i] * b[j])).sum()"),
+        ];
+        for src in &fixed {
+            assert_eq!(run_vm_jit(src), run_tw(src), "parallel triangular nested reduce JIT ≠ tree-walker on `{src}`");
+        }
+        // Fuzzed `{acc, a[i], a[j]}` bodies under a triangular range at a parallel size.
+        let mut rng = 0x7B1A_9C1A_B00F_1234u64;
+        let atoms = vec!["acc".to_string(), "a[i]".to_string(), "a[j]".to_string()];
+        for _ in 0..25 {
+            let body = gen_i64_eligible(&mut rng, 3, &atoms);
+            let src = format!("a = {aa}\n(range(0, 300)).map(i => (range(i + 1, 300)).reduce(0, (acc, j) => ({body}))).sum()");
+            match (run_vm_jit(&src), run_tw(&src)) {
+                (Ok(x), Ok(y)) => assert_eq!(x, y, "triangular nested reduce JIT ≠ tree-walker on `{src}`"),
+                (Err(ea), Err(eb)) => assert_eq!(ea, eb, "error-message divergence on `{src}`"),
+                (v, t) => panic!("OUTCOME divergence on `{src}`: vmjit={v:?} tw={t:?}"),
+            }
+        }
+    }
+
+    /// ENGAGEMENT probe (the "engagement ≠ correctness" trap). The differential tests above would
+    /// pass just as happily if the triangular shape silently DECLINED and the serial map-of-reduce
+    /// produced the same correct numbers — which is precisely the bug being fixed, so correctness
+    /// alone cannot pin it. The counter discriminates: `run_nested_reduce_arrays` notes exactly ONE
+    /// native call on the CALLING thread (its rayon workers bump their own thread-locals), whereas
+    /// the declined fallback drives `call_reduce_caps` once per outer `i` — ~300 notes. The
+    /// rectangular control proves the probe reads the same way on a shape that always engaged.
+    #[test]
+    fn triangular_nested_reduce_actually_engages_the_nested_path() {
+        let a: Vec<i64> = (0..320).map(|k| (k * 13 + 7) % 100 - 50).collect();
+        let aa = fmt_i64_arr(&a);
+        let probe = |inner: &str| -> u64 {
+            let src = format!(
+                "a = {aa}\n(range(0, 300)).map(i => ({inner}).reduce(0, (acc, j) => acc + abs(a[i] - a[j]))).sum()"
+            );
+            crate::jit::reset_native_call_count();
+            let got = run_vm_jit(&src);
+            assert!(got.is_ok(), "kernel failed on `{src}`: {got:?}");
+            crate::jit::native_call_count()
+        };
+        let rect = probe("(range(0, 300))");
+        let tri = probe("(range(i + 1, 300))");
+        assert_eq!(
+            tri, rect,
+            "the TRIANGULAR nested reduce does not engage the nested path the way the rectangular \
+             one does: {tri} native calls vs {rect}. One dispatch = the parallel nested path; a \
+             per-`i` count (~300) = the serial fallback — the gap this change fixes."
+        );
+        assert!(tri <= 2, "expected a single nested dispatch, got {tri} native calls");
+    }
+
+    #[test]
+    fn zz_probe_discriminates_scratch() {
+        let a: Vec<i64> = (0..320).map(|k| (k * 13 + 7) % 100 - 50).collect();
+        let aa = fmt_i64_arr(&a);
+        let probe = |inner: &str| -> u64 {
+            let src = format!(
+                "a = {aa}\n(range(0, 300)).map(i => ({inner}).reduce(0, (acc, j) => acc + abs(a[i] - a[j]))).sum()"
+            );
+            crate::jit::reset_native_call_count();
+            let _ = run_vm_jit(&src);
+            crate::jit::native_call_count()
+        };
+        eprintln!("PROBE RECT range(0,300)       -> {}", probe("(range(0, 300))"));
+        eprintln!("PROBE TRI  range(i+1,300)     -> {}", probe("(range(i + 1, 300))"));
+        eprintln!("PROBE NONAFFINE range(i*i,300)-> {}", probe("(range(i * i, 300))"));
+        eprintln!("PROBE BINARY-NOI range(1+1,300)-> {}", probe("(range(1 + 1, 300))"));
+    }
+
+    /// TRIANGULAR nested reduce — the pre-check's decline paths. The per-`i` inner range varies, so
+    /// the bounds obligation lands on the UNION `[min_i start(i), max_i end(i))`; when that union
+    /// escapes the array the parallel path must DECLINE to the serial map-of-reduce, which raises
+    /// the EXACT interpreter error — identical string on both engines. Also pins the affine
+    /// OVERFLOW guard (a bound that leaves `i64` for some `i` must fall back rather than wrap in a
+    /// worker) and a NON-affine bound (`i * i`), which declines as it always has.
+    #[test]
+    fn triangular_nested_reduce_bounds_and_edges() {
+        let a: Vec<i64> = (0..100).map(|k| (k * 7 + 1) % 40).collect();
+        let aa = fmt_i64_arr(&a);
+        // Counter union `[1, 200)` escapes len 100 → decline → the serial path's exact OOB error.
+        let oob = format!("a = {aa}\n(range(0, 50)).map(i => (range(i + 1, 200)).reduce(0, (acc, j) => acc + a[i] + a[j])).sum()");
+        let vm = vm_jit_err_msg(&oob).expect("VM must error (triangular counter OOB)");
+        let tw = tw_err_msg(&oob).expect("tree-walker must error (triangular counter OOB)");
+        assert_eq!(vm, tw, "triangular counter-OOB message must match on `{oob}`");
+        assert!(vm.contains("out of bounds"), "unexpected: {vm}");
+
+        // Scalar bound: outer 200 > len 100 → `a[i]` OOB → decline → identical error.
+        let oob_s = format!("a = {aa}\n(range(0, 200)).map(i => (range(i + 1, 200)).reduce(0, (acc, j) => acc + a[i] + a[j])).sum()");
+        assert_eq!(
+            vm_jit_err_msg(&oob_s).expect("VM must error"),
+            tw_err_msg(&oob_s).expect("tree-walker must error"),
+            "triangular scalar-OOB message must match on `{oob_s}`"
+        );
+
+        let edges = [
+            // affine start that OVERFLOWS i64 for i >= 1 → the `fits` guard declines to the serial
+            // path, which wraps `i + hi` exactly as the tree-walker does.
+            "hi = 9223372036854775807\n(range(0, 10)).map(i => (range(i + hi, 4)).reduce(0, (acc, j) => acc + i + j)).sum()".to_string(),
+            // affine END that overflows.
+            "hi = 9223372036854775807\n(range(0, 10)).map(i => (range(0, i + hi)).reduce(0, (acc, j) => acc + i + j)).sum()".to_string(),
+            // NON-affine inner bound (`i * i`) → declines, serial, still correct.
+            format!("a = {aa}\n(range(0, 9)).map(i => (range(i * i, 81)).reduce(0, (acc, j) => acc + i + j)).sum()"),
+            // empty outer range with a triangular inner → `[]` → 0.
+            "(range(5, 5)).map(i => (range(i + 1, 30)).reduce(0, (acc, j) => acc + i * j)).sum()".to_string(),
+            // triangular over a NEGATIVE outer start: start(i) = i+1 goes negative → the union's
+            // `inner_lo < 0` declines (the serial path Python-wraps a negative index).
+            format!("a = {aa}\n(range(0 - 5, 40)).map(i => (range(i + 1, 40)).reduce(0, (acc, j) => acc + a[j])).sum()"),
+            // whole triangle empty for every i (start always past end) → sum of inits.
+            "(range(0, 20)).map(i => (range(i + 100, 30)).reduce(7, (acc, j) => acc + i + j)).sum()".to_string(),
+            // tiny triangular, BELOW the parallel threshold → the serial affine route.
+            "(range(0, 12)).map(i => (range(i + 1, 12)).reduce(0, (acc, j) => acc + i * j)).sum()".to_string(),
+        ];
+        for src in &edges {
+            assert_eq!(run_vm_jit(src), run_tw(src), "triangular edge JIT ≠ tree-walker on `{src}`");
+        }
+    }
+
     /// The **multi-accumulator i64 reduce** (K=4 partials over a K-strided main loop + a remainder
     /// tail, combined at exit) must equal the single-accumulator fold BYTE-FOR-BYTE across the
     /// K-boundary edges — empty, `len < K` (tail only), `len = K·m` (no tail), `len = K·m + r`

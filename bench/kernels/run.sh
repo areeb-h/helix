@@ -118,7 +118,7 @@ run_impl() {
   local k=$1 lang=$2 n=$3
   case "$lang" in
     helix) echo "$n" | "$HX" run "$k.helix" 2>/dev/null ;;
-    helix_trial) echo "$n" | "$HX" run "${k}_trial.helix" 2>/dev/null ;;
+    helix_*) echo "$n" | "$HX" run "${k}_${lang#helix_}.helix" 2>/dev/null ;;
     c) "$BUILD/$k.c.bin" "$n" 2>/dev/null ;;
     rs) "$BUILD/$k.rs.bin" "$n" 2>/dev/null ;;
     go) "$BUILD/$k.go.bin" "$n" 2>/dev/null ;;
@@ -130,9 +130,18 @@ run_impl() {
 impls_for() {
   local k=$1 out=()
   [ -f "$k.helix" ] && out+=(helix)
-  # k6 ships a second Helix entry: the honest pure-Helix trial-division sieve
-  # beside the native-builtin one, so the delegation gap is visible, not hidden.
-  [ -f "${k}_trial.helix" ] && out+=(helix_trial)
+  # Extra Helix entries: any `<kernel>_<variant>.helix` runs as `helix_<variant>`.
+  # A kernel uses these when a second spelling measures a real, named gap rather
+  # than repeating the first — k6_sieve_trial (the cost of NOT delegating to the
+  # native primes()), k9_matmul_naive_maptemp (the cost of the map-side Index gap).
+  # They must compute the SAME anchor, so the gate holds them to it like any
+  # other language.
+  local extra v
+  for extra in "${k}"_*.helix; do
+    [ -f "$extra" ] || continue
+    v=${extra#"${k}"_}; v=${v%.helix}
+    out+=("helix_$v")
+  done
   [ -f "$k.c" ] && out+=(c)
   [ -f "$k.rs" ] && out+=(rs)
   [ -f "$k.go" ] && out+=(go)

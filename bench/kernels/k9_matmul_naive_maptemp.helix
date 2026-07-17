@@ -1,0 +1,49 @@
+# K9, SECOND HELIX ENTRY — the same matmul written `map(k => ...).reduce(...)` instead
+# of reducing directly. Identical arithmetic, identical ijk order, identical anchor. It
+# exists to MEASURE a real Helix gap rather than let the main file quietly avoid it.
+#
+# WHAT IS DIFFERENT: this spelling materializes an n-element array for every (i,j) pair
+# — 262,144 temporary arrays of 512 f64 at n=512 — and then reduces each one. C/Rust/Go
+# accumulate into a scalar and allocate nothing, so this is NOT a like-for-like port of
+# the C loop; k9_matmul_naive.helix is. But it is perfectly natural Helix, and a user who
+# writes it deserves to know what it costs.
+#
+# MEASURED, n=512, idle 6-core box (2026-07-17):
+#
+#   k9_matmul_naive.helix (direct reduce) .... 0.45s   <- JITs: affine index, 1.2x C
+#   this file (map + reduce) ................. ~25s    <- 55x slower
+#
+# WHY: the JIT's map-kernel eligibility (`value_eligible_cap` in src/jit.rs) has no
+# `Expr::Index` arm, so a map body that reads `a[...]` falls to the `_ => false`
+# catch-all and the whole map runs on the bytecode VM — deliberately, per that code's
+# own note: array indexing "stays scoped to the reduce path until the map variant
+# lands." The reduce side got affine indices; the map side has not got indices at all
+# yet. So this file's 55x is two things stacked: an interpreted map, plus n² temporary
+# allocations.
+#
+# This is the honest counterpart to k6_sieve_trial.helix: where that one shows the cost
+# of NOT delegating, this one shows the cost of a shape the compiler does not yet accept.
+# Neither is a workaround; both are the number a real user would hit.
+#
+# Fixing the map-side gap should collapse most of the 55x — the temps would remain, and
+# their measured share (with both spellings unJITted, before the affine work) was ~1.19x.
+n = read_int() ?? 512
+
+fn idiv(x, m) = round((x - (x % m)) / m)
+
+a = (0..(n * n)).map(t => ((idiv(t, n) * (t % n)) % 100) * 0.5)
+b = (0..(n * n)).map(t => ((idiv(t, n) + (t % n)) % 100) * 0.25)
+
+c = (0..n).map(i =>
+  (0..n).map(j =>
+    # THE MARKED LINE: builds an n-element temp for this (i,j), then reduces it.
+    (0..n).map(k => a[i * n + k] * b[k * n + j]).reduce(0.0, (s, x) => s + x)))
+
+h = idiv(n, 2)
+v = c[0][0] + c[n - 1][n - 1] + c[h][h]
+
+eighths = round(v * 8)
+ip = idiv(eighths, 8)
+micros = (eighths % 8) * 125000
+frac = if micros == 0 then "000000" else "{micros}"
+print("{ip}.{frac}")
