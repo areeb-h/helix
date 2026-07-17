@@ -469,11 +469,47 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       excluded PERMANENTLY, not as a gap: its binder is an element value — the
       gather shape whose bounds are undischargeable (Stage 3d's safety argument).
 
-      Remaining after this: **affine map indices** (`a[2*i]`, `a[i*n+k]`), then
-      **FusedKernel captures+bounds** — only both together move
-      `k9_matmul_naive_maptemp`. The k9 *naive* spelling (direct inner `reduce`) is
-      the faithful port and already runs at 1.2× C, so maptemp is natural-Helix
-      ergonomics, not the headline number.
+- [x] **Stage 3f — affine map indices.** `a[2*i]`, `a[i + off]`, and the matmul
+      row/column reads `a[i*n + k]` / `b[k*n + j]` now run native in the mixed
+      kernel — the missing piece for the naive-comprehension matmul. MEASURED: the
+      maptemp inner-loop miniature (n=300) **1.0× → 4.9×**; the real
+      `k9_matmul_naive_maptemp` at n=512 **~25s → 6.0s** (was 55× over the naive
+      reduce spelling, now ~10×). The naive `reduce` spelling is still the faithful
+      port at 1.2× C — maptemp is natural-Helix ergonomics, and it is no longer a
+      cliff.
+
+      Reuses the reduce's affine machinery verbatim: `infer_mixed_kind_indexed`'s
+      `Index` arm calls `index_scalars_eligible` + `affine_split` (the map binder as
+      the counter, the empty string as the absent `pa`), `base`/`coef` land as
+      Scalar caps — bare idents reuse the body's own, compound terms like `i*n` get
+      a synthetic `$aff{k}` slot the compile site evaluates once (counter-free
+      `+ - *`, so side-effect-free — the same argument the reduce site makes).
+
+      **SAFETY — a stronger overflow story than the reduce's.** The index composes
+      with the source's step: `idx = base + coef*(start + step*j)`, affine∘affine,
+      monotone in `j`, so the two ENDPOINT indices bound the set. The reduce's
+      affine bounds a counter ≤ 2^63 (products fit in i128); here the composed
+      magnitude `coef*(start + step*j)` can exceed even i128 — so `map_index_caps`
+      computes it in **CHECKED i128** (`checked_mul`/`checked_add`), and an overflow
+      DECLINES exactly as an out-of-range endpoint does (a value that large is
+      outside `[0,len)` anyway). The kernel then evaluates the original index in
+      wrapping i64 over the materialized element; mod-2^64 is a ring homomorphism,
+      so the wrapped index equals the true i128 value precisely when that value is
+      in `[0,len) ⊂ [0,2^63)` — exactly the checked set.
+
+      Pinned by `affine_map_index_agrees_at_every_boundary` (an exhaustive
+      stride × offset × range × length sweep + engagement + the matmul reads +
+      stepped-range composition + the overflow-declines-with-the-exact-error probe)
+      and `tests/corpus/j3_map_index_affine.helix`. Both endpoint checks
+      sabotage-proven load-bearing. (The sweep's first version spelled negatives as
+      `-1` literals — a PARSE error, so every `lo<0` corner was a vacuous
+      `(Err,Err)`; caught because sabotaging the lower endpoint FAILED to turn it
+      red. Negatives now spell as `(0 - k)` arithmetic. The mirror of the same
+      print-wrap/parse-error trap that recurs across this codebase.)
+
+      Remaining: **FusedKernel captures+bounds** — `(0..n).map(k => …).reduce(…)`
+      still materializes the inner array per (i,j); fusing it away is the last step
+      to bring maptemp to the naive spelling's cost.
 ## Phase 7 — Adoption and ecosystem
 
 The viability requirements: the work that turns a capable compiler into a language

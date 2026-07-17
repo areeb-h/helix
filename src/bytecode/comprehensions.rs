@@ -96,11 +96,16 @@ impl super::Compiler {
         // source array's element type at run time (`Int`→i64 kernel, `Float`→f64). Both
         // analyses collect free vars in the same first-appearance order, so the stored
         // capture list is consistent whichever kernel the dispatch ends up taking.
-        // Each analysis yields the ordered captures; only the indexed one yields bounds.
+        // Each analysis yields the ordered captures; the indexed ones add bounds, and the
+        // mixed-indexed one may add synthetic `$aff*` terms (an affine index's pre-computed
+        // base/coef — expressions, not variables, so the push loop below evaluates them).
         let scalar = |v: Vec<String>| {
-            (v.into_iter().map(|name| Capture { name, kind: CaptureKind::Scalar }).collect(), Vec::new())
+            let caps: Vec<Capture> =
+                v.into_iter().map(|name| Capture { name, kind: CaptureKind::Scalar }).collect();
+            (caps, Vec::new(), Vec::new())
         };
-        let captures: Option<(Vec<Capture>, Vec<IndexBound>)> = if params.len() != 1 {
+        type MapAnalysis = (Vec<Capture>, Vec<IndexBound>, Vec<(String, Expr)>);
+        let captures: Option<MapAnalysis> = if params.len() != 1 {
             None
         } else if is_map {
             crate::jit::map_kernel_captures(body, &params[0], &fns)
@@ -111,8 +116,11 @@ impl super::Compiler {
                 // A body reading a captured array (`a[it]`). Tried AFTER the scalar analyses so
                 // an unindexed body keeps its existing (bound-free) kernel unchanged — this arm
                 // only ever admits shapes that used to fall to the per-element bytecode loop.
-                .or_else(|| crate::jit::map_kernel_captures_indexed(body, &params[0], &fns))
-                // The FLOAT-rooted indexed body (`a[i] + b[i]` over f64 arrays, `a[i] * 2.0`)
+                .or_else(|| {
+                    crate::jit::map_kernel_captures_indexed(body, &params[0], &fns)
+                        .map(|(c, bnd)| (c, bnd, Vec::new()))
+                })
+                // The FLOAT-rooted indexed body (`a[i] + b[i]` over f64 arrays, `a[i*n + k]`)
                 // the i64 analysis rejects. Same capture/bounds vocabulary — the JIT builds
                 // the mixed (i64 range → f64 out) specialization from it, and a body BOTH
                 // analyses admit (`a[i] + 1`) got the same list from the i64 one above, so
@@ -125,20 +133,31 @@ impl super::Compiler {
                 // map falling to the per-element bytecode loop.
                 .or_else(|| {
                     crate::jit::mixed_map_eligible(body, &params[0], &user_fns)
-                        .then(|| (Vec::new(), Vec::new()))
+                        .then(|| (Vec::new(), Vec::new(), Vec::new()))
                 })
         } else if crate::jit::filter_kernel_eligible(body, &params[0], &fns) {
-            Some((Vec::new(), Vec::new()))
+            Some((Vec::new(), Vec::new(), Vec::new()))
         } else {
             None
         };
-        let kernel_guard: Option<(usize, u32)> = if let Some((caps, index_bounds)) = captures {
+        let kernel_guard: Option<(usize, u32)> = if let Some((caps, index_bounds, synth_exprs)) =
+            captures
+        {
             // Push each captured value (in capture order) just above the receiver array;
             // the VM pops them off whether or not it takes the native kernel. An array cap
             // pushes the ARRAY itself — the VM turns it into a base pointer only after
-            // discharging that cap's bounds obligation.
+            // discharging that cap's bounds obligation. A synthetic `$aff*` slot pushes its
+            // EXPRESSION's value — counter-free `+ - *` over names in scope, so evaluating
+            // it once here is side-effect-free (the fall-through bytecode loop re-evaluates
+            // the original index itself, and a double evaluation of anything effectful
+            // would diverge from the oracle — same argument as the reduce site's).
             for cap in &caps {
-                self.compile_expr(b, &Expr::Ident { name: cap.name.clone(), line, col })?;
+                match synth_exprs.iter().find(|(n, _)| *n == cap.name) {
+                    Some((_, e)) => self.compile_expr(b, &e.clone())?,
+                    None => {
+                        self.compile_expr(b, &Expr::Ident { name: cap.name.clone(), line, col })?
+                    }
+                }
             }
             let kernel = ArrayKernel {
                 binder: params[0].clone(),

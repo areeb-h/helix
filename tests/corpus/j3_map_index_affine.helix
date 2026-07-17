@@ -1,0 +1,52 @@
+# Affine map indices — a[2*i], a[i+1], a[i*n+k] — the matmul row/column reads, running as
+# native MIXED-kernel loads. The discharge composes the affine index with the source
+# range's step (idx = base + coef*(start + step*j), affine of affine, monotone in j) and
+# proves the two endpoint indices in CHECKED i128, where overflow declines exactly like
+# out-of-range. Everything the proof declines lands on the checked loop: same values, same
+# errors, same Python-wrapping as the walker.
+
+a = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]
+
+# stride-2 gather, and an offset read
+print((0..3).map(i => a[2 * i]))
+print((0..5).map(i => a[i + 1]))
+
+# offset ending exactly at the last element, then one past it
+print((0..5).map(i => a[i + 1] * 2.0))
+print([0.5, 1.5, 2.5][0:2].map(x => x))
+
+# reversal via a negative coefficient: a[n - 1 - i]
+n = 6
+print((0..6).map(i => a[n - 1 - i]))
+
+# a negative base: the first access wraps, so the kernel must decline — the checked loop
+# Python-wraps it (a[-1] = the last element)
+print((0..3).map(i => a[i - 1]))
+
+# the matmul ROW read a[i*n+k] (i*n rides as a synthetic $aff cap) and COLUMN read b[k*n+j]
+m = 3
+r = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+i = 1
+j = 2
+print((0..3).map(k => r[i * m + k]))
+print((0..3).map(k => r[k * m + j]))
+
+# the maptemp inner loop: both affine reads in one body, reduced
+c = [9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+print((0..3).map(k => r[i * m + k] * c[k * m + j]).reduce(0.0, (s, x) => s + x))
+
+# a STEPPED source range composing with the affine index: elements 0,2,4 -> indices 0,4,8
+q = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]
+print(range(0, 6, 2).map(e => q[2 * e]))
+
+# a descending stepped range
+print(range(4, 0-1, 0-1).map(e => a[e + 1]))
+
+# (The huge-coefficient DECLINE-then-raise case is pinned in the Rust suite —
+# affine_map_index_agrees_at_every_boundary — where an exact-error assertion fits; a raise
+# mid-corpus-file would mask every line after it.)
+
+# affine over an INTS array: only the mixed (f64) specialization exists, so this falls
+# back to the checked loop — correct, just not native (documented, not accidental)
+z = [10, 20, 30, 40, 50, 60]
+print((0..3).map(i => z[2 * i]))

@@ -681,8 +681,11 @@ fn define_array_kernels(
             !indexed && filter_kernel_eligible(&k.body, &k.binder, eligible)
         } else if mixed {
             if indexed {
+                // Synthetic `$aff*` naming is a deterministic function of the body (dedup
+                // by printed form), so the re-derived capture list — `$aff` slots included
+                // — must equal the stored one exactly or the build declines.
                 mixed_map_captures_indexed(&k.body, &k.binder, user_fns)
-                    .is_some_and(|(c, bnd)| c == k.captures && bnd == k.index_bounds)
+                    .is_some_and(|(c, bnd, _)| c == k.captures && bnd == k.index_bounds)
             } else {
                 mixed_map_eligible(&k.body, &k.binder, user_fns)
             }
@@ -2101,14 +2104,15 @@ pub fn mixed_map_captures_indexed(
     body: &Expr,
     binder: &str,
     user_fns: &HashSet<&str>,
-) -> Option<(Vec<Capture>, Vec<IndexBound>)> {
+) -> Option<(Vec<Capture>, Vec<IndexBound>, Vec<(String, Expr)>)> {
     let mut caps: Vec<Capture> = Vec::new();
     let mut bounds: Vec<IndexBound> = Vec::new();
-    let root = infer_mixed_kind_indexed(body, binder, &mut caps, &mut bounds, user_fns)?;
+    let mut synth: Vec<(String, Expr)> = Vec::new();
+    let root = infer_mixed_kind_indexed(body, binder, &mut caps, &mut bounds, &mut synth, user_fns)?;
     // Float root: the kernel writes an f64 buffer. Non-empty bounds: an unindexed body
     // belongs to the plain i64/f64/mixed analyses, which run first at the compile site.
     if root == NumKind::Float && !bounds.is_empty() && caps.len() <= MAX_CAPTURES {
-        Some((caps, bounds))
+        Some((caps, bounds, synth))
     } else {
         None
     }
@@ -2124,6 +2128,7 @@ fn infer_mixed_kind_indexed(
     binder: &str,
     caps: &mut Vec<Capture>,
     bounds: &mut Vec<IndexBound>,
+    synth: &mut Vec<(String, Expr)>,
     user_fns: &HashSet<&str>,
 ) -> Option<NumKind> {
     match e {
@@ -2138,44 +2143,64 @@ fn infer_mixed_kind_indexed(
                 record_cap(caps, name, CaptureKind::Scalar).then_some(NumKind::Int)
             }
         }
-        Expr::Index { recv, index, .. } => match (&**recv, &**index) {
-            // `a[binder]`: a captured f64 array read by the counter → a Counter bound.
-            (Expr::Ident { name: arr, .. }, Expr::Ident { name: idx, .. })
-                if arr != binder && idx == binder =>
-            {
-                let ap = record_cap_pos(caps, arr, CaptureKind::ArrayI64)?;
-                push_bound(bounds, IndexBound::Counter { array: ap as u32 });
-                Some(NumKind::Float)
+        Expr::Index { recv, index, .. } => {
+            let arr = match &**recv {
+                Expr::Ident { name, .. } if name != binder => name,
+                _ => return None,
+            };
+            let ap = record_cap_pos(caps, arr, CaptureKind::ArrayI64)?;
+            match &**index {
+                // `a[binder]`: read by the counter → a Counter bound.
+                Expr::Ident { name: idx, .. } if idx == binder => {
+                    push_bound(bounds, IndexBound::Counter { array: ap as u32 });
+                }
+                // `a[k]`: a free loop-invariant scalar → a point bound.
+                Expr::Ident { name: idx, .. } if idx != arr => {
+                    let sp = record_cap_pos(caps, idx, CaptureKind::Scalar)?;
+                    push_bound(bounds, IndexBound::Scalar { array: ap as u32, scalar: sp as u32 });
+                }
+                // An AFFINE index (`a[2*i]`, `a[i*n + k]` with the map binder as the counter)
+                // — the same admission as the f64 reduce's [`infer_f64_indexed`]. The whole
+                // index is validated first as a pure `i64` expression over the binder, free
+                // scalars, and `Int` literals (codegen lowers it VERBATIM from those caps, so
+                // it must be checked verbatim; every leaf effect-free and non-trapping, which
+                // licenses `affine_split`'s algebraic folding). `base`/`coef` land as extra
+                // Scalar cap slots — bare idents reuse the body's own caps, compound terms
+                // (`i*n`) get a synthetic `$aff{k}` slot the compile site evaluates once —
+                // and the VM proves the two ENDPOINT indices of the range in bounds, in i128
+                // (`map_index_caps`, composed with the range's step). There is no `pa` in a
+                // map, so the empty string — never a legal ident — fills that reject-slot.
+                _ => {
+                    index_scalars_eligible(index, "", binder, caps)?;
+                    let (base, coef) = affine_split(index, binder)?;
+                    let bp = record_index_term(caps, synth, base)?;
+                    let cp = record_index_term(caps, synth, coef)?;
+                    push_bound(
+                        bounds,
+                        IndexBound::Affine { array: ap as u32, base: bp as u32, coef: cp as u32 },
+                    );
+                }
             }
-            // `a[k]`: indexed by a free loop-invariant scalar → a point bound.
-            (Expr::Ident { name: arr, .. }, Expr::Ident { name: idx, .. })
-                if arr != binder && idx != binder && idx != arr =>
-            {
-                let ap = record_cap_pos(caps, arr, CaptureKind::ArrayI64)?;
-                let sp = record_cap_pos(caps, idx, CaptureKind::Scalar)?;
-                push_bound(bounds, IndexBound::Scalar { array: ap as u32, scalar: sp as u32 });
-                Some(NumKind::Float)
-            }
-            _ => None,
-        },
+            Some(NumKind::Float)
+        }
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
-                    infer_mixed_kind_indexed(&args[0], binder, caps, bounds, user_fns)?;
+                    infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)?;
                     Some(NumKind::Float)
                 }
-                ("abs", 1) => infer_mixed_kind_indexed(&args[0], binder, caps, bounds, user_fns),
+                ("abs", 1) => infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns),
                 ("min" | "max", 2) => {
-                    let ka = infer_mixed_kind_indexed(&args[0], binder, caps, bounds, user_fns)?;
-                    let kb = infer_mixed_kind_indexed(&args[1], binder, caps, bounds, user_fns)?;
+                    let ka = infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)?;
+                    let kb = infer_mixed_kind_indexed(&args[1], binder, caps, bounds, synth, user_fns)?;
                     if ka == kb { Some(ka) } else { None }
                 }
                 _ => None,
             }
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, user_fns)?;
-            let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, user_fns)?;
+            let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, synth, user_fns)?;
+            let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, synth, user_fns)?;
             Some(if lk == NumKind::Float || rk == NumKind::Float {
                 NumKind::Float
             } else {
@@ -2196,8 +2221,8 @@ fn infer_mixed_kind_indexed(
             if !op_ok {
                 return None;
             }
-            let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, user_fns)?;
-            let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, user_fns)?;
+            let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, synth, user_fns)?;
+            let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, synth, user_fns)?;
             if lk == NumKind::Int && rk == NumKind::Int {
                 Some(NumKind::Int)
             } else {

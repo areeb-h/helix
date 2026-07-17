@@ -240,9 +240,38 @@ fn map_index_caps(
                     return None;
                 }
             }
-            // Affine is a reduce-only shape today; the map analysis never emits one. Refusing
-            // beats assuming if that ever changes.
-            IndexBound::Affine { .. } => return None,
+            // `a[base + coef*elem]` where `elem` ranges over the lazy source's
+            // `start + step*j`, `j ∈ [0, len)`. Affine composed with affine is affine in
+            // `j`, so the two ENDPOINT indices bound the whole access set — the `Counter`
+            // proof with the step generalizing its unit stride and `base`/`coef` riding as
+            // pre-evaluated Scalar caps. Computed in CHECKED i128: unlike the reduce's
+            // affine (counter ≤ 2^63, so products fit ≤ 2^126), the composed magnitude
+            // `coef*(start + step*j)` can exceed even i128 — and a value that large is
+            // outside `[0, len)` by definition, so overflow DECLINES, identically to
+            // out-of-range. The kernel then evaluates the original index expression in
+            // wrapping i64 over the materialized (possibly wrapped) element; mod-2^64 is a
+            // ring homomorphism, so wrap(base + coef*wrap(start + step*j)) equals the TRUE
+            // i128 value whenever that value lies in [0, len) ⊂ [0, 2^63) — which is
+            // exactly what was just checked, and the interpreter's own wrapping arith
+            // agrees on every declined case via the fallback loop.
+            IndexBound::Affine { array, base, coef } => {
+                let (start, step, len) = src_range?;
+                if len > 0 {
+                    let b0 = caps[base as usize] as i128;
+                    let c0 = caps[coef as usize] as i128;
+                    let idx_at = |j: i128| -> Option<i128> {
+                        let elem = (step as i128).checked_mul(j)?.checked_add(start as i128)?;
+                        c0.checked_mul(elem)?.checked_add(b0)
+                    };
+                    let (Some(first), Some(last)) = (idx_at(0), idx_at(len as i128 - 1)) else {
+                        return None;
+                    };
+                    let (lo, hi) = if first <= last { (first, last) } else { (last, first) };
+                    if lo < 0 || hi >= lens[array as usize] as i128 {
+                        return None;
+                    }
+                }
+            }
         }
     }
     Some(caps)

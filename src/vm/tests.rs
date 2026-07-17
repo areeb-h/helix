@@ -1363,6 +1363,82 @@
         }
     }
 
+
+    /// Affine map indices — `a[2*i]`, `a[i + off]`, `a[i*n + k]` (the matmul row/column
+    /// reads) — discharge by proving the range's two ENDPOINT indices in bounds, composed
+    /// with the source's step (`idx = base + coef*(start + step*j)`, affine∘affine, monotone
+    /// in `j`) in CHECKED i128 — with i64 captures and the 100M materialization cap the
+    /// composed magnitude can exceed even i128, and overflow must decline exactly like
+    /// out-of-range, never accept. The sweep runs stride × offset × range × length
+    /// exhaustively; the endpoint mistakes (an off-by-one at either end of a NEGATIVE-coef
+    /// descent, a base that wraps only the first element) live at boundaries a fuzzer
+    /// reaches by luck.
+    #[test]
+    fn affine_map_index_agrees_at_every_boundary() {
+        crate::jit::reset_native_call_count();
+        for len in [0usize, 1, 4, 7] {
+            let arr: Vec<String> = (0..len).map(|i| format!("{i}.5")).collect();
+            let a = format!("[{}]", arr.join(", "));
+            for coef in [-2i64, -1, 0, 1, 2, 3] {
+                for off in [-2i64, -1, 0, 1, 2] {
+                    for end in [0i64, 1, 3, 4] {
+                        // Spell negatives as real arithmetic — `a[1 * i + -1]` is a PARSE
+                        // error, and a sweep corner that parse-errors "agrees" on (Err,Err)
+                        // while exercising nothing. That vacuous corner shipped in this
+                        // test's first version and was caught only because sabotaging the
+                        // LOWER endpoint failed to turn it red: every lo<0 case needs a
+                        // negative constant, and every negative constant was a parse error.
+                        let c = if coef < 0 { format!("(0 - {})", -coef) } else { coef.to_string() };
+                        let o = if off < 0 { format!("- {}", -off) } else { format!("+ {off}") };
+                        let src =
+                            format!("a = {a}\n(0..{end}).map(i => a[{c} * i {o}] * 2.0)");
+                        let (tw, vm, jit) = (run_tw(&src), run_vm(&src), run_vm_jit(&src));
+                        assert_eq!(tw, vm, "tw vs vm on `{src}`");
+                        assert_eq!(vm, jit, "vm vs JIT on `{src}`");
+                    }
+                }
+            }
+        }
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the affine map kernel never engaged — the sweep compared the VM against itself"
+        );
+
+        // The matmul row/column reads (captured scalars riding in base and coef — `i*n`
+        // lands as a synthetic `$aff` cap the compile site evaluates once) and the composed
+        // maptemp inner loop, pinned against literal values.
+        for (src, want) in [
+            (
+                "n = 3\na = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]\ni = 1\n(0..3).map(k => a[i * n + k])",
+                "[4.0, 5.0, 6.0]",
+            ),
+            (
+                "n = 3\nb = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]\nj = 2\n(0..3).map(k => b[k * n + j])",
+                "[3.0, 6.0, 9.0]",
+            ),
+            (
+                "n = 3\na = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]\nb = [9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]\ni = 1\nj = 0\n(0..3).map(k => a[i * n + k] * b[k * n + j]).reduce(0.0, (s, x) => s + x)",
+                "84.0",
+            ),
+            // A STEPPED source range composing with the affine index.
+            (
+                "a = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5]\nrange(0, 6, 2).map(e => a[2 * e])",
+                "[0.5, 4.5, 8.5]",
+            ),
+        ] {
+            let jit = run_vm_jit(src);
+            assert_eq!(jit, run_tw(src), "engines disagree on `{src}`");
+            assert_eq!(jit, run_vm(src), "vm disagrees on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+
+        // A huge captured coefficient: the i128 endpoint lands far outside [0, len), so the
+        // kernel must never run — the checked loop raises the exact interpreter error.
+        let src = "a = [0.5, 1.5]\nm = 4000000000000000000\n(0..2).map(i => a[m * i] * 2.0)";
+        assert!(run_vm_jit(src).is_err(), "overflown affine index should raise");
+        assert_eq!(run_vm_jit(src), run_tw(src), "overflow error text must match the walker");
+    }
+
     #[test]
     fn differential_functions_with_jit() {
         let mut rng = 0xFEED_FACE_DEAD_BEEFu64;
