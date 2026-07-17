@@ -610,9 +610,21 @@ motivates this phase.
       + IUPAC `R Y S W K M B D H V`), erroring with the record id and position;
       lowercase soft-masking, `N`, and ambiguity codes still read normally.
       Pinned: `fasta_enforces_the_dna_invariant_at_the_boundary`.
-- [ ] **A `#![deny]` gate for new `unwrap`/`expect` in interpreter paths** (or a
-      clippy `disallowed_methods` config scoped to `src/interp`/`src/vm`) so the
-      never-abort property is enforced by CI, not re-audited by hand.
+- [x] **A gate for new `unwrap`/`expect` in interpreter paths** so the never-abort
+      property is enforced by CI, not re-audited by hand. Shipped as a per-file
+      **ratchet** (`no_new_panicking_calls_on_user_reachable_paths`), not the
+      `#![deny]` this entry originally asked for: the ~90 existing calls are
+      proven-by-construction, not sloppiness — 38 of `vm.rs`'s are
+      `stack.pop().unwrap()`, sound because the compiler emits balanced code, and
+      the rest are guarded (`get_mut(name).unwrap()` after a contains-check) or
+      genuine invariants (`expect("same length as source tensor")`). A blanket
+      deny would have meant ~90 `#[allow]`s: churn that buys no safety and trains
+      reviewers to wave the attribute through. What matters is that the count
+      cannot silently *grow*. The budget fails in both directions — a new call
+      must be justified by raising the number in the same commit, and removing one
+      forces the budget down so it cannot creep back. Verified by sabotage (add a
+      call → fails `+1`; remove one → fails `lower it to 0`), because a gate you
+      have not watched reject something is not known to be a gate.
 - [ ] **Document NaN ordering** in the language docs (`sort` places NaN after
       `+inf`; reductions propagate `missing`) so the behavior is a contract, not an
       implementation detail.

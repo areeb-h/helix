@@ -2802,3 +2802,100 @@ fn fasta_enforces_the_dna_invariant_at_the_boundary() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR-0024's never-abort property, enforced by CI instead of re-audited by hand.
+///
+/// A `.unwrap()`/`.expect()` on a path that user input can reach is a process
+/// ABORT — uncatchable by `try`, no error message, no line number. This session's
+/// audits found three of exactly that class ([10, 20][1::i64::MAX] wrapping a
+/// slice cursor into a 2^63 index; `i64::MIN % -1`; a NaN comparator making
+/// Rust's sort panic). Each was found by a human hunt months apart, which does
+/// not scale.
+///
+/// This is a RATCHET, not a ban. The ~90 existing calls are proven-by-
+/// construction, not sloppiness: 38 of vm.rs's are `stack.pop().unwrap()`, sound
+/// because the compiler emits balanced code; the rest are guarded (a
+/// `get_mut(name).unwrap()` after a contains-check) or genuine invariants
+/// (`expect("same length as source tensor")`). Denying them outright would mean
+/// ~90 `#[allow]`s — churn that buys no safety. What actually matters is that the
+/// number cannot silently GROW: a new panicking call in a user-reachable path
+/// must be a deliberate, reviewed act.
+///
+/// TO RAISE A BUDGET: prove the call cannot panic on ANY user input, say so in a
+/// comment at the site, and bump the number here in the same commit — so the
+/// justification lands in review next to the risk. If it can panic on some input,
+/// it is a bug: return a `HelixError` instead.
+#[test]
+fn no_new_panicking_calls_on_user_reachable_paths() {
+    // Files user input flows through. (Test modules live in their own files and
+    // are excluded — a panicking assert in a test is the point of a test.)
+    const BUDGET: &[(&str, usize)] = &[
+        ("src/interp.rs", 7),
+        ("src/interp/methods.rs", 1),
+        ("src/interp/ops.rs", 3),
+        ("src/interp/access.rs", 1),
+        ("src/interp/builtins.rs", 8),
+        ("src/interp/comprehensions.rs", 4),
+        ("src/interp/dataframe_ops.rs", 0),
+        ("src/vm.rs", 52),
+        ("src/bytecode.rs", 2),
+        ("src/bytecode/comprehensions.rs", 0),
+        ("src/bytecode/ops.rs", 0),
+        ("src/lexer.rs", 0),
+        ("src/parser.rs", 7),
+        ("src/bio.rs", 0),
+        ("src/value.rs", 0),
+        ("src/jit.rs", 1),
+        ("src/jit/ffi.rs", 0),
+        ("src/types.rs", 0),
+        ("src/types/synth.rs", 0),
+        ("src/strfmt.rs", 0),
+        ("src/module.rs", 2),
+        ("src/sam.rs", 11),
+    ];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut over: Vec<String> = Vec::new();
+    let mut under: Vec<String> = Vec::new();
+    for (rel, budget) in BUDGET {
+        let path = root.join(rel);
+        let src = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            // A budgeted file that vanished means the list is stale — say so
+            // rather than silently passing.
+            Err(_) => {
+                over.push(format!("{rel}: budgeted but missing — update BUDGET"));
+                continue;
+            }
+        };
+        let n = src
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !(t.starts_with("//") || t.starts_with("/*") || t.starts_with('*'))
+            })
+            .filter(|l| l.contains(".unwrap()") || l.contains(".expect("))
+            .count();
+        if n > *budget {
+            over.push(format!(
+                "{rel}: {n} panicking calls, budget {budget} (+{})",
+                n - budget
+            ));
+        } else if n < *budget {
+            under.push(format!("{rel}: {n}, budget {budget} — lower it to {n}"));
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "NEW panicking call(s) on a user-reachable path — ADR 0024 says user input must never \
+         abort the host:\n  {}\n\nIf the call genuinely cannot panic on any input, prove it in a \
+         comment at the site and raise the budget in the same commit. If it can, return a \
+         HelixError instead.",
+        over.join("\n  ")
+    );
+    // The ratchet only ratchets if it tightens when code improves.
+    assert!(
+        under.is_empty(),
+        "panicking calls were REMOVED — tighten the budget so they cannot come back:\n  {}",
+        under.join("\n  ")
+    );
+}
