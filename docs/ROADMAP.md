@@ -370,6 +370,47 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).
+- [ ] **Stage 3d — map-side `arr[i]`: the largest measured JIT gap.** A `reduce`
+      body may read a captured array; a `map` body may not, so ONE arm's absence
+      sends the whole map to the per-element VM loop.
+
+      MEASURED (2026-07-17, `target/gate`, n=20M, min of 2, same binary):
+
+      | body | JIT | `HELIX_NOJIT=1` |
+      | --- | --- | --- |
+      | `(0..n).map(i => i*2+1)` | **0.03s** | 1.01s |
+      | `(0..n).map(i => a[i]+1)` | **1.31s** | 2.33s |
+      | `(0..n).reduce(0, (s,i) => s+a[i])` | **0.03s** | 2.16s |
+
+      The indexed map costs ~1.28s under BOTH engines (1.31 − 0.03 to build `a`;
+      2.33 − 1.01) — it never JITs, while the identical read on the reduce side is
+      native. ~40× on this shape, and it is the same gap `k9_matmul_naive_maptemp`
+      pays 55× for (`bench/kernels/README.md`).
+
+      It is NOT a codegen gap. `gen_value`'s `Expr::Index` arm (`src/jit.rs`)
+      already emits the load and is shared by both kinds; the map kernel already
+      hoists loop-invariant capture loads off a `caps` pointer as `I64` slots, and
+      an array capture is just such a slot (its base pointer). What is missing is
+      eligibility plus the bounds obligation:
+      1. `value_eligible_cap` (`src/jit.rs`) has no `Expr::Index` arm.
+      2. `ArrayKernel` (`src/bytecode/ops.rs`) carries `captures: Vec<String>` —
+         names only. It must mirror `ReduceLoop`'s `Vec<Capture>` +
+         `Vec<IndexBound>` to say WHICH caps are array bases and what the VM owes.
+
+      **SAFETY — the part that is not mechanical.** A reduce's `pb` is the loop
+      COUNTER, so `IndexBound::Counter` discharges the whole access set with a
+      two-endpoint check. A map's binder is an ELEMENT VALUE: in `xs.map(x =>
+      a[x])` the index is arbitrary data, unpre-checkable without an O(n) scan,
+      and `x` may be negative — which the interpreter Python-WRAPS rather than
+      rejecting, so a `min >= 0` test would reject legal programs. Admit map-side
+      `Index` ONLY when the receiver is a **lazy `ArrayData::Range`**, where the
+      elements ARE `start..end` and the same two-endpoint proof applies
+      (`0 <= start && end <= len(a)`, in `i128`; empty range vacuous; anything else
+      falls back to the checked loop). Note this must be decided BEFORE
+      `densify_range_top` (`src/vm.rs`, in `Op::TryJitMap`) materializes the range
+      and erases the range-ness — after that the kernel sees only an `Ints` buffer
+      and the proof is gone. Measured `idx.map(x => a[x])` (gather, element-value
+      binder) at 2.26s JIT / 3.24s VM: correctly excluded, and it stays excluded.
 
 ## Phase 7 — Adoption and ecosystem
 
