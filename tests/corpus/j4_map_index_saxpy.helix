@@ -1,0 +1,45 @@
+# SAXPY — a value scalar (the coefficient `a` in `a * x[i] + y[i]`) in the mixed kernel. One
+# stored kernel carries an i64 spec (Ints arrays, int coefficient) and a mixed spec (Floats
+# arrays, f64 coefficient); the VM routes by runtime representation. The coefficient rides as
+# f64 in the mixed kernel but is possibly-Int at runtime, so it is admitted ONLY where a
+# genuine float promotes it — `a * x[i]` is fine, `a * i` / `a + b` (scalar with an integer,
+# no float between) would be i64 in the interpreter and f64 in the kernel and are DECLINED.
+# The declined cases below use 2^53+1 so the divergence would be real; they must still agree,
+# via the checked loop.
+
+a = 2.5
+x = [1.5, 2.5, 3.5]
+y = [0.25, 0.5, 0.75]
+
+# the canonical SAXPY, and AXPY with an int coefficient in a float body
+print((0..3).map(i => a * x[i] + y[i]))
+print((0..3).map(i => 3 * x[i] + y[i]))
+
+# two value scalars, each promoted by its own array
+print((0..3).map(i => 2.0 * x[i] + 4.0 * y[i]))
+
+# additive offset, and the safe left-assoc `x[i] + a + b`
+print((0..3).map(i => 100.0 + x[i]))
+b = 10.0
+print((0..3).map(i => x[i] + a + b))
+
+# sqrt promotes its argument, so a value scalar under sqrt is safe
+s = [4.0, 9.0, 16.0]
+print((0..3).map(i => sqrt(s[i]) + a))
+
+# routing: the SAME body over Ints with an int coefficient stays Int (i64 spec)
+xi = [10, 20, 30]
+print((0..3).map(i => 3 * xi[i] + 1))
+
+# a float coefficient with Int arrays: both specs decline -> checked loop, f64 result
+print((0..3).map(i => a * xi[i]))
+
+# DECLINE cases (2^53+1 makes the interp-vs-kernel gap real) — must agree via fallback
+big = 9007199254740993
+o = [1.0, 1.0]
+print((0..2).map(i => big * 3 + o[i]))
+print((0..2).map(i => big + big + o[i]))
+print((0..2).map(i => big * i + o[i]))
+
+# composed into a float reduce
+print((0..3).map(i => a * x[i] + y[i]).reduce(0.0, (acc, e) => acc + e))

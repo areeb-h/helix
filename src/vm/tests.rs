@@ -1437,6 +1437,100 @@
         let src = "a = [0.5, 1.5]\nm = 4000000000000000000\n(0..2).map(i => a[m * i] * 2.0)";
         assert!(run_vm_jit(src).is_err(), "overflown affine index should raise");
         assert_eq!(run_vm_jit(src), run_tw(src), "overflow error text must match the walker");
+
+        // A COMPOUND affine term (`i + a + b`) folds `a + b` into a synthetic `$aff` slot, so
+        // the bound names the slot, not `a`/`b`. `relabel_value_scalars` must still recognize
+        // `a`/`b` as INDEX scalars (they are recomputed in the index codegen) and keep them
+        // `i64` — mislabeling them `ScalarValue` typed the index in `f64` and emitted ill-typed
+        // IR the Cranelift verifier rejected, silently declining the kernel (an audit finding).
+        // So this must ENGAGE the native kernel, not merely agree by falling back.
+        crate::jit::reset_native_call_count();
+        for (src, want) in [
+            ("x = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]\na = 1\nb = 2\n(0..3).map(i => x[i + a + b])", "[40.0, 50.0, 60.0]"),
+            ("x = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]\na = 1\nb = 1\n(0..3).map(i => x[(a + b) * i])", "[10.0, 30.0, 50.0]"),
+            // a genuine value scalar `c` alongside the compound-affine index: `c` becomes
+            // ScalarValue (f64), `a`/`b` stay Scalar (i64).
+            ("x = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0]\na = 1\nb = 2\nc = 2.0\n(0..3).map(i => c * x[i + a + b])", "[80.0, 100.0, 120.0]"),
+        ] {
+            let jit = run_vm_jit(src);
+            assert_eq!(jit, run_tw(src), "compound-affine disagreement on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "compound-affine gather never JITed — the index scalars were mislabeled f64 and the \
+             verifier declined the kernel (the perf cliff this guards against)"
+        );
+    }
+
+
+    /// SAXPY — `(0..n).map(i => a * x[i] + y[i])` with a runtime float coefficient — is the
+    /// canonical BLAS-1 op, and a value scalar in the mixed kernel is the feature under test.
+    /// The subtle part is bit-identity: the scalar rides as `f64` in the kernel but is
+    /// possibly-`Int` at runtime, so it is admitted ONLY where a genuine float promotes it
+    /// (`MixT`). This pins both the routing (one kernel, i64 vs f64 by representation) AND the
+    /// decline of the shapes that would diverge — verified against LITERAL values, since three
+    /// engines agreeing cannot tell "correct" from "all fell back".
+    #[test]
+    fn saxpy_float_scalar_caps_route_and_decline_correctly() {
+        crate::jit::reset_native_call_count();
+        // Engaging SAXPY shapes over Floats arrays → the mixed kernel, exact values.
+        for (src, want) in [
+            (
+                "a = 2.5\nx = [1.5, 2.5, 3.5]\ny = [0.25, 0.5, 0.75]\n(0..3).map(i => a * x[i] + y[i])",
+                "[4.0, 6.75, 9.5]",
+            ),
+            // an INT coefficient in a float body: promoted, so the mixed kernel handles it too.
+            (
+                "a = 3\nx = [1.5, 2.5, 3.5]\ny = [0.25, 0.5, 0.75]\n(0..3).map(i => a * x[i] + y[i])",
+                "[4.75, 8.0, 11.25]",
+            ),
+            // two value scalars, each promoted by its own array.
+            (
+                "c = 2.0\nd = 3.0\nx = [1.0, 2.0, 3.0]\ny = [0.5, 0.5, 0.5]\n(0..3).map(i => c * x[i] + d * y[i])",
+                "[3.5, 5.5, 7.5]",
+            ),
+            // additive offset, and left-assoc `x[i] + a + b` (safe: the array promotes first).
+            ("a = 100.0\nx = [1.0, 2.0, 3.0]\n(0..3).map(i => a + x[i])", "[101.0, 102.0, 103.0]"),
+            ("a = 1.5\nb = 2.5\nx = [10.0, 20.0]\n(0..2).map(i => x[i] + a + b)", "[14.0, 24.0]"),
+            // sqrt promotes, so a value scalar under sqrt is safe.
+            ("a = 16.0\nx = [1.0, 2.0]\n(0..2).map(i => sqrt(a) + x[i])", "[5.0, 6.0]"),
+        ] {
+            let jit = run_vm_jit(src);
+            assert_eq!(jit, run_tw(src), "engines disagree on `{src}`");
+            assert_eq!(jit, run_vm(src), "vm disagrees on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the SAXPY mixed kernel never engaged — the oracle tested the VM against itself"
+        );
+
+        // The DECLINE cases: a value scalar combined with an integer (or under abs/min) would be
+        // i64 in the interpreter and f64 in the kernel. The `2^53+1` inputs make that a REAL
+        // divergence (proven by sabotage: forcing engagement yields ...976 vs the correct
+        // ...980), so these MUST fall back and agree on the i64-exact value.
+        for src in [
+            "a = 9007199254740993\nx = [1.0, 1.0]\n(0..2).map(i => a * 3 + x[i])",
+            "a = 9007199254740993\nb = 9007199254740993\nx = [1.0, 1.0]\n(0..2).map(i => a + b + x[i])",
+            "a = 9007199254740993\nx = [1.0, 1.0]\n(0..2).map(i => a * i + x[i])",
+            "a = 0.0 - 5.5\nx = [1.0, 2.0]\n(0..2).map(i => abs(a) + x[i])",
+            "a = 2.5\nx = [1.0, 5.0]\n(0..2).map(i => min(a, x[i]))",
+        ] {
+            assert_eq!(run_vm_jit(src), run_tw(src), "declined shape must match the walker on `{src}`");
+            assert_eq!(run_vm_jit(src), run_vm(src), "declined shape must match the VM on `{src}`");
+        }
+
+        // Representation routing: the SAME body over Ints (int coefficient) runs the i64 spec
+        // and stays Int; a Float coefficient with Int arrays declines to the VM.
+        for (src, want) in [
+            ("a = 3\nx = [10, 20, 30]\n(0..3).map(i => a * x[i])", "[30, 60, 90]"),
+            ("a = 2.5\nx = [10, 20, 30]\n(0..3).map(i => a * x[i])", "[25.0, 50.0, 75.0]"),
+        ] {
+            let jit = run_vm_jit(src);
+            assert_eq!(jit, run_tw(src), "routing disagreement on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
     }
 
     #[test]

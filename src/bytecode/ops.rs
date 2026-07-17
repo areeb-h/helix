@@ -321,8 +321,20 @@ const _: () = assert!(
 /// and `Op::TryJitReduce`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureKind {
-    /// A loop-invariant `i64` value read bare (`caps[j]` IS the value).
+    /// A loop-invariant `i64` value read bare (`caps[j]` IS the value). Used for INDEX
+    /// scalars (`a[k]`, an affine `base`/`coef`) — always `i64` because an index is an
+    /// integer — and for value scalars in the i64 map/reduce kernels.
     Scalar,
+    /// A loop-invariant scalar used as a VALUE (never as an index) in a map body — the
+    /// coefficient `a` in SAXPY `a * x[i]`. Representation-agnostic: the i64 map kernel
+    /// marshals it from a `Value::Int` and loads `i64`; the MIXED (i64-range → f64) kernel
+    /// marshals `Value::Int`→`f64` or `Value::Float` bits and loads `f64`, so one stored
+    /// kernel serves both an all-`Int` and an all-`Float` call, routed by the runtime types
+    /// (exactly as [`CaptureKind::ArrayI64`] routes array representation). Distinct from
+    /// [`CaptureKind::Scalar`] so the mixed codegen knows to load it `f64` and type it
+    /// `Float`. Never emitted by the reduce path (its analysis keeps value scalars `Scalar`,
+    /// so reduce kernels are untouched); `map` only.
+    ScalarValue,
     /// A packed `i64` array (`ArrayData::Ints`) read by the loop counter as `arr[counter]`;
     /// `caps[j]` is the base pointer, the kernel loads `caps[j] + counter*8`. The VM
     /// pre-checks the whole counter range is in bounds before passing the pointer.

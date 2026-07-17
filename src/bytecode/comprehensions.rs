@@ -424,6 +424,10 @@ impl super::Compiler {
                 CaptureKind::Scalar => c.name == outer_binder,
                 CaptureKind::ArrayI64 => true,
                 CaptureKind::ArrayF64 => false,
+                // A `map`-only kind: `reduce_loop_captures` (this path's collector) never emits
+                // it, so it cannot appear on an inner reduce — decline defensively rather than
+                // assume a shape.
+                CaptureKind::ScalarValue => false,
             });
         if !shape_ok {
             return Ok(None);

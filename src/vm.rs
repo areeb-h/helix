@@ -201,12 +201,32 @@ fn map_index_caps(
                 // dispatch tries the other kernel or the checked loop.
                 _ => return None,
             },
+            // An INDEX scalar — always `i64` (an index is an integer). A `Value::Float` here
+            // means the whole index arithmetic isn't `i64`; decline.
             (CaptureKind::Scalar, Value::Int(i)) => {
                 caps.push(*i);
                 lens.push(0);
             }
-            // A non-`Int` scalar (both kernels load scalar caps as `i64`), or an array cap
-            // bound to a non-array value → fall back rather than guess.
+            // A VALUE scalar (SAXPY's coefficient). In the i64 kernel it must be `Int` and
+            // rides as its value; in the mixed kernel it rides as `f64` BITS — a `Value::Int`
+            // promoted to `f64` (matching the interpreter's `Int * Float` promotion) or a
+            // `Value::Float` passed through. Reinterpreting those 8 bits as `f64` in the kernel
+            // is exactly what the codegen's F64 load expects.
+            (CaptureKind::ScalarValue, Value::Int(i)) => {
+                if float_arrays {
+                    caps.push((*i as f64).to_bits() as i64);
+                } else {
+                    caps.push(*i);
+                }
+                lens.push(0);
+            }
+            (CaptureKind::ScalarValue, Value::Float(f)) if float_arrays => {
+                caps.push(f.to_bits() as i64);
+                lens.push(0);
+            }
+            // A `Value::Float` value scalar for the i64 kernel (which has no f64 slot for it),
+            // a non-`Int`/`Float` scalar, or an array cap bound to a non-array value → fall
+            // back rather than guess.
             _ => return None,
         }
     }
@@ -1881,7 +1901,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     lens[pos] = v.len() as i64;
                                     keepalive.push(val.clone());
                                 }
-                                CaptureKind::ArrayF64 => return None,
+                                // `ScalarValue` is map-only and `ArrayF64` is the f64 reduce
+                                // variant this parallel path doesn't build — neither can appear on
+                                // an eligible inner reduce; decline rather than assume.
+                                CaptureKind::ArrayF64 | CaptureKind::ScalarValue => return None,
                             }
                         }
                         // Bounds pre-check (ONCE, before the parallel region): a counter-indexed

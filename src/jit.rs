@@ -831,6 +831,50 @@ fn push_bound(bounds: &mut Vec<IndexBound>, b: IndexBound) {
     }
 }
 
+/// Relabel every `Scalar` cap that is used only as a VALUE (never as an index) to
+/// [`CaptureKind::ScalarValue`] — a purely-VALUE scalar. Both map indexed analyses call this
+/// before returning, so the i64 and mixed derivations of the same body produce byte-identical
+/// capture lists and the dual-spec re-gate matches. A scalar that IS index-referenced stays
+/// `Scalar`: an index is an integer, so it is `i64` in both specs even when the same name also
+/// appears in a value position (`n` in both `a[i*n+k]` and `n * x[i]` is necessarily `Int`, so
+/// `i64` is correct there too). Reduce captures never pass through here, so the reduce path
+/// keeps `Scalar` and is untouched. Idempotent.
+///
+/// A scalar is index-referenced when a bound names it DIRECTLY (a `Scalar` index, or an
+/// `Affine` `base`/`coef` that is a bare ident), OR when it appears inside a COMPOUND affine
+/// term — `a` and `b` in `x[i + a + b]`, folded into a synthetic `$aff` slot. The affine
+/// codegen recomputes the whole index (`i + a + b`) from the individual `a`/`b` caps, so those
+/// too are index arithmetic and must stay `i64`; missing them let the mixed kernel type the
+/// index in `f64` and emit ill-typed IR (the Cranelift verifier caught it and the kernel
+/// silently declined — a perf cliff, not a divergence). So `synth`'s expressions are scanned
+/// for cap names as well.
+fn relabel_value_scalars(caps: &mut [Capture], bounds: &[IndexBound], synth: &[(String, Expr)]) {
+    let mut index_ref = vec![false; caps.len()];
+    for b in bounds {
+        match *b {
+            IndexBound::Scalar { scalar, .. } => index_ref[scalar as usize] = true,
+            IndexBound::Affine { base, coef, .. } => {
+                index_ref[base as usize] = true;
+                index_ref[coef as usize] = true;
+            }
+            IndexBound::Counter { .. } => {}
+        }
+    }
+    // A cap named inside any synthetic affine term (`$aff0 = a + b`) is part of the index.
+    for i in 0..caps.len() {
+        if caps[i].kind == CaptureKind::Scalar
+            && synth.iter().any(|(_, e)| expr_uses_ident(e, &caps[i].name))
+        {
+            index_ref[i] = true;
+        }
+    }
+    for (i, c) in caps.iter_mut().enumerate() {
+        if c.kind == CaptureKind::Scalar && !index_ref[i] {
+            c.kind = CaptureKind::ScalarValue;
+        }
+    }
+}
+
 /// Reduce-only twin of [`value_eligible_cap`] that additionally accepts `arr[pb]` — a free
 /// array indexed by exactly the loop counter — recording it as a [`CaptureKind::ArrayI64`].
 /// A bare free ident is a [`CaptureKind::Scalar`] cap (as before). `pb` is threaded so the
@@ -1925,6 +1969,13 @@ pub fn map_kernel_captures_indexed(
     if value_eligible_cap_indexed(body, fns, &locals, binder, &mut caps, &mut bounds)
         && caps.len() <= MAX_CAPTURES
     {
+        // Relabel purely-value scalars to `ScalarValue` — same as the mixed twin, so the two
+        // derivations of one body produce identical lists (the i64 kernel loads a `ScalarValue`
+        // as `i64` exactly as it did a `Scalar`, so its behavior is unchanged; the relabel only
+        // lets the mixed kernel recognize the same cap as `f64`). The reduce path does NOT
+        // relabel, so its captures are untouched. `value_eligible_cap_indexed` emits no affine
+        // synthetic terms (the i64 map has no affine arm), so an empty `synth` here.
+        relabel_value_scalars(&mut caps, &bounds, &[]);
         Some((caps, bounds))
     } else {
         None
@@ -2096,33 +2147,64 @@ fn infer_mixed_kind(
 /// not "an array of i64" — which marshal it gets is the dispatch's decision, and the marshal
 /// itself is the type guard (an `Ints` buffer never reaches this kernel's F64 loads).
 ///
-/// Scalar captures stay `Int` (the kernel loads them as `i64`); a runtime `Float` scalar cap
-/// declines at the marshal. The bounds story is IDENTICAL to the i64 path — same
-/// [`IndexBound`]s, same lazy-range-only discharge (`map_index_caps` in `vm.rs`) — because
-/// bounds depend on the index arithmetic, which is `i64` in both.
+/// INDEX scalars (`a[k]`, affine `base`/`coef`) stay `Scalar` (`i64`, an index is an integer);
+/// VALUE scalars (`a` in `a * x[i]`) become [`CaptureKind::ScalarValue`] via
+/// [`relabel_value_scalars`], loaded `f64` here and `i64` in the i64 twin. A value scalar is
+/// admitted only where a genuine float promotes it (SAXPY `a * x[i]`), not `a * i` — see
+/// [`MixT`]. The bounds story is IDENTICAL to the i64 path — same [`IndexBound`]s, same
+/// lazy-range-only discharge (`map_index_caps` in `vm.rs`) — because bounds depend on the
+/// index arithmetic, which is `i64` in both.
+pub type MapIndexAnalysis = (Vec<Capture>, Vec<IndexBound>, Vec<(String, Expr)>);
+
 pub fn mixed_map_captures_indexed(
     body: &Expr,
     binder: &str,
     user_fns: &HashSet<&str>,
-) -> Option<(Vec<Capture>, Vec<IndexBound>, Vec<(String, Expr)>)> {
+) -> Option<MapIndexAnalysis> {
     let mut caps: Vec<Capture> = Vec::new();
     let mut bounds: Vec<IndexBound> = Vec::new();
     let mut synth: Vec<(String, Expr)> = Vec::new();
     let root = infer_mixed_kind_indexed(body, binder, &mut caps, &mut bounds, &mut synth, user_fns)?;
-    // Float root: the kernel writes an f64 buffer. Non-empty bounds: an unindexed body
-    // belongs to the plain i64/f64/mixed analyses, which run first at the compile site.
-    if root == NumKind::Float && !bounds.is_empty() && caps.len() <= MAX_CAPTURES {
+    // GFloat root: a genuine `f64` the kernel writes to the output buffer (a bare-`SFloat` root
+    // — an un-promoted value scalar — is rejected, matching the interpreter). Non-empty bounds:
+    // an unindexed body belongs to the plain i64/f64/mixed analyses, which run first at the
+    // compile site.
+    if root == MixT::GFloat && !bounds.is_empty() && caps.len() <= MAX_CAPTURES {
+        relabel_value_scalars(&mut caps, &bounds, &synth);
         Some((caps, bounds, synth))
     } else {
         None
     }
 }
 
-/// Bottom-up type of an indexed-mixed node — [`infer_mixed_kind`]'s arm set plus the two
-/// index shapes and free-scalar captures, mirroring [`gen_value_typed`]'s codegen exactly
-/// (a node this admits and that miscompiles is a divergence, so the two must stay twins).
-/// No `Let` arm — `gen_value_typed` has none, so the counter-shadowing hazard the i64
-/// path guards against cannot arise here: a shadowing body is simply ineligible.
+/// The kernel-vs-interpreter type of an indexed-mixed subexpression. The mixed kernel
+/// evaluates integer subexpressions in `i64` and promotes at the first FLOAT, exactly like
+/// the interpreter's `arith` — so the two agree bit-for-bit ONLY if they promote at the same
+/// point. A value scalar breaks that: it rides as `f64` in the kernel but is possibly-`Int`
+/// at runtime, so the interpreter keeps it `i64` until IT hits a float. `MixT` tracks the
+/// distinction that makes the promotion points line up.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MixT {
+    /// Both engines evaluate this in `i64` (binder, int literal, index scalar, i64-closed op).
+    Int,
+    /// A GENUINE float in both engines — an array load or a float literal — so combining it
+    /// with anything promotes identically (the interpreter promotes the `i64` side to `f64`,
+    /// which is the same `fcvt` the kernel does). Safe to combine with anything.
+    GFloat,
+    /// A value SCALAR riding as `f64` but possibly `Int` at runtime. Safe ONLY once a
+    /// `GFloat` has promoted it: `a * x[i]` (`SFloat * GFloat`) is fine because the
+    /// interpreter also promotes `a` there, but `a * i` / `a + b` (`SFloat` with `Int` or
+    /// another bare `SFloat`) would be `i64` in the interpreter and `f64` in the kernel —
+    /// diverging once the true product exceeds 2^53. Such a node is REJECTED.
+    SFloat,
+}
+
+/// Bottom-up [`MixT`] of an indexed-mixed node, recording captures/bounds as it goes —
+/// [`infer_mixed_kind`]'s arm set plus the index shapes and value-scalar captures, mirroring
+/// [`gen_value_typed`]'s codegen (a node this admits and that miscompiles is a divergence, so
+/// the two stay twins). No `Let` arm — `gen_value_typed` has none, so the counter-shadowing
+/// hazard the i64 path guards against cannot arise here: a shadowing body is simply
+/// ineligible. The caller requires the root to be [`MixT::GFloat`] (the map writes `f64`).
 fn infer_mixed_kind_indexed(
     e: &Expr,
     binder: &str,
@@ -2130,17 +2212,28 @@ fn infer_mixed_kind_indexed(
     bounds: &mut Vec<IndexBound>,
     synth: &mut Vec<(String, Expr)>,
     user_fns: &HashSet<&str>,
-) -> Option<NumKind> {
+) -> Option<MixT> {
+    // Combine two `+`/`-`/`*` operands: a genuine float promotes anything (safe); two `Int`s
+    // stay `Int`; a value scalar NOT paired with a genuine float is the divergence case.
+    fn combine(l: MixT, r: MixT) -> Option<MixT> {
+        match (l, r) {
+            (MixT::GFloat, _) | (_, MixT::GFloat) => Some(MixT::GFloat),
+            (MixT::Int, MixT::Int) => Some(MixT::Int),
+            // (SFloat, Int) | (Int, SFloat) | (SFloat, SFloat): the interpreter may do i64.
+            _ => None,
+        }
+    }
     match e {
-        Expr::Int(_) => Some(NumKind::Int),
-        Expr::Float(_) => Some(NumKind::Float),
+        Expr::Int(_) => Some(MixT::Int),
+        Expr::Float(_) => Some(MixT::GFloat),
         Expr::Ident { name, .. } => {
             if name == binder {
-                Some(NumKind::Int) // the i64 range element
+                Some(MixT::Int) // the i64 range element
             } else {
-                // A free scalar capture, loaded as `i64` (a runtime Float declines at the
-                // marshal rather than riding as reinterpreted bits).
-                record_cap(caps, name, CaptureKind::Scalar).then_some(NumKind::Int)
+                // A value scalar — recorded `Scalar` here, relabeled to `ScalarValue` by
+                // `relabel_value_scalars` once the bounds show it is not an index. It rides as
+                // `f64` in the mixed kernel, so `SFloat`.
+                record_cap(caps, name, CaptureKind::Scalar).then_some(MixT::SFloat)
             }
         }
         Expr::Index { recv, index, .. } => {
@@ -2154,7 +2247,8 @@ fn infer_mixed_kind_indexed(
                 Expr::Ident { name: idx, .. } if idx == binder => {
                     push_bound(bounds, IndexBound::Counter { array: ap as u32 });
                 }
-                // `a[k]`: a free loop-invariant scalar → a point bound.
+                // `a[k]`: a free loop-invariant scalar → a point bound. The index scalar is
+                // recorded `Scalar` and STAYS `Scalar` (an index is `i64`).
                 Expr::Ident { name: idx, .. } if idx != arr => {
                     let sp = record_cap_pos(caps, idx, CaptureKind::Scalar)?;
                     push_bound(bounds, IndexBound::Scalar { array: ap as u32, scalar: sp as u32 });
@@ -2181,19 +2275,27 @@ fn infer_mixed_kind_indexed(
                     );
                 }
             }
-            Some(NumKind::Float)
+            Some(MixT::GFloat) // an f64 array load is a genuine float
         }
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
+                // `sqrt` promotes its argument to `f64` in BOTH engines, so an `SFloat` arg is
+                // safe here and the result is a genuine float.
                 ("sqrt", 1) => {
                     infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)?;
-                    Some(NumKind::Float)
+                    Some(MixT::GFloat)
                 }
-                ("abs", 1) => infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns),
+                // `abs`/`min`/`max` do NOT promote (interp `abs(Int)` is `iabs`, `min(Int,Int)`
+                // an i64 compare) — so an `SFloat` argument would diverge. Admit only genuine
+                // floats or ints, and preserve the kind (an `Int` `abs`/`min` stays i64).
+                ("abs", 1) => match infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)? {
+                    MixT::SFloat => None,
+                    k => Some(k),
+                },
                 ("min" | "max", 2) => {
                     let ka = infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)?;
                     let kb = infer_mixed_kind_indexed(&args[1], binder, caps, bounds, synth, user_fns)?;
-                    if ka == kb { Some(ka) } else { None }
+                    if ka == kb && ka != MixT::SFloat { Some(ka) } else { None }
                 }
                 _ => None,
             }
@@ -2201,11 +2303,7 @@ fn infer_mixed_kind_indexed(
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
             let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, synth, user_fns)?;
             let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, synth, user_fns)?;
-            Some(if lk == NumKind::Float || rk == NumKind::Float {
-                NumKind::Float
-            } else {
-                NumKind::Int
-            })
+            combine(lk, rk)
         }
         Expr::Binary {
             op: op @ (BinOp::Mod | BinOp::FloorDiv | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr),
@@ -2223,10 +2321,12 @@ fn infer_mixed_kind_indexed(
             }
             let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, synth, user_fns)?;
             let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, synth, user_fns)?;
-            if lk == NumKind::Int && rk == NumKind::Int {
-                Some(NumKind::Int)
+            // The i64-closed ops require both operands `Int` — a genuine float or a value
+            // scalar is not even valid Helix here (`x[i] % 3` on an f64 array is a type error).
+            if lk == MixT::Int && rk == MixT::Int {
+                Some(MixT::Int)
             } else {
-                None // the i64-closed ops are meaningless on f64
+                None
             }
         }
         _ => None,
@@ -3257,7 +3357,9 @@ fn define_reduce_loop(
                     // index expression from it. Synthetic `$aff*` caps carry the same index's
                     // pre-computed base/coef for the VM's bounds check ONLY — the body never names
                     // them, so binding them here is harmless and they simply go unread.
-                    CaptureKind::Scalar => {
+                    // A value scalar (map-only) never reaches a reduce, but if one ever did it is
+                    // an `i64` value exactly like a `Scalar` here — bind it the same way.
+                    CaptureKind::Scalar | CaptureKind::ScalarValue => {
                         binders.insert(cap.name.as_str(), (cv, NumKind::Int));
                     }
                     CaptureKind::ArrayI64 => {}
@@ -3380,16 +3482,21 @@ fn define_array_kernel<'a>(
             .iter()
             .enumerate()
             .map(|(j, cap)| {
-                // A Scalar cap rides as an element-typed value (`i64` for an `Int` kernel,
-                // `f64` for a `Float` one — the VM coerces). An ArrayI64 cap rides as a base
-                // POINTER, which is `i64` regardless of the kernel's element type, so it must
-                // not be reinterpreted as an `f64`. (Today only the i64 kernel admits array
-                // caps — `define_array_kernels` rejects an indexed body in the f64/mixed
-                // paths — but typing the load by the cap rather than by the kernel is what
-                // makes that a policy choice instead of a latent bit-reinterpretation.)
+                // Load type per cap KIND, not per kernel — this is what keeps a base pointer
+                // from being reinterpreted as an `f64`, or a value scalar from riding as the
+                // wrong width:
+                //   * Scalar (an INDEX scalar, or a value scalar in the i64/f64 map) → the
+                //     element type: `i64` for the i64 kernel, `f64` for the f64 (Floats-source)
+                //     kernel, which the VM marshals to match.
+                //   * ScalarValue in the MIXED kernel → `f64` (SAXPY's coefficient; the VM
+                //     marshals `Value::Int`→f64 or passes `Value::Float` bits). Elsewhere it
+                //     rides `i64` exactly like a Scalar.
+                //   * ArrayI64/ArrayF64 → a base POINTER, always `i64`.
+                use crate::bytecode::CaptureKind as CK;
                 let ty = match cap.kind {
-                    crate::bytecode::CaptureKind::Scalar => elem_ty,
-                    _ => I64,
+                    CK::ScalarValue if mixed => F64,
+                    CK::Scalar | CK::ScalarValue => elem_ty,
+                    CK::ArrayI64 | CK::ArrayF64 => I64,
                 };
                 let v = b.ins().load(ty, MemFlags::trusted(), cp, (j * 8) as i32);
                 let cvar = b.declare_var(ty);
@@ -3448,7 +3555,15 @@ fn define_array_kernel<'a>(
         // dst[i] = body(elem). `mixed` types the body node-by-node (i64 element → f64
         // result); the plain map uses the monomorphized `elem_kind` codegen.
         let r = if mixed {
-            gen_value_typed(&mut b, &k.body, &vars, &k.binder).0
+            // The `ScalarValue` caps ride as `f64` in this kernel — hand their names to the
+            // typed codegen so its `Ident` arm types them `Float` (the prologue loaded them F64).
+            let f64_scalars: HashSet<&str> = k
+                .captures
+                .iter()
+                .filter(|c| c.kind == crate::bytecode::CaptureKind::ScalarValue)
+                .map(|c| c.name.as_str())
+                .collect();
+            gen_value_typed(&mut b, &k.body, &vars, &k.binder, &f64_scalars).0
         } else {
             gen_value(&mut b, &k.body, &mut vars, fn_ids, module, elem_kind)
         };
@@ -4423,19 +4538,25 @@ fn gen_value_typed<'a>(
     e: &'a Expr,
     vars: &HashMap<&'a str, Variable>,
     binder: &str,
+    f64_scalars: &HashSet<&str>,
 ) -> (ClValue, NumKind) {
     match e {
         Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
         Expr::Float(f) => (b.ins().f64const(*f), NumKind::Float),
         Expr::Ident { name, .. } => {
-            // The binder (the i64 range element) or a Scalar capture — both `i64` slots in
-            // `vars` (the prologue loads Scalar caps as `elem_ty` = I64 for a mixed kernel).
-            // A Float scalar cap never gets here: the VM's marshal requires `Value::Int`.
             debug_assert!(
                 name == binder || vars.contains_key(name.as_str()),
                 "unbound ident reached mixed codegen"
             );
-            (b.use_var(vars[name.as_str()]), NumKind::Int)
+            let var = b.use_var(vars[name.as_str()]);
+            // A `ScalarValue` cap rides as `f64` in this kernel (SAXPY's coefficient), so its
+            // slot IS a float — the prologue loaded it `F64`. Everything else here (the binder,
+            // an index scalar) is an `i64` element.
+            if f64_scalars.contains(name.as_str()) {
+                (var, NumKind::Float)
+            } else {
+                (var, NumKind::Int)
+            }
         }
         // `a[binder]` / `a[scalar_cap]` reading a captured **f64** array: `vars[recv]` holds
         // the base POINTER (the prologue loads non-Scalar caps as I64 regardless of the
@@ -4448,15 +4569,15 @@ fn gen_value_typed<'a>(
                 _ => unreachable!("ineligible index receiver reached mixed codegen"),
             };
             let base = b.use_var(vars[name]);
-            let (idx, ik) = gen_value_typed(b, index, vars, binder);
+            let (idx, ik) = gen_value_typed(b, index, vars, binder, f64_scalars);
             debug_assert!(matches!(ik, NumKind::Int), "non-i64 index reached mixed codegen");
             let off = b.ins().imul_imm(idx, 8);
             let addr = b.ins().iadd(base, off);
             (b.ins().load(F64, MemFlags::trusted(), addr, 0), NumKind::Float)
         }
         Expr::Binary { op, left, right, .. } => {
-            let (lv, lk) = gen_value_typed(b, left, vars, binder);
-            let (rv, rk) = gen_value_typed(b, right, vars, binder);
+            let (lv, lk) = gen_value_typed(b, left, vars, binder, f64_scalars);
+            let (rv, rk) = gen_value_typed(b, right, vars, binder, f64_scalars);
             if lk == NumKind::Int && rk == NumKind::Int {
                 // Integer subexpression — identical codegen to `gen_value`'s i64 arms (euclidean
                 // `%`/`//` by a positive const, bitwise, const shifts), so a mixed body's integer
@@ -4513,20 +4634,20 @@ fn gen_value_typed<'a>(
         // (via f64 compare, as the interpreter) or `f64`.
         Expr::Call { name, args, .. } => match name.as_str() {
             "sqrt" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
             }
             "abs" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
                 match ak {
                     NumKind::Int => (b.ins().iabs(av), NumKind::Int),
                     NumKind::Float => (b.ins().fabs(av), NumKind::Float),
                 }
             }
             "min" | "max" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder);
-                let (cv, _ck) = gen_value_typed(b, &args[1], vars, binder);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
+                let (cv, _ck) = gen_value_typed(b, &args[1], vars, binder, f64_scalars);
                 let le = name == "min";
                 let cc = if le { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
                 match ak {
