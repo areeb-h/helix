@@ -1,0 +1,52 @@
+# Map-side `a[i]`: the JIT compiles this to UNCHECKED native loads, so every case here is
+# one the VM must have DECLINED to hand it — or the answer is a garbage read. The whole
+# point is that the JIT column of this file is boring: identical to the walker's.
+#
+# A reduce's binder is the loop COUNTER, so its bounds fall out of the range endpoints. A
+# map's binder is an ELEMENT VALUE, so the endpoint proof only transfers when the receiver
+# is a lazy range. Both spellings are exercised below; the gather ones must keep working
+# by falling back, not by being fast.
+
+a = [10, 20, 30, 40, 50]
+
+# in bounds, the shape the kernel exists for
+print((0..5).map(i => a[i] + 1))
+
+# the exact upper edge — last index == len-1, the endpoint the proof checks
+print((0..5).map(i => a[i]))
+
+# empty range: accesses nothing, vacuously in bounds
+print((3..3).map(i => a[i]))
+
+# NEGATIVE start. a[-2] is legal Helix — the interpreter Python-WRAPS it — so a proof that
+# only tested `< len` would let the kernel read off the FRONT of the buffer. Must wrap.
+print((-2..3).map(i => a[i]))
+
+# a loop-invariant scalar index (a point check, independent of the source's shape) beside
+# the binder-indexed read
+k = 3
+print((0..5).map(i => a[i] + a[k]))
+
+# a `let` REBINDING the binder: `a[i]` no longer means a[counter], so the kernel must not
+# treat it as one
+print((0..3).map(i => let i = 4 in a[i]))
+
+# element-value binder over a NON-range source (gather): unprovable without scanning, so
+# this must fall back and stay correct
+idx = [4, 0, 2]
+print(idx.map(x => a[x]))
+
+# gather with negative elements — wraps, again via the checked loop
+print([-1, -5].map(x => a[x]))
+
+# a Floats source: the i64 kernel must not read f64 bits as a base pointer
+f = [1.5, 2.5, 3.5]
+print((0..3).map(i => f[i]))
+
+# composed with the reduce-side indexed path
+b = (0..100).map(i => i * 3)
+print((0..100).map(i => b[i] + 1).reduce(0, (s, x) => s + x))
+
+# non-Ints element type reached through the index
+m = [[1, 2], [3, 4]]
+print((0..2).map(i => m[i][0]))

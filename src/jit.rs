@@ -668,12 +668,22 @@ fn define_array_kernels(
         // — `mixed_map_eligible`), Float map (the safe `+ - *` subset over a Floats source
         // — `map_kernel_captures_f64`), or Int map (capture-aware, body re-checked so a
         // captured-var body compiles).
+        // An INDEXED body (`a[it]`) is admitted only by the i64 path: its array caps are base
+        // pointers, and only that path's `caps` slice is typed to carry them. The f64/mixed
+        // specializations must decline rather than reinterpret a pointer as an `f64` — the VM
+        // then falls through to the bytecode loop, which is the oracle path anyway.
+        let indexed = !k.index_bounds.is_empty();
         let ok = if is_filter {
-            filter_kernel_eligible(&k.body, &k.binder, eligible)
+            !indexed && filter_kernel_eligible(&k.body, &k.binder, eligible)
         } else if mixed {
-            mixed_map_eligible(&k.body, &k.binder, user_fns)
+            !indexed && mixed_map_eligible(&k.body, &k.binder, user_fns)
         } else if matches!(elem_kind, NumKind::Float) {
-            map_kernel_captures_f64(&k.body, &k.binder, user_fns).is_some()
+            !indexed && map_kernel_captures_f64(&k.body, &k.binder, user_fns).is_some()
+        } else if indexed {
+            // Re-derive from the body and require the SAME capture list the compiler stored,
+            // so codegen's `caps[j]` and the VM's load order cannot drift apart.
+            map_kernel_captures_indexed(&k.body, &k.binder, eligible)
+                .is_some_and(|(c, bnd)| c == k.captures && bnd == k.index_bounds)
         } else {
             map_kernel_captures(&k.body, &k.binder, eligible).is_some()
         };
@@ -1870,6 +1880,40 @@ pub fn map_kernel_captures(body: &Expr, binder: &str, fns: &HashSet<&str>) -> Op
     let mut caps: Vec<String> = Vec::new();
     if value_eligible_cap(body, fns, &locals, &mut caps) && caps.len() <= MAX_CAPTURES {
         Some(caps)
+    } else {
+        None
+    }
+}
+
+/// Like [`map_kernel_captures`] but the body may additionally read a captured array —
+/// `a[it]` (the binder) or `a[i]` (a loop-invariant scalar cap). Returns the ordered
+/// captures plus the bounds the VM must discharge before the kernel's unchecked loads,
+/// or `None` if ineligible. Shares [`value_eligible_cap_indexed`] with the reduce path:
+/// a reduce passes its counter as `pb`, a map passes its binder, and the index shapes
+/// the analysis accepts are the same.
+///
+/// The two paths differ in what `pb` MEANS, and that difference is a soundness cliff,
+/// not a detail. A reduce's `pb` is the loop counter, so an [`IndexBound::Counter`] is
+/// discharged by the range's endpoints. A map's binder is an ELEMENT VALUE: for
+/// `xs.map(x => a[x])` the index is arbitrary data — and possibly negative, which the
+/// interpreter Python-WRAPS rather than rejecting, so no cheap scan can discharge it.
+/// The VM therefore takes this kernel ONLY when the receiver is a lazy `Range` (whose
+/// elements ARE the counter), and only checks that BEFORE materializing it. See
+/// [`crate::bytecode::ArrayKernel::index_bounds`] — the obligation is stated there
+/// because the VM, not this analysis, is what discharges it.
+pub fn map_kernel_captures_indexed(
+    body: &Expr,
+    binder: &str,
+    fns: &HashSet<&str>,
+) -> Option<(Vec<Capture>, Vec<IndexBound>)> {
+    let mut locals: HashSet<&str> = HashSet::new();
+    locals.insert(binder);
+    let mut caps: Vec<Capture> = Vec::new();
+    let mut bounds: Vec<IndexBound> = Vec::new();
+    if value_eligible_cap_indexed(body, fns, &locals, binder, &mut caps, &mut bounds)
+        && caps.len() <= MAX_CAPTURES
+    {
+        Some((caps, bounds))
     } else {
         None
     }
@@ -3172,9 +3216,20 @@ fn define_array_kernel<'a>(
         k.captures
             .iter()
             .enumerate()
-            .map(|(j, _)| {
-                let v = b.ins().load(elem_ty, MemFlags::trusted(), cp, (j * 8) as i32);
-                let cvar = b.declare_var(elem_ty);
+            .map(|(j, cap)| {
+                // A Scalar cap rides as an element-typed value (`i64` for an `Int` kernel,
+                // `f64` for a `Float` one — the VM coerces). An ArrayI64 cap rides as a base
+                // POINTER, which is `i64` regardless of the kernel's element type, so it must
+                // not be reinterpreted as an `f64`. (Today only the i64 kernel admits array
+                // caps — `define_array_kernels` rejects an indexed body in the f64/mixed
+                // paths — but typing the load by the cap rather than by the kernel is what
+                // makes that a policy choice instead of a latent bit-reinterpretation.)
+                let ty = match cap.kind {
+                    crate::bytecode::CaptureKind::Scalar => elem_ty,
+                    _ => I64,
+                };
+                let v = b.ins().load(ty, MemFlags::trusted(), cp, (j * 8) as i32);
+                let cvar = b.declare_var(ty);
                 b.def_var(cvar, v);
                 cvar
             })
@@ -3210,8 +3265,8 @@ fn define_array_kernel<'a>(
     vars.insert(k.binder.as_str(), elem_var);
     // Bind each captured variable to its pre-hoisted entry-block load (loop-invariant;
     // `caps[j]` is `i64` for an `Int` kernel, `f64` for a `Float` one — the VM coerces).
-    for (j, cname) in k.captures.iter().enumerate() {
-        vars.insert(cname.as_str(), cap_vars[j]);
+    for (j, cap) in k.captures.iter().enumerate() {
+        vars.insert(cap.name.as_str(), cap_vars[j]);
     }
 
     if is_filter {

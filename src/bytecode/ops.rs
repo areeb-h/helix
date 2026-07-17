@@ -438,11 +438,29 @@ pub struct ArrayKernel {
     /// The body (a value expression for `map`, a boolean predicate for `filter`),
     /// evaluated over `{binder}` as `i64`.
     pub body: Expr,
-    /// Free (captured) variable names referenced by the body, in first-appearance
-    /// order — loop-invariant `i64` values the VM resolves at the call site and passes
-    /// to the kernel as a `caps` slice. Empty for a capture-free body (and for filter
-    /// kernels, which don't take captures). `map` only.
-    pub captures: Vec<String>,
+    /// Free (captured) variables referenced by the body, in first-appearance order —
+    /// loop-invariant values the VM resolves at the call site and passes to the kernel
+    /// as a `caps` slice. A [`CaptureKind::Scalar`] rides as its `i64`/`f64` value; a
+    /// [`CaptureKind::ArrayI64`] rides as a packed array base the body indexes by the
+    /// binder (`a[i]`), which `index_bounds` obliges the VM to prove first. Empty for a
+    /// capture-free body (and for filter kernels, which don't take captures). `map` only.
+    pub captures: Vec<Capture>,
+    /// Bounds obligations for the array-indexed reads in the body — one [`IndexBound`]
+    /// per distinct `a[binder]` access the VM must verify before the kernel's unchecked
+    /// loads. Empty unless the body indexes a captured array.
+    ///
+    /// SOUNDNESS — why this is NOT just the reduce's obligation copied over. A reduce's
+    /// binder is the loop COUNTER, so [`IndexBound::Counter`] proves the whole access set
+    /// from the range's two endpoints. A `map`'s binder is an ELEMENT VALUE: in
+    /// `xs.map(x => a[x])` the index is arbitrary data — unprovable without scanning, and
+    /// possibly NEGATIVE, which the interpreter Python-WRAPS rather than rejecting (so even
+    /// an O(n) `min >= 0` scan would reject legal programs). The obligation is therefore
+    /// dischargeable ONLY when the receiver is a lazy [`crate::value::ArrayData::Range`],
+    /// whose elements ARE `start..end` — there the counter proof transfers intact. The VM
+    /// checks this in [`Op::TryJitMap`] BEFORE materializing the range, because densifying
+    /// erases the range-ness the proof depends on. Every other source falls back to the
+    /// checked bytecode loop, which raises the exact error (or wraps the exact way).
+    pub index_bounds: Vec<IndexBound>,
 }
 
 /// One stage of a fused pipeline (`xs.filter(g).map(f)…`). Each is a pure single-binder

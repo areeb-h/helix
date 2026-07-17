@@ -1221,6 +1221,86 @@
         );
     }
 
+    /// Map-side `a[i]` lowers to UNCHECKED native loads, so the VM must discharge a bounds
+    /// obligation before every kernel run. This sweeps the boundary EXHAUSTIVELY rather than
+    /// randomly: endpoint bugs live at `end == len`, `end == len+1`, `start == -1`, and empty
+    /// ranges, and a fuzzer hits those only by luck.
+    ///
+    /// The map's binder is an ELEMENT VALUE, not a counter (the reduce's is), so the endpoint
+    /// proof transfers only over a lazy range. Negative indices are the sharp edge: `a[-2]` is
+    /// LEGAL Helix (the interpreter Python-wraps it), so a proof that only checked `< len`
+    /// would let the kernel read off the front of the buffer and still look right.
+    #[test]
+    fn map_index_bounds_agree_across_engines_at_every_boundary() {
+        crate::jit::reset_native_call_count();
+        let mut checked = 0u32;
+        for len in [0usize, 1, 3, 5] {
+            let arr: Vec<String> = (0..len).map(|i| ((i + 1) * 10).to_string()).collect();
+            let a = format!("[{}]", arr.join(", "));
+            for start in -4i64..=5 {
+                for end in -4i64..=6 {
+                    // `a[i]` over a range: the Counter obligation, dischargeable only because
+                    // the source is a range.
+                    let src = format!("a = {a}\n({start}..{end}).map(i => a[i])");
+                    let (tw, vm, jit) = (run_tw(&src), run_vm(&src), run_vm_jit(&src));
+                    assert_eq!(tw, vm, "tw vs vm on `{src}`");
+                    assert_eq!(vm, jit, "vm vs JIT on `{src}`");
+                    checked += 1;
+
+                    // `a[k]` for a loop-invariant scalar: a point check that holds over any
+                    // source shape, so it must NOT be gated on range-ness.
+                    let src = format!("a = {a}\nk = {start}\n(0..{end}).map(i => a[i] + a[k])");
+                    let (tw, vm, jit) = (run_tw(&src), run_vm(&src), run_vm_jit(&src));
+                    assert_eq!(tw, vm, "scalar-index tw vs vm on `{src}`");
+                    assert_eq!(vm, jit, "scalar-index vm vs JIT on `{src}`");
+
+                    // The gather shape: an element-value binder over a NON-range source. The
+                    // indices are arbitrary data, so this must fall back — and stay correct,
+                    // including the negative (wrapping) elements.
+                    let src = format!("a = {a}\nidx = [{start}, {end}]\nidx.map(x => a[x])");
+                    let (tw, vm, jit) = (run_tw(&src), run_vm(&src), run_vm_jit(&src));
+                    assert_eq!(tw, vm, "gather tw vs vm on `{src}`");
+                    assert_eq!(vm, jit, "gather vm vs JIT on `{src}`");
+                }
+            }
+        }
+        assert!(checked > 300, "boundary sweep too small: {checked}");
+        // Agreement is worthless if the kernel never ran — three engines silently sharing the
+        // bytecode loop agree trivially. This is the "engagement ≠ correctness" trap the
+        // differential fuzzers guard the same way.
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "no native kernel ran across the sweep — the oracle compared the VM against itself"
+        );
+    }
+
+    /// The indexed map kernel must actually ENGAGE on the shape it exists for — not merely
+    /// agree by falling back. Pins the payoff (the ~40x gap this closed) as a behavioral fact:
+    /// if a future change quietly stops admitting `a[i]`, the perf regression fails HERE, as a
+    /// correctness test, instead of silently costing 40x until someone re-benchmarks.
+    #[test]
+    fn indexed_map_engages_the_native_kernel_only_over_a_range_source() {
+        // In bounds over a range → the kernel runs.
+        crate::jit::reset_native_call_count();
+        let src = "a = (0..64).map(i => i * 3)\n(0..64).map(i => a[i] + 1).reduce(0, (s, x) => s + x)";
+        assert_eq!(run_vm_jit(src), run_tw(src));
+        let over_range = crate::jit::native_call_count();
+        assert!(over_range > 0, "indexed map did not engage over a range source");
+
+        // Out of bounds by ONE → the obligation fails, so the kernel must NOT run this map.
+        // (`a`'s own construction still JITs, so the count can rise; what matters is the
+        // answer, which only the checked loop can produce.)
+        let src = "a = (0..64).map(i => i * 3)\n(0..65).map(i => a[i])";
+        assert!(run_vm_jit(src).is_err(), "out-of-bounds indexed map should raise");
+        assert_eq!(run_vm_jit(src), run_tw(src), "OOB error text must match the walker");
+
+        // A gather (element-value binder, non-range source) is unprovable → must fall back.
+        // Verified by agreement rather than by counting, since `idx`'s own map may JIT.
+        let src = "a = [10, 20, 30]\nidx = [2, 0, 1]\nidx.map(x => a[x])";
+        assert_eq!(run_vm_jit(src), run_tw(src));
+        assert_eq!(run_vm_jit(src).unwrap(), "[30, 10, 20]");
+    }
+
     #[test]
     fn differential_functions_with_jit() {
         let mut rng = 0xFEED_FACE_DEAD_BEEFu64;

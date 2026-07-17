@@ -159,6 +159,77 @@ fn densify_range_top(stack: &mut [Value]) {
     }
 }
 
+/// Discharge an indexed `map` kernel's bounds obligations and marshal its `caps` slice
+/// (array caps as base pointers, scalars as values), or `None` to fall back to the checked
+/// bytecode loop — which raises the exact error, or wraps the exact way, that the native
+/// kernel's UNCHECKED loads cannot. `src_range` is the receiver's range shape as read
+/// BEFORE materialization; `None` means the source is an ordinary buffer.
+///
+/// The caller keeps `cap_vals` alive across the kernel call, which is what keeps the base
+/// pointers valid.
+fn map_index_caps(
+    k: &crate::bytecode::ArrayKernel,
+    cap_vals: &[Value],
+    src_range: Option<(i64, i64, usize)>,
+) -> Option<Vec<i64>> {
+    use crate::bytecode::{CaptureKind, IndexBound};
+    use crate::value::ArrayData;
+    let mut caps: Vec<i64> = Vec::with_capacity(cap_vals.len());
+    let mut lens: Vec<i64> = Vec::with_capacity(cap_vals.len()); // array len; 0 for scalars
+    for (cap, val) in k.captures.iter().zip(cap_vals.iter()) {
+        match (cap.kind, val) {
+            (CaptureKind::ArrayI64, Value::Array(a)) => {
+                let ArrayData::Ints(v) = &**a else { return None };
+                caps.push(v.as_ptr() as i64);
+                lens.push(v.len() as i64);
+            }
+            (CaptureKind::Scalar, Value::Int(i)) => {
+                caps.push(*i);
+                lens.push(0);
+            }
+            // A non-`Int` scalar, or an array cap bound to a non-`Ints` array: the body's
+            // index arithmetic wouldn't be i64 at all → fall back rather than guess.
+            _ => return None,
+        }
+    }
+    for bnd in &k.index_bounds {
+        match *bnd {
+            // `a[it]`. The binder is an ELEMENT of the source, not a counter, so this is
+            // dischargeable ONLY over a lazy range — there the elements are exactly
+            // `start + step*j` for `j in [0, len)`, which is monotone in `j`, so the two
+            // ENDPOINTS bound the whole access set. That is the same proof
+            // `IndexBound::Counter` uses on the reduce side, with `step` generalizing its
+            // unit stride. Computed in `i128` so the CHECK itself cannot overflow.
+            IndexBound::Counter { array } => {
+                let (start, step, len) = src_range?;
+                if len > 0 {
+                    let first = start as i128;
+                    let last = first + (step as i128) * (len as i128 - 1);
+                    let (lo, hi) = if first <= last { (first, last) } else { (last, first) };
+                    // `lo < 0` also rejects the NEGATIVE indices the interpreter Python-WRAPS:
+                    // wrapping is legal Helix, and the kernel would read off the front instead.
+                    if lo < 0 || hi >= lens[array as usize] as i128 {
+                        return None;
+                    }
+                }
+                // An empty range accesses nothing: vacuously in bounds.
+            }
+            // `a[i]` for a loop-invariant scalar `i` — a point check that says nothing about
+            // the binder, so unlike `Counter` it holds over ANY source shape.
+            IndexBound::Scalar { array, scalar } => {
+                let iv = caps[scalar as usize];
+                if iv < 0 || iv >= lens[array as usize] {
+                    return None;
+                }
+            }
+            // Affine is a reduce-only shape today; the map analysis never emits one. Refusing
+            // beats assuming if that ever changes.
+            IndexBound::Affine { .. } => return None,
+        }
+    }
+    Some(caps)
+}
+
 /// Active comprehension iterator state (a stack, so comprehensions nest).
 /// `cur_val` is the element just yielded (used by `filter`); `builder` collects
 /// results for `map`/`filter` and is ignored by `reduce`.
@@ -1415,6 +1486,18 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let n_caps = program.map_kernels[kidx].captures.len();
                 let split = stack.len() - n_caps;
                 let cap_vals = stack.split_off(split);
+                // Read the receiver's range shape BEFORE materializing it. An indexed body's
+                // `Counter` bound is discharged by the range's endpoints, and densifying erases
+                // exactly that: afterwards a range is indistinguishable from any other `Ints`
+                // buffer, and the elements-are-the-counter fact the proof rests on is gone. See
+                // `ArrayKernel::index_bounds`.
+                let src_range: Option<(i64, i64, usize)> = match stack.last() {
+                    Some(Value::Array(a)) => match &**a {
+                        ArrayData::Range { start, step, len } => Some((*start, *step, *len)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
                 // A lazy `range` source has no buffer for the native map kernel; materialize it so
                 // the JIT engages (as before ranges were lazy). The receiver is now the stack top.
                 densify_range_top(&mut stack);
@@ -1428,11 +1511,19 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     (Some(j), Some(Value::Array(a))) => match &**a {
                         ArrayData::Ints(_) => {
                             if let Some(p) = j.map_kernel(kidx) {
-                                // plain i64 kernel: every capture must be an `Int`
-                                let caps: Option<Vec<i64>> = cap_vals
-                                    .iter()
-                                    .map(|v| if let Value::Int(i) = v { Some(*i) } else { None })
-                                    .collect();
+                                let k = &program.map_kernels[kidx];
+                                let caps: Option<Vec<i64>> = if k.index_bounds.is_empty() {
+                                    // plain i64 kernel: every capture must be an `Int`
+                                    cap_vals
+                                        .iter()
+                                        .map(|v| if let Value::Int(i) = v { Some(*i) } else { None })
+                                        .collect()
+                                } else {
+                                    // A body reading a captured array: every `a[…]` becomes an
+                                    // UNCHECKED native load, so prove them all in bounds first
+                                    // or decline.
+                                    map_index_caps(k, &cap_vals, src_range)
+                                };
                                 match caps {
                                     Some(c) => Pick::I64(p, c),
                                     None => Pick::No,

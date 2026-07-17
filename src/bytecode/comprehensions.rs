@@ -96,30 +96,50 @@ impl super::Compiler {
         // source array's element type at run time (`Int`→i64 kernel, `Float`→f64). Both
         // analyses collect free vars in the same first-appearance order, so the stored
         // capture list is consistent whichever kernel the dispatch ends up taking.
-        let captures: Option<Vec<String>> = if params.len() != 1 {
+        // Each analysis yields the ordered captures; only the indexed one yields bounds.
+        let scalar = |v: Vec<String>| {
+            (v.into_iter().map(|name| Capture { name, kind: CaptureKind::Scalar }).collect(), Vec::new())
+        };
+        let captures: Option<(Vec<Capture>, Vec<IndexBound>)> = if params.len() != 1 {
             None
         } else if is_map {
             crate::jit::map_kernel_captures(body, &params[0], &fns)
-                .or_else(|| crate::jit::map_kernel_captures_f64(body, &params[0], &user_fns))
+                .map(scalar)
+                .or_else(|| {
+                    crate::jit::map_kernel_captures_f64(body, &params[0], &user_fns).map(scalar)
+                })
+                // A body reading a captured array (`a[it]`). Tried AFTER the scalar analyses so
+                // an unindexed body keeps its existing (bound-free) kernel unchanged — this arm
+                // only ever admits shapes that used to fall to the per-element bytecode loop.
+                .or_else(|| crate::jit::map_kernel_captures_indexed(body, &params[0], &fns))
                 // A **mixed** `Int`-source → `Float` body the i64/f64 analyses both reject —
                 // e.g. `(it % 97) * 1.0` (integer `%`/`//`/bitwise/shift subexpression, float
                 // root). Capture-free; storing the kernel lets the JIT build the mixed
                 // specialization the VM dispatches for an `Int` source, instead of the whole
                 // map falling to the per-element bytecode loop.
-                .or_else(|| crate::jit::mixed_map_eligible(body, &params[0], &user_fns).then(Vec::new))
+                .or_else(|| {
+                    crate::jit::mixed_map_eligible(body, &params[0], &user_fns)
+                        .then(|| (Vec::new(), Vec::new()))
+                })
         } else if crate::jit::filter_kernel_eligible(body, &params[0], &fns) {
-            Some(Vec::new())
+            Some((Vec::new(), Vec::new()))
         } else {
             None
         };
-        let kernel_guard: Option<(usize, u32)> = if let Some(caps) = captures {
+        let kernel_guard: Option<(usize, u32)> = if let Some((caps, index_bounds)) = captures {
             // Push each captured value (in capture order) just above the receiver array;
-            // the VM pops them off whether or not it takes the native kernel.
+            // the VM pops them off whether or not it takes the native kernel. An array cap
+            // pushes the ARRAY itself — the VM turns it into a base pointer only after
+            // discharging that cap's bounds obligation.
             for cap in &caps {
-                self.compile_expr(b, &Expr::Ident { name: cap.clone(), line, col })?;
+                self.compile_expr(b, &Expr::Ident { name: cap.name.clone(), line, col })?;
             }
-            let kernel =
-                ArrayKernel { binder: params[0].clone(), body: body.clone(), captures: caps };
+            let kernel = ArrayKernel {
+                binder: params[0].clone(),
+                body: body.clone(),
+                captures: caps,
+                index_bounds,
+            };
             if is_map {
                 let idx = self.map_kernels.len() as u32;
                 self.map_kernels.push(kernel);
