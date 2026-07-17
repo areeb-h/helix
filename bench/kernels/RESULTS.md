@@ -20,7 +20,7 @@ never do — a wall-clock win bought with 2.5× the cores is not a codegen win.
 
 | # | Kernel | Helix | C | Rust | Go | CPython | NumPy | Helix vs C |
 |---|--------|-------|---|------|-----|---------|-------|------------|
-| k1 | dot 50M i64 | 0.16s (254%) | **0.10s** | 0.12s | 0.43s | 8.86s | 0.27s | **1.6× slower** (≈3.8× per-core) |
+| k1 | dot 50M i64 | 0.16s (254%) | **0.10s** | 0.12s | 0.43s | 8.86s | 0.27s | **1.6× slower** (2.2× per-core; see k1 note) |
 | k2 | mandelbrot 1200² | 0.41s | **0.07s** | 0.07s | 0.07s | 6.01s | — | **5.9× slower** |
 | k3 | basel 1e8 | 0.08s | **0.05s** | 0.08s | 0.08s | 8.40s | 0.44s | **1.6× slower** |
 | k4 | allpairs 15k | 0.04s | **<0.01s** | <0.01s | 0.05s | 4.36s | 0.11s | **slower** (timer-grain; ~7× per the audit) |
@@ -111,6 +111,27 @@ say so rather than dropping the row.
   Helix parallelizes exactly the 94% (the array-building maps, via rayon) and
   not the 6% (the reduce is serial by design, to keep float results
   deterministic). Not a codegen benchmark.
+
+  **Its parallelism saturates at 2 threads — threads 3-6 are pure waste.**
+  Measured (page-equalized, N=50M, min of 3):
+
+  | `RAYON_NUM_THREADS` | wall | %CPU | vs previous |
+  |---|---|---|---|
+  | 1 | 0.24s | 104% | — |
+  | 2 | 0.17s | 152% | 1.4× wall for 1.5× CPU — a fair trade |
+  | 4 | 0.16s | 220% | 1.06× wall for 1.45× more CPU |
+  | 6 | 0.16s | 300% | **0% wall for 36% more CPU** |
+  | *C* | *0.11s* | *107%* | |
+
+  This is the predicted consequence of the phase being **page-fault-bound
+  rather than bandwidth-bound**: first touch takes `mmap_sem` in the kernel, so
+  the faulting serializes no matter how many workers ask. Helix ends up trading
+  **2.8× the CPU for 1.5× the wall time** here. That is a defensible
+  latency-over-throughput choice, but it must not be read as codegen: the
+  honest per-core comparison is **single-threaded Helix 0.24s vs C 0.11s =
+  2.2×**. (An earlier version of this file said 3.8× per-core — that was
+  CPU-seconds at 6 threads, which charges Helix for the *wasted* CPU as if it
+  were work. Corrected.)
 - **k2 mandelbrot** — scalar FP codegen and branch prediction. Single-threaded
   everywhere (Helix 107% CPU). gcc contracts one `2*zr*zi+ci` into an FMA at
   `-march=native`; we build with `-ffp-contract=off` for rounding parity. Note
