@@ -12,12 +12,61 @@ use crate::error::HelixError;
 use crate::symbol::Symbol;
 use crate::value::Value;
 
+/// Validate + normalize a sequence read from a file into the `Dna` invariant —
+/// the SAME rule `dna()` applies (uppercase; `A C G T N` plus the IUPAC
+/// ambiguity codes `R Y S W K M B D H V`).
+///
+/// The readers used to uppercase WITHOUT validating, minting `Dna` values that
+/// `dna()` itself would reject — and the sequence methods, which are written
+/// against this invariant, then answered with plausible nonsense instead of
+/// erroring: a `>s1 / ATGCXXZZ!!` record gave `gc_content() = 0.2` (counted over
+/// the garbage) and `kmers(3) = ["ATG", "TGC"]` (2 k-mers where a 10-base
+/// sequence must yield 8, the rest silently dropped), and the value could not be
+/// round-tripped through `dna()`. A scientist reading a corrupt FASTA got a
+/// believable GC number and no warning. Enforcing the invariant at the boundary
+/// is what makes every downstream method's assumption true.
+fn dna_from_record(
+    seq: &[u8],
+    id: &str,
+    path: &str,
+    line: usize,
+    col: usize,
+) -> Result<String, HelixError> {
+    let mut out = String::with_capacity(seq.len());
+    for (i, b) in seq.iter().enumerate() {
+        let up = (*b as char).to_ascii_uppercase();
+        if crate::interp::is_iupac_dna(up) {
+            out.push(up);
+        } else {
+            return Err(HelixError::new(
+                format!(
+                    "`{}` is not a valid DNA base (record `{}`, position {})",
+                    (*b as char).escape_default(),
+                    id,
+                    i
+                ),
+                line,
+                col,
+            )
+            .hint(format!(
+                "DNA may contain A, C, G, T, N, or an IUPAC ambiguity code (R Y S W K M B D H V). \
+                 Check `{}` in {} — a protein FASTA or a corrupt record reads this way.",
+                id, path
+            )));
+        }
+    }
+    Ok(out)
+}
+
 /// `read_fasta(path)` → an array of sequence records `{id, seq, length}`.
 ///
-/// `seq` is a `Dna` value (uppercased). Ambiguous/soft-masked bases such as `N`
-/// or lowercase are preserved on read — the sequence methods (`gc_content`,
-/// `complement`, `kmers`, …) handle non-ACGT characters gracefully. Plain `.fa`
-/// and gzipped `.fa.gz` are both accepted (needletail sniffs compression).
+/// `seq` is a `Dna` value, normalized and VALIDATED exactly as `dna()` does:
+/// uppercased, and restricted to `A C G T N` plus the IUPAC ambiguity codes
+/// (`R Y S W K M B D H V`). Lowercase soft-masking and ambiguity codes are
+/// therefore read fine; anything else — a protein FASTA, a corrupt record — is a
+/// clean error naming the record and position, NOT a `Dna` value that lies to
+/// every method downstream (see [`dna_from_record`]). Plain `.fa` and gzipped
+/// `.fa.gz` are both accepted (needletail sniffs compression).
 pub fn read_fasta(path: &str, line: usize, col: usize) -> Result<Value, HelixError> {
     let mut reader: Box<dyn FastxReader> = parse_fastx_file(path).map_err(|e| {
         HelixError::new(format!("cannot read FASTA `{}`: {}", path, e), line, col).hint(
@@ -36,7 +85,7 @@ pub fn read_fasta(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
         // The header is everything after `>`; the id is its first whitespace token.
         let header = String::from_utf8_lossy(rec.id());
         let id = header.split_whitespace().next().unwrap_or("").to_string();
-        let seq: String = rec.seq().iter().map(|b| b.to_ascii_uppercase() as char).collect();
+        let seq: String = dna_from_record(&rec.seq(), &id, path, line, col)?;
         let length = seq.len() as i64;
 
         crate::error::try_push(
@@ -79,7 +128,7 @@ pub fn read_fastq(path: &str, line: usize, col: usize) -> Result<Value, HelixErr
         })?;
         let header = String::from_utf8_lossy(rec.id());
         let id = header.split_whitespace().next().unwrap_or("").to_string();
-        let seq: String = rec.seq().iter().map(|b| b.to_ascii_uppercase() as char).collect();
+        let seq: String = dna_from_record(&rec.seq(), &id, path, line, col)?;
         let length = seq.len() as i64;
         let qual = match rec.qual() {
             Some(q) => Value::Str(Rc::new(String::from_utf8_lossy(q).into_owned())),

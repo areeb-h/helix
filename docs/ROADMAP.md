@@ -590,9 +590,26 @@ motivates this phase.
       quality byte `>= 223` overflowed `u8` (panic in debug, wrong char in release).
       The score is now clamped to the SAM-valid `0..=93` before the `+ 33` (the doc
       comment already assumed that range). Text SAM couldn't reach it; only `read_bam`.
-- [ ] **Panic-free audit of the remaining surfaces** — Dict operations, the other
-      genomics parsers (VCF/GFF/BED) on malformed files, unicode byte-vs-char
-      slicing, module-system cycles. (Rounds 1–2 done 2026-07-10.)
+- [x] **Panic-free audit, round 3** (2026-07-17) — the surfaces this list named:
+      Dict operations, the genomics parsers (VCF/GFF/BED/FASTA/FASTQ/SAM) on
+      malformed files, unicode byte-vs-char slicing, module-system cycles, plus
+      malformed JSON/CSV and numeric conversion edges. **~60 adversarial probes,
+      zero panics** — every one produced a value or a clean Helix error. Import
+      cycles report `import cycle detected`; binary garbage, truncated records,
+      non-numeric fields, negative coordinates, and `i64::MAX` slice bounds all
+      error cleanly. (Probes were validated against positive controls first — a
+      "clean" result from a program that never ran is worthless.)
+      **But the audit found a WRONG-ANSWER bug instead of a crash**, which is
+      worse: `read_fasta`/`read_fastq` uppercased without validating, minting
+      `Dna` values that `dna()` itself rejects. A `>s1 / ATGCXXZZ!!` record gave
+      `gc_content() = 0.2` (counted over the garbage) and `kmers(3) = ["ATG",
+      "TGC"]` — 2 k-mers where a 10-base sequence must yield 8, the rest silently
+      dropped — and the value could not round-trip through `dna()`. A scientist
+      reading a corrupt FASTA got a believable GC number and no warning. Both
+      readers now enforce `dna()`'s exact rule at the boundary (uppercase; ACGTN
+      + IUPAC `R Y S W K M B D H V`), erroring with the record id and position;
+      lowercase soft-masking, `N`, and ambiguity codes still read normally.
+      Pinned: `fasta_enforces_the_dna_invariant_at_the_boundary`.
 - [ ] **A `#![deny]` gate for new `unwrap`/`expect` in interpreter paths** (or a
       clippy `disallowed_methods` config scoped to `src/interp`/`src/vm`) so the
       never-abort property is enforced by CI, not re-audited by hand.

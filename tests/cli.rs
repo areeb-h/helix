@@ -2742,3 +2742,63 @@ fn corpus_is_engine_identical_and_pinned() {
         );
     }
 }
+
+/// The `Dna` invariant holds at the FILE BOUNDARY, not just at `dna()`.
+///
+/// `read_fasta`/`read_fastq` used to uppercase without validating, minting `Dna`
+/// values that `dna()` itself rejects — and the sequence methods, written against
+/// the invariant, then answered with plausible nonsense instead of erroring: a
+/// `>s1 / ATGCXXZZ!!` record gave `gc_content() = 0.2` and `kmers(3)` returned 2
+/// k-mers where a 10-base sequence must yield 8. A corrupt FASTA produced a
+/// believable GC number and no warning. Both readers now apply `dna()`'s exact
+/// rule, and real-world FASTA (lowercase soft-masking, `N`, IUPAC codes) must
+/// still read — that is the half a naive tightening would break.
+#[test]
+fn fasta_enforces_the_dna_invariant_at_the_boundary() {
+    let dir = std::env::temp_dir().join("helix_bio_inv");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // (1) Bases `dna()` rejects must NOT become a Dna value.
+    let bad = dir.join("bad.fasta");
+    std::fs::write(&bad, ">s1\nATGCXXZZ!!\n").unwrap();
+    let src = format!("r = try read_fasta(\"{}\")\nprint(r.ok)\nprint(r.error)\n", bad.display());
+    let (out, err, code) = run_source(&src, &[], "bio_inv_bad");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "false", "a protein/corrupt FASTA must not yield a Dna: {out}");
+    assert!(lines[1].contains("not a valid DNA base"), "got: {}", lines[1]);
+    assert!(lines[1].contains("s1"), "the error should name the record: {}", lines[1]);
+    assert!(lines[1].contains("position 4"), "and the position: {}", lines[1]);
+
+    // (2) Real-world FASTA still reads: lowercase soft-masking, N, IUPAC codes.
+    let good = dir.join("good.fasta");
+    std::fs::write(&good, ">ok1\natgcRYKM\n>ok2\nACGTNNNN\n").unwrap();
+    let src = format!(
+        "f = read_fasta(\"{}\")\nprint(f.count())\nprint(f[0].seq)\nprint(f[1].seq.gc_content())\n",
+        good.display()
+    );
+    let (out, err, code) = run_source(&src, &[], "bio_inv_good");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["2", "ATGCRYKM", "0.5"], "valid FASTA must still read: {out}");
+
+    // (3) Whatever a reader produces, `dna()` must accept — the round-trip that
+    //     the old readers broke.
+    let src = format!(
+        "f = read_fasta(\"{}\")\nprint((try dna(\"{{f[0].seq}}\")).ok)\n",
+        good.display()
+    );
+    let (out, err, code) = run_source(&src, &[], "bio_inv_roundtrip");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "true", "a reader's Dna must round-trip through dna(): {out}");
+
+    // (4) Same rule for FASTQ.
+    let badq = dir.join("bad.fastq");
+    std::fs::write(&badq, "@r1\nATGCZ\n+\n!!!!!\n").unwrap();
+    let src = format!("r = try read_fastq(\"{}\")\nprint(r.ok)\n", badq.display());
+    let (out, err, code) = run_source(&src, &[], "bio_inv_fastq");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "false", "FASTQ must enforce the same invariant: {out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
