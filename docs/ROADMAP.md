@@ -510,6 +510,34 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       Remaining: **FusedKernel captures+bounds** — `(0..n).map(k => …).reduce(…)`
       still materializes the inner array per (i,j); fusing it away is the last step
       to bring maptemp to the naive spelling's cost.
+- [ ] **Stage 3g — float scalar captures in the mixed kernel (SAXPY).** Found by an
+      honest AXPY-vs-C measurement: `(0..n).map(i => a * x[i] + y[i])` with a runtime
+      float coefficient `a` DECLINES to the VM (0.56s vs 0.03s for the same body with
+      a float *literal* `2.5` or an *int* variable `m`). The mixed kernel loads scalar
+      captures as `i64`, so the marshal rejects a `Value::Float` scalar. SAXPY/AXPY
+      with a runtime coefficient is *the* canonical BLAS-1 op, so this is the gap that
+      matters most for the flagship numeric domain — more than FusedKernel.
+
+      WHY IT IS NOT A ONE-LINER. `a * x[i]` is admitted by BOTH the i64 analysis
+      (`a` as an `i64` Scalar, `x` as an `Ints` array) and the mixed analysis (`a` as
+      a float, `x` as `Floats`), so the two must agree on `a`'s capture KIND — but the
+      i64 spec needs it loaded `i64` and the mixed spec `f64`. Making a *value* scalar
+      representation-agnostic (marshaled `i64` in one spec, `f64` in the other, like
+      the `ArrayI64` array caps already are) requires distinguishing value-scalars
+      from INDEX-scalars (`a[k]` — always `i64`) in `value_eligible_cap_indexed`,
+      which is SHARED WITH THE REDUCE PATH. That is a cross-cutting change to shipped,
+      tested code, not a bolt-on; it needs its own session. Plan: a
+      representation-agnostic `ScalarValue` kind emitted by both analyses, loaded per
+      spec, typed `Int` in the i64 codegen and `Float` (a promoted `fcvt`, matching
+      the interpreter) in the mixed one; the marshal converts `Value::Int`→f64 or
+      passes `Value::Float` bits.
+
+      HONEST CEILING even after the fix: a functional-immutable AXPY builds a NEW
+      vector where C's BLAS mutates `y` in place, so it pays an allocation C never
+      does. Helix wins on memory-bound *reduces* (k1 dot beats C) but the
+      "produce a new vector" pattern is allocation-bound — the same lesson as k7. The
+      kernel engaging is necessary, not sufficient; the honest number will trail
+      in-place C by the allocation, and the benchmark note must say so.
 ## Phase 7 — Adoption and ecosystem
 
 The viability requirements: the work that turns a capable compiler into a language
