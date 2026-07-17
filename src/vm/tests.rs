@@ -1301,6 +1301,68 @@
         assert_eq!(run_vm_jit(src).unwrap(), "[30, 10, 20]");
     }
 
+
+    /// The f64 (mixed-indexed) twin of the map-side bounds sweep: `(0..n).map(i => a[i] *
+    /// 2.0)` over a `Floats` array runs the MIXED kernel's unchecked F64 loads, so the same
+    /// endpoint discharge applies. What is NEW — and what this test chiefly exists for — is
+    /// TYPE CONFUSION: one stored kernel now carries an i64 and a mixed specialization, and
+    /// the VM's marshal routes by the runtime array representation. An `Ints` buffer
+    /// reaching an F64 load would reinterpret the bits as (tiny, plausible-looking) floats
+    /// and corrupt results SILENTLY — no crash, no error, just wrong science — so the
+    /// routing probes below are asserted against literal expected VALUES, not merely
+    /// cross-engine agreement.
+    #[test]
+    fn f64_map_index_agrees_and_routes_by_representation() {
+        crate::jit::reset_native_call_count();
+        for len in [0usize, 1, 3, 5] {
+            let arr: Vec<String> = (0..len).map(|i| format!("{i}.5")).collect();
+            let a = format!("[{}]", arr.join(", "));
+            for start in -3i64..=4 {
+                for end in -3i64..=5 {
+                    let src = format!("a = {a}\n({start}..{end}).map(i => a[i] * 2.0)");
+                    let (tw, vm, jit) = (run_tw(&src), run_vm(&src), run_vm_jit(&src));
+                    assert_eq!(tw, vm, "tw vs vm on `{src}`");
+                    assert_eq!(vm, jit, "vm vs JIT on `{src}`");
+                }
+            }
+        }
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the mixed-indexed kernel never engaged — the sweep compared the VM against itself"
+        );
+
+        for (src, want) in [
+            // Float-rooted body over an INTS array: the mixed spec's marshal requires
+            // `Floats` → declines → checked loop. (The corruption signature this guards
+            // against: tiny denormal-ish junk like 4.9e-323 in place of 20.0.)
+            ("a = [10, 20, 30]\n(0..3).map(i => a[i] * 2.0)", "[20.0, 40.0, 60.0]"),
+            // A body BOTH analyses admit (`a[i] + 1`), over Floats → the mixed spec.
+            ("a = [1.5, 2.5, 3.5]\n(0..3).map(i => a[i] + 1)", "[2.5, 3.5, 4.5]"),
+            // The same body over Ints → the i64 spec; floats here would be corruption.
+            ("a = [10, 20, 30]\n(0..3).map(i => a[i] + 1)", "[11, 21, 31]"),
+            // Mixed representations across two caps: neither spec matches → checked loop.
+            (
+                "a = [10, 20, 30]\nb = [0.5, 1.5, 2.5]\n(0..3).map(i => a[i] + b[i])",
+                "[10.5, 21.5, 32.5]",
+            ),
+            // A Float SCALAR cap: the analysis types scalar caps `i64`, so the marshal
+            // (which requires `Value::Int`) must decline rather than pass f64 bits.
+            ("a = [1.5, 2.5, 3.5]\nk = 0.5\n(0..3).map(i => a[i] * k)", "[0.75, 1.25, 1.75]"),
+            // sqrt/min compose over the loads (the same arms the unindexed mixed kernel
+            // has always had, now fed from memory instead of the counter).
+            ("a = [4.0, 9.0, 16.0]\n(0..3).map(i => sqrt(a[i]))", "[2.0, 3.0, 4.0]"),
+            (
+                "a = [1.5, 2.5, 3.5]\nb = [3.0, 1.0, 2.0]\n(0..3).map(i => min(a[i], b[i]))",
+                "[1.5, 1.0, 2.0]",
+            ),
+        ] {
+            let jit = run_vm_jit(src);
+            assert_eq!(jit, run_tw(src), "engines disagree on `{src}`");
+            assert_eq!(jit, run_vm(src), "vm disagrees on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+    }
+
     #[test]
     fn differential_functions_with_jit() {
         let mut rng = 0xFEED_FACE_DEAD_BEEFu64;

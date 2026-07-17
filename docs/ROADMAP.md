@@ -426,17 +426,54 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       | shape | JIT speedup | why |
       | --- | --- | --- |
       | i64 `a[i]` gather + reduce | **3.7×** | this change |
-      | f64 `a[i]` | ~1.5× | f64 indexed map still DECLINES → runs on the VM |
+      | f64 `a[i]` | ~~1.5×~~ → **done, below** | was: f64 indexed map declined |
       | affine i64 `a[2*i]` | ~1.6× | map analysis emits no `Affine` bound (reduce-only) |
-      | matmul `_maptemp` (f64 **and** affine) | ~1.0× | needs both of the above |
+      | matmul `_maptemp` (f64 **and** affine) | ~1.0× | needs affine + fused captures |
 
-      So the contained next step is **f64 map-side `a[i]`** (reuse this machinery over a
-      `Floats` source: an `ArrayF64` cap kind, an F64 element load in the codegen's
-      `Index` arm, and an f64 twin of `map_index_caps`). **Affine map indices** are the
-      step after, and only both together move `k9_matmul_naive_maptemp` — but note the
-      k9 *naive* spelling (the direct inner `reduce`) is the faithful port and already
-      runs at 1.2× C, so the maptemp shape is natural-Helix ergonomics, not the
-      headline number.
+- [x] **Stage 3e — f64 map-side `a[i]`: the MIXED kernel reads f64 arrays.** The
+      vector-add / AXPY / gather-transform shape `(0..n).map(i => a[i] + b[i])` over
+      `Floats` arrays now runs native. MEASURED (n=5M, min-of-4, same binary):
+      vector-add **5.9×** (was 1.8×), AXPY **6.0×**, scale-by-constant **4.2×**, the
+      isolated map **32×**. (The composed `map→reduce` still materializes the
+      intermediate the reduce-side spelling avoids — its 51× belongs to fusion, a
+      separate lever.)
+
+      Design: ONE stored `ArrayKernel` now carries TWO specializations of the same
+      indexed body — the i64 build (caps marshaled from `Ints`, I64 loads) and the
+      mixed build (caps from `Floats`, F64 loads, f64 result) — because the compile
+      time analysis cannot know a captured array's element type. A dual-typed body
+      like `a[i] + 1` is admitted by BOTH analyses (`map_kernel_captures_indexed`
+      types the load Int; the new `mixed_map_captures_indexed` types it Float), both
+      record identical captures/bounds, and the VM routes by the runtime
+      representation. The bounds discharge is unchanged — the index arithmetic is
+      `i64` in both, so `map_index_caps` gained only a `float_arrays` flag.
+
+      **THE NEW HAZARD — type confusion — and why it cannot happen.** The i64
+      version's failure mode was an out-of-bounds read; this version adds a worse
+      one: an `Ints` buffer reaching an F64 load reinterprets the bits as denormal
+      junk (~5e-323 where 20.0 belongs) — no crash, no error, silently wrong
+      science. The marshal's match-on-representation IS the guard: it declines
+      before any pointer is formed, and the dispatch falls back to the other
+      specialization or the checked loop. Sabotage-verified: forcing the marshal to
+      accept `Ints` under float mode makes
+      `f64_map_index_agrees_and_routes_by_representation` fail with exactly that
+      denormal signature, pinned against literal expected values (routing probes:
+      float body over Ints falls back; dual-typed body over Ints stays int, over
+      Floats goes f64; mixed representations decline; a Float SCALAR cap declines —
+      scalar caps are typed `i64`). Also pinned: a boundary sweep over float arrays
+      with an engagement assertion, `tests/corpus/j2_map_index_f64.helix`, and a
+      1600-program random fuzz that randomizes the array REPRESENTATIONS per capture
+      (so the routing itself is fuzzed), 0 divergences.
+
+      The f64-SOURCE map (`xs.map(x => a[x])` where `xs` is a `Floats` array) stays
+      excluded PERMANENTLY, not as a gap: its binder is an element value — the
+      gather shape whose bounds are undischargeable (Stage 3d's safety argument).
+
+      Remaining after this: **affine map indices** (`a[2*i]`, `a[i*n+k]`), then
+      **FusedKernel captures+bounds** — only both together move
+      `k9_matmul_naive_maptemp`. The k9 *naive* spelling (direct inner `reduce`) is
+      the faithful port and already runs at 1.2× C, so maptemp is natural-Helix
+      ergonomics, not the headline number.
 ## Phase 7 — Adoption and ecosystem
 
 The viability requirements: the work that turns a capable compiler into a language

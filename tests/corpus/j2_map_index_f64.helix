@@ -1,0 +1,58 @@
+# Map-side `a[i]` over f64 arrays — the MIXED kernel's unchecked F64 loads. The bounds
+# story is j1's (endpoints over a lazy range, in i128); what is new here is TYPE ROUTING:
+# one stored kernel carries an i64 and a mixed specialization, and the VM marshals by the
+# runtime array representation. An `Ints` buffer reaching an F64 load would reinterpret
+# the bits as denormal junk (~5e-323 where 20.0 belongs) with no crash — so the cases
+# below pin exact VALUES for every routing, not just cross-engine agreement.
+
+a = [1.5, 2.5, 3.5]
+b = [0.25, 0.5, 0.75]
+
+# the shape the kernel exists for: vector add and AXPY over f64 arrays
+print((0..3).map(i => a[i] + b[i]))
+print((0..3).map(i => 2.0 * a[i] + b[i]))
+
+# a dual-typed body (+ 1 admits both specs): Floats -> mixed spec, f64 out...
+print((0..3).map(i => a[i] + 1))
+# ...and the SAME body over Ints -> i64 spec, int out. Floats here = corruption.
+n = [10, 20, 30]
+print((0..3).map(i => n[i] + 1))
+
+# a float-rooted body over an INTS array: the mixed marshal requires Floats -> checked loop
+print((0..3).map(i => n[i] * 2.0))
+
+# mixed representations across two caps: neither spec matches -> checked loop
+print((0..3).map(i => n[i] + b[i]))
+
+# a Float scalar capture: scalar caps are typed i64, so this declines rather than ride bits
+k = 0.5
+print((0..3).map(i => a[i] * k))
+
+# the upper edge, then one past it (the endpoint the proof checks)
+print((0..3).map(i => a[i] * 2.0))
+print([-1.0, -2.0][0:0].map(x => x))
+
+# negative start Python-wraps via the checked loop — a[-2] is legal Helix
+print((-2..3).map(i => a[i] * 1.0))
+
+# scalar point-index beside the counter index, over floats
+j = 2
+print((0..3).map(i => a[i] + a[j]))
+
+# sqrt/abs/min over the loads (the mixed kernel's call arms, fed from memory)
+s = [4.0, 9.0, 16.0]
+print((0..3).map(i => sqrt(s[i])))
+print((0..3).map(i => min(a[i], b[i])))
+
+# the binder promoting at the first float operand, beside a load
+print((0..3).map(i => a[i] + i * 0.5))
+
+# a descending range over a float array
+print(range(2, 0-1, 0-1).map(i => a[i] + 0.5))
+
+# composed with the float reduce
+print((0..3).map(i => a[i] * 2.0).reduce(0.0, (s, x) => s + x))
+
+# gather over floats (element-value binder, non-range source): falls back, stays correct
+idx = [2, 0]
+print(idx.map(x => a[x]))

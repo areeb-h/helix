@@ -293,13 +293,14 @@ pub unsafe fn run_map_kernel_f64(ptr: *const u8, src: &[f64], caps: &[f64]) -> V
 }
 
 /// The **mixed** map kernel: `dst[i] = body(src[i])` reading an `i64` buffer and writing
-/// `f64` (Int source, float body), no captures. SAFETY: as [`run_map_kernel`], with an
-/// `fn(*const i64, *mut f64, i64, *const i64)` contract; the caps pointer is a valid
-/// (empty) slice the kernel never reads (mixed kernels are capture-free by construction).
-pub unsafe fn run_map_kernel_mixed(ptr: *const u8, src: &[i64]) -> Vec<f64> {
-    // Capture-free by construction — pass an empty caps slice the kernel never reads.
-    let no_caps: [i64; 0] = [];
-    unsafe { run_map_chunked::<i64, f64, i64>(ptr, src, &no_caps) }
+/// `f64` (Int source, float body). `caps` carries the loop-invariant captures as `i64`
+/// slots: scalar values, and — for an INDEXED body — `f64`-array base pointers the VM
+/// bounds-checked and type-checked (`Floats` only) before this call. Empty for the
+/// capture-free unindexed form. SAFETY: as [`run_map_kernel`], with an
+/// `fn(*const i64, *mut f64, i64, *const i64)` contract; the caller keeps the arrays
+/// behind any base pointers alive across the call.
+pub unsafe fn run_map_kernel_mixed(ptr: *const u8, src: &[i64], caps: &[i64]) -> Vec<f64> {
+    unsafe { run_map_chunked::<i64, f64, i64>(ptr, src, caps) }
 }
 
 /// Run a native filter kernel over `src`, returning the kept elements in order. SAFETY:

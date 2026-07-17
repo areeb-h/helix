@@ -112,6 +112,12 @@ impl super::Compiler {
                 // an unindexed body keeps its existing (bound-free) kernel unchanged — this arm
                 // only ever admits shapes that used to fall to the per-element bytecode loop.
                 .or_else(|| crate::jit::map_kernel_captures_indexed(body, &params[0], &fns))
+                // The FLOAT-rooted indexed body (`a[i] + b[i]` over f64 arrays, `a[i] * 2.0`)
+                // the i64 analysis rejects. Same capture/bounds vocabulary — the JIT builds
+                // the mixed (i64 range → f64 out) specialization from it, and a body BOTH
+                // analyses admit (`a[i] + 1`) got the same list from the i64 one above, so
+                // whichever runs, `caps[j]` and the VM's load order agree.
+                .or_else(|| crate::jit::mixed_map_captures_indexed(body, &params[0], &user_fns))
                 // A **mixed** `Int`-source → `Float` body the i64/f64 analyses both reject —
                 // e.g. `(it % 97) * 1.0` (integer `%`/`//`/bitwise/shift subexpression, float
                 // root). Capture-free; storing the kernel lets the JIT build the mixed

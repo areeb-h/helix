@@ -668,15 +668,24 @@ fn define_array_kernels(
         // — `mixed_map_eligible`), Float map (the safe `+ - *` subset over a Floats source
         // — `map_kernel_captures_f64`), or Int map (capture-aware, body re-checked so a
         // captured-var body compiles).
-        // An INDEXED body (`a[it]`) is admitted only by the i64 path: its array caps are base
-        // pointers, and only that path's `caps` slice is typed to carry them. The f64/mixed
-        // specializations must decline rather than reinterpret a pointer as an `f64` — the VM
-        // then falls through to the bytecode loop, which is the oracle path anyway.
+        // An INDEXED body (`a[it]`) is admitted by the i64 path (caps marshaled from `Ints`
+        // arrays) and by the MIXED path (caps marshaled from `Floats` arrays, F64 loads,
+        // f64 result) — each specialization re-derives the capture list from the body and
+        // must reproduce the stored one exactly, so codegen's `caps[j]` and the VM's load
+        // order cannot drift. The f64-SOURCE map and filter still decline indexed bodies:
+        // their source is a data array, i.e. an element-value binder — the gather shape
+        // whose bounds are undischargeable (see `ArrayKernel::index_bounds`) — and that is
+        // permanent, not a v1 gap.
         let indexed = !k.index_bounds.is_empty();
         let ok = if is_filter {
             !indexed && filter_kernel_eligible(&k.body, &k.binder, eligible)
         } else if mixed {
-            !indexed && mixed_map_eligible(&k.body, &k.binder, user_fns)
+            if indexed {
+                mixed_map_captures_indexed(&k.body, &k.binder, user_fns)
+                    .is_some_and(|(c, bnd)| c == k.captures && bnd == k.index_bounds)
+            } else {
+                mixed_map_eligible(&k.body, &k.binder, user_fns)
+            }
         } else if matches!(elem_kind, NumKind::Float) {
             !indexed && map_kernel_captures_f64(&k.body, &k.binder, user_fns).is_some()
         } else if indexed {
@@ -2064,6 +2073,135 @@ fn infer_mixed_kind(
                 Some(NumKind::Int)
             } else {
                 None // an i64-only op with a Float operand is not a valid Helix expression
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The **indexed** mixed-map analysis: an i64 range source, an `f64` result, and a body that
+/// reads captured **`f64` arrays** by the binder (`a[it]`) or by a loop-invariant scalar
+/// (`a[k]`) — the vector-add / AXPY / gather-transform shape `(0..n).map(i => a[i] + b[i])`.
+/// Returns the ordered captures plus the bounds the VM must discharge, or `None`.
+///
+/// This types `a[…]` as **`Float`** where [`map_kernel_captures_indexed`] (the i64 twin over
+/// the same body shapes) types it `Int`. Both analyses record the same names, kinds, and
+/// bounds in the same first-appearance order, so ONE stored kernel can carry BOTH
+/// specializations and the VM dispatches on the runtime capture type: all-`Ints` caps run the
+/// i64 kernel, all-`Floats` caps run this mixed kernel, and a mismatch falls back to the
+/// bytecode loop. The `ArrayI64` capture kind therefore means "array indexed by the counter",
+/// not "an array of i64" — which marshal it gets is the dispatch's decision, and the marshal
+/// itself is the type guard (an `Ints` buffer never reaches this kernel's F64 loads).
+///
+/// Scalar captures stay `Int` (the kernel loads them as `i64`); a runtime `Float` scalar cap
+/// declines at the marshal. The bounds story is IDENTICAL to the i64 path — same
+/// [`IndexBound`]s, same lazy-range-only discharge (`map_index_caps` in `vm.rs`) — because
+/// bounds depend on the index arithmetic, which is `i64` in both.
+pub fn mixed_map_captures_indexed(
+    body: &Expr,
+    binder: &str,
+    user_fns: &HashSet<&str>,
+) -> Option<(Vec<Capture>, Vec<IndexBound>)> {
+    let mut caps: Vec<Capture> = Vec::new();
+    let mut bounds: Vec<IndexBound> = Vec::new();
+    let root = infer_mixed_kind_indexed(body, binder, &mut caps, &mut bounds, user_fns)?;
+    // Float root: the kernel writes an f64 buffer. Non-empty bounds: an unindexed body
+    // belongs to the plain i64/f64/mixed analyses, which run first at the compile site.
+    if root == NumKind::Float && !bounds.is_empty() && caps.len() <= MAX_CAPTURES {
+        Some((caps, bounds))
+    } else {
+        None
+    }
+}
+
+/// Bottom-up type of an indexed-mixed node — [`infer_mixed_kind`]'s arm set plus the two
+/// index shapes and free-scalar captures, mirroring [`gen_value_typed`]'s codegen exactly
+/// (a node this admits and that miscompiles is a divergence, so the two must stay twins).
+/// No `Let` arm — `gen_value_typed` has none, so the counter-shadowing hazard the i64
+/// path guards against cannot arise here: a shadowing body is simply ineligible.
+fn infer_mixed_kind_indexed(
+    e: &Expr,
+    binder: &str,
+    caps: &mut Vec<Capture>,
+    bounds: &mut Vec<IndexBound>,
+    user_fns: &HashSet<&str>,
+) -> Option<NumKind> {
+    match e {
+        Expr::Int(_) => Some(NumKind::Int),
+        Expr::Float(_) => Some(NumKind::Float),
+        Expr::Ident { name, .. } => {
+            if name == binder {
+                Some(NumKind::Int) // the i64 range element
+            } else {
+                // A free scalar capture, loaded as `i64` (a runtime Float declines at the
+                // marshal rather than riding as reinterpreted bits).
+                record_cap(caps, name, CaptureKind::Scalar).then_some(NumKind::Int)
+            }
+        }
+        Expr::Index { recv, index, .. } => match (&**recv, &**index) {
+            // `a[binder]`: a captured f64 array read by the counter → a Counter bound.
+            (Expr::Ident { name: arr, .. }, Expr::Ident { name: idx, .. })
+                if arr != binder && idx == binder =>
+            {
+                let ap = record_cap_pos(caps, arr, CaptureKind::ArrayI64)?;
+                push_bound(bounds, IndexBound::Counter { array: ap as u32 });
+                Some(NumKind::Float)
+            }
+            // `a[k]`: indexed by a free loop-invariant scalar → a point bound.
+            (Expr::Ident { name: arr, .. }, Expr::Ident { name: idx, .. })
+                if arr != binder && idx != binder && idx != arr =>
+            {
+                let ap = record_cap_pos(caps, arr, CaptureKind::ArrayI64)?;
+                let sp = record_cap_pos(caps, idx, CaptureKind::Scalar)?;
+                push_bound(bounds, IndexBound::Scalar { array: ap as u32, scalar: sp as u32 });
+                Some(NumKind::Float)
+            }
+            _ => None,
+        },
+        Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
+            match (name.as_str(), args.len()) {
+                ("sqrt", 1) => {
+                    infer_mixed_kind_indexed(&args[0], binder, caps, bounds, user_fns)?;
+                    Some(NumKind::Float)
+                }
+                ("abs", 1) => infer_mixed_kind_indexed(&args[0], binder, caps, bounds, user_fns),
+                ("min" | "max", 2) => {
+                    let ka = infer_mixed_kind_indexed(&args[0], binder, caps, bounds, user_fns)?;
+                    let kb = infer_mixed_kind_indexed(&args[1], binder, caps, bounds, user_fns)?;
+                    if ka == kb { Some(ka) } else { None }
+                }
+                _ => None,
+            }
+        }
+        Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
+            let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, user_fns)?;
+            let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, user_fns)?;
+            Some(if lk == NumKind::Float || rk == NumKind::Float {
+                NumKind::Float
+            } else {
+                NumKind::Int
+            })
+        }
+        Expr::Binary {
+            op: op @ (BinOp::Mod | BinOp::FloorDiv | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr),
+            left,
+            right,
+            ..
+        } => {
+            let op_ok = match op {
+                BinOp::Mod | BinOp::FloorDiv => matches!(**right, Expr::Int(n) if n > 0),
+                BinOp::Shl | BinOp::Shr => matches!(**right, Expr::Int(n) if (0..=63).contains(&n)),
+                _ => true,
+            };
+            if !op_ok {
+                return None;
+            }
+            let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, user_fns)?;
+            let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, user_fns)?;
+            if lk == NumKind::Int && rk == NumKind::Int {
+                Some(NumKind::Int)
+            } else {
+                None // the i64-closed ops are meaningless on f64
             }
         }
         _ => None,
@@ -4265,8 +4403,31 @@ fn gen_value_typed<'a>(
         Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
         Expr::Float(f) => (b.ins().f64const(*f), NumKind::Float),
         Expr::Ident { name, .. } => {
-            debug_assert_eq!(name, binder, "only the binder reaches the mixed kernel");
+            // The binder (the i64 range element) or a Scalar capture — both `i64` slots in
+            // `vars` (the prologue loads Scalar caps as `elem_ty` = I64 for a mixed kernel).
+            // A Float scalar cap never gets here: the VM's marshal requires `Value::Int`.
+            debug_assert!(
+                name == binder || vars.contains_key(name.as_str()),
+                "unbound ident reached mixed codegen"
+            );
             (b.use_var(vars[name.as_str()]), NumKind::Int)
+        }
+        // `a[binder]` / `a[scalar_cap]` reading a captured **f64** array: `vars[recv]` holds
+        // the base POINTER (the prologue loads non-Scalar caps as I64 regardless of the
+        // kernel's element type), and the VM discharged this access's `IndexBound` before
+        // dispatch — see `map_index_caps` — so the raw F64 load is safe. The marshal is the
+        // type guard: an `Ints` array declines there, so these 8 bytes are always an `f64`.
+        Expr::Index { recv, index, .. } => {
+            let name = match &**recv {
+                Expr::Ident { name, .. } => name.as_str(),
+                _ => unreachable!("ineligible index receiver reached mixed codegen"),
+            };
+            let base = b.use_var(vars[name]);
+            let (idx, ik) = gen_value_typed(b, index, vars, binder);
+            debug_assert!(matches!(ik, NumKind::Int), "non-i64 index reached mixed codegen");
+            let off = b.ins().imul_imm(idx, 8);
+            let addr = b.ins().iadd(base, off);
+            (b.ins().load(F64, MemFlags::trusted(), addr, 0), NumKind::Float)
         }
         Expr::Binary { op, left, right, .. } => {
             let (lv, lk) = gen_value_typed(b, left, vars, binder);

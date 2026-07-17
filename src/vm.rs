@@ -165,12 +165,22 @@ fn densify_range_top(stack: &mut [Value]) {
 /// kernel's UNCHECKED loads cannot. `src_range` is the receiver's range shape as read
 /// BEFORE materialization; `None` means the source is an ordinary buffer.
 ///
+/// `float_arrays` selects which SPECIALIZATION is being marshaled for: `false` = the i64
+/// kernel (array caps must be `Ints`, elements load as I64), `true` = the mixed kernel
+/// (array caps must be `Floats`, elements load as F64). This match-on-representation IS
+/// the type guard — the one new hazard the f64 variant adds over the i64 one is an `Ints`
+/// buffer reaching an F64 load, whose 8 bytes would reinterpret as a (usually tiny,
+/// plausible-looking) float and corrupt results SILENTLY rather than crash. Declining
+/// here, before any pointer is formed, is what makes that impossible; the dispatch tries
+/// the other specialization or falls back to the bytecode loop.
+///
 /// The caller keeps `cap_vals` alive across the kernel call, which is what keeps the base
 /// pointers valid.
 fn map_index_caps(
     k: &crate::bytecode::ArrayKernel,
     cap_vals: &[Value],
     src_range: Option<(i64, i64, usize)>,
+    float_arrays: bool,
 ) -> Option<Vec<i64>> {
     use crate::bytecode::{CaptureKind, IndexBound};
     use crate::value::ArrayData;
@@ -178,17 +188,25 @@ fn map_index_caps(
     let mut lens: Vec<i64> = Vec::with_capacity(cap_vals.len()); // array len; 0 for scalars
     for (cap, val) in k.captures.iter().zip(cap_vals.iter()) {
         match (cap.kind, val) {
-            (CaptureKind::ArrayI64, Value::Array(a)) => {
-                let ArrayData::Ints(v) = &**a else { return None };
-                caps.push(v.as_ptr() as i64);
-                lens.push(v.len() as i64);
-            }
+            (CaptureKind::ArrayI64, Value::Array(a)) => match (&**a, float_arrays) {
+                (ArrayData::Ints(v), false) => {
+                    caps.push(v.as_ptr() as i64);
+                    lens.push(v.len() as i64);
+                }
+                (ArrayData::Floats(v), true) => {
+                    caps.push(v.as_ptr() as i64);
+                    lens.push(v.len() as i64);
+                }
+                // The wrong representation for this specialization — decline; the
+                // dispatch tries the other kernel or the checked loop.
+                _ => return None,
+            },
             (CaptureKind::Scalar, Value::Int(i)) => {
                 caps.push(*i);
                 lens.push(0);
             }
-            // A non-`Int` scalar, or an array cap bound to a non-`Ints` array: the body's
-            // index arithmetic wouldn't be i64 at all → fall back rather than guess.
+            // A non-`Int` scalar (both kernels load scalar caps as `i64`), or an array cap
+            // bound to a non-array value → fall back rather than guess.
             _ => return None,
         }
     }
@@ -1504,14 +1522,20 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 enum Pick {
                     I64(*const u8, Vec<i64>),
                     F64(*const u8, Vec<f64>),
-                    Mixed(*const u8),
+                    Mixed(*const u8, Vec<i64>),
                     No,
                 }
                 let pick = match (jit, stack.last()) {
                     (Some(j), Some(Value::Array(a))) => match &**a {
                         ArrayData::Ints(_) => {
-                            if let Some(p) = j.map_kernel(kidx) {
-                                let k = &program.map_kernels[kidx];
+                            // The SAME stored kernel may carry TWO specializations: an i64
+                            // build (array caps marshaled from `Ints`) and a mixed build
+                            // (array caps from `Floats`, f64 result). Try i64 first; for an
+                            // indexed body the marshal's representation check routes to
+                            // whichever matches the runtime captures, and a mismatch with
+                            // BOTH declines to the bytecode loop.
+                            let k = &program.map_kernels[kidx];
+                            let i64_pick = j.map_kernel(kidx).and_then(|p| {
                                 let caps: Option<Vec<i64>> = if k.index_bounds.is_empty() {
                                     // plain i64 kernel: every capture must be an `Int`
                                     cap_vals
@@ -1522,21 +1546,27 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     // A body reading a captured array: every `a[…]` becomes an
                                     // UNCHECKED native load, so prove them all in bounds first
                                     // or decline.
-                                    map_index_caps(k, &cap_vals, src_range)
+                                    map_index_caps(k, &cap_vals, src_range, false)
                                 };
-                                match caps {
-                                    Some(c) => Pick::I64(p, c),
-                                    None => Pick::No,
+                                caps.map(|c| Pick::I64(p, c))
+                            });
+                            match (i64_pick, j.map_kernel_mixed(kidx)) {
+                                (Some(pk), _) => pk,
+                                // unindexed mixed (`range.map(j => j*0.001)`): capture-free
+                                // by construction.
+                                (None, Some(p))
+                                    if k.index_bounds.is_empty() && cap_vals.is_empty() =>
+                                {
+                                    Pick::Mixed(p, Vec::new())
                                 }
-                            } else if cap_vals.is_empty() {
-                                // no i64 kernel + capture-free → a mixed Int→Float body
-                                // (`range.map(j => j*0.001)`) may have a mixed kernel.
-                                match j.map_kernel_mixed(kidx) {
-                                    Some(p) => Pick::Mixed(p),
-                                    None => Pick::No,
+                                // indexed mixed: f64-array caps, the same bounds discharge.
+                                (None, Some(p)) if !k.index_bounds.is_empty() => {
+                                    match map_index_caps(k, &cap_vals, src_range, true) {
+                                        Some(c) => Pick::Mixed(p, c),
+                                        None => Pick::No,
+                                    }
                                 }
-                            } else {
-                                Pick::No
+                                _ => Pick::No,
                             }
                         }
                         ArrayData::Floats(_) => {
@@ -1575,12 +1605,14 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             stack.push(arr);
                         }
                     }
-                    Pick::Mixed(ptr) => {
+                    Pick::Mixed(ptr, caps) => {
                         let arr = stack.pop().unwrap();
                         if let Value::Array(a) = &arr
                             && let ArrayData::Ints(v) = &**a
                         {
-                            let out = unsafe { crate::jit::run_map_kernel_mixed(ptr, v) };
+                            // `cap_vals` (holding the Rcs behind any base pointers in `caps`)
+                            // is still in scope — dropped only when this arm ends.
+                            let out = unsafe { crate::jit::run_map_kernel_mixed(ptr, v, &caps) };
                             stack.push(Value::float_array(out));
                             frames[fi].ip = *after as usize;
                         } else {

@@ -442,8 +442,13 @@ pub struct ArrayKernel {
     /// loop-invariant values the VM resolves at the call site and passes to the kernel
     /// as a `caps` slice. A [`CaptureKind::Scalar`] rides as its `i64`/`f64` value; a
     /// [`CaptureKind::ArrayI64`] rides as a packed array base the body indexes by the
-    /// binder (`a[i]`), which `index_bounds` obliges the VM to prove first. Empty for a
-    /// capture-free body (and for filter kernels, which don't take captures). `map` only.
+    /// binder (`a[i]`), which `index_bounds` obliges the VM to prove first. In a MAP
+    /// kernel `ArrayI64` means "array indexed by the counter", not "array of i64": the
+    /// same stored kernel may carry an i64 specialization (caps marshaled from `Ints`,
+    /// I64 loads) and a mixed one (caps from `Floats`, F64 loads, f64 result), and the
+    /// VM's marshal picks by the runtime representation — which is also the type guard
+    /// keeping an `Ints` buffer away from an F64 load. Empty for a capture-free body
+    /// (and for filter kernels, which don't take captures). `map` only.
     pub captures: Vec<Capture>,
     /// Bounds obligations for the array-indexed reads in the body — one [`IndexBound`]
     /// per distinct `a[binder]` access the VM must verify before the kernel's unchecked
