@@ -419,6 +419,24 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       `map_index_caps` was verified load-bearing by sabotage: delete any one and the
       sweep goes red.
 
+      NEXT LEVERS, measured after this landed (n=5M, min-of-4, same binary — a single
+      cold run reads ~6× slow from JIT compile + cold cache, so min-of-N is not
+      optional here):
+
+      | shape | JIT speedup | why |
+      | --- | --- | --- |
+      | i64 `a[i]` gather + reduce | **3.7×** | this change |
+      | f64 `a[i]` | ~1.5× | f64 indexed map still DECLINES → runs on the VM |
+      | affine i64 `a[2*i]` | ~1.6× | map analysis emits no `Affine` bound (reduce-only) |
+      | matmul `_maptemp` (f64 **and** affine) | ~1.0× | needs both of the above |
+
+      So the contained next step is **f64 map-side `a[i]`** (reuse this machinery over a
+      `Floats` source: an `ArrayF64` cap kind, an F64 element load in the codegen's
+      `Index` arm, and an f64 twin of `map_index_caps`). **Affine map indices** are the
+      step after, and only both together move `k9_matmul_naive_maptemp` — but note the
+      k9 *naive* spelling (the direct inner `reduce`) is the faithful port and already
+      runs at 1.2× C, so the maptemp shape is natural-Helix ergonomics, not the
+      headline number.
 ## Phase 7 — Adoption and ecosystem
 
 The viability requirements: the work that turns a capable compiler into a language
