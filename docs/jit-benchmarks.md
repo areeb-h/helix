@@ -1,14 +1,46 @@
 # Helix JIT numeric-kernel benchmarks (vs C / Rust / Go / Python)
 
-**Summary:** Helix compiles pure-numeric `map`/`filter`/`reduce` kernels — including
+> ## ⚠️ SUPERSEDED — the C baselines below are wrong by ~4.4×
+>
+> **Read [`bench/kernels/RESULTS.md`](../bench/kernels/RESULTS.md) instead.** This document
+> is kept for its engineering history (what each JIT lever did, and why), **not** for its
+> cross-language verdicts.
+>
+> **What was wrong.** Every `C 0.47 s` figure here — and so every "≈ C" / "C-parity" /
+> "beats 1-thread C" conclusion drawn from it — measured a C reference that was **not
+> getting transparent huge pages**, while Helix's mimalloc allocator silently was. The
+> system's THP policy is `madvise`-only; glibc `malloc` never asks, mimalloc does.
+> Measured minor page faults on the 50M dot: **Helix 1,779 vs C 195,388**. Since ~86% of
+> that kernel's build phase is page-faulting (cold first touch 2.1 GB/s vs a byte-identical
+> warm rewrite at 15.8 GB/s), the benchmark was largely ranking *allocators*.
+>
+> One environment variable (`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`), no source change:
+>
+> | | as measured here | page-equalized |
+> |---|---|---|
+> | C (50M dot) | 0.47 s | **0.10–0.12 s** |
+> | Rust | 0.47 s | **0.13 s** |
+> | Helix | 0.16–0.34 s | 0.16 s (unchanged — it always had huge pages) |
+>
+> Helix's own number never moved; **C's improved 4.4× and the parity claim evaporated.**
+> On the page-fair suite Helix **loses to C on every kernel** (1.6× on the dot — and ~3.8×
+> per-core, since it spends 2.5× the CPU getting there). Its real wins are *algorithmic*
+> (memoized `fib`: O(n) vs O(2ⁿ)) and *delegation* (native `primes()`, a BLAS-class GEMM) —
+> not codegen.
+>
+> The §5 "honesty correction" below was a step in the right direction (it caught the
+> non-uniform `-march=native` flags) but it did not catch the allocator asymmetry, so its
+> C numbers are still the un-equalized ones. `bench/kernels/` is permanent, re-runnable,
+> and gates every language's anchor before reporting any timing.
+
+**Summary (historical):** Helix compiles pure-numeric `map`/`filter`/`reduce` kernels — including
 **array-indexed reductions** (`a[j]`) and **nested reductions** (`map` of `reduce`) — to
-native machine code via Cranelift. On memory-bandwidth-bound kernels it is **~C-class**, beats
-NumPy, and runs ~20–700× over its own bytecode interpreter — every result **bit-identical** across
-all languages (and enforced bit-identical across Helix's own three engines by a differential oracle;
-see [execution-engine.md](execution-engine.md)). On **compute-bound SIMD-friendly** kernels it
-*loses* to properly-vectorized (`-march=native`) C, because Cranelift emits scalar code — see the
-§5 correction. The tables in §1–4 below use each kernel's original flags (some scalar `C -O3`); §5
-is the honest reckoning against uniform `-march=native` C.
+native machine code via Cranelift, and runs ~20–700× over its own bytecode interpreter — every
+result **bit-identical** across all languages (and enforced bit-identical across Helix's own three
+engines by a differential oracle; see [execution-engine.md](execution-engine.md)). The
+cross-language *verdicts* in §1–5 are superseded per the notice above; the per-lever speedups
+(what each JIT feature bought over the interpreter) remain valid, since those compare Helix
+against itself.
 
 For the **full honest picture — a ten-kernel run that includes the workloads Helix *loses* at
 (mandelbrot, wordcount, montecarlo, sieve)** and the per-core (single-thread) numbers, jump to
