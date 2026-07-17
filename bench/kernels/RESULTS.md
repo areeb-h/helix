@@ -132,12 +132,35 @@ say so rather than dropping the row.
   2.2×**. (An earlier version of this file said 3.8× per-core — that was
   CPU-seconds at 6 threads, which charges Helix for the *wasted* CPU as if it
   were work. Corrected.)
-- **k2 mandelbrot** — scalar FP codegen and branch prediction. Single-threaded
-  everywhere (Helix 107% CPU). gcc contracts one `2*zr*zi+ci` into an FMA at
-  `-march=native`; we build with `-ffp-contract=off` for rounding parity. Note
-  the escape test lands **exactly 1 ulp** from the boundary at two pixels
-  (x=80, y=320/880), so cross-build agreement is real but has zero headroom —
-  `-ffast-math` does change the anchor.
+- **k2 mandelbrot** — scalar FP codegen and branch prediction *for the C/Rust/Go
+  siblings*. **For Helix it currently measures the per-pixel wrapper, not the
+  escape loop.** gcc contracts one `2*zr*zi+ci` into an FMA at `-march=native`;
+  we build with `-ffp-contract=off` for rounding parity. Note the escape test
+  lands **exactly 1 ulp** from the boundary at two pixels (x=80, y=320/880), so
+  cross-build agreement is real but has zero headroom — `-ffast-math` does
+  change the anchor.
+
+  **Where Helix's 5.9× actually goes (measured 2026-07-17, grid 600 = 360k
+  pixels and 10.18M total escape iterations):**
+
+  | variant | time |
+  |---|---|
+  | trivial callee (`fn step(...) = i + 1`) — wrapper only, **0 escape iters** | 0.10–0.13s |
+  | the real kernel — same pixels **+ 10.18M escape iters** | 0.10s |
+
+  **The escape loop is free; the wrapper is the entire runtime.** The native
+  tail loop is doing 10M float iterations inside the noise of the
+  `map(y => map(x => …).sum()).sum()` that surrounds it. Two hypotheses were
+  tested and **refuted** on the way: hand-CSE'ing `zr*zr`/`zi*zi` into `let`s
+  changes nothing (0.11s either way — Cranelift already CSEs), and the
+  per-float-compare NaN-poison guard is free (30M-iteration tail loops cost
+  0.03s with and without a float compare — the never-taken guard predicts
+  perfectly).
+
+  So k2 is **not** a codegen result and must not be quoted as the Cranelift
+  ceiling. It is the same class as k9's old 72×: a surrounding comprehension the
+  JIT does not compile, making a fast inner kernel irrelevant. It belongs with
+  the map-side gap, not with scalar codegen.
 - **k3 basel** — serial FP-add latency. On this box ~0.056s of *every* compiled
   entry is the shared dependent-`vaddsd` latency floor (3 cycles/add), i.e.
   98.8% of C's 0.057s and ~64% of Helix's. This kernel **under-discriminates
