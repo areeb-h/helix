@@ -1709,6 +1709,81 @@
         }
     }
 
+
+    /// Numeric recursion reaches native code WITHOUT type annotations.
+    ///
+    /// The mixed per-parameter specialization is the sound successor to the removed blanket-`f64`
+    /// function spec (a float-arg function can still return an `Int`, so blanket `f64` codegen
+    /// diverged on result type). But it was reachable only through explicit `: Int` / `: Float`
+    /// annotations, so the natural shape of a numeric loop — float state plus an integer counter —
+    /// never compiled at all. Measured before this: `fn spin(zr, zi, i, n)` ran 0.53s where the
+    /// identical annotated body ran 0.01s, with `JIT ≈ NOJIT` confirming it never reached native
+    /// code; the all-`Float` shape was the same at 0.63s. Both are now 0.01s.
+    ///
+    /// `infer_param_kinds` only PROPOSES kinds. Two validators stand behind it, which is why a
+    /// wrong proposal cannot produce a wrong answer: `mixed_tail_ret_kind` re-types the body under
+    /// the proposal and declines if it does not check, and the VM re-tests every argument's runtime
+    /// type against the compiled `float_mask` before dispatching. The engagement assertions below
+    /// are what make this test meaningful — agreement alone would also hold if nothing compiled.
+    #[test]
+    fn unannotated_numeric_recursion_reaches_native_code() {
+        // Each pair is (unannotated, annotated) with identical bodies: same answer, and the
+        // unannotated form must ENGAGE rather than merely agree.
+        let cases = [
+            // mixed: float state + int counter (the shape that was 53× slower)
+            (
+                "fn spin(zr, zi, i, n) = if i >= n then zr + zi else spin(zr * 0.5 + 1.0, zi * 0.5 + 0.25, i + 1, n)\nspin(0.0, 0.0, 0, 40)",
+                "fn spin(zr: Float, zi: Float, i: Int, n: Int) = if i >= n then zr + zi else spin(zr * 0.5 + 1.0, zi * 0.5 + 0.25, i + 1, n)\nspin(0.0, 0.0, 0, 40)",
+            ),
+            // all-float, where the LIMIT's kind is only knowable from the comparison `i >= lim`
+            (
+                "fn spin(zr, zi, i, lim) = if i >= lim then zr + zi else spin(zr * 0.5 + 1.0, zi * 0.5 + 0.25, i + 1.0, lim)\nspin(0.0, 0.0, 0.0, 40.0)",
+                "fn spin(zr: Float, zi: Float, i: Float, lim: Float) = if i >= lim then zr + zi else spin(zr * 0.5 + 1.0, zi * 0.5 + 0.25, i + 1.0, lim)\nspin(0.0, 0.0, 0.0, 40.0)",
+            ),
+            // the mandelbrot inner loop, unannotated — an int result out of a float body
+            (
+                "fn step(zr, zi, cr, ci, i) = if i >= 50 then 50 else if zr * zr + zi * zi > 4.0 then i else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)\nstep(0.0, 0.0, 0.3, 0.5, 0)",
+                "fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) = if i >= 50 then 50 else if zr * zr + zi * zi > 4.0 then i else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)\nstep(0.0, 0.0, 0.3, 0.5, 0)",
+            ),
+            // a partly-annotated signature: the annotations must be honoured exactly and the rest
+            // inferred around them
+            (
+                "fn go(a, b: Int) = if b >= 20 then a else go(a * 0.5 + 1.0, b + 1)\ngo(0.0, 0)",
+                "fn go(a: Float, b: Int) = if b >= 20 then a else go(a * 0.5 + 1.0, b + 1)\ngo(0.0, 0)",
+            ),
+        ];
+        for (unann, ann) in cases {
+            // Correctness first: all three engines, both spellings, one value.
+            let want = run_tw(unann);
+            assert!(want.is_ok(), "walker failed on `{unann}`: {want:?}");
+            assert_eq!(run_vm(unann), want, "VM disagrees on `{unann}`");
+            assert_eq!(run_vm_jit(unann), want, "JIT disagrees on `{unann}`");
+            assert_eq!(run_vm_jit(ann), want, "the annotated twin gives a different answer");
+
+            // Engagement: the unannotated form must actually call native code. Without this the
+            // test would pass just as happily if the inference did nothing.
+            crate::jit::reset_native_call_count();
+            let _ = run_vm_jit(unann);
+            assert!(
+                crate::jit::native_call_count() > 0,
+                "unannotated recursion did not reach native code — the annotation cliff is back:\n\
+                 {unann}"
+            );
+        }
+
+        // The DECLINE path: a parameter with contradictory evidence (used as an i64-closed operand
+        // AND float-tainted) must be refused rather than guessed at, and the program must still
+        // produce the interpreter's answer via the bytecode path.
+        for src in [
+            "fn odd(a, i, n) = if i >= n then a else odd(a % 3 + 0.5, i + 1, n)\nodd(1, 0, 5)",
+            "fn shifty(a, i, n) = if i >= n then a else shifty((a << 1) + 0.25, i + 1, n)\nshifty(1, 0, 4)",
+        ] {
+            let want = run_tw(src);
+            assert_eq!(run_vm(src), want, "VM disagrees on the declined shape `{src}`");
+            assert_eq!(run_vm_jit(src), want, "JIT disagrees on the declined shape `{src}`");
+        }
+    }
+
     #[test]
     fn differential_functions_with_jit() {
         let mut rng = 0xFEED_FACE_DEAD_BEEFu64;

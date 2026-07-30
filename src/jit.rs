@@ -2894,6 +2894,253 @@ fn mixed_tail_ret_kind<'a>(
 /// f64 math inside each iteration, Int result), which `value_eligible` rejects for its
 /// float literals. Returns (float bitmask, per-param kinds, result kind — `None` when
 /// every path re-loops).
+/// Does this subtree force `f64` evaluation? A `Float` literal, a float-returning builtin, a
+/// division (never `i64`-closed — see `value_eligible_cap`), or a parameter already known to be
+/// `Float`. Used only to PROPOSE kinds in [`infer_param_kinds`]; the proposal is then validated,
+/// so a wrong answer here costs a missed specialization, never a wrong one.
+fn subtree_forces_float(e: &Expr, float_params: &HashSet<&str>) -> bool {
+    match e {
+        Expr::Float(_) => true,
+        Expr::Int(_) => false,
+        Expr::Ident { name, .. } => float_params.contains(name.as_str()),
+        Expr::Call { name, args, .. } => {
+            matches!(name.as_str(), "sqrt" | "to_float")
+                || args.iter().any(|a| subtree_forces_float(a, float_params))
+        }
+        Expr::Binary { op: BinOp::Div, .. } => true,
+        Expr::Binary { left, right, .. } => {
+            subtree_forces_float(left, float_params) || subtree_forces_float(right, float_params)
+        }
+        Expr::Unary { expr, .. } => subtree_forces_float(expr, float_params),
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            subtree_forces_float(cond, float_params)
+                || subtree_forces_float(then_branch, float_params)
+                || subtree_forces_float(else_branch, float_params)
+        }
+        _ => false,
+    }
+}
+
+/// Collect the parameter names occurring anywhere in `e`.
+fn params_in<'a>(e: &'a Expr, params: &HashSet<&'a str>, out: &mut HashSet<&'a str>) {
+    match e {
+        Expr::Ident { name, .. } => {
+            if params.contains(name.as_str()) {
+                out.insert(name.as_str());
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            params_in(left, params, out);
+            params_in(right, params, out);
+        }
+        Expr::Unary { expr, .. } => params_in(expr, params, out),
+        Expr::Call { args, .. } => args.iter().for_each(|a| params_in(a, params, out)),
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            params_in(cond, params, out);
+            params_in(then_branch, params, out);
+            params_in(else_branch, params, out);
+        }
+        Expr::Index { recv, index, .. } => {
+            params_in(recv, params, out);
+            params_in(index, params, out);
+        }
+        _ => {}
+    }
+}
+
+/// Walk `e` marking parameters `Float` (float taint) and `Int` (used by an `i64`-closed operator
+/// or as an index). Returns `false` on a CONTRADICTION — a parameter with both kinds of evidence —
+/// so the caller declines rather than guessing.
+fn gather_kind_evidence<'a>(
+    e: &'a Expr,
+    self_name: &str,
+    params: &HashSet<&'a str>,
+    order: &[&'a str],
+    float: &mut HashSet<&'a str>,
+    int: &mut HashSet<&'a str>,
+) -> bool {
+    match e {
+        // A self-call ties argument j to parameter j — the strongest signal in a
+        // tail-recursive function, and the shape this exists for.
+        Expr::Call { name, args, .. } if name == self_name && args.len() == order.len() => {
+            for (j, a) in args.iter().enumerate() {
+                if subtree_forces_float(a, float) {
+                    float.insert(order[j]);
+                }
+                if !gather_kind_evidence(a, self_name, params, order, float, int) {
+                    return false;
+                }
+            }
+        }
+        // `%`, `//`, bitwise and shifts are `i64`-closed: their operands are integers.
+        Expr::Binary {
+            op:
+                BinOp::Mod
+                | BinOp::FloorDiv
+                | BinOp::BitAnd
+                | BinOp::BitOr
+                | BinOp::BitXor
+                | BinOp::Shl
+                | BinOp::Shr,
+            left,
+            right,
+            ..
+        } => {
+            let mut here = HashSet::new();
+            params_in(left, params, &mut here);
+            params_in(right, params, &mut here);
+            int.extend(here);
+            if !gather_kind_evidence(left, self_name, params, order, float, int)
+                || !gather_kind_evidence(right, self_name, params, order, float, int)
+            {
+                return false;
+            }
+        }
+        // A COMPARISON ties its two sides to the same kind in practice — the loop-bound idiom
+        // `i >= lim` is how a float counter's limit gets its type, and without this the limit
+        // infers `Int`, the mask mismatches at dispatch, and the whole function silently falls
+        // back (correct, but 60× slower). Same proposal-not-proof status as the rest.
+        Expr::Binary {
+            op: BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne,
+            left,
+            right,
+            ..
+        } => {
+            if subtree_forces_float(left, float) || subtree_forces_float(right, float) {
+                let mut here = HashSet::new();
+                params_in(left, params, &mut here);
+                params_in(right, params, &mut here);
+                float.extend(here);
+            }
+            if !gather_kind_evidence(left, self_name, params, order, float, int)
+                || !gather_kind_evidence(right, self_name, params, order, float, int)
+            {
+                return false;
+            }
+        }
+        // `+ - * /` mixing a parameter with anything float-forcing makes that parameter float.
+        Expr::Binary {
+            op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, left, right, ..
+        } => {
+            if subtree_forces_float(e, float) {
+                let mut here = HashSet::new();
+                params_in(left, params, &mut here);
+                params_in(right, params, &mut here);
+                float.extend(here);
+            }
+            if !gather_kind_evidence(left, self_name, params, order, float, int)
+                || !gather_kind_evidence(right, self_name, params, order, float, int)
+            {
+                return false;
+            }
+        }
+        // An index is an integer.
+        Expr::Index { recv, index, .. } => {
+            let mut here = HashSet::new();
+            params_in(index, params, &mut here);
+            int.extend(here);
+            if !gather_kind_evidence(recv, self_name, params, order, float, int)
+                || !gather_kind_evidence(index, self_name, params, order, float, int)
+            {
+                return false;
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            if !gather_kind_evidence(left, self_name, params, order, float, int)
+                || !gather_kind_evidence(right, self_name, params, order, float, int)
+            {
+                return false;
+            }
+        }
+        Expr::Unary { expr, .. } => {
+            if !gather_kind_evidence(expr, self_name, params, order, float, int) {
+                return false;
+            }
+        }
+        Expr::Call { args, .. } => {
+            for a in args {
+                if !gather_kind_evidence(a, self_name, params, order, float, int) {
+                    return false;
+                }
+            }
+        }
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            for b in [cond, then_branch, else_branch] {
+                if !gather_kind_evidence(b, self_name, params, order, float, int) {
+                    return false;
+                }
+            }
+        }
+        _ => {}
+    }
+    // A parameter cannot be both an `i64`-closed operand and float-tainted.
+    !float.iter().any(|p| int.contains(p))
+}
+
+/// Propose a numeric kind per parameter when the source did not annotate them.
+///
+/// WHY THIS EXISTS. The mixed specialization is the sound successor to the removed blanket-`f64`
+/// function spec (see the note above `let kind = NumKind::Int` in [`build`]): it tracks each
+/// parameter's kind AND derives the exact return kind, so it cannot diverge from the interpreter
+/// on result type the way blanket `f64` codegen did. But it was reachable only through explicit
+/// `: Int` / `: Float` annotations — so an ORDINARY numeric loop, whose natural shape is float
+/// state plus an integer counter, never reached native code at all. Measured: `fn spin(zr, zi, i,
+/// n)` ran 0.72s where the identical annotated body ran 0.01s, a **72×** cliff with `JIT ≈ NOJIT`
+/// (i.e. it never compiled), and the same cliff hit all-`Float` recursion too.
+///
+/// WHY A PROPOSAL IS ENOUGH — this needs to be plausible, not sound, because two independent
+/// validators already stand behind it:
+/// 1. [`mixed_tail_ret_kind`] re-types the whole body under the proposed kinds and returns `None`
+///    if anything fails to check, so a body that does not fit the proposal is never compiled.
+/// 2. The VM re-tests every ARGUMENT's runtime type against `float_mask` before dispatching to
+///    the specialization (`vm.rs`, `Op::CallFn`), so a specialization built on a wrong guess is
+///    simply never called — the ordinary bytecode path runs and the result is unchanged.
+///
+/// So the cost of a bad proposal is a few microseconds of wasted JIT time, never a wrong answer.
+/// A parameter with contradictory evidence (used both as an `i64`-closed operand and float-tainted)
+/// declines the whole function rather than picking a side. Unresolved parameters default to `Int`;
+/// if that makes the signature all-`Int`, [`mixed_fn_sig`]'s existing `int_eligible` check drops
+/// it so the plain `i64` loop keeps the function.
+fn infer_param_kinds<'a>(f: &'a FnDef) -> Option<Vec<NumKind>> {
+    let order: Vec<&'a str> = f.params.iter().map(|(n, _)| n.as_str()).collect();
+    let params: HashSet<&'a str> = order.iter().copied().collect();
+    if params.len() != order.len() {
+        return None; // duplicate parameter names — not a shape to reason about
+    }
+    let mut float: HashSet<&'a str> = HashSet::new();
+    let mut int: HashSet<&'a str> = HashSet::new();
+    // Seed from whatever WAS annotated, so a partly-annotated signature is honoured exactly.
+    for (n, ann) in f.params {
+        match ann {
+            Some(TypeAnn::Float) => {
+                float.insert(n.as_str());
+            }
+            Some(TypeAnn::Int) => {
+                int.insert(n.as_str());
+            }
+            _ => {}
+        }
+    }
+    // Float taint propagates (a param becomes Float, which makes its neighbours Float), so
+    // iterate to a fixpoint. Bounded by the parameter count: each round either grows `float` or
+    // stops.
+    for _ in 0..=order.len() {
+        let before = float.len() + int.len();
+        if !gather_kind_evidence(f.body, f.name, &params, &order, &mut float, &mut int) {
+            return None;
+        }
+        if float.len() + int.len() == before {
+            break;
+        }
+    }
+    Some(
+        order
+            .iter()
+            .map(|n| if float.contains(n) { NumKind::Float } else { NumKind::Int })
+            .collect(),
+    )
+}
+
 fn mixed_fn_sig(
     f: &FnDef,
     tail_loop: &HashSet<&str>,
@@ -2911,17 +3158,30 @@ fn mixed_fn_sig(
     if f.params.is_empty() || f.params.len() > MAX_ARITY {
         return None;
     }
+    // Annotations win where present; anything unannotated gets an INFERRED kind, so an ordinary
+    // numeric loop (`fn spin(zr, zi, i, n)`) reaches this specialization instead of falling to
+    // the per-element VM — a measured 72× cliff. The proposal is validated by
+    // `mixed_tail_ret_kind` below and again by the VM's per-argument type test at dispatch, so a
+    // wrong inference costs a never-used specialization, not a wrong result. See
+    // [`infer_param_kinds`].
+    let inferred = if f.params.iter().any(|(_, a)| a.is_none()) {
+        Some(infer_param_kinds(f)?)
+    } else {
+        None
+    };
     let mut kinds = Vec::with_capacity(f.params.len());
     let mut mask: u16 = 0;
     for (j, (_, ann)) in f.params.iter().enumerate() {
-        match ann {
-            Some(TypeAnn::Int) => kinds.push(NumKind::Int),
-            Some(TypeAnn::Float) => {
-                kinds.push(NumKind::Float);
-                mask |= 1 << j;
-            }
-            _ => return None,
+        let k = match ann {
+            Some(TypeAnn::Int) => NumKind::Int,
+            Some(TypeAnn::Float) => NumKind::Float,
+            Some(_) => return None, // a non-numeric annotation is not this specialization's shape
+            None => inferred.as_ref()?[j],
+        };
+        if matches!(k, NumKind::Float) {
+            mask |= 1 << j;
         }
+        kinds.push(k);
     }
     if mask == 0 && int_eligible.contains(f.name) {
         // The plain i64 loop already covers an all-Int, i64-closed function — a mixed

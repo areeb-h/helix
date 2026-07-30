@@ -424,6 +424,52 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       array representations, and the capture/shadow/raise shapes so the DECLINE paths
       are exercised as hard as the fused one. 0 divergences.
 
+- [x] **Stage 3j — numeric recursion JITs without type annotations.** Found while
+      investigating whether to replace Cranelift, and it turned out to be the largest
+      single perf defect in the engine. The mixed per-parameter specialization — the
+      sound successor to the removed blanket-`f64` function spec (see the note above
+      `let kind = NumKind::Int` in `build`: a float-arg function can still return an
+      `Int`, so blanket `f64` codegen diverged on result type) — was reachable ONLY
+      through explicit `: Int` / `: Float` annotations. One line,
+      `_ => return None`, meant that the natural shape of a numeric loop (float state
+      plus an integer counter) never reached native code at all.
+
+      MEASURED (n=5M, min-of-3, gate profile), identical bodies:
+
+      | signature | before | after |
+      | --- | --- | --- |
+      | `fn spin(zr, zi, i, n)` (mixed) | 0.53s | **0.01s** (53×) |
+      | `fn spin(zr, zi, i, lim)` (all `Float`) | 0.63s | **0.01s** (63×) |
+      | `fn spin(zr: Float, …, n: Int)` (annotated) | 0.01s | 0.01s |
+      | `fn spin(a, b, i, n)` (all `Int`) | 0.00s | 0.00s |
+
+      `JIT ≈ NOJIT` on the unannotated forms confirmed they never compiled — this was
+      a cliff, not a slow path.
+
+      `infer_param_kinds` proposes a kind per unannotated parameter by float taint:
+      a `Float` literal, `sqrt`/`to_float`, or a division forces `f64`; `%`, `//`,
+      bitwise, shifts and array indices force `i64`; a self-call ties argument *j* to
+      parameter *j* (the strongest signal in a tail-recursive function); and a
+      comparison ties its two sides, which is the only way the limit in `i >= lim`
+      gets its type. Contradictory evidence declines the function rather than picking
+      a side. It iterates to a fixpoint because taint propagates.
+
+      **It only has to be PLAUSIBLE, not sound**, and that is the design's point:
+      `mixed_tail_ret_kind` re-types the whole body under the proposal and declines if
+      anything fails to check, and the VM re-tests every ARGUMENT's runtime type
+      against the compiled `float_mask` before dispatching (`vm.rs`, `Op::CallFn`). So
+      a wrong proposal costs a specialization that is never called — never a wrong
+      answer. Annotations, where present, are still honoured exactly.
+
+      Verified: `unannotated_numeric_recursion_reaches_native_code` (four
+      shapes — mixed, all-float, the mandelbrot inner loop, and a partly-annotated
+      signature — each checked against the walker AND asserted to engage native code,
+      since agreement alone would also hold if nothing compiled), plus the decline
+      path; sabotage-proven (restoring the old behaviour fails the test with "the
+      annotation cliff is back"); 1300 fuzzed unannotated mixed-recursion programs
+      across 5 seeds, 0 divergences. The suite's kernels are all annotated and
+      unchanged.
+
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).
