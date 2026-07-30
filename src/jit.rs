@@ -1705,6 +1705,58 @@ fn subst_acc(e: &Expr, pa: &str, n: usize, fields: &[String]) -> Expr {
     }
 }
 
+/// Replace every occurrence of the identifier `name` in `e` with `repl` — the substitution
+/// behind map→reduce fusion (`g_body[pb := f_body[fb := $counter]]`, the classical
+/// `map(f).reduce(init,g) ≡ reduce(init, (acc,i) => g(acc, f(i)))` identity).
+///
+/// DELIBERATELY CONSERVATIVE: only the pure-arithmetic node set that the f64 indexed reduce can
+/// actually lower is handled, and **anything else returns `None`** so the caller declines the
+/// whole fusion instead of emitting a body whose meaning it has not reasoned about. That rules
+/// out every binding form (`let`, lambda, `match`) by construction, so there is no shadowing
+/// case to get subtly wrong: a rebound `name` inside the substituted region cannot occur because
+/// no construct that could rebind it is admitted here. `repl` is substituted structurally, so a
+/// `name` occurring more than once duplicates it — safe, because every admitted node is pure and
+/// deterministic (the same reason the reduce kernel may re-evaluate an index expression).
+pub fn subst_ident(e: &Expr, name: &str, repl: &Expr) -> Option<Expr> {
+    Some(match e {
+        Expr::Int(_) | Expr::Float(_) => e.clone(),
+        Expr::Ident { name: n, .. } => {
+            if n == name {
+                repl.clone()
+            } else {
+                e.clone()
+            }
+        }
+        Expr::Unary { op, expr, line, col } => Expr::Unary {
+            op: op.clone(),
+            expr: Box::new(subst_ident(expr, name, repl)?),
+            line: *line,
+            col: *col,
+        },
+        Expr::Binary { op, left, right, line, col } => Expr::Binary {
+            op: op.clone(),
+            left: Box::new(subst_ident(left, name, repl)?),
+            right: Box::new(subst_ident(right, name, repl)?),
+            line: *line,
+            col: *col,
+        },
+        Expr::Index { recv, index, line, col } => Expr::Index {
+            recv: Box::new(subst_ident(recv, name, repl)?),
+            index: Box::new(subst_ident(index, name, repl)?),
+            line: *line,
+            col: *col,
+        },
+        Expr::Call { name: f, args, line, col } => Expr::Call {
+            name: f.clone(),
+            args: args.iter().map(|a| subst_ident(a, name, repl)).collect::<Option<Vec<_>>>()?,
+            line: *line,
+            col: *col,
+        },
+        // Every other node — binding forms, strings, records, method calls, … — declines.
+        _ => return None,
+    })
+}
+
 /// Substitute the slot accesses in each component (already in slot order) and keep them
 /// only if every one is `i64`-eligible over `{$acc0.., pb}`.
 fn check_slot_bodies(

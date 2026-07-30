@@ -367,6 +367,63 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       is supported in the float path. Float recursion `fibf(35.0)` runs native:
       **0.05s vs 1.58s on the VM (32×)**, the same tier as integer code.
       Parity-tested.
+- [x] **Stage 3i — map→reduce fusion by substitution.** The last spelling inversion:
+      `(0..n).map(f).reduce(init,g)` materialized an intermediate array the equivalent
+      direct reduce never builds. MEASURED (n=5M, min-of-4, JIT): `f64_mr`
+      **0.21s → 0.00s**, `f64arr_mr` **0.23s → 0.03s**, `saxpy_mr` **0.23s → 0.02s** —
+      each now equal to its `_dr` twin, so the table has no inversions left. The VM
+      path is unchanged (1.39s vs 1.47s before; the first reading of 6.12s was a
+      single cold run — measure min-of-N).
+
+      Implemented as the algebraic identity `map(f).reduce(init,g) ≡ reduce(init,
+      (acc,i) => g(acc, f(i)))`, NOT by teaching `FusionStage` to carry f64 elements.
+      That alternative would have built a SECOND implementation of "f64 body with
+      array captures and bounds" beside the reduce path's — which already has f64
+      accumulators over the i64 counter, `ArrayF64` captures with i128-proven bounds,
+      affine indices, value scalars, multi-accumulator splitting, and the poison-flag
+      division rule. Substitution reuses the proven one; the duplicate would drift.
+
+      **SAFETY comes from the emission shape, not the identity.** The fused body is a
+      `TryJitReduce` GUARD whose fall-through is the ORIGINAL unfused expression, so
+      the fused form runs ONLY as native code and only once the VM has proven `Int`
+      bounds within the cap, a `Float` init, every array index in range, and a clear
+      poison flag. A kernel meeting those cannot raise — which retires the one real
+      hazard of map-reduce fusion: unfused, `map` evaluates EVERY `f(i)` before any
+      `g`, so if both can raise the two spellings report DIFFERENT errors (f's
+      out-of-bounds at a later index vs g's division at an earlier one). Every
+      raising case takes the untouched original path.
+
+      Three guards, each sabotage-proven against a specific case:
+      * the capture check (`f` must not mention `pa`) — without it,
+        `s = 5.0; map(i => s * 1.0).reduce(0.0, (s,x) => s+x)` binds `s` to the
+        accumulator and returns 0.0 instead of 15.0;
+      * the SYNTHETIC accumulator slot name — naming it `pa` shadows an outer
+        variable for the recompiled fall-through, breaking
+        `range(0,u)…reduce(0.0,(u,x) => …)`. **Visible only on the VM path**, since
+        the JIT path takes the fused route and never runs the fall-through — which is
+        why every battery here compares all three engines;
+      * the `no_fuse` re-entry flag — without it, compiling the fall-through
+        re-detects the same expression and compilation hangs (exit 124).
+
+      `subst_ident` (`src/jit.rs`) is deliberately partial: it handles only the pure
+      arithmetic node set the f64 reduce can lower and returns `None` for anything
+      else, so every binding form (`let`, lambda, `match`) is excluded by
+      construction and there is no shadowing case inside the substituted region to
+      get wrong. Declines (and stays correct via the original) on: an i64 init (the
+      i64 map→reduce already fuses through `FusedKernel` — measured equal to its
+      direct twin, and untouched), a binding form, chained maps, a filter in the
+      chain, and a non-idempotent bound (which the guard's operands and the
+      fall-through would otherwise evaluate twice).
+
+      Pinned by `map_reduce_fusion_is_exact_and_declines_where_it_must` — whose
+      engagement check is the *property*, not a counter threshold: the map spelling
+      must cost the SAME number of native calls as the equivalent direct reduce, so
+      it self-calibrates if kernel accounting changes — plus
+      `tests/corpus/j6_map_reduce_fusion.helix`, a 24-case cross-engine battery, and
+      1500 fuzzed programs across 5 seeds that randomize both bodies, the init type,
+      array representations, and the capture/shadow/raise shapes so the DECLINE paths
+      are exercised as hard as the fused one. 0 divergences.
+
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).

@@ -1605,6 +1605,110 @@
         }
     }
 
+
+    /// map→reduce fusion by substitution: `range(s,e).map(f).reduce(init,g)` compiles the fold
+    /// over `g(acc, f(i))` directly, so no intermediate array is built. This is an AST rewrite,
+    /// which makes the hazards CAPTURE, SHADOWING, and ERROR ORDER rather than arithmetic — each
+    /// gets a case below, and each guard has been sabotage-proven (removing the capture check
+    /// makes the first case return 0.0 instead of 15.0; naming the accumulator slot after the
+    /// user's binder breaks the second ON THE VM PATH ONLY, since the JIT path takes the fused
+    /// route and never runs the fall-through; removing the re-entry guard makes compilation hang).
+    #[test]
+    fn map_reduce_fusion_is_exact_and_declines_where_it_must() {
+        // ENGAGEMENT, expressed as the property that actually matters: the map spelling must cost
+        // the SAME number of native calls as the equivalent direct reduce. Fused, both are one
+        // native fold; unfused, the map spelling additionally runs a map kernel and builds an
+        // array. A relative assertion self-calibrates if kernel accounting ever changes.
+        let fused = "(0..4).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)";
+        let direct = "(0..4).reduce(0.0, (s, i) => s + i * 1.5)";
+        crate::jit::reset_native_call_count();
+        assert_eq!(run_vm_jit(fused).as_deref(), Ok("9.0"), "fused value");
+        let n_fused = crate::jit::native_call_count();
+        crate::jit::reset_native_call_count();
+        assert_eq!(run_vm_jit(direct).as_deref(), Ok("9.0"), "direct value");
+        let n_direct = crate::jit::native_call_count();
+        assert!(n_direct > 0, "the direct reduce did not engage — the oracle is not testing native code");
+        assert_eq!(
+            n_fused, n_direct,
+            "map→reduce cost {n_fused} native calls vs {n_direct} for the equivalent direct \
+             reduce — fusion is not engaging, so the intermediate array is back"
+        );
+
+        // Exactness across the shapes fusion takes.
+        for (src, want) in [
+            ("(0..4).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)", "9.0"),
+            ("a = [1.5, 2.5, 3.5]\n(0..3).map(i => a[i]).reduce(0.0, (s, x) => s + x)", "7.5"),
+            (
+                "a = [1.5, 2.5, 3.5]\nb = [0.25, 0.5, 0.75]\nc = 2.5\n(0..3).map(i => c * a[i] + b[i]).reduce(0.0, (s, x) => s + x)",
+                "20.25",
+            ),
+            // the element binder used TWICE in `g` → the substituted body is duplicated, which is
+            // safe only because every admitted node is pure and deterministic
+            ("(0..4).map(i => i * 1.5).reduce(0.0, (s, x) => s + x * x)", "31.5"),
+            // absent from `g`
+            ("(0..3).map(i => i * 1.5).reduce(0.0, (s, x) => s + 1.0)", "3.0"),
+            // an affine index and a promoting call inside the map body
+            ("a = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]\n(0..3).map(i => a[2 * i]).reduce(0.0, (s, x) => s + x)", "7.5"),
+            ("a = [4.0, 9.0, 16.0]\n(0..3).map(i => sqrt(a[i])).reduce(0.0, (s, x) => s + x)", "9.0"),
+            // empty, reverse, and negative-start ranges
+            ("(3..3).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)", "0.0"),
+            ("(3..0).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)", "0.0"),
+            ("((0 - 2)..2).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)", "-3.0"),
+        ] {
+            let jit = run_vm_jit(src);
+            assert_eq!(jit, run_tw(src), "JIT vs walker on `{src}`");
+            assert_eq!(jit, run_vm(src), "JIT vs VM on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+
+        // CAPTURE: `f` references a variable named like the accumulator. Substituting would bind
+        // it to the accumulator and yield 0.0; the fusion must decline. All three engines agree.
+        let src = "s = 5.0\n(0..3).map(i => s * 1.0).reduce(0.0, (s, x) => s + x)";
+        assert_eq!(run_vm_jit(src), run_tw(src), "capture case: JIT vs walker");
+        assert_eq!(run_vm_jit(src), run_vm(src), "capture case: JIT vs VM");
+        assert_eq!(run_vm_jit(src).as_deref(), Ok("15.0"), "capture case value");
+
+        // SHADOWING: the range bound shares the accumulator's name. The accumulator SLOT is
+        // synthetic, so the recompiled fall-through still resolves the bound outward. The VM path
+        // is the one that exercises this (it runs the fall-through), so all three are compared.
+        let src = "u = 3\n(0..u).map(i => i * 1.5).reduce(0.0, (u, x) => u + x)";
+        assert_eq!(run_vm_jit(src), run_tw(src), "shadow case: JIT vs walker");
+        assert_eq!(run_vm(src), run_tw(src), "shadow case: VM vs walker (runs the fall-through)");
+        assert_eq!(run_vm_jit(src).as_deref(), Ok("4.5"), "shadow case value");
+
+        // ERROR ORDER — the hazard fusion would introduce if the fused body could raise. Here `f`
+        // raises out-of-bounds at i=2 while `g` divides by zero at i=0. Unfused, `map` runs to
+        // completion first, so the OOB is what surfaces; a fused body would surface the division.
+        // Because the guard declines whenever bounds are not proven, the original path runs and
+        // the OOB is reported — on every engine.
+        let src = "a = [1.5, 2.5]\n(0..3).map(i => a[i]).reduce(0.0, (s, x) => s + 1.0 / (x - 1.5))";
+        let e = run_vm_jit(src);
+        assert!(e.is_err(), "expected a raise");
+        assert_eq!(e, run_tw(src), "error-order: JIT vs walker");
+        assert_eq!(e, run_vm(src), "error-order: JIT vs VM");
+        assert!(
+            e.as_ref().unwrap_err().contains("out of bounds"),
+            "must report f's out-of-bounds, not g's division: {e:?}"
+        );
+
+        // Shapes that must DECLINE and stay correct: an i64 init (already fused by FusedKernel and
+        // not to be disturbed), a binding form the substitution refuses, non-numeric elements,
+        // chained maps, a filter in the chain, and a non-idempotent bound (which would otherwise
+        // be evaluated twice — once for the guard's operands, once by the fall-through).
+        for (src, want) in [
+            ("(0..5).map(i => i * 2).reduce(0, (s, x) => s + x)", "20"),
+            ("(0..3).map(i => let q = i in q * 1.5).reduce(0.0, (s, x) => s + x)", "4.5"),
+            ("(0..3).map(i => i * 1.5).map(y => y + 1.0).reduce(0.0, (s, x) => s + x)", "7.5"),
+            ("(0..5).filter(i => i > 1).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)", "13.5"),
+            ("fn f() = 3\n(0..f()).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)", "4.5"),
+        ] {
+            let jit = run_vm_jit(src);
+            assert_eq!(jit, run_tw(src), "declined shape: JIT vs walker on `{src}`");
+            assert_eq!(jit, run_vm(src), "declined shape: JIT vs VM on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+    }
+
     #[test]
     fn differential_functions_with_jit() {
         let mut rng = 0xFEED_FACE_DEAD_BEEFu64;

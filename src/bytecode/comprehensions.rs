@@ -637,6 +637,162 @@ impl super::Compiler {
         Ok(())
     }
 
+    /// `range(s,e).map(f).reduce(init, (pa,pb) => g)` — fuse the map INTO the fold via the
+    /// identity `map(f).reduce(init,g) ≡ reduce(init, (acc,i) => g(acc, f(i)))`, so no
+    /// intermediate array is built at all. The rewrite is exact: `map` preserves order and the
+    /// fold is still left-to-right over the same element values, so the result is bit-identical.
+    ///
+    /// WHY SUBSTITUTION AND NOT AN f64 `FusionStage`. The f64 reduce kernel already handles
+    /// everything such a body needs: an `f64` accumulator over the `i64` counter, `ArrayF64`
+    /// captures with i128-proven bounds, affine indices, value scalars, multi-accumulator
+    /// splitting, and the poison-flag division rule. Teaching [`FusionStage`] to carry f64
+    /// elements would build a SECOND implementation of that same capability, which would then
+    /// drift from the first. Substitution reuses the proven one.
+    ///
+    /// SAFETY comes from the emission shape, not from the identity. The fused body is emitted as
+    /// a `TryJitReduce` GUARD whose fall-through is the ORIGINAL unfused expression, so the fused
+    /// form runs ONLY as native code, and only after the VM proves its preconditions (`Int`
+    /// bounds within the materialization cap, a `Float` init, every array index in range, and a
+    /// clear poison flag for a dividing body). A kernel that satisfies those cannot raise — which
+    /// retires the one real hazard of map-reduce fusion: unfused, `map` evaluates EVERY `f(i)`
+    /// before any `g`, so if both could raise, the two spellings could report DIFFERENT errors
+    /// (f's at a later index rather than g's at an earlier one). Every case that can raise takes
+    /// the untouched original path, where the walker, the VM and the JIT agree by construction.
+    ///
+    /// Returns `true` if the guarded form was emitted (the caller must emit nothing further),
+    /// `false` if it declined WITHOUT emitting anything.
+    #[allow(clippy::too_many_arguments)] // as its neighbours: the reduce's parts are all distinct
+    fn emit_map_reduce_fusion(
+        &mut self,
+        b: &mut Builder,
+        orig: &Expr,
+        recv: &Expr,
+        init: &Expr,
+        pa: &str,
+        pb: &str,
+        gbody: &Expr,
+        line: usize,
+        col: usize,
+    ) -> R<bool> {
+        // Suppressed while emitting a fall-through (this one's or a fused pipeline's), so the
+        // recompiled original cannot re-detect itself and loop.
+        if self.no_fuse || pa == pb {
+            return Ok(false);
+        }
+        // recv must be `<source>.map(f)` with a single-parameter `f`.
+        let Expr::Method { recv: map_recv, name: mname, args: margs, .. } = recv else {
+            return Ok(false);
+        };
+        if mname.as_str() != "map" || margs.len() != 1 {
+            return Ok(false);
+        }
+        let Expr::Lambda { params: fp, body: fbody, .. } = &margs[0] else { return Ok(false) };
+        if fp.len() != 1 {
+            return Ok(false);
+        }
+        // The source must be a `range` counter: the substituted body folds over the COUNTER, which
+        // is what `reduce_jit_f64_range_*` (and its i128 bounds proof) is defined over.
+        let Some((start, end)) = self.builtin_range_call(b, map_recv) else { return Ok(false) };
+        // A `Float` init only. The i64 map→reduce ALREADY fuses through `FusedKernel` (measured
+        // equal to the direct reduce), so this must not disturb it.
+        if !matches!(init, Expr::Float(_)) {
+            return Ok(false);
+        }
+        // CAPTURE SAFETY: `f`'s body is about to sit inside a lambda binding `pa`, so a free
+        // variable of `f` named `pa` would be captured by the accumulator and silently change
+        // meaning. (`pb` needs no such check — it is the binder being replaced, and the new
+        // counter name is synthetic, so nothing in `g` can be captured by it either.)
+        if expr_mentions(fbody, pa) {
+            return Ok(false);
+        }
+        // Every operand is evaluated at the push site AND again by the recompiled original on the
+        // fall-through, so each must be idempotent.
+        for e in [start, Some(end), Some(init)].into_iter().flatten() {
+            if !is_idempotent(e) {
+                return Ok(false);
+            }
+        }
+        let counter = Expr::Ident { name: MR_COUNTER.to_string(), line, col };
+        let Some(f_sub) = crate::jit::subst_ident(fbody, &fp[0], &counter) else {
+            return Ok(false);
+        };
+        let Some(new_body) = crate::jit::subst_ident(gbody, pb, &f_sub) else { return Ok(false) };
+
+        // Decide eligibility BEFORE emitting anything — the same two f64 range analyses
+        // `compile_reduce_range` selects between, so the fused body is admitted on exactly the
+        // terms an unfused one would be (and `reduce_bodies_eligible` re-derives both at build
+        // time, which is what actually keeps compile-gate and build-gate from drifting).
+        let user_fns = self.user_fn_set();
+        let (bodies, captures, bounds, synth) =
+            match crate::jit::reduce_jit_f64_range_captures(init, &new_body, pa, MR_COUNTER, &user_fns) {
+                Some((bd, caps, bnds, syn)) => (vec![bd], caps, bnds, syn),
+                None => match crate::jit::reduce_jit_f64_range_body(init, &new_body, pa, MR_COUNTER, &user_fns) {
+                    Some(bd) => (vec![bd], Vec::new(), Vec::new(), Vec::new()),
+                    None => return Ok(false),
+                },
+            };
+
+        // --- committed: emit [start, end], the acc slot, the captures, then the guard ---
+        match start {
+            None => {
+                let c0 = b.add_const(Value::Int(0));
+                b.emit(Op::Const(c0), line, col);
+            }
+            Some(e) => self.compile_expr(b, e)?,
+        }
+        self.compile_expr(b, end)?;
+
+        b.scopes.push(Vec::new());
+        let saved_next = b.next_slot;
+        // `init` in the OUTER environment (no binder is in scope yet), then into a SYNTHETIC slot.
+        // The slot must not be named `pa`: declaring `s` here would shadow an outer `s` for the
+        // fall-through expression, so `range(0, s).map(…).reduce(0.0, (s, x) => …)` would resolve
+        // its bound to this scratch slot.
+        self.compile_expr(b, init)?;
+        let acc = b.declare_local(MR_ACC);
+        b.emit(Op::StoreLocal(acc), line, col);
+        for cap in &captures {
+            match synth.iter().find(|(n, _)| *n == cap.name) {
+                Some((_, e)) => self.compile_expr(b, &e.clone())?,
+                None => self.compile_expr(b, &Expr::Ident { name: cap.name.clone(), line, col })?,
+            }
+        }
+        let loop_idx = self.reduce_loops.len() as u32;
+        self.reduce_loops.push(ReduceLoop {
+            pa: pa.to_string(),
+            pb: MR_COUNTER.to_string(),
+            bodies,
+            captures,
+            index_bounds: bounds,
+            float: true,
+            inner_start_coeff: 0,
+            inner_end_coeff: 0,
+        });
+        let at = b.emit(Op::TryJitReduce { loop_idx, acc_slot: acc, after: 0 }, line, col);
+
+        // Fall-through: the VM leaves `[start, end]` on the stack (it only pops them when it TAKES
+        // the native path), so discard them, then recompile the ORIGINAL unfused expression with
+        // fusion suppressed so it cannot re-detect itself.
+        b.emit(Op::Pop, line, col);
+        b.emit(Op::Pop, line, col);
+        self.no_fuse = true;
+        let r = self.compile_expr(b, orig);
+        self.no_fuse = false;
+        r?;
+        let jmp_at = b.emit(Op::Jump(0), line, col);
+
+        // Native path lands here with the fold's result in the acc slot.
+        let after_at = b.code.len() as u32;
+        b.code[at] = Op::TryJitReduce { loop_idx, acc_slot: acc, after: after_at };
+        b.emit(Op::LoadLocal(acc), line, col);
+        let converge = b.code.len() as u32;
+        b.code[jmp_at] = Op::Jump(converge);
+
+        b.scopes.pop();
+        b.next_slot = saved_next;
+        Ok(true)
+    }
+
     fn compile_reduce(
         &mut self,
         b: &mut Builder,
@@ -690,6 +846,21 @@ impl super::Compiler {
         // array materialized at all — the element binder *is* the counter.
         if let Some((start, end)) = self.builtin_range_call(b, recv) {
             return self.compile_reduce_range(b, start, end, &args[0], &pa, &pb, body, line, col);
+        }
+
+        // MAP→REDUCE fusion: `range(..).map(f).reduce(init, g)` folds `f` into `g` so the
+        // intermediate array is never built. Guarded, with this same expression as the
+        // fall-through — see `emit_map_reduce_fusion`.
+        let orig = Expr::Method {
+            recv: Box::new(recv.clone()),
+            name: "reduce".to_string(),
+            args: args.to_vec(),
+            named: Vec::new(),
+            line,
+            col,
+        };
+        if self.emit_map_reduce_fusion(b, &orig, recv, &args[0], &pa, &pb, body, line, col)? {
+            return Ok(());
         }
 
         self.compile_expr(b, recv)?;
@@ -1109,6 +1280,15 @@ impl super::Compiler {
         Ok(())
     }
 }
+
+/// The synthetic counter binder for a fused map→reduce body. `$`-prefixed, so it cannot collide
+/// with any user identifier (the lexer never produces one) — which is what makes the
+/// substitution capture-free with no renaming pass: nothing in `g` can be captured by it.
+const MR_COUNTER: &str = "$mrc";
+/// The synthetic name for a fused map→reduce's accumulator SLOT. Synthetic for a concrete
+/// reason: declaring the slot under the user's own accumulator name would shadow an outer
+/// variable of that name for the fall-through expression.
+const MR_ACC: &str = "$mracc";
 
 /// Conservative "does `name` appear as an identifier anywhere in `e`?" — used to keep the
 /// nested-reduce operands (`is`/`ie`/`init`/`oe`) independent of the outer binder, so they can

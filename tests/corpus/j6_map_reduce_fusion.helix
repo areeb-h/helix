@@ -1,0 +1,57 @@
+# map→reduce fusion: `range(s,e).map(f).reduce(init,g)` compiles the fold over `g(acc, f(i))`
+# directly, so the intermediate array is never built. The identity is exact — `map` preserves
+# order and the fold is still left-to-right over the same values — so this is a rewrite, not an
+# approximation.
+#
+# Because it IS an AST rewrite, the hazards are capture, shadowing, and error ORDER rather than
+# arithmetic. It is emitted as a guard whose fall-through is the ORIGINAL unfused expression, so
+# the fused body runs only as native code under proven preconditions and therefore cannot raise;
+# every case that can raise takes the untouched original path. Each hazard has a case here.
+
+a = [1.5, 2.5, 3.5]
+b = [0.25, 0.5, 0.75]
+
+# the shapes fusion takes
+print((0..4).map(i => i * 1.5).reduce(0.0, (s, x) => s + x))
+print((0..3).map(i => a[i]).reduce(0.0, (s, x) => s + x))
+print((0..3).map(i => a[i] + b[i]).reduce(0.0, (s, x) => s + x))
+
+# a SAXPY sum — the flagship composition, now with no intermediate array
+c = 2.5
+print((0..3).map(i => c * a[i] + b[i]).reduce(0.0, (s, x) => s + x))
+
+# the element binder used TWICE in g (the substituted body is duplicated — safe because every
+# admitted node is pure and deterministic), and not at all
+print((0..4).map(i => i * 1.5).reduce(0.0, (s, x) => s + x * x))
+print((0..3).map(i => i * 1.5).reduce(0.0, (s, x) => s + 1.0))
+
+# an affine index and a promoting call inside the map body
+q = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]
+print((0..3).map(i => q[2 * i]).reduce(0.0, (s, x) => s + x))
+r = [4.0, 9.0, 16.0]
+print((0..3).map(i => sqrt(r[i])).reduce(0.0, (s, x) => s + x))
+
+# CAPTURE: `f` reads a variable named like the accumulator. Substituting would bind it to the
+# accumulator and give 0.0, so the fusion declines and this stays 15.0.
+s = 5.0
+print((0..3).map(i => s * 1.0).reduce(0.0, (s, x) => s + x))
+
+# SHADOWING: the range bound shares the accumulator's name. The accumulator slot is synthetic,
+# so the recompiled fall-through still resolves the bound outward. (The VM path is what runs
+# that fall-through — this case is invisible on the JIT path.)
+u = 3
+print((0..u).map(i => i * 1.5).reduce(0.0, (u, x) => u + x))
+
+# shapes that DECLINE and stay correct: an i64 init (already fused elsewhere), a binding form the
+# substitution refuses, chained maps, a filter in the chain, a non-idempotent bound
+print((0..5).map(i => i * 2).reduce(0, (acc, x) => acc + x))
+print((0..3).map(i => let z = i in z * 1.5).reduce(0.0, (acc, x) => acc + x))
+print((0..3).map(i => i * 1.5).map(y => y + 1.0).reduce(0.0, (acc, x) => acc + x))
+print((0..5).filter(i => i > 1).map(i => i * 1.5).reduce(0.0, (acc, x) => acc + x))
+fn three() = 3
+print((0..three()).map(i => i * 1.5).reduce(0.0, (acc, x) => acc + x))
+
+# empty, reverse, and negative-start ranges
+print((3..3).map(i => i * 1.5).reduce(0.0, (acc, x) => acc + x))
+print((3..0).map(i => i * 1.5).reduce(0.0, (acc, x) => acc + x))
+print(((0 - 2)..2).map(i => i * 1.5).reduce(0.0, (acc, x) => acc + x))
