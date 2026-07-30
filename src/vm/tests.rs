@@ -1533,6 +1533,78 @@
         }
     }
 
+
+    /// Value scalars in the **f64 indexed REDUCE** — the allocation-free spelling, and the one
+    /// that matters most (it is the faithful port that beats C on k1 dot). Before this, the f64
+    /// indexed reduce admitted NO value-scalar captures at all (`infer_f64_indexed`'s Ident arm
+    /// returned `None` — a documented v1b limitation), so `s + c * a[i]` with `c` a variable of
+    /// EITHER type fell to the VM: a measured ~30× cliff, and `map(...).reduce(...)` was
+    /// perversely faster than the direct reduce that allocates nothing.
+    ///
+    /// This kernel is monomorphically `f64` (a `Float` init picked it), so there is no
+    /// representation routing here — but the bit-identity rule carries over exactly, via the
+    /// same shared `mix_combine`: a value scalar rides as `f64` yet may be `Int` at runtime, so
+    /// it is admitted only where a genuine float (the accumulator, an array load, a float
+    /// literal) promotes it. The decline cases below use 2^53+1 so a wrong admission is a REAL
+    /// divergence — proven by sabotage (forcing it yields …928.0 vs the correct …944.0).
+    #[test]
+    fn f64_reduce_value_scalars_promote_or_decline() {
+        crate::jit::reset_native_call_count();
+        let arrs = "a = [1.5, 2.5, 3.5]\nb = [0.25, 0.5, 0.75]\n";
+        // Engaging: the value scalar is promoted by an array load or the f64 accumulator.
+        for (body, want) in [
+            ("c = 2.5\n(0..3).reduce(0.0, (s, i) => s + c * a[i] + b[i])", "20.25"),
+            // an INT variable coefficient — also declined before this change
+            ("m = 3\n(0..3).reduce(0.0, (s, i) => s + m * a[i])", "22.5"),
+            ("c = 2.0\nd = 4.0\n(0..3).reduce(0.0, (s, i) => s + c * a[i] + d * b[i])", "21.0"),
+            ("c = 10.0\n(0..3).reduce(0.0, (s, i) => s + a[i] + c)", "37.5"),
+            // sqrt promotes, so a value scalar under it is safe
+            ("c = 16.0\n(0..3).reduce(0.0, (s, i) => s + sqrt(c) + a[i])", "19.5"),
+            // the accumulator itself is a genuine float and promotes the scalar
+            ("c = 1.5\n(0..3).reduce(1.0, (s, i) => s * c + a[i])", "14.0"),
+        ] {
+            let src = format!("{arrs}{body}");
+            let jit = run_vm_jit(&src);
+            assert_eq!(jit, run_tw(&src), "engines disagree on `{src}`");
+            assert_eq!(jit, run_vm(&src), "vm disagrees on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the f64 reduce never engaged with a value scalar — the oracle tested the VM against \
+             itself, and the ~30× cliff this closes would be silently back"
+        );
+
+        // MUST DECLINE — the interpreter evaluates these subterms in i64, the kernel would use
+        // f64. Fall back and agree on the i64-exact value.
+        for body in [
+            "big = 9007199254740993\n(0..3).reduce(0.0, (s, i) => s + big * 3 + a[i])",
+            "big = 9007199254740993\n(0..3).reduce(0.0, (s, i) => s + big * i + a[i])",
+            "p = 9007199254740993\nq = 9007199254740993\n(0..3).reduce(0.0, (s, i) => s + p + q + a[i])",
+            // abs/min do not promote, so an SFloat argument must be refused
+            "c = 0.0 - 5.5\n(0..3).reduce(0.0, (s, i) => s + abs(c) + a[i])",
+            "c = 2.5\n(0..3).reduce(0.0, (s, i) => s + min(c, a[i]))",
+        ] {
+            let src = format!("{arrs}{body}");
+            assert_eq!(run_vm_jit(&src), run_tw(&src), "declined shape must match the walker on `{src}`");
+            assert_eq!(run_vm_jit(&src), run_vm(&src), "declined shape must match the VM on `{src}`");
+        }
+
+        // INDEX scalars must stay `i64` and NOT be relabeled into f64 value scalars — including a
+        // name used as both an index and a value (necessarily Int), and a COMPOUND affine term
+        // whose parts are named only through a synthetic `$aff` slot.
+        for (src, want) in [
+            ("a = [1.5, 2.5, 3.5]\nb = [0.25, 0.5, 0.75]\nk = 2\n(0..3).reduce(0.0, (s, i) => s + a[k] + b[i])", "12.0"),
+            ("n = 2\nm = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\nj = 1\n(0..3).reduce(0.0, (s, k) => s + m[k * n + j])", "12.0"),
+            ("n = 2\nm = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\n(0..3).reduce(0.0, (s, k) => s + m[k * n] * n)", "18.0"),
+            ("a = [1.5, 2.5, 3.5]\np = 1\nq = 1\nc = 2.0\n(0..2).reduce(0.0, (s, i) => s + c * a[i + p + q - 1])", "12.0"),
+        ] {
+            let jit = run_vm_jit(src);
+            assert_eq!(jit, run_tw(src), "index-scalar disagreement on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+    }
+
     #[test]
     fn differential_functions_with_jit() {
         let mut rng = 0xFEED_FACE_DEAD_BEEFu64;

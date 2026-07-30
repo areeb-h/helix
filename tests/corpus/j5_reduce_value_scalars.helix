@@ -1,0 +1,60 @@
+# Value scalars in the f64 indexed REDUCE — the allocation-free spelling (and the one that
+# beats C on k1 dot). Before this the f64 indexed reduce admitted NO value-scalar captures at
+# all, so `s + c * a[i]` with `c` a variable of EITHER type fell to the per-element VM loop.
+#
+# The kernel is monomorphically f64 (a Float init picked it), so there is no representation
+# routing here — but the bit-identity rule is the same one the mixed map uses, via the shared
+# `mix_combine`: a value scalar rides as f64 yet may be Int at runtime, so it is admitted only
+# where a genuine float (the accumulator, an array load, a float literal) promotes it. The
+# decline cases below use 2^53+1, where the interpreter's exact i64 and the kernel's f64 really
+# differ, so they must fall back and still agree.
+
+a = [1.5, 2.5, 3.5]
+b = [0.25, 0.5, 0.75]
+
+# the flagship shape: a SAXPY sum with a runtime float coefficient, no intermediate array
+c = 2.5
+print((0..3).reduce(0.0, (s, i) => s + c * a[i] + b[i]))
+
+# an INT variable coefficient — also declined before this change
+m = 3
+print((0..3).reduce(0.0, (s, i) => s + m * a[i]))
+
+# two coefficients, each promoted by its own array
+d = 4.0
+print((0..3).reduce(0.0, (s, i) => s + c * a[i] + d * b[i]))
+
+# an additive offset, and sqrt (which promotes, so a value scalar under it is safe)
+off = 10.0
+print((0..3).reduce(0.0, (s, i) => s + a[i] + off))
+f = 16.0
+print((0..3).reduce(0.0, (s, i) => s + sqrt(f) + a[i]))
+
+# the accumulator is itself a genuine float and promotes the scalar
+print((0..3).reduce(1.0, (s, i) => s * c + a[i]))
+
+# INDEX scalars stay i64 — a point index, an affine i*n+j, a name used as BOTH index and value
+# (necessarily Int), and a COMPOUND affine term named only through a synthetic $aff slot
+k = 2
+print((0..3).reduce(0.0, (s, i) => s + a[k] + b[i]))
+n = 2
+mm = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+j = 1
+print((0..3).reduce(0.0, (s, t) => s + mm[t * n + j]))
+print((0..3).reduce(0.0, (s, t) => s + mm[t * n] * n))
+p = 1
+q = 1
+print((0..2).reduce(0.0, (s, i) => s + c * a[i + p + q - 1]))
+
+# DECLINE cases (2^53+1 makes the interp-vs-kernel gap real) — must agree via the checked loop
+big = 9007199254740993
+print((0..3).reduce(0.0, (s, i) => s + big * 3 + a[i]))
+print((0..3).reduce(0.0, (s, i) => s + big * i + a[i]))
+# abs/min do not promote, so an unpromoted value scalar under them is refused
+g = 0.0 - 5.5
+print((0..3).reduce(0.0, (s, i) => s + abs(g) + a[i]))
+print((0..3).reduce(0.0, (s, i) => s + min(c, a[i])))
+
+# a float coefficient over an INTS array: the i64 reduce path, must stay correct
+x = [10, 20, 30]
+print((0..3).reduce(0.0, (s, i) => s + c * x[i]))

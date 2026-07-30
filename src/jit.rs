@@ -1192,13 +1192,22 @@ fn reduce_multiacc_term(rl: &crate::bytecode::ReduceLoop) -> Option<&Expr> {
     None
 }
 
-/// Bottom-up kind of a **scalar f64 reduce body that indexes captured `f64` arrays by the
-/// loop counter** (the float dot-product / weighted-sum case): `pa` is the `f64` accumulator,
-/// `pb` the `i64` counter, and `arr[pb]` for a free array `arr` is an `f64` element →
-/// records `arr` as a [`CaptureKind::ArrayF64`] capture (first-appearance order). A bare free
-/// var is still rejected (its runtime type is unknown — no scalar f64 captures in v1b). Same
-/// promotion rules as [`infer_reduce_f64_kind`]; the VM pre-checks each array's bounds before
-/// the kernel does raw `f64` loads. `None` outside the eligible shape.
+/// Bottom-up [`MixT`] of a **scalar f64 reduce body that indexes captured `f64` arrays by the
+/// loop counter** (the float dot-product / weighted-sum / SAXPY-sum case): `pa` is the `f64`
+/// accumulator, `pb` the `i64` counter, and `arr[index]` for a free array `arr` is an `f64`
+/// element → records `arr` as a [`CaptureKind::ArrayF64`] capture (first-appearance order).
+///
+/// A bare free var is a VALUE SCALAR — the coefficient `c` in `s + c * a[i]`. It rides as `f64`
+/// in this kernel (which is monomorphically `f64`: a `Float` init picked it), so unlike the map
+/// case there is no representation routing to do. What DOES carry over is the bit-identity rule:
+/// the codegen evaluates integer subexpressions in `i64` and promotes at the first float, exactly
+/// like the interpreter, so a value scalar — `f64` in the kernel but possibly `Int` at runtime —
+/// is admitted ONLY where a genuine float ([`MixT::GFloat`]: the accumulator, an array load, a
+/// float literal) promotes it. `c * a[i]` is safe; `c * pb` or `c + d` would be `i64` in the
+/// interpreter and `f64` here, diverging past 2^53, so they are rejected. See [`MixT`].
+///
+/// The VM pre-checks each array's bounds before the kernel does raw `f64` loads. `None` outside
+/// the eligible shape.
 fn infer_f64_indexed(
     e: &Expr,
     pa: &str,
@@ -1207,17 +1216,20 @@ fn infer_f64_indexed(
     synth: &mut Vec<(String, Expr)>,
     bounds: &mut Vec<IndexBound>,
     user_fns: &HashSet<&str>,
-) -> Option<NumKind> {
+) -> Option<MixT> {
     match e {
-        Expr::Int(_) => Some(NumKind::Int),
-        Expr::Float(_) => Some(NumKind::Float),
+        Expr::Int(_) => Some(MixT::Int),
+        Expr::Float(_) => Some(MixT::GFloat),
         Expr::Ident { name, .. } => {
             if name == pa {
-                Some(NumKind::Float)
+                Some(MixT::GFloat) // the f64 accumulator register — a genuine float
             } else if name == pb {
-                Some(NumKind::Int)
+                Some(MixT::Int)
             } else {
-                None // bare free var: unknown runtime type (only indexed array caps allowed)
+                // A free VALUE scalar, loaded `f64` by the kernel. Recorded `Scalar` here and
+                // relabeled to `ScalarValue` by the caller once the bounds show it is not an
+                // index (an index scalar must stay `i64`).
+                record_cap(caps, name, CaptureKind::Scalar).then_some(MixT::SFloat)
             }
         }
         // A free `f64` array read at an index that is AFFINE in the counter → an `f64` element.
@@ -1250,28 +1262,30 @@ fn infer_f64_indexed(
                     );
                 }
             }
-            Some(NumKind::Float)
+            Some(MixT::GFloat) // an f64 array load is a genuine float
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
             let lk = infer_f64_indexed(left, pa, pb, caps, synth, bounds, user_fns)?;
             let rk = infer_f64_indexed(right, pa, pb, caps, synth, bounds, user_fns)?;
-            Some(if lk == NumKind::Float || rk == NumKind::Float {
-                NumKind::Float
-            } else {
-                NumKind::Int
-            })
+            mix_combine(lk, rk)
         }
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
+                // `sqrt` promotes its argument in BOTH engines → an `SFloat` arg is safe.
                 ("sqrt", 1) => {
                     infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)?;
-                    Some(NumKind::Float)
+                    Some(MixT::GFloat)
                 }
-                ("abs", 1) => infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns),
+                // `abs`/`min`/`max` do NOT promote (interp `abs(Int)` is `iabs`), so an `SFloat`
+                // argument would diverge; admit only genuine floats or ints, preserving the kind.
+                ("abs", 1) => match infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)? {
+                    MixT::SFloat => None,
+                    k => Some(k),
+                },
                 ("min" | "max", 2) => {
                     let ka = infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)?;
                     let kb = infer_f64_indexed(&args[1], pa, pb, caps, synth, bounds, user_fns)?;
-                    if ka == kb { Some(ka) } else { None }
+                    if ka == kb && ka != MixT::SFloat { Some(ka) } else { None }
                 }
                 _ => None,
             }
@@ -1438,10 +1452,14 @@ pub fn reduce_jit_f64_range_captures(
     let mut synth: Vec<(String, Expr)> = Vec::new();
     let mut bounds: Vec<IndexBound> = Vec::new();
     if infer_f64_indexed(body, pa, pb, &mut caps, &mut synth, &mut bounds, user_fns)
-        == Some(NumKind::Float)
+        == Some(MixT::GFloat)
         && caps.iter().any(|c| c.kind == CaptureKind::ArrayF64)
         && caps.len() <= MAX_CAPTURES
     {
+        // Value scalars (`c` in `s + c*a[i]`) become `ScalarValue`, loaded `f64` by the kernel;
+        // INDEX scalars (an `a[k]` index, an affine `base`/`coef`, incl. names inside a
+        // synthetic `$aff` term) stay `Scalar` — `i64`, since an index is an integer.
+        relabel_value_scalars(&mut caps, &bounds, &synth);
         Some((body.clone(), caps, bounds, synth))
     } else {
         None
@@ -1861,14 +1879,26 @@ fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>,
             let mut bounds: Vec<IndexBound> = Vec::new();
             let root =
                 infer_f64_indexed(&rl.bodies[0], &rl.pa, &rl.pb, &mut caps, &mut synth, &mut bounds, user_fns);
+            // Mirror the compile gate exactly, INCLUDING the value-scalar relabel — otherwise the
+            // re-derived list differs from the stored one by kind alone and every such kernel
+            // silently declines.
+            if root == Some(MixT::GFloat) {
+                relabel_value_scalars(&mut caps, &bounds, &synth);
+            }
             // Reproduce BOTH the capture set and the bounds obligations exactly (the i64 path's
-            // rule, now that an f64 kernel can carry `Scalar` caps and affine bounds): any drift
-            // would run unchecked native loads behind a pre-check that doesn't describe them.
-            return root == Some(NumKind::Float)
+            // rule, now that an f64 kernel can carry `Scalar`/`ScalarValue` caps and affine
+            // bounds): any drift would run unchecked native loads behind a pre-check that doesn't
+            // describe them.
+            return root == Some(MixT::GFloat)
                 && caps == rl.captures
                 && bounds == rl.index_bounds
                 && caps.iter().any(|c| c.kind == CaptureKind::ArrayF64)
-                && caps.iter().all(|c| matches!(c.kind, CaptureKind::ArrayF64 | CaptureKind::Scalar))
+                && caps.iter().all(|c| {
+                    matches!(
+                        c.kind,
+                        CaptureKind::ArrayF64 | CaptureKind::Scalar | CaptureKind::ScalarValue
+                    )
+                })
                 && caps.len() <= MAX_CAPTURES;
         }
         let n = rl.bodies.len();
@@ -2199,6 +2229,21 @@ enum MixT {
     SFloat,
 }
 
+/// Combine two `+`/`-`/`*` operand kinds: a genuine float promotes anything (both engines
+/// promote, so it is safe); two `Int`s stay `Int`; a value scalar NOT paired with a genuine
+/// float is the divergence case and is rejected. Shared by the mixed MAP analysis
+/// ([`infer_mixed_kind_indexed`]) and the f64 indexed REDUCE analysis ([`infer_f64_indexed`])
+/// so both sites enforce one rule — the rule proven load-bearing by sabotage (forcing
+/// `(SFloat, Int)` to combine makes `(2^53+1) * 3 + x[i]` differ from the interpreter).
+fn mix_combine(l: MixT, r: MixT) -> Option<MixT> {
+    match (l, r) {
+        (MixT::GFloat, _) | (_, MixT::GFloat) => Some(MixT::GFloat),
+        (MixT::Int, MixT::Int) => Some(MixT::Int),
+        // (SFloat, Int) | (Int, SFloat) | (SFloat, SFloat): the interpreter may do i64.
+        _ => None,
+    }
+}
+
 /// Bottom-up [`MixT`] of an indexed-mixed node, recording captures/bounds as it goes —
 /// [`infer_mixed_kind`]'s arm set plus the index shapes and value-scalar captures, mirroring
 /// [`gen_value_typed`]'s codegen (a node this admits and that miscompiles is a divergence, so
@@ -2213,16 +2258,6 @@ fn infer_mixed_kind_indexed(
     synth: &mut Vec<(String, Expr)>,
     user_fns: &HashSet<&str>,
 ) -> Option<MixT> {
-    // Combine two `+`/`-`/`*` operands: a genuine float promotes anything (safe); two `Int`s
-    // stay `Int`; a value scalar NOT paired with a genuine float is the divergence case.
-    fn combine(l: MixT, r: MixT) -> Option<MixT> {
-        match (l, r) {
-            (MixT::GFloat, _) | (_, MixT::GFloat) => Some(MixT::GFloat),
-            (MixT::Int, MixT::Int) => Some(MixT::Int),
-            // (SFloat, Int) | (Int, SFloat) | (SFloat, SFloat): the interpreter may do i64.
-            _ => None,
-        }
-    }
     match e {
         Expr::Int(_) => Some(MixT::Int),
         Expr::Float(_) => Some(MixT::GFloat),
@@ -2303,7 +2338,7 @@ fn infer_mixed_kind_indexed(
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
             let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, synth, user_fns)?;
             let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, synth, user_fns)?;
-            combine(lk, rk)
+            mix_combine(lk, rk)
         }
         Expr::Binary {
             op: op @ (BinOp::Mod | BinOp::FloorDiv | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr),
@@ -3169,15 +3204,21 @@ fn define_reduce_loop(
         }
     }
 
-    // Load each captured value once (loop-invariant) from the `caps` pointer (4th param).
+    // Load each captured value once (loop-invariant) from the `caps` pointer (4th param). The
+    // load TYPE is per cap kind, not per kernel: a `ScalarValue` (a VALUE scalar such as the
+    // coefficient `c` in `s + c*a[i]`) rides as `f64` — the VM packs `Value::Int` as
+    // `(i as f64).to_bits()` or passes `Value::Float`'s bits — while a `Scalar` (an INDEX
+    // scalar) and every array BASE POINTER are `i64`. Typing the load by the cap is what keeps
+    // a pointer from being read as a float and vice versa.
     let cap_vars: Vec<Variable> = if has_caps {
         let caps_ptr = b.block_params(entry)[3];
         rl.captures
             .iter()
             .enumerate()
-            .map(|(j, _)| {
-                let v = b.ins().load(I64, MemFlags::trusted(), caps_ptr, (j * 8) as i32);
-                let var = b.declare_var(I64);
+            .map(|(j, cap)| {
+                let ty = if cap.kind == CaptureKind::ScalarValue { F64 } else { I64 };
+                let v = b.ins().load(ty, MemFlags::trusted(), caps_ptr, (j * 8) as i32);
+                let var = b.declare_var(ty);
                 b.def_var(var, v);
                 var
             })
@@ -3357,10 +3398,17 @@ fn define_reduce_loop(
                     // index expression from it. Synthetic `$aff*` caps carry the same index's
                     // pre-computed base/coef for the VM's bounds check ONLY — the body never names
                     // them, so binding them here is harmless and they simply go unread.
-                    // A value scalar (map-only) never reaches a reduce, but if one ever did it is
-                    // an `i64` value exactly like a `Scalar` here — bind it the same way.
-                    CaptureKind::Scalar | CaptureKind::ScalarValue => {
+                    // An INDEX scalar: `i64` (`i`/`n` in `a[i*n+k]`), bound as an `Int` binder so
+                    // the generic `Index` arm can evaluate the ORIGINAL index expression from it.
+                    CaptureKind::Scalar => {
                         binders.insert(cap.name.as_str(), (cv, NumKind::Int));
+                    }
+                    // A VALUE scalar (the coefficient `c` in `s + c*a[i]`): loaded `f64` below,
+                    // so it is a `Float` binder. `infer_f64_indexed` admitted it only where a
+                    // genuine float promotes it, which is what makes the `f64` typing match the
+                    // interpreter bit-for-bit.
+                    CaptureKind::ScalarValue => {
+                        binders.insert(cap.name.as_str(), (cv, NumKind::Float));
                     }
                     CaptureKind::ArrayI64 => {}
                 }

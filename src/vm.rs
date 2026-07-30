@@ -1359,6 +1359,20 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                             caps.push(*i);
                                             lens.push(0);
                                         }
+                                        // A VALUE scalar (the coefficient `c` in `s + c*a[i]`).
+                                        // This kernel is monomorphically `f64`, so the slot rides
+                                        // as `f64` BITS: an `Int` promoted (matching the
+                                        // interpreter's `Int * Float` promotion, which
+                                        // `infer_f64_indexed` only admitted where a genuine float
+                                        // forces it) or a `Float` passed through.
+                                        (CaptureKind::ScalarValue, Value::Int(i)) => {
+                                            caps.push((*i as f64).to_bits() as i64);
+                                            lens.push(0);
+                                        }
+                                        (CaptureKind::ScalarValue, Value::Float(f)) => {
+                                            caps.push(f.to_bits() as i64);
+                                            lens.push(0);
+                                        }
                                         _ => {
                                             ok = false;
                                             break;

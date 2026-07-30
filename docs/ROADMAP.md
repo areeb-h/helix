@@ -550,6 +550,39 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       on memory-bound *reduces*, k1 dot beats C, not on produce-a-new-vector — the k7
       lesson). A k10 BLAS-1 benchmark should be added and say so; the kernel engaging
       is necessary, not sufficient.
+
+- [x] **Stage 3h — value scalars in the f64 indexed REDUCE.** Found by measuring the
+      map-vs-reduce spellings side by side: `map(i => c*a[i]+b[i]).reduce(…)` came out
+      **faster** than the direct `reduce(0.0, (s,i) => s + c*a[i]+b[i])` — impossible,
+      since the reduce allocates nothing. `infer_f64_indexed`'s `Ident` arm returned
+      `None` for any free var ("only indexed array caps allowed", a documented v1b
+      limit), so a coefficient of EITHER type sent the whole reduce to the VM.
+      MEASURED (n=5M, min-of-3): float coefficient **0.75s → 0.03s**, int coefficient
+      **0.76s → 0.02s** (~30×). This is the *allocation-free* spelling — the faithful
+      port that beats C on k1 dot — so it matters more than the map side.
+
+      Simpler than the map case: this kernel is monomorphically `f64` (a `Float` init
+      picked it), so there is no representation routing — a value scalar always rides
+      `f64`. What carries over is the bit-identity rule, and it is now literally the
+      same code: `mix_combine` was hoisted out of the mixed-map analysis and is shared
+      by both, so one proven rule guards both sites. `infer_f64_indexed` returns
+      [`MixT`]; the accumulator and array loads are `GFloat`, the counter and index
+      scalars `Int`, a free value scalar `SFloat` — admitted only where a genuine float
+      promotes it. INDEX scalars (a point index, an affine `base`/`coef`, and names
+      inside a synthetic `$aff` term) stay `Scalar`/`i64` via `relabel_value_scalars`.
+
+      Proven load-bearing AT THIS SITE (a shared rule still needs proving wherever it
+      guards): sabotaging `mix_combine` makes `s + (2^53+1)*3 + a[i]` compute
+      `…928.0` on the JIT vs the interpreter's correct `…944.0`; restoring makes them
+      agree. Pinned by `f64_reduce_value_scalars_promote_or_decline` (engaging shapes
+      to literal values with an engagement assertion + the 2^53+1 decline cases +
+      index-scalar cases incl. compound affine) and
+      `tests/corpus/j5_reduce_value_scalars.helix`; 1750 fuzzed programs across 5
+      seeds, 0 divergences; the reduce oracles
+      (`differential_f64_dot_product_reduce_jit`,
+      `differential_indexed_reduce_oob_fallback`,
+      `parallel_indexed_nested_reduce_matches_tree_walker`,
+      `multiacc_reduce_matches_across_k_boundary`) all still pass.
 ## Phase 7 — Adoption and ecosystem
 
 The viability requirements: the work that turns a capable compiler into a language
