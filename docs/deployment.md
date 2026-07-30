@@ -50,6 +50,40 @@ serverless sandboxes restrict that (W^X). The bytecode **VM** (`HELIX_NOJIT=1`) 
 universal fallback and remains fast, so run on the VM where the sandbox or architecture
 (e.g. arm64) precludes the JIT.
 
+## Capping CPU — `HELIX_THREADS`
+
+Helix parallelizes array work across every core it can see. That is a **wall-clock-for-CPU
+trade**, and whether it is the right one depends entirely on the workload — so it is a
+setting, not a policy. `HELIX_THREADS=N` caps the worker pool; `HELIX_THREADS=1` runs fully
+serial. Anything absent or unparsable leaves the default (one worker per core).
+
+**Results never depend on it.** Parallel `map`/`filter` are elementwise so chunking cannot
+reorder anything, float reductions are never reassociated (that would change the last bits
+and break the three-engine oracle), and the parallel nested reduce partitions over
+independent outer indices and collects in order. Pinned by
+`thread_count_changes_cpu_not_results`, which also runs the whole corpus at
+`HELIX_THREADS=1` and byte-compares.
+
+Measured, min-of-4 on a 6-core box (gate profile), showing why one default cannot be right:
+
+| workload | 1 thread | all cores | wall gain | total CPU |
+|---|---|---|---|---|
+| compute-bound (all-pairs, 3.6e9 distances) | 0.59s @ 99% | 0.11s @ 550% | **5.4×** | 0.58 → 0.61 core-s (**+4%**) |
+| allocation-bound (dot, two 160 MB arrays) | 0.14s @ 96% | 0.08s @ 300% | 1.75× | 0.13 → 0.24 core-s (**+79%**) |
+
+On compute-bound work the extra cores are nearly free and you should take them. On
+allocation-bound work — where much of the time is the kernel faulting in and zeroing fresh
+pages, not arithmetic — efficiency drops to ~45% and the last cores buy little: on that dot
+product, 2 threads reach 0.10s for 0.14 core-s while all cores reach 0.08s for 0.24. If you
+are billed per core-second, running several jobs on one box, or on a laptop, set
+`HELIX_THREADS` to 1–2 and give up ~25% wall for ~45% less CPU.
+
+**When to reach for it**
+- Serverless/batch billed on CPU time, or with a hard core quota → set it to the quota.
+- Many concurrent Helix processes → `HELIX_THREADS=1` each, and let the scheduler
+  parallelize across jobs instead of within them (higher total throughput).
+- Latency-critical single job on an idle machine → leave it unset.
+
 ## Status & roadmap
 
 Built: mimalloc allocator, PGO CI pipeline, static musl artifact, distroless Dockerfile,

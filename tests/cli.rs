@@ -2899,3 +2899,68 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         under.join("\n  ")
     );
 }
+
+/// `HELIX_THREADS` caps the worker pool. It must be a pure CPU/latency control: the OUTPUT is
+/// identical at every thread count, because parallel `map`/`filter` are elementwise, float
+/// reductions are never reassociated (that would change the last bits and break the three-engine
+/// oracle), and the parallel nested reduce partitions over independent outer indices and collects
+/// in order.
+///
+/// This exists because the parallelism used to be imposed rather than chosen: the pool could only
+/// be resized through rayon's own `RAYON_NUM_THREADS`, an implementation detail a Helix user has
+/// no reason to know. The trade it controls is real and workload-dependent — measured on a 6-core
+/// box, compute-bound work scales 5.4× for +4% total CPU while allocation-bound work gains only
+/// 1.75× for +79% CPU — which is why this is a setting and not a different hard-coded default.
+///
+/// SCOPE, stated precisely so this is not mistaken for more than it is. The parallel branch is
+/// selected by ARRAY LENGTH (`PAR_MATH_THRESHOLD`), not by worker count, so with
+/// `HELIX_THREADS=1` rayon still takes the parallel code path — just with one worker. This test
+/// therefore CANNOT catch a deterministic chunking bug (one that mis-orders identically at every
+/// thread count); the corpus goldens and the three-engine oracle cover that. What it does catch is
+/// any future change that makes a result depend on the worker count — e.g. parallelizing a float
+/// reduce with a tree fold whose shape follows the split, which would move the last bits. That is
+/// the property being pinned, and the wiring itself is verified separately: %CPU tracks the cap
+/// (measured 99% / 195% / 374% / 446% at 1 / 2 / 4 / all on the all-pairs kernel).
+#[test]
+fn thread_count_changes_cpu_not_results() {
+    // Shapes a bad chunking WOULD change: a parallel float map feeding an order-sensitive float
+    // fold, a fused indexed map→reduce, a SAXPY sum with a float scalar capture, the parallel
+    // nested reduce, and a filter whose output order must survive. Sizes are past
+    // PAR_MATH_THRESHOLD (1<<15) so the parallel paths actually engage — below it everything is
+    // serial and this would prove nothing.
+    let progs = [
+        "n = 200000\nxs = (0..n).map(i => i * 0.001)\nprint(xs.reduce(0.0, (s, x) => s + x))",
+        "n = 200000\na = (0..n).map(i => i * 1.5)\nb = (0..n).map(i => i * 0.25)\nprint((0..n).map(i => a[i] + b[i]).reduce(0.0, (s, x) => s + x))",
+        "n = 200000\nc = 2.5\na = (0..n).map(i => i * 1.5)\nprint((0..n).reduce(0.0, (s, i) => s + c * a[i]))",
+        "n = 300\ncodes = (0..n).map(i => (i * 7) % 101)\nprint((0..n).map(i => (0..n).reduce(0, (acc, j) => acc + abs(codes[i] - codes[j]))).sum())",
+        "n = 100000\nys = (0..n).map(i => i * 3).filter(x => x % 7 == 0)\nprint(\"{ys.length()} {ys.first()} {ys.last()}\")",
+        "n = 200000\nprint((0..n).reduce(0, (s, i) => s + i * i))",
+    ];
+    for (i, src) in progs.iter().enumerate() {
+        let (base, err, code) =
+            run_source(src, &[("HELIX_THREADS", "1")], &format!("thr1_{i}"));
+        assert_eq!(code, Some(0), "HELIX_THREADS=1 failed on program {i}: {err}");
+        for t in ["2", "3", "6", "12"] {
+            let (got, _, c) =
+                run_source(src, &[("HELIX_THREADS", t)], &format!("thr{t}_{i}"));
+            assert_eq!(c, Some(0), "HELIX_THREADS={t} failed on program {i}");
+            assert_eq!(
+                got, base,
+                "HELIX_THREADS={t} changed the RESULT on program {i} — a thread count must never \
+                 be observable in the output"
+            );
+        }
+        let (dflt, _, _) = run_source(src, &[], &format!("thrd_{i}"));
+        assert_eq!(dflt, base, "the default pool disagrees with HELIX_THREADS=1 on program {i}");
+    }
+    // Garbage, zero and negatives fall back to the default rather than erroring or hanging.
+    for (i, bad) in ["0", "-4", "many", "", "3.5", "999999999999999999999"].iter().enumerate() {
+        let (out, err, code) = run_source(
+            "print((0..100000).map(i => i * 2).sum())",
+            &[("HELIX_THREADS", bad)],
+            &format!("thrbad_{i}"),
+        );
+        assert_eq!(code, Some(0), "HELIX_THREADS={bad:?} should be ignored, not fatal: {err}");
+        assert_eq!(out.trim(), "9999900000", "HELIX_THREADS={bad:?} changed the result");
+    }
+}

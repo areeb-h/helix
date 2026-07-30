@@ -240,6 +240,28 @@ say so rather than dropping the row.
   OpenBLAS. Isolated GEMM at n=2048: faer ~0.11s vs OpenBLAS ~0.061s — OpenBLAS
   is ~1.8× faster. At n=512 the GEMM is ~1% of the wall time and you are timing
   interpreter startup, which is why the default is 1024.
+### The %CPU column is a trade you can now decline
+
+Helix's wall-clock standing on k1 and k4 is bought with cores the references never use, which
+is why `%CPU` is in the table. Quantified (min-of-4, gate profile), the scaling is
+workload-dependent in a way no single default can serve:
+
+| | 1 thread | all cores | wall gain | total CPU |
+|---|---|---|---|---|
+| k4 all-pairs (compute-bound) | 0.59s @ 99% | 0.11s @ 550% | **5.4×** | 0.58 → 0.61 core-s (**+4%**) |
+| k1 dot (allocation-bound) | 0.14s @ 96% | 0.08s @ 300% | 1.75× | 0.13 → 0.24 core-s (**+79%**) |
+
+On compute-bound work the cores are nearly free. On k1 they are not: much of that kernel is the
+OS faulting in and zeroing 800 MB of fresh pages, so parallel efficiency falls to ~45% and the
+last cores buy almost nothing — 2 threads reach 0.10s for 0.13 core-s where all cores reach
+0.08s for 0.24. Per core, C is ~4.3× more efficient than default-threaded Helix here and ~2.2×
+more efficient than serial Helix; only the second number is about codegen.
+
+`HELIX_THREADS=N` now caps the pool (`1` = fully serial), so the trade is the caller's to make
+— see [docs/deployment.md](../../docs/deployment.md). Before this, the only lever was rayon's
+own `RAYON_NUM_THREADS`, which is an implementation detail no Helix user had reason to know.
+Results are identical at every thread count, pinned by `thread_count_changes_cpu_not_results`.
+
 - **k9 matmul (naive)** — the honest triple-loop peer group. Both Helix spellings
   now reach the JIT: the transcribed inner `reduce` compiles to a native loop over
   affine indices, and the `map().reduce()` spelling *fuses* so the per-(i,j)

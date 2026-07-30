@@ -71,6 +71,7 @@ use value::Value;
 
 fn main() -> ExitCode {
     install_robustness_hooks();
+    configure_thread_pool();
     // Return freed memory to the OS promptly (mimalloc `purge_delay = 0`) instead of
     // its default ~10 ms hold. Helix processes are typically short-lived (CLI,
     // serverless), so they exit before that delay ever fires — leaving freed pages
@@ -90,6 +91,35 @@ fn main() -> ExitCode {
     // big-stack thread on demand (see `run_on_big_stack`). So the process no longer
     // reserves 2 GiB up front for every invocation.
     run()
+}
+
+/// `HELIX_THREADS` — cap the worker threads Helix may use, or `1` to run fully serial.
+///
+/// Helix parallelizes array work past [`crate::interp::PAR_MATH_THRESHOLD`], which is a
+/// WALL-CLOCK-FOR-CPU TRADE and not always the one a caller wants. Measured on the k1 dot
+/// product (50M elements): the default uses ~2.8 cores to finish in 0.18 s, while one thread
+/// takes 0.26 s — so parallelism buys 1.44× wall for ~2× the CPU time. On a laptop, a shared
+/// box, or a machine running several jobs, that is the wrong trade, and until now there was no
+/// documented way to decline it: the pool's size could only be changed through rayon's own
+/// `RAYON_NUM_THREADS`, which is an implementation detail a Helix user has no reason to know.
+///
+/// Results do NOT depend on this value. Parallel `map`/`filter` are elementwise, so chunking
+/// cannot reorder anything; float reductions are never reassociated (that would change the last
+/// bits and break the three-engine oracle); and the parallel nested reduce partitions over
+/// independent outer indices and collects in order. `HELIX_THREADS=1` is therefore a pure
+/// CPU/latency control, which the test
+/// `cli::thread_count_changes_cpu_not_results` pins.
+///
+/// Invalid or absent values leave rayon's default (one worker per core). Set before any parallel
+/// work runs, and failure to install is ignored — a pool already built is not an error worth
+/// aborting a program over.
+fn configure_thread_pool() {
+    let Ok(raw) = std::env::var("HELIX_THREADS") else { return };
+    let Ok(n) = raw.trim().parse::<usize>() else { return };
+    if n == 0 {
+        return; // 0 would mean "rayon picks"; say nothing rather than surprise the caller
+    }
+    let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
 }
 
 /// Process-wide robustness: never crash on a broken pipe, and present any unexpected
