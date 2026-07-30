@@ -1,4 +1,4 @@
-# Kernel benchmark results — 2026-07-17
+# Kernel benchmark results — 2026-07-18 (HEAD `e178c76`)
 
 Regenerate with `./run.sh` from this directory. Every number below was produced
 by that script on a quiet machine, after the anchor gate confirmed that all
@@ -20,24 +20,45 @@ never do — a wall-clock win bought with 2.5× the cores is not a codegen win.
 
 | # | Kernel | Helix | C | Rust | Go | CPython | NumPy | Helix vs C |
 |---|--------|-------|---|------|-----|---------|-------|------------|
-| k1 | dot 50M i64 | 0.16s (254%) | **0.10s** | 0.12s | 0.43s | 8.86s | 0.27s | **1.6× slower** (2.2× per-core; see k1 note) |
-| k2 | mandelbrot 1200² | 0.41s | **0.07s** | 0.07s | 0.07s | 6.01s | — | **5.9× slower** |
-| k3 | basel 1e8 | 0.08s | **0.05s** | 0.08s | 0.08s | 8.40s | 0.44s | **1.6× slower** |
-| k4 | allpairs 15k | 0.04s | **<0.01s** | <0.01s | 0.05s | 4.36s | 0.11s | **slower** (timer-grain; ~7× per the audit) |
-| k5 | montecarlo 1e8 | 0.54s | **0.26s** | 0.22s | 0.27s | 39.09s | — | **2.1× slower** |
-| k6 | sieve π(10⁷) | **0.02s** | 0.01s | 0.01s | 0.02s | 0.67s | 0.07s | ~tie (**delegation** — beats NumPy 3.5×) |
-| k7 | wordcount 5M | 1.60s | **0.20s** | 0.24s | 0.21s | 1.44s | 1.83s | **8× slower** (also loses to CPython) |
-| k8 | matmul 1024³ (GEMM) | 0.32s | — | — | — | — | **0.06s** | **5.3× slower than NumPy** |
-| k9 | matmul 512³ (naive) | **0.51s** | 0.33s | 0.34s | **0.31s** | 16.60s | — | **1.5× slower** (was 72× — see below) |
+| k1 | dot 50M i64 | 0.17s (275%) | **0.12s** | 0.13s | 0.51s | 10.12s | 0.31s | **1.4× slower** (≈3.9× per-core; see k1 note) |
+| k2 | mandelbrot 1200² | 0.43s (98%) | **0.08s** | 0.07s | 0.07s | 6.09s | — | **5.4× slower** |
+| k3 | basel 1e8 | 0.09s (96%) | **0.06s** | 0.10s | 0.09s | 9.20s | 0.44s | **1.5× slower** (beats Rust and Go) |
+| k4 | allpairs 15k | 0.01s (306%) | **<0.01s** | <0.01s | 0.06s | 4.42s | 0.12s | **slower** (timer-grain; ~7× per the audit) |
+| k5 | montecarlo 1e8 | 0.57s (99%) | **0.24s** | 0.24s | 0.29s | 39.58s | — | **2.4× slower** |
+| k6 | sieve π(10⁷) | **0.02s** (92%) | 0.01s | 0.01s | 0.02s | 0.65s | 0.07s | ~tie (**delegation** — beats NumPy 3.5×) |
+| k7 | wordcount 5M | 1.61s (99%) | **0.22s** | 0.27s | 0.23s | 1.53s | 1.94s | **7.3× slower** (also loses to CPython) |
+| k8 | matmul 1024³ (GEMM) | 0.34s (108%) | — | — | — | — | **0.07s** | **4.9× slower than NumPy** |
+| k9 | matmul 512³ (naive) | 0.52s (99%) | 0.36s | 0.33s | **0.32s** | 19.96s | — | **1.4× slower** |
+| k9m | matmul 512³ (map-temp) | 0.50s (100%) | 0.36s | 0.33s | **0.32s** | 19.96s | — | **1.4× slower** (was **27.12s / 75×** — see below) |
 
-**Helix loses to C on every kernel in this suite**, though k9 is now within 1.5×.
-The one place it stands out is k6, where it wins by *not doing the work* —
-calling a native `primes()` builtin, the same way NumPy wins by calling BLAS.
-The honest counterpart is `k6_sieve_trial.helix` (pure-Helix trial division):
-**83.00s**, i.e. ~8300× slower than the builtin and ~5500× slower than C's
-sieve. That gap is the kernel's whole point.
+**Helix loses to C on every kernel in this suite**, though k9 (both spellings) is
+now within 1.4× and k3 beats Rust and Go. The one place it stands out is k6,
+where it wins by *not doing the work* — calling a native `primes()` builtin, the
+same way NumPy wins by calling BLAS. The honest counterpart is
+`k6_sieve_trial.helix` (pure-Helix trial division): **88.31s**, i.e. ~4400×
+slower than the builtin and ~8800× slower than C's sieve. That gap is the
+kernel's whole point.
 
-## k9: 72× → 1.5× (affine indices), and what it cost to learn
+**What changed since 2026-07-17, and what did not.** One number in this table
+moved materially: **k9 map-temp, 27.12s → 0.50s (54×)**, which also erases the
+75× penalty for writing the natural `map().reduce()` spelling instead of the
+hand-transcribed one. Everything else is within run-to-run noise of the previous
+table. That is the honest shape of the result: the arc that produced it (map-side
+array indices for i64/f64, affine indices, value scalars on both the map and
+reduce sides, and map→reduce fusion — commits `00c23fd`…`e178c76`) targeted
+*comprehension shapes that previously fell to the bytecode VM*, and *k9 map-temp
+is the only kernel in this suite that writes one*. The other eight already used
+shapes the JIT compiled. So the suite confirms the fix and simultaneously shows
+that this suite under-covers the new capability — the shapes it most helps (BLAS-1
+vector ops, sums of a computed vector) have no kernel here yet. That gap is
+tracked as k10, not papered over: measured off-suite on this same release binary,
+the identical expression before and after the arc (n=5M, min-of-4), a **SAXPY sum**
+(`Σ a*x[i]+y[i]`) went **0.64s → 0.02s** and a **vector-add sum** (`Σ a[i]+b[i]`)
+**0.66s → 0.02s** — both ≈32×. Those are Helix-vs-Helix numbers and are
+deliberately **not** in the scorecard: with no C/Rust/Go reference they say nothing
+about how Helix compares to anything, only that it improved.
+
+## k9: 72× → 1.4×, and the map-temp spelling from 75× to parity
 
 The first run of this suite reported k9 at 25.86s against C's 0.36s and blamed
 "the nested map-of-reduce shape never reaches the JIT". **The shape was never
@@ -64,19 +85,54 @@ Two changes closed it, and only one of them is a compiler change:
    allocation the reference doesn't have.
 
 The map-temp spelling is **kept and still measured**, as
-`k9_matmul_naive_maptemp.helix`: **27.12s**. That 55× is a live gap — the map
-kernel's eligibility (`value_eligible_cap`) has no `Expr::Index` arm at all, so
-a map body reading `a[…]` runs on the bytecode VM. The reduce side got affine
-indices; the map side has not got indices at all. Reporting it beside the fast
-spelling is the point: a user who writes the natural `map().reduce()` hits 55×,
-and hiding that behind the faithful port would be exactly the flattery this
-suite exists to prevent.
+`k9_matmul_naive_maptemp.helix`. It was **27.12s** here — a 75× penalty for
+writing the natural `map().reduce()` instead of the hand-transcribed reduce.
+Reporting it beside the fast spelling was the point: hiding it behind the
+faithful port would have been exactly the flattery this suite exists to prevent.
 
-**Verification**: gate 358 bin + 122 cli, clippy 0, vmparity 0; 210k-program
-3-seed soak, all engine-identical. Unchecked native loads are the risk class
-here, which is why the endpoint proof is done in `i128` (so the check itself
-cannot overflow) and why a negative index — which the interpreter Python-*wraps*
-rather than rejecting — falls back to the checked bytecode loop.
+**That gap is now closed: 0.50s (54×), i.e. parity with the transcribed spelling
+(0.52s) and 1.4× C.** It took three separate fixes, and the order matters because
+each one only exposed the next:
+
+1. **Map-side array indices.** `value_eligible_cap` had no `Expr::Index` arm, so
+   *any* map body reading `a[…]` ran on the bytecode VM. Admitting it required a
+   bounds obligation the map side cannot discharge in general — a `map`'s binder
+   is an *element value*, not a counter, so `xs.map(x => a[x])` indexes on
+   arbitrary data (and possibly negative data, which the interpreter Python-*wraps*
+   rather than rejecting). It is therefore admitted only over a lazy `Range`
+   source, where the elements *are* the counter and the reduce side's
+   two-endpoint `i128` proof transfers intact (`00c23fd`, and `7b8f047` for the
+   f64 twin).
+2. **Affine map indices.** `a[i*n+k]` needed `IndexBound::Affine` on the map side
+   too, composed with the source range's step — which can exceed `i128`, so the
+   endpoint check is `checked_*` and overflow *declines* exactly as an
+   out-of-range endpoint does (`e1692ba`). This brought it to ~6s.
+3. **map→reduce fusion.** The remaining ~12× was the intermediate array itself:
+   262,144 n-element temporaries at n=512. Fused via the identity
+   `map(f).reduce(init,g) ≡ reduce(init,(acc,i) => g(acc,f(i)))`, emitted as a
+   JIT guard whose *fall-through is the original unfused expression* — so the
+   fused body only ever runs as native code under proven preconditions and
+   therefore cannot raise, which is what retires fusion's error-ordering hazard
+   (unfused, `map` evaluates every `f(i)` before any `g`, so if both can raise the
+   two spellings report different errors) (`e178c76`).
+
+So the natural spelling and the transcribed one now cost the same, which is the
+outcome that makes the fidelity argument above moot rather than merely defensible.
+
+**Verification**: gate 366 bin + 124 cli, clippy baseline, vmparity 0; corpus
+goldens `j1`–`j6` (all three engines byte-identical); seven named boundary sweeps,
+each carrying an *engagement* assertion so a silent fall-back cannot pass as a
+pass; ~8,500 fuzzed programs across the arc, 0 divergences. Unchecked native
+loads are the risk class here, so every bounds check was **sabotage-proven** —
+removed one at a time to confirm each turns a test red, because a guard whose
+removal breaks nothing is decoration. The endpoint proof is done in `i128` (so the
+check itself cannot overflow), a negative index — which the interpreter
+Python-*wraps* rather than rejecting — falls back to the checked bytecode loop,
+and the f64 paths additionally guard *type confusion*: an `Ints` buffer reaching
+an `f64` load would reinterpret the bits as denormal junk (~5e-323 where 20.0
+belongs) with no crash, so the marshal declines on representation before any
+pointer is formed. Forcing it to accept prints exactly that junk, which is how the
+guard was verified rather than assumed.
 
 ## The huge-page correction (why these numbers differ from earlier claims)
 
@@ -184,9 +240,15 @@ say so rather than dropping the row.
   OpenBLAS. Isolated GEMM at n=2048: faer ~0.11s vs OpenBLAS ~0.061s — OpenBLAS
   is ~1.8× faster. At n=512 the GEMM is ~1% of the wall time and you are timing
   interpreter startup, which is why the default is 1024.
-- **k9 matmul (naive)** — the honest triple-loop peer group. Helix's
-  comprehension version never reaches the JIT (verified: identical time with
-  `HELIX_NOJIT=1`) and allocates an n-element temporary per (i,j) pair.
+- **k9 matmul (naive)** — the honest triple-loop peer group. Both Helix spellings
+  now reach the JIT: the transcribed inner `reduce` compiles to a native loop over
+  affine indices, and the `map().reduce()` spelling *fuses* so the per-(i,j)
+  temporary is never allocated (it used to be 262,144 arrays at n=512, and the
+  earlier note here — "never reaches the JIT, identical time with `HELIX_NOJIT=1`"
+  — described that state and is superseded: it is now **0.50s JIT vs 27.76s under
+  `HELIX_NOJIT=1`, a 55× engagement gap**. That the no-JIT time still matches the
+  previously published 27.12s is the clean confirmation that the old number *was*
+  the VM path.
 
 ## Known reporting caveats
 
@@ -195,7 +257,16 @@ say so rather than dropping the row.
    nil. On k1 it is real and unquantified.
 2. **k4's C/Rust times are at timer grain** (`<0.01s`). The audit's finer
    measurement puts Helix ≈6.9× behind C there.
-3. **CPython's k9 number beats Helix's** (14.79s vs 25.86s). Reported, not hidden.
+3. ~~**CPython's k9 number beats Helix's** (14.79s vs 25.86s).~~ **Resolved** —
+   Helix's k9 is now 0.52s (transcribed) / 0.50s (map-temp) against CPython's
+   19.96s. Kept struck through rather than deleted: this caveat was true when
+   published, and the record of it being true is what made fixing it a priority.
+5. **This suite under-covers the 2026-07-18 arc.** Only k9's map-temp spelling
+   exercises the comprehension shapes those commits fixed, so eight of the nine
+   kernels are unchanged by them. The shapes most improved (BLAS-1 vector ops,
+   sums of a computed vector) have no kernel here — tracked as k10. Until it
+   exists, any claim about those shapes is a Helix-vs-Helix number and is labelled
+   as such.
 4. `-march=native` is a ~9% *pessimization* for gcc on k2 (79ms vs 72ms without).
    We keep it as the conventional "give C every advantage" flag; it slightly
    understates C.
