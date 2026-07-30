@@ -679,14 +679,18 @@ impl super::Compiler {
         if self.no_fuse || pa == pb {
             return Ok(false);
         }
-        // recv must be `<source>.map(f)` with a single-parameter `f`.
+        // recv must be `<source>.map(f)` with a single-parameter `f`. Both spellings count:
+        // `map(x => x * 2)` AND the `it` sugar `map(it * 2)` — which is the IDIOMATIC one, so
+        // matching `Expr::Lambda` directly (as this did first) silently excluded most real code
+        // and left it 93× slower. `comprehension_params` is the same desugaring the compile path
+        // itself uses, so the two cannot drift apart.
         let Expr::Method { recv: map_recv, name: mname, args: margs, .. } = recv else {
             return Ok(false);
         };
         if mname.as_str() != "map" || margs.len() != 1 {
             return Ok(false);
         }
-        let Expr::Lambda { params: fp, body: fbody, .. } = &margs[0] else { return Ok(false) };
+        let (fp, fbody) = crate::interp::comprehension_params(&margs[0]);
         if fp.len() != 1 {
             return Ok(false);
         }

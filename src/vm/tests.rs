@@ -1637,6 +1637,13 @@
         // Exactness across the shapes fusion takes.
         for (src, want) in [
             ("(0..4).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)", "9.0"),
+            // The `it` SUGAR must fuse identically. It is the IDIOMATIC spelling, and the
+            // first version of this matched `Expr::Lambda` directly, silently excluding it and
+            // leaving ordinary code 93x slower (0.93s vs 0.01s at n=20M). Now routed through
+            // `comprehension_params`, the same desugaring the compile path uses, so the two
+            // spellings cannot drift apart again.
+            ("(0..4).map(it * 1.5).reduce(0.0, (s, x) => s + x)", "9.0"),
+            ("a = [1.5, 2.5, 3.5]\n(0..3).map(a[it]).reduce(0.0, (s, x) => s + x)", "7.5"),
             ("a = [1.5, 2.5, 3.5]\n(0..3).map(i => a[i]).reduce(0.0, (s, x) => s + x)", "7.5"),
             (
                 "a = [1.5, 2.5, 3.5]\nb = [0.25, 0.5, 0.75]\nc = 2.5\n(0..3).map(i => c * a[i] + b[i]).reduce(0.0, (s, x) => s + x)",
