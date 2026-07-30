@@ -1791,6 +1791,71 @@
         }
     }
 
+
+    /// `to_float` — the explicit Int→Float conversion — compiles natively instead of forcing the
+    /// whole enclosing loop onto the VM.
+    ///
+    /// It is what a careful user writes, and it was in none of the JIT's float-builtin gates, so
+    /// any body containing it declined. Measured at n=20M before/after:
+    /// `reduce(0.0, (a,i) => a + to_float(i) * 1.5)` 1.56s → 0.01s (156×),
+    /// `map(to_float(it) * 1.5).reduce(…)` 2.27s → 0.01s (227×),
+    /// `reduce(0.0, (a,i) => a + to_float(i))` 1.32s → 0.01s (132×).
+    ///
+    /// The risk is ROUNDING, not speed: the interpreter computes `*i as f64` while the kernel
+    /// emits `fcvt_from_sint`. Both round to nearest-even, so they agree — but past 2^53 the
+    /// conversion is lossy and a mismatch would be invisible on small inputs, which is why the
+    /// cases below straddle 2^53 and both i64 extremes.
+    #[test]
+    fn to_float_compiles_natively_and_rounds_like_the_interpreter() {
+        crate::jit::reset_native_call_count();
+        for (src, want) in [
+            // exact, in both the map and the reduce position
+            ("(0..5).map(to_float(it)).reduce(0.0, (s, x) => s + x)", "10.0"),
+            ("(0..5).reduce(0.0, (s, i) => s + to_float(i))", "10.0"),
+            // LOSSY past 2^53: 9007199254740993 has no f64 representation and must round DOWN
+            ("to_float(9007199254740993)", "9007199254740992.0"),
+            (
+                "(9007199254740990..9007199254740995).map(to_float(it)).reduce(0.0, (s, x) => s + x)",
+                "45035996273704960.0",
+            ),
+            // the i64 extremes
+            ("to_float(9223372036854775807)", "9223372036854775808.0"),
+            ("to_float(0 - 9223372036854775807)", "-9223372036854775808.0"),
+            // negatives, nesting, composition with sqrt, and to_float of a Float (identity)
+            ("((0 - 5)..5).map(to_float(it) * 1.5).reduce(0.0, (s, x) => s + x)", "-7.5"),
+            ("(0..5).map(to_float(to_float(it))).reduce(0.0, (s, x) => s + x)", "10.0"),
+            ("a = [1.5, 2.5, 3.5]\n(0..3).map(to_float(a[it])).reduce(0.0, (s, x) => s + x)", "7.5"),
+            // inside a tail-recursive numeric function, inferred and annotated
+            ("fn go(a, i, n) = if i >= n then a else go(a + to_float(i) * 0.5, i + 1, n)\ngo(0.0, 0, 20)", "95.0"),
+            ("fn go(a: Float, i: Int, n: Int) = if i >= n then a else go(a + to_float(i) * 0.5, i + 1, n)\ngo(0.0, 0, 20)", "95.0"),
+        ] {
+            let jit = run_vm_jit(src);
+            assert_eq!(jit, run_tw(src), "JIT vs walker on `{src}`");
+            assert_eq!(jit, run_vm(src), "JIT vs VM on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "no native call — `to_float` is back to forcing the VM path"
+        );
+
+        // Still correct where it CANNOT compile: a non-numeric argument (`to_float` also parses
+        // numeric strings) and a genuine division by zero must behave exactly as the interpreter.
+        for src in [
+            "to_float(\"3.5\") + 1.0",
+            "(0..3).map(to_float(\"2.5\")).reduce(0.0, (s, x) => s + x)",
+            "(0..4).reduce(0.0, (s, i) => s + 1.0 / to_float(i))",
+        ] {
+            assert_eq!(run_vm_jit(src), run_tw(src), "fallback shape `{src}`");
+            assert_eq!(run_vm_jit(src), run_vm(src), "fallback shape (VM) `{src}`");
+        }
+
+        // `to_float` returns Float, so it must NOT leak into the i64-only kernel: an integer
+        // context containing it stays correct rather than compiling as i64.
+        let src = "(0..5).map(it * 2).reduce(0, (s, x) => s + x)";
+        assert_eq!(run_vm_jit(src).as_deref(), Ok("20"), "the i64 path is unaffected");
+    }
+
     #[test]
     fn differential_functions_with_jit() {
         let mut rng = 0xFEED_FACE_DEAD_BEEFu64;

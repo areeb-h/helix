@@ -1091,6 +1091,13 @@ fn infer_reduce_f64_kind(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>)
                     infer_reduce_f64_kind(&args[0], pa, pb, user_fns)?;
                     Some(NumKind::Float)
                 }
+                // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
+                // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
+                // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
+                ("to_float", 1) => {
+                    infer_reduce_f64_kind(&args[0], pa, pb, user_fns)?;
+                    Some(NumKind::Float)
+                }
                 ("abs", 1) => infer_reduce_f64_kind(&args[0], pa, pb, user_fns),
                 ("min" | "max", 2) => {
                     let ka = infer_reduce_f64_kind(&args[0], pa, pb, user_fns)?;
@@ -1273,6 +1280,13 @@ fn infer_f64_indexed(
             match (name.as_str(), args.len()) {
                 // `sqrt` promotes its argument in BOTH engines → an `SFloat` arg is safe.
                 ("sqrt", 1) => {
+                    infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)?;
+                    Some(MixT::GFloat)
+                }
+                // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
+                // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
+                // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
+                ("to_float", 1) => {
                     infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)?;
                     Some(MixT::GFloat)
                 }
@@ -1490,6 +1504,13 @@ fn infer_f64_typed(e: &Expr, binders: &HashMap<&str, NumKind>, user_fns: &HashSe
                     infer_f64_typed(&args[0], binders, user_fns)?;
                     Some(NumKind::Float)
                 }
+                // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
+                // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
+                // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
+                ("to_float", 1) => {
+                    infer_f64_typed(&args[0], binders, user_fns)?;
+                    Some(NumKind::Float)
+                }
                 ("abs", 1) => infer_f64_typed(&args[0], binders, user_fns),
                 ("min" | "max", 2) => {
                     let ka = infer_f64_typed(&args[0], binders, user_fns)?;
@@ -1583,6 +1604,14 @@ fn gen_f64_typed(
                 let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
+            }
+            // `to_float` IS that promotion with nothing applied after it: an `i64` becomes
+            // `f64` via `fcvt_from_sint` (the interpreter's `*i as f64`), and an `f64`
+            // passes through unchanged.
+            "to_float" => {
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
+                let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
+                (af, NumKind::Float)
             }
             "abs" => {
                 let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
@@ -2158,6 +2187,12 @@ fn infer_mixed_kind(
                     infer_mixed_kind(&args[0], binder, uses_binder, user_fns)?;
                     Some(NumKind::Float) // sqrt always returns Float
                 }
+                // `to_float` is the explicit Int->Float conversion: always Float, and the typed
+                // codegen emits the same `fcvt_from_sint` promotion it already emits for `sqrt`.
+                ("to_float", 1) => {
+                    infer_mixed_kind(&args[0], binder, uses_binder, user_fns)?;
+                    Some(NumKind::Float)
+                }
                 ("abs", 1) => infer_mixed_kind(&args[0], binder, uses_binder, user_fns), // preserves kind
                 ("min" | "max", 2) => {
                     let ka = infer_mixed_kind(&args[0], binder, uses_binder, user_fns)?;
@@ -2369,6 +2404,13 @@ fn infer_mixed_kind_indexed(
                 // `sqrt` promotes its argument to `f64` in BOTH engines, so an `SFloat` arg is
                 // safe here and the result is a genuine float.
                 ("sqrt", 1) => {
+                    infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)?;
+                    Some(MixT::GFloat)
+                }
+                // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
+                // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
+                // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
+                ("to_float", 1) => {
                     infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)?;
                     Some(MixT::GFloat)
                 }
@@ -2779,6 +2821,13 @@ fn infer_typed_env(
             }
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
+                    infer_typed_env(&args[0], env, sigs, user_fns)?;
+                    Some(NumKind::Float)
+                }
+                // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
+                // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
+                // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
+                ("to_float", 1) => {
                     infer_typed_env(&args[0], env, sigs, user_fns)?;
                     Some(NumKind::Float)
                 }
@@ -3217,7 +3266,8 @@ fn jit_builtin_arity_ok(name: &str, nargs: usize) -> bool {
 /// interpreter's `as_f64()`-compare (identity for floats) then pick the original operand,
 /// so NaN propagates identically. The libm transcendentals (`exp`/`sin`/`tanh`/…) are NOT
 /// here: they'd need an external-symbol call whose result must match the host libm exactly.
-const JIT_FLOAT_BUILTINS: &[(&str, usize)] = &[("sqrt", 1), ("abs", 1), ("min", 2), ("max", 2)];
+const JIT_FLOAT_BUILTINS: &[(&str, usize)] =
+    &[("sqrt", 1), ("abs", 1), ("min", 2), ("max", 2), ("to_float", 1)];
 
 /// The arity of a recognized JIT float builtin, or `None` if `name` is not one.
 fn jit_float_builtin_arity(name: &str) -> Option<usize> {
@@ -3234,11 +3284,13 @@ fn gen_builtin_f64<'a>(
     fn_ids: &HashMap<&str, FuncId>,
     module: &mut JITModule,
 ) -> ClValue {
-    match name {
-        "sqrt" => {
-            let x = gen_value(b, &args[0], vars, fn_ids, module, NumKind::Float);
-            b.ins().sqrt(x)
-        }
+        match name {
+            "sqrt" => {
+                let x = gen_value(b, &args[0], vars, fn_ids, module, NumKind::Float);
+                b.ins().sqrt(x)
+            }
+        // Every value in this kernel is already `f64`, so the conversion is the identity.
+        "to_float" => gen_value(b, &args[0], vars, fn_ids, module, NumKind::Float),
         "abs" => {
             let x = gen_value(b, &args[0], vars, fn_ids, module, NumKind::Float);
             b.ins().fabs(x)
@@ -4398,6 +4450,15 @@ fn gen_value_env<'a>(
                         if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                     (b.ins().sqrt(af), NumKind::Float)
                 }
+                // `to_float` IS that promotion with nothing applied after it: an `i64` becomes
+                // `f64` via `fcvt_from_sint` (the interpreter's `*i as f64`), and an `f64`
+                // passes through unchanged.
+                "to_float" => {
+                    let (av, ak) = gen_value_env(b, &args[0], vars, env, module, tl);
+                    let af =
+                        if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
+                    (af, NumKind::Float)
+                }
                 "abs" => {
                     let (av, ak) = gen_value_env(b, &args[0], vars, env, module, tl);
                     match ak {
@@ -4997,6 +5058,14 @@ fn gen_value_typed<'a>(
                 let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
+            }
+            // `to_float` IS that promotion with nothing applied after it: an `i64` becomes
+            // `f64` via `fcvt_from_sint` (the interpreter's `*i as f64`), and an `f64`
+            // passes through unchanged.
+            "to_float" => {
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
+                let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
+                (af, NumKind::Float)
             }
             "abs" => {
                 let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
