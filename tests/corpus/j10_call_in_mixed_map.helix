@@ -1,0 +1,84 @@
+# A user function CALLED from a mixed Int->Float map body (Stage 3p). Factoring a loop body
+# into a named function used to drop the whole map to the bytecode loop: at 20M elements
+# `f(i) * 0.5` cost 1.50s against 0.02s for the same arithmetic written inline, and
+# `(f(i) % 100) * 0.5` cost 2.00s against 0.02s. Both now equal their inlined spelling exactly.
+#
+# The i64 map kernel could always call user functions; the mixed one could not, because its
+# codegen (`gen_value_typed`) was never given the function table. An i64-eligible callee needs
+# no extra information to type: `int_eligible` means "i64-closed for all-Int arguments", so the
+# call takes Int args and returns Int, and the enclosing expression promotes it at the first
+# Float exactly where the interpreter does.
+#
+# THE SHARP EDGE IS SHADOWING. The user-call arm is tried BEFORE the inline-builtin arm, so a
+# user function named `abs` must dispatch to the user's function and never to the native `iabs`.
+# Every shadow below returns something the genuine builtin never would, so a wrong dispatch
+# cannot accidentally produce the right answer.
+
+fn abs(x) = x + 1000
+print((0..4).map(i => abs(0 - i) * 0.5))
+
+fn min(a, b) = a
+print((0..4).map(i => min(i, 99) * 0.5))
+
+fn max(a, b) = a * 10 + b
+print((0..3).map(i => max(i, 2) * 0.5))
+
+fn to_int(x) = x * 7
+print((0..3).map(i => to_int(i) * 0.5))
+
+fn sign(x) = x - 1
+print((0..3).map(i => sign(i) * 0.5))
+
+# ---- ordinary shapes ----
+
+fn f(x) = x * 2 + 1
+print((0..5).map(i => f(i) * 0.5))
+
+# the call sits under an integer op, so it must stay i64 until the float multiply
+print((0..5).map(i => (f(i) % 4) * 0.25))
+
+# nested calls, and a call whose argument is itself a call
+fn g(x) = x + 1
+fn h(x) = g(x) * 2
+print((0..5).map(i => h(g(i)) * 0.5))
+
+# a captured scalar inside the argument
+c = 3
+fn dbl(x) = x * 2
+print((0..5).map(i => dbl(i + c) * 0.5))
+
+# two arguments
+fn lin(a, b) = a * b + 1
+print((0..5).map(i => lin(i, 3) * 0.5))
+
+# the callee WRAPS at i64::MAX; the kernel must wrap identically before promoting
+fn wrap(x) = x * 9223372036854775807
+print((0..4).map(i => (wrap(i) % 100) * 0.5))
+
+# a tail-recursive callee, which compiles as a native loop
+fn tri(x, acc) = if x <= 0 then acc else tri(x - 1, acc + x)
+print((0..5).map(i => tri(i, 0) * 0.5))
+
+# ---- cases that must DECLINE to the bytecode loop and still be right ----
+
+# a Float argument: the callee has no f64 form to call
+print((0..3).map(i => dbl(2.5) * 0.5))
+print((0..3).map(i => dbl(to_float(i)) * 0.5))
+
+# callees the i64 specialization does not compile: `/` is not i64-closed, a float literal
+# makes the body non-integer, and non-tail recursion is excluded
+fn usesdiv(x) = x / 2
+print((0..3).map(i => usesdiv(i) * 0.5))
+fn usesfloat(x) = x * 1.5
+print((0..3).map(i => usesfloat(i) * 0.5))
+fn nontail(x) = if x <= 0 then 0 else x + nontail(x - 1)
+print((0..4).map(i => nontail(i) * 0.5))
+
+# ---- degenerate and non-range sources ----
+print((0..0).map(i => f(i) * 0.5))
+print([1, 2, 3].map(i => dbl(i) * 0.5))
+
+# ---- a call inside a NESTED build, where the inner map also captures the outer binder ----
+fn m7(x) = x % 7
+n = 3
+print((0..n).map(i => (0..n).map(j => m7(i * j) * 0.5)))

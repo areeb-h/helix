@@ -690,7 +690,8 @@ fn define_array_kernels(
                 // Same drift guard as the indexed arms: re-derive the capture list and require
                 // it to equal the stored one, so codegen's `caps[j]` and the VM's marshal order
                 // cannot disagree.
-                mixed_map_eligible(&k.body, &k.binder, user_fns).is_some_and(|c| c == k.captures)
+                mixed_map_eligible(&k.body, &k.binder, eligible, user_fns)
+                    .is_some_and(|c| c == k.captures)
             }
         } else if matches!(elem_kind, NumKind::Float) {
             !indexed && map_kernel_captures_f64(&k.body, &k.binder, user_fns).is_some()
@@ -2245,14 +2246,21 @@ fn f64_body_eligible(
 /// body with `7` replaced by a variable fell to the VM — 0.01s vs 0.37s over 4M elements. That
 /// is the shape every nested array build has (the inner map captures the outer binder), and
 /// `map(i => i * dt)` besides.
+/// `fns` is the `i64`-eligible set (`int_eligible` at build time, `jit_fn_set()` at compile
+/// time — the same set by contract). A user function in it may be CALLED from a mixed body:
+/// it takes `Int` arguments and returns `Int` by construction, which is precisely the
+/// contract its `i64` specialization was compiled under, so the call types with no extra
+/// information. Without this, factoring a loop body into a named function dropped the whole
+/// map to the bytecode loop — measured 1.50s against 0.02s inline over 20M elements.
 pub fn mixed_map_eligible(
     body: &Expr,
     binder: &str,
+    fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
 ) -> Option<Vec<Capture>> {
     let mut uses_binder = false;
     let mut caps: Vec<Capture> = Vec::new();
-    let root = infer_mixed_kind(body, binder, &mut uses_binder, &mut caps, user_fns)?;
+    let root = infer_mixed_kind(body, binder, &mut uses_binder, &mut caps, fns, user_fns)?;
     (root == NumKind::Float && uses_binder && caps.len() <= MAX_CAPTURES).then_some(caps)
 }
 
@@ -2267,24 +2275,58 @@ fn infer_mixed_kind(
     binder: &str,
     uses_binder: &mut bool,
     caps: &mut Vec<Capture>,
+    fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
 ) -> Option<NumKind> {
     match e {
         Expr::Int(_) => Some(NumKind::Int),
         Expr::Float(_) => Some(NumKind::Float),
+        // A USER function with an `i64` specialization. Tried BEFORE the builtin arm, so a
+        // user function shadowing `abs`/`min`/`max` dispatches to the user's function — the
+        // precedence `gen_value` already establishes via its `fn_ids` lookup, and mirrored
+        // by `gen_value_typed`'s twin arm.
+        //
+        // Every argument must type `Int`, which is exactly the contract the callee's i64
+        // specialization was compiled under (`int_eligible` means "i64-closed for all-`Int`
+        // arguments"), so the result is an `i64` and types `Int` here. The enclosing
+        // expression then promotes it at the first `Float` precisely where the interpreter
+        // does. A FLOAT argument is rejected rather than converted: the callee has no f64
+        // form to call, and silently truncating or promoting would not be the interpreter's
+        // answer.
+        //
+        // That `Int` check is defence in depth, not the only line: relaxing it does not
+        // produce a wrong answer, because the f64 value would reach an `i64` call signature
+        // and Cranelift rejects the function, so the kernel simply declines (verified by
+        // removing the check — the three float-argument cases still agree on all engines).
+        // It is kept because the alternative is CONSTRUCTING ill-typed IR and relying on the
+        // builder to refuse it, and a builder that panics instead of erroring would breach
+        // ADR-0024's never-abort guarantee. Cheaper to never build it.
+        Expr::Call { name, args, .. }
+            if fns.contains(name.as_str()) && user_fns.contains(name.as_str()) =>
+        {
+            if !jit_builtin_arity_ok(name, args.len()) {
+                return None;
+            }
+            for a in args {
+                if infer_mixed_kind(a, binder, uses_binder, caps, fns, user_fns)? != NumKind::Int {
+                    return None;
+                }
+            }
+            Some(NumKind::Int)
+        }
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, caps, user_fns)?;
+                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns)?;
                     Some(NumKind::Float) // sqrt always returns Float
                 }
                 // `to_float` is the explicit Int->Float conversion: always Float, and the typed
                 // codegen emits the same `fcvt_from_sint` promotion it already emits for `sqrt`.
                 ("to_float", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, caps, user_fns)?;
+                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns)?;
                     Some(NumKind::Float)
                 }
-                ("abs", 1) => infer_mixed_kind(&args[0], binder, uses_binder, caps, user_fns), // preserves kind
+                ("abs", 1) => infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns), // preserves kind
                 // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
                 // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
                 // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
@@ -2292,12 +2334,12 @@ fn infer_mixed_kind(
                 // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
                 // RAISE when the result leaves i64 range and therefore still need a poison path.
                 ("to_int" | "sign", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, caps, user_fns)?;
+                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns)?;
                     Some(NumKind::Int)
                 }
                 ("min" | "max", 2) => {
-                    let ka = infer_mixed_kind(&args[0], binder, uses_binder, caps, user_fns)?;
-                    let kb = infer_mixed_kind(&args[1], binder, uses_binder, caps, user_fns)?;
+                    let ka = infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns)?;
+                    let kb = infer_mixed_kind(&args[1], binder, uses_binder, caps, fns, user_fns)?;
                     if ka == kb { Some(ka) } else { None }
                 }
                 _ => None,
@@ -2317,8 +2359,8 @@ fn infer_mixed_kind(
             }
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_mixed_kind(left, binder, uses_binder, caps, user_fns)?;
-            let rk = infer_mixed_kind(right, binder, uses_binder, caps, user_fns)?;
+            let lk = infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns)?;
+            let rk = infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns)?;
             Some(if lk == NumKind::Float || rk == NumKind::Float {
                 NumKind::Float
             } else {
@@ -2344,8 +2386,8 @@ fn infer_mixed_kind(
             if !op_ok {
                 return None;
             }
-            let lk = infer_mixed_kind(left, binder, uses_binder, caps, user_fns)?;
-            let rk = infer_mixed_kind(right, binder, uses_binder, caps, user_fns)?;
+            let lk = infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns)?;
+            let rk = infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns)?;
             if lk == NumKind::Int && rk == NumKind::Int {
                 Some(NumKind::Int)
             } else {
@@ -4117,7 +4159,7 @@ fn define_array_kernel<'a>(
                 .filter(|c| c.kind == crate::bytecode::CaptureKind::ScalarValue)
                 .map(|c| c.name.as_str())
                 .collect();
-            gen_value_typed(&mut b, &k.body, &vars, &k.binder, &f64_scalars).0
+            gen_value_typed(&mut b, &k.body, &vars, &k.binder, &f64_scalars, fn_ids, module).0
         } else {
             gen_value(&mut b, &k.body, &mut vars, fn_ids, module, elem_kind)
         };
@@ -5138,6 +5180,8 @@ fn gen_value_typed<'a>(
     vars: &HashMap<&'a str, Variable>,
     binder: &str,
     f64_scalars: &HashSet<&str>,
+    fn_ids: &HashMap<&'a str, FuncId>,
+    module: &mut JITModule,
 ) -> (ClValue, NumKind) {
     match e {
         Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
@@ -5168,15 +5212,15 @@ fn gen_value_typed<'a>(
                 _ => unreachable!("ineligible index receiver reached mixed codegen"),
             };
             let base = b.use_var(vars[name]);
-            let (idx, ik) = gen_value_typed(b, index, vars, binder, f64_scalars);
+            let (idx, ik) = gen_value_typed(b, index, vars, binder, f64_scalars, fn_ids, module);
             debug_assert!(matches!(ik, NumKind::Int), "non-i64 index reached mixed codegen");
             let off = b.ins().imul_imm(idx, 8);
             let addr = b.ins().iadd(base, off);
             (b.ins().load(F64, MemFlags::trusted(), addr, 0), NumKind::Float)
         }
         Expr::Binary { op, left, right, .. } => {
-            let (lv, lk) = gen_value_typed(b, left, vars, binder, f64_scalars);
-            let (rv, rk) = gen_value_typed(b, right, vars, binder, f64_scalars);
+            let (lv, lk) = gen_value_typed(b, left, vars, binder, f64_scalars, fn_ids, module);
+            let (rv, rk) = gen_value_typed(b, right, vars, binder, f64_scalars, fn_ids, module);
             if lk == NumKind::Int && rk == NumKind::Int {
                 // Integer subexpression — identical codegen to `gen_value`'s i64 arms (euclidean
                 // `%`/`//` by a positive const, bitwise, const shifts), so a mixed body's integer
@@ -5227,13 +5271,30 @@ fn gen_value_typed<'a>(
                 (v, NumKind::Float)
             }
         }
+        // A USER function the `i64` specialization compiled. Tried first, so a user function
+        // shadowing a builtin name dispatches to the user's function — the same precedence
+        // `gen_value`'s `fn_ids` lookup establishes. `infer_mixed_kind` admitted this only
+        // with every argument typed `Int`, which is exactly the contract the callee's i64
+        // specialization was compiled under, so the result is an `i64` and types as `Int`:
+        // the enclosing expression then promotes it at the first `Float` exactly where the
+        // interpreter does.
+        Expr::Call { name, args, .. } if fn_ids.contains_key(name.as_str()) => {
+            let fid = fn_ids[name.as_str()];
+            let fref = module.declare_func_in_func(fid, b.func);
+            let argv: Vec<ClValue> = args
+                .iter()
+                .map(|a| gen_value_typed(b, a, vars, binder, f64_scalars, fn_ids, module).0)
+                .collect();
+            let call = b.ins().call(fref, &argv);
+            (b.inst_results(call)[0], NumKind::Int)
+        }
         // The pure builtins (eligibility guaranteed the names + arities, and same-kind
         // `min`/`max`): `sqrt` promotes its arg to f64 (fsqrt → Float); `abs` is `iabs`
         // (Int) / `fabs` (Float); `min`/`max` compare-then-select-original, on `i64`
         // (via f64 compare, as the interpreter) or `f64`.
         Expr::Call { name, args, .. } => match name.as_str() {
             "sqrt" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
             }
@@ -5241,12 +5302,12 @@ fn gen_value_typed<'a>(
             // `f64` via `fcvt_from_sint` (the interpreter's `*i as f64`), and an `f64`
             // passes through unchanged.
             "to_float" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (af, NumKind::Float)
             }
             "abs" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module);
                 match ak {
                     NumKind::Int => (b.ins().iabs(av), NumKind::Int),
                     NumKind::Float => (b.ins().fabs(av), NumKind::Float),
@@ -5255,7 +5316,7 @@ fn gen_value_typed<'a>(
             // `to_int`: saturating float->int, the identity on an `Int`. `fcvt_to_sint_sat`
             // matches the interpreter exactly -- NaN to 0, +-inf to the i64 extremes.
             "to_int" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module);
                 match ak {
                     NumKind::Int => (av, NumKind::Int),
                     NumKind::Float => (b.ins().fcvt_to_sint_sat(I64, av), NumKind::Int),
@@ -5265,7 +5326,7 @@ fn gen_value_typed<'a>(
             // through to 0 -- which is what the interpreter returns for NaN (it compares
             // rather than using `signum`, which would propagate NaN).
             "sign" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module);
                 let one = b.ins().iconst(I64, 1);
                 let neg = b.ins().iconst(I64, -1);
                 let zero = b.ins().iconst(I64, 0);
@@ -5289,8 +5350,8 @@ fn gen_value_typed<'a>(
                 (b.ins().select(gt, one, lo), NumKind::Int)
             }
             "min" | "max" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
-                let (cv, _ck) = gen_value_typed(b, &args[1], vars, binder, f64_scalars);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module);
+                let (cv, _ck) = gen_value_typed(b, &args[1], vars, binder, f64_scalars, fn_ids, module);
                 let le = name == "min";
                 let cc = if le { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
                 match ak {

@@ -4463,6 +4463,69 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         }
     }
 
+    /// A mixed `Int`→`Float` map body may CALL an `i64`-eligible user function. Factoring a
+    /// loop body into a named function used to drop the whole map to the bytecode loop —
+    /// measured 1.50s against 0.02s inline over 20M elements, and 2.00s vs 0.02s with an
+    /// integer op wrapped around the call. Both spellings now cost the same.
+    ///
+    /// The sharp edge is SHADOWING: the user-call arm is tried before the inline-builtin arm,
+    /// so `fn abs(x) = x + 1000` must dispatch to the user's function and never to `iabs`.
+    /// Each shadow case below returns something the real builtin never would, so a wrong
+    /// dispatch cannot coincide with the right answer.
+    #[test]
+    fn a_mixed_map_body_may_call_an_i64_user_function() {
+        for (src, want) in [
+            // Shadowed builtins: each returns what the genuine builtin would not.
+            ("fn abs(x) = x + 1000\n(0..4).map(i => abs(0 - i) * 0.5)", "[500.0, 499.5, 499.0, 498.5]"),
+            ("fn min(a, b) = a\n(0..4).map(i => min(i, 99) * 0.5)", "[0.0, 0.5, 1.0, 1.5]"),
+            ("fn max(a, b) = a * 10 + b\n(0..3).map(i => max(i, 2) * 0.5)", "[1.0, 6.0, 11.0]"),
+            ("fn to_int(x) = x * 7\n(0..3).map(i => to_int(i) * 0.5)", "[0.0, 3.5, 7.0]"),
+            ("fn sign(x) = x - 1\n(0..3).map(i => sign(i) * 0.5)", "[-0.5, 0.0, 0.5]"),
+            // Ordinary shapes.
+            ("fn f(x) = x * 2 + 1\n(0..5).map(i => f(i) * 0.5)", "[0.5, 1.5, 2.5, 3.5, 4.5]"),
+            ("fn f(x) = x * 2 + 1\n(0..5).map(i => (f(i) % 4) * 0.25)", "[0.25, 0.75, 0.25, 0.75, 0.25]"),
+            ("fn g(x) = x + 1\nfn f(x) = g(x) * 2\n(0..5).map(i => f(g(i)) * 0.5)", "[2.0, 3.0, 4.0, 5.0, 6.0]"),
+            ("c = 3\nfn f(x) = x * 2\n(0..5).map(i => f(i + c) * 0.5)", "[3.0, 4.0, 5.0, 6.0, 7.0]"),
+            ("fn f(a, b) = a * b + 1\n(0..5).map(i => f(i, 3) * 0.5)", "[0.5, 2.0, 3.5, 5.0, 6.5]"),
+            // The callee wraps at i64::MAX; the kernel must wrap identically before promoting.
+            (
+                "fn f(x) = x * 9223372036854775807\n(0..4).map(i => (f(i) % 100) * 0.5)",
+                "[0.0, 3.5, 49.0, 2.5]",
+            ),
+            ("fn f(x, acc) = if x <= 0 then acc else f(x - 1, acc + x)\n(0..5).map(i => f(i, 0) * 0.5)", "[0.0, 0.5, 1.5, 3.0, 5.0]"),
+            // A FLOAT argument must decline — the callee has no f64 form. These must still
+            // produce the interpreter's answer, via the bytecode loop.
+            ("fn f(x) = x * 2\n(0..3).map(i => f(2.5) * 0.5)", "[2.5, 2.5, 2.5]"),
+            ("fn f(x) = x * 2\n(0..3).map(i => f(to_float(i)) * 0.5)", "[0.0, 1.0, 2.0]"),
+            // Callees the i64 specialization does not compile must decline, not miscompile.
+            ("fn f(x) = x / 2\n(0..3).map(i => f(i) * 0.5)", "[0.0, 0.25, 0.5]"),
+            ("fn f(x) = x * 1.5\n(0..3).map(i => f(i) * 0.5)", "[0.0, 0.75, 1.5]"),
+            ("fn f(x) = if x <= 0 then 0 else x + f(x - 1)\n(0..4).map(i => f(i) * 0.5)", "[0.0, 0.5, 1.5, 3.0]"),
+            // Degenerate and non-range sources.
+            ("fn f(x) = x * 2\n(0..0).map(i => f(i) * 0.5)", "[]"),
+            ("fn f(x) = x * 2\n[1, 2, 3].map(i => f(i) * 0.5)", "[1.0, 2.0, 3.0]"),
+            // A call inside a NESTED build, where the inner map also captures the outer binder.
+            (
+                "fn f(x) = x % 7\nn = 3\n(0..n).map(i => (0..n).map(j => f(i * j) * 0.5))",
+                "[[0.0, 0.0, 0.0], [0.0, 0.5, 1.0], [0.0, 1.0, 2.0]]",
+            ),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // The call must actually reach native code — every assertion above is satisfied by a
+        // JIT that declines, which is exactly the state this test exists to prevent.
+        crate::jit::reset_native_call_count();
+        let src = "fn f(x) = x * 2 + 1\n(0..64).map(i => f(i) * 0.5).sum()";
+        assert!(run_vm_jit(src).is_ok());
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "a user call in a mixed map body never reached a native kernel"
+        );
+    }
+
     /// A map over a uniquely-owned array REUSES its buffer instead of allocating a second
     /// one. `xs.map(f).map(g)` used to peak at both buffers even though the intermediate is
     /// dead the moment `g` consumes it — measured 340 MB at n=20M against 186 MB now.

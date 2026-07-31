@@ -135,7 +135,7 @@ impl super::Compiler {
                 // per-element bytecode loop. The captures ride as `i64` and the VM re-checks
                 // each is really an `Int` before dispatch — see `mixed_map_eligible`.
                 .or_else(|| {
-                    crate::jit::mixed_map_eligible(body, &params[0], &user_fns)
+                    crate::jit::mixed_map_eligible(body, &params[0], &fns, &user_fns)
                         .map(|c| (c, Vec::new(), Vec::new()))
                 })
         } else if crate::jit::filter_kernel_eligible(body, &params[0], &fns) {

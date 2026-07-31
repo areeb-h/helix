@@ -696,6 +696,48 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       `Rc::get_mut` with an unconditional `&mut` makes `src` print `[10, 20, 30]` instead of
       `[1, 2, 3]` on the JIT while the other two engines still print the original.
 
+- [x] **Stage 3p — a mixed `Int`→`Float` map body may CALL an `i64` user function: 75–100×.**
+      Factoring a loop body into a named function dropped the whole map to the bytecode
+      loop. The `i64` map kernel had always been able to call user functions; the mixed one
+      could not, because `define_array_kernel` hands the non-mixed path
+      `gen_value(…, fn_ids, module, …)` while the mixed path called `gen_value_typed(…)`,
+      which took neither — so it had no call support, and `infer_mixed_kind`'s `Call` arm
+      admitted only builtins to match.
+
+      MEASURED (20M elements, min-of-3 both engines):
+
+      | body | before | after | inline twin |
+      | --- | --- | --- | --- |
+      | `f(i) * 0.5` | 1.50s | **0.02s** | 0.02s |
+      | `(f(i) % 100) * 0.5` | 2.00s | **0.02s** | 0.02s |
+
+      Both now equal their inlined spelling exactly, which is the result — the inversion is
+      gone, not merely smaller.
+
+      An `i64`-eligible callee needs no new information to type: `int_eligible` means
+      "i64-closed for all-`Int` arguments", so such a call takes `Int` args and returns
+      `Int`, and the enclosing expression promotes it at the first `Float` precisely where
+      the interpreter does. That is why this case is separable from the `Float`-parameter
+      one still open above, which needs signatures the bytecode compiler does not have.
+
+      SHADOWING is the sharp edge: the user-call arm is tried BEFORE the inline-builtin arm
+      in both the analysis and the codegen, so `fn abs(x) = x + 1000` dispatches to the
+      user's function and never to `iabs` — the same precedence `gen_value`'s `fn_ids`
+      lookup already establishes. `a_mixed_map_body_may_call_an_i64_user_function` shadows
+      all five scalar builtins (`abs`/`min`/`max`/`to_int`/`sign`), each returning something
+      the genuine builtin never would, so a wrong dispatch cannot coincide with the right
+      answer. It also covers `i64::MAX` wrapping inside the callee, nested calls, a
+      tail-recursive callee, callees the i64 spec declines (`/`, a float literal, non-tail
+      recursion), `Float` arguments, an empty and a data-array source, a nested build, and
+      an engagement assertion.
+
+      Honest note on one guard: requiring every argument to type `Int` is defence in depth
+      rather than the only line. Removing it does not produce a wrong answer — the `f64`
+      value reaches an `i64` call signature, Cranelift refuses the function, and the kernel
+      declines (verified). It is kept because the alternative is constructing ill-typed IR
+      and relying on the builder to reject it, and a builder that panics rather than erroring
+      would breach ADR-0024's never-abort guarantee.
+
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).
@@ -1172,25 +1214,29 @@ motivates this phase.
 - [ ] **`try`-on-VM error-recovery soak** — `TryBegin`/`TryOk`/`TryErr` unwinding
       under the fuzzer, composed with JIT bailouts mid-`try`.
 
-- [ ] **A user function with a FLOAT parameter, called from a map body, does not
-      compile — 73× measured.** Same arithmetic, 20M elements, only the spelling differs:
+- [ ] **A user function with a FLOAT parameter, called from a map body, still does not
+      compile.** Partially closed by Stage 3p below, which handles the `i64` callee; the
+      remaining case is a callee whose parameters are `Float`:
 
-      | spelling | JIT | VM | |
+      | spelling (20M elements) | JIT | VM | |
       | --- | --- | --- | --- |
       | `map(i => to_float(i) * 2.0 + 1.0)` inline | 0.02s | 1.63s | native, 82× |
-      | `fn g(x: Float) = x * 2.0 + 1.0` + `map(i => g(to_float(i)))` | **1.47s** | 2.15s | **VM (1×)** |
-      | `fn f(x) = x * 2 + 1` + `map(i => f(i))` (i64) | 0.02s | 1.86s | native, 93× |
+      | `fn g(x: Float) = x * 2.0 + 1.0` + `map(i => g(to_float(i)))` | **1.47s** | 2.15s | **VM** |
 
-      The `i64` map kernel calls user functions natively; the FLOAT/mixed one cannot.
-      `define_array_kernel` hands the non-mixed path `gen_value(…, fn_ids, module, …)`,
-      which can emit a call, but the mixed path calls `gen_value_typed(…)`, which takes
-      neither `fn_ids` nor `module` — so it has no call support at all, and
-      `infer_mixed_kind`'s `Call` arm accordingly admits only builtins
-      (`!user_fns.contains(name)`). A user call therefore makes the whole map ineligible.
-      This is the same "the idiomatic spelling is slower" defect class as Stages 3i/3j/3m,
-      and factoring a body into a named function is about as idiomatic as it gets.
-      Fix: thread `fn_ids`/`module` into `gen_value_typed` and admit a user call in
-      `infer_mixed_kind` under the same rules the i64 analysis uses.
+      This one is NOT the same fix. There is deliberately no standalone `f64`
+      specialization of a user function (see the note above `let kind = NumKind::Int` in
+      `build`): a float-argument function can still return an `Int` — a literal, or an
+      `Int`-only subexpression — so an `f64`-monomorphic codegen would diverge from the
+      interpreter on RESULT TYPE, not just value. The machinery that solves this already
+      exists for *functions* calling functions: `MixedSig` carries `params` + `ret`, and
+      `infer_typed_env`/`gen_value_env` type and emit such calls. The map kernel cannot
+      reach it because `mixed_sigs` is built inside `jit::build`, while the decision to
+      emit a kernel (and its capture list) is made earlier, in the bytecode compiler,
+      which knows only function NAMES (`jit_fns`, `func_names`) and no signatures.
+      Closing it means giving the bytecode compiler a mixed-signature table — i.e. moving
+      or duplicating `mixed_fn_sig`'s inference — which is a compiler↔JIT contract change,
+      not a local edit. Worth it (this is `map(i => escape(...))`, the k2/mandelbrot
+      shape), but it should be designed rather than bolted on.
 
 - [ ] **k2 mandelbrot: the loop body is at PARITY with C; the gap is a ~250 ns
       per-pixel fixed cost that is still unidentified.** Recorded because the obvious
