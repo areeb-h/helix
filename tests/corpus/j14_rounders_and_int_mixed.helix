@@ -1,0 +1,61 @@
+# Stages 3u + 3v: the Int-rooted mixed map (i64 out through Float intermediates) and the
+# raising rounders (floor/ceil/round/trunc) it unlocks, backed by the poison out-param — on any
+# out-of-i64-range result the VM discards the whole output and the bytecode loop re-runs to
+# raise the exact interpreter error. (The raise cases themselves live in the Rust test — they
+# stop a program, so a corpus file can only pin the accepting side.)
+#
+# THE TWO SABOTAGE-PROVEN CRUXES, pinned as values:
+#  * round is HALF-AWAY-FROM-ZERO. Lowering to the hardware nearest-even turns the tie rows
+#    below into [0, 2, 2, 4]; and the 0.49999999999999994 row defeats the textbook
+#    trunc(x + copysign(0.5, x)) lowering, whose f64 add rounds up to 1.0.
+#  * a RAISING kernel never takes the in-place buffer reuse (its ABI carries a 5th poison
+#    param, and the fall-back needs the source intact) — the chain row exercises exactly the
+#    dead-intermediate path where that guard is what stands between right and wrong.
+
+# ---- Stage 3u: Int-rooted mixed bodies (to_int/sign never raise) ----
+
+print((0..8).map(i => to_int(to_float(i) * 1.5)))
+c = 10
+print((0..6).map(i => to_int(to_float(i) * 1.5) + c))
+fn f(x) = x * 3
+print((0..6).map(i => to_int(to_float(f(i)) * 0.5)))
+
+# to_int SATURATES (never raises): +-huge and NaN
+print((1..4).map(i => to_int(to_float(i) * 1e19)))
+print((0..3).map(i => to_int(sqrt(0.0 - to_float(i + 1)))))
+
+# ---- Stage 3v: every tie, both signs ----
+
+print((0..4).map(i => round(to_float(i) + 0.5)))
+print((0..4).map(i => round(0.0 - to_float(i) - 0.5)))
+print((0..4).map(i => round(to_float(i) + 0.4)))
+
+# the largest f64 below 0.5: f64::round gives 0; the add-0.5 shortcut gives 1
+print((0..2).map(i => round(to_float(i) * 0.49999999999999994)))
+
+print((0..4).map(i => floor(0.0 - to_float(i) - 0.5)))
+print((0..4).map(i => ceil(0.0 - to_float(i) - 0.5)))
+print((0..4).map(i => trunc(0.0 - to_float(i) - 0.5)))
+
+# floor of an Int is the identity, matching the interpreter
+print((0..4).map(i => floor(i) + 1))
+
+# exactly-representable i64::MIN is ACCEPTED — the poison range check is half-open
+print((1..3).map(i => round(to_float(i) * (0.0 - 4.611686018427388e18))))
+
+# ---- captures, calls, the Float-rooted variant, shadowing ----
+
+k = 2
+print((0..5).map(i => round(to_float(i * k) * 0.5)))
+print((0..5).map(i => trunc(to_float(f(i)) * 0.5)))
+print((0..5).map(i => to_float(round(to_float(i) * 0.5)) * 2.0))
+print((0..5).map(i => round(to_float(i) * 0.5) + floor(to_float(i) * 0.25)))
+
+# a user fn shadowing `round` must win over the native lowering
+fn round(x) = 99
+print((0..3).map(i => round(to_float(i) * 0.5) + 0))
+
+# ---- the chain: a dead intermediate through a raising-SHAPED kernel that does not raise ----
+# (the raising variant of this chain is in the Rust test; here the shape runs clean and the
+# values must be exact)
+print((0..5).map(i => i * 2).map(i => trunc(to_float(i) * 0.5)))

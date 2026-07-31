@@ -138,12 +138,23 @@ impl super::Compiler {
                     crate::jit::mixed_map_eligible(body, &params[0], &fns, &user_fns)
                         .map(|c| (c, Vec::new(), Vec::new()))
                 })
+                // The Int-ROOTED mixed body — `to_int(to_float(it) * 1.5)`, which previously
+                // had NO kernel shape at all. Tried LAST, so it only admits what every other
+                // analysis rejected (the i64 analysis in particular ran first, so a plain
+                // i64-closed body never lands here).
+                .or_else(|| {
+                    crate::jit::mixed_map_int_root_eligible(body, &params[0], &fns, &user_fns)
+                        .map(|c| (c, Vec::new(), Vec::new()))
+                })
         } else {
             // A `filter` predicate may capture free `i64` scalars, same as a `map` body — the
             // VM proves each is an `Int` at dispatch and passes them as a `caps` slice.
             crate::jit::filter_kernel_eligible(body, &params[0], &fns)
                 .map(|c| (c, Vec::new(), Vec::new()))
         };
+        // Computed here, while `user_fns` is still borrowable — the capture-push loop below
+        // needs `&mut self`, which would end the borrow.
+        let kernel_raises = crate::jit::map_body_raises(body, &user_fns);
         let kernel_guard: Option<(usize, u32)> = if let Some((caps, index_bounds, synth_exprs)) =
             captures
         {
@@ -168,6 +179,7 @@ impl super::Compiler {
                 body: body.clone(),
                 captures: caps,
                 index_bounds,
+                raises: kernel_raises,
             };
             if is_map {
                 let idx = self.map_kernels.len() as u32;

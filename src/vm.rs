@@ -344,6 +344,16 @@ fn try_map_range(
         if k.index_bounds.is_empty()
             && let Some(c) = int_scalar_caps(cap_vals)
         {
+            // A RAISING body (rounder inside) takes the poison range wrapper; `None` means
+            // some element left i64 range, and returning None here falls through to the
+            // materializing path, whose poison wrapper declines again into the bytecode
+            // loop — which re-runs and raises the exact interpreter error.
+            if k.raises {
+                let out = unsafe {
+                    crate::jit::run_map_kernel_range_mixed_poison(p, start, step, len, &c)
+                };
+                return out.map(Value::float_array);
+            }
             let out = unsafe { crate::jit::run_map_kernel_mixed_range(p, start, step, len, &c) };
             return Some(Value::float_array(out));
         }
@@ -353,6 +363,21 @@ fn try_map_range(
             let out = unsafe { crate::jit::run_map_kernel_mixed_range(p, start, step, len, &c) };
             return Some(Value::float_array(out));
         }
+    }
+    // The Int-ROOTED mixed specialization (i64 out through Float intermediates). Its ABI is
+    // the plain i64 kernel's, so the i64 range runner produces the `Ints` result directly —
+    // unless the body RAISES, in which case the poison signature and wrapper apply.
+    if let Some(p) = j.map_kernel_mixed_int(kidx)
+        && k.index_bounds.is_empty()
+        && let Some(c) = int_scalar_caps(cap_vals)
+    {
+        if k.raises {
+            let out =
+                unsafe { crate::jit::run_map_kernel_range_int_poison(p, start, step, len, &c) };
+            return out.map(Value::int_array);
+        }
+        let out = unsafe { crate::jit::run_map_kernel_range(p, start, step, len, &c) };
+        return Some(Value::int_array(out));
     }
     None
 }
@@ -1698,7 +1723,15 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                             None => Pick::No,
                                         }
                                     }
-                                    _ => Pick::No,
+                                    // The Int-ROOTED mixed specialization: same ABI as the
+                                    // i64 kernel, so it RIDES `Pick::I64` — including the
+                                    // dead-buffer in-place reuse — and produces `Ints`.
+                                    _ => match (j.map_kernel_mixed_int(kidx), int_scalar_caps(&cap_vals)) {
+                                        (Some(p), Some(c)) if k.index_bounds.is_empty() => {
+                                            Pick::I64(p, c)
+                                        }
+                                        _ => Pick::No,
+                                    },
                                 }
                             }
                             ArrayData::Floats(_) => {
@@ -1727,7 +1760,15 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         Pick::I64(ptr, caps) => {
                             let mut arr = stack.pop().unwrap();
                             let unindexed = program.map_kernels[kidx].index_bounds.is_empty();
+                            // A RAISING kernel (rounder body, poison signature) must never
+                            // take the in-place branch: on poison the fall-back re-runs the
+                            // body over the SOURCE, which in-place reuse would have already
+                            // overwritten. It calls the poison wrapper instead, whose `None`
+                            // (some element left i64 range) falls through to the bytecode
+                            // loop for the exact interpreter error.
+                            let raises = program.map_kernels[kidx].raises;
                             let ran = if unindexed
+                                && !raises
                                 && let Value::Array(a) = &mut arr
                                 && let Some(ArrayData::Ints(v)) = std::rc::Rc::get_mut(a)
                             {
@@ -1736,9 +1777,22 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             } else if let Value::Array(a) = &arr
                                 && let ArrayData::Ints(v) = &**a
                             {
-                                let out = unsafe { crate::jit::run_map_kernel(ptr, v, &caps) };
-                                arr = Value::int_array(out);
-                                true
+                                if raises {
+                                    match unsafe {
+                                        crate::jit::run_map_kernel_int_poison(ptr, v, &caps)
+                                    } {
+                                        Some(out) => {
+                                            arr = Value::int_array(out);
+                                            true
+                                        }
+                                        None => false,
+                                    }
+                                } else {
+                                    let out =
+                                        unsafe { crate::jit::run_map_kernel(ptr, v, &caps) };
+                                    arr = Value::int_array(out);
+                                    true
+                                }
                             } else {
                                 false
                             };
@@ -1777,9 +1831,24 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             {
                                 // `cap_vals` (holding the Rcs behind any base pointers in `caps`)
                                 // is still in scope — dropped only when this arm ends.
-                                let out = unsafe { crate::jit::run_map_kernel_mixed(ptr, v, &caps) };
-                                stack.push(Value::float_array(out));
-                                frames[fi].ip = *after as usize;
+                                // A RAISING body takes the poison wrapper; its `None` (a
+                                // rounder left i64 range) falls through to the bytecode loop.
+                                if program.map_kernels[kidx].raises {
+                                    match unsafe {
+                                        crate::jit::run_map_kernel_mixed_poison(ptr, v, &caps)
+                                    } {
+                                        Some(out) => {
+                                            stack.push(Value::float_array(out));
+                                            frames[fi].ip = *after as usize;
+                                        }
+                                        None => stack.push(arr),
+                                    }
+                                } else {
+                                    let out =
+                                        unsafe { crate::jit::run_map_kernel_mixed(ptr, v, &caps) };
+                                    stack.push(Value::float_array(out));
+                                    frames[fi].ip = *after as usize;
+                                }
                             } else {
                                 stack.push(arr);
                             }

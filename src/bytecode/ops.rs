@@ -488,6 +488,15 @@ pub struct ArrayKernel {
     /// erases the range-ness the proof depends on. Every other source falls back to the
     /// checked bytecode loop, which raises the exact error (or wraps the exact way).
     pub index_bounds: Vec<IndexBound>,
+    /// `true` if the body contains a builtin that can RAISE mid-loop (`floor`/`ceil`/
+    /// `round`/`trunc` on an out-of-i64-range result). Such a kernel takes an extra
+    /// poison out-param the codegen sets on any raising condition; the VM discards the
+    /// whole output and falls back to the bytecode loop, which re-runs and raises the
+    /// exact interpreter error. Set at compile time by [`crate::jit::map_body_raises`],
+    /// re-derived at build time (drift guard), and read at dispatch to pick the poison
+    /// call wrapper. A raising kernel must NEVER take the in-place buffer reuse — a
+    /// poison after mutating the source would corrupt the fall-back's input.
+    pub raises: bool,
 }
 
 /// One stage of a fused pipeline (`xs.filter(g).map(f)…`). Each is a pure single-binder

@@ -814,6 +814,55 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       always built, passed and consumed together, so they are now one `IndexedOut` — 8
       arguments down to 6, and clippy back to its 2-warning baseline.
 
+- [x] **Stage 3u — the Int-ROOTED mixed map: 105–423×.** An `i64`-out body through Float
+      intermediates (`to_int(to_float(i) * 1.5)`) had NO kernel shape at all — recorded in
+      the handoff as 4.05s JIT against 4.01s VM, i.e. silently interpreted. The new
+      specialization ("mapmi") types the body per node exactly as the f64-rooted mixed
+      kernel does, but with root `Int` — and because it reads `i64` and writes `i64`, its
+      ABI is the plain i64 kernel's, so it rides the same FFI wrappers, the same dispatch
+      marshalling (`Pick::I64`), and the same dead-buffer in-place reuse for free.
+      `define_array_kernels`' `mixed: bool` became `mixed_root: Option<NumKind>`; the build
+      gate requires `map_kernel_captures` to have REJECTED the body, so an i64-closed body
+      is never double-compiled. Measured: `to_int(to_float(i)*1.5)` 167×, with a capture
+      423×, `sign(to_float(i)-5e6)` 105×, with a user call 131×. 21-case battery: to_int
+      saturation at ±huge and NaN, 2^53 spacing, shadowed `to_int` dispatching to the user
+      fn, chains in both directions, declines.
+
+- [x] **Stage 3v — the RAISING rounders compile, behind a poison out-param: 32–58×.**
+      `floor`/`ceil`/`round`/`trunc` raise when their result leaves i64 range, and a kernel
+      cannot raise mid-loop — the mechanism that kept them (and 17 of 22 numeric builtins,
+      per the audit) blocking the JIT. The retrofit: `ArrayKernel.raises` (set by
+      `map_body_raises` at compile, re-derived at build as a drift guard — it decides the
+      SIGNATURE), a 5th poison out-cell param on raising mixed kernels, an accumulator the
+      rounder arm ORs into, and serial poison FFI wrappers whose `None` falls through to the
+      bytecode loop for the exact interpreter error. The range wrapper stops at the first
+      poisoned chunk.
+
+      THE TWO SABOTAGE-PROVEN CRUXES:
+      * `round` is HALF-AWAY-FROM-ZERO. Cranelift's `nearest` is round-to-nearest-EVEN —
+        sabotaging to it turns `[1, 2, 3, 4]` into `[0, 2, 2, 4]` on the tie battery. The
+        textbook `trunc(x + copysign(0.5, x))` is also wrong: for x = 0.49999999999999994
+        (the largest f64 below 0.5) the add rounds up to 1.0. The exact lowering is
+        `t = trunc(x); |x − t| ≥ 0.5 ? t + copysign(1, x) : t` — the subtraction is exact
+        below 2^52 and the fraction is exactly 0 above it. The range check is the
+        interpreter's `round_to_i64` verbatim: accept iff rounded ∈ [−2^63, 2^63), half-open,
+        NaN/±inf rejected by the comparisons themselves; the conversion is
+        `fcvt_to_sint_sat` because a plain `fcvt_to_sint` TRAPS.
+      * A raising kernel must NEVER take the in-place buffer reuse. Sabotaging the `!raises`
+        guard crashes outright — the 4-param in-place runner calls a 5-param kernel — and
+        even with matched ABI, a poison after mutating the source would corrupt the
+        fall-back's input. The guard lives at the dispatch site next to the `Rc::get_mut`.
+
+      Measured (10M elements): `round(to_float(i)*0.5)` 32×, `floor` 46×, `trunc`+capture
+      58×, Float-rooted `to_float(round(…))*2.0` 45×, with a user call 45×. Raise cases
+      verified for EXACT error text on all three engines from a range source, a chained dead
+      intermediate, NaN, inf, and one element past the boundary — with exactly-representable
+      `i64::MIN` accepted. NOT yet admitted: `clamp` (runtime-typed mixing like `min`/`max`,
+      plus a second raise condition — needs its own design), `/` inside mixed bodies (the
+      pre-existing division exclusion, which is why `ceil(x / 4.0)` still declines — use
+      `* 0.25`), and rounders in INDEXED mixed bodies or reduce bodies (the analyses there
+      have no rounder arm yet; same mechanism would apply).
+
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).

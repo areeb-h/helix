@@ -487,6 +487,115 @@ pub unsafe fn run_filter_kernel_range(
     dst
 }
 
+/// Run a RAISING map kernel (body contains a rounder — see `ArrayKernel::raises`) over a
+/// materialized buffer: `fn(src, dst, len, caps, poison_cell)`. Returns `None` when the
+/// kernel set poison — some element's rounded result left the i64 range — and the caller
+/// falls through to the bytecode loop, which re-runs and raises the exact interpreter
+/// error. The whole output is discarded on poison, which is also why a raising kernel must
+/// NEVER take the in-place buffer reuse: the fall-back needs the source intact.
+///
+/// SERIAL deliberately: the parallel form would need per-chunk poison cells to stay
+/// race-free, and a raising map has shown no throughput demand — simplest-correct wins
+/// until a profile says otherwise.
+///
+/// SAFETY: `ptr` is a finalized `extern "C" fn(*const S, *mut D, i64, *const i64, *mut i64)`
+/// matching `S`/`D` from `define_array_kernel` with the poison signature.
+unsafe fn run_map_poison<S, D: Copy + Default>(
+    ptr: *const u8,
+    src: &[S],
+    caps: &[i64],
+) -> Option<Vec<D>> {
+    note_native_call();
+    let mut dst: Vec<D> = vec![D::default(); src.len()];
+    if src.is_empty() {
+        return Some(dst);
+    }
+    let f: extern "C" fn(*const S, *mut D, i64, *const i64, *mut i64) =
+        unsafe { std::mem::transmute(ptr) };
+    let mut poison: i64 = 0;
+    f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, caps.as_ptr(), &mut poison);
+    (poison == 0).then_some(dst)
+}
+
+/// The i64-out raising map kernel (Int-rooted mixed body with a rounder). SAFETY: as
+/// [`run_map_poison`] with `S = D = i64`.
+pub unsafe fn run_map_kernel_int_poison(
+    ptr: *const u8,
+    src: &[i64],
+    caps: &[i64],
+) -> Option<Vec<i64>> {
+    unsafe { run_map_poison::<i64, i64>(ptr, src, caps) }
+}
+
+/// The f64-out raising map kernel (Float-rooted mixed body with a rounder inside). SAFETY:
+/// as [`run_map_poison`] with `S = i64, D = f64`.
+pub unsafe fn run_map_kernel_mixed_poison(
+    ptr: *const u8,
+    src: &[i64],
+    caps: &[i64],
+) -> Option<Vec<f64>> {
+    unsafe { run_map_poison::<i64, f64>(ptr, src, caps) }
+}
+
+/// The RANGE-source twin of [`run_map_poison`]: counter values are generated per chunk into
+/// a reused scratch (so nothing is materialized), and generation STOPS at the first
+/// poisoned chunk — a 20M-element map that raised in chunk one does not run to completion
+/// before falling back. Serial for the same reason as the materialized form.
+///
+/// SAFETY: as [`run_map_poison`]; the element formula is `Value::range_at`'s verbatim in
+/// `i128`, identical to `run_map_kernel_range`'s.
+unsafe fn run_map_range_poison<D: Copy + Default>(
+    ptr: *const u8,
+    start: i64,
+    step: i64,
+    len: usize,
+    caps: &[i64],
+) -> Option<Vec<D>> {
+    note_native_call();
+    let mut dst: Vec<D> = vec![D::default(); len];
+    if len == 0 {
+        return Some(dst);
+    }
+    let f: extern "C" fn(*const i64, *mut D, i64, *const i64, *mut i64) =
+        unsafe { std::mem::transmute(ptr) };
+    const CH: usize = 1 << 14;
+    let at = |j: usize| -> i64 { (start as i128 + step as i128 * j as i128) as i64 };
+    let mut scratch: Vec<i64> = Vec::with_capacity(CH.min(len));
+    let mut poison: i64 = 0;
+    for base in (0..len).step_by(CH) {
+        let n = CH.min(len - base);
+        scratch.clear();
+        scratch.extend((0..n).map(|k| at(base + k)));
+        f(scratch.as_ptr(), dst[base..].as_mut_ptr(), n as i64, caps.as_ptr(), &mut poison);
+        if poison != 0 {
+            return None;
+        }
+    }
+    Some(dst)
+}
+
+/// SAFETY: as [`run_map_range_poison`] with `D = i64`.
+pub unsafe fn run_map_kernel_range_int_poison(
+    ptr: *const u8,
+    start: i64,
+    step: i64,
+    len: usize,
+    caps: &[i64],
+) -> Option<Vec<i64>> {
+    unsafe { run_map_range_poison::<i64>(ptr, start, step, len, caps) }
+}
+
+/// SAFETY: as [`run_map_range_poison`] with `D = f64`.
+pub unsafe fn run_map_kernel_range_mixed_poison(
+    ptr: *const u8,
+    start: i64,
+    step: i64,
+    len: usize,
+    caps: &[i64],
+) -> Option<Vec<f64>> {
+    unsafe { run_map_range_poison::<f64>(ptr, start, step, len, caps) }
+}
+
 /// Run a native scan (prefix-fold) kernel over the range counter `[start, end)`, returning
 /// the array of successive accumulators. SERIAL by definition — `out[i]` depends on
 /// `out[i-1]` — so there is no parallel form and byte-identity needs no ordering argument.

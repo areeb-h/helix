@@ -4467,6 +4467,84 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         }
     }
 
+    /// The Int-rooted mixed map and the RAISING rounders. Two stages pinned together
+    /// because the second builds on the first: (3u) an `i64`-out body through Float
+    /// intermediates (`to_int(to_float(i) * 1.5)`) previously had no kernel shape at all;
+    /// (3v) `floor`/`ceil`/`round`/`trunc` may now appear in mixed map bodies, backed by a
+    /// poison out-param — on any out-of-i64-range result the VM discards the whole output
+    /// and the bytecode loop re-runs to raise the exact interpreter error.
+    ///
+    /// The two sabotage-proven cruxes: `round` is HALF-AWAY-FROM-ZERO — lowering it to
+    /// Cranelift's `nearest` (round-to-nearest-even) turns `[1, 2, 3, 4]` into
+    /// `[0, 2, 2, 4]` on the tie battery — and the `0.49999999999999994` case defeats the
+    /// textbook `trunc(x + copysign(0.5, x))` lowering, whose f64 add rounds up to 1.0.
+    /// And a RAISING kernel must never take the in-place buffer reuse: forcing it makes the
+    /// 4-param in-place runner call a 5-param kernel (ABI mismatch, crash) — and even with
+    /// matched ABI, a poison after mutating the source would corrupt the fall-back's input.
+    #[test]
+    fn int_rooted_mixed_maps_and_raising_rounders_agree_and_poison_exactly() {
+        for (src, want) in [
+            // Stage 3u: Int-rooted mixed bodies (no rounder, never raise).
+            ("(0..8).map(i => to_int(to_float(i) * 1.5))", "[0, 1, 3, 4, 6, 7, 9, 10]"),
+            ("c = 10\n(0..6).map(i => to_int(to_float(i) * 1.5) + c)", "[10, 11, 13, 14, 16, 17]"),
+            ("fn f(x) = x * 3\n(0..6).map(i => to_int(to_float(f(i)) * 0.5))", "[0, 1, 3, 4, 6, 7]"),
+            ("(1..4).map(i => to_int(to_float(i) * 1e19))", "[9223372036854775807, 9223372036854775807, 9223372036854775807]"),
+            ("(0..3).map(i => to_int(sqrt(0.0 - to_float(i + 1))))", "[0, 0, 0]"),
+            // Stage 3v: every tie, both signs — half-away-from-zero.
+            ("(0..4).map(i => round(to_float(i) + 0.5))", "[1, 2, 3, 4]"),
+            ("(0..4).map(i => round(0.0 - to_float(i) - 0.5))", "[-1, -2, -3, -4]"),
+            // The largest f64 below 0.5: `f64::round` gives 0; the add-0.5 shortcut gives 1.
+            ("(0..2).map(i => round(to_float(i) * 0.49999999999999994))", "[0, 0]"),
+            ("(0..4).map(i => floor(0.0 - to_float(i) - 0.5))", "[-1, -2, -3, -4]"),
+            ("(0..4).map(i => ceil(0.0 - to_float(i) - 0.5))", "[0, -1, -2, -3]"),
+            ("(0..4).map(i => trunc(0.0 - to_float(i) - 0.5))", "[0, -1, -2, -3]"),
+            ("(0..4).map(i => floor(i) + 1)", "[1, 2, 3, 4]"),
+            // Exactly representable MIN is accepted; the poison range check is half-open.
+            (
+                "(1..3).map(i => round(to_float(i) * (0.0 - 4.611686018427388e18)))",
+                "[-4611686018427387904, -9223372036854775808]",
+            ),
+            // A capture, a user call, the Float-rooted variant, and a shadowed `round`.
+            ("c = 2\n(0..5).map(i => round(to_float(i * c) * 0.5))", "[0, 1, 2, 3, 4]"),
+            ("fn f(x) = x * 3\n(0..5).map(i => trunc(to_float(f(i)) * 0.5))", "[0, 1, 3, 4, 6]"),
+            ("(0..5).map(i => to_float(round(to_float(i) * 0.5)) * 2.0)", "[0.0, 2.0, 2.0, 4.0, 4.0]"),
+            ("fn round(x) = 99\n(0..3).map(i => round(to_float(i) * 0.5) + 0)", "[99, 99, 99]"),
+            // A chain whose SECOND map raises: the dead intermediate must survive the
+            // poisoned kernel so the bytecode re-run raises over intact input.
+            ("(0..5).map(i => i * 2).map(i => round(to_float(i) * 0.5))", "[0, 1, 2, 3, 4]"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // The raises: identical ERROR TEXT on all three engines, from a range source, a
+        // chained dead intermediate, NaN, and inf.
+        for src in [
+            "(0..5).map(i => round(to_float(i) * 4.0e18))",
+            "(1..4).map(i => floor(to_float(i) * 1e19))",
+            "(0..5).map(i => i * 2).map(i => round(to_float(i) * 4.0e18))",
+            "(0..3).map(i => round(sqrt(0.0 - to_float(i + 1))))",
+            "(0..3).map(i => floor(to_float(i) + inf))",
+            "(1..3).map(i => round(to_float(i) * 4.611686018427388e18))",
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert!(tw.is_err(), "`{src}` should raise");
+            assert_eq!(tw, vm, "tree-walker and VM disagree on the error for `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on the error for `{src}`");
+        }
+        // Engagement, separately per specialization: the Int-rooted kernel and the raising
+        // kernel each must actually run — agreement alone is satisfied by declining.
+        for src in [
+            "(0..64).map(i => to_int(to_float(i) * 1.5)).sum()",
+            "(0..64).map(i => round(to_float(i) * 0.5)).sum()",
+        ] {
+            crate::jit::reset_native_call_count();
+            assert!(run_vm_jit(src).is_ok());
+            assert!(crate::jit::native_call_count() > 0, "never reached native: `{src}`");
+        }
+    }
+
     /// `scan` — the prefix fold — gets a native kernel. It was the last comprehension with no
     /// native form at all: 0.54s against its `reduce` twin's 0.00s at 10M elements, now 0.05s.
     ///
