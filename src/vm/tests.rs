@@ -4463,6 +4463,64 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         }
     }
 
+    /// A `filter` predicate may CAPTURE free `i64` scalars. Before this, swapping a literal
+    /// threshold for a variable moved the whole filter onto the bytecode loop — the same cliff
+    /// the map body had, measured 0.55s against 0.01s over 10M elements.
+    ///
+    /// The filter kernel COMPACTS, so its output offset depends on how many earlier elements
+    /// were kept; chunk boundaries are therefore the sharp edge and are read INDIVIDUALLY here
+    /// (a sum can hide a swapped pair). The decline cases matter as much as the accepting ones:
+    /// they exercise popping the captures off the stack and falling through to the bytecode
+    /// loop, which is where a stack-discipline mistake would surface.
+    #[test]
+    fn a_filter_predicate_may_capture_and_declines_a_non_int_capture() {
+        for (src, want) in [
+            ("k = 3\n(0..8).filter(it > k)", "[4, 5, 6, 7]"),
+            ("c = 2\n(0..8).filter(it * c > 6)", "[4, 5, 6, 7]"),
+            ("lo = 2\nhi = 6\n(0..10).filter(it > lo and it < hi)", "[3, 4, 5]"),
+            ("a = 1\nb = 8\n(0..10).filter(it < a or it > b)", "[0, 9]"),
+            ("k = 3\n(0..10).filter(it > k and it < k * 3)", "[4, 5, 6, 7, 8]"),
+            ("k = 0 - 3\n(0 - 5..5).filter(it > k)", "[-2, -1, 0, 1, 2, 3, 4]"),
+            // A literal modulus is still required (a variable divisor could be 0, which must
+            // raise); combining one with a capture must work.
+            ("k = 3\n(0..20).filter(it % 5 == 0 and it > k)", "[5, 10, 15]"),
+            ("fn dbl(x) = x * 2\nk = 4\n(0..10).filter(dbl(it) > k)", "[3, 4, 5, 6, 7, 8, 9]"),
+            ("k = 2\n[5, 1, 4, 2, 3].filter(it > k)", "[5, 4, 3]"),
+            ("k = 2\n(0..6).where(it > k)", "[3, 4, 5]"),
+            // A non-`Int` capture must DECLINE to the bytecode loop, never reinterpret bits.
+            ("k = 2.5\n(0..8).filter(it > k)", "[3, 4, 5, 6, 7]"),
+            ("k = 3.0\n(0..8).filter(it > k)", "[4, 5, 6, 7]"),
+            // Degenerate sources, and the all-keep / all-drop extremes of a compacting loop.
+            ("k = 3\n(0..0).filter(it > k)", "[]"),
+            ("k = 3\n(8..0).filter(it > k)", "[]"),
+            ("k = 0 - 1\n(0..5).filter(it > k)", "[0, 1, 2, 3, 4]"),
+            ("k = 100\n(0..5).filter(it > k)", "[]"),
+            // Roughly one survivor per chunk, where a wrong output offset shows up at once
+            // instead of being absorbed by its neighbours.
+            ("k = 0 - 1\nn = 40000\n(0..n).filter(it % 16384 == 0 and it > k)", "[0, 16384, 32768]"),
+            ("k = 20000\nn = 40000\n(0..n).filter(it % 8192 == 0 and it < k)", "[0, 8192, 16384]"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // Chunk-boundary elements read one at a time, straddling `PAR_MATH_THRESHOLD`.
+        let src = "k = 0 - 1\nn = 40000\na = (0..n).filter(it > k)\n\
+                   [a[0], a[16383], a[16384], a[32767], a[32768], a[39999]]";
+        let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+        assert_eq!(tw, vm, "tree-walker and VM disagree at the chunk boundaries");
+        assert_eq!(vm, jit, "VM and JIT disagree at the chunk boundaries");
+        assert_eq!(vm, Ok("[0, 16383, 16384, 32767, 32768, 39999]".to_string()));
+
+        crate::jit::reset_native_call_count();
+        assert!(run_vm_jit("k = 3\n(0..64).filter(it > k).count()").is_ok());
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "a capturing filter predicate never reached a native kernel"
+        );
+    }
+
     /// A mixed `Int`→`Float` map body may CALL an `i64`-eligible user function. Factoring a
     /// loop body into a named function used to drop the whole map to the bytecode loop —
     /// measured 1.50s against 0.02s inline over 20M elements, and 2.00s vs 0.02s with an

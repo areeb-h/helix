@@ -1793,6 +1793,15 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // the kernel can be fed generated values instead of a materialized buffer that
                 // would sit live beside the output. Tried BEFORE `densify_range_top`, which is
                 // what allocates it.
+                // A capturing predicate (`it % k == 0`) pushed its captures above the receiver;
+                // pop them whether or not the kernel is taken, so the bytecode fall-through
+                // sees only the array. Each must be an `Int` at run time — the same proof the
+                // map path uses, and what lets the predicate read them as `i64`.
+                let fkidx = *kernel_idx as usize;
+                let n_fcaps = program.filter_kernels[fkidx].captures.len();
+                let fsplit = stack.len() - n_fcaps;
+                let fcap_vals = stack.split_off(fsplit);
+                let fcaps = int_scalar_caps(&fcap_vals);
                 let filt_range: Option<(i64, i64, usize)> = match stack.last() {
                     Some(Value::Array(a)) => match &**a {
                         crate::value::ArrayData::Range { start, step, len } => {
@@ -1803,9 +1812,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     _ => None,
                 };
                 let range_taken = if let (Some(j), Some((rs, rstep, rlen))) = (jit, filt_range)
-                    && let Some(p) = j.filter_kernel(*kernel_idx as usize)
+                    && let Some(p) = j.filter_kernel(fkidx)
+                    && let Some(c) = fcaps.as_deref()
                 {
-                    let out = unsafe { crate::jit::run_filter_kernel_range(p, rs, rstep, rlen) };
+                    let out =
+                        unsafe { crate::jit::run_filter_kernel_range(p, rs, rstep, rlen, c) };
                     stack.pop(); // the lazy range receiver
                     stack.push(Value::int_array(out));
                     frames[fi].ip = *after as usize;
@@ -1815,20 +1826,21 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 };
                 if !range_taken {
                     densify_range_top(&mut stack); // materialize so the native filter engages
-                    let ptr = match (jit, stack.last()) {
-                        (Some(j), Some(Value::Array(a)))
+                    let ptr = match (jit, stack.last(), fcaps.as_deref()) {
+                        (Some(j), Some(Value::Array(a)), Some(_))
                             if matches!(&**a, crate::value::ArrayData::Ints(_)) =>
                         {
-                            j.filter_kernel(*kernel_idx as usize)
+                            j.filter_kernel(fkidx)
                         }
                         _ => None,
                     };
                     if let Some(ptr) = ptr {
+                        let c = fcaps.as_deref().unwrap_or(&[]);
                         let arr = stack.pop().unwrap();
                         if let Value::Array(a) = &arr
                             && let crate::value::ArrayData::Ints(v) = &**a
                         {
-                            let out = unsafe { crate::jit::run_filter_kernel(ptr, v) };
+                            let out = unsafe { crate::jit::run_filter_kernel(ptr, v, c) };
                             stack.push(Value::int_array(out));
                             frames[fi].ip = *after as usize;
                         } else {

@@ -138,10 +138,11 @@ impl super::Compiler {
                     crate::jit::mixed_map_eligible(body, &params[0], &fns, &user_fns)
                         .map(|c| (c, Vec::new(), Vec::new()))
                 })
-        } else if crate::jit::filter_kernel_eligible(body, &params[0], &fns) {
-            Some((Vec::new(), Vec::new(), Vec::new()))
         } else {
-            None
+            // A `filter` predicate may capture free `i64` scalars, same as a `map` body — the
+            // VM proves each is an `Int` at dispatch and passes them as a `caps` slice.
+            crate::jit::filter_kernel_eligible(body, &params[0], &fns)
+                .map(|c| (c, Vec::new(), Vec::new()))
         };
         let kernel_guard: Option<(usize, u32)> = if let Some((caps, index_bounds, synth_exprs)) =
             captures
@@ -1115,7 +1116,10 @@ impl super::Compiler {
             crate::jit::map_kernel_eligible(body, &binder, &fns)
                 .then(|| FusionStage::Map { binder, body: body.clone() })
         } else {
+            // Capture-free only: a fused pipeline has no caps slice to carry them, so a
+            // capturing predicate declines here and takes the standalone filter kernel.
             crate::jit::filter_kernel_eligible(body, &binder, &fns)
+                .is_some_and(|c| c.is_empty())
                 .then(|| FusionStage::Filter { binder, body: body.clone() })
         }
     }

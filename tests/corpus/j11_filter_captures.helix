@@ -1,0 +1,88 @@
+# A `filter` predicate that CAPTURES free i64 scalars (Stage 3q). Swapping a literal threshold
+# for a variable used to move the whole filter onto the bytecode loop — `xs.filter(it > k)` cost
+# 0.55s against 0.01s for `xs.filter(it > 5000000)` over 10M elements. The filter kernel simply
+# had no caps pointer (only map got one), and its eligibility check used the capture-REJECTING
+# condition analysis even though a capture-collecting twin already existed for the fused path.
+#
+# The filter kernel COMPACTS: chunk i writes at an offset determined by how many elements chunks
+# 0..i kept. So the failure mode is a wrong OFFSET, not a wrong element — which is why the
+# boundary cases below are read individually and why predicates keeping roughly one element per
+# chunk are included. A sum would hide a swapped pair.
+#
+# The DECLINE cases are load-bearing too: a non-Int capture must fall through to the bytecode
+# loop, and that fall-through is what exercises popping the captures back off the stack.
+
+# ---- values ----
+
+k = 3
+print((0..8).filter(it > k))
+
+c = 2
+print((0..8).filter(it * c > 6))
+
+lo = 2
+hi = 6
+print((0..10).filter(it > lo and it < hi))
+
+a = 1
+b = 8
+print((0..10).filter(it < a or it > b))
+
+# the same capture read twice — one slot, deduped by the analysis
+print((0..10).filter(it > k and it < k * 3))
+
+# a negative capture, and a source spanning zero
+neg = 0 - 3
+print((0 - 5..5).filter(it > neg))
+
+# a capture beside a LITERAL modulus. The modulus must stay a literal: a variable divisor could
+# be zero (which must raise) and a negative one has sign subtleties, so `it % k` is excluded on
+# its own merits and has nothing to do with captures.
+print((0..20).filter(it % 5 == 0 and it > k))
+
+# a user call in the predicate, alongside a capture
+fn dbl(x) = x * 2
+kk = 4
+print((0..10).filter(dbl(it) > kk))
+
+# a data-array source rather than a range
+print([5, 1, 4, 2, 3].filter(it > 2))
+
+# `where` is the same kernel under the other surface name
+print((0..6).where(it > 2))
+
+# ---- declines: a non-Int capture must fall back, never reinterpret bits ----
+
+f1 = 2.5
+print((0..8).filter(it > f1))
+
+# 3.0 is here too, and on its own it proves nothing — a truncating bug would still give the
+# right answer. It is the 2.5 case above that discriminates.
+f2 = 3.0
+print((0..8).filter(it > f2))
+
+# ---- degenerate sources, and the extremes of a compacting loop ----
+
+print((0..0).filter(it > k))
+print((8..0).filter(it > k))
+print((0..5).filter(it > 0 - 1))
+print((0..5).filter(it > 100))
+
+# ---- chunk boundaries (16K chunks; 32768 is also the parallel threshold) ----
+
+n = 40000
+keepall = 0 - 1
+big = (0..n).filter(it > keepall)
+print(big[0])
+print(big[16383])
+print(big[16384])
+print(big[32767])
+print(big[32768])
+print(big[39999])
+
+# roughly one survivor per chunk, where a wrong output offset shows up immediately
+print((0..n).filter(it % 16384 == 0 and it > keepall))
+
+# a sparse keep bounded by a capture, so both the offset and the predicate matter
+cap = 20000
+print((0..n).filter(it % 8192 == 0 and it < cap))

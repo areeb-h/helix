@@ -738,6 +738,45 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       and relying on the builder to reject it, and a builder that panics rather than erroring
       would breach ADR-0024's never-abort guarantee.
 
+- [x] **Stage 3q — a `filter` predicate may CAPTURE: 55–119×.** Found by sweeping the
+      constructs the map family's fixes had not touched. `xs.filter(it > k)` fell to the
+      bytecode loop while the identical `xs.filter(it > 5000000)` ran natively — the same
+      swap-a-literal-for-a-variable cliff, in the one place still carrying it. The filter
+      kernel had no `caps` pointer at all (`define_array_kernel` gave one only to map), and
+      `filter_kernel_eligible` used the capture-*rejecting* `cond_eligible`.
+
+      MEASURED (10M elements; a declining JIT runs the bytecode loop, so the VM column is the
+      before-number):
+
+      | predicate | before | after |
+      | --- | --- | --- |
+      | `it > k` | 0.55s | **0.01s** (55×) |
+      | `it * c > 9000000` | 0.68s | **0.01s** (68×) |
+      | `it > lo and it < hi` | 1.19s | **0.01s** (119×) |
+      | `it % 7 == 0 and it > k` | 0.60s | **0.02s** (30×) |
+
+      The capture-collecting condition analysis (`cond_eligible_cap`) already existed for the
+      fused path; `filter_kernel_eligible` simply was not using it. The filter kernel now takes
+      the caps pointer as its 4th parameter, exactly as map does — the only remaining signature
+      difference is that filter also RETURNS the kept count.
+
+      NOT fixed, and deliberately: `filter(it % k == 0)` with a VARIABLE divisor stays on the
+      VM. That exclusion is about `%`, not captures — a non-literal divisor could be `0`, which
+      must raise, and a negative one has sign subtleties. The first sweep conflated the two,
+      which is why the original measurement showed no improvement at all; the corrected probe
+      isolates a capture that is not a divisor.
+
+      A capturing predicate declines in a FUSED pipeline (which has no caps slice) and falls to
+      this standalone kernel instead — both fusion call sites now require an empty capture list
+      explicitly.
+
+      The failure mode of a compacting loop is a wrong output OFFSET, so
+      `a_filter_predicate_may_capture_and_declines_a_non_int_capture` reads chunk-boundary
+      elements individually across `PAR_MATH_THRESHOLD` and includes predicates keeping roughly
+      one element per chunk. The non-`Int`-capture declines are load-bearing too: they are what
+      exercises popping the captures off the stack and falling through, where a stack-discipline
+      mistake would surface.
+
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).
@@ -1237,6 +1276,29 @@ motivates this phase.
       or duplicating `mixed_fn_sig`'s inference — which is a compiler↔JIT contract change,
       not a local edit. Worth it (this is `map(i => escape(...))`, the k2/mandelbrot
       shape), but it should be designed rather than bolted on.
+
+- [ ] **Three more spelling inversions, measured and unfixed.** Turned up by the same
+      sweep that found Stage 3q, and left recorded rather than half-fixed. All at 10M
+      elements; a declining JIT runs the bytecode loop, so "VM" means the JIT time equals it.
+
+      | shape | JIT | its twin | |
+      | --- | --- | --- | --- |
+      | `reduce(0.0, (s,i) => s + to_float(i) * c)` — captured coefficient | 0.74s | 0.01s inline | **VM** |
+      | `reduce(0.0, (s,i) => s + to_float(f(i)) * 0.5)` — a call | 0.85s | — | barely native (5×) |
+      | `map(i => i * c + 1).reduce(…)` — captured, fused chain | 0.35s | 0.00s inline | 3× only |
+      | `scan(0, (s,x) => s + x)` | 0.54s | — | **VM — `scan` has no kernel at all** |
+
+      The first is NOT Stage 3h: that fixed value scalars in the *indexed* f64 reduce (the
+      dot-product shape, with array captures). This is the plain non-indexed f64 reduce with
+      a scalar capture, which `float_reduce_body_eligible` still rejects outright — its doc
+      says so explicitly ("NO free (captured) variable is [allowed]"), for the same reason
+      the mixed map used to: a capture's runtime type is unknown. The same resolution should
+      apply — prove it `Int` (or `Float`) at dispatch rather than statically — and the
+      `MixT`/`mix_combine` rule already exists to keep the promotion points aligned.
+
+      `scan` is a different matter: it is a prefix fold, so element *i* depends on element
+      *i−1*. That is a genuine serial dependency (like `filter`'s output offset), so it can
+      have a native kernel but not a parallel one.
 
 - [ ] **k2 mandelbrot: the loop body is at PARITY with C; the gap is a ~250 ns
       per-pixel fixed cost that is still unidentified.** Recorded because the obvious

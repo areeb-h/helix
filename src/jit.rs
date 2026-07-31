@@ -577,7 +577,11 @@ fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &HashSet<&str>, user_f
     use crate::bytecode::{FusionSink, FusionStage};
     k.stages.iter().all(|s| match s {
         FusionStage::Map { binder, body } => map_kernel_eligible(body, binder, fns),
-        FusionStage::Filter { binder, body } => filter_kernel_eligible(body, binder, fns),
+        // A fused pipeline has no caps slice, so a CAPTURING predicate must decline here and
+        // fall to the standalone filter kernel (which does carry captures) instead.
+        FusionStage::Filter { binder, body } => {
+            filter_kernel_eligible(body, binder, fns).is_some_and(|c| c.is_empty())
+        }
     }) && match &k.sink {
         FusionSink::Collect | FusionSink::Count => true,
         // A float reduce is checked against the f64 subset (using `user_fns` to exclude a
@@ -678,7 +682,9 @@ fn define_array_kernels(
         // permanent, not a v1 gap.
         let indexed = !k.index_bounds.is_empty();
         let ok = if is_filter {
-            !indexed && filter_kernel_eligible(&k.body, &k.binder, eligible)
+            !indexed
+                && filter_kernel_eligible(&k.body, &k.binder, eligible)
+                    .is_some_and(|c| c == k.captures)
         } else if mixed {
             if indexed {
                 // Synthetic `$aff*` naming is a deterministic function of the body (dedup
@@ -2699,10 +2705,29 @@ fn cond_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>,
 
 /// True if a `filter`/`where` predicate is a pure `i64` comparison over its binder
 /// (`it > 5`, `it % 2 == 0`, `is_even(it)`, …), calling only `fns`.
-pub fn filter_kernel_eligible(body: &Expr, binder: &str, fns: &HashSet<&str>) -> bool {
+/// Returns the ordered captures, or `None` if the predicate is ineligible.
+///
+/// A `filter` predicate may CAPTURE free `i64` variables, exactly as a `map` body may — each
+/// is passed to the kernel as a loop-invariant `caps[i]` and proven `Int` at dispatch. Without
+/// this, `xs.filter(it % k == 0)` fell to the bytecode loop while the identical
+/// `xs.filter(it % 7 == 0)` ran natively: measured 0.66s against 0.01s over 10M elements, the
+/// same "swap a literal for a variable" cliff the map path had.
+///
+/// The two FUSED call sites require an EMPTY list: a fused pipeline has no caps mechanism, so
+/// a capturing predicate must decline there and be handled by this standalone kernel instead.
+pub fn filter_kernel_eligible(
+    body: &Expr,
+    binder: &str,
+    fns: &HashSet<&str>,
+) -> Option<Vec<Capture>> {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(binder);
-    cond_eligible(body, fns, &locals, NumKind::Int)
+    let mut names: Vec<String> = Vec::new();
+    if cond_eligible_cap(body, fns, &locals, &mut names) && names.len() <= MAX_CAPTURES {
+        Some(names.into_iter().map(|name| Capture { name, kind: CaptureKind::Scalar }).collect())
+    } else {
+        None
+    }
 }
 
 fn eligible_set<'a>(funcs: &[FnDef<'a>], kind: NumKind) -> HashSet<&'a str> {
@@ -4041,10 +4066,12 @@ fn define_array_kernel<'a>(
     for _ in 0..3 {
         ctx.func.signature.params.push(AbiParam::new(I64)); // src, dst, len
     }
+    // The caps pointer is the 4th param for BOTH shapes — a filter predicate may capture
+    // loop-invariant `i64` scalars exactly as a map body may. Filter additionally RETURNS the
+    // kept count; that is the only signature difference.
+    ctx.func.signature.params.push(AbiParam::new(I64)); // caps ptr
     if is_filter {
         ctx.func.signature.returns.push(AbiParam::new(I64));
-    } else {
-        ctx.func.signature.params.push(AbiParam::new(I64)); // map: caps ptr
     }
 
     let mut b = FunctionBuilder::new(&mut ctx.func, bctx);
@@ -4055,8 +4082,9 @@ fn define_array_kernel<'a>(
     let src = b.block_params(entry)[0];
     let dst = b.block_params(entry)[1];
     let len = b.block_params(entry)[2];
-    // map: the caps pointer (loop-invariant captured i64 values), bound below.
-    let caps_ptr = if is_filter { None } else { Some(b.block_params(entry)[3]) };
+    // The caps pointer (loop-invariant captured `i64` values), bound below. Present for both
+    // map and filter.
+    let caps_ptr = Some(b.block_params(entry)[3]);
 
     let i_var = b.declare_var(I64); // read cursor
     let w_var = b.declare_var(I64); // write cursor (filter); == i for map
