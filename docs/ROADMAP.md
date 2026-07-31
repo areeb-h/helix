@@ -548,9 +548,17 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       start, indexed maps (whose bounds still discharge against the range endpoints),
       and 880 fuzzed programs across the boundary sizes — 0 divergences.
 
-      REMAINING memory work: `filter` still materializes (`Op::TryJitFilter` calls
-      `densify_range_top` unconditionally), and a map over a real array necessarily
-      keeps both buffers — only the *range* source can be generated.
+      `filter` over a range now takes the same path: **250 MB → 98 MB (−61%)** on a 20M
+      range keeping half, and slightly faster. Its generation is serial by construction —
+      a filter COMPACTS, so chunk *i*'s output offset depends on how many elements chunks
+      `0..i` kept, which is the same dependency that already makes `run_filter_kernel`
+      serial. Chunk offsets are the sharp edge, so the test includes a predicate keeping
+      ~one element per chunk, where a wrong offset shows up at once instead of being
+      absorbed by its neighbours.
+
+      REMAINING memory work: a map over a REAL array necessarily keeps both buffers —
+      only a *range* source can be generated away. Reducing that needs either in-place
+      mutation when the input is uniquely owned, or fusing the consumer.
 
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),

@@ -1746,23 +1746,51 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 }
             }
             Op::TryJitFilter { kernel_idx, after } => {
-                densify_range_top(&mut stack); // materialize a lazy range so the native filter engages
-                let ptr = match (jit, stack.last()) {
-                    (Some(j), Some(Value::Array(a)))
-                        if matches!(&**a, crate::value::ArrayData::Ints(_)) =>
-                    {
-                        j.filter_kernel(*kernel_idx as usize)
-                    }
+                // Same fast path as `TryJitMap`: a lazy range's elements are `start + step*j`, so
+                // the kernel can be fed generated values instead of a materialized buffer that
+                // would sit live beside the output. Tried BEFORE `densify_range_top`, which is
+                // what allocates it.
+                let filt_range: Option<(i64, i64, usize)> = match stack.last() {
+                    Some(Value::Array(a)) => match &**a {
+                        crate::value::ArrayData::Range { start, step, len } => {
+                            Some((*start, *step, *len))
+                        }
+                        _ => None,
+                    },
                     _ => None,
                 };
-                if let Some(ptr) = ptr {
-                    let arr = stack.pop().unwrap();
-                    if let Value::Array(a) = &arr
-                        && let crate::value::ArrayData::Ints(v) = &**a
-                    {
-                        let out = unsafe { crate::jit::run_filter_kernel(ptr, v) };
-                        stack.push(Value::int_array(out));
-                        frames[fi].ip = *after as usize;
+                let range_taken = if let (Some(j), Some((rs, rstep, rlen))) = (jit, filt_range)
+                    && let Some(p) = j.filter_kernel(*kernel_idx as usize)
+                {
+                    let out = unsafe { crate::jit::run_filter_kernel_range(p, rs, rstep, rlen) };
+                    stack.pop(); // the lazy range receiver
+                    stack.push(Value::int_array(out));
+                    frames[fi].ip = *after as usize;
+                    true
+                } else {
+                    false
+                };
+                if !range_taken {
+                    densify_range_top(&mut stack); // materialize so the native filter engages
+                    let ptr = match (jit, stack.last()) {
+                        (Some(j), Some(Value::Array(a)))
+                            if matches!(&**a, crate::value::ArrayData::Ints(_)) =>
+                        {
+                            j.filter_kernel(*kernel_idx as usize)
+                        }
+                        _ => None,
+                    };
+                    if let Some(ptr) = ptr {
+                        let arr = stack.pop().unwrap();
+                        if let Value::Array(a) = &arr
+                            && let crate::value::ArrayData::Ints(v) = &**a
+                        {
+                            let out = unsafe { crate::jit::run_filter_kernel(ptr, v) };
+                            stack.push(Value::int_array(out));
+                            frames[fi].ip = *after as usize;
+                        } else {
+                            stack.push(arr);
+                        }
                     }
                 }
             }

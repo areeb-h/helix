@@ -382,6 +382,44 @@ pub unsafe fn run_map_kernel_mixed(ptr: *const u8, src: &[i64], caps: &[i64]) ->
 /// Run a native filter kernel over `src`, returning the kept elements in order. SAFETY:
 /// `ptr` is a finalized `extern "C" fn(*const i64,*mut i64,i64)->i64` (kept count) from
 /// [`define_array_kernel`].
+/// The RANGE-source twin of [`run_filter_kernel`], for the same reason as
+/// [`run_map_range_chunked`]: materializing a lazy range purely to be read once doubled peak
+/// memory. Each chunk's values are generated into a reused scratch and filtered straight into
+/// `dst` at the running offset, so survivors stay contiguous and in order. Serial by
+/// construction — the filter kernel compacts, so chunk *i*'s output position depends on how many
+/// elements chunks `0..i` kept, which is exactly the dependency that rules out parallelism here
+/// (`run_filter_kernel` is serial for the same reason).
+///
+/// SAFETY: as [`run_filter_kernel`] — `ptr` is a finalized
+/// `extern "C" fn(*const i64,*mut i64,i64)->i64`, and `dst` has room for every element because a
+/// filter can keep them all.
+pub unsafe fn run_filter_kernel_range(
+    ptr: *const u8,
+    start: i64,
+    step: i64,
+    len: usize,
+) -> Vec<i64> {
+    note_native_call();
+    let mut dst = vec![0i64; len];
+    if len == 0 {
+        return dst;
+    }
+    let f: extern "C" fn(*const i64, *mut i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    const CH: usize = 1 << 14;
+    let at = |j: usize| -> i64 { (start as i128 + step as i128 * j as i128) as i64 };
+    let mut scratch: Vec<i64> = Vec::with_capacity(CH.min(len));
+    let mut kept_total = 0usize;
+    for base in (0..len).step_by(CH) {
+        let n = CH.min(len - base);
+        scratch.clear();
+        scratch.extend((0..n).map(|k| at(base + k)));
+        let kept = f(scratch.as_ptr(), dst[kept_total..].as_mut_ptr(), n as i64);
+        kept_total += kept as usize;
+    }
+    dst.truncate(kept_total);
+    dst
+}
+
 pub unsafe fn run_filter_kernel(ptr: *const u8, src: &[i64]) -> Vec<i64> {
     note_native_call();
     let mut dst = vec![0i64; src.len()];

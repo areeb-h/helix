@@ -2064,6 +2064,30 @@
             assert_eq!(jit.as_deref(), Ok(want), "`{s}`");
         }
 
+        // FILTER over a range takes the same fast path, and compaction makes chunk offsets the
+        // sharp edge: chunk i's survivors must land immediately after chunk i-1's. Peak memory
+        // 250 MB -> 98 MB on a 20M range keeping half.
+        for (s, want) in [
+            ("a = (0..100000).filter(it % 2 == 0)\n\"{a.length()} {a[8191]} {a[8192]} {a[16383]} {a[16384]} {a[a.length() - 1]}\"",
+             "50000 16382 16384 32766 32768 99998"),
+            // a predicate keeping ~one element per chunk, so a wrong offset shows up at once
+            // rather than being absorbed by neighbours
+            ("a = (0..100000).filter(it % 16384 == 0)\n\"{a.length()} {a[1]} {a[2]}\"", "7 16384 32768"),
+            ("a = (0..16384).filter(it > 16000)\n\"{a.length()} {a[0]}\"", "383 16001"),
+            ("a = (0..16385).filter(it > 16000)\n\"{a.length()} {a[a.length() - 1]}\"", "384 16384"),
+            ("(0..100000).filter(it < 0).length()", "0"),
+            ("(0..100000).filter(it >= 0).length()", "100000"),
+            ("(5..5).filter(it > 0).length()", "0"),
+            ("range(20, 0, 0 - 1).filter(it % 3 == 0)", "[18, 15, 12, 9, 6, 3]"),
+            ("((0 - 10)..10).filter(it % 4 == 0)", "[-8, -4, 0, 4, 8]"),
+            ("(0..40000).filter(it % 3 == 0).map(it * 2).reduce(0, (s, x) => s + x)", "533346666"),
+        ] {
+            let jit = run_vm_jit(s);
+            assert_eq!(jit, run_tw(s), "filter-over-range vs walker on `{s}`");
+            assert_eq!(jit, run_vm(s), "filter-over-range vs VM on `{s}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{s}`");
+        }
+
         // An out-of-bounds indexed map over a range must still raise the interpreter's exact
         // error — the fast path declines and the checked loop runs.
         let src = "x = [1, 2, 3]\n(0..40000).map(x[it]).length()";
