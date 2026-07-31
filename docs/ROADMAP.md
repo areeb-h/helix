@@ -615,6 +615,45 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       body at top level with a captured scalar was equally VM-bound, so k8 only *looked*
       like a nesting problem.
 
+- [x] **Stage 3n — `tensor()` stops boxing every element, and k8 overtakes NumPy.**
+      With Stage 3m's build cost gone, conversion was k8's largest single term: **0.12s**
+      to turn a nested 1024×1024 array into a tensor, ~120 ns per element where the copy
+      itself is an 8 MB memcpy. The cause was `ArrayData::to_values()`, which materializes
+      a `Vec<Value>` — for a packed `Floats` buffer that means BOXING every element. It
+      was called twice per row: once in `shape_of`, purely to re-derive `vec![]` from each
+      element and throw it away, and once in `flatten_into` to copy. A 1024×1024 build
+      paid ~2M allocations, into a `Vec::new()` that doubled its way to 8 MB.
+
+      Three changes, no new machinery: `shape_of` short-circuits a packed
+      `Ints`/`Floats`/`Range` buffer to `[len]` without walking it; `flatten_into` copies
+      one straight through (`extend_from_slice` for `Floats`, a converting `extend` for
+      `Ints`, `range_at`'s `i128` formula for `Range`); and `from_value` sizes the buffer
+      from the known shape instead of growing it.
+
+      MEASURED (k8 phases at n=1024, cumulative):
+
+      | phase | before 3m | after 3m | after 3n |
+      | --- | --- | --- | --- |
+      | build both | 0.17s | 0.02s | 0.03s |
+      | + `tensor()` both | 0.32s | 0.14s | **0.03s** |
+      | + `matmul` (= k8) | 0.37s | 0.17s | **0.05s** |
+
+      **Whole kernel min-of-8: 0.04s against NumPy's 0.07s — Helix is 1.75× faster**, at
+      67 MB to NumPy's 58 MB and ~120% CPU to NumPy's 471%. Output bit-identical on all
+      three engines (`606023.500000`). This is a WHOLE-PROGRAM win: the isolated GEMM
+      still loses to OpenBLAS ~1.8×, and nothing here changed that.
+
+      The short-circuit is only sound because a packed buffer holds numbers by
+      construction, so the element walk it skips could never have rejected anything —
+      `missing` and non-numeric elements only ever live in an `ArrayData::Values`, which
+      still takes the original path (where `to_values()` borrows and costs nothing).
+      Ragged detection is the sharp edge, since only non-first rows are compared against
+      the first: `tensor_construction_takes_the_packed_path_without_weakening_its_checks`
+      covers packed+packed, packed+nested AND nested+packed, plus the `Ints`/`Range`
+      conversions, an empty buffer's `[0]` shape, and element ORDER (a row/column mix-up
+      would otherwise pass a shape-only check). Sabotage-proven: extending the
+      short-circuit to `Values` — which would skip real ragged checks — fails the test.
+
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).

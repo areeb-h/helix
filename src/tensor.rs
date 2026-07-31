@@ -10,7 +10,7 @@ use faer::linalg::solvers::Solve;
 
 use crate::ast::BinOp;
 use crate::error::{suggest, HelixError};
-use crate::value::Value;
+use crate::value::{ArrayData, Value};
 
 pub type Tensor = ArrayD<f64>;
 
@@ -21,6 +21,19 @@ fn shape_of(v: &Value, line: usize, col: usize) -> Result<Vec<usize>, HelixError
     match v {
         Value::Int(_) | Value::Float(_) => Ok(vec![]),
         Value::Array(items) => {
+            // A PACKED numeric buffer is 1-D by construction and every element is a scalar, so
+            // its shape is `[len]` and there is nothing to inspect. Without this, `to_values()`
+            // below BOXES every element into a `Value` purely to re-derive `vec![]` from each
+            // one and throw it away — and since a nested build calls this per row, a 1024×1024
+            // tensor paid ~1M allocations before a single number was copied. No error is
+            // skipped: a packed buffer cannot hold `missing` or a non-numeric element, which
+            // are the only things the element walk rejects.
+            if matches!(
+                &**items,
+                ArrayData::Ints(_) | ArrayData::Floats(_) | ArrayData::Range { .. }
+            ) {
+                return Ok(vec![items.len()]);
+            }
             if items.is_empty() {
                 return Ok(vec![0]);
             }
@@ -52,11 +65,24 @@ fn flatten_into(v: &Value, out: &mut Vec<f64>, line: usize, col: usize) -> Resul
     match v {
         Value::Int(i) => out.push(*i as f64),
         Value::Float(f) => out.push(*f),
-        Value::Array(items) => {
-            for it in items.to_values().iter() {
-                flatten_into(it, out, line, col)?;
+        // A packed buffer copies straight through — `extend_from_slice` on `Floats` is the
+        // memcpy this function should always have been, and the `Ints`/`Range` arms convert
+        // in place. The general arm below is unchanged, and `to_values()` is free there
+        // (`ArrayData::Values` borrows); it was the packed cases that boxed every element.
+        Value::Array(items) => match &**items {
+            ArrayData::Floats(v) => out.extend_from_slice(v),
+            ArrayData::Ints(v) => out.extend(v.iter().map(|&n| n as f64)),
+            // `range_at`'s element formula verbatim. The `i128` widening matches it exactly
+            // rather than relying on the range invariant a caller could later weaken.
+            ArrayData::Range { start, step, len } => out.extend(
+                (0..*len).map(|i| (*start as i128 + *step as i128 * i as i128) as i64 as f64),
+            ),
+            _ => {
+                for it in items.to_values().iter() {
+                    flatten_into(it, out, line, col)?;
+                }
             }
-        }
+        },
         Value::Missing => {
             return Err(HelixError::new("tensors cannot contain `missing`", line, col)
                 .hint("drop or impute missing values before building a tensor."))
@@ -74,7 +100,11 @@ fn flatten_into(v: &Value, out: &mut Vec<f64>, line: usize, col: usize) -> Resul
 
 pub fn from_value(v: &Value, line: usize, col: usize) -> Result<Tensor, HelixError> {
     let shape = shape_of(v, line, col)?;
-    let mut data = Vec::new();
+    // The shape is already known, so the buffer can be sized once instead of doubling its way
+    // to 8 MB. `checked_mul` because a bogus shape must not wrap into a small capacity; on
+    // overflow we simply do not preallocate and `from_shape_vec` reports the real error.
+    let count = shape.iter().try_fold(1usize, |a, &d| a.checked_mul(d)).unwrap_or(0);
+    let mut data = Vec::with_capacity(count);
     flatten_into(v, &mut data, line, col)?;
     ArrayD::from_shape_vec(IxDyn(&shape), data)
         .map_err(|e| HelixError::new(format!("could not build tensor: {}", e), line, col))
@@ -621,6 +651,58 @@ pub fn method(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `shape_of` short-circuits a PACKED buffer to `[len]` without walking its elements, and
+    /// `flatten_into` copies one straight through. That is sound only because a packed buffer
+    /// holds numbers by construction — so the element walk it skips could never have rejected
+    /// anything. The cases that would expose a mistake are ragged nesting where one row is
+    /// packed and another is not (in BOTH orientations, since only the non-first row is
+    /// compared against the first), and the `Ints`/`Range` → `f64` conversions.
+    ///
+    /// Before this, `to_values()` boxed every element into a `Value` twice — once per row to
+    /// re-derive `vec![]` and discard it, once to copy — so a 1024×1024 build paid ~2M
+    /// allocations. It cost 0.12s of k8's wall time, more than the GEMM.
+    #[test]
+    fn tensor_construction_takes_the_packed_path_without_weakening_its_checks() {
+        use crate::value::Value;
+        let f = |v: &Value| from_value(v, 1, 1);
+        let ints = |v: Vec<i64>| Value::Array(std::rc::Rc::new(ArrayData::Ints(v)));
+        let floats = |v: Vec<f64>| Value::Array(std::rc::Rc::new(ArrayData::Floats(v)));
+        let nested = |v: Vec<Value>| Value::Array(std::rc::Rc::new(ArrayData::Values(v)));
+
+        // Packed sources convert, and `Ints` widen to `f64`.
+        assert_eq!(f(&floats(vec![1.0, 2.5])).unwrap().shape(), &[2]);
+        let t = f(&ints(vec![-3, 4])).unwrap();
+        assert_eq!(t.iter().copied().collect::<Vec<f64>>(), vec![-3.0, 4.0]);
+        // A lazy range must produce `range_at`'s elements, negative step included.
+        let rng = |start, step, len| Value::Array(std::rc::Rc::new(ArrayData::Range { start, step, len }));
+        assert_eq!(
+            f(&rng(10, -2, 5)).unwrap().iter().copied().collect::<Vec<f64>>(),
+            vec![10.0, 8.0, 6.0, 4.0, 2.0]
+        );
+        assert_eq!(f(&rng(0, 1, 0)).unwrap().shape(), &[0]);
+        // An empty packed buffer keeps the `[0]` shape the element walk used to produce.
+        assert_eq!(f(&ints(vec![])).unwrap().shape(), &[0]);
+
+        // Nested rows: shape and element order (a row/column mix-up would show here).
+        let m = f(&nested(vec![ints(vec![1, 2]), ints(vec![3, 4])])).unwrap();
+        assert_eq!(m.shape(), &[2, 2]);
+        assert_eq!(m.iter().copied().collect::<Vec<f64>>(), vec![1.0, 2.0, 3.0, 4.0]);
+
+        // RAGGED must still be caught — including when one row is packed and the other is
+        // not, in both orders, since only non-first rows are compared against the first.
+        for bad in [
+            nested(vec![floats(vec![1.0, 2.0]), floats(vec![3.0])]),
+            nested(vec![floats(vec![1.0, 2.0]), nested(vec![floats(vec![3.0])])]),
+            nested(vec![nested(vec![floats(vec![3.0])]), floats(vec![1.0, 2.0])]),
+        ] {
+            assert!(f(&bad).is_err(), "ragged input was accepted");
+        }
+        // And a non-numeric element inside a general array is still rejected.
+        assert!(f(&nested(vec![Value::Float(1.0), Value::Missing])).is_err());
+        let s = Value::Str(std::rc::Rc::new(String::from("x")));
+        assert!(f(&nested(vec![Value::Float(1.0), s])).is_err());
+    }
 
     #[test]
     fn faer_matmul_is_correct_and_deterministic() {

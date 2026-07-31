@@ -27,7 +27,7 @@ never do — a wall-clock win bought with 2.5× the cores is not a codegen win.
 | k5 | montecarlo 1e8 | 0.51s (108%) | 0.25s | **0.22s** | 0.26s | 44.60s | — | **2.0× slower** |
 | k6 | sieve π(10⁷) | **0.01s** (105%) | 0.01s | 0.01s | 0.02s | 0.60s | 0.06s | ~tie (**delegation** — beats NumPy 6×) |
 | k7 | wordcount 5M | 1.39s (108%) | **0.20s**† | 0.24s | 0.21s | 1.37s | 1.79s | **7.0× slower** (also loses to CPython) |
-| k8 | matmul 1024³ (build + GEMM) | 0.20s (120%) | — | — | — | — | **0.07s** (471% CPU) | **2.9× slower than NumPy** (was 4.4× at 0.31s; see below — the GEMM was never the problem) |
+| k8 | matmul 1024³ (build + GEMM) | **0.04s** (120%) | — | — | — | — | 0.07s (471% CPU) | **1.75× FASTER than NumPy** (was 4.4× slower at 0.31s — see below) |
 | k9 | matmul 512³ (naive) | 0.49s (109%) | 0.39s | 0.33s | **0.32s** | 15.45s | — | **1.3× slower** |
 | k9m | matmul 512³ (map-temp) | 0.48s (108%) | 0.39s | 0.33s | **0.32s** | 15.45s | — | **1.2× slower** (was **27.12s / 75×** — see below) |
 
@@ -44,6 +44,14 @@ same way NumPy wins by calling BLAS. The honest counterpart is
 `k6_sieve_trial.helix` (pure-Helix trial division): **88.31s**, i.e. ~4400×
 slower than the builtin and ~8800× slower than C's sieve. That gap is the
 kernel's whole point.
+
+**Against NumPy the picture is different, and k8 has now flipped.** k8 is
+0.04s vs 0.07s (**1.75× faster**) and k6 wins 6×; those are the two kernels with a
+NumPy reference where Helix leads. Both wins deserve the same caveat as NumPy's
+own: k6 delegates to a builtin, and k8's win is a *whole-program* one — Helix
+beats NumPy on build + convert + GEMM together while still losing the isolated
+GEMM to OpenBLAS (~1.8×). It is a real end-to-end result, not a claim that faer
+beats OpenBLAS.
 
 **What changed since 2026-07-17, and what did not.** One number in this table
 moved materially: **k9 map-temp, 27.12s → 0.50s (54×)**, which also erases the
@@ -253,29 +261,26 @@ say so rather than dropping the row.
   allocator benchmark, unlike for the streaming four.
 - **k8 matmul (GEMM)** — **the row title is misleading and the gap is not the GEMM.**
   Isolated GEMM at n=2048: faer ~0.11s vs OpenBLAS ~0.061s, so OpenBLAS is ~1.8×
-  faster — but that ~1.8× is levied on a small slice of k8. Phase split at n=1024,
-  cumulative, the same script run before and after the captured-map fix below:
+  faster — but that ~1.8× was levied on a small slice of k8, and the row was never
+  really a BLAS comparison. Phase split at n=1024, cumulative, the same script run
+  at each stage:
 
-  | phase | before | after |
-  |---|---|---|
-  | build one nested 1024×1024 | 0.08s | 0.01s |
-  | build both | 0.17s (44%) | **0.02s** |
-  | + `tensor()` both | 0.32s (38%) | 0.14s |
-  | + `matmul` (= k8) | 0.37s (13% was the GEMM) | **0.17s** |
+  | phase | original | after captured-map | after `tensor()` |
+  |---|---|---|---|
+  | build one nested 1024×1024 | 0.08s | 0.01s | 0.02s |
+  | build both | 0.17s (44%) | **0.02s** | 0.03s |
+  | + `tensor()` both | 0.32s (38%) | 0.14s | **0.03s** |
+  | + `matmul` (= k8) | 0.37s (13% was the GEMM) | 0.17s | **0.05s** |
 
   NumPy's own split: 0.04s import, 0.05s building both, 0.06s total — so NumPy's
   GEMM is ~0.01s. Helix was losing k8 at *building and converting the inputs*, not
-  at matrix multiply, and fixing faer would have recovered at most the 13%.
-  Construction is now **8.5× faster** and no longer the dominant term; `tensor()`
-  conversion (0.12s) is, and is the next thing to look at — ~120 ns per element to
-  convert 1M f64 out of a nested array, far above what the copy itself costs.
-  Output is bit-identical on all three engines (`606023.500000`).
+  at matrix multiply; fixing faer would have recovered at most the 13%. Both input
+  costs are now gone: construction 8.5× (the captured-map kernel) and `tensor()`
+  conversion from 0.12s to under the timer's resolution.
 
-  The whole kernel re-measured min-of-5 is **0.20s at ~120% CPU**, against NumPy's
-  0.07s at **471%** — so the remaining 2.9× wall-clock gap is bought by NumPy with
-  ~4× the cores. Per core the two are close; that is a fairer reading of this row
-  than the wall-clock ratio alone, and the same caveat the `%CPU` column exists for
-  elsewhere in this table.
+  **Whole kernel, min-of-8: Helix 0.04s vs NumPy 0.07s — Helix is 1.75× faster**,
+  at 67 MB against NumPy's 58 MB, and it wins while using ~120% CPU to NumPy's
+  471%. Output bit-identical on all three engines (`606023.500000`).
   At n=512 the GEMM is ~1% of the wall time and you are timing interpreter
   startup, which is why the default is 1024.
 - ~~**k8's build does not reach native code.**~~ **FIXED.** An `Int`-source `map`
