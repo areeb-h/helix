@@ -4463,6 +4463,65 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         }
     }
 
+    /// A mixed `Int`-source → `Float` map that CAPTURES a free scalar. The capture rides as a
+    /// plain `i64` and is typed `Int` by the kernel, which matches the interpreter only if an
+    /// integer subexpression containing it wraps identically and promotion happens at the same
+    /// node — so the cases that matter are the ones that overflow or sit at 2^53, not the ones
+    /// that merely work.
+    ///
+    /// The `Float`-capture rows are the guard: typing `c` as `i64` is sound ONLY because the VM
+    /// proves it is a `Value::Int` before dispatch. Sabotaging that check (accepting a `Float`
+    /// by truncation) makes `c = 2.5` return `[0.0, 1.0, 2.0, 3.0]` on the JIT against
+    /// `[0.0, 1.25, 2.5, 3.75]` on the other two engines — which is why `2.5` is here and not
+    /// just `2.0`, whose truncation is invisible.
+    #[test]
+    fn captured_mixed_int_to_float_map_agrees_and_declines_a_float_capture() {
+        for (src, want) in [
+            // The capture makes an integer subexpression wrap; the kernel must wrap the same.
+            (
+                "c = 9223372036854775807\n(0..4).map(j => ((c * j) % 100) * 0.5)",
+                "[0.0, 3.5, 49.0, 2.5]",
+            ),
+            ("c = 9223372036854775807\n(0..3).map(j => (c + j) * 1.0)", "[9223372036854775808.0, -9223372036854775808.0, -9223372036854775808.0]"),
+            ("c = 0 - 7\n(0..4).map(j => ((c * j) % 100) * 0.5)", "[0.0, 46.5, 43.0, 39.5]"),
+            // Exact in `i64` past `f64`'s 2^53: promotion happens once, at the end.
+            ("c = 9007199254740993\n(1..3).map(j => (c * j) * 1.0)", "[9007199254740992.0, 18014398509481984.0]"),
+            ("c = 9007199254740992\n(1..4).map(j => (c + j) * 1.0)", "[9007199254740992.0, 9007199254740994.0, 9007199254740996.0]"),
+            // A FLOAT capture must decline to the bytecode loop, not promote early.
+            ("c = 2.5\n(0..4).map(j => (c * j) * 0.5)", "[0.0, 1.25, 2.5, 3.75]"),
+            ("c = 2.0\n(0..4).map(j => (c * j) * 0.5)", "[0.0, 1.0, 2.0, 3.0]"),
+            // Shape coverage: several captures, a repeat, an empty and a reversed range, a
+            // data-array source, and the builtins the mixed analysis admits.
+            ("a = 3\nb = 5\n(0..4).map(j => ((a * j + b) % 7) * 0.25)", "[1.25, 0.25, 1.0, 0.0]"),
+            ("c = 6\n(0..4).map(j => (c * j + c) * 0.5)", "[3.0, 6.0, 9.0, 12.0]"),
+            ("c = 3\n(0..0).map(j => (c * j) * 0.5)", "[]"),
+            ("c = 3\n(4..0).map(j => (c * j) * 0.5)", "[]"),
+            ("c = 3\n[1, 2, 3].map(j => (c * j) * 0.5)", "[1.5, 3.0, 4.5]"),
+            ("c = 3\n(0..4).map(j => to_float(c * j) * 0.5)", "[0.0, 1.5, 3.0, 4.5]"),
+            ("c = 3\n(0..4).map(j => max(c * j, 4) * 0.5)", "[2.0, 2.0, 3.0, 4.5]"),
+            ("c = 3\n(0..4).map(j => ((c * j) << 2) * 0.5)", "[0.0, 6.0, 12.0, 18.0]"),
+            // k8's build shape: the inner map captures the OUTER binder, which is the whole
+            // reason a nested array build used to fall to the VM.
+            (
+                "n = 3\n(0..n).map(i => (0..n).map(j => ((i * j) % 100) * 0.5))",
+                "[[0.0, 0.0, 0.0], [0.0, 0.5, 1.0], [0.0, 1.0, 2.0]]",
+            ),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // Agreement alone would be satisfied by a JIT that declined every one of the above.
+        crate::jit::reset_native_call_count();
+        let src = "c = 7\n(0..64).map(j => ((c * j) % 100) * 0.5).sum()";
+        assert!(run_vm_jit(src).is_ok());
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the captured mixed map never reached a native kernel"
+        );
+    }
+
     /// `i64` arithmetic wraps, and division is total. Both are deliberate (see
     /// `docs/integer-semantics.md`), and both are easy to break silently: Cranelift's
     /// `sdiv`/`srem` raise a hardware trap (SIGFPE) on divide-by-zero AND on

@@ -297,6 +297,16 @@ fn map_index_caps(
     Some(caps)
 }
 
+/// Marshal an UNINDEXED kernel's captures as `i64`: every one must be a `Value::Int` at run
+/// time, or the whole map declines. That runtime proof is precisely what lets the mixed
+/// analysis type a free scalar as `i64` (see [`crate::jit::mixed_map_eligible`]) — a `Float`
+/// in the slot would promote earlier in the kernel than in the interpreter, so declining is
+/// the correctness rule, not a missed optimization. An empty list marshals to an empty vec,
+/// which is how the capture-free mixed kernels that predate captures keep working unchanged.
+fn int_scalar_caps(cap_vals: &[Value]) -> Option<Vec<i64>> {
+    cap_vals.iter().map(|v| if let Value::Int(i) = v { Some(*i) } else { None }).collect()
+}
+
 /// The lazy-range `map` fast path: run the kernel over counter values GENERATED per chunk instead
 /// of over a materialized buffer. `None` means no specialization matched, and the caller falls
 /// back to the ordinary route (which materializes, exactly as before).
@@ -320,7 +330,7 @@ fn try_map_range(
     // i64 specialization first, mirroring the materializing dispatch's order exactly.
     if let Some(p) = j.map_kernel(kidx) {
         let caps: Option<Vec<i64>> = if k.index_bounds.is_empty() {
-            cap_vals.iter().map(|v| if let Value::Int(i) = v { Some(*i) } else { None }).collect()
+            int_scalar_caps(cap_vals)
         } else {
             map_index_caps(k, cap_vals, Some(rng), false)
         };
@@ -331,8 +341,10 @@ fn try_map_range(
     }
     // then the mixed specialization (i64 elements -> f64 output).
     if let Some(p) = j.map_kernel_mixed(kidx) {
-        if k.index_bounds.is_empty() && cap_vals.is_empty() {
-            let out = unsafe { crate::jit::run_map_kernel_mixed_range(p, start, step, len, &[]) };
+        if k.index_bounds.is_empty()
+            && let Some(c) = int_scalar_caps(cap_vals)
+        {
+            let out = unsafe { crate::jit::run_map_kernel_mixed_range(p, start, step, len, &c) };
             return Some(Value::float_array(out));
         }
         if !k.index_bounds.is_empty()
@@ -1660,10 +1672,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 let i64_pick = j.map_kernel(kidx).and_then(|p| {
                                     let caps: Option<Vec<i64>> = if k.index_bounds.is_empty() {
                                         // plain i64 kernel: every capture must be an `Int`
-                                        cap_vals
-                                            .iter()
-                                            .map(|v| if let Value::Int(i) = v { Some(*i) } else { None })
-                                            .collect()
+                                        int_scalar_caps(&cap_vals)
                                     } else {
                                         // A body reading a captured array: every `a[…]` becomes an
                                         // UNCHECKED native load, so prove them all in bounds first
@@ -1674,12 +1683,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 });
                                 match (i64_pick, j.map_kernel_mixed(kidx)) {
                                     (Some(pk), _) => pk,
-                                    // unindexed mixed (`range.map(j => j*0.001)`): capture-free
-                                    // by construction.
-                                    (None, Some(p))
-                                        if k.index_bounds.is_empty() && cap_vals.is_empty() =>
-                                    {
-                                        Pick::Mixed(p, Vec::new())
+                                    // unindexed mixed (`range.map(j => j*0.001)`), with or
+                                    // without `Int` scalar captures (`range.map(j => c*j*0.5)`).
+                                    (None, Some(p)) if k.index_bounds.is_empty() => {
+                                        match int_scalar_caps(&cap_vals) {
+                                            Some(c) => Pick::Mixed(p, c),
+                                            None => Pick::No,
+                                        }
                                     }
                                     // indexed mixed: f64-array caps, the same bounds discharge.
                                     (None, Some(p)) if !k.index_bounds.is_empty() => {

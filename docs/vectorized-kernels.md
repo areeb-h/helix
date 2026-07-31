@@ -41,13 +41,21 @@ A **mixed `Int`-source → `Float` `map`** compiles as well (`range(N).map(j => 
 the kernel reads an `i64` element and writes an `f64`, typing the body **node by node** by
 the interpreter's promotion rule — an `Int OP Int` subexpression stays `i64` (wrapping
 `iadd/isub/imul`) and only the first `Float` operand promotes via `fcvt`, so an `i64` wrap
-that happens *before* a float enters is preserved exactly. Same `{+,-,*}` subset, and —
-because a capture's runtime type isn't known at compile time — **no captures** (a captured
-`i` in `(i+j)*0.001` still falls through).
+that happens *before* a float enters is preserved exactly. Same `{+,-,*}` subset.
 
-Anything else — `Float` *filters*, a float body using `/` or `if`/comparison/call, a mixed
-body with a capture, `missing`, multi-binder destructuring — transparently **falls through
-to the bytecode loop**. Correct everywhere; accelerated where it can be. The JIT itself is
+It **may capture** free scalars (`(i + j) * 0.001`, `(c * j) % 100 * 0.5`), which it could
+not before — and that exclusion was expensive, because it made the *literal* spelling of a
+body 86× faster than the identical body with a variable in it, and it is what kept every
+nested array build (whose inner map captures the outer binder) on the VM. A capture's
+runtime type still isn't known at compile time; it doesn't need to be. The capture rides as
+a plain `i64` and is typed `Int`, and the VM **proves** it really is an `Int` at dispatch,
+declining to the bytecode loop otherwise — the same runtime proof the `i64` map path always
+used. A `Float` there would promote earlier in the kernel than in the interpreter, so
+declining is the correctness rule rather than a missed optimization.
+
+Anything else — `Float` *filters*, a float body using `/` or `if`/comparison/call, a
+non-`Int` capture at run time, `missing`, multi-binder destructuring — transparently **falls
+through to the bytecode loop**. Correct everywhere; accelerated where it can be. The JIT itself is
 x86-64 Linux only; other targets always run the bytecode loop.
 
 Every path is held to the tree-walker's result byte-for-byte (the parity oracle): integer
@@ -142,9 +150,10 @@ runtime — and runs at the bare reduce-loop's C/Go-class speed.
   feeding a `reduce` currently un-fuses and runs the map as a standalone kernel).
 - ~~`f64` `map` kernels~~ — **done** (monomorphized over element type; `{+,-,*}` subset,
   `f64` captures). ~~mixed `Int`-source → `Float` `map`~~ — **done** (`range(N).map(j =>
-  j*0.001)`; node-by-node typing, no captures). Still to do: `f64` *filters* and the wider
-  float body (`/`, `if`, comparison, calls) once each divergence (float `/0` → raise,
-  result-type, NaN-compare) is handled; the `f64`/mixed kernel in the **fused** pipeline;
-  captures in the mixed kernel (needs compile-time capture types).
+  j*0.001)`; node-by-node typing). ~~captures in the mixed kernel~~ — **done**, and it did
+  *not* need compile-time capture types as this list once assumed: the capture rides as an
+  `i64` and the VM proves it is an `Int` at dispatch. Still to do: `f64` *filters* and the
+  wider float body (`/`, `if`, comparison, calls) once each divergence (float `/0` → raise,
+  result-type, NaN-compare) is handled; the `f64`/mixed kernel in the **fused** pipeline.
 - SIMD lanes; horizontal fusion (several aggregates in one pass); statistical sinks
   (`.sum()`/`.mean()` with an incremental Neumaier compensator).

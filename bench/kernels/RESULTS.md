@@ -27,7 +27,7 @@ never do — a wall-clock win bought with 2.5× the cores is not a codegen win.
 | k5 | montecarlo 1e8 | 0.51s (108%) | 0.25s | **0.22s** | 0.26s | 44.60s | — | **2.0× slower** |
 | k6 | sieve π(10⁷) | **0.01s** (105%) | 0.01s | 0.01s | 0.02s | 0.60s | 0.06s | ~tie (**delegation** — beats NumPy 6×) |
 | k7 | wordcount 5M | 1.39s (108%) | **0.20s**† | 0.24s | 0.21s | 1.37s | 1.79s | **7.0× slower** (also loses to CPython) |
-| k8 | matmul 1024³ (build + GEMM) | 0.31s (118%) | — | — | — | — | **0.07s** | **4.4× slower than NumPy** (but only ~13% of that is the GEMM — see below) |
+| k8 | matmul 1024³ (build + GEMM) | 0.20s (120%) | — | — | — | — | **0.07s** (471% CPU) | **2.9× slower than NumPy** (was 4.4× at 0.31s; see below — the GEMM was never the problem) |
 | k9 | matmul 512³ (naive) | 0.49s (109%) | 0.39s | 0.33s | **0.32s** | 15.45s | — | **1.3× slower** |
 | k9m | matmul 512³ (map-temp) | 0.48s (108%) | 0.39s | 0.33s | **0.32s** | 15.45s | — | **1.2× slower** (was **27.12s / 75×** — see below) |
 
@@ -254,42 +254,62 @@ say so rather than dropping the row.
 - **k8 matmul (GEMM)** — **the row title is misleading and the gap is not the GEMM.**
   Isolated GEMM at n=2048: faer ~0.11s vs OpenBLAS ~0.061s, so OpenBLAS is ~1.8×
   faster — but that ~1.8× is levied on a small slice of k8. Phase split at n=1024,
-  cumulative, all four figures from one run (which totalled 0.39s):
+  cumulative, the same script run before and after the captured-map fix below:
 
-  | phase | cumulative | share |
+  | phase | before | after |
   |---|---|---|
-  | build one nested 1024×1024 | 0.08s | |
-  | build both | 0.17s | **44%** (construction) |
-  | + `tensor()` both | 0.32s | **38%** (conversion) |
-  | + `matmul` (= k8) | 0.37s | **13%** (the actual GEMM) |
+  | build one nested 1024×1024 | 0.08s | 0.01s |
+  | build both | 0.17s (44%) | **0.02s** |
+  | + `tensor()` both | 0.32s (38%) | 0.14s |
+  | + `matmul` (= k8) | 0.37s (13% was the GEMM) | **0.17s** |
 
   NumPy's own split: 0.04s import, 0.05s building both, 0.06s total — so NumPy's
-  GEMM is ~0.01s. Helix loses k8 at *building and converting the inputs*, not at
-  matrix multiply. The construction cost has a known cause (see below); it is not
-  a BLAS deficiency, and fixing faer would recover at most the 13%.
+  GEMM is ~0.01s. Helix was losing k8 at *building and converting the inputs*, not
+  at matrix multiply, and fixing faer would have recovered at most the 13%.
+  Construction is now **8.5× faster** and no longer the dominant term; `tensor()`
+  conversion (0.12s) is, and is the next thing to look at — ~120 ns per element to
+  convert 1M f64 out of a nested array, far above what the copy itself costs.
+  Output is bit-identical on all three engines (`606023.500000`).
+
+  The whole kernel re-measured min-of-5 is **0.20s at ~120% CPU**, against NumPy's
+  0.07s at **471%** — so the remaining 2.9× wall-clock gap is bought by NumPy with
+  ~4× the cores. Per core the two are close; that is a fairer reading of this row
+  than the wall-clock ratio alone, and the same caveat the `%CPU` column exists for
+  elsewhere in this table.
   At n=512 the GEMM is ~1% of the wall time and you are timing interpreter
   startup, which is why the default is 1024.
-- **k8's build does not reach native code**, and the reason generalizes well past
-  this kernel. An `Int`-source `map` whose body produces `Float` compiles **only if
-  the body captures nothing**. Measured, 4M elements:
+- ~~**k8's build does not reach native code.**~~ **FIXED.** An `Int`-source `map`
+  whose body produced `Float` used to compile *only if the body captured nothing*.
+  Replacing a literal with a variable was the entire difference — at 4M elements
+  `((7 * j) % 100) * 0.5` ran native at 0.01s while `((c * j) % 100) * 0.5` sat on
+  the VM at 0.37s. The `i64` analysis took captures; the mixed `Int`→`Float` one was
+  capture-free by construction, and the indexed mixed analysis that *does* take
+  captures required a non-empty `index_bounds`, so an unindexed captured body
+  matched no analysis at all.
 
-  | body | JIT | NOJIT | |
+  A free scalar now rides as a plain `i64` capture, which is sound because both VM
+  dispatch sites require it to be a `Value::Int` at run time and decline otherwise —
+  the same runtime proof the i64 map path always used. Measured at 20M elements,
+  min-of-5 on both engines:
+
+  | body | JIT | VM | |
   |---|---|---|---|
-  | `((7 * j) % 100) * 0.5` | 0.01s | 0.52s | native, **52×** |
-  | `((c * j) % 100) * 0.5` | 0.37s | 0.40s | **VM** |
-  | `(c * j) * 0.5` | 0.31s | 0.31s | **VM** |
-  | `(c * j) % 100` (Int-rooted) | 0.00s | 0.26s | native |
+  | `((c * j) % 100) * 0.5` captured | 0.02s | 1.72s | **86×** |
+  | `((7 * j) % 100) * 0.5` literal | 0.02s | 1.69s | 84× |
+  | `(c * j) * 0.5` | 0.02s | 1.42s | 71× |
+  | `i * dt * 0.001` | 0.02s | 1.45s | 72× |
 
-  Replacing the literal `7` with a variable is the entire difference. The `i64`
-  analysis takes captures; the mixed `Int`→`Float` one is capture-free by
-  construction (`comprehensions.rs` stores `Vec::new()` for it), and the indexed
-  mixed analysis that *does* take captures requires a non-empty `index_bounds`
-  (`jit.rs`), so an unindexed captured body matches nothing. Reassociating to put
-  the promotion first (`(j * 0.5) * c`) does **not** help — checked, still VM — so
-  this is the missing-analysis gap, not the `mix_combine` value-scalar rule.
-  k8's `((i * j) % 100) * 0.5` captures the outer binder `i`, which is why the
-  nested build looks like a nesting problem and is not one. The same gap hits
-  `map(i => i * dt)` and `map(i => i * scale + off)`.
+  The captured spelling now matches the capture-free one (86× vs 84×), which is the
+  result that matters: the *inversion* is gone, not merely the absolute time. A
+  `Float` capture still declines to the bytecode loop rather than promoting early —
+  sabotaging that check makes `c = 2.5` return `[0.0, 1.0, 2.0, 3.0]` on the JIT
+  against `[0.0, 1.25, 2.5, 3.75]` on the other two engines.
+
+  Two hypotheses were tested and rejected before the fix, not assumed: reassociating
+  to promote first (`(j * 0.5) * c`) did not help, so it was the missing analysis
+  rather than the `mix_combine` value-scalar rule; and nesting was not the cause —
+  the same body at top level with a captured scalar was equally VM-bound. k8 only
+  *looked* like a nesting problem because its inner body captures the outer binder.
 ### The %CPU column is a trade you can now decline
 
 Helix's wall-clock standing on k1 and k4 is bought with cores the references never use, which

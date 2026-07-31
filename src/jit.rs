@@ -687,7 +687,10 @@ fn define_array_kernels(
                 mixed_map_captures_indexed(&k.body, &k.binder, user_fns)
                     .is_some_and(|(c, bnd, _)| c == k.captures && bnd == k.index_bounds)
             } else {
-                mixed_map_eligible(&k.body, &k.binder, user_fns)
+                // Same drift guard as the indexed arms: re-derive the capture list and require
+                // it to equal the stored one, so codegen's `caps[j]` and the VM's marshal order
+                // cannot disagree.
+                mixed_map_eligible(&k.body, &k.binder, user_fns).is_some_and(|c| c == k.captures)
             }
         } else if matches!(elem_kind, NumKind::Float) {
             !indexed && map_kernel_captures_f64(&k.body, &k.binder, user_fns).is_some()
@@ -2221,17 +2224,36 @@ fn f64_body_eligible(
 
 /// Is `body` a **mixed** `Int`-source → `Float` map: an `f64`-producing expression over
 /// an `i64` element? Eligible when it uses the binder, is built only from `+ - *` over the
-/// binder / int / float literals (no captures — a capture's runtime type is unknown at
-/// compile time, and an `Int` capture in an `Int` subexpression must wrap as `i64`, which
-/// we couldn't guarantee), and its inferred root type is `Float` (else it's a pure `i64`
-/// map). The kernel ([`define_array_kernel`] with `mixed`) types every node bottom-up by
+/// binder / int / float literals / free scalars, and its inferred root type is `Float`
+/// (else it's a pure `i64` map). Returns the ordered captures, or `None` if ineligible.
+/// The kernel ([`define_array_kernel`] with `mixed`) types every node bottom-up by
 /// the interpreter's promotion rule — `Int OP Int` stays `i64` (wrapping `iadd/isub/imul`),
 /// and the *first* `Float` operand promotes via `fcvt_from_sint` — so it matches the
 /// interpreter bit-for-bit, including any `i64` wrap in an integer subexpression.
-pub fn mixed_map_eligible(body: &Expr, binder: &str, user_fns: &HashSet<&str>) -> bool {
+///
+/// A free scalar rides as a plain `i64` [`CaptureKind::Scalar`] (loaded as `elem_ty`, which
+/// is `I64` for a mixed kernel, and typed `Int` by [`gen_value_typed`]'s `Ident` arm). Captures
+/// were once excluded here outright, because "a capture's runtime type is unknown at compile
+/// time, and an `Int` capture in an `Int` subexpression must wrap as `i64`, which we couldn't
+/// guarantee". We CAN guarantee it — just not statically: both dispatch sites (`try_map_range`
+/// and `Op::TryJitMap` in `vm.rs`) require every capture to be a `Value::Int` at run time and
+/// decline to the bytecode loop otherwise, which is the identical runtime proof the plain i64
+/// map path has always relied on. A `Float` in that slot would promote EARLIER in the kernel
+/// than in the interpreter, so declining is not a missed optimization but the correctness rule.
+///
+/// Excluding them cost a lot: capture-free `((7 * j) % 100) * 0.5` ran native while the same
+/// body with `7` replaced by a variable fell to the VM — 0.01s vs 0.37s over 4M elements. That
+/// is the shape every nested array build has (the inner map captures the outer binder), and
+/// `map(i => i * dt)` besides.
+pub fn mixed_map_eligible(
+    body: &Expr,
+    binder: &str,
+    user_fns: &HashSet<&str>,
+) -> Option<Vec<Capture>> {
     let mut uses_binder = false;
-    matches!(infer_mixed_kind(body, binder, &mut uses_binder, user_fns), Some(NumKind::Float))
-        && uses_binder
+    let mut caps: Vec<Capture> = Vec::new();
+    let root = infer_mixed_kind(body, binder, &mut uses_binder, &mut caps, user_fns)?;
+    (root == NumKind::Float && uses_binder && caps.len() <= MAX_CAPTURES).then_some(caps)
 }
 
 /// Bottom-up type of a mixed-map node, or `None` if it contains anything outside the
@@ -2244,6 +2266,7 @@ fn infer_mixed_kind(
     e: &Expr,
     binder: &str,
     uses_binder: &mut bool,
+    caps: &mut Vec<Capture>,
     user_fns: &HashSet<&str>,
 ) -> Option<NumKind> {
     match e {
@@ -2252,16 +2275,16 @@ fn infer_mixed_kind(
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, user_fns)?;
+                    infer_mixed_kind(&args[0], binder, uses_binder, caps, user_fns)?;
                     Some(NumKind::Float) // sqrt always returns Float
                 }
                 // `to_float` is the explicit Int->Float conversion: always Float, and the typed
                 // codegen emits the same `fcvt_from_sint` promotion it already emits for `sqrt`.
                 ("to_float", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, user_fns)?;
+                    infer_mixed_kind(&args[0], binder, uses_binder, caps, user_fns)?;
                     Some(NumKind::Float)
                 }
-                ("abs", 1) => infer_mixed_kind(&args[0], binder, uses_binder, user_fns), // preserves kind
+                ("abs", 1) => infer_mixed_kind(&args[0], binder, uses_binder, caps, user_fns), // preserves kind
                 // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
                 // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
                 // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
@@ -2269,12 +2292,12 @@ fn infer_mixed_kind(
                 // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
                 // RAISE when the result leaves i64 range and therefore still need a poison path.
                 ("to_int" | "sign", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, user_fns)?;
+                    infer_mixed_kind(&args[0], binder, uses_binder, caps, user_fns)?;
                     Some(NumKind::Int)
                 }
                 ("min" | "max", 2) => {
-                    let ka = infer_mixed_kind(&args[0], binder, uses_binder, user_fns)?;
-                    let kb = infer_mixed_kind(&args[1], binder, uses_binder, user_fns)?;
+                    let ka = infer_mixed_kind(&args[0], binder, uses_binder, caps, user_fns)?;
+                    let kb = infer_mixed_kind(&args[1], binder, uses_binder, caps, user_fns)?;
                     if ka == kb { Some(ka) } else { None }
                 }
                 _ => None,
@@ -2285,12 +2308,17 @@ fn infer_mixed_kind(
                 *uses_binder = true;
                 Some(NumKind::Int) // the `i64` element
             } else {
-                None // captures are excluded from the mixed kernel
+                // A free scalar, typed `Int` and loaded `i64` — sound ONLY because the VM
+                // proves the value really is a `Value::Int` before dispatch (see
+                // [`mixed_map_eligible`]); a `Float` there declines to the bytecode loop.
+                // Typing it `Int` is what keeps an integer subexpression containing it
+                // wrapping exactly like the interpreter's.
+                record_cap(caps, name, CaptureKind::Scalar).then_some(NumKind::Int)
             }
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_mixed_kind(left, binder, uses_binder, user_fns)?;
-            let rk = infer_mixed_kind(right, binder, uses_binder, user_fns)?;
+            let lk = infer_mixed_kind(left, binder, uses_binder, caps, user_fns)?;
+            let rk = infer_mixed_kind(right, binder, uses_binder, caps, user_fns)?;
             Some(if lk == NumKind::Float || rk == NumKind::Float {
                 NumKind::Float
             } else {
@@ -2316,8 +2344,8 @@ fn infer_mixed_kind(
             if !op_ok {
                 return None;
             }
-            let lk = infer_mixed_kind(left, binder, uses_binder, user_fns)?;
-            let rk = infer_mixed_kind(right, binder, uses_binder, user_fns)?;
+            let lk = infer_mixed_kind(left, binder, uses_binder, caps, user_fns)?;
+            let rk = infer_mixed_kind(right, binder, uses_binder, caps, user_fns)?;
             if lk == NumKind::Int && rk == NumKind::Int {
                 Some(NumKind::Int)
             } else {

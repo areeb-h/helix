@@ -560,6 +560,61 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       only a *range* source can be generated away. Reducing that needs either in-place
       mutation when the input is uniquely owned, or fusing the consumer.
 
+- [x] **Stage 3m — a mixed `Int`→`Float` map may CAPTURE, which unblocked k8's build.**
+      An `Int`-source map whose body produces `Float` compiled *only if the body
+      captured nothing*, so swapping one literal for a variable moved the whole map onto
+      the VM. At 4M elements `((7 * j) % 100) * 0.5` ran native in 0.01s while
+      `((c * j) % 100) * 0.5` took 0.37s — the same arithmetic. The `i64` analysis had
+      always taken captures; `mixed_map_eligible` was capture-free by construction, and
+      `mixed_map_captures_indexed` (which does take them) required a non-empty
+      `index_bounds`, so an *unindexed captured* body matched no analysis at all.
+
+      MEASURED (20M elements, min-of-5 on both engines):
+
+      | body | JIT | VM | |
+      | --- | --- | --- | --- |
+      | `((c * j) % 100) * 0.5` captured | 0.02s | 1.72s | **86×** |
+      | `((7 * j) % 100) * 0.5` literal | 0.02s | 1.69s | 84× |
+      | `(c * j) * 0.5` | 0.02s | 1.42s | **71×** |
+      | `i * dt * 0.001` | 0.02s | 1.45s | **72×** |
+
+      The number that matters is 86 vs 84: the captured spelling now matches the
+      capture-free one, so the *inversion* is gone rather than merely shrunk. On k8 the
+      nested build fell **0.17s → 0.02s (8.5×)** and the kernel **0.39s → 0.17s**,
+      output bit-identical on all three engines.
+
+      A free scalar rides as a plain `i64` `CaptureKind::Scalar` and is typed `Int` by
+      `gen_value_typed` — which is what keeps an integer subexpression containing it
+      *wrapping* exactly like the interpreter's. The old comment said a capture's runtime
+      type "is unknown at compile time … which we couldn't guarantee". It cannot be
+      guaranteed statically, but it can be *proved at dispatch*: both sites (`try_map_range`
+      and `Op::TryJitMap`) now marshal through `int_scalar_caps`, which requires every
+      capture to be a `Value::Int` and declines to the bytecode loop otherwise — the
+      identical runtime proof the plain i64 map path has always used. A `Float` there
+      would promote earlier in the kernel than in the interpreter, so declining is the
+      correctness rule, not a missed optimization.
+
+      That guard is the load-bearing one and it is sabotage-proven: accepting a `Float`
+      by truncation makes `c = 2.5` return `[0.0, 1.0, 2.0, 3.0]` on the JIT against
+      `[0.0, 1.25, 2.5, 3.75]` on the other two engines. The test therefore uses `2.5`
+      and not just `2.0`, whose truncation is invisible. The build-side re-check also
+      requires the re-derived capture list to equal the stored one, so codegen's
+      `caps[j]` and the VM's marshal order cannot drift — the same discipline the indexed
+      arms already had.
+
+      Pinned by `captured_mixed_int_to_float_map_agrees_and_declines_a_float_capture`:
+      the wrap cases (`c = i64::MAX`), both sides of 2^53 where mistyping would diverge,
+      `Float`/non-numeric captures that must decline, empty and reversed ranges, a data
+      array source, multiple captures, and k8's own nested shape — plus an engagement
+      assertion, since agreement alone would be satisfied by a JIT that declined
+      everything.
+
+      Two hypotheses were tested and REJECTED before writing any code: reassociating to
+      promote first (`(j * 0.5) * c`) did not help, so this was the missing analysis and
+      not the `mix_combine` value-scalar rule; and nesting was not the cause — the same
+      body at top level with a captured scalar was equally VM-bound, so k8 only *looked*
+      like a nesting problem.
+
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).
