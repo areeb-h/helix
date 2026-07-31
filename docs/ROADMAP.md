@@ -1318,16 +1318,35 @@ motivates this phase.
       At 10M elements; a declining JIT runs the bytecode loop, so "VM" means the JIT time
       equals it.
 
-      | shape | JIT | its twin | |
+      | shape | JIT | peak RSS | its twin |
       | --- | --- | --- | --- |
-      | `map(i => i * c + 1).reduce(…)` — captured, fused chain | 0.35s | 0.00s inline | 3–7× only |
-      | `scan(0, (s,x) => s + x)` | 0.54s | 0.00s `reduce` twin | **VM — `scan` has no kernel at all** |
+      | `map(i => i * c + 1).reduce(0, …)` — **Int** init | 0.34s | **110 MB** | 0.00s / 20 MB with a literal |
+      | `map(i => to_float(i) * c).reduce(0.0, …)` — Float init | 0.01s | 20 MB | already fuses ✓ |
+      | `scan(0, (s,x) => s + x)` | 0.54s | — | 0.00s `reduce` twin — **no kernel at all** |
 
-      The fused chain declines its map stage when the body captures; the standalone map has
-      handled captures since Stage 3m, so the pipeline is now the odd one out. `scan` is a
-      different matter: it is a prefix fold, so element *i* depends on element *i−1*. That is
-      a genuine serial dependency (like `filter`'s output offset), so it can have a native
-      kernel but not a parallel one.
+      **The captured-chain gap is `i64`-ONLY**, which narrows the work considerably. There are
+      two different fusion mechanisms and only one of them is affected: a **Float** init takes
+      the map→reduce SUBSTITUTION (Stage 3i), and Stage 3r's captured reduce made that path
+      capture-capable for free — measured above, it now fuses. An **Int** init takes
+      `FusedKernel`, whose kernel signature is `(src, len, init) → result` with no `caps`
+      pointer at all, so a capturing map stage declines and the chain materializes its
+      intermediate. The 110 MB against 20 MB is that 80 MB intermediate made visible.
+
+      Two ways to close it, and they are not the same size. (a) Give `FusedKernel` a caps
+      slice: a 4th signature parameter, a `captures` field, capture collection merged across
+      stages in first-appearance order, and VM marshalling — plus `n_operands()`, which is
+      stack-discipline-critical because the VM must consume exactly the same operands whether
+      or not it takes the native path. (b) Extend `emit_map_reduce_fusion` to an `Int` init
+      when — and only when — the map body captures, which is exactly when `FusedKernel`
+      declines, so the existing i64 fused path is undisturbed. (b) looks smaller, but the
+      downstream emission in that function is f64-specific today (it ends in
+      `reduce_jit_f64_range_*`), so it needs an i64 arm that reproduces
+      `compile_reduce_range`'s captured-i64 emission, keeping the guard-with-original-as-
+      fall-through shape that makes fusion error-order-safe.
+
+      `scan` is a different matter entirely: it is a prefix fold, so element *i* depends on
+      element *i−1*. That is a genuine serial dependency (like `filter`'s output offset), so
+      it can have a native kernel but never a parallel one.
 
 - [ ] **k2 mandelbrot: the loop body is at PARITY with C; the gap is a ~250 ns
       per-pixel fixed cost that is still unidentified.** Recorded because the obvious
