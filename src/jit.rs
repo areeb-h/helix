@@ -1063,9 +1063,35 @@ pub fn reduce_jit_f64_body(init: &Expr, body: &Expr, pa: &str, pb: &str, user_fn
 /// `+ - *` (Int OP Int stays `i64`/wrapping, mixed → `f64`), `sqrt`→Float, `abs` preserves
 /// kind, `min`/`max` require both args the SAME kind (a mixed `min(float,int)` returns
 /// whichever original operand wins → runtime-dependent type → rejected). No captures.
-fn infer_reduce_f64_kind(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>) -> Option<NumKind> {
+fn infer_reduce_f64_kind(
+    e: &Expr,
+    pa: &str,
+    pb: &str,
+    fns: &HashSet<&str>,
+    user_fns: &HashSet<&str>,
+) -> Option<NumKind> {
     match e {
         Expr::Int(_) => Some(NumKind::Int),
+        // A USER function with an `i64` specialization — the third instance of the same arm
+        // (`infer_mixed_kind` for the map, `infer_f64_indexed` for the captured reduce). All
+        // three f64/mixed paths lower through codegen that can now emit the call; this is the
+        // capture-FREE reduce, which was the last analysis still refusing it. `int_eligible`
+        // means "i64-closed for all-`Int` arguments", so the call takes `Int` args and returns
+        // `Int`, and the body promotes it at the first float exactly as the interpreter does.
+        // Tried before the builtin arm so a user function shadowing a builtin name wins.
+        Expr::Call { name, args, .. }
+            if fns.contains(name.as_str()) && user_fns.contains(name.as_str()) =>
+        {
+            if !jit_builtin_arity_ok(name, args.len()) {
+                return None;
+            }
+            for a in args {
+                if infer_reduce_f64_kind(a, pa, pb, fns, user_fns)? != NumKind::Int {
+                    return None;
+                }
+            }
+            Some(NumKind::Int)
+        }
         Expr::Float(_) => Some(NumKind::Float),
         Expr::Ident { name, .. } => {
             if name == pa {
@@ -1077,8 +1103,8 @@ fn infer_reduce_f64_kind(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>)
             }
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_reduce_f64_kind(left, pa, pb, user_fns)?;
-            let rk = infer_reduce_f64_kind(right, pa, pb, user_fns)?;
+            let lk = infer_reduce_f64_kind(left, pa, pb, fns, user_fns)?;
+            let rk = infer_reduce_f64_kind(right, pa, pb, fns, user_fns)?;
             Some(if lk == NumKind::Float || rk == NumKind::Float {
                 NumKind::Float
             } else {
@@ -1091,24 +1117,24 @@ fn infer_reduce_f64_kind(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>)
         // `min`/`max` exclusion (see `f64_range_body_eligible`) + the VM's `is_finite` guard, which
         // together make a division-by-zero fall back to the exact-erroring bytecode loop.
         Expr::Binary { op: BinOp::Div, left, right, .. } => {
-            infer_reduce_f64_kind(left, pa, pb, user_fns)?;
-            infer_reduce_f64_kind(right, pa, pb, user_fns)?;
+            infer_reduce_f64_kind(left, pa, pb, fns, user_fns)?;
+            infer_reduce_f64_kind(right, pa, pb, fns, user_fns)?;
             Some(NumKind::Float)
         }
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
-                    infer_reduce_f64_kind(&args[0], pa, pb, user_fns)?;
+                    infer_reduce_f64_kind(&args[0], pa, pb, fns, user_fns)?;
                     Some(NumKind::Float)
                 }
                 // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
                 // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
                 // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
                 ("to_float", 1) => {
-                    infer_reduce_f64_kind(&args[0], pa, pb, user_fns)?;
+                    infer_reduce_f64_kind(&args[0], pa, pb, fns, user_fns)?;
                     Some(NumKind::Float)
                 }
-                ("abs", 1) => infer_reduce_f64_kind(&args[0], pa, pb, user_fns),
+                ("abs", 1) => infer_reduce_f64_kind(&args[0], pa, pb, fns, user_fns),
                 // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
                 // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
                 // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
@@ -1116,12 +1142,12 @@ fn infer_reduce_f64_kind(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>)
                 // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
                 // RAISE when the result leaves i64 range and therefore still need a poison path.
                 ("to_int" | "sign", 1) => {
-                    infer_reduce_f64_kind(&args[0], pa, pb, user_fns)?;
+                    infer_reduce_f64_kind(&args[0], pa, pb, fns, user_fns)?;
                     Some(NumKind::Int)
                 }
                 ("min" | "max", 2) => {
-                    let ka = infer_reduce_f64_kind(&args[0], pa, pb, user_fns)?;
-                    let kb = infer_reduce_f64_kind(&args[1], pa, pb, user_fns)?;
+                    let ka = infer_reduce_f64_kind(&args[0], pa, pb, fns, user_fns)?;
+                    let kb = infer_reduce_f64_kind(&args[1], pa, pb, fns, user_fns)?;
                     if ka == kb { Some(ka) } else { None }
                 }
                 _ => None,
@@ -1136,8 +1162,15 @@ fn infer_reduce_f64_kind(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>)
 /// root type is `Float` (so the result stores into the `f64` accumulator). Capture-free.
 /// Returns the body, or `None`. (Unlike the array f64 reduce — where the element is itself
 /// `f64` — here `pb` is the `i64` counter, so the body is lowered per-node, not pure-`f64`.)
-pub fn reduce_jit_f64_range_body(init: &Expr, body: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>) -> Option<Expr> {
-    if matches!(init, Expr::Float(_)) && f64_range_body_eligible(body, pa, pb, user_fns) {
+pub fn reduce_jit_f64_range_body(
+    init: &Expr,
+    body: &Expr,
+    pa: &str,
+    pb: &str,
+    fns: &HashSet<&str>,
+    user_fns: &HashSet<&str>,
+) -> Option<Expr> {
+    if matches!(init, Expr::Float(_)) && f64_range_body_eligible(body, pa, pb, fns, user_fns) {
         Some(body.clone())
     } else {
         None
@@ -1150,8 +1183,8 @@ pub fn reduce_jit_f64_range_body(init: &Expr, body: &Expr, pa: &str, pb: &str, u
 /// division site itself (see [`gen_f64_typed`]), so the VM falls back on the exact `/0` the
 /// interpreter raises on, regardless of whether a later op or iteration would "rescue" the inf.
 /// Shared by the compile gate and the build re-gate so the two never drift.
-fn f64_range_body_eligible(body: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>) -> bool {
-    infer_reduce_f64_kind(body, pa, pb, user_fns) == Some(NumKind::Float)
+fn f64_range_body_eligible(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>, user_fns: &HashSet<&str>) -> bool {
+    infer_reduce_f64_kind(body, pa, pb, fns, user_fns) == Some(NumKind::Float)
 }
 
 /// Whether `e` contains a `/` (float division) anywhere — a dividing reduce kernel carries a
@@ -1235,17 +1268,46 @@ fn reduce_multiacc_term(rl: &crate::bytecode::ReduceLoop) -> Option<&Expr> {
 ///
 /// The VM pre-checks each array's bounds before the kernel does raw `f64` loads. `None` outside
 /// the eligible shape.
+/// The three parallel OUTPUTS of an indexed analysis. They are always constructed together,
+/// passed together, and consumed together — bundling them keeps the walker's signature at a
+/// readable width now that it also needs the eligible-function set.
+#[derive(Default)]
+struct IndexedOut {
+    caps: Vec<Capture>,
+    synth: Vec<(String, Expr)>,
+    bounds: Vec<IndexBound>,
+}
+
 fn infer_f64_indexed(
     e: &Expr,
     pa: &str,
     pb: &str,
-    caps: &mut Vec<Capture>,
-    synth: &mut Vec<(String, Expr)>,
-    bounds: &mut Vec<IndexBound>,
+    out: &mut IndexedOut,
+    fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
 ) -> Option<MixT> {
     match e {
         Expr::Int(_) => Some(MixT::Int),
+        // A USER function with an `i64` specialization, typed exactly as the mixed map's twin
+        // arm does (Stage 3p): `int_eligible` means "i64-closed for all-`Int` arguments", so
+        // such a call takes `Int` args and returns `Int`, and `mix_combine` then promotes the
+        // result at the first genuine float precisely where the interpreter does. Tried BEFORE
+        // the builtin arm so a user function shadowing `abs`/`min`/`max` dispatches to the
+        // user's function. An `SFloat` argument is refused for the same reason `abs` refuses
+        // one — its runtime type is not pinned, and the callee would read it directly.
+        Expr::Call { name, args, .. }
+            if fns.contains(name.as_str()) && user_fns.contains(name.as_str()) =>
+        {
+            if !jit_builtin_arity_ok(name, args.len()) {
+                return None;
+            }
+            for a in args {
+                if infer_f64_indexed(a, pa, pb, out, fns, user_fns)? != MixT::Int {
+                    return None;
+                }
+            }
+            Some(MixT::Int)
+        }
         Expr::Float(_) => Some(MixT::GFloat),
         Expr::Ident { name, .. } => {
             if name == pa {
@@ -1256,7 +1318,7 @@ fn infer_f64_indexed(
                 // A free VALUE scalar, loaded `f64` by the kernel. Recorded `Scalar` here and
                 // relabeled to `ScalarValue` by the caller once the bounds show it is not an
                 // index (an index scalar must stay `i64`).
-                record_cap(caps, name, CaptureKind::Scalar).then_some(MixT::SFloat)
+                record_cap(&mut out.caps, name, CaptureKind::Scalar).then_some(MixT::SFloat)
             }
         }
         // A free `f64` array read at an index that is AFFINE in the counter → an `f64` element.
@@ -1267,11 +1329,11 @@ fn infer_f64_indexed(
                 Expr::Ident { name, .. } if name != pa && name != pb => name,
                 _ => return None,
             };
-            let ap = record_cap_pos(caps, arr, CaptureKind::ArrayF64)?;
+            let ap = record_cap_pos(&mut out.caps, arr, CaptureKind::ArrayF64)?;
             match &**index {
                 // The bare counter: exactly v1b's shape, exactly v1b's obligation.
                 Expr::Ident { name: idx, .. } if idx == pb => {
-                    push_bound(bounds, IndexBound::Counter { array: ap as u32 });
+                    push_bound(&mut out.bounds, IndexBound::Counter { array: ap as u32 });
                 }
                 _ => {
                     // Validate the WHOLE index first — a pure `i64` expression over the counter,
@@ -1279,12 +1341,12 @@ fn infer_f64_indexed(
                     // lowers verbatim, so it must be checked verbatim; it also makes every leaf
                     // effect-free and non-trapping, which is what licenses `affine_split`'s
                     // algebraic folding to DISCARD subterms (`0 * x → 0`) without losing a raise.
-                    index_scalars_eligible(index, pa, pb, caps)?;
+                    index_scalars_eligible(index, pa, pb, &mut out.caps)?;
                     let (base, coef) = affine_split(index, pb)?;
-                    let bp = record_index_term(caps, synth, base)?;
-                    let cp = record_index_term(caps, synth, coef)?;
+                    let bp = record_index_term(&mut out.caps, &mut out.synth, base)?;
+                    let cp = record_index_term(&mut out.caps, &mut out.synth, coef)?;
                     push_bound(
-                        bounds,
+                        &mut out.bounds,
                         IndexBound::Affine { array: ap as u32, base: bp as u32, coef: cp as u32 },
                     );
                 }
@@ -1292,22 +1354,22 @@ fn infer_f64_indexed(
             Some(MixT::GFloat) // an f64 array load is a genuine float
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_f64_indexed(left, pa, pb, caps, synth, bounds, user_fns)?;
-            let rk = infer_f64_indexed(right, pa, pb, caps, synth, bounds, user_fns)?;
+            let lk = infer_f64_indexed(left, pa, pb, out, fns, user_fns)?;
+            let rk = infer_f64_indexed(right, pa, pb, out, fns, user_fns)?;
             mix_combine(lk, rk)
         }
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 // `sqrt` promotes its argument in BOTH engines → an `SFloat` arg is safe.
                 ("sqrt", 1) => {
-                    infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)?;
+                    infer_f64_indexed(&args[0], pa, pb, out, fns, user_fns)?;
                     Some(MixT::GFloat)
                 }
                 // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
                 // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
                 // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
                 ("to_float", 1) => {
-                    infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)?;
+                    infer_f64_indexed(&args[0], pa, pb, out, fns, user_fns)?;
                     Some(MixT::GFloat)
                 }
                 // `abs`/`min`/`max` do NOT promote (interp `abs(Int)` is `iabs`), so an `SFloat`
@@ -1320,17 +1382,17 @@ fn infer_f64_indexed(
                 // RAISE when the result leaves i64 range and therefore still need a poison path.
                 // An unpromoted value scalar is refused for the same reason `abs` refuses one:
                 // its runtime type is not yet pinned, and `to_int`/`sign` read it directly.
-                ("to_int" | "sign", 1) => match infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)? {
+                ("to_int" | "sign", 1) => match infer_f64_indexed(&args[0], pa, pb, out, fns, user_fns)? {
                     MixT::SFloat => None,
                     _ => Some(MixT::Int),
                 },
-("abs", 1) => match infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)? {
+("abs", 1) => match infer_f64_indexed(&args[0], pa, pb, out, fns, user_fns)? {
                     MixT::SFloat => None,
                     k => Some(k),
                 },
                 ("min" | "max", 2) => {
-                    let ka = infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)?;
-                    let kb = infer_f64_indexed(&args[1], pa, pb, caps, synth, bounds, user_fns)?;
+                    let ka = infer_f64_indexed(&args[0], pa, pb, out, fns, user_fns)?;
+                    let kb = infer_f64_indexed(&args[1], pa, pb, out, fns, user_fns)?;
                     if ka == kb && ka != MixT::SFloat { Some(ka) } else { None }
                 }
                 _ => None,
@@ -1489,24 +1551,28 @@ pub fn reduce_jit_f64_range_captures(
     body: &Expr,
     pa: &str,
     pb: &str,
+    fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
 ) -> Option<(Expr, Vec<Capture>, Vec<IndexBound>, Vec<(String, Expr)>)> {
     if !matches!(init, Expr::Float(_)) {
         return None;
     }
-    let mut caps: Vec<Capture> = Vec::new();
-    let mut synth: Vec<(String, Expr)> = Vec::new();
-    let mut bounds: Vec<IndexBound> = Vec::new();
-    if infer_f64_indexed(body, pa, pb, &mut caps, &mut synth, &mut bounds, user_fns)
-        == Some(MixT::GFloat)
-        && caps.iter().any(|c| c.kind == CaptureKind::ArrayF64)
-        && caps.len() <= MAX_CAPTURES
+    let mut out = IndexedOut::default();
+    if infer_f64_indexed(body, pa, pb, &mut out, fns, user_fns) == Some(MixT::GFloat)
+        // Non-empty, NOT "contains an array". Requiring an array capture kept this path from
+        // competing with the capture-free `reduce_jit_f64_range_body` — but it also meant a body
+        // whose only capture is a SCALAR matched neither: `s + to_float(i) * c` fell to the
+        // bytecode loop while `s + to_float(i) * 0.5` ran natively, 0.78s against 0.01s over 10M
+        // elements. An empty list still falls through to the capture-free path exactly as before,
+        // so this only admits shapes that previously had no kernel at all.
+        && !out.caps.is_empty()
+        && out.caps.len() <= MAX_CAPTURES
     {
         // Value scalars (`c` in `s + c*a[i]`) become `ScalarValue`, loaded `f64` by the kernel;
         // INDEX scalars (an `a[k]` index, an affine `base`/`coef`, incl. names inside a
         // synthetic `$aff` term) stay `Scalar` — `i64`, since an index is an integer.
-        relabel_value_scalars(&mut caps, &bounds, &synth);
-        Some((body.clone(), caps, bounds, synth))
+        relabel_value_scalars(&mut out.caps, &out.bounds, &out.synth);
+        Some((body.clone(), out.caps, out.bounds, out.synth))
     } else {
         None
     }
@@ -1576,9 +1642,26 @@ fn gen_f64_typed(
     binders: &HashMap<&str, (Variable, NumKind)>,
     arrays: &HashMap<&str, Variable>,
     poison: Option<Variable>,
+    fn_ids: &HashMap<&str, FuncId>,
+    module: &mut JITModule,
 ) -> (ClValue, NumKind) {
     match e {
         Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
+        // A USER function the `i64` specialization compiled — the twin of `gen_value_typed`'s
+        // arm. Tried first, so a user function shadowing a builtin name dispatches to the
+        // user's function. `infer_f64_indexed` admitted this only with every argument typed
+        // `Int`, which is the contract the callee was compiled under, so the result is an
+        // `i64` and types `Int`.
+        Expr::Call { name, args, .. } if fn_ids.contains_key(name.as_str()) => {
+            let fid = fn_ids[name.as_str()];
+            let fref = module.declare_func_in_func(fid, b.func);
+            let argv: Vec<ClValue> = args
+                .iter()
+                .map(|a| gen_f64_typed(b, a, binders, arrays, poison, fn_ids, module).0)
+                .collect();
+            let call = b.ins().call(fref, &argv);
+            (b.inst_results(call)[0], NumKind::Int)
+        }
         Expr::Float(f) => (b.ins().f64const(*f), NumKind::Float),
         Expr::Ident { name, .. } => {
             let (var, kind) = binders[name.as_str()];
@@ -1594,14 +1677,14 @@ fn gen_f64_typed(
                 _ => unreachable!("ineligible f64 index receiver reached codegen"),
             };
             let base = b.use_var(arrays[name]);
-            let (idx, _) = gen_f64_typed(b, index, binders, arrays, poison);
+            let (idx, _) = gen_f64_typed(b, index, binders, arrays, poison, fn_ids, module);
             let off = b.ins().imul_imm(idx, 8);
             let addr = b.ins().iadd(base, off);
             (b.ins().load(F64, MemFlags::trusted(), addr, 0), NumKind::Float)
         }
         Expr::Binary { op, left, right, .. } => {
-            let (lv, lk) = gen_f64_typed(b, left, binders, arrays, poison);
-            let (rv, rk) = gen_f64_typed(b, right, binders, arrays, poison);
+            let (lv, lk) = gen_f64_typed(b, left, binders, arrays, poison, fn_ids, module);
+            let (rv, rk) = gen_f64_typed(b, right, binders, arrays, poison, fn_ids, module);
             // `/` is always float division in Helix, so it forces the f64 path even for `Int/Int`
             // (matching the interpreter); `+ - *` stay `i64` when both operands are `Int`.
             if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div) {
@@ -1643,7 +1726,7 @@ fn gen_f64_typed(
         }
         Expr::Call { name, args, .. } => match name.as_str() {
             "sqrt" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison, fn_ids, module);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
             }
@@ -1651,12 +1734,12 @@ fn gen_f64_typed(
             // `f64` via `fcvt_from_sint` (the interpreter's `*i as f64`), and an `f64`
             // passes through unchanged.
             "to_float" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison, fn_ids, module);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (af, NumKind::Float)
             }
             "abs" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison, fn_ids, module);
                 match ak {
                     NumKind::Int => (b.ins().iabs(av), NumKind::Int),
                     NumKind::Float => (b.ins().fabs(av), NumKind::Float),
@@ -1665,7 +1748,7 @@ fn gen_f64_typed(
             // `to_int`: saturating float->int, the identity on an `Int`. `fcvt_to_sint_sat`
             // matches the interpreter exactly -- NaN to 0, +-inf to the i64 extremes.
             "to_int" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison, fn_ids, module);
                 match ak {
                     NumKind::Int => (av, NumKind::Int),
                     NumKind::Float => (b.ins().fcvt_to_sint_sat(I64, av), NumKind::Int),
@@ -1675,7 +1758,7 @@ fn gen_f64_typed(
             // through to 0 -- which is what the interpreter returns for NaN (it compares
             // rather than using `signum`, which would propagate NaN).
             "sign" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison, fn_ids, module);
                 let one = b.ins().iconst(I64, 1);
                 let neg = b.ins().iconst(I64, -1);
                 let zero = b.ins().iconst(I64, 0);
@@ -1699,8 +1782,8 @@ fn gen_f64_typed(
                 (b.ins().select(gt, one, lo), NumKind::Int)
             }
             "min" | "max" => {
-                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
-                let (cv, _ck) = gen_f64_typed(b, &args[1], binders, arrays, poison);
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison, fn_ids, module);
+                let (cv, _ck) = gen_f64_typed(b, &args[1], binders, arrays, poison, fn_ids, module);
                 let le = name == "min";
                 let cc = if le { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
                 match ak {
@@ -2033,25 +2116,26 @@ fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>,
             if rl.bodies.len() != 1 {
                 return false;
             }
-            let mut caps: Vec<Capture> = Vec::new();
-            let mut synth: Vec<(String, Expr)> = Vec::new();
-            let mut bounds: Vec<IndexBound> = Vec::new();
-            let root =
-                infer_f64_indexed(&rl.bodies[0], &rl.pa, &rl.pb, &mut caps, &mut synth, &mut bounds, user_fns);
+            let mut out = IndexedOut::default();
+            let root = infer_f64_indexed(&rl.bodies[0], &rl.pa, &rl.pb, &mut out, fns, user_fns);
             // Mirror the compile gate exactly, INCLUDING the value-scalar relabel — otherwise the
             // re-derived list differs from the stored one by kind alone and every such kernel
             // silently declines.
             if root == Some(MixT::GFloat) {
-                relabel_value_scalars(&mut caps, &bounds, &synth);
+                relabel_value_scalars(&mut out.caps, &out.bounds, &out.synth);
             }
+            let (caps, bounds) = (out.caps, out.bounds);
             // Reproduce BOTH the capture set and the bounds obligations exactly (the i64 path's
             // rule, now that an f64 kernel can carry `Scalar`/`ScalarValue` caps and affine
             // bounds): any drift would run unchecked native loads behind a pre-check that doesn't
             // describe them.
+            // `!caps.is_empty()`, matching the compile gate exactly — see
+            // `reduce_jit_f64_range_captures`. These two must relax together or the build
+            // declines a kernel the compiler emitted.
             return root == Some(MixT::GFloat)
                 && caps == rl.captures
                 && bounds == rl.index_bounds
-                && caps.iter().any(|c| c.kind == CaptureKind::ArrayF64)
+                && !caps.is_empty()
                 && caps.iter().all(|c| {
                     matches!(
                         c.kind,
@@ -2065,7 +2149,7 @@ fn reduce_bodies_eligible(rl: &crate::bytecode::ReduceLoop, fns: &HashSet<&str>,
             // Identical gate to the compiler's `reduce_jit_f64_range_body` (root `Float`, and the
             // division/min-max soundness rule) so the build never lowers a body the compiler
             // rejected — or vice versa.
-            return f64_range_body_eligible(&rl.bodies[0], &rl.pa, &rl.pb, user_fns);
+            return f64_range_body_eligible(&rl.bodies[0], &rl.pa, &rl.pb, fns, user_fns);
         }
         if !(2..=MAX_ACC_SLOTS).contains(&n) {
             return false;
@@ -3988,7 +4072,7 @@ fn define_reduce_loop(
             }
         }
         for body in &rl.bodies {
-            new_vals.push(gen_f64_typed(&mut b, body, &binders, &arrays, poison_var).0);
+            new_vals.push(gen_f64_typed(&mut b, body, &binders, &arrays, poison_var, fn_ids, module).0);
         }
     } else {
         for body in &rl.bodies {
@@ -4396,7 +4480,7 @@ fn define_fused_kernel<'a>(
                 binders.insert(pb.as_str(), (cur_var, NumKind::Float));
                 let no_arrays: HashMap<&str, Variable> = HashMap::new();
                 let new_vals: Vec<ClValue> =
-                    bodies.iter().map(|body| gen_f64_typed(&mut b, body, &binders, &no_arrays, None).0).collect();
+                    bodies.iter().map(|body| gen_f64_typed(&mut b, body, &binders, &no_arrays, None, fn_ids, module).0).collect();
                 for (k2, &v) in acc_vars.iter().enumerate() {
                     b.def_var(v, new_vals[k2]);
                 }

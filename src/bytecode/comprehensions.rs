@@ -549,12 +549,12 @@ impl super::Compiler {
                 // path range-checks its array caps inline, so it carries no `IndexBound`s.)
                 let user_fns = self.user_fn_set();
                 if matches!(init, Expr::Float(_)) {
-                    match crate::jit::reduce_jit_f64_range_captures(init, body, pa, pb, &user_fns) {
+                    match crate::jit::reduce_jit_f64_range_captures(init, body, pa, pb, &fns, &user_fns) {
                         Some((b, caps, bnds, synth)) => {
                             synth_exprs = synth;
                             (Some(vec![b]), caps, bnds, true)
                         }
-                        None => match crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &user_fns) {
+                        None => match crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &fns, &user_fns) {
                             Some(b) => (Some(vec![b]), Vec::new(), Vec::new(), true),
                             None => (None, Vec::new(), Vec::new(), false),
                         },
@@ -731,10 +731,11 @@ impl super::Compiler {
         // terms an unfused one would be (and `reduce_bodies_eligible` re-derives both at build
         // time, which is what actually keeps compile-gate and build-gate from drifting).
         let user_fns = self.user_fn_set();
+        let fns = self.jit_fn_set();
         let (bodies, captures, bounds, synth) =
-            match crate::jit::reduce_jit_f64_range_captures(init, &new_body, pa, MR_COUNTER, &user_fns) {
+            match crate::jit::reduce_jit_f64_range_captures(init, &new_body, pa, MR_COUNTER, &fns, &user_fns) {
                 Some((bd, caps, bnds, syn)) => (vec![bd], caps, bnds, syn),
-                None => match crate::jit::reduce_jit_f64_range_body(init, &new_body, pa, MR_COUNTER, &user_fns) {
+                None => match crate::jit::reduce_jit_f64_range_body(init, &new_body, pa, MR_COUNTER, &fns, &user_fns) {
                     Some(bd) => (vec![bd], Vec::new(), Vec::new(), Vec::new()),
                     None => return Ok(false),
                 },

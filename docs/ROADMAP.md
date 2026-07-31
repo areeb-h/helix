@@ -777,6 +777,43 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       exercises popping the captures off the stack and falling through, where a stack-discipline
       mistake would surface.
 
+- [x] **Stage 3r — an `f64` reduce may CAPTURE a scalar and CALL a user function: 48–134×.**
+      Two more inversions from the same sweep, sharing one root cause: the f64 reduce
+      analyses refused both, while their i64 twins had always accepted them.
+
+      MEASURED (10M elements; the VM column is the before-number):
+
+      | body | before | after |
+      | --- | --- | --- |
+      | `s + to_float(i) * c` — captured coefficient | 0.78s | **0.01s** (75–134×) |
+      | `s + to_float(f(i))` — a call, no captures | 0.74s | **0.02s** (48×) |
+      | `s + to_float(f(i)) * c` — both | 0.80s | **0.02s** (54×) |
+
+      TWO gates had to learn it, and they are selected separately — a body WITH captures takes
+      the indexed analysis (`infer_f64_indexed`), a capture-FREE one takes
+      `infer_reduce_f64_kind`. Fixing only the first left call-only bodies still on the VM,
+      which the probe caught; both now carry the same user-call arm, and the codegen they
+      share (`gen_f64_typed`) grew the matching emit.
+
+      The captured case was one guard: `reduce_jit_f64_range_captures` required
+      `caps.iter().any(|c| c.kind == ArrayF64)` — "at least one array capture" — so a body
+      whose only capture was a SCALAR matched neither that path nor the capture-free one. It
+      is now `!caps.is_empty()`, which still lets an empty list fall through to the
+      capture-free path exactly as before, so this admits only shapes that previously had no
+      kernel. The build re-gate carried the identical guard and was relaxed with it; those two
+      must always move together or the build declines a kernel the compiler emitted.
+
+      Promotion is the correctness crux and is unchanged: a value scalar rides as `f64` but
+      may be `Int` at runtime, so `mix_combine` admits it only where a genuine float promotes
+      it. The test pins both sides of 2^53, where `i64` and `f64` genuinely differ, and
+      re-checks the two shapes this must NOT disturb — the Stage 3h dot product and the
+      dividing body whose kernel carries a poison out-param.
+
+      One refactor came with it, not a suppression: `infer_f64_indexed` reached 8 arguments
+      and tripped clippy's limit. Its three parallel OUTPUTS (`caps`, `synth`, `bounds`) are
+      always built, passed and consumed together, so they are now one `IndexedOut` — 8
+      arguments down to 6, and clippy back to its 2-warning baseline.
+
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).
@@ -1277,28 +1314,20 @@ motivates this phase.
       not a local edit. Worth it (this is `map(i => escape(...))`, the k2/mandelbrot
       shape), but it should be designed rather than bolted on.
 
-- [ ] **Three more spelling inversions, measured and unfixed.** Turned up by the same
-      sweep that found Stage 3q, and left recorded rather than half-fixed. All at 10M
-      elements; a declining JIT runs the bytecode loop, so "VM" means the JIT time equals it.
+- [ ] **Two spelling inversions still open** (two others from this sweep are now Stage 3r).
+      At 10M elements; a declining JIT runs the bytecode loop, so "VM" means the JIT time
+      equals it.
 
       | shape | JIT | its twin | |
       | --- | --- | --- | --- |
-      | `reduce(0.0, (s,i) => s + to_float(i) * c)` — captured coefficient | 0.74s | 0.01s inline | **VM** |
-      | `reduce(0.0, (s,i) => s + to_float(f(i)) * 0.5)` — a call | 0.85s | — | barely native (5×) |
-      | `map(i => i * c + 1).reduce(…)` — captured, fused chain | 0.35s | 0.00s inline | 3× only |
-      | `scan(0, (s,x) => s + x)` | 0.54s | — | **VM — `scan` has no kernel at all** |
+      | `map(i => i * c + 1).reduce(…)` — captured, fused chain | 0.35s | 0.00s inline | 3–7× only |
+      | `scan(0, (s,x) => s + x)` | 0.54s | 0.00s `reduce` twin | **VM — `scan` has no kernel at all** |
 
-      The first is NOT Stage 3h: that fixed value scalars in the *indexed* f64 reduce (the
-      dot-product shape, with array captures). This is the plain non-indexed f64 reduce with
-      a scalar capture, which `float_reduce_body_eligible` still rejects outright — its doc
-      says so explicitly ("NO free (captured) variable is [allowed]"), for the same reason
-      the mixed map used to: a capture's runtime type is unknown. The same resolution should
-      apply — prove it `Int` (or `Float`) at dispatch rather than statically — and the
-      `MixT`/`mix_combine` rule already exists to keep the promotion points aligned.
-
-      `scan` is a different matter: it is a prefix fold, so element *i* depends on element
-      *i−1*. That is a genuine serial dependency (like `filter`'s output offset), so it can
-      have a native kernel but not a parallel one.
+      The fused chain declines its map stage when the body captures; the standalone map has
+      handled captures since Stage 3m, so the pipeline is now the odd one out. `scan` is a
+      different matter: it is a prefix fold, so element *i* depends on element *i−1*. That is
+      a genuine serial dependency (like `filter`'s output offset), so it can have a native
+      kernel but not a parallel one.
 
 - [ ] **k2 mandelbrot: the loop body is at PARITY with C; the gap is a ~250 ns
       per-pixel fixed cost that is still unidentified.** Recorded because the obvious

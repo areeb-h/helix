@@ -4463,6 +4463,70 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         }
     }
 
+    /// An `f64` reduce body may CAPTURE a scalar and may CALL an `i64` user function. Both
+    /// spellings used to fall to the bytecode loop while their literal/inline twins ran
+    /// natively — 0.78s vs 0.01s for a captured coefficient, 0.74s vs 0.01s for a call, over
+    /// 10M elements.
+    ///
+    /// Two paths had to learn this, and they are gated separately: a body WITH captures goes
+    /// through the indexed analysis, a capture-FREE one through `infer_reduce_f64_kind`. So a
+    /// call-only body and a call-plus-capture body exercise different code and both are here.
+    ///
+    /// The promotion rule is the correctness crux: a value scalar rides as `f64` but may be
+    /// `Int` at runtime, so `mix_combine` admits it only where a genuine float promotes it.
+    /// The 2^53 cases pin that — where `i64` and `f64` genuinely differ.
+    #[test]
+    fn an_f64_reduce_may_capture_a_scalar_and_call_a_user_function() {
+        for (src, want) in [
+            // Scalar captures, float and int.
+            ("c = 0.5\n(0..6).reduce(0.0, (s, i) => s + to_float(i) * c)", "7.5"),
+            ("c = 3\n(0..6).reduce(0.0, (s, i) => s + to_float(i) * c)", "45.0"),
+            ("a = 0.5\nb = 2.0\n(0..6).reduce(0.0, (s, i) => s + to_float(i) * a + b)", "19.5"),
+            ("xs = [1.0, 2.0, 3.0]\nc = 2.0\n(0..3).reduce(0.0, (s, i) => s + c * xs[i])", "12.0"),
+            // Past 2^53, where an `i64` product and an `f64` one diverge.
+            (
+                "c = 9007199254740993\n(0..3).reduce(0.0, (s, i) => s + to_float(c * i))",
+                "27021597764222976.0",
+            ),
+            // User calls: capture-free path, then the captured path.
+            ("fn f(x) = x * 2\n(0..6).reduce(0.0, (s, i) => s + to_float(f(i)))", "30.0"),
+            ("fn f(x) = x * 2\nc = 0.5\n(0..6).reduce(0.0, (s, i) => s + to_float(f(i)) * c)", "15.0"),
+            ("fn g(x) = x + 1\nfn f(x) = g(x) * 2\n(0..6).reduce(0.0, (s, i) => s + to_float(f(g(i))))", "54.0"),
+            ("fn f(a, b) = a * b + 1\n(0..6).reduce(0.0, (s, i) => s + to_float(f(i, 3)))", "51.0"),
+            // The callee wraps at i64::MAX before the body promotes.
+            ("fn f(x) = x * 9223372036854775807\n(0..4).reduce(0.0, (s, i) => s + to_float(f(i) % 100))", "110.0"),
+            ("fn tri(x, acc) = if x <= 0 then acc else tri(x - 1, acc + x)\n(0..5).reduce(0.0, (s, i) => s + to_float(tri(i, 0)))", "20.0"),
+            // A user function shadowing a builtin must win over the inline lowering.
+            ("fn abs(x) = x + 1000\n(0..4).reduce(0.0, (s, i) => s + to_float(abs(0 - i)))", "3994.0"),
+            ("fn min(a, b) = a\n(0..4).reduce(0.0, (s, i) => s + to_float(min(i, 99)))", "6.0"),
+            ("fn sign(x) = x - 1\n(0..4).reduce(0.0, (s, i) => s + to_float(sign(i)))", "2.0"),
+            // Declines that must still produce the interpreter's answer.
+            ("fn f(x) = x * 2\n(0..4).reduce(0.0, (s, i) => s + f(2.5))", "20.0"),
+            ("fn f(x) = x / 2\n(0..4).reduce(0.0, (s, i) => s + to_float(f(i)))", "3.0"),
+            ("fn f(x) = if x <= 0 then 0 else x + f(x - 1)\n(0..4).reduce(0.0, (s, i) => s + to_float(f(i)))", "10.0"),
+            ("c = 0.5\n(0..0).reduce(0.0, (s, i) => s + to_float(i) * c)", "0.0"),
+            // Shapes that must be UNCHANGED by this: the Stage 3h dot product, and the
+            // dividing body whose kernel carries a poison out-param.
+            ("a = [1.5, 2.5, 3.5]\nb = [0.25, 0.5, 0.75]\nc = 2.5\n(0..3).reduce(0.0, (s, i) => s + c * a[i] + b[i])", "20.25"),
+            ("(0..5).reduce(0.0, (s, i) => s + to_float(i) / 2.0)", "5.0"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // Both new shapes must actually reach native code, checked separately because they
+        // take different paths (capture-free vs captured).
+        for src in [
+            "fn f(x) = x * 2\n(0..64).reduce(0.0, (s, i) => s + to_float(f(i)))",
+            "c = 0.5\n(0..64).reduce(0.0, (s, i) => s + to_float(i) * c)",
+        ] {
+            crate::jit::reset_native_call_count();
+            assert!(run_vm_jit(src).is_ok());
+            assert!(crate::jit::native_call_count() > 0, "never reached a native kernel: `{src}`");
+        }
+    }
+
     /// A `filter` predicate may CAPTURE free `i64` scalars. Before this, swapping a literal
     /// threshold for a variable moved the whole filter onto the bytecode loop — the same cliff
     /// the map body had, measured 0.55s against 0.01s over 10M elements.
