@@ -198,6 +198,16 @@ pub enum Op {
     /// to `after`. Otherwise it pops the same operands and falls through to the ordinary
     /// per-stage chain compilation (the oracle path).
     TryJitFused { kernel_idx: u32, after: u32 },
+    /// Fast path for a JIT-eligible `range(..).scan(init, (acc, x) => body)` — the prefix
+    /// fold, which had no native form at all (measured 0.54s against the `reduce` twin's
+    /// 0.00s at 10M elements). Same operand protocol as [`Op::TryJitFused`]: the guard's
+    /// operands (`[start, end, init]`, plus any capture values above them) are pushed before
+    /// it and the VM consumes ALL of them whether or not it takes the native path; on
+    /// success the result array is pushed and control jumps to `after`, otherwise the
+    /// recompiled original (fusion-suppressed) runs as the fall-through. The kernel is
+    /// SERIAL by nature — element *i* of a prefix fold depends on element *i−1* — so unlike
+    /// the map kernels it never parallelizes; byte-identity needs no order argument.
+    TryJitScan { loop_idx: u32, after: u32 },
     /// Fast path for a **parallel nested reduce**: `range(os,oe).map(i =>
     /// range(is,ie).reduce(init, (acc,j) => body))`, where the inner reduce captures the outer
     /// binder `i` (a scalar) plus zero or more loop-invariant i64 arrays it indexes by `i` and/or
@@ -572,6 +582,10 @@ pub struct Program {
     /// Fuseable `map`/`filter`/`reduce` pipelines, indexed by [`Op::TryJitFused`]'s
     /// `kernel_idx` — each lowered to a single intermediate-free native loop.
     pub fused_kernels: Vec<FusedKernel>,
+    /// JIT-eligible `scan` (prefix-fold) bodies, indexed by [`Op::TryJitScan::loop_idx`].
+    /// Reuses [`ReduceLoop`] — a scan is a reduce that also stores each successive
+    /// accumulator — with the same single-source-of-truth contract as `reduce_loops`.
+    pub scan_loops: Vec<ReduceLoop>,
     /// Global slot names, aligned with `global_init`. Lets the VM resolve a bare
     /// name to a global's runtime value inside a DataFrame predicate
     /// (`df.where(age > threshold)`) — the column-verb `resolve_var`.

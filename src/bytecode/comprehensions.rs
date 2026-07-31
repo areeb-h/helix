@@ -982,6 +982,70 @@ impl super::Compiler {
             }
         };
 
+        // Native fast path: `range(a, b).scan(init, (acc, x) => body)` with an `i64` body —
+        // the prefix fold, which had no native form at all (0.54s against the `reduce` twin's
+        // 0.00s at 10M elements). Operand protocol as `TryJitFused`: push `[start, end, init]`
+        // plus any capture values, emit the guard (the VM consumes ALL operands whether or not
+        // it takes the native path), and recompile THIS scan with `no_fuse` set as the
+        // fall-through. Everything pushed is re-evaluated by that recompile, so each operand
+        // must be idempotent — the same rule every other fusion site enforces.
+        //
+        // An `Int`-literal init only (the accumulator must be provably `i64`), scalar captures
+        // only, and no index bounds: an `ArrayI64` capture would need the reduce path's bounds
+        // discharge in the VM arm, and no probe has shown a scan body indexing an array yet —
+        // decline rather than carry unexercised safety code. The kernel is SERIAL by nature
+        // (element *i* of a prefix fold depends on element *i−1*), so unlike the map kernels
+        // there is no parallel form to keep byte-identical; order is the definition.
+        if !self.no_fuse
+            && pa != pb
+            && matches!(args[0], Expr::Int(_))
+            && let Some((start, end)) = self.builtin_range_call(b, recv)
+            && start.is_none_or(is_idempotent)
+            && is_idempotent(end)
+        {
+            let fns = self.jit_fn_set();
+            if let Some((caps, bounds)) = crate::jit::reduce_loop_captures(body, &pa, &pb, &fns)
+                && bounds.is_empty()
+                && caps.iter().all(|c| c.kind == CaptureKind::Scalar)
+            {
+                match start {
+                    None => {
+                        let c0 = b.add_const(Value::Int(0));
+                        b.emit(Op::Const(c0), line, col);
+                    }
+                    Some(e) => self.compile_expr(b, e)?,
+                }
+                self.compile_expr(b, end)?;
+                self.compile_expr(b, &args[0])?;
+                for cap in &caps {
+                    self.compile_expr(b, &Expr::Ident { name: cap.name.clone(), line, col })?;
+                }
+                let loop_idx = self.scan_loops.len() as u32;
+                self.scan_loops.push(ReduceLoop {
+                    pa: pa.clone(),
+                    pb: pb.clone(),
+                    bodies: vec![body.clone()],
+                    captures: caps,
+                    index_bounds: bounds,
+                    float: false,
+                    inner_start_coeff: 0,
+                    inner_end_coeff: 0,
+                });
+                let at = b.emit(Op::TryJitScan { loop_idx, after: 0 }, line, col);
+                // Fall-through: this same scan, with the guard suppressed so it cannot
+                // re-detect itself. Both paths leave exactly one array on the stack, and
+                // nothing sits between the fall-through's end and the convergence point, so
+                // no jump is needed.
+                self.no_fuse = true;
+                let r = self.compile_scan(b, recv, args, line, col);
+                self.no_fuse = false;
+                r?;
+                let converge = b.code.len() as u32;
+                b.code[at] = Op::TryJitScan { loop_idx, after: converge };
+                return Ok(());
+            }
+        }
+
         self.compile_expr(b, recv)?;
         let init_at = b.emit(Op::CompInit(CompKind::Map, 0), line, col);
 

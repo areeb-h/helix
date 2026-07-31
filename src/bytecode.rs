@@ -290,6 +290,8 @@ pub struct Compiler {
     filter_kernels: Vec<ArrayKernel>,
     /// Accumulated fuseable pipelines (see [`Program::fused_kernels`]).
     fused_kernels: Vec<FusedKernel>,
+    /// Accumulated JIT `scan` (prefix-fold) requests (see [`Program::scan_loops`]).
+    scan_loops: Vec<ReduceLoop>,
     /// Set while emitting a fused pipeline's fall-through, so the recompiled chain takes
     /// the ordinary per-stage path instead of re-triggering fusion (which would loop).
     no_fuse: bool,
@@ -330,6 +332,7 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         map_kernels: Vec::new(),
         filter_kernels: Vec::new(),
         fused_kernels: Vec::new(),
+        scan_loops: Vec::new(),
         no_fuse: false,
         jit_fns: crate::jit::int_eligible_fns(program),
         types,
@@ -366,6 +369,7 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         map_kernels: c.map_kernels,
         filter_kernels: c.filter_kernels,
         fused_kernels: c.fused_kernels,
+        scan_loops: c.scan_loops,
         global_names: std::rc::Rc::new(c.globals),
     })
 }

@@ -1,0 +1,83 @@
+# The native scan (prefix-fold) kernel (Stage 3t). `scan` was the last comprehension with no
+# native form at all: 0.54s against its `reduce` twin's 0.00s at 10M elements, now 0.05s. The
+# kernel is SERIAL by definition — element j depends on element j-1 — so unlike the map kernels
+# there is no parallel form to keep byte-identical; the order IS the definition.
+#
+# Every value case prints the FULL output array, because the kernel's one new obligation over a
+# reduce is the STORE INDEX — and the classic scan bug is the inclusive/exclusive off-by-one.
+# Sabotage-proven: storing the pre-update accumulator turns [0, 1, 3, 6, ...] into
+# [0, 0, 1, 3, ...] on the JIT alone, caught by the first line of this file.
+#
+# The declines matter equally. The guard's operands ([start, end, init] plus captures) are
+# consumed whether or not the native path is taken, so a Float init, a Float capture, an array
+# source, an array capture, and a shadowed `range` each exercise exactly the stack discipline a
+# protocol mistake would corrupt.
+
+# ---- values, full arrays ----
+
+print((0..8).scan(0, (s, x) => s + x))
+print((0..5).scan(100, (s, x) => s + x))
+print((3..8).scan(0, (s, x) => s + x))
+
+# 20! wraps i64 twice over; the wrap must be the interpreter's
+print((1..21).scan(1, (s, x) => s * x).last())
+
+# a branching body (running maximum of a scrambled sequence)
+print((0..6).scan(0, (s, x) => if x * 7 % 5 > s then x * 7 % 5 else s))
+
+# captured scalars — one, then two
+c = 3
+print((0..6).scan(0, (s, x) => s + x * c))
+a2 = 2
+b5 = 5
+print((0..6).scan(0, (s, x) => s + x * a2 + b5))
+
+# a user call in the body, then a call plus a capture
+fn dbl(x) = x * 2
+print((0..6).scan(0, (s, x) => s + dbl(x)))
+print((0..6).scan(0, (s, x) => s + dbl(x) + c))
+
+# wrapping at i64::MAX from the very first element
+big = 9223372036854775807
+print((0..2).scan(big, (s, x) => s + 1))
+
+# scan feeding the other kernels
+print((0..100).scan(0, (s, x) => s + x).reduce(0, (a, y) => a + y))
+print((0..5).scan(0, (s, x) => s + x).map(it * 2))
+
+# ---- declines that must still be exact ----
+
+print((0..5).scan(0.0, (s, x) => s + to_float(x)))
+f = 2.5
+print((0..5).scan(0, (s, x) => s + x * f))
+print([5, 1, 4].scan(0, (s, x) => s + x))
+arr = [10, 20, 30, 40, 50]
+print((0..5).scan(0, (s, x) => s + arr[x]))
+
+# a non-tail-recursive callee is not i64-eligible, so the whole scan declines
+fn tri(x) = if x <= 0 then 0 else x + tri(x - 1)
+print((0..5).scan(0, (s, x) => s + tri(x)))
+
+# ---- degenerate ranges and scope hygiene ----
+
+print((0..0).scan(42, (s, x) => s + x))
+print((5..0).scan(42, (s, x) => s + x))
+print((7..8).scan(1, (s, x) => s + x))
+
+# init reads the OUTER s, not the accumulator binder of the same name
+s = 50
+print((0..4).scan(s, (s, x) => s + x))
+
+# the element binder must not leak over an outer variable of the same name
+x = 999
+print((0..4).scan(0, (s, x) => s + x))
+print(x)
+
+# ---- element-wise reads at a size where a wrong store index cannot hide in a sum ----
+
+big_scan = (0..100000).scan(0, (s, x) => s + x)
+print(big_scan[0])
+print(big_scan[1])
+print(big_scan[99998])
+print(big_scan[99999])
+print(big_scan.count())

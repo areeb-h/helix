@@ -140,6 +140,9 @@ pub struct Jit {
     /// [`define_fused_kernel`]), indexed by [`crate::bytecode::Op::TryJitFused`]'s
     /// `kernel_idx`.
     fused_ptrs: Vec<Option<*const u8>>,
+    /// Native `extern "C" fn(start, end, init, *mut i64 dst, *const i64 caps)` scan
+    /// (prefix-fold) kernels, indexed by [`crate::bytecode::Op::TryJitScan`]'s `loop_idx`.
+    scan_ptrs: Vec<Option<*const u8>>,
 }
 
 impl Jit {
@@ -170,6 +173,10 @@ impl Jit {
     pub fn fused_kernel(&self, idx: usize) -> Option<*const u8> {
         self.fused_ptrs.get(idx).copied().flatten()
     }
+    /// The native scan (prefix-fold) kernel for site `idx`, if one compiled.
+    pub fn scan_loop(&self, idx: usize) -> Option<*const u8> {
+        self.scan_ptrs.get(idx).copied().flatten()
+    }
 }
 
 struct FnDef<'a> {
@@ -187,6 +194,7 @@ pub fn build(
     map_kernels: &[crate::bytecode::ArrayKernel],
     filter_kernels: &[crate::bytecode::ArrayKernel],
     fused_kernels: &[crate::bytecode::FusedKernel],
+    scan_loops: &[crate::bytecode::ReduceLoop],
 ) -> Option<Jit> {
     // The native call transmutes Cranelift output to `extern "C"`, which matches
     // the convention we force (SystemV) only on x86-64 Linux. On every other
@@ -208,6 +216,7 @@ pub fn build(
         && map_kernels.is_empty()
         && filter_kernels.is_empty()
         && fused_kernels.is_empty()
+        && scan_loops.is_empty()
     {
         return None;
     }
@@ -518,6 +527,42 @@ pub fn build(
     );
     let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns);
 
+    // `scan` (prefix-fold) loops — SERIAL kernels (see `define_scan_loop`). Same defensive
+    // re-check discipline as the reduce loops: re-derive the capture list from the body with
+    // the SAME collector the compiler used and require it to reproduce the stored one exactly,
+    // so codegen's `caps[i]` and the VM's push order cannot drift.
+    let mut scan_ids: Vec<Option<FuncId>> = Vec::with_capacity(scan_loops.len());
+    {
+        let mut ctx = module.make_context();
+        let mut bctx = FunctionBuilderContext::new();
+        for (i, rl) in scan_loops.iter().enumerate() {
+            let ok = rl.bodies.len() == 1
+                && !rl.float
+                && rl.index_bounds.is_empty()
+                && rl.captures.iter().all(|c| c.kind == CaptureKind::Scalar)
+                && reduce_loop_captures(&rl.bodies[0], &rl.pa, &rl.pb, &int_eligible)
+                    .is_some_and(|(caps, bnds)| caps == rl.captures && bnds.is_empty());
+            if !ok {
+                scan_ids.push(None);
+                continue;
+            }
+            let mut sig = module.make_signature();
+            sig.call_conv = CallConv::SystemV;
+            for _ in 0..5 {
+                sig.params.push(AbiParam::new(I64)); // start, end, init, dst, caps
+            }
+            let Ok(id) = module.declare_function(&format!("scan${i}"), Linkage::Local, &sig)
+            else {
+                scan_ids.push(None);
+                continue;
+            };
+            match define_scan_loop(&mut module, &mut ctx, &mut bctx, id, rl, &fn_ids) {
+                Some(()) => scan_ids.push(Some(id)),
+                None => scan_ids.push(None),
+            }
+        }
+    }
+
     if compiled.is_empty()
         && compiled_mixed.is_empty()
         && reduce_ids.iter().all(|r| r.is_none())
@@ -526,6 +571,7 @@ pub fn build(
         && map_mixed_ids.iter().all(|r| r.is_none())
         && filter_ids.iter().all(|r| r.is_none())
         && fused_ids.iter().all(|r| r.is_none())
+        && scan_ids.iter().all(|r| r.is_none())
     {
         return None;
     }
@@ -559,6 +605,7 @@ pub fn build(
     let map_ptrs_mixed = finalize(map_mixed_ids, &module);
     let filter_ptrs = finalize(filter_ids, &module);
     let fused_ptrs = finalize(fused_ids, &module);
+    let scan_ptrs = finalize(scan_ids, &module);
 
     Some(Jit {
         _module: module,
@@ -569,6 +616,7 @@ pub fn build(
         map_ptrs_mixed,
         filter_ptrs,
         fused_ptrs,
+        scan_ptrs,
     })
 }
 
@@ -3774,6 +3822,101 @@ fn cond_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, kin
 }
 
 // ---------- codegen ----------
+
+/// Emit the native prefix-fold loop for `range(start,end).scan(init, (pa,pb)=>body)`:
+/// `acc=init; j=0; x=start; while x<end { acc=body(acc,x); dst[j]=acc; j+=1; x+=1 }`.
+/// The reduce loop's i64 scalar shape, plus one store per iteration — each successive
+/// accumulator lands in `dst[j]`, which is exactly what the bytecode loop's `CompMapPush`
+/// collects. SERIAL by definition: element *j* depends on element *j−1*, so there is no
+/// parallel form and byte-identity needs no ordering argument. Integer arithmetic wraps
+/// (`iadd`/`imul`) as everywhere else, and an empty range writes nothing.
+///
+/// Signature: `fn(start, end, init, dst, caps)`, all `i64` (two pointers ride as `i64`).
+/// `dst` has exactly `end - start` slots — the caller allocates from the SAME endpoints it
+/// passes here, and the VM capped the length before dispatch. `caps` carries the
+/// loop-invariant `Scalar` captures in the stored order, loaded once in the entry block.
+fn define_scan_loop<'a>(
+    module: &mut JITModule,
+    ctx: &mut cranelift_codegen::Context,
+    bctx: &mut FunctionBuilderContext,
+    fid: FuncId,
+    rl: &'a crate::bytecode::ReduceLoop,
+    fn_ids: &HashMap<&'a str, FuncId>,
+) -> Option<()> {
+    ctx.func.signature.call_conv = CallConv::SystemV;
+    for _ in 0..5 {
+        ctx.func.signature.params.push(AbiParam::new(I64));
+    }
+    let mut b = FunctionBuilder::new(&mut ctx.func, bctx);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    b.seal_block(entry);
+    let p = b.block_params(entry).to_vec();
+    let (start, end, init, dst, caps_ptr) = (p[0], p[1], p[2], p[3], p[4]);
+
+    let acc = b.declare_var(I64);
+    let x = b.declare_var(I64);
+    let j = b.declare_var(I64);
+    let dst_var = b.declare_var(I64);
+    let end_var = b.declare_var(I64);
+    b.def_var(acc, init);
+    b.def_var(x, start);
+    let zero = b.ins().iconst(I64, 0);
+    b.def_var(j, zero);
+    b.def_var(dst_var, dst);
+    b.def_var(end_var, end);
+
+    // Bind the binders and the hoisted capture loads. Insertion order matters for nothing —
+    // codegen resolves by name — but the caps' SLOT order is the stored capture order, which
+    // the build gate proved identical to what the VM pushes.
+    let mut vars: HashMap<&'a str, Variable> = HashMap::new();
+    for (i, cap) in rl.captures.iter().enumerate() {
+        let v = b.ins().load(I64, MemFlags::trusted(), caps_ptr, (i * 8) as i32);
+        let cv = b.declare_var(I64);
+        b.def_var(cv, v);
+        vars.insert(cap.name.as_str(), cv);
+    }
+    vars.insert(rl.pa.as_str(), acc);
+    vars.insert(rl.pb.as_str(), x);
+
+    let header = b.create_block();
+    let body_blk = b.create_block();
+    let exit_blk = b.create_block();
+    b.ins().jump(header, &[]);
+
+    b.switch_to_block(header);
+    let xv = b.use_var(x);
+    let ev = b.use_var(end_var);
+    let cond = b.ins().icmp(IntCC::SignedLessThan, xv, ev);
+    b.ins().brif(cond, body_blk, &[], exit_blk, &[]);
+
+    b.switch_to_block(body_blk);
+    b.seal_block(body_blk);
+    let r = gen_value(&mut b, &rl.bodies[0], &mut vars, fn_ids, module, NumKind::Int);
+    b.def_var(acc, r);
+    let jv = b.use_var(j);
+    let off = b.ins().imul_imm(jv, 8);
+    let dp = b.use_var(dst_var);
+    let addr = b.ins().iadd(dp, off);
+    b.ins().store(MemFlags::trusted(), r, addr, 0);
+    let nj = b.ins().iadd_imm(jv, 1);
+    b.def_var(j, nj);
+    let xv2 = b.use_var(x);
+    let nx = b.ins().iadd_imm(xv2, 1);
+    b.def_var(x, nx);
+    b.ins().jump(header, &[]);
+    b.seal_block(header);
+
+    b.switch_to_block(exit_blk);
+    b.seal_block(exit_blk);
+    b.ins().return_(&[]);
+
+    b.finalize();
+    module.define_function(fid, ctx).ok()?;
+    module.clear_context(ctx);
+    Some(())
+}
 
 /// Emit a native loop for `range(start,end).reduce(init, (pa,pb)=>body)`:
 /// `acc=init; x=start; while x<end { acc=body(acc,x); x+=1 } return acc`.

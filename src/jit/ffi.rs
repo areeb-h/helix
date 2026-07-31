@@ -487,6 +487,33 @@ pub unsafe fn run_filter_kernel_range(
     dst
 }
 
+/// Run a native scan (prefix-fold) kernel over the range counter `[start, end)`, returning
+/// the array of successive accumulators. SERIAL by definition — `out[i]` depends on
+/// `out[i-1]` — so there is no parallel form and byte-identity needs no ordering argument.
+///
+/// SAFETY: `ptr` is a finalized `extern "C" fn(i64, i64, i64, *mut i64, *const i64)` from
+/// `define_scan_loop`; `dst` is allocated here with exactly the `end - start` slots the
+/// kernel writes (the VM capped the length before dispatch); `caps` is a valid slice the
+/// kernel only reads.
+pub unsafe fn run_scan_kernel_range(
+    ptr: *const u8,
+    start: i64,
+    end: i64,
+    init: i64,
+    caps: &[i64],
+) -> Vec<i64> {
+    note_native_call();
+    let n = (end as i128 - start as i128).max(0) as usize;
+    let mut dst = vec![0i64; n];
+    if n == 0 {
+        return dst;
+    }
+    let f: extern "C" fn(i64, i64, i64, *mut i64, *const i64) =
+        unsafe { std::mem::transmute(ptr) };
+    f(start, end, init, dst.as_mut_ptr(), caps.as_ptr());
+    dst
+}
+
 pub unsafe fn run_filter_kernel(ptr: *const u8, src: &[i64], caps: &[i64]) -> Vec<i64> {
     note_native_call();
     let mut dst = vec![0i64; src.len()];

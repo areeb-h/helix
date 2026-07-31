@@ -858,6 +858,7 @@ fn run_program(program: &[ast::Stmt], spans: &[module::Span], multi: bool) -> Re
                     &prog.map_kernels,
                     &prog.filter_kernels,
                     &prog.fused_kernels,
+                    &prog.scan_loops,
                 )
             };
             vm::run(&prog, jit.as_ref()).map_err(|e| render_err(e, spans, multi))?

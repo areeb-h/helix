@@ -2837,7 +2837,10 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         ("src/interp/builtins.rs", 8),
         ("src/interp/comprehensions.rs", 4),
         ("src/interp/dataframe_ops.rs", 0),
-        ("src/vm.rs", 52),
+        // +3 (52 → 55): `TryJitScan`'s three operand pops. Emitted at exactly one compiler
+        // site, which pushes `[start, end, init]` immediately before the op — proven at the
+        // call site in `vm.rs`.
+        ("src/vm.rs", 55),
         ("src/bytecode.rs", 2),
         ("src/bytecode/comprehensions.rs", 0),
         ("src/bytecode/ops.rs", 0),

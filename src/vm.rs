@@ -1849,6 +1849,44 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     }
                 }
             }
+            Op::TryJitScan { loop_idx, after } => {
+                // Operands `[start, end, init]` plus any capture values sit on the stack, and
+                // are consumed WHETHER OR NOT the native path is taken (`TryJitFused`'s
+                // protocol — the fall-through is a fresh recompile of the whole scan, which
+                // re-evaluates everything itself). Native requires: a kernel compiled, all of
+                // start/end/init `Int`, every capture an `Int` (the same runtime proof every
+                // capturing kernel uses), and the length within the same cap as the reduce
+                // guard — an over-cap scan must take the bytecode path so it errors (or
+                // builds) exactly as `CompInit` does.
+                let rl = &program.scan_loops[*loop_idx as usize];
+                let n_caps = rl.captures.len();
+                let cap_vals =
+                    if n_caps > 0 { stack.split_off(stack.len() - n_caps) } else { Vec::new() };
+                // These three cannot fail: `TryJitScan` is emitted at exactly one site
+                // (`compile_scan`'s guard), which pushes `[start, end, init]` immediately
+                // before it — and the capture split above only removed what the same site
+                // pushed above them. Counted in the ADR-0024 budget on that argument.
+                let init_v = stack.pop().unwrap();
+                let end_v = stack.pop().unwrap();
+                let start_v = stack.pop().unwrap();
+                let native: Option<Vec<i64>> = (|| {
+                    let ptr = jit?.scan_loop(*loop_idx as usize)?;
+                    let (Value::Int(s), Value::Int(e), Value::Int(init)) =
+                        (&start_v, &end_v, &init_v)
+                    else {
+                        return None;
+                    };
+                    if (*e as i128) - (*s as i128) > 100_000_000 {
+                        return None;
+                    }
+                    let caps = int_scalar_caps(&cap_vals)?;
+                    Some(unsafe { crate::jit::run_scan_kernel_range(ptr, *s, *e, *init, &caps) })
+                })();
+                if let Some(out) = native {
+                    stack.push(Value::int_array(out));
+                    frames[fi].ip = *after as usize;
+                }
+            }
             Op::TryJitFused { kernel_idx, after } => {
                 use crate::bytecode::FusionSink;
                 // The pipeline's source operands sit on the stack (array, or [start,end];

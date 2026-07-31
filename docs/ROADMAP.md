@@ -1322,11 +1322,46 @@ motivates this phase.
       | --- | --- | --- | --- |
       | ~~`map(i => i * c + 1).reduce(0, …)` — **Int** init~~ | ~~0.34s~~ | ~~110 MB~~ | **closed by Stage 3s below** |
       | `map(i => to_float(i) * c).reduce(0.0, …)` — Float init | 0.01s | 20 MB | already fuses ✓ |
-      | `scan(0, (s,x) => s + x)` | 0.54s | — | 0.00s `reduce` twin — **no kernel at all** |
+      | ~~`scan(0, (s,x) => s + x)`~~ | ~~0.54s~~ | — | **closed by Stage 3t below** |
 
-      `scan` is a different matter entirely: it is a prefix fold, so element *i* depends on
-      element *i−1*. That is a genuine serial dependency (like `filter`'s output offset), so
-      it can have a native kernel but never a parallel one.
+- [x] **Stage 3t — `scan` gets a native kernel: 0.54s → 0.05s.** The prefix fold was the
+      last comprehension with no native form at all. The kernel is SERIAL by definition —
+      element *j* depends on element *j−1* — so unlike the map kernels there is no parallel
+      form to keep byte-identical; the order IS the definition.
+
+      New machinery, each piece the smallest that works: `Op::TryJitScan` with `TryJitFused`'s
+      operand protocol (the VM consumes `[start, end, init]` + captures whether or not it
+      takes the native path; the fall-through is this same scan recompiled with `no_fuse`
+      set); `Program.scan_loops` reusing `ReduceLoop`; `define_scan_loop` — the reduce loop's
+      i64 scalar shape plus one store per iteration; `run_scan_kernel_range`; and the VM arm.
+      Eligibility reuses `reduce_loop_captures` (scalar captures and user calls admitted —
+      captures were this whole arc's theme, so they are in from day one; `ArrayI64` captures
+      decline, since their bounds discharge is unexercised here and no probe has shown a scan
+      body indexing an array). An `Int`-literal init only; the VM re-checks everything at
+      dispatch and applies the same 100M length cap as the reduce guard.
+
+      TWO LESSONS PAID FOR:
+      * `jit::build` has TWO empty-checks — an early "is there anything at all" bail and a
+        post-define "did anything compile" bail — and adding a kernel type to only the second
+        makes a scan-ONLY program silently never build the JIT. Found because the probe
+        `(0..8).scan(…)` printed correct values at VM speed; three temporary `eprintln!`s
+        (guard emitted? kernel defined? VM sees a jit?) localized it in one run:
+        guard ✓, defined ✗, `jit=false`.
+      * The ADR-0024 never-abort ratchet caught the VM arm's three operand pops (+3 on
+        `vm.rs`'s budget). They cannot fail — `TryJitScan` is emitted at exactly one site,
+        which pushes exactly those three operands immediately before it — so the proof is now
+        a comment at the site and the budget moves in the same commit, per the ratchet's own
+        instructions.
+
+      Sabotage-proven: storing the PRE-update accumulator (the classic inclusive/exclusive
+      scan off-by-one) turns `[0, 1, 3, 6, …]` into `[0, 0, 1, 3, …]` on the JIT alone,
+      caught by the first case of the battery. Every value case checks the FULL output array
+      element-wise, because the store index is the kernel's one new obligation over a reduce.
+      25-case battery across all three engines (0 divergences): wrapping at `i64::MAX` and
+      in `20!`, a branching body, captures and calls, Float/array/shadowed-`range` declines
+      (which exercise the consume-always stack discipline), scope hygiene (`init` reading an
+      outer variable named like the accumulator), degenerate ranges, element-wise reads at
+      100k, and an engagement assertion. Corpus golden `j13_scan_kernel`.
 
 - [x] **Stage 3s — a CAPTURED i64 `map.reduce` chain fuses by substitution: 0.34s/110 MB →
       0.00s/20 MB.** The capture-free i64 chain has always fused through `FusedKernel`, but

@@ -476,6 +476,7 @@
             &prog.map_kernels,
             &prog.filter_kernels,
             &prog.fused_kernels,
+            &prog.scan_loops,
         );
         match exec(&prog, jit.as_ref()) {
             Ok(mut s) => Ok(format!("{}", s.pop().unwrap_or(Value::Unit))),
@@ -2896,6 +2897,7 @@
             &prog.map_kernels,
             &prog.filter_kernels,
             &prog.fused_kernels,
+            &prog.scan_loops,
         );
         match exec(&prog, jit.as_ref()) {
             Ok(_) => None,
@@ -4196,6 +4198,7 @@
             &prog.map_kernels,
             &prog.filter_kernels,
             &prog.fused_kernels,
+            &prog.scan_loops,
         );
         let err = exec(&prog, jit.as_ref()).unwrap_err();
         assert!(err.message.contains("division by zero"), "got: {}", err.message);
@@ -4231,6 +4234,7 @@
             &prog.map_kernels,
             &prog.filter_kernels,
             &prog.fused_kernels,
+            &prog.scan_loops,
         );
         exec(&prog, jit.as_ref()).unwrap().pop().unwrap_or(Value::Unit)
     }
@@ -4461,6 +4465,73 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             assert_eq!(run_vm(src), run_tw(src), "engines disagree on `{src}`");
             assert_eq!(run_vm(src), Ok(want.to_string()), "`{src}`");
         }
+    }
+
+    /// `scan` — the prefix fold — gets a native kernel. It was the last comprehension with no
+    /// native form at all: 0.54s against its `reduce` twin's 0.00s at 10M elements, now 0.05s.
+    ///
+    /// The kernel is SERIAL by definition (element *j* depends on element *j−1*), so there is
+    /// no parallel form to keep byte-identical; order is the definition. Every value case here
+    /// checks the FULL output array element-wise, because the kernel's one new obligation over
+    /// a reduce is the store index — and an off-by-one there is the classic scan bug
+    /// (inclusive vs exclusive). Sabotage-proven: storing the PRE-update accumulator turns
+    /// `[0, 1, 3, 6, …]` into `[0, 0, 1, 3, …]` on the JIT alone, caught by the first case.
+    ///
+    /// The declines matter equally: the guard's operands are consumed whether or not the
+    /// native path is taken (`TryJitFused`'s protocol), so a Float init/capture, an array
+    /// source, an array capture, or a shadowed `range` exercises exactly the stack discipline
+    /// a mistake would corrupt.
+    #[test]
+    fn scan_compiles_to_a_native_prefix_fold_and_declines_exactly() {
+        for (src, want) in [
+            ("(0..8).scan(0, (s, x) => s + x)", "[0, 1, 3, 6, 10, 15, 21, 28]"),
+            ("(0..5).scan(100, (s, x) => s + x)", "[100, 101, 103, 106, 110]"),
+            ("(3..8).scan(0, (s, x) => s + x)", "[3, 7, 12, 18, 25]"),
+            // 20! wraps i64 twice over; the wrap must be the interpreter's.
+            ("(1..21).scan(1, (s, x) => s * x).last()", "2432902008176640000"),
+            ("(0..6).scan(0, (s, x) => if x * 7 % 5 > s then x * 7 % 5 else s)", "[0, 2, 4, 4, 4, 4]"),
+            ("c = 3\n(0..6).scan(0, (s, x) => s + x * c)", "[0, 3, 9, 18, 30, 45]"),
+            ("a = 2\nb = 5\n(0..6).scan(0, (s, x) => s + x * a + b)", "[5, 12, 21, 32, 45, 60]"),
+            ("fn dbl(x) = x * 2\n(0..6).scan(0, (s, x) => s + dbl(x))", "[0, 2, 6, 12, 20, 30]"),
+            ("fn dbl(x) = x * 2\nc = 1\n(0..6).scan(0, (s, x) => s + dbl(x) + c)", "[1, 4, 9, 16, 25, 36]"),
+            ("big = 9223372036854775807\n(0..2).scan(big, (s, x) => s + 1)", "[-9223372036854775808, -9223372036854775807]"),
+            ("(0..100).scan(0, (s, x) => s + x).reduce(0, (a, y) => a + y)", "166650"),
+            ("(0..5).scan(0, (s, x) => s + x).map(it * 2)", "[0, 2, 6, 12, 20]"),
+            // Declines — each re-evaluates its operands on the fall-through, so these are the
+            // stack-discipline and idempotence cases as much as value cases.
+            ("(0..5).scan(0.0, (s, x) => s + to_float(x))", "[0.0, 1.0, 3.0, 6.0, 10.0]"),
+            ("c = 2.5\n(0..5).scan(0, (s, x) => s + x * c)", "[0.0, 2.5, 7.5, 15.0, 25.0]"),
+            ("[5, 1, 4].scan(0, (s, x) => s + x)", "[5, 6, 10]"),
+            ("a = [10, 20, 30, 40, 50]\n(0..5).scan(0, (s, x) => s + a[x])", "[10, 30, 60, 100, 150]"),
+            // A user `range` must be CALLED, never fused over.
+            ("fn range(a, b) = [7, 8]\nrange(0, 2).scan(0, (s, x) => s + x)", "[7, 15]"),
+            // Degenerate ranges and scope hygiene.
+            ("(0..0).scan(42, (s, x) => s + x)", "[]"),
+            ("(5..0).scan(42, (s, x) => s + x)", "[]"),
+            ("(7..8).scan(1, (s, x) => s + x)", "[8]"),
+            ("s = 50\n(0..4).scan(s, (s, x) => s + x)", "[50, 51, 53, 56]"),
+            ("x = 999\nr = (0..4).scan(0, (s, x) => s + x)\n[r, [x]]", "[[0, 1, 3, 6], [999]]"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // Element-wise reads at a size where a wrong store index cannot hide in a sum.
+        let src = "a = (0..100000).scan(0, (s, x) => s + x)\n[a[0], a[1], a[99998], a[99999]]";
+        let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+        assert_eq!(tw, vm);
+        assert_eq!(vm, jit);
+        assert_eq!(vm, Ok("[0, 1, 4999850001, 4999950000]".to_string()));
+
+        // And the kernel must actually run — every assertion above is satisfied by a guard
+        // that always falls through.
+        crate::jit::reset_native_call_count();
+        assert!(run_vm_jit("(0..64).scan(0, (s, x) => s + x).last()").is_ok());
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the scan kernel never reached native code"
+        );
     }
 
     /// A CAPTURED i64 `map(f).reduce(init, g)` chain fuses by substitution instead of
