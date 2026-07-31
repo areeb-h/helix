@@ -1455,9 +1455,24 @@ motivates this phase.
       Corpus golden `j12_captured_i64_fusion` runs the same shapes as a program on all three
       engines.
 
-- [ ] **k2 mandelbrot: the loop body is at PARITY with C; the gap is a ~250 ns
-      per-pixel fixed cost that is still unidentified.** Recorded because the obvious
-      suspects are now ruled OUT and re-checking them would be wasted work.
+- [ ] **k2 mandelbrot: CAUSE IDENTIFIED — a float division by a NON-LITERAL declines the
+      whole enclosing function to the VM.** `row`'s body computes
+      `-2.1 + to_float(x) * 2.7 / to_float(g)`, and `infer_typed_env` admits `/` only with a
+      nonzero Float-LITERAL divisor (native `fdiv` yields inf where the interpreter RAISES
+      on `/0`). So `row` — and `grid`, which calls it — fell to the VM, and every pixel paid
+      ~250 ns of VM dispatch into the (native) `step`, which amortized only at huge inner
+      caps. CONFIRMED by one change: precomputing the reciprocals once and passing them as
+      parameters (`sx = 2.7 / to_float(g)` at the call site, `to_float(x) * sx` in the body)
+      is **0.39s → 0.07s** with a byte-identical anchor (40715058) — C parity.
+
+      THE FIX is in the language, not the benchmark: admit `/` by a non-literal `Float`
+      divisor in mixed function bodies, guarded by the /0 **immediate poison bail** the
+      mixed ABI already has for NaN comparisons (`MixedFn`'s trailing poison pointer —
+      check `divisor == 0`, bail, VM re-runs and raises exactly). The benchmark kernel
+      stays as written: the idiomatic spelling is the thing being measured, and rewriting
+      it to dodge the division would be flattery. Everything previously ruled out (call
+      path ~2.5 ns, arity, nesting) stays ruled out — the fixed cost was real and this is
+      what it was.
 
       Holding the pixel count fixed and raising the inner iteration cap (so per-pixel
       work grows while the number of calls does not):

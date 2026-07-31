@@ -387,7 +387,16 @@ Results are identical at every thread count, pinned by `thread_count_changes_cpu
    **344 MB → 186 MB**. A source that is still named keeps its own buffer and is
    never rewritten — that is what `Rc::get_mut` is checking, and removing the check
    makes a live `src` print its mapped values instead of its own.
-7. **k2's 5.3× is NOT the inner loop.** Holding the pixel count fixed and raising
+7. **k2's 5.3× is NOT the inner loop — and the cause is now identified.** `row`'s
+   `2.7 / to_float(g)` is a float division by a NON-LITERAL, which the mixed-function
+   analysis declines (only nonzero Float literals are admitted — native `fdiv` yields
+   inf where the interpreter raises on `/0`). `row` and `grid` therefore run on the
+   VM, and every pixel pays ~250 ns of VM dispatch into the native `step`. Confirmed
+   by precomputing the reciprocals and passing them as parameters: **0.39s → 0.07s**,
+   anchor byte-identical. The kernel stays as written — the idiomatic spelling is the
+   thing measured — and the fix (a /0 poison bail for non-literal divisors, the same
+   immediate-bail mechanism the mixed ABI uses for NaN compares) is tracked in
+   `docs/ROADMAP.md`. The earlier findings below remain true and ruled out. Holding the pixel count fixed and raising
    the iteration cap: at cap=100 (as shipped) Helix is 10× behind C, at cap=1,000
    it is 1.4×, and at cap=10,000 it is **1.0×** — at cap=100,000 Helix is slightly
    ahead. So the generated loop matches or beats gcc, and the whole gap is ≈250 ns
