@@ -1320,33 +1320,56 @@ motivates this phase.
 
       | shape | JIT | peak RSS | its twin |
       | --- | --- | --- | --- |
-      | `map(i => i * c + 1).reduce(0, …)` — **Int** init | 0.34s | **110 MB** | 0.00s / 20 MB with a literal |
+      | ~~`map(i => i * c + 1).reduce(0, …)` — **Int** init~~ | ~~0.34s~~ | ~~110 MB~~ | **closed by Stage 3s below** |
       | `map(i => to_float(i) * c).reduce(0.0, …)` — Float init | 0.01s | 20 MB | already fuses ✓ |
       | `scan(0, (s,x) => s + x)` | 0.54s | — | 0.00s `reduce` twin — **no kernel at all** |
-
-      **The captured-chain gap is `i64`-ONLY**, which narrows the work considerably. There are
-      two different fusion mechanisms and only one of them is affected: a **Float** init takes
-      the map→reduce SUBSTITUTION (Stage 3i), and Stage 3r's captured reduce made that path
-      capture-capable for free — measured above, it now fuses. An **Int** init takes
-      `FusedKernel`, whose kernel signature is `(src, len, init) → result` with no `caps`
-      pointer at all, so a capturing map stage declines and the chain materializes its
-      intermediate. The 110 MB against 20 MB is that 80 MB intermediate made visible.
-
-      Two ways to close it, and they are not the same size. (a) Give `FusedKernel` a caps
-      slice: a 4th signature parameter, a `captures` field, capture collection merged across
-      stages in first-appearance order, and VM marshalling — plus `n_operands()`, which is
-      stack-discipline-critical because the VM must consume exactly the same operands whether
-      or not it takes the native path. (b) Extend `emit_map_reduce_fusion` to an `Int` init
-      when — and only when — the map body captures, which is exactly when `FusedKernel`
-      declines, so the existing i64 fused path is undisturbed. (b) looks smaller, but the
-      downstream emission in that function is f64-specific today (it ends in
-      `reduce_jit_f64_range_*`), so it needs an i64 arm that reproduces
-      `compile_reduce_range`'s captured-i64 emission, keeping the guard-with-original-as-
-      fall-through shape that makes fusion error-order-safe.
 
       `scan` is a different matter entirely: it is a prefix fold, so element *i* depends on
       element *i−1*. That is a genuine serial dependency (like `filter`'s output offset), so
       it can have a native kernel but never a parallel one.
+
+- [x] **Stage 3s — a CAPTURED i64 `map.reduce` chain fuses by substitution: 0.34s/110 MB →
+      0.00s/20 MB.** The capture-free i64 chain has always fused through `FusedKernel`, but
+      that kernel's signature has no caps pointer, so a chain whose map stage captured a
+      variable had NO fused form: it materialized its 80 MB intermediate and ran 0.34s where
+      the literal spelling ran 0.00s.
+
+      Of the two routes considered, the substitution one (route b) won, and it turned out to
+      be almost entirely selection: `emit_map_reduce_fusion`'s emission was already generic,
+      so the change is the init guard (`Float` literal → `Float | Int` literal) plus an i64
+      eligibility arm calling `reduce_loop_captures` — the SAME collector
+      `compile_reduce_range` uses for a captured scalar body, so the fused body is admitted
+      on exactly the terms an unfused one would be, and `reduce_bodies_eligible` re-derives
+      the identical list at build time. `ReduceLoop.float` comes from the branch. No codegen,
+      no FFI, no VM change: the i64 captured reduce kernel and its dispatch (caps
+      marshalling, Counter/Scalar bounds discharge) predate this and are reused as-is.
+
+      THE ROUTING RULE: the i64 arm requires captures to be NON-EMPTY. This site is only
+      reached when `collect_fusion_chain` declined (compile_fused returns first), and for an
+      i64 chain that means a stage captured — but if the chain was declined for some other
+      reason, a capture-free body must stay on the path it had rather than gain a second one
+      here. Only shapes that previously had no fused form are admitted.
+
+      THE LOAD-BEARING GUARD is Stage 3i's capture-safety check (`expr_mentions(fbody, pa)`),
+      and it needed re-proving on this arm because the corruption can be MASKED: if `f`'s only
+      free variable is the one named like the accumulator, the corrupted body has no captures
+      left and the empty-caps check declines by luck. Sabotage with the single-capture probe
+      showed exactly that — nothing broke. Adding a second, genuine capture defeats the mask:
+      `s = 4; c = 3; (0..5).map(i => i * s + c).reduce(0, (s, x) => s + x)` returns **618 on
+      the JIT against 55** on the other two engines with the guard disabled. That case is
+      pinned in the test and the corpus golden precisely because the obvious probe proves
+      nothing.
+
+      Also pinned: captures in `g` only and in BOTH stages (the collector merges them in
+      first-appearance order), the same capture in both stages (one slot, deduped), an array
+      capture `a[i]` whose OOB-at-end must produce the fall-through's exact error, a
+      negative-start range whose `a[-1]` the interpreter Python-wraps (native declines via
+      the `s < 0` bounds pre-check and all engines agree), wrapping at `i64::MAX`, `init`
+      evaluating in the OUTER scope even when it names the accumulator binder, Float-capture
+      declines, degenerate ranges, an engagement assertion, and the two NEIGHBOURS this must
+      not disturb — the capture-free `FusedKernel` chain and the Float-init substitution.
+      Corpus golden `j12_captured_i64_fusion` runs the same shapes as a program on all three
+      engines.
 
 - [ ] **k2 mandelbrot: the loop body is at PARITY with C; the gap is a ~250 ns
       per-pixel fixed cost that is still unidentified.** Recorded because the obvious

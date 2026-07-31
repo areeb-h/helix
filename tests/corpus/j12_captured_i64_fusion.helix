@@ -1,0 +1,78 @@
+# A CAPTURED i64 map->reduce chain fusing by substitution (Stage 3s). The capture-free i64
+# chain has always fused through FusedKernel, but that kernel's signature has no caps pointer —
+# so a chain whose map stage captured a variable materialized its 80 MB intermediate and ran
+# 0.34s where the literal spelling ran 0.00s. The substitution route (Stage 3i) now takes an
+# Int-literal init when — and only when — the substituted body captures, which is exactly when
+# FusedKernel declines, so the existing fused path is undisturbed.
+#
+# THE LOAD-BEARING GUARD IS CAPTURE SAFETY: f's body is about to sit inside a lambda binding
+# the accumulator, so a free variable of f named like the accumulator would be captured by it
+# and silently change meaning. On this arm the corruption can be MASKED — if the stolen name
+# was f's only free variable, the corrupted body has no captures left and the empty-caps check
+# declines by luck. The s+c case below defeats the mask with a second, genuine capture:
+# sabotaging the guard makes it print 618 instead of 55.
+
+# ---- values ----
+
+c = 3
+print((0..6).map(i => i * c + 1).reduce(0, (s, x) => s + x))
+
+# capture in g only, then in BOTH stages (the collector merges them in first-appearance order)
+k = 10
+print((0..6).map(i => i + 1).reduce(0, (s, x) => s + x * k))
+print((0..6).map(i => i * c).reduce(0, (s, x) => s + x * k))
+
+# the same capture used in f AND g — one slot, not two
+print((0..6).map(i => i * c).reduce(0, (s, x) => s + x + c))
+
+# the it-sugar spelling, which is the idiomatic one
+print((0..6).map(it * c + 1).reduce(0, (s, x) => s + x))
+
+# an array captured in f, indexed by the counter — bounds discharged against the endpoints
+a = [10, 20, 30, 40]
+print((0..4).map(i => a[i] * 2).reduce(0, (s, x) => s + x))
+print((0..4).map(i => a[i] * c).reduce(0, (s, x) => s + x))
+
+# wrapping at i64::MAX must be identical fused or not
+big = 9223372036854775807
+print((0..4).map(i => i * big).reduce(0, (s, x) => s + x))
+
+# a user call and a capture together in f
+fn dbl(x) = x * 2
+print((0..6).map(i => dbl(i) + c).reduce(0, (s, x) => s + x))
+
+# ---- capture safety: f mentioning the accumulator's name must NOT fuse corrupted ----
+
+# the mask-defeating case: a second capture keeps the corrupted body fusable, so only the
+# guard stands between this and 618
+s = 4
+print((0..5).map(i => i * s + c).reduce(0, (s, x) => s + x))
+
+# its single-capture sibling, where the corruption would be masked by the empty-caps check
+print((0..5).map(i => i * s).reduce(0, (s, x) => s + x))
+
+# init evaluates in the OUTER scope even when it names the accumulator binder
+print((0..5).map(i => i * c).reduce(s, (s, x) => s + x))
+
+# ---- declines that must still be exact ----
+
+# negative start: the interpreter Python-wraps a[-1], so native must decline and agree
+print((0 - 1..3).map(i => a[i] * c).reduce(0, (s, x) => s + x))
+
+# a Float capture declines to the ordinary path
+f = 2.5
+print((0..5).map(i => i * f).reduce(0, (s, x) => s + x))
+
+# ---- degenerate ----
+
+print((0..0).map(i => i * c).reduce(42, (s, x) => s + x))
+print((5..0).map(i => i * c).reduce(42, (s, x) => s + x))
+
+# ---- the neighbours this must not disturb ----
+
+# capture-free i64 chain: FusedKernel's territory
+print((0..6).map(i => i * 2 + 1).reduce(0, (s, x) => s + x))
+
+# Float-init captured chain: Stage 3r's substitution
+g = 0.5
+print((0..6).map(i => to_float(i) * g).reduce(0.0, (s, x) => s + x))

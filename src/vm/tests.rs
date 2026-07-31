@@ -4463,6 +4463,74 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         }
     }
 
+    /// A CAPTURED i64 `map(f).reduce(init, g)` chain fuses by substitution instead of
+    /// materializing its intermediate array. Before this it had NO fused form at all — the
+    /// capture-free chain goes through `FusedKernel` (which has no caps slice), so a captured
+    /// one materialized: 0.34s and 110 MB against 0.00s and 20 MB at 10M elements.
+    ///
+    /// The load-bearing guard is capture SAFETY: `f`'s body is about to sit inside a lambda
+    /// binding the accumulator, so a free variable of `f` named `pa` would be captured by the
+    /// accumulator and silently change meaning. On this i64 arm that corruption can be MASKED —
+    /// if the stolen variable was `f`'s only free var, the corrupted body has no captures left
+    /// and the empty-caps check declines by luck. The `s`+`c` case below defeats the mask with a
+    /// second, genuine capture: sabotaging the guard makes it return 618 on the JIT against 55
+    /// on the other two engines, which is how it earned its place here.
+    #[test]
+    fn a_captured_i64_map_reduce_chain_fuses_and_shadowing_declines() {
+        for (src, want) in [
+            ("c = 3\n(0..6).map(i => i * c + 1).reduce(0, (s, x) => s + x)", "51"),
+            ("k = 10\n(0..6).map(i => i + 1).reduce(0, (s, x) => s + x * k)", "210"),
+            ("c = 3\nk = 10\n(0..6).map(i => i * c).reduce(0, (s, x) => s + x * k)", "450"),
+            ("c = 3\n(0..6).map(i => i * c).reduce(0, (s, x) => s + x + c)", "63"),
+            ("c = 3\n(0..6).map(it * c + 1).reduce(0, (s, x) => s + x)", "51"),
+            ("a = [10, 20, 30, 40]\n(0..4).map(i => a[i] * 2).reduce(0, (s, x) => s + x)", "200"),
+            ("a = [10, 20, 30, 40]\nc = 3\n(0..4).map(i => a[i] * c).reduce(0, (s, x) => s + x)", "300"),
+            ("c = 9223372036854775807\n(0..4).map(i => i * c).reduce(0, (s, x) => s + x)", "-6"),
+            ("c = 0 - 7\n(0..6).map(i => i * c).reduce(100, (s, x) => s + x)", "-5"),
+            ("fn f(x) = x * 2\nc = 5\n(0..6).map(i => f(i) + c).reduce(0, (s, x) => s + x)", "60"),
+            // THE MASK-DEFEATING CASE: `f` mentions the accumulator's name AND carries a second
+            // capture. Fusion must decline (capture safety), and the answer must be the
+            // unfused 55 — a corrupted substitution gives 618.
+            ("s = 4\nc = 3\n(0..5).map(i => i * s + c).reduce(0, (s, x) => s + x)", "55"),
+            // Its single-capture sibling, where the corruption would be masked — kept so both
+            // routes through the guard are pinned.
+            ("s = 4\n(0..5).map(i => i * s).reduce(0, (s, x) => s + x)", "40"),
+            // `init` evaluates in the OUTER scope even when it names the accumulator binder.
+            ("s = 100\nc = 2\n(0..5).map(i => i * c).reduce(s, (s, x) => s + x)", "120"),
+            // OOB inside `f` must produce the fall-through's exact error, not a native load.
+            // Negative start Python-wraps in the interpreter, so it must decline and agree.
+            ("a = [10, 20, 30]\nc = 1\n(0 - 1..3).map(i => a[i] * c).reduce(0, (s, x) => s + x)", "90"),
+            // A Float capture declines to the ordinary path and still answers.
+            ("c = 2.5\n(0..5).map(i => i * c).reduce(0, (s, x) => s + x)", "25.0"),
+            // Degenerate ranges return `init` untouched.
+            ("c = 3\n(0..0).map(i => i * c).reduce(42, (s, x) => s + x)", "42"),
+            ("c = 3\n(5..0).map(i => i * c).reduce(42, (s, x) => s + x)", "42"),
+            // The two NEIGHBOURS this must not disturb: the capture-free `FusedKernel` chain
+            // and the Float-init substitution.
+            ("(0..6).map(i => i * 2 + 1).reduce(0, (s, x) => s + x)", "36"),
+            ("c = 0.5\n(0..6).map(i => to_float(i) * c).reduce(0.0, (s, x) => s + x)", "7.5"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // The OOB-at-end decline: all three engines must raise the SAME error text.
+        let src = "a = [10, 20, 30]\nc = 1\n(0..4).map(i => a[i] * c).reduce(0, (s, x) => s + x)";
+        let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+        assert!(tw.is_err(), "OOB should raise");
+        assert_eq!(tw, vm, "tree-walker and VM disagree on the OOB error");
+        assert_eq!(vm, jit, "VM and JIT disagree on the OOB error");
+
+        // Engagement: the fused chain must actually reach a native reduce kernel.
+        crate::jit::reset_native_call_count();
+        assert!(run_vm_jit("c = 3\n(0..64).map(i => i * c + 1).reduce(0, (s, x) => s + x)").is_ok());
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the captured i64 fused chain never reached a native kernel"
+        );
+    }
+
     /// An `f64` reduce body may CAPTURE a scalar and may CALL an `i64` user function. Both
     /// spellings used to fall to the bytecode loop while their literal/inline twins ran
     /// natively — 0.78s vs 0.01s for a captured coefficient, 0.74s vs 0.01s for a call, over

@@ -701,9 +701,14 @@ impl super::Compiler {
         // The source must be a `range` counter: the substituted body folds over the COUNTER, which
         // is what `reduce_jit_f64_range_*` (and its i128 bounds proof) is defined over.
         let Some((start, end)) = self.builtin_range_call(b, map_recv) else { return Ok(false) };
-        // A `Float` init only. The i64 map→reduce ALREADY fuses through `FusedKernel` (measured
-        // equal to the direct reduce), so this must not disturb it.
-        if !matches!(init, Expr::Float(_)) {
+        // A `Float` or `Int` LITERAL init. Float takes the f64 substitution below, as always.
+        // Int is admitted only when the substituted body CAPTURES (checked at the selection) —
+        // the capture-free i64 chain already fuses through `FusedKernel`, and this site is only
+        // reached when `collect_fusion_chain` declined, which for an i64 chain means a stage
+        // captured. Before this, a captured i64 chain had NO fused form at all: it materialized
+        // its intermediate (110 MB against 20 MB at 10M elements) and ran 0.34s against the
+        // literal spelling's 0.00s.
+        if !matches!(init, Expr::Float(_) | Expr::Int(_)) {
             return Ok(false);
         }
         // CAPTURE SAFETY: `f`'s body is about to sit inside a lambda binding `pa`, so a free
@@ -732,14 +737,31 @@ impl super::Compiler {
         // time, which is what actually keeps compile-gate and build-gate from drifting).
         let user_fns = self.user_fn_set();
         let fns = self.jit_fn_set();
-        let (bodies, captures, bounds, synth) =
+        let (bodies, captures, bounds, synth, float) = if matches!(init, Expr::Float(_)) {
             match crate::jit::reduce_jit_f64_range_captures(init, &new_body, pa, MR_COUNTER, &fns, &user_fns) {
-                Some((bd, caps, bnds, syn)) => (vec![bd], caps, bnds, syn),
+                Some((bd, caps, bnds, syn)) => (vec![bd], caps, bnds, syn, true),
                 None => match crate::jit::reduce_jit_f64_range_body(init, &new_body, pa, MR_COUNTER, &fns, &user_fns) {
-                    Some(bd) => (vec![bd], Vec::new(), Vec::new(), Vec::new()),
+                    Some(bd) => (vec![bd], Vec::new(), Vec::new(), Vec::new(), true),
                     None => return Ok(false),
                 },
-            };
+            }
+        } else {
+            // The i64 arm: the same collector `compile_reduce_range` uses for a captured scalar
+            // body, so the fused body is admitted on exactly the terms an unfused one would be,
+            // and `reduce_bodies_eligible` re-derives the identical list at build time. CAPTURES
+            // MUST BE NON-EMPTY: a capture-free i64 chain belongs to `FusedKernel`, and if it was
+            // declined for some other reason it should stay on the path it had, not gain a second
+            // one here — this arm only admits shapes that previously had no fused form at all.
+            // (`reduce_loop_captures` emits no synthetic `$aff` terms — the i64 collector only
+            // admits `arr[counter]`/`arr[scalar]` indices — so `synth` is empty and every capture
+            // pushes as a bare ident, exactly as `compile_reduce_range`'s captured arm does.)
+            match crate::jit::reduce_loop_captures(&new_body, pa, MR_COUNTER, &fns) {
+                Some((caps, bnds)) if !caps.is_empty() => {
+                    (vec![new_body.clone()], caps, bnds, Vec::new(), false)
+                }
+                _ => return Ok(false),
+            }
+        };
 
         // --- committed: emit [start, end], the acc slot, the captures, then the guard ---
         match start {
@@ -773,7 +795,7 @@ impl super::Compiler {
             bodies,
             captures,
             index_bounds: bounds,
-            float: true,
+            float,
             inner_start_coeff: 0,
             inner_end_coeff: 0,
         });
