@@ -2475,6 +2475,9 @@ pub fn map_body_raises(e: &Expr, user_fns: &HashSet<&str>) -> bool {
                 && !user_fns.contains(name.as_str()))
                 || args.iter().any(|a| map_body_raises(a, user_fns))
         }
+        // Any `/`: the interpreter raises on a zero divisor. Over-approximates on a nonzero
+        // literal divisor (which cannot raise) — that costs a dead poison slot, nothing else.
+        Expr::Binary { op: BinOp::Div, .. } => true,
         Expr::Binary { left, right, .. } => {
             map_body_raises(left, user_fns) || map_body_raises(right, user_fns)
         }
@@ -2620,6 +2623,16 @@ fn infer_mixed_kind(
             } else {
                 NumKind::Int
             })
+        }
+        // `/` is always float division and always yields Float, for ANY eligible divisor —
+        // admissible because `map_body_raises` counts every `/`, so the kernel carries the
+        // poison accumulator `gen_value_typed`'s Div arm ORs `divisor == 0.0` into (the
+        // interpreter raises on `/0` where native `fdiv` yields inf). This is what lets
+        // `ceil(to_float(i) / 4.0)` compile instead of forcing the `* 0.25` spelling.
+        Expr::Binary { op: BinOp::Div, left, right, .. } => {
+            infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns)?;
+            infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns)?;
+            Some(NumKind::Float)
         }
         // The i64-closed integer ops (`%`, `//`, bitwise, shifts) — the SAME safe subset as
         // `value_eligible`, so an integer subexpression like `j % 97` in a float-producing map
@@ -3216,9 +3229,17 @@ fn infer_typed_env(
                         NumKind::Int
                     })
                 }
-                BinOp::Div => {
-                    matches!(**right, Expr::Float(d) if d != 0.0).then_some(NumKind::Float)
-                }
+                // `/` is always float division and always yields Float, for ANY eligible
+                // divisor. This was literal-only (`Expr::Float(d) if d != 0.0`) — and that
+                // single restriction was k2's entire 5.3×: `row`'s `2.7 / to_float(g)`
+                // declined the whole function to the VM, costing ~250 ns of dispatch per
+                // pixel around a native `step` (0.39s against 0.07s with the reciprocal
+                // hoisted). A zero divisor now bails IMMEDIATELY to the poison block
+                // (`gen_value_env`'s Div arm) — the same rule as the NaN-compare bail, and
+                // for the same reason: a tail loop can be infinite, so the interpreter's
+                // `/0` error cannot wait for an accumulate-and-store. The VM then discards
+                // the result and re-runs on bytecode, raising the exact error.
+                BinOp::Div => Some(NumKind::Float),
                 BinOp::Mod | BinOp::FloorDiv => (lk == NumKind::Int
                     && rk == NumKind::Int
                     && matches!(**right, Expr::Int(n) if n > 0))
@@ -4935,7 +4956,9 @@ fn gen_value_env<'a>(
         Expr::Binary { op, left, right, .. } => {
             let (lv, lk) = gen_value_env(b, left, vars, env, module, tl);
             let (rv, rk) = gen_value_env(b, right, vars, env, module, tl);
-            if lk == NumKind::Int && rk == NumKind::Int {
+            // `/` is ALWAYS float division in Helix (`10 / 2 == 5.0`), so it takes the f64
+            // branch even for two `Int` operands.
+            if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div) {
                 let v = match op {
                     BinOp::Add => b.ins().iadd(lv, rv),
                     BinOp::Sub => b.ins().isub(lv, rv),
@@ -4976,10 +4999,21 @@ fn gen_value_env<'a>(
                     BinOp::Add => b.ins().fadd(lf, rf),
                     BinOp::Sub => b.ins().fsub(lf, rf),
                     BinOp::Mul => b.ins().fmul(lf, rf),
-                    // Eligibility admits `/` only with a nonzero Float-literal divisor:
-                    // the interpreter's `/` always yields Float and can't raise here,
-                    // so a plain fdiv is bit-exact (no poison obligation).
-                    BinOp::Div => b.ins().fdiv(lf, rf),
+                    // Any eligible divisor. The interpreter RAISES on a zero divisor while
+                    // native `fdiv` would yield inf/nan — so bail IMMEDIATELY to the poison
+                    // block, exactly like the NaN-compare bail and for the same reason: a
+                    // tail loop can be infinite, so the error cannot wait for an
+                    // accumulate-and-store. `rf == 0.0` also catches `-0.0`, matching the
+                    // interpreter's `b == 0.0` divisor check bit for bit.
+                    BinOp::Div => {
+                        let zero = b.ins().f64const(0.0);
+                        let is_zero = b.ins().fcmp(FloatCC::Equal, rf, zero);
+                        let cont = b.create_block();
+                        b.ins().brif(is_zero, tl.poison_blk, &[], cont, &[]);
+                        b.switch_to_block(cont);
+                        b.seal_block(cont);
+                        b.ins().fdiv(lf, rf)
+                    }
                     _ => unreachable!("ineligible operator reached mixed-env codegen"),
                 };
                 (v, NumKind::Float)
@@ -5622,7 +5656,9 @@ fn gen_value_typed<'a>(
         Expr::Binary { op, left, right, .. } => {
             let (lv, lk) = gen_value_typed(b, left, vars, binder, f64_scalars, fn_ids, module, poison);
             let (rv, rk) = gen_value_typed(b, right, vars, binder, f64_scalars, fn_ids, module, poison);
-            if lk == NumKind::Int && rk == NumKind::Int {
+            // `/` is ALWAYS float division in Helix (`10 / 2 == 5.0`), so it takes the f64
+            // branch even for two `Int` operands.
+            if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div) {
                 // Integer subexpression — identical codegen to `gen_value`'s i64 arms (euclidean
                 // `%`/`//` by a positive const, bitwise, const shifts), so a mixed body's integer
                 // part is bit-exact to the interpreter, same as the i64 map/reduce.
@@ -5667,6 +5703,23 @@ fn gen_value_typed<'a>(
                     BinOp::Add => b.ins().fadd(lf, rf),
                     BinOp::Sub => b.ins().fsub(lf, rf),
                     BinOp::Mul => b.ins().fmul(lf, rf),
+                    // The interpreter RAISES on a zero divisor where native `fdiv` yields
+                    // inf/nan — so OR `divisor == 0.0` into the poison accumulator (this is
+                    // a MAP body: the loop always terminates, so accumulate-and-store is
+                    // sound, unlike the mixed-FUNCTION tail loop whose bail must be
+                    // immediate). The VM discards the whole output on poison and the
+                    // bytecode loop re-runs to raise the exact error. `map_body_raises`
+                    // counts any `/`, so a dividing kernel always has the poison signature.
+                    // `rf == 0.0` also catches `-0.0`, matching the interpreter's check.
+                    BinOp::Div => {
+                        let zero = b.ins().f64const(0.0);
+                        let is_zero = b.ins().fcmp(FloatCC::Equal, rf, zero);
+                        let bad = b.ins().uextend(I64, is_zero);
+                        let pv = b.use_var(poison);
+                        let npv = b.ins().bor(pv, bad);
+                        b.def_var(poison, npv);
+                        b.ins().fdiv(lf, rf)
+                    }
                     _ => unreachable!("ineligible operator reached mixed codegen"),
                 };
                 (v, NumKind::Float)

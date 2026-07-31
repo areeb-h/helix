@@ -1455,8 +1455,39 @@ motivates this phase.
       Corpus golden `j12_captured_i64_fusion` runs the same shapes as a program on all three
       engines.
 
-- [ ] **k2 mandelbrot: CAUSE IDENTIFIED — a float division by a NON-LITERAL declines the
-      whole enclosing function to the VM.** `row`'s body computes
+- [x] **Stage 3w — non-literal float divisors compile behind a `/0` poison bail: k2 goes
+      from 5.3× slower to a ~TIE with C (0.42s → 0.08s).** Two sites, two bail styles:
+      * A mixed FUNCTION body (`infer_typed_env` + `gen_value_env`): the bail is
+        IMMEDIATE — `divisor == 0.0` branches to the existing `poison_blk` (store 1,
+        return), exactly like the NaN-compare bail and for the same reason: a tail loop
+        can be infinite, so the interpreter's `/0` error cannot wait for an
+        accumulate-and-store. Zero ABI or VM changes — every mixed function already
+        carries the trailing poison pointer, and the VM already discards-and-reruns.
+        `/` also now takes the f64 branch for two `Int` operands (`10 / 2 == 5.0`),
+        which the literal-only rule had made unreachable.
+      * A mixed MAP body (`infer_mixed_kind` + `gen_value_typed`): the loop always
+        terminates, so `divisor == 0.0` ORs into the Stage 3v poison accumulator, and
+        `map_body_raises` counts every `/` so a dividing kernel always gets the poison
+        signature. This is what lets `ceil(to_float(i) / d)` compile instead of forcing
+        the `* 0.25` spelling.
+
+      Sabotage-proven: removing the immediate bail makes `f(1.5, 0.0)` return `inf` on the
+      JIT where both other engines raise "division by zero". The billion-iteration tail
+      loop with `/0` on iteration one errors immediately (pinned — accumulate-and-store
+      would spin for minutes). `-0.0` divisors count as zero, matching the interpreter's
+      `b == 0.0` check. Poison propagates through mixed callees via the existing
+      post-call re-check.
+
+      THE ENGAGEMENT ASSERTION EARNED ITS KEEP AGAIN: every map value case passes on VM
+      fallback alone, and the assertion is what exposed that a FLOAT-variable divisor
+      (`d = 4.0`) still declines — the plain mixed analysis carries captures as Int-proven
+      scalars (Stage 3m's contract), so only Int variables and literals engage (measured:
+      0.24s / 0.06s against 3.48s VM at 20M). Closing that means `ScalarValue` captures in
+      the PLAIN mixed analysis — the `MixT` machinery the indexed analysis already has —
+      recorded here as the next lever in this family.
+
+- [x] ~~**k2 mandelbrot: CAUSE IDENTIFIED — a float division by a NON-LITERAL declines the
+      whole enclosing function to the VM.**~~ Closed by Stage 3w above. `row`'s body computes
       `-2.1 + to_float(x) * 2.7 / to_float(g)`, and `infer_typed_env` admits `/` only with a
       nonzero Float-LITERAL divisor (native `fdiv` yields inf where the interpreter RAISES
       on `/0`). So `row` — and `grid`, which calls it — fell to the VM, and every pixel paid

@@ -21,7 +21,7 @@ never do — a wall-clock win bought with 2.5× the cores is not a codegen win.
 | # | Kernel | Helix | C | Rust | Go | CPython | NumPy | Helix vs C |
 |---|--------|-------|---|------|-----|---------|-------|------------|
 | k1 | dot 50M i64 | 0.16s (254%) | **0.10s** | 0.13s | 0.57s | 8.78s | 0.28s | **1.6× slower** (≈4× per-core; see k1 note) |
-| k2 | mandelbrot 1200² | 0.42s (99%) | 0.08s | **0.07s** | **0.07s** | 6.85s | — | **5.3× slower** |
+| k2 | mandelbrot 1200² | **0.08s** (96%) | 0.08s | **0.07s** | **0.07s** | 6.85s | — | **~tie with C** (was 5.3× slower at 0.42s — see caveat 7) |
 | k3 | basel 1e8 | 0.09s (94%) | **0.06s** | 0.09s | 0.10s | 10.36s | 0.48s | **1.5× slower** (ties Rust, beats Go) |
 | k4 | allpairs 15k | 0.01s (313%) | **<0.01s** | <0.01s | 0.05s | 9.99s | 0.17s | **slower** (timer-grain; ~7× per the audit) |
 | k5 | montecarlo 1e8 | 0.51s (108%) | 0.25s | **0.22s** | 0.26s | 44.60s | — | **2.0× slower** |
@@ -387,16 +387,21 @@ Results are identical at every thread count, pinned by `thread_count_changes_cpu
    **344 MB → 186 MB**. A source that is still named keeps its own buffer and is
    never rewritten — that is what `Rc::get_mut` is checking, and removing the check
    makes a live `src` print its mapped values instead of its own.
-7. **k2's 5.3× is NOT the inner loop — and the cause is now identified.** `row`'s
-   `2.7 / to_float(g)` is a float division by a NON-LITERAL, which the mixed-function
-   analysis declines (only nonzero Float literals are admitted — native `fdiv` yields
-   inf where the interpreter raises on `/0`). `row` and `grid` therefore run on the
-   VM, and every pixel pays ~250 ns of VM dispatch into the native `step`. Confirmed
-   by precomputing the reciprocals and passing them as parameters: **0.39s → 0.07s**,
-   anchor byte-identical. The kernel stays as written — the idiomatic spelling is the
-   thing measured — and the fix (a /0 poison bail for non-literal divisors, the same
-   immediate-bail mechanism the mixed ABI uses for NaN compares) is tracked in
-   `docs/ROADMAP.md`. The earlier findings below remain true and ruled out. Holding the pixel count fixed and raising
+7. **k2's 5.3× — RESOLVED, now a ~tie with C.** The cause was one restriction:
+   `row`'s `2.7 / to_float(g)` is a float division by a NON-LITERAL, which the
+   mixed-function analysis used to decline outright (native `fdiv` yields inf where
+   the interpreter raises on `/0`), so `row` and `grid` ran on the VM and every
+   pixel paid ~250 ns of dispatch into the native `step`. Non-literal divisors now
+   compile behind a `/0` **immediate poison bail** — the same mechanism as the
+   NaN-compare bail, and immediate for the same reason (a tail loop can be
+   infinite). Measured after: **0.08s against C's 0.08s** (Rust/Go 0.07s), anchor
+   byte-identical, and the `/0` cases raise the interpreter's exact error on all
+   three engines — including from a loop capped at a billion iterations, which
+   errors at once instead of spinning natively. The kernel was never rewritten:
+   the idiomatic spelling is the thing that got fast. One residue is recorded: a
+   FLOAT-variable divisor in a *map* body still falls back (captures ride as
+   Int-proven scalars — the ScalarValue gap, in the roadmap); Int variables and
+   literals engage. Holding the pixel count fixed and raising
    the iteration cap: at cap=100 (as shipped) Helix is 10× behind C, at cap=1,000
    it is 1.4×, and at cap=10,000 it is **1.0×** — at cap=100,000 Helix is slightly
    ahead. So the generated loop matches or beats gcc, and the whole gap is ≈250 ns

@@ -4467,6 +4467,78 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         }
     }
 
+    /// Non-literal float divisors compile — in mixed FUNCTION bodies behind an IMMEDIATE
+    /// poison bail, and in mixed MAP bodies behind the accumulated poison. This single
+    /// literal-only restriction was k2's entire 5.3×: `row`'s `2.7 / to_float(g)` declined
+    /// the whole function to the VM, costing ~250 ns of dispatch per pixel around a native
+    /// `step`. k2 is now 0.08s — tied with C.
+    ///
+    /// The bail must be IMMEDIATE in a function body (not accumulate-and-store): a tail loop
+    /// can be infinite, and a `/0` inside one must error like the interpreter, not spin
+    /// natively — pinned below by a loop capped at a billion iterations. Sabotage-proven:
+    /// removing the bail makes `f(1.5, 0.0)` return `inf` on the JIT where both other
+    /// engines raise "division by zero".
+    #[test]
+    fn non_literal_float_divisors_compile_and_zero_divisors_raise_exactly() {
+        for (src, want) in [
+            // The k2 shape: a tail loop dividing by a parameter.
+            (
+                "fn f(x: Int, n: Int, acc: Float, d: Float) =\n  if x >= n then acc\n  else f(x + 1, n, acc + to_float(x) / d, d)\nf(0, 10, 0.0, 4.0)",
+                "11.25",
+            ),
+            // `/` always yields Float, even Int / Int.
+            ("fn f(a, b) = a / b\nf(10, 4)", "2.5"),
+            // A callee that divides, called from a loop — poison must propagate.
+            (
+                "fn sq(x: Float) = x * x\nfn f(i: Int, n: Int, acc: Float, d: Float) =\n  if i >= n then acc\n  else f(i + 1, n, acc + sq(to_float(i)) / d, d)\nf(0, 5, 0.0, 2.0)",
+                "15.0",
+            ),
+            // Division inside a CONDITION.
+            ("fn f(x: Float, d: Float) = if x / d > 1.0 then 1 else 0\nf(3.0, 2.0)", "1"),
+            // Map bodies: the `ceil(x / d)` spelling that previously forced `* 0.25`.
+            ("d = 4.0\n(0..8).map(i => ceil(to_float(i) / d))", "[0, 1, 1, 1, 1, 2, 2, 2]"),
+            ("d = 4.0\n(0..6).map(i => to_float(i) / d)", "[0.0, 0.25, 0.5, 0.75, 1.0, 1.25]"),
+            ("(0..6).map(i => i / 2 + 0.0)", "[0.0, 0.5, 1.0, 1.5, 2.0, 2.5]"),
+            ("(0..6).map(i => to_float(i) / 4.0)", "[0.0, 0.25, 0.5, 0.75, 1.0, 1.25]"),
+            ("fn dbl(x) = x * 2\nd = 4.0\n(0..6).map(i => to_float(dbl(i)) / d)", "[0.0, 0.5, 1.0, 1.5, 2.0, 2.5]"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // The raises: exact error text everywhere. The billion-iteration loop is the
+        // immediate-bail case — accumulate-and-store would spin natively for minutes.
+        for src in [
+            "fn f(x: Float, d: Float) = x / d\nf(1.5, 0.0)",
+            "fn f(x: Float, d: Float) = x / d\nf(1.5, 0.0 - 0.0)",
+            "fn f(a, b) = a / b\nf(10, 0)",
+            "fn f(a: Float, n: Int) =\n  if n >= 1000000000 then a\n  else f(a / to_float(0), n + 1)\nf(1.0, 0)",
+            "fn f(x: Int, n: Int, acc: Float) =\n  if x >= n then acc\n  else f(x + 1, n, acc + 1.0 / to_float(3 - x))\nf(0, 6, 0.0)",
+            "fn inner(x: Float, d: Float) = x / d\nfn outer(i: Int, n: Int, acc: Float, d: Float) =\n  if i >= n then acc\n  else outer(i + 1, n, acc + inner(to_float(i), d), d)\nouter(0, 5, 0.0, 0.0)",
+            "fn f(x: Float, d: Float) = if x / d > 1.0 then 1 else 0\nf(3.0, 0.0)",
+            "d = 0.0\n(0..6).map(i => to_float(i) / d)",
+            "(0..6).map(i => 6.0 / to_float(3 - i))",
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert!(tw.is_err(), "`{src}` should raise");
+            assert_eq!(tw, vm, "tree-walker and VM disagree on the error for `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on the error for `{src}`");
+        }
+        // Engagement: the dividing map kernel must actually run natively. The divisor is an
+        // INT variable deliberately — the plain mixed analysis carries captures as
+        // Int-proven scalars (Stage 3m's contract), so a FLOAT-variable divisor still falls
+        // back to the VM (correct, measured 3.48s vs 0.24s at 20M; recorded in the roadmap
+        // as the ScalarValue gap). This assertion is what caught that gap in the first
+        // place: every value case above passes on VM fallback alone.
+        crate::jit::reset_native_call_count();
+        assert!(run_vm_jit("d = 4\n(0..64).map(i => to_float(i) / d).sum()").is_ok());
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the dividing map kernel never reached native code"
+        );
+    }
+
     /// The Int-rooted mixed map and the RAISING rounders. Two stages pinned together
     /// because the second builds on the first: (3u) an `i64`-out body through Float
     /// intermediates (`to_int(to_float(i) * 1.5)`) previously had no kernel shape at all;

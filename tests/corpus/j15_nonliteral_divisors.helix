@@ -1,0 +1,64 @@
+# Non-literal float divisors (Stage 3w) — the single restriction that was k2's entire 5.3×.
+# `infer_typed_env` admitted `/` only with a nonzero Float LITERAL divisor, so `row`'s
+# `2.7 / to_float(g)` declined the whole function to the VM and every pixel paid ~250 ns of
+# dispatch around a native `step`. k2 is now 0.08s — tied with C — with this file's miniature
+# as the anchor.
+#
+# The mechanism: in a mixed FUNCTION body, a zero divisor bails IMMEDIATELY to the poison
+# block (a tail loop can be infinite, so the interpreter's /0 error cannot wait for an
+# accumulate-and-store — the same rule as the NaN-compare bail). In a mixed MAP body the loop
+# always terminates, so `divisor == 0.0` ORs into the Stage 3v poison accumulator instead.
+# The raise cases live in the Rust test (they stop a program); this file pins the values.
+
+# ---- mixed function bodies ----
+
+# a tail loop dividing by a parameter — the k2 shape
+fn f1(x: Int, n: Int, acc: Float, d: Float) =
+  if x >= n then acc
+  else f1(x + 1, n, acc + to_float(x) / d, d)
+print(f1(0, 10, 0.0, 4.0))
+
+# `/` always yields Float, even for Int / Int
+fn f2(a, b) = a / b
+print(f2(10, 4))
+
+# a dividing callee inside a loop
+fn sq(x: Float) = x * x
+fn f3(i: Int, n: Int, acc: Float, d: Float) =
+  if i >= n then acc
+  else f3(i + 1, n, acc + sq(to_float(i)) / d, d)
+print(f3(0, 5, 0.0, 2.0))
+
+# division inside a condition
+fn f4(x: Float, d: Float) = if x / d > 1.0 then 1 else 0
+print(f4(3.0, 2.0))
+print(f4(3.0, 4.0))
+
+# ---- mixed map bodies ----
+
+d = 4.0
+print((0..8).map(i => ceil(to_float(i) / d)))
+print((0..6).map(i => to_float(i) / d))
+print((0..6).map(i => i / 2 + 0.0))
+print((0..6).map(i => to_float(i) / 4.0))
+
+fn dbl(x) = x * 2
+print((0..6).map(i => to_float(dbl(i)) / d))
+
+# division and a rounder in one body: both poison sources share one accumulator
+print((0..8).map(i => round(to_float(i) / d)))
+
+# ---- the k2 miniature, byte-anchored across all three engines ----
+
+g = 300
+fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) =
+  if i >= 100 then 100
+  else if zr * zr + zi * zi > 4.0 then i
+  else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)
+fn row(x: Int, ci: Float, g: Int, acc: Int) =
+  if x >= g then acc
+  else row(x + 1, ci, g, acc + step(0.0, 0.0, -2.1 + to_float(x) * 2.7 / to_float(g), ci, 0))
+fn grid(y: Int, g: Int, acc: Int) =
+  if y >= g then acc
+  else grid(y + 1, g, acc + row(0, -1.2 + to_float(y) * 2.4 / to_float(g), g, 0))
+print(grid(0, g, 0))
