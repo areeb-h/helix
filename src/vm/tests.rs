@@ -4462,3 +4462,85 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             assert_eq!(run_vm(src), Ok(want.to_string()), "`{src}`");
         }
     }
+
+    /// `i64` arithmetic wraps, and division is total. Both are deliberate (see
+    /// `docs/integer-semantics.md`), and both are easy to break silently: Cranelift's
+    /// `sdiv`/`srem` raise a hardware trap (SIGFPE) on divide-by-zero AND on
+    /// `i64::MIN / -1`, so a kernel that lowered `//` or `%` directly would kill the
+    /// process where the tree-walker raises a catchable error. Nothing in the type
+    /// system prevents that regression, so it is pinned here.
+    ///
+    /// The expected VALUES are asserted, not just cross-engine agreement — three engines
+    /// that agree on a newly-wrong answer would satisfy agreement alone.
+    #[test]
+    fn integer_overflow_wraps_and_division_is_total_on_every_engine() {
+        // MIN has no literal spelling (the lexer sees `9223372036854775808` first), so it
+        // is built by subtraction — which is itself the wrapping behaviour under test.
+        const MIN: &str = "(0 - 9223372036854775807 - 1)";
+        for (src, want) in [
+            ("9223372036854775807 + 1", "-9223372036854775808"),
+            ("9223372036854775807 * 2", "-2"),
+            ("(0 - 9223372036854775807) - 2", "9223372036854775807"),
+            ("9223372036854775807 * 9223372036854775807", "1"),
+            // `/` is true division: it always promotes to `f64`, so it never wraps — but
+            // promotion is not exactness. `MAX / 1` rounds to 2^63 because `i64::MAX` has
+            // no `f64` representation. Both failure modes are real and they are different.
+            ("9223372036854775807 / 1", "9223372036854775808.0"),
+            // `to_int` saturates rather than wrapping or trapping: total for finite input.
+            ("to_int(9.3e18)", "9223372036854775807"),
+            // `i64::MAX` is not representable as `f64`; the nearest is 2^63.
+            ("to_float(9223372036854775807)", "9223372036854775808.0"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // The `sdiv`/`srem` overflow case, which traps in hardware but must wrap here.
+        for (expr, want) in [
+            (format!("{MIN} // (0 - 1)"), "-9223372036854775808"),
+            (format!("{MIN} % (0 - 1)"), "0"),
+            (format!("{MIN} / (0 - 1)"), "9223372036854775808.0"),
+        ] {
+            let (tw, vm, jit) = (run_tw(&expr), run_vm(&expr), run_vm_jit(&expr));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{expr}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{expr}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{expr}`");
+        }
+        // Divide-by-zero raises rather than trapping — checked with the divisor arriving
+        // as ARRAY DATA so constant folding cannot mask it, and in the map / reduce /
+        // compiled-function positions where a native kernel is what actually runs.
+        for src in [
+            "1 / 0",
+            "1 % 0",
+            "d = (0..3).map(it - 1)\nd.map(100 // it).sum()",
+            "d = (0..3).map(it - 1)\nd.map(100 % it).sum()",
+            "d = (0..3).map(it - 1)\nd.reduce(0, (s, x) => s + (100 // x))",
+            "fn f(a, b) = a // b\nf(100, 0)",
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert!(tw.is_err(), "`{src}` should raise, not wrap or trap");
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+        }
+        // Everything above would be satisfied by a JIT that simply declines integer `//`,
+        // which would make the kernel claims vacuous. Establish that a native kernel DOES
+        // run integer division, using divisors that do not raise — so the zero and
+        // `MIN / -1` cases above are genuinely guarded rather than merely never compiled.
+        crate::jit::reset_native_call_count();
+        let safe = "d = (0..3).map(it + 1)\nd.map(100 // it).sum()";
+        assert_eq!(run_vm_jit(safe), Ok("183".to_string()), "`{safe}`");
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "integer `//` never reached a native kernel, so the trap-safety cases above \
+             prove nothing about compiled code"
+        );
+
+        // `MIN // -1` through a native map kernel: the divisor is data, so the kernel —
+        // not constant folding — performs the division that would trap.
+        let src = format!("d = (0..2).map(0 - 1)\nd.map({MIN} // it)[0]");
+        let (tw, vm, jit) = (run_tw(&src), run_vm(&src), run_vm_jit(&src));
+        assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+        assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+        assert_eq!(vm, Ok("-9223372036854775808".to_string()), "`{src}`");
+    }
