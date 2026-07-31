@@ -27,7 +27,7 @@ never do — a wall-clock win bought with 2.5× the cores is not a codegen win.
 | k5 | montecarlo 1e8 | 0.51s (108%) | 0.25s | **0.22s** | 0.26s | 44.60s | — | **2.0× slower** |
 | k6 | sieve π(10⁷) | **0.01s** (105%) | 0.01s | 0.01s | 0.02s | 0.60s | 0.06s | ~tie (**delegation** — beats NumPy 6×) |
 | k7 | wordcount 5M | 1.39s (108%) | **0.20s**† | 0.24s | 0.21s | 1.37s | 1.79s | **7.0× slower** (also loses to CPython) |
-| k8 | matmul 1024³ (GEMM) | 0.31s (118%) | — | — | — | — | **0.07s** | **4.4× slower than NumPy** |
+| k8 | matmul 1024³ (build + GEMM) | 0.31s (118%) | — | — | — | — | **0.07s** | **4.4× slower than NumPy** (but only ~13% of that is the GEMM — see below) |
 | k9 | matmul 512³ (naive) | 0.49s (109%) | 0.39s | 0.33s | **0.32s** | 15.45s | — | **1.3× slower** |
 | k9m | matmul 512³ (map-temp) | 0.48s (108%) | 0.39s | 0.33s | **0.32s** | 15.45s | — | **1.2× slower** (was **27.12s / 75×** — see below) |
 
@@ -251,10 +251,45 @@ say so rather than dropping the row.
   materialize the whole corpus; C (2.1 MB), Rust (3.0 MB), Go (7.7 MB) and
   CPython (11.0 MB) stream one word at a time. For Helix this is *also* an
   allocator benchmark, unlike for the streaming four.
-- **k8 matmul (GEMM)** — **delegation**: Helix's tensor path (faer) vs NumPy's
-  OpenBLAS. Isolated GEMM at n=2048: faer ~0.11s vs OpenBLAS ~0.061s — OpenBLAS
-  is ~1.8× faster. At n=512 the GEMM is ~1% of the wall time and you are timing
-  interpreter startup, which is why the default is 1024.
+- **k8 matmul (GEMM)** — **the row title is misleading and the gap is not the GEMM.**
+  Isolated GEMM at n=2048: faer ~0.11s vs OpenBLAS ~0.061s, so OpenBLAS is ~1.8×
+  faster — but that ~1.8× is levied on a small slice of k8. Phase split at n=1024,
+  cumulative, all four figures from one run (which totalled 0.39s):
+
+  | phase | cumulative | share |
+  |---|---|---|
+  | build one nested 1024×1024 | 0.08s | |
+  | build both | 0.17s | **44%** (construction) |
+  | + `tensor()` both | 0.32s | **38%** (conversion) |
+  | + `matmul` (= k8) | 0.37s | **13%** (the actual GEMM) |
+
+  NumPy's own split: 0.04s import, 0.05s building both, 0.06s total — so NumPy's
+  GEMM is ~0.01s. Helix loses k8 at *building and converting the inputs*, not at
+  matrix multiply. The construction cost has a known cause (see below); it is not
+  a BLAS deficiency, and fixing faer would recover at most the 13%.
+  At n=512 the GEMM is ~1% of the wall time and you are timing interpreter
+  startup, which is why the default is 1024.
+- **k8's build does not reach native code**, and the reason generalizes well past
+  this kernel. An `Int`-source `map` whose body produces `Float` compiles **only if
+  the body captures nothing**. Measured, 4M elements:
+
+  | body | JIT | NOJIT | |
+  |---|---|---|---|
+  | `((7 * j) % 100) * 0.5` | 0.01s | 0.52s | native, **52×** |
+  | `((c * j) % 100) * 0.5` | 0.37s | 0.40s | **VM** |
+  | `(c * j) * 0.5` | 0.31s | 0.31s | **VM** |
+  | `(c * j) % 100` (Int-rooted) | 0.00s | 0.26s | native |
+
+  Replacing the literal `7` with a variable is the entire difference. The `i64`
+  analysis takes captures; the mixed `Int`→`Float` one is capture-free by
+  construction (`comprehensions.rs` stores `Vec::new()` for it), and the indexed
+  mixed analysis that *does* take captures requires a non-empty `index_bounds`
+  (`jit.rs`), so an unindexed captured body matches nothing. Reassociating to put
+  the promotion first (`(j * 0.5) * c`) does **not** help — checked, still VM — so
+  this is the missing-analysis gap, not the `mix_combine` value-scalar rule.
+  k8's `((i * j) % 100) * 0.5` captures the outer binder `i`, which is why the
+  nested build looks like a nesting problem and is not one. The same gap hits
+  `map(i => i * dt)` and `map(i => i * scale + off)`.
 ### The %CPU column is a trade you can now decline
 
 Helix's wall-clock standing on k1 and k4 is bought with cores the references never use, which
