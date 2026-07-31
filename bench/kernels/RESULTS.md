@@ -377,6 +377,16 @@ Results are identical at every thread count, pinned by `thread_count_changes_cpu
    `(0..n).map(f)` peaked at *twice* its result. The kernel is now fed values
    generated per 16K chunk, so nothing is stored. Kept struck through for the same
    reason as (3): it was true, and recording that it was true is what got it fixed.
+
+   The companion case — a map over a *real* array, which has a buffer that cannot be
+   generated away — is now also handled, though it does not show in this table
+   because no kernel here chains maps. When the receiver's `Rc` is the only handle
+   (a dead intermediate, as in `xs.map(f).map(g)`) the kernel writes back into it
+   rather than allocating a second full-size buffer. Measured at n=20M, 160 MB per
+   buffer: a two-stage chain fell **340 MB → 186 MB**, a three-stage chain
+   **344 MB → 186 MB**. A source that is still named keeps its own buffer and is
+   never rewritten — that is what `Rc::get_mut` is checking, and removing the check
+   makes a live `src` print its mapped values instead of its own.
 7. **A row with an implausible `%CPU` is not a measurement.** k7's C entry came out
    of one suite run at 5.75s with 3% CPU — a starved process. Re-run alone it is
    0.20s at 108% across five consecutive runs, which is what the table records.

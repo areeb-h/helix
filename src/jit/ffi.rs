@@ -277,6 +277,70 @@ where
     dst
 }
 
+/// [`run_map_chunked`] over a buffer the caller **uniquely owns**, reusing it as both source
+/// and destination instead of allocating a second one.
+///
+/// A map over a real array allocated a fresh output while the input stayed live, so a chain
+/// like `xs.map(f).map(g)` peaked at BOTH buffers even though the intermediate is dead the
+/// moment `g` consumes it. Measured at n=20M (160 MB per buffer): 340 MB peak, identical to
+/// keeping the source alive on purpose. It also pays to zero a fresh `Vec` that is about to be
+/// overwritten in full.
+///
+/// Only the caller can know the buffer is dead, and it proves that with `Rc::get_mut` — so this
+/// runs ONLY when no other handle to the array exists, and the mutation is therefore
+/// unobservable. Values are unchanged either way; this is an allocation decision, not a
+/// semantic one.
+///
+/// ALIASING is the sharp edge and it is safe by the map's own shape: `dst[i]` depends only on
+/// `src[i]` and the read-only `caps`, so reading and writing the same index in the same
+/// iteration reads the old value before storing the new one, and no iteration ever looks at an
+/// index another iteration writes. Both pointers are derived from ONE `&mut` borrow rather than
+/// from a `&`/`&mut` pair, so no aliasing rule is broken on the Rust side either. The parallel
+/// form keeps that: `par_chunks_mut` hands out disjoint sub-slices, and each chunk aliases only
+/// itself, at matching indices — which is also why the output stays byte-identical to the
+/// sequential run. A body that reads a *captured* array is excluded by the caller (it would
+/// carry `index_bounds`, and those are dischargeable only over a lazy range, which has no
+/// buffer to reuse in the first place).
+///
+/// # Safety
+/// As [`run_map_chunked`], with `S == D == T`: `ptr` must be a finalized
+/// `extern "C" fn(*const T, *mut T, i64, *const C)`.
+unsafe fn run_map_inplace<T, C>(ptr: *const u8, buf: &mut [T], caps: &[C])
+where
+    T: Send,
+    C: Sync,
+{
+    let n = buf.len();
+    if n == 0 {
+        return;
+    }
+    note_native_call();
+    let f: extern "C" fn(*const T, *mut T, i64, *const C) = unsafe { std::mem::transmute(ptr) };
+    if n >= crate::interp::PAR_MATH_THRESHOLD {
+        use rayon::prelude::*;
+        const CH: usize = 1 << 14;
+        buf.par_chunks_mut(CH).for_each(|d| {
+            let p = d.as_mut_ptr();
+            f(p as *const T, p, d.len() as i64, caps.as_ptr());
+        });
+    } else {
+        let p = buf.as_mut_ptr();
+        f(p as *const T, p, n as i64, caps.as_ptr());
+    }
+}
+
+/// The `i64` map kernel run in place over a uniquely-owned buffer. SAFETY: as
+/// [`run_map_kernel`], with the `fn(*const i64, *mut i64, i64, *const i64)` contract.
+pub unsafe fn run_map_kernel_inplace(ptr: *const u8, buf: &mut [i64], caps: &[i64]) {
+    unsafe { run_map_inplace::<i64, i64>(ptr, buf, caps) }
+}
+
+/// The `f64` map kernel run in place over a uniquely-owned buffer. SAFETY: as
+/// [`run_map_kernel_f64`], with the `fn(*const f64, *mut f64, i64, *const f64)` contract.
+pub unsafe fn run_map_kernel_f64_inplace(ptr: *const u8, buf: &mut [f64], caps: &[f64]) {
+    unsafe { run_map_inplace::<f64, f64>(ptr, buf, caps) }
+}
+
 /// The RANGE-source twin of [`run_map_chunked`]: the same kernel, fed source values that are
 /// COMPUTED rather than read from a materialized buffer.
 ///

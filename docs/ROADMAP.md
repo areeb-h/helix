@@ -556,9 +556,8 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       ~one element per chunk, where a wrong offset shows up at once instead of being
       absorbed by its neighbours.
 
-      REMAINING memory work: a map over a REAL array necessarily keeps both buffers —
-      only a *range* source can be generated away. Reducing that needs either in-place
-      mutation when the input is uniquely owned, or fusing the consumer.
+      REMAINING memory work at the time: a map over a REAL array necessarily keeps both
+      buffers — only a *range* source can be generated away. Closed by Stage 3o below.
 
 - [x] **Stage 3m — a mixed `Int`→`Float` map may CAPTURE, which unblocked k8's build.**
       An `Int`-source map whose body produces `Float` compiled *only if the body
@@ -653,6 +652,49 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       conversions, an empty buffer's `[0]` shape, and element ORDER (a row/column mix-up
       would otherwise pass a shape-only check). Sabotage-proven: extending the
       short-circuit to `Values` — which would skip real ragged checks — fails the test.
+
+- [x] **Stage 3o — a map over a DEAD buffer reuses it: chained-map peak −45%.**
+      Stage 3l removed the transient for a *range* source, leaving the case it could not
+      reach: a map over a real array allocated a fresh output while the input stayed live.
+      For `xs.map(f).map(g)` that is pure waste — the intermediate is dead the moment `g`
+      consumes it — and it also pays to zero a fresh `Vec` about to be overwritten in full.
+
+      MEASURED (n=20M, 160 MB per buffer, peak RSS):
+
+      | shape | before | after |
+      | --- | --- | --- |
+      | `(0..n).map(f).map(g)`, intermediate dead | 340 MB | **186 MB** |
+      | three-stage chain, all temps | 344 MB | **186 MB** |
+      | `f64` two-stage chain | 340 MB | **186 MB** |
+      | source still NAMED and live | 338 MB | 340 MB (unchanged — correct) |
+
+      That last row is the result, not a miss: a reachable source must keep its own buffer.
+      The whole mechanism is `Rc::get_mut`, which succeeds only when the handle on the stack
+      is the ONLY one — so reuse happens exactly when the mutation is unobservable, and the
+      values are identical either way. This is an allocation decision, not a semantic one.
+      It follows the interpreter's existing precedent (`map_buf_inplace`, used by `abs` and
+      the float math functions behind the same `Rc::get_mut` gate).
+
+      ALIASING is the sharp edge on the kernel side: `run_map_inplace` hands the same
+      pointer to the kernel as both source and destination. Sound because `dst[i]` depends
+      only on `src[i]` and the read-only `caps` — each iteration reads its own index before
+      storing to it, and never looks at an index another iteration writes. Both pointers are
+      derived from ONE `&mut` borrow (not a `&`/`&mut` pair), and the parallel form keeps the
+      property because `par_chunks_mut` hands out disjoint sub-slices that alias only
+      themselves at matching indices — which is also why output stays byte-identical to the
+      sequential run. A body reading a *captured* array is excluded by an explicit
+      `index_bounds.is_empty()` check at the call site; such bodies are already range-only
+      (their bounds are dischargeable only against range endpoints), so it cannot trigger
+      today, but the guard keeps the safety argument local instead of in another function.
+
+      The failure mode is the opposite of a wrong number — a live source silently rewritten —
+      so `map_reuses_a_dead_buffer_but_never_a_reachable_one` keeps a SECOND way to observe
+      the original in every case and reads it after the map: under its own name, an alias, a
+      record field, a closure capture, and a source mapped twice (where the second map must
+      see the original). Plus chunk boundaries read individually across
+      `PAR_MATH_THRESHOLD`, and an engagement assertion. Sabotage-proven: replacing
+      `Rc::get_mut` with an unconditional `&mut` makes `src` print `[10, 20, 30]` instead of
+      `[1, 2, 3]` on the JIT while the other two engines still print the original.
 
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),

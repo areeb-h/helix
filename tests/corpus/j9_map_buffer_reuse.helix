@@ -1,0 +1,94 @@
+# In-place map over a DEAD buffer (Stage 3o). A map over a real array used to allocate a fresh
+# output while the input stayed live, so `xs.map(f).map(g)` peaked at BOTH buffers even though
+# the intermediate dies the moment `g` consumes it. Measured at n=20M (160 MB per buffer):
+# 340 MB peak before, 186 MB now — and a three-stage chain is the same 186 MB rather than
+# growing. It also stops zeroing a fresh Vec that is about to be overwritten in full.
+#
+# The whole mechanism is `Rc::get_mut`: the buffer is reused ONLY when the handle being mapped
+# is the only one in existence, so the mutation cannot be observed and the values are identical
+# either way. This is an allocation decision, not a semantic one.
+#
+# THE FAILURE MODE IS THE OPPOSITE OF A WRONG NUMBER — a source that is still reachable being
+# silently rewritten. So every case below keeps a SECOND way to observe the original and reads
+# it AFTER the map. Removing the ownership check makes the first line print [10, 20, 30] twice.
+
+# ---- a source that is still reachable must come through untouched ----
+
+# under its own name
+src = [1, 2, 3]
+out = src.map(it * 10)
+print(src)
+print(out)
+
+# under an alias, so both handles must survive
+alias = src
+out2 = src.map(it * 100)
+print(alias)
+print(src)
+print(out2)
+
+# mapped twice: the second map must see the ORIGINAL, not the first map's output
+a = src.map(it * 10)
+b = src.map(it + 100)
+print(src)
+print(a)
+print(b)
+
+# held inside a record field
+r = {xs: [4, 5, 6]}
+ro = r.xs.map(it * 2)
+print(r.xs)
+print(ro)
+
+# captured by a function, which is a reference the stack cannot see directly
+keep = [7, 8, 9]
+fn peek() = keep[0]
+ko = keep.map(it * 3)
+print(peek())
+print(keep)
+print(ko)
+
+# floats take the same path and the same guard
+fsrc = [1.5, 2.5]
+fout = fsrc.map(it * 2.0)
+print(fsrc)
+print(fout)
+
+# ---- dead intermediates: reuse happens here, and the values must still be right ----
+
+print((0..5).map(it * 2).map(it + 1))
+print((0..5).map(it * 2).map(it + 1).map(it * 3))
+print([1, 2, 3].map(it * 2).map(it + 1))
+print((0..5).map(it * 0.5).map(it + 1.0))
+print((0..0).map(it * 2).map(it + 1))
+
+# a chain with a capture, so the reused buffer coexists with a caps slice
+c = 7
+print((0..5).map(it * c).map(it + c))
+
+# a chain whose MIDDLE stage is named: the first is dead, the second is not
+s0 = (0..5).map(it * 2)
+mid = s0.map(it + 1)
+fin = mid.map(it * 3)
+print(s0)
+print(mid)
+print(fin)
+
+# ---- chunk boundaries, where the parallel form aliases per chunk ----
+# 16384 and 32768 are chunk edges; 32768 is also PAR_MATH_THRESHOLD, where the run moves onto
+# rayon workers. Read INDIVIDUALLY rather than summed — a sum can hide a swapped pair.
+n = 40000
+big = (0..n).map(it * 2).map(it + 1)
+print(big[0])
+print(big[16383])
+print(big[16384])
+print(big[32767])
+print(big[32768])
+print(big[39999])
+print(big.reduce(0, (s, x) => s + x))
+
+# just under the threshold, so the serial path is exercised at a near-boundary size
+m = 32767
+small = (0..m).map(it * 2).map(it + 1)
+print(small[m - 1])
+print(small.reduce(0, (s, x) => s + x))

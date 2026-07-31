@@ -1713,28 +1713,61 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         _ => Pick::No,
                     };
                     match pick {
+                        // `Rc::get_mut` succeeds only when this handle is the ONLY one, i.e. the
+                        // receiver is a dead temporary (`xs.map(f).map(g)`'s intermediate). Then
+                        // the kernel writes back into it instead of allocating and zeroing a
+                        // second full-size buffer — see `run_map_kernel_inplace` for why
+                        // aliasing src and dst is sound for a map. A named source keeps a second
+                        // `Rc` alive, so it takes the allocating path and is never mutated under
+                        // the program's feet. `index_bounds` must be empty: a body reading a
+                        // captured array is the one shape where an iteration could touch an
+                        // index another iteration writes. (Such bodies are already range-only,
+                        // so this cannot trigger today — but the guard is local, and the
+                        // alternative is a safety argument that lives in another function.)
                         Pick::I64(ptr, caps) => {
-                            let arr = stack.pop().unwrap();
-                            if let Value::Array(a) = &arr
+                            let mut arr = stack.pop().unwrap();
+                            let unindexed = program.map_kernels[kidx].index_bounds.is_empty();
+                            let ran = if unindexed
+                                && let Value::Array(a) = &mut arr
+                                && let Some(ArrayData::Ints(v)) = std::rc::Rc::get_mut(a)
+                            {
+                                unsafe { crate::jit::run_map_kernel_inplace(ptr, v, &caps) };
+                                true
+                            } else if let Value::Array(a) = &arr
                                 && let ArrayData::Ints(v) = &**a
                             {
                                 let out = unsafe { crate::jit::run_map_kernel(ptr, v, &caps) };
-                                stack.push(Value::int_array(out));
-                                frames[fi].ip = *after as usize;
+                                arr = Value::int_array(out);
+                                true
                             } else {
-                                stack.push(arr);
+                                false
+                            };
+                            stack.push(arr);
+                            if ran {
+                                frames[fi].ip = *after as usize;
                             }
                         }
                         Pick::F64(ptr, caps) => {
-                            let arr = stack.pop().unwrap();
-                            if let Value::Array(a) = &arr
+                            let mut arr = stack.pop().unwrap();
+                            let unindexed = program.map_kernels[kidx].index_bounds.is_empty();
+                            let ran = if unindexed
+                                && let Value::Array(a) = &mut arr
+                                && let Some(ArrayData::Floats(v)) = std::rc::Rc::get_mut(a)
+                            {
+                                unsafe { crate::jit::run_map_kernel_f64_inplace(ptr, v, &caps) };
+                                true
+                            } else if let Value::Array(a) = &arr
                                 && let ArrayData::Floats(v) = &**a
                             {
                                 let out = unsafe { crate::jit::run_map_kernel_f64(ptr, v, &caps) };
-                                stack.push(Value::float_array(out));
-                                frames[fi].ip = *after as usize;
+                                arr = Value::float_array(out);
+                                true
                             } else {
-                                stack.push(arr);
+                                false
+                            };
+                            stack.push(arr);
+                            if ran {
+                                frames[fi].ip = *after as usize;
                             }
                         }
                         Pick::Mixed(ptr, caps) => {

@@ -4463,6 +4463,78 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         }
     }
 
+    /// A map over a uniquely-owned array REUSES its buffer instead of allocating a second
+    /// one. `xs.map(f).map(g)` used to peak at both buffers even though the intermediate is
+    /// dead the moment `g` consumes it — measured 340 MB at n=20M against 186 MB now.
+    ///
+    /// The failure mode is the opposite of a wrong number: a source that is still reachable
+    /// being mutated under the program. So every case here keeps a SECOND way to observe the
+    /// original and reads it AFTER the map. Sabotage-proven — replacing `Rc::get_mut` with an
+    /// unconditional `&mut` makes `src` print `[10, 20, 30]` instead of `[1, 2, 3]` on the JIT
+    /// while the other two engines still print the original.
+    ///
+    /// Sizes straddle `PAR_MATH_THRESHOLD`, because the parallel form aliases per chunk and a
+    /// boundary mistake is invisible below it. Boundary elements are read INDIVIDUALLY rather
+    /// than summed, since a sum can hide a swapped pair.
+    #[test]
+    fn map_reuses_a_dead_buffer_but_never_a_reachable_one() {
+        for (src, want) in [
+            // Still reachable under its own name, an alias, a field, and a closure — none of
+            // these may be rewritten.
+            ("src = [1, 2, 3]\nout = src.map(it * 10)\n[src, out]", "[[1, 2, 3], [10, 20, 30]]"),
+            (
+                "src = [1, 2, 3]\nalias = src\nout = src.map(it * 10)\n[alias, src, out]",
+                "[[1, 2, 3], [1, 2, 3], [10, 20, 30]]",
+            ),
+            // Mapped twice: the second map must see the ORIGINAL, not the first's output.
+            (
+                "src = [1, 2, 3]\na = src.map(it * 10)\nb = src.map(it + 100)\n[src, a, b]",
+                "[[1, 2, 3], [10, 20, 30], [101, 102, 103]]",
+            ),
+            ("r = {xs: [1, 2, 3]}\nout = r.xs.map(it * 10)\n[r.xs, out]", "[[1, 2, 3], [10, 20, 30]]"),
+            ("src = [1.5, 2.5]\nout = src.map(it * 2.0)\n[src, out]", "[[1.5, 2.5], [3.0, 5.0]]"),
+            // Dead intermediates: the values must still be right after reuse.
+            ("(0..5).map(it * 2).map(it + 1)", "[1, 3, 5, 7, 9]"),
+            ("(0..5).map(it * 2).map(it + 1).map(it * 3)", "[3, 9, 15, 21, 27]"),
+            ("[1, 2, 3].map(it * 2).map(it + 1)", "[3, 5, 7]"),
+            ("(0..5).map(it * 0.5).map(it + 1.0)", "[1.0, 1.5, 2.0, 2.5, 3.0]"),
+            ("(0..0).map(it * 2).map(it + 1)", "[]"),
+            ("c = 7\n(0..5).map(it * c).map(it + c)", "[7, 14, 21, 28, 35]"),
+            // A chain where the middle stage is named, so IT is reachable while the first is not.
+            (
+                "src = (0..5).map(it * 2)\nmid = src.map(it + 1)\nout = mid.map(it * 3)\n[src, mid, out]",
+                "[[0, 2, 4, 6, 8], [1, 3, 5, 7, 9], [3, 9, 15, 21, 27]]",
+            ),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // Chunk boundaries, read one at a time. 16384 and 32768 are the chunk edges; 32768 is
+        // also PAR_MATH_THRESHOLD itself, where the whole run moves onto rayon workers.
+        let src = "n = 40000\na = (0..n).map(it * 2).map(it + 1)\n\
+                   [a[0], a[16383], a[16384], a[32767], a[32768], a[39999]]";
+        let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+        assert_eq!(tw, vm, "tree-walker and VM disagree at the chunk boundaries");
+        assert_eq!(vm, jit, "VM and JIT disagree at the chunk boundaries");
+        assert_eq!(vm, Ok("[1, 32767, 32769, 65535, 65537, 79999]".to_string()));
+
+        // Just under the threshold, so the serial path is exercised at a near-boundary size.
+        let src = "n = 32767\na = (0..n).map(it * 2).map(it + 1)\na[n - 1]";
+        assert_eq!(run_vm_jit(src), run_tw(src));
+        assert_eq!(run_vm_jit(src), Ok("65533".to_string()));
+
+        // And the reuse must actually be reached natively — a JIT that declined every chain
+        // would satisfy every assertion above.
+        crate::jit::reset_native_call_count();
+        assert!(run_vm_jit("(0..70000).map(it * 2).map(it + 1)[69999]").is_ok());
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the chained map never reached a native kernel"
+        );
+    }
+
     /// A mixed `Int`-source → `Float` map that CAPTURES a free scalar. The capture rides as a
     /// plain `i64` and is typed `Int` by the kernel, which matches the interpreter only if an
     /// integer subexpression containing it wraps identically and promotion happens at the same
