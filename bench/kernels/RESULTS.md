@@ -387,7 +387,18 @@ Results are identical at every thread count, pinned by `thread_count_changes_cpu
    **344 MB → 186 MB**. A source that is still named keeps its own buffer and is
    never rewritten — that is what `Rc::get_mut` is checking, and removing the check
    makes a live `src` print its mapped values instead of its own.
-7. **A row with an implausible `%CPU` is not a measurement.** k7's C entry came out
+7. **k2's 5.3× is NOT the inner loop.** Holding the pixel count fixed and raising
+   the iteration cap: at cap=100 (as shipped) Helix is 10× behind C, at cap=1,000
+   it is 1.4×, and at cap=10,000 it is **1.0×** — at cap=100,000 Helix is slightly
+   ahead. So the generated loop matches or beats gcc, and the whole gap is ≈250 ns
+   of fixed cost per pixel. Measured and RULED OUT as the cause: the scalar
+   function-call path (~2.5 ns/call over 4M calls, recursion included), callee arity
+   (2/3/5 mixed args all ~2.5 ns), and the three-layer nesting (flattening it is
+   worse). Every spelling reports as natively compiled. The cause is still open —
+   see `docs/ROADMAP.md`. Caveat for anyone re-running this: gcc at `-march=native`
+   contracts to FMA, so iteration counts drift between the two at high caps
+   (86125823 vs 86125368 at cap=1,000); those runs are not anchor-clean.
+8. **A row with an implausible `%CPU` is not a measurement.** k7's C entry came out
    of one suite run at 5.75s with 3% CPU — a starved process. Re-run alone it is
    0.20s at 108% across five consecutive runs, which is what the table records.
    Re-measure such rows rather than publishing them.

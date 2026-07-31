@@ -1172,6 +1172,54 @@ motivates this phase.
 - [ ] **`try`-on-VM error-recovery soak** — `TryBegin`/`TryOk`/`TryErr` unwinding
       under the fuzzer, composed with JIT bailouts mid-`try`.
 
+- [ ] **A user function with a FLOAT parameter, called from a map body, does not
+      compile — 73× measured.** Same arithmetic, 20M elements, only the spelling differs:
+
+      | spelling | JIT | VM | |
+      | --- | --- | --- | --- |
+      | `map(i => to_float(i) * 2.0 + 1.0)` inline | 0.02s | 1.63s | native, 82× |
+      | `fn g(x: Float) = x * 2.0 + 1.0` + `map(i => g(to_float(i)))` | **1.47s** | 2.15s | **VM (1×)** |
+      | `fn f(x) = x * 2 + 1` + `map(i => f(i))` (i64) | 0.02s | 1.86s | native, 93× |
+
+      The `i64` map kernel calls user functions natively; the FLOAT/mixed one cannot.
+      `define_array_kernel` hands the non-mixed path `gen_value(…, fn_ids, module, …)`,
+      which can emit a call, but the mixed path calls `gen_value_typed(…)`, which takes
+      neither `fn_ids` nor `module` — so it has no call support at all, and
+      `infer_mixed_kind`'s `Call` arm accordingly admits only builtins
+      (`!user_fns.contains(name)`). A user call therefore makes the whole map ineligible.
+      This is the same "the idiomatic spelling is slower" defect class as Stages 3i/3j/3m,
+      and factoring a body into a named function is about as idiomatic as it gets.
+      Fix: thread `fn_ids`/`module` into `gen_value_typed` and admit a user call in
+      `infer_mixed_kind` under the same rules the i64 analysis uses.
+
+- [ ] **k2 mandelbrot: the loop body is at PARITY with C; the gap is a ~250 ns
+      per-pixel fixed cost that is still unidentified.** Recorded because the obvious
+      suspects are now ruled OUT and re-checking them would be wasted work.
+
+      Holding the pixel count fixed and raising the inner iteration cap (so per-pixel
+      work grows while the number of calls does not):
+
+      | pixels | cap | Helix | C | ratio |
+      | --- | --- | --- | --- | --- |
+      | 360,000 | 100 (k2 as shipped) | 0.10s | 0.01s | 10.0× |
+      | 360,000 | 1,000 | 0.23s | 0.16s | 1.4× |
+      | 360,000 | 10,000 | 1.55s | 1.62s | **1.0×** |
+      | 40,000 | 100,000 | 1.66s | 1.77s | **0.9× (Helix ahead)** |
+
+      So codegen for the inner loop is not the problem — at cap≥10,000 Helix matches or
+      beats gcc, consistent with the earlier finding that Cranelift beats gcc on tight
+      scalar `f64` loops. Subtracting the measured ~1.8 ns/iteration leaves ≈250 ns per
+      pixel. RULED OUT by measurement, each at 4M calls: the scalar call path itself
+      (~2.5 ns/call, recursion included), callee arity (2, 3 and 5 mixed args all
+      ~2.5 ns), and the three-layer `grid`→`row`→`step` nesting (flattening to two layers
+      is *worse*, 0.15s vs 0.11s). Every spelling reports as natively compiled (JIT 18–26×
+      over the VM), so it is not a silent fall-back either.
+
+      Note when re-measuring: gcc at `-march=native` contracts to FMA, so Helix and C
+      iteration counts diverge slightly at high caps (86125823 vs 86125368 at cap=1000).
+      That is the known mandelbrot FMA drift, not a Helix defect — but it means high-cap
+      runs are not anchor-clean and must not be published as a like-for-like comparison.
+
 ## Cross-cutting principles to uphold at every phase
 - Prefer dots over pipes; minimize operator symbols.
 - One obvious way to perform each task.
