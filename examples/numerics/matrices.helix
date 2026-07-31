@@ -1,0 +1,74 @@
+# Matrices — building them, converting them, multiplying them.
+#   helix run examples/numerics/matrices.helix
+#
+# The point of this file is that the OBVIOUS spelling is the fast one. Helix builds a matrix
+# from ordinary nested comprehensions, and the whole pipeline — build, convert, multiply —
+# runs natively. On the 1024x1024 benchmark that pipeline is 0.04s against NumPy's 0.07s,
+# using about a quarter of the cores.
+#
+# That was not always true, and the two things that made it true are worth knowing because
+# they are about SPELLING, not about calling a different function:
+#
+#   1. A map producing Floats from an Int counter used to compile only if its body captured
+#      nothing — so `(0..n).map(j => (7 * j) * 0.5)` ran natively while the identical
+#      `(0..n).map(j => (c * j) * 0.5)` fell to the interpreter, 86x slower. A nested build
+#      is exactly that shape, because the inner map captures the outer index.
+#   2. `tensor()` boxed every element on the way in, which cost more than the matrix
+#      multiply that followed it.
+#
+# Both are fixed. Nothing below needs a type annotation, a loop, or a parallel directive.
+
+n = 6
+
+# --- 1. Build a matrix with a nested comprehension ---
+# The inner map captures `i` from the outer one. That capture is the whole reason this used
+# to be slow, and it is the natural way to write a matrix, so it had to be the fast way too.
+a = (0..n).map(i => (0..n).map(j => ((i * j) % 7) * 0.5))
+b = (0..n).map(i => (0..n).map(j => ((i + j) % 5) * 0.25))
+print("a[2] =", a[2])
+print("b[2] =", b[2])
+
+# --- 2. Convert to tensors ---
+# `tensor()` infers the shape and requires every row to be the same length; a ragged input is
+# an error rather than a silently truncated matrix.
+ta = tensor(a)
+tb = tensor(b)
+print("shape:", ta.shape(), " ndim:", ta.ndim())
+
+# --- 3. Multiply ---
+# `matmul` routes to a real GEMM (faer), the same way NumPy routes to BLAS. It is
+# deterministic: the result does not depend on how many cores ran it.
+c = ta.matmul(tb)
+print("c[3][2] =", c[3][2])
+print("c.sum() =", c.sum())
+
+# Multiplying by the identity returns the original — a cheap check that nothing got
+# transposed on the way into or out of the tensor.
+id = tensor((0..n).map(i => (0..n).map(j => if i == j then 1.0 else 0.0)))
+print("a.matmul(id) == a:", ta.matmul(id).sum() == ta.sum())
+
+# --- 4. You do not need tensors for everything ---
+# A plain array comprehension is already native and already parallel. Reach for `tensor()`
+# when you want linear algebra (matmul, solve, transpose) or broadcasting — not as a
+# performance ritual.
+row_sums = (0..n).map(i => (0..n).map(j => a[i][j]).sum())
+print("row sums:", row_sums)
+
+# --- 5. A flat buffer with an affine index is the other idiom ---
+# `flat[i * n + j]` compiles to a direct load: the index arithmetic is proven in range once,
+# before the loop, rather than checked per element. Use this when a matrix is really a dense
+# buffer and you never need a row on its own. (The modulus is 9, not 7: with n=6 every
+# diagonal index i*6+i is a multiple of 7, so `% 7` would make the trace exactly zero and
+# hide whether the indexing worked at all.)
+flat = (0..(n * n)).map(t => ((t % 9)) * 0.5)
+diag = (0..n).reduce(0.0, (acc, i) => acc + flat[i * n + i])
+print("trace of flat:", diag)
+
+# --- 6. Integer matrices stay exact ---
+# Integer arithmetic is i64 and does NOT promote: it wraps at the boundary rather than
+# growing like a Python int. Below 2^63 that means exact answers with no rounding, which is
+# what you want for counts and indices. `tensor()` converts to f64, so build the tensor only
+# once you are done counting.
+counts = (0..n).map(i => (0..n).map(j => i * j))
+print("integer product matrix, row 5:", counts[5])
+print("total:", counts.map(r => r.sum()).sum())

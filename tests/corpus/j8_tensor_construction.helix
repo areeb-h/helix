@@ -1,0 +1,73 @@
+# `tensor()` construction over PACKED buffers (Stage 3n). Converting a nested 1024x1024 array
+# cost 0.12s — about 120 ns per element for what is fundamentally an 8 MB memcpy, and more than
+# the 1024^3 GEMM that followed it. The cause was `ArrayData::to_values()`, which materializes a
+# `Vec<Value>`: on a packed float buffer that means allocating a box per element. It ran TWICE
+# per row — once in `shape_of` purely to re-derive each element's (empty) shape and discard it,
+# once in `flatten_into` to copy — so a 1024x1024 build paid ~2M allocations.
+#
+# `shape_of` now short-circuits a packed Ints/Floats/Range buffer to `[len]` without walking it,
+# and `flatten_into` copies straight through. That is sound because a packed buffer holds
+# numbers by construction, so the element walk it skips could never have rejected anything —
+# `missing` and non-numeric elements only ever live in an `ArrayData::Values`, which still takes
+# the original path.
+#
+# The SHARP EDGE is ragged detection, because only NON-FIRST rows are compared against the
+# first: a mistake shows in one nesting orientation and not the other. Those rejection cases
+# live in the Rust test (they raise, which would stop this file); what is pinned here is that
+# every accepted shape still produces the right VALUES in the right ORDER — a row/column swap
+# would slip past a shape-only check.
+
+# ---- 1-D sources, one per packed representation ----
+
+# a packed Floats buffer: the extend_from_slice path
+print(tensor([1.5, 2.5, 3.5]))
+
+# a packed Ints buffer: widened to f64 on the way in
+print(tensor([1, 2, 3]))
+
+# negative and large ints, either side of 2^53 — the widening is a real conversion, and
+# 2^53+1 has no f64 representation, so it lands on the even neighbour
+print(tensor([0 - 5, 0, 9007199254740993]))
+
+# a LAZY range source, never materialized as a Vec<i64> first
+print(tensor(0..5))
+
+# a range with a negative step: the element formula must match `range_at` exactly
+print(tensor(range(10, 0, 0 - 2)))
+
+# an empty buffer keeps the [0] shape the element walk used to produce
+print(tensor([]).shape())
+
+# a bare scalar is rank 0, not rank 1
+print(tensor(5).shape())
+
+# ---- 2-D and 3-D: shape AND element order ----
+
+# element order is the assertion here; a row/column mix-up prints differently
+print(tensor([[1, 2], [3, 4]]))
+print(tensor([[1, 2], [3, 4]]).shape())
+
+# a non-square matrix, so a transposed flatten cannot pass by symmetry
+print(tensor([[1, 2, 3], [4, 5, 6]]))
+print(tensor([[1, 2, 3], [4, 5, 6]]).shape())
+
+# rank 3
+print(tensor([[[1, 2]], [[3, 4]]]).shape())
+
+# rows of different element types: one packed Ints, one packed Floats, both widened
+print(tensor([[1, 2], [3.5, 4.5]]))
+
+# ---- the k8 path end to end: build by nested map, convert, multiply ----
+# Every stage here was a separate defect at some point: the build fell to the VM because the
+# inner map captures `i`, and the conversion boxed every element.
+n = 3
+a = tensor((0..n).map(i => (0..n).map(j => ((i * j) % 100) * 0.5)))
+b = tensor((0..n).map(i => (0..n).map(j => ((i + j) % 100) * 0.25)))
+print(a)
+print(b)
+print(a.matmul(b))
+print(a.matmul(b).shape())
+
+# an identity multiply, where any element reordering in EITHER operand shows immediately
+id = tensor([[1, 0, 0], [0, 1, 0], [0, 0, 1]])
+print(a.matmul(id))

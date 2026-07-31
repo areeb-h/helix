@@ -1,0 +1,84 @@
+# The CAPTURED mixed `Int` -> `Float` map (Stage 3m). An Int-source map whose body produces a
+# Float used to compile ONLY IF THE BODY CAPTURED NOTHING, so swapping one literal for a
+# variable moved the whole loop onto the bytecode VM — at 20M elements, 0.02s became 0.37s for
+# the identical arithmetic. That is also why every nested array build was slow: the inner map
+# captures the outer binder.
+#
+# The capture now rides as a plain i64 and is typed `Int` by the kernel. That is sound ONLY
+# because the VM proves it really is a `Value::Int` before dispatch and declines to the
+# bytecode loop otherwise — the same runtime proof the plain i64 map path has always used. A
+# Float in that slot would promote EARLIER in the kernel than in the interpreter, so declining
+# is the correctness rule rather than a missed optimization.
+#
+# The cases below are chosen so a MISTYPED capture would show up, not so they merely pass:
+# integer subexpressions that WRAP, values either side of 2^53, and Float captures that must
+# fall back. All three engines must agree on every line.
+
+# ---- the wrap cases: `c * j` must overflow i64 identically in kernel and interpreter ----
+
+# i64::MAX as a capture. `(c * j) % 100` wraps hard, then promotes at `* 0.5`.
+c = 9223372036854775807
+print((0..4).map(j => ((c * j) % 100) * 0.5))
+
+# addition wrapping past MAX, promoted only at the very end
+print((0..3).map(j => (c + j) * 1.0))
+
+# a negative capture — the euclidean `%` result must match the interpreter's, not C's
+n = 0 - 7
+print((0..4).map(j => ((n * j) % 100) * 0.5))
+
+# ---- either side of 2^53, where an f64-typed capture would visibly diverge ----
+
+# 2^53 + 1 is exact in i64 and NOT representable in f64; the product stays integral until
+# the final `* 1.0`, so the answer is the i64 one rounded once, not an f64 accumulation.
+big = 9007199254740993
+print((1..3).map(j => (big * j) * 1.0))
+
+# 2^53 itself, incremented — consecutive f64s here differ by 2, which is the tell
+even = 9007199254740992
+print((1..4).map(j => (even + j) * 1.0))
+
+# ---- a FLOAT capture must DECLINE to the bytecode loop, not promote early ----
+
+# 2.5 truncates to 2 if the guard is ever weakened, so this line is the sabotage detector
+f = 2.5
+print((0..4).map(j => (f * j) * 0.5))
+
+# 2.0 is deliberately here too: its truncation is INVISIBLE, so it proves nothing on its own
+g = 2.0
+print((0..4).map(j => (g * j) * 0.5))
+
+# ---- shape coverage ----
+
+# two captures, mixed into one integer subexpression before promotion
+a = 3
+b = 5
+print((0..4).map(j => ((a * j + b) % 7) * 0.25))
+
+# the same capture read twice (one slot, deduped by the analysis)
+k = 6
+print((0..4).map(j => (k * j + k) * 0.5))
+
+# a capture with the binder outside the integer part
+print((0..4).map(j => a * 1.0 + j))
+
+# degenerate ranges: empty, and reversed (which is also empty)
+print((0..0).map(j => (a * j) * 0.5))
+print((4..0).map(j => (a * j) * 0.5))
+
+# a DATA array source rather than a range — the elements are values, not a counter
+print([1, 2, 3].map(j => (a * j) * 0.5))
+
+# the builtins the mixed analysis admits, each with a capture underneath
+print((0..4).map(j => to_float(a * j) * 0.5))
+print((0..4).map(j => max(a * j, 4) * 0.5))
+print((0..4).map(j => ((a * j) << 2) * 0.5))
+
+# ---- k8's own build shape: the inner map captures the OUTER binder ----
+# This is the line that made a 1024x1024 matrix build 8.5x faster, and the reason k8 looked
+# like a nesting problem when it never was one.
+m = 3
+print((0..m).map(i => (0..m).map(j => ((i * j) % 100) * 0.5)))
+
+# and the same build consumed, so the values are checked as numbers and not just as printing
+print((0..m).map(i => (0..m).map(j => ((i * j) % 100) * 0.5).sum()))

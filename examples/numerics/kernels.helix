@@ -39,9 +39,14 @@ fn collatz_len(k, steps) =
 longest = range(1, 100000).map(k => collatz_len(k, 0)).max()
 print("longest collatz:", longest)
 
-# --- 5. Annotated float functions get a mixed-type native loop ---
-# Type annotations are advisory — they let the JIT specialize a function whose
-# parameters mix Float and Int. The answer is identical either way.
+# --- 5. Functions mixing Float and Int params get a native loop, unannotated ---
+# The annotations below are DOCUMENTATION, not a requirement: the JIT infers each
+# parameter's kind from how the body uses it, so deleting every `: Float` and
+# `: Int` here changes neither the answer nor the speed (measured: same result,
+# 0.15s vs 0.16s, both native). They were once load-bearing — the mixed
+# specialization was reachable only through an explicit annotation, which made the
+# natural spelling of a numeric loop 53x slower — and that is exactly why they are
+# no longer needed. Annotate for readers, not for the compiler.
 fn escape(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) =
   if i >= 50 then i
   else if (zr * zr + zi * zi) > 4.0 then i
