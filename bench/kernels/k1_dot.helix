@@ -61,13 +61,23 @@
 # reading both captured arrays by the loop counter (arr[j] reduce kernel); that
 # part of the old header was accurate and is retained.
 #
-# MEMORY: Helix is the HEAVIEST implementation here, not the leanest. Measured
-# maxRSS at N=50M: Helix 1,195,128-1,196,032 kB vs C 782,848, Rust 783,104, Go
-# 784,256 kB (= the 800 MB the arrays actually need). Helix carries ~400 MB over
-# the two-array footprint. The NumPy and CPython refs used to carry a comparable
-# ~1.18-1.20 GB and were fixed to reach parity (807,452 and 791,552 kB), which
-# leaves Helix as the only implementation still ~1.5x over. That is a real cost of
-# this kernel's execution model and is not charged to it anywhere in the score.
+# MEMORY: Helix WAS the heaviest implementation here, and is now at parity. Measured
+# maxRSS at N=50M: Helix 815,912 kB vs C 782,848, Rust 783,104, Go 784,256 kB (= the
+# 800 MB the arrays actually need). That is 1.04x the reference footprint.
+#
+# It used to be 1,195,128-1,196,032 kB, i.e. ~400 MB over and ~1.5x C, and the whole
+# overhead was ONE TRANSIENT: `(0..n)` is a lazy range, but the native map kernel read
+# its source from memory, so `densify_range_top` materialized the range into a full
+# 400 MB `Ints` buffer purely to be read once — and it stayed live alongside the output
+# array being written. Every `(0..n).map(f)` therefore peaked at TWICE its result.
+# A range's element is `start + step*j`, so nothing needed storing: the kernel is now
+# fed values generated into a 16K-element scratch reused per chunk. Peak fell 1,195,400
+# -> 815,912 kB here (-32%), and the isolated one-array case 328 -> 186 MB (-43%). It is
+# also 2-3x faster, since a full buffer is no longer written and then read back.
+#
+# The NumPy and CPython refs had carried a comparable ~1.18-1.20 GB and were fixed
+# earlier to reach parity (807,452 and 791,552 kB); Helix has now joined them. What
+# remains above the payload is ~33 MB of interpreter and allocator arenas.
 #
 # METHOD/BOX: AMD Ryzen 7 7700X, 6 cores visible, 12 GB, Linux
 # 6.6.87.2-microsoft-standard-WSL2, THP=madvise, helix target/gate build, gcc

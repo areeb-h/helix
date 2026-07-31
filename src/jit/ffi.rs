@@ -277,6 +277,82 @@ where
     dst
 }
 
+/// The RANGE-source twin of [`run_map_chunked`]: the same kernel, fed source values that are
+/// COMPUTED rather than read from a materialized buffer.
+///
+/// A lazy range's element `j` is `start + step*j`, so handing the kernel a real array meant
+/// building one purely to be read once — and it stayed live alongside the output, making a single
+/// `(0..n).map(f)` peak at TWICE its result. Measured at n=20M (160 MB of payload): 328 MB peak
+/// before, and the k1 dot product's documented ~400 MB overhead over C was exactly this, one
+/// transient materialized range.
+///
+/// Each chunk's values are generated into a small scratch buffer (16K elements = 128 KB, so it
+/// stays in cache) that is reused per chunk — peak becomes the output plus a scratch instead of
+/// two full buffers. The element formula is `Value::range_at`'s verbatim, computed in `i128` so
+/// the multiply cannot overflow before the truncation the interpreter also performs.
+///
+/// SAFETY: as [`run_map_chunked`] — `ptr` is a finalized
+/// `extern "C" fn(*const i64,*mut D,i64,*const C)`, and the scratch outlives the call.
+unsafe fn run_map_range_chunked<D, C>(
+    ptr: *const u8,
+    start: i64,
+    step: i64,
+    len: usize,
+    caps: &[C],
+) -> Vec<D>
+where
+    D: Copy + Default + Send,
+    C: Sync,
+{
+    let mut dst: Vec<D> = vec![D::default(); len];
+    if len == 0 {
+        return dst;
+    }
+    note_native_call();
+    let f: extern "C" fn(*const i64, *mut D, i64, *const C) = unsafe { std::mem::transmute(ptr) };
+    const CH: usize = 1 << 14;
+    let at = |j: usize| -> i64 { (start as i128 + step as i128 * j as i128) as i64 };
+    if len >= crate::interp::PAR_MATH_THRESHOLD {
+        use rayon::prelude::*;
+        dst.par_chunks_mut(CH).enumerate().for_each(|(ci, d)| {
+            let base = ci * CH;
+            let scratch: Vec<i64> = (0..d.len()).map(|k| at(base + k)).collect();
+            f(scratch.as_ptr(), d.as_mut_ptr(), d.len() as i64, caps.as_ptr());
+        });
+    } else {
+        let mut scratch: Vec<i64> = Vec::with_capacity(CH.min(len));
+        for base in (0..len).step_by(CH) {
+            let n = CH.min(len - base);
+            scratch.clear();
+            scratch.extend((0..n).map(|k| at(base + k)));
+            f(scratch.as_ptr(), dst[base..].as_mut_ptr(), n as i64, caps.as_ptr());
+        }
+    }
+    dst
+}
+
+/// `run_map_kernel` over a lazy range, with no materialization. See [`run_map_range_chunked`].
+pub unsafe fn run_map_kernel_range(
+    ptr: *const u8,
+    start: i64,
+    step: i64,
+    len: usize,
+    caps: &[i64],
+) -> Vec<i64> {
+    unsafe { run_map_range_chunked::<i64, i64>(ptr, start, step, len, caps) }
+}
+
+/// The **mixed** kernel (i64 elements → f64 output) over a lazy range, with no materialization.
+pub unsafe fn run_map_kernel_mixed_range(
+    ptr: *const u8,
+    start: i64,
+    step: i64,
+    len: usize,
+    caps: &[i64],
+) -> Vec<f64> {
+    unsafe { run_map_range_chunked::<f64, i64>(ptr, start, step, len, caps) }
+}
+
 /// Run a native map kernel over `src` (same length and order). Parallel past the shared
 /// threshold — see [`run_map_chunked`]. SAFETY: `ptr` is a finalized
 /// `extern "C" fn(*const i64,*mut i64,i64,*const i64)` from [`define_array_kernel`].

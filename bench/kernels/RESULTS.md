@@ -295,15 +295,29 @@ Results are identical at every thread count, pinned by `thread_count_changes_cpu
 2. **k4's C/Rust times are at timer grain** (`<0.01s`). The audit's finer
    measurement puts Helix ≈6.9× behind C there.
 3. ~~**CPython's k9 number beats Helix's** (14.79s vs 25.86s).~~ **Resolved** —
-   Helix's k9 is now 0.52s (transcribed) / 0.50s (map-temp) against CPython's
-   19.96s. Kept struck through rather than deleted: this caveat was true when
+   Helix's k9 is now 0.49s (transcribed) / 0.48s (map-temp) against CPython's
+   15.45s. Kept struck through rather than deleted: this caveat was true when
    published, and the record of it being true is what made fixing it a priority.
+4. `-march=native` is a ~9% *pessimization* for gcc on k2 (79ms vs 72ms without).
+   We keep it as the conventional "give C every advantage" flag; it slightly
+   understates C.
 5. **This suite under-covers the 2026-07-18 arc.** Only k9's map-temp spelling
    exercises the comprehension shapes those commits fixed, so eight of the nine
    kernels are unchanged by them. The shapes most improved (BLAS-1 vector ops,
    sums of a computed vector) have no kernel here — tracked as k10. Until it
    exists, any claim about those shapes is a Helix-vs-Helix number and is labelled
-   as such.
-4. `-march=native` is a ~9% *pessimization* for gcc on k2 (79ms vs 72ms without).
-   We keep it as the conventional "give C every advantage" flag; it slightly
-   understates C.
+   as such. The same is true of the JIT's *builtin* surface — see
+   [docs/jit-builtin-coverage.md](../../docs/jit-builtin-coverage.md).
+6. ~~**Helix is the heaviest implementation here** — ~1.20 GB peak RSS on k1
+   against C's 783 MB, ~1.5× over, and not charged anywhere in the score.~~
+   **Resolved** — k1's peak is now **815,912 kB against C's 782,848**, i.e. 1.04×.
+   The entire overhead was one transient: the native map kernel read its source
+   from memory, so a lazy `(0..n)` was materialized into a full-size buffer purely
+   to be read once, and it stayed live alongside the output — every
+   `(0..n).map(f)` peaked at *twice* its result. The kernel is now fed values
+   generated per 16K chunk, so nothing is stored. Kept struck through for the same
+   reason as (3): it was true, and recording that it was true is what got it fixed.
+7. **A row with an implausible `%CPU` is not a measurement.** k7's C entry came out
+   of one suite run at 5.75s with 3% CPU — a starved process. Re-run alone it is
+   0.20s at 108% across five consecutive runs, which is what the table records.
+   Re-measure such rows rather than publishing them.

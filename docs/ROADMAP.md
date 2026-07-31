@@ -514,6 +514,44 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       reduce bodies and a tail-recursive function, plus an engagement assertion) and by
       asserting the EXCLUDED builtins still raise identically on all three engines.
 
+- [x] **Stage 3l — a range `map` no longer materializes its source: peak memory −43%.**
+      Helix was the heaviest implementation in the kernel suite — `k1_dot.helix`
+      recorded ~1,195 MB peak against C's 783 MB for the same 800 MB of arrays. The
+      whole overhead was one transient: `densify_range_top` built a full-size `Ints`
+      buffer purely so the map kernel had something to *read*, and it stayed live
+      alongside the output, so a single `(0..n).map(f)` peaked at **twice** its result.
+
+      MEASURED (n=20M, 160 MB of payload per array):
+
+      | shape | before | after |
+      | --- | --- | --- |
+      | `(0..n).map(f)`, array kept | 328 MB | **186 MB** |
+      | k1 shape (two arrays) | 485 MB | **345 MB** |
+      | `(0..n).map(f).reduce(…)` (already fused) | 20 MB | 20 MB |
+
+      Overhead above payload fell from ~165 MB to ~25 MB. It is also **2–3× faster**,
+      because a full buffer is no longer written and then read back.
+
+      A range's element is `start + step*j`, so there is nothing to store: the kernel
+      now receives values generated into a 16K-element scratch (128 KB, cache-resident)
+      reused per chunk, via `run_map_range_chunked`. The kernel itself is unchanged —
+      only what feeds it — so no codegen was touched. The formula is `range_at`'s
+      verbatim, in `i128`, so the multiply cannot overflow before the truncation the
+      interpreter also performs.
+
+      The sharp edge is CHUNK BOUNDARIES: the element index must be `base + k`, not
+      `k`, and a bug there is invisible below 16384 elements. Pinned by
+      `range_map_generates_values_without_materializing`, which reads
+      `a[16383]`/`a[16384]`/`a[32767]`/`a[32768]` individually rather than summing (a
+      sum can hide a swapped pair), and straddles `PAR_MATH_THRESHOLD` where generation
+      moves into rayon workers. Plus degenerate ranges, negative steps, an `i64::MAX`
+      start, indexed maps (whose bounds still discharge against the range endpoints),
+      and 880 fuzzed programs across the boundary sizes — 0 divergences.
+
+      REMAINING memory work: `filter` still materializes (`Op::TryJitFilter` calls
+      `densify_range_top` unconditionally), and a map over a real array necessarily
+      keeps both buffers — only the *range* source can be generated.
+
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).

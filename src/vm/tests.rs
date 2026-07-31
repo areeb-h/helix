@@ -2010,6 +2010,69 @@
         }
     }
 
+
+    /// A `map` over a lazy range runs on GENERATED counter values, not a materialized buffer.
+    ///
+    /// Materializing purely so the kernel had something to read left that buffer live alongside
+    /// the output, so a single `(0..n).map(f)` peaked at TWICE its result — measured 328 MB for
+    /// 160 MB of payload at n=20M, now 186 MB; the k1 dot product's documented ~400 MB overhead
+    /// over C was exactly one such transient, and its peak fell 485 MB → 345 MB. It is also 2–3×
+    /// FASTER, because a full buffer is no longer written and then read back.
+    ///
+    /// The sharp edge is CHUNK BOUNDARIES: values are generated 16K at a time, so the element
+    /// index must be `base + k` rather than `k`. A bug there is invisible below 16384 elements,
+    /// which is why the cases below straddle 16383/16384/16385 and 32767/32768 (the latter also
+    /// crossing `PAR_MATH_THRESHOLD`, where generation moves into rayon workers).
+    #[test]
+    fn range_map_generates_values_without_materializing() {
+        // Chunk-boundary elements, read individually so an off-by-chunk shows up as a wrong value
+        // rather than being averaged away by a sum.
+        let src = "n = 100000\na = (0..n).map(it * 2)\n\"{a[0]} {a[16383]} {a[16384]} {a[32767]} {a[32768]} {a[n - 1]}\"";
+        assert_eq!(run_vm_jit(src), run_tw(src), "chunk boundaries vs walker");
+        assert_eq!(run_vm_jit(src).as_deref(), Ok("0 32766 32768 65534 65536 199998"));
+
+        for (s, want) in [
+            // lengths exactly at, and one past, a chunk boundary
+            ("a = (0..16384).map(it * 3)\n\"{a.length()} {a[16383]} {a.reduce(0, (s, x) => s + x)}\"", "16384 49149 402628608"),
+            ("a = (0..16385).map(it * 3)\n\"{a.length()} {a[16384]} {a.reduce(0, (s, x) => s + x)}\"", "16385 49152 402677760"),
+            // below vs above PAR_MATH_THRESHOLD — serial and parallel generation
+            ("(0..1000).map(it * 7).reduce(0, (s, x) => s + x)", "3496500"),
+            ("(0..40000).map(it * 7).reduce(0, (s, x) => s + x)", "5599860000"),
+            // degenerate ranges
+            ("(5..5).map(it * 2).length()", "0"),
+            ("(5..0).map(it * 2).length()", "0"),
+            ("(0..1).map(it * 2)", "[0]"),
+            // negative start and negative step
+            ("((0 - 5)..5).map(it * 2)", "[-10, -8, -6, -4, -2, 0, 2, 4, 6, 8]"),
+            ("range(10, 0, 0 - 1).map(it * 2)", "[20, 18, 16, 14, 12, 10, 8, 6, 4, 2]"),
+            ("range(0, 20, 3).map(it + 1)", "[1, 4, 7, 10, 13, 16, 19]"),
+            // the element formula is computed in i128, so a start near i64::MAX cannot overflow
+            // before the truncation the interpreter also performs
+            ("range(9223372036854775805, 9223372036854775807, 1).map(it * 1)",
+             "[9223372036854775805, 9223372036854775806]"),
+            // f64 output (the mixed kernel) over a generated range
+            ("a = (0..40000).map(it * 1.5)\n\"{a[16384]} {a[39999]}\"", "24576.0 59998.5"),
+            // an INDEXED map over a range still discharges its bounds against the range's
+            // endpoints — the fast path passes the same `src_range` to the marshal
+            ("n = 40000\nx = (0..n).map(it * 2)\n(0..n).map(x[it] + 1).reduce(0, (s, y) => s + y)", "1600000000"),
+            // a captured scalar in the body, i64 and f64
+            ("c = 3\n(0..40000).map(it * c).reduce(0, (s, x) => s + x)", "2399940000"),
+        ] {
+            let jit = run_vm_jit(s);
+            assert_eq!(jit, run_tw(s), "JIT vs walker on `{s}`");
+            assert_eq!(jit, run_vm(s), "JIT vs VM on `{s}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{s}`");
+        }
+
+        // An out-of-bounds indexed map over a range must still raise the interpreter's exact
+        // error — the fast path declines and the checked loop runs.
+        let src = "x = [1, 2, 3]\n(0..40000).map(x[it]).length()";
+        let e = run_vm_jit(src);
+        assert!(e.is_err(), "expected an out-of-bounds raise");
+        assert_eq!(e, run_tw(src), "raise text vs walker");
+        assert_eq!(e, run_vm(src), "raise text vs VM");
+    }
+
     #[test]
     fn differential_functions_with_jit() {
         let mut rng = 0xFEED_FACE_DEAD_BEEFu64;
