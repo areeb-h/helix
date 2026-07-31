@@ -1099,6 +1099,16 @@ fn infer_reduce_f64_kind(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>)
                     Some(NumKind::Float)
                 }
                 ("abs", 1) => infer_reduce_f64_kind(&args[0], pa, pb, user_fns),
+                // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
+                // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
+                // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
+                // comparisons whose NaN case falls through to 0 -- matching the interpreter, which
+                // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
+                // RAISE when the result leaves i64 range and therefore still need a poison path.
+                ("to_int" | "sign", 1) => {
+                    infer_reduce_f64_kind(&args[0], pa, pb, user_fns)?;
+                    Some(NumKind::Int)
+                }
                 ("min" | "max", 2) => {
                     let ka = infer_reduce_f64_kind(&args[0], pa, pb, user_fns)?;
                     let kb = infer_reduce_f64_kind(&args[1], pa, pb, user_fns)?;
@@ -1292,7 +1302,19 @@ fn infer_f64_indexed(
                 }
                 // `abs`/`min`/`max` do NOT promote (interp `abs(Int)` is `iabs`), so an `SFloat`
                 // argument would diverge; admit only genuine floats or ints, preserving the kind.
-                ("abs", 1) => match infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)? {
+                                // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
+                // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
+                // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
+                // comparisons whose NaN case falls through to 0 -- matching the interpreter, which
+                // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
+                // RAISE when the result leaves i64 range and therefore still need a poison path.
+                // An unpromoted value scalar is refused for the same reason `abs` refuses one:
+                // its runtime type is not yet pinned, and `to_int`/`sign` read it directly.
+                ("to_int" | "sign", 1) => match infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)? {
+                    MixT::SFloat => None,
+                    _ => Some(MixT::Int),
+                },
+("abs", 1) => match infer_f64_indexed(&args[0], pa, pb, caps, synth, bounds, user_fns)? {
                     MixT::SFloat => None,
                     k => Some(k),
                 },
@@ -1512,6 +1534,16 @@ fn infer_f64_typed(e: &Expr, binders: &HashMap<&str, NumKind>, user_fns: &HashSe
                     Some(NumKind::Float)
                 }
                 ("abs", 1) => infer_f64_typed(&args[0], binders, user_fns),
+                // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
+                // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
+                // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
+                // comparisons whose NaN case falls through to 0 -- matching the interpreter, which
+                // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
+                // RAISE when the result leaves i64 range and therefore still need a poison path.
+                ("to_int" | "sign", 1) => {
+                    infer_f64_typed(&args[0], binders, user_fns)?;
+                    Some(NumKind::Int)
+                }
                 ("min" | "max", 2) => {
                     let ka = infer_f64_typed(&args[0], binders, user_fns)?;
                     let kb = infer_f64_typed(&args[1], binders, user_fns)?;
@@ -1619,6 +1651,42 @@ fn gen_f64_typed(
                     NumKind::Int => (b.ins().iabs(av), NumKind::Int),
                     NumKind::Float => (b.ins().fabs(av), NumKind::Float),
                 }
+            }
+            // `to_int`: saturating float->int, the identity on an `Int`. `fcvt_to_sint_sat`
+            // matches the interpreter exactly -- NaN to 0, +-inf to the i64 extremes.
+            "to_int" => {
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
+                match ak {
+                    NumKind::Int => (av, NumKind::Int),
+                    NumKind::Float => (b.ins().fcvt_to_sint_sat(I64, av), NumKind::Int),
+                }
+            }
+            // `sign`: 1 / -1 / 0. Both comparisons are FALSE for NaN, so the selects fall
+            // through to 0 -- which is what the interpreter returns for NaN (it compares
+            // rather than using `signum`, which would propagate NaN).
+            "sign" => {
+                let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
+                let one = b.ins().iconst(I64, 1);
+                let neg = b.ins().iconst(I64, -1);
+                let zero = b.ins().iconst(I64, 0);
+                let (gt, lt) = match ak {
+                    NumKind::Int => {
+                        let z = b.ins().iconst(I64, 0);
+                        (
+                            b.ins().icmp(IntCC::SignedGreaterThan, av, z),
+                            b.ins().icmp(IntCC::SignedLessThan, av, z),
+                        )
+                    }
+                    NumKind::Float => {
+                        let z = b.ins().f64const(0.0);
+                        (
+                            b.ins().fcmp(FloatCC::GreaterThan, av, z),
+                            b.ins().fcmp(FloatCC::LessThan, av, z),
+                        )
+                    }
+                };
+                let lo = b.ins().select(lt, neg, zero);
+                (b.ins().select(gt, one, lo), NumKind::Int)
             }
             "min" | "max" => {
                 let (av, ak) = gen_f64_typed(b, &args[0], binders, arrays, poison);
@@ -2194,6 +2262,16 @@ fn infer_mixed_kind(
                     Some(NumKind::Float)
                 }
                 ("abs", 1) => infer_mixed_kind(&args[0], binder, uses_binder, user_fns), // preserves kind
+                // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
+                // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
+                // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
+                // comparisons whose NaN case falls through to 0 -- matching the interpreter, which
+                // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
+                // RAISE when the result leaves i64 range and therefore still need a poison path.
+                ("to_int" | "sign", 1) => {
+                    infer_mixed_kind(&args[0], binder, uses_binder, user_fns)?;
+                    Some(NumKind::Int)
+                }
                 ("min" | "max", 2) => {
                     let ka = infer_mixed_kind(&args[0], binder, uses_binder, user_fns)?;
                     let kb = infer_mixed_kind(&args[1], binder, uses_binder, user_fns)?;
@@ -2417,7 +2495,19 @@ fn infer_mixed_kind_indexed(
                 // `abs`/`min`/`max` do NOT promote (interp `abs(Int)` is `iabs`, `min(Int,Int)`
                 // an i64 compare) — so an `SFloat` argument would diverge. Admit only genuine
                 // floats or ints, and preserve the kind (an `Int` `abs`/`min` stays i64).
-                ("abs", 1) => match infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)? {
+                                // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
+                // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
+                // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
+                // comparisons whose NaN case falls through to 0 -- matching the interpreter, which
+                // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
+                // RAISE when the result leaves i64 range and therefore still need a poison path.
+                // An unpromoted value scalar is refused for the same reason `abs` refuses one:
+                // its runtime type is not yet pinned, and `to_int`/`sign` read it directly.
+                ("to_int" | "sign", 1) => match infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)? {
+                    MixT::SFloat => None,
+                    _ => Some(MixT::Int),
+                },
+("abs", 1) => match infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)? {
                     MixT::SFloat => None,
                     k => Some(k),
                 },
@@ -2832,6 +2922,16 @@ fn infer_typed_env(
                     Some(NumKind::Float)
                 }
                 ("abs", 1) => infer_typed_env(&args[0], env, sigs, user_fns),
+                // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
+                // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
+                // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
+                // comparisons whose NaN case falls through to 0 -- matching the interpreter, which
+                // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
+                // RAISE when the result leaves i64 range and therefore still need a poison path.
+                ("to_int" | "sign", 1) => {
+                    infer_typed_env(&args[0], env, sigs, user_fns)?;
+                    Some(NumKind::Int)
+                }
                 ("min" | "max", 2) => {
                     let ka = infer_typed_env(&args[0], env, sigs, user_fns)?;
                     let kb = infer_typed_env(&args[1], env, sigs, user_fns)?;
@@ -3249,7 +3349,8 @@ fn mixed_fn_sig(
 /// original-operand semantics (so they agree even past 2^53, where a native integer
 /// compare would differ). Added to the JIT-eligible set only when no user function of the
 /// same name shadows them (then the call dispatches to the user's function instead).
-pub const JIT_SCALAR_BUILTINS: &[(&str, usize)] = &[("abs", 1), ("min", 2), ("max", 2)];
+pub const JIT_SCALAR_BUILTINS: &[(&str, usize)] =
+    &[("abs", 1), ("min", 2), ("max", 2), ("to_int", 1), ("sign", 1)];
 
 /// For a recognized JIT builtin, whether the call arity matches; for any other name (a
 /// user function) there is no constraint here — its arity is validated by the front end.
@@ -3323,6 +3424,19 @@ fn gen_builtin_i64<'a>(
         "abs" => {
             let x = gen_value(b, &args[0], vars, fn_ids, module, NumKind::Int);
             b.ins().iabs(x) // wraps i64::MIN to itself, matching `wrapping_abs`
+        }
+        // On an `Int` these are trivial: `to_int` is the identity and `sign` is a compare pair.
+        "to_int" => gen_value(b, &args[0], vars, fn_ids, module, NumKind::Int),
+        "sign" => {
+            let x = gen_value(b, &args[0], vars, fn_ids, module, NumKind::Int);
+            let z = b.ins().iconst(I64, 0);
+            let one = b.ins().iconst(I64, 1);
+            let neg = b.ins().iconst(I64, -1);
+            let zero = b.ins().iconst(I64, 0);
+            let gt = b.ins().icmp(IntCC::SignedGreaterThan, x, z);
+            let lt = b.ins().icmp(IntCC::SignedLessThan, x, z);
+            let lo = b.ins().select(lt, neg, zero);
+            b.ins().select(gt, one, lo)
         }
         "min" | "max" => {
             let a = gen_value(b, &args[0], vars, fn_ids, module, NumKind::Int);
@@ -4466,6 +4580,42 @@ fn gen_value_env<'a>(
                         NumKind::Float => (b.ins().fabs(av), NumKind::Float),
                     }
                 }
+                // `to_int`: saturating float->int, the identity on an `Int`. `fcvt_to_sint_sat`
+                // matches the interpreter exactly -- NaN to 0, +-inf to the i64 extremes.
+                "to_int" => {
+                    let (av, ak) = gen_value_env(b, &args[0], vars, env, module, tl);
+                    match ak {
+                        NumKind::Int => (av, NumKind::Int),
+                        NumKind::Float => (b.ins().fcvt_to_sint_sat(I64, av), NumKind::Int),
+                    }
+                }
+                // `sign`: 1 / -1 / 0. Both comparisons are FALSE for NaN, so the selects fall
+                // through to 0 -- which is what the interpreter returns for NaN (it compares
+                // rather than using `signum`, which would propagate NaN).
+                "sign" => {
+                    let (av, ak) = gen_value_env(b, &args[0], vars, env, module, tl);
+                    let one = b.ins().iconst(I64, 1);
+                    let neg = b.ins().iconst(I64, -1);
+                    let zero = b.ins().iconst(I64, 0);
+                    let (gt, lt) = match ak {
+                        NumKind::Int => {
+                            let z = b.ins().iconst(I64, 0);
+                            (
+                                b.ins().icmp(IntCC::SignedGreaterThan, av, z),
+                                b.ins().icmp(IntCC::SignedLessThan, av, z),
+                            )
+                        }
+                        NumKind::Float => {
+                            let z = b.ins().f64const(0.0);
+                            (
+                                b.ins().fcmp(FloatCC::GreaterThan, av, z),
+                                b.ins().fcmp(FloatCC::LessThan, av, z),
+                            )
+                        }
+                    };
+                    let lo = b.ins().select(lt, neg, zero);
+                    (b.ins().select(gt, one, lo), NumKind::Int)
+                }
                 "min" | "max" => {
                     let (av, ak) = gen_value_env(b, &args[0], vars, env, module, tl);
                     let (cv, _ck) = gen_value_env(b, &args[1], vars, env, module, tl);
@@ -5073,6 +5223,42 @@ fn gen_value_typed<'a>(
                     NumKind::Int => (b.ins().iabs(av), NumKind::Int),
                     NumKind::Float => (b.ins().fabs(av), NumKind::Float),
                 }
+            }
+            // `to_int`: saturating float->int, the identity on an `Int`. `fcvt_to_sint_sat`
+            // matches the interpreter exactly -- NaN to 0, +-inf to the i64 extremes.
+            "to_int" => {
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
+                match ak {
+                    NumKind::Int => (av, NumKind::Int),
+                    NumKind::Float => (b.ins().fcvt_to_sint_sat(I64, av), NumKind::Int),
+                }
+            }
+            // `sign`: 1 / -1 / 0. Both comparisons are FALSE for NaN, so the selects fall
+            // through to 0 -- which is what the interpreter returns for NaN (it compares
+            // rather than using `signum`, which would propagate NaN).
+            "sign" => {
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);
+                let one = b.ins().iconst(I64, 1);
+                let neg = b.ins().iconst(I64, -1);
+                let zero = b.ins().iconst(I64, 0);
+                let (gt, lt) = match ak {
+                    NumKind::Int => {
+                        let z = b.ins().iconst(I64, 0);
+                        (
+                            b.ins().icmp(IntCC::SignedGreaterThan, av, z),
+                            b.ins().icmp(IntCC::SignedLessThan, av, z),
+                        )
+                    }
+                    NumKind::Float => {
+                        let z = b.ins().f64const(0.0);
+                        (
+                            b.ins().fcmp(FloatCC::GreaterThan, av, z),
+                            b.ins().fcmp(FloatCC::LessThan, av, z),
+                        )
+                    }
+                };
+                let lo = b.ins().select(lt, neg, zero);
+                (b.ins().select(gt, one, lo), NumKind::Int)
             }
             "min" | "max" => {
                 let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars);

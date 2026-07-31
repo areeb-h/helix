@@ -1,4 +1,4 @@
-# Kernel benchmark results — 2026-07-18 (HEAD `e178c76`)
+# Kernel benchmark results — 2026-07-18 (HEAD `4cddbbc`+)
 
 Regenerate with `./run.sh` from this directory. Every number below was produced
 by that script on a quiet machine, after the anchor gate confirmed that all
@@ -20,16 +20,22 @@ never do — a wall-clock win bought with 2.5× the cores is not a codegen win.
 
 | # | Kernel | Helix | C | Rust | Go | CPython | NumPy | Helix vs C |
 |---|--------|-------|---|------|-----|---------|-------|------------|
-| k1 | dot 50M i64 | 0.17s (275%) | **0.12s** | 0.13s | 0.51s | 10.12s | 0.31s | **1.4× slower** (≈3.9× per-core; see k1 note) |
-| k2 | mandelbrot 1200² | 0.43s (98%) | **0.08s** | 0.07s | 0.07s | 6.09s | — | **5.4× slower** |
-| k3 | basel 1e8 | 0.09s (96%) | **0.06s** | 0.10s | 0.09s | 9.20s | 0.44s | **1.5× slower** (beats Rust and Go) |
-| k4 | allpairs 15k | 0.01s (306%) | **<0.01s** | <0.01s | 0.06s | 4.42s | 0.12s | **slower** (timer-grain; ~7× per the audit) |
-| k5 | montecarlo 1e8 | 0.57s (99%) | **0.24s** | 0.24s | 0.29s | 39.58s | — | **2.4× slower** |
-| k6 | sieve π(10⁷) | **0.02s** (92%) | 0.01s | 0.01s | 0.02s | 0.65s | 0.07s | ~tie (**delegation** — beats NumPy 3.5×) |
-| k7 | wordcount 5M | 1.61s (99%) | **0.22s** | 0.27s | 0.23s | 1.53s | 1.94s | **7.3× slower** (also loses to CPython) |
-| k8 | matmul 1024³ (GEMM) | 0.34s (108%) | — | — | — | — | **0.07s** | **4.9× slower than NumPy** |
-| k9 | matmul 512³ (naive) | 0.52s (99%) | 0.36s | 0.33s | **0.32s** | 19.96s | — | **1.4× slower** |
-| k9m | matmul 512³ (map-temp) | 0.50s (100%) | 0.36s | 0.33s | **0.32s** | 19.96s | — | **1.4× slower** (was **27.12s / 75×** — see below) |
+| k1 | dot 50M i64 | 0.16s (254%) | **0.10s** | 0.13s | 0.57s | 8.78s | 0.28s | **1.6× slower** (≈4× per-core; see k1 note) |
+| k2 | mandelbrot 1200² | 0.42s (99%) | 0.08s | **0.07s** | **0.07s** | 6.85s | — | **5.3× slower** |
+| k3 | basel 1e8 | 0.09s (94%) | **0.06s** | 0.09s | 0.10s | 10.36s | 0.48s | **1.5× slower** (ties Rust, beats Go) |
+| k4 | allpairs 15k | 0.01s (313%) | **<0.01s** | <0.01s | 0.05s | 9.99s | 0.17s | **slower** (timer-grain; ~7× per the audit) |
+| k5 | montecarlo 1e8 | 0.51s (108%) | 0.25s | **0.22s** | 0.26s | 44.60s | — | **2.0× slower** |
+| k6 | sieve π(10⁷) | **0.01s** (105%) | 0.01s | 0.01s | 0.02s | 0.60s | 0.06s | ~tie (**delegation** — beats NumPy 6×) |
+| k7 | wordcount 5M | 1.39s (108%) | **0.20s**† | 0.24s | 0.21s | 1.37s | 1.79s | **7.0× slower** (also loses to CPython) |
+| k8 | matmul 1024³ (GEMM) | 0.31s (118%) | — | — | — | — | **0.07s** | **4.4× slower than NumPy** |
+| k9 | matmul 512³ (naive) | 0.49s (109%) | 0.39s | 0.33s | **0.32s** | 15.45s | — | **1.3× slower** |
+| k9m | matmul 512³ (map-temp) | 0.48s (108%) | 0.39s | 0.33s | **0.32s** | 15.45s | — | **1.2× slower** (was **27.12s / 75×** — see below) |
+
+† k7's C entry came out of the suite run at **5.75s with 3% CPU** — a starved process, not a
+slow one, and not a measurement. Re-run alone it is 0.20s at 108% CPU across five consecutive
+runs, which is the number recorded. Any row whose `%CPU` is far from ~100% (for the
+single-threaded references) or far from its usual value (for Helix) should be treated the same
+way: re-measured, not published.
 
 **Helix loses to C on every kernel in this suite**, though k9 (both spellings) is
 now within 1.4× and k3 beats Rust and Go. The one place it stands out is k6,
@@ -51,6 +57,15 @@ is the only kernel in this suite that writes one*. The other eight already used
 shapes the JIT compiled. So the suite confirms the fix and simultaneously shows
 that this suite under-covers the new capability — the shapes it most helps (BLAS-1
 vector ops, sums of a computed vector) have no kernel here yet. That gap is
+**The suite also under-covers the JIT's builtin surface.** A separate audit of all 22 numeric
+builtins found **17 that block compilation outright** — a builtin outside the JIT's subset does
+not slow a loop down, it forces the *entire* loop onto the bytecode VM. `to_float`, `to_int` and
+`sign` have since been lowered (132–308× each, measured off-suite); `floor`/`ceil`/`round`/
+`trunc`/`clamp` still block because they can *raise*, and a kernel cannot. None of that is
+visible in the nine kernels here, because none of them uses a blocked builtin in a hot loop. See
+[docs/jit-builtin-coverage.md](../../docs/jit-builtin-coverage.md) for the standing table, the
+reason for each exclusion, and how to re-run the audit.
+
 tracked as k10, not papered over: measured off-suite on this same release binary,
 the identical expression before and after the arc (n=5M, min-of-4), a **SAXPY sum**
 (`Σ a*x[i]+y[i]`) went **0.64s → 0.02s** and a **vector-add sum** (`Σ a[i]+b[i]`)

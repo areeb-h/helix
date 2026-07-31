@@ -470,6 +470,50 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       across 5 seeds, 0 divergences. The suite's kernels are all annotated and
       unchanged.
 
+- [x] **Stage 3k — the numeric-builtin coverage audit, and the three it closed.** After
+      `to_float` turned out to be missing from every float gate (132–227×), all 22 numeric
+      builtins were audited the same way — a hot loop with the JIT on and off, where
+      `JIT ≈ NOJIT` means the builtin blocks compilation. **17 of 22 blocked.** Full
+      standing result, with the reason for each exclusion, in
+      [jit-builtin-coverage.md](jit-builtin-coverage.md).
+
+      Closed here: **`to_float`** (Stage 3i), **`to_int`** and **`sign`**. Measured at
+      n=30M, before = the VM time (these did not compile at all):
+
+      | shape | before | after | |
+      | --- | --- | --- | --- |
+      | `map(to_int(it) * 2)` | 3.08s | 0.01s | **308×** |
+      | `map(to_float(to_int(x * 1.5)))` | 4.41s | 0.02s | **220×** |
+      | `reduce(s + sign(i - k))` | 1.91s | 0.01s | **191×** |
+      | `map(sign(it - k))` | 3.18s | 0.02s | **159×** |
+
+      The dividing line is **"can it fail?"**, not "what does it return". `to_int` and
+      `sign` never raise — `to_int` SATURATES (NaN → 0, ±inf → the i64 extremes, exactly
+      `fcvt_to_sint_sat` and Rust's `as i64`), and `sign`'s two comparisons both go false
+      on NaN so the selects fall through to 0, matching the interpreter (which compares
+      rather than using `signum`, so it does not propagate NaN). That is what let them be
+      lowered with no new machinery.
+
+      STILL EXCLUDED, deliberately: `floor`/`ceil`/`round`/`trunc` return an `Int` and
+      **raise** out of i64 range, and `clamp` raises when `lo > hi`. A kernel cannot raise
+      mid-loop, so they need the **poison out-param** pattern the dividing f64 reduce
+      already uses, extended to the map/filter/fused kernels. Recorded with it: Helix's
+      `round` is **half-away-from-zero**, NOT IEEE round-to-nearest-even, so lowering it to
+      Cranelift's `nearest` would be silently wrong on every tie — a bug no small-input
+      test would catch. The transcendentals stay out permanently (they must match the host
+      libm bit-for-bit).
+
+      Also measured and recorded as a separate, larger gap: an **`Int`-rooted body with
+      `Float` intermediates** (`map(to_int(to_float(it) * 1.5))`) has no kernel shape at
+      all — 4.05s JIT vs 4.01s VM — because the i64 kernel cannot hold a float intermediate
+      and the mixed kernel needs a float root. No builtin work changes that; it needs a
+      Float-source → Int-output map specialization.
+
+      Verified by `to_int_and_sign_compile_and_match_the_interpreter_at_every_edge`
+      (17 value cases across saturation, both infinities, NaN, both zeroes, Int identity,
+      reduce bodies and a tail-recursive function, plus an engagement assertion) and by
+      asserting the EXCLUDED builtins still raise identically on all three engines.
+
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
       forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).

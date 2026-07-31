@@ -1933,6 +1933,83 @@
         }
     }
 
+
+    /// `to_int` and `sign` compile natively. Both are Int-returning and — the property that makes
+    /// them safe with no new machinery — **neither can raise**:
+    /// `to_int` SATURATES (NaN → 0, ±inf → the i64 extremes), which is exactly Rust's `as i64`
+    /// and Cranelift's `fcvt_to_sint_sat`; `sign` is two comparisons whose NaN case falls through
+    /// to 0, matching the interpreter (which compares rather than using `signum`, so it does not
+    /// propagate NaN). Measured at n=30M: `map(sign(…))` 3.18s → 0.02s (159×), `map(to_int(it)*2)`
+    /// 3.08s → 0.01s (308×), `map(to_float(to_int(…)))` 4.41s → 0.02s (220×).
+    ///
+    /// Contrast `floor`/`ceil`/`round`/`trunc`, which RAISE when the result leaves i64 range and
+    /// so still need a poison path — and `clamp`, which raises when `lo > hi`. Those remain on the
+    /// VM deliberately, not by oversight.
+    #[test]
+    fn to_int_and_sign_compile_and_match_the_interpreter_at_every_edge() {
+        crate::jit::reset_native_call_count();
+        for (src, want) in [
+            // to_int: truncation toward zero, both signs
+            ("(0..6).map(to_int(to_float(it) * 1.5)).reduce(0, (s, x) => s + x)", "21"),
+            ("((0 - 6)..0).map(to_int(to_float(it) * 1.5)).reduce(0, (s, x) => s + x)", "-30"),
+            // to_int SATURATES rather than raising — the property the lowering depends on
+            ("to_int(1.0e30)", "9223372036854775807"),
+            ("to_int(0.0 - 1.0e30)", "-9223372036854775808"),
+            ("to_int(inf)", "9223372036854775807"),
+            ("to_int(0.0 - inf)", "-9223372036854775808"),
+            // NaN → 0 for BOTH (sqrt of a negative is how a NaN is reached without raising)
+            ("to_int(sqrt(0.0 - 1.0))", "0"),
+            ("sign(sqrt(0.0 - 1.0))", "0"),
+            // sign over floats and ints, including the infinities and both zeroes
+            ("((0 - 5)..5).map(sign(to_float(it))).reduce(0, (s, x) => s + x)", "-1"),
+            ("((0 - 5)..5).map(sign(it)).reduce(0, (s, x) => s + x)", "-1"),
+            ("sign(inf) + sign(0.0 - inf)", "0"),
+            ("sign(0.0) + sign(0) + sign(0.0 - 0.0)", "0"),
+            // to_int of an Int is the identity
+            ("(0..5).map(to_int(it)).reduce(0, (s, x) => s + x)", "10"),
+            // inside a reduce body and a tail-recursive function
+            ("(0..20).reduce(0, (s, i) => s + sign(to_float(i) - 10.0))", "-1"),
+            ("fn go(a, i, n) = if i >= n then a else go(a + to_int(to_float(i) * 1.5), i + 1, n)\ngo(0, 0, 12)", "96"),
+            // float-ROOTED bodies with the Int builtin inside — the mixed kernel
+            ("(0..6).map(to_float(to_int(to_float(it) * 1.5)) * 2.0).reduce(0.0, (s, x) => s + x)", "42.0"),
+            ("(0..6).map(to_float(sign(to_float(it) - 3.0)) * 0.5).reduce(0.0, (s, x) => s + x)", "-0.5"),
+        ] {
+            let jit = run_vm_jit(src);
+            assert_eq!(jit, run_tw(src), "JIT vs walker on `{src}`");
+            assert_eq!(jit, run_vm(src), "JIT vs VM on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "neither builtin reached native code — they are back to forcing the VM path"
+        );
+
+        // The RAISING builtins must still behave exactly as the interpreter, on every engine.
+        // They are excluded on purpose: a native kernel cannot raise, and no poison path covers
+        // the map/reduce kernels yet.
+        for src in [
+            "floor(1.0e30)",
+            "ceil(1.0e30)",
+            "round(1.0e30)",
+            "trunc(1.0e30)",
+            "clamp(1.5, 3.0, 0.0)",
+            "(0..3).map(floor(1.0e30)).reduce(0, (s, x) => s + x)",
+        ] {
+            let e = run_vm_jit(src);
+            assert!(e.is_err(), "expected a raise on `{src}`");
+            assert_eq!(e, run_tw(src), "raise text vs walker on `{src}`");
+            assert_eq!(e, run_vm(src), "raise text vs VM on `{src}`");
+        }
+        // …and where they do NOT raise they must still give the interpreter's answer.
+        for (src, want) in [
+            ("floor(2.7) + ceil(2.1) + trunc(2.9) + round(2.5)", "10"),
+            ("clamp(5.0, 0.0, 3.0)", "3.0"),
+        ] {
+            assert_eq!(run_vm_jit(src), run_tw(src), "non-raising case `{src}`");
+            assert_eq!(run_vm_jit(src).as_deref(), Ok(want), "`{src}`");
+        }
+    }
+
     #[test]
     fn differential_functions_with_jit() {
         let mut rng = 0xFEED_FACE_DEAD_BEEFu64;
