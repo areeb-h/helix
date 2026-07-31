@@ -1856,6 +1856,83 @@
         assert_eq!(run_vm_jit(src).as_deref(), Ok("20"), "the i64 path is unaffected");
     }
 
+
+    /// A FLOAT `reduce` over an ARRAY folds leading `map` stages into its own body, so
+    /// `xs.map(f).reduce(0.0, g)` costs what the hand-composed `xs.reduce(0.0, g∘f)` costs —
+    /// measured 0.73s vs 0.04s at n=20M, an 18× penalty for writing the pipeline the natural way.
+    ///
+    /// This is the array-source twin of the range-source fusion, and it needed a different
+    /// mechanism: `fusion_stage` builds only `i64` transforms, so a float map body is not an
+    /// eligible stage at all — the chain walk stopped immediately and the receiver stayed a method
+    /// call, which is not idempotent, so the whole plan declined. The maps are therefore peeled
+    /// SYNTACTICALLY and folded before the sink is built, which also means the folded body faces
+    /// exactly the same `reduce_jit_f64_body` validation a hand-written one would.
+    ///
+    /// Both guards are sabotage-proven: dropping them makes the capture case return 0.0 instead of
+    /// 20.0 and the shadow case 4.0 instead of 200.0.
+    #[test]
+    fn float_array_reduce_folds_map_stages() {
+        let xs = "xs = [1.5, 2.5, 3.5]\n";
+        for (body, want) in [
+            ("xs.map(it * 1.5).reduce(0.0, (a, x) => a + x)", "11.25"),
+            ("xs.map(it * 1.5).map(it + 1.0).reduce(0.0, (a, x) => a + x)", "14.25"),
+            ("xs.map(x => x * 2.0).reduce(0.0, (a, y) => a + y * y)", "83.0"),
+            // the element binder used TWICE in the reduce body duplicates the folded expression,
+            // which is safe only because every admitted node is pure
+            ("xs.map(it * 2.0).reduce(0.0, (a, x) => a + x * x)", "83.0"),
+            ("xs.map(abs(it - 2.5)).reduce(0.0, (a, x) => a + x)", "2.0"),
+            ("c = 3.0\nxs.map(it * c).reduce(0.0, (a, x) => a + x)", "22.5"),
+        ] {
+            let src = format!("{xs}{body}");
+            let jit = run_vm_jit(&src);
+            assert_eq!(jit, run_tw(&src), "JIT vs walker on `{src}`");
+            assert_eq!(jit, run_vm(&src), "JIT vs VM on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+
+        // CAPTURE: the map body names the reduce's accumulator. Folding would bind it to the
+        // accumulator and yield 0.0.
+        let src = "a = 10.0\nxs = [1.5, 2.5]\nxs.map(a * 1.0).reduce(0.0, (a, x) => a + x)";
+        assert_eq!(run_vm_jit(src), run_tw(src), "capture case vs walker");
+        assert_eq!(run_vm_jit(src).as_deref(), Ok("20.0"), "capture case");
+
+        // SHADOW: the map body names the reduce's element binder.
+        let src = "x = 100.0\nxs = [1.5, 2.5]\nxs.map(x * 1.0).reduce(0.0, (a, x) => a + x)";
+        assert_eq!(run_vm_jit(src), run_tw(src), "shadow case vs walker");
+        assert_eq!(run_vm_jit(src).as_deref(), Ok("200.0"), "shadow case");
+
+        // Shapes that must NOT fold, each still correct: a filter in the chain (the f64 reduce
+        // analysis has no `if`), an i64 accumulator (a separate, untouched path), an `Ints` array
+        // under a float reduce (representation mismatch → fallback), a non-idempotent source
+        // (which folding must not cause to be evaluated twice), and an empty array.
+        for (src, want) in [
+            ("xs = [1.5, 2.5, 3.5]\nxs.filter(it > 2.0).map(it * 2.0).reduce(0.0, (a, x) => a + x)", "12.0"),
+            ("xs = [1.5, 2.5, 3.5]\nxs.map(it * 2.0).filter(it > 4.0).reduce(0.0, (a, x) => a + x)", "12.0"),
+            ("ys = [1, 2, 3]\nys.map(it * 3).reduce(0, (a, x) => a + x)", "18"),
+            ("ys = [1, 2, 3]\nys.map(it * 2).reduce(0.0, (a, x) => a + to_float(x))", "12.0"),
+            ("fn mk() = [1.5, 2.5]\nmk().map(it * 2.0).reduce(0.0, (a, x) => a + x)", "8.0"),
+            ("emp = [1.0][0:0]\nemp.map(it * 2.0).reduce(0.0, (a, x) => a + x)", "0.0"),
+        ] {
+            let jit = run_vm_jit(src);
+            assert_eq!(jit, run_tw(src), "non-folding shape vs walker on `{src}`");
+            assert_eq!(jit, run_vm(src), "non-folding shape vs VM on `{src}`");
+            assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
+        }
+
+        // ERROR ORDER: unfused, every `f(x)` runs before any `g`. A raise from either side must
+        // surface identically on all three engines — the folded kernel poisons and falls back to
+        // the original chain rather than reporting a different error.
+        for src in [
+            "xs = [1.5, 2.5, 3.5]\nxs.map(1.0 / (it - 1.5)).reduce(0.0, (a, x) => a + x)",
+            "xs = [1.5, 2.5, 3.5]\nxs.map(it * 2.0).reduce(0.0, (a, x) => a + 1.0 / (x - 3.0))",
+        ] {
+            let e = run_vm_jit(src);
+            assert!(e.is_err(), "expected a raise on `{src}`");
+            assert_eq!(e, run_tw(src), "error text vs walker on `{src}`");
+            assert_eq!(e, run_vm(src), "error text vs VM on `{src}`");
+        }
+    }
+
     #[test]
     fn differential_functions_with_jit() {
         let mut rng = 0xFEED_FACE_DEAD_BEEFu64;

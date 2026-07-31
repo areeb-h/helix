@@ -1131,6 +1131,12 @@ impl super::Compiler {
     ) -> Option<FusionPlan<'a>> {
         // The outer method is either the reduce sink or the last (outermost) stage.
         let mut outer_first: Vec<FusionStage> = Vec::new();
+        // `recv` is rebound below: a FLOAT reduce may fold leading `map` stages into its own body
+        // and then start the stage walk PAST them.
+        let mut recv = recv;
+        // Storage for a folded reduce body, which is a fresh `Expr` rather than a borrow of
+        // `args`; the `&'a Expr` used below points either here or into `args`.
+        let folded_store: Expr;
         let (sink, init): (FusionSink, Option<&'a Expr>) = if name == "reduce" {
             if args.len() != 2 {
                 return None;
@@ -1141,6 +1147,62 @@ impl super::Compiler {
                 }
                 _ => return None,
             };
+            // FOLD leading `map` stages into a FLOAT reduce's body, so `xs.map(f).reduce(0.0, g)`
+            // costs what the hand-composed `xs.reduce(0.0, g of f)` costs — measured 0.73s vs
+            // 0.04s at n=20M, an 18x penalty for writing the pipeline the natural way.
+            //
+            // It has to happen HERE, before the sink is built, for two reasons. The body that
+            // `reduce_jit_f64_body` validates must be the FINAL one, so the folded result gets
+            // exactly the same scrutiny as a hand-written one — no second, weaker gate. And the
+            // stages cannot be collected the usual way at all: `fusion_stage` builds `i64`
+            // transforms, so a float map body is not an eligible stage, the walk below stops
+            // immediately, and `cur` stays a method call that is not idempotent — which is why
+            // this shape declined outright instead of merely fusing badly.
+            //
+            // Maps only: a `filter` would need an `if` in the body, which the f64 reduce analysis
+            // does not admit. Capture safety mirrors the range path — a map body naming the
+            // reduce's own binders would be captured by them — and anything `subst_ident` cannot
+            // rewrite declines. Every decline leaves the pipeline exactly as it was.
+            let mut body: &Expr = body;
+            if crate::jit::is_float_acc_init(&args[0]) && matches!(&args[0], Expr::Float(_)) {
+                let mut maps: Vec<(String, &Expr)> = Vec::new();
+                let mut probe = recv;
+                while let Expr::Method { recv: inner, name: m, args: margs, .. } = probe {
+                    if m.as_str() != "map" || margs.len() != 1 {
+                        break;
+                    }
+                    let (ps, mbody) = crate::interp::comprehension_params(&margs[0]);
+                    if ps.len() != 1 {
+                        break;
+                    }
+                    maps.push((ps[0].clone(), mbody));
+                    probe = inner;
+                }
+                if !maps.is_empty() {
+                    // `maps` is outermost-first, so compose in reverse: the element flows through
+                    // the innermost map first.
+                    let mut composed = Expr::Ident { name: pb.clone(), line: 0, col: 0 };
+                    let mut ok = true;
+                    for (binder, mbody) in maps.iter().rev() {
+                        if expr_mentions(mbody, &pa) || expr_mentions(mbody, &pb) {
+                            ok = false;
+                            break;
+                        }
+                        match crate::jit::subst_ident(mbody, binder, &composed) {
+                            Some(next) => composed = next,
+                            None => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok && let Some(folded) = crate::jit::subst_ident(body, &pb, &composed) {
+                        folded_store = folded;
+                        body = &folded_store;
+                        recv = probe;
+                    }
+                }
+            }
             // The init literal's type fixes the accumulator type — and they must not
             // compete: `reduce_jit_bodies` keys only off the body shape (`acc + x*x` is
             // structurally i64-eligible), so a `Float` init would otherwise be claimed as
