@@ -4467,6 +4467,104 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         }
     }
 
+    /// A map body may CALL a `Float`-parameter user function — the last shape where naming
+    /// something cost two orders of magnitude (2.09s against 0.02s inline at 20M, annotated
+    /// or inferred). The kernel marshals to the mixed bits ABI, hands the callee a stack
+    /// cell as its poison out-param, and folds that cell into its own accumulator.
+    ///
+    /// THE CRUX IS THAT A CALLEE'S BAIL MUST POISON THE WHOLE MAP. It very nearly did not:
+    /// `map_body_raises` scanned only for rounders and division *in the body*, so a body that
+    /// merely CALLS a mixed function was built poison-free, the VM took the non-poison
+    /// wrapper, and a raising callee was silently swallowed — `[0.0, 0.0, …]` where the other
+    /// two engines raised "division by zero". Every raise case below failed that way before
+    /// the fix, and they are the reason this test exists.
+    #[test]
+    fn a_map_body_may_call_a_float_parameter_function_and_its_bail_poisons_the_map() {
+        for (src, want) in [
+            ("fn g(x: Float) = x * 2.0 + 1.0\n(0..6).map(i => g(to_float(i)))", "[1.0, 3.0, 5.0, 7.0, 9.0, 11.0]"),
+            // Unannotated: the kinds are inferred (Stage 3j), and must reach the same table.
+            ("fn g(x) = x * 2.0 + 1.0\n(0..6).map(i => g(to_float(i)))", "[1.0, 3.0, 5.0, 7.0, 9.0, 11.0]"),
+            ("fn g(a: Float, b: Int) = a * to_float(b) + 1.0\n(0..6).map(i => g(to_float(i), 3))", "[1.0, 4.0, 7.0, 10.0, 13.0, 16.0]"),
+            // A Float-argument function returning `Int` — the exact reason there is no plain
+            // f64 specialization, so the mixed one is the only thing callable.
+            ("fn g(x: Float) = if x > 2.0 then 1 else 0\n(0..6).map(i => g(to_float(i)))", "[0, 0, 0, 1, 1, 1]"),
+            ("fn inner(x: Float) = x * 2.0\nfn outer(x: Float) = inner(x) + 1.0\n(0..6).map(i => outer(to_float(i)))", "[1.0, 3.0, 5.0, 7.0, 9.0, 11.0]"),
+            ("c = 2.5\nfn g(x: Float) = x * 2.0\n(0..6).map(i => g(to_float(i)) + c)", "[2.5, 4.5, 6.5, 8.5, 10.5, 12.5]"),
+            ("fn g(x: Float) = x * 1.5\n(0..6).map(i => floor(g(to_float(i))))", "[0, 1, 3, 4, 6, 7]"),
+            ("fn g(x: Float, d: Float) = x / d\n(0..6).map(i => g(to_float(i), 4.0))", "[0.0, 0.25, 0.5, 0.75, 1.0, 1.25]"),
+            ("fn g(x: Float, n: Int) = if n <= 0 then x else g(x * 1.5, n - 1)\n(0..5).map(i => g(to_float(i), 2))", "[0.0, 2.25, 4.5, 6.75, 9.0]"),
+            // Argument kinds must EQUAL the callee's parameter kinds — no promoting at the
+            // boundary, so an `Int` argument to a `Float` parameter declines to the VM.
+            ("fn g(x: Float) = x * 2.0\n(0..4).map(i => g(i) + 0.0)", "[0.0, 2.0, 4.0, 6.0]"),
+            // Neighbours: an i64 callee, and a user function shadowing a builtin name.
+            ("fn f(x) = x * 2 + 1\n(0..5).map(i => f(i) * 0.5)", "[0.5, 1.5, 2.5, 3.5, 4.5]"),
+            ("fn sqrt(x: Float) = x + 100.0\n(0..4).map(i => sqrt(to_float(i)))", "[100.0, 101.0, 102.0, 103.0]"),
+            ("fn g(x: Float) = x * 2.0\n(0..0).map(i => g(to_float(i)))", "[]"),
+            ("fn g(x: Float) = x * 2.0\n[1, 2, 3].map(i => g(to_float(i)))", "[2.0, 4.0, 6.0]"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // The callee raises: `/0` at every element and at one element, a NaN comparison, and
+        // a rounder out of range. Each must surface the interpreter's exact error.
+        for src in [
+            "fn g(x: Float, d: Float) = x / d\n(0..6).map(i => g(to_float(i), 0.0))",
+            "fn g(x: Float, d: Float) = x / d\n(0..6).map(i => g(1.0, to_float(3 - i)))",
+            "fn g(x: Float) = if x > 1.0 then 1.0 else 0.0\n(0..4).map(i => g(sqrt(0.0 - to_float(i + 1))))",
+            "fn g(x: Float) = to_float(floor(x))\n(0..4).map(i => g(to_float(i) * 1e19))",
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert!(tw.is_err(), "`{src}` should raise");
+            assert_eq!(tw, vm, "tree-walker and VM disagree on the error for `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on the error for `{src}`");
+        }
+        crate::jit::reset_native_call_count();
+        assert!(run_vm_jit("fn g(x: Float) = x * 2.0 + 1.0\n(0..64).map(i => g(to_float(i))).sum()").is_ok());
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the float-parameter callee never reached a native kernel"
+        );
+    }
+
+    /// The pure mixed-signature table must name exactly the functions the JIT gives a mixed
+    /// specialization, with the same kinds. It is the compile-time half of a two-sided gate:
+    /// the bytecode compiler uses it to decide whether a call inside a map body can be typed,
+    /// and `build` re-derives the same thing. A disagreement would mean emitting guards for
+    /// kernels the JIT never compiles — or typing a call by a signature the callee lacks.
+    #[test]
+    fn the_pure_mixed_sig_table_matches_what_the_jit_specializes() {
+        use crate::jit::NumKind;
+        let src = "fn plain(x: Float) = x * 2.0 + 1.0\n\
+                   fn twoarg(a: Float, b: Int) = a * to_float(b)\n\
+                   fn inty(x) = x * 2 + 1\n\
+                   fn spin(zr, zi, i, n) = if i >= n then i else spin(zr * zr - zi * zi, 2.0 * zr * zi, i + 1, n)\n\
+                   fn wrapper(px: Int) = plain(to_float(px))\n\
+                   fn usesdiv(x: Float, d: Float) = x / d\n\
+                   fn nontail(x: Float) = if x <= 0.0 then 0.0 else x + nontail(x - 1.0)\n\
+                   plain(1.0)\n";
+        let toks = lexer::lex(src).expect("lex");
+        let ast = parser::parse(toks).expect("parse");
+        let table = crate::jit::mixed_fn_sigs(&ast);
+
+        assert!(table.contains_key("plain"), "a Float-parameter function must get a mixed sig");
+        assert!(table.contains_key("twoarg"));
+        assert!(table.contains_key("wrapper"), "a mixed body calling an earlier one qualifies");
+        assert!(table.contains_key("usesdiv"), "non-literal divisors are admitted since 3w");
+        // Unannotated numeric recursion must still be inferred — Stage 3j's annotation cliff.
+        assert!(table.contains_key("spin"), "unannotated numeric recursion must be inferred");
+        // An all-`Int` function is the plain i64 specialization's job; `mixed_fn_sig` declines
+        // a zero float-mask so the two never compete.
+        assert!(!table.contains_key("inty"), "all-Int belongs to the i64 spec, not mixed");
+        assert!(!table.contains_key("nontail"), "non-tail recursion is excluded");
+
+        assert_eq!(table["plain"].0, vec![NumKind::Float]);
+        assert_eq!(table["plain"].1, NumKind::Float);
+        assert_eq!(table["twoarg"].0, vec![NumKind::Float, NumKind::Int]);
+        assert_eq!(table["twoarg"].1, NumKind::Float);
+    }
+
     /// The VALUE-SCALAR mixed map: captures ride as `f64` bits instead of Int-proven `i64`s,
     /// so a `Float` variable in a mixed body compiles instead of declining. `d = 4.0;
     /// map(i => to_float(i) / d)` went 3.48s → 0.05s at 20M, matching the `d = 4` and

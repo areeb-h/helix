@@ -299,6 +299,11 @@ pub struct Compiler {
     /// may *call* them. Computed once (identically to `jit::build`) so the compile-time
     /// guard decision matches what the JIT will actually compile.
     jit_fns: std::collections::HashSet<String>,
+    /// User functions that get a MIXED specialization, with their parameter kinds and return
+    /// kind. The names alone are not enough to type a call inside a mixed map body — a
+    /// `Float`-parameter callee needs its signature — so this carries them. Same
+    /// single-source-of-truth contract as `jit_fns`: `jit::build` re-derives it.
+    mixed_sigs: std::collections::HashMap<String, (Vec<crate::jit::NumKind>, crate::jit::NumKind)>,
     /// Inferred receiver types from the type checker (see [`crate::types::TypeMap`]),
     /// used to route receiver-polymorphic methods. `None` when compiling without a
     /// prior type-check (tests/fuzzers) — then such methods fall back as before.
@@ -335,6 +340,7 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         scan_loops: Vec::new(),
         no_fuse: false,
         jit_fns: crate::jit::int_eligible_fns(program),
+        mixed_sigs: crate::jit::mixed_fn_sigs(program),
         types,
     };
 

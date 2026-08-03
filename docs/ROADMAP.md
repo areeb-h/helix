@@ -1339,29 +1339,58 @@ motivates this phase.
 - [ ] **`try`-on-VM error-recovery soak** — `TryBegin`/`TryOk`/`TryErr` unwinding
       under the fuzzer, composed with JIT bailouts mid-`try`.
 
-- [ ] **A user function with a FLOAT parameter, called from a map body, still does not
-      compile.** Partially closed by Stage 3p below, which handles the `i64` callee; the
-      remaining case is a callee whose parameters are `Float`:
+- [x] **Stage 3y — a map body may CALL a `Float`-parameter function: 2.09s → 0.06s.** The
+      last shape where naming something cost two orders of magnitude. Same body, 20M
+      elements: inline 0.02s, behind `fn g(x: Float) = …` **2.09s** — annotated or inferred.
 
-      | spelling (20M elements) | JIT | VM | |
-      | --- | --- | --- | --- |
-      | `map(i => to_float(i) * 2.0 + 1.0)` inline | 0.02s | 1.63s | native, 82× |
-      | `fn g(x: Float) = x * 2.0 + 1.0` + `map(i => g(to_float(i)))` | **1.47s** | 2.15s | **VM** |
+      This needed more than Stages 3p/3r's call work. There is deliberately no standalone
+      `f64` specialization of a user function (see the note above `let kind = NumKind::Int`
+      in `build`): a float-argument function can still return an `Int`, so `f64`-monomorphic
+      codegen would diverge on RESULT TYPE. The only thing callable is the MIXED
+      specialization, whose ABI is all-`i64` bit slots plus a trailing poison pointer.
 
-      This one is NOT the same fix. There is deliberately no standalone `f64`
-      specialization of a user function (see the note above `let kind = NumKind::Int` in
-      `build`): a float-argument function can still return an `Int` — a literal, or an
-      `Int`-only subexpression — so an `f64`-monomorphic codegen would diverge from the
-      interpreter on RESULT TYPE, not just value. The machinery that solves this already
-      exists for *functions* calling functions: `MixedSig` carries `params` + `ret`, and
-      `infer_typed_env`/`gen_value_env` type and emit such calls. The map kernel cannot
-      reach it because `mixed_sigs` is built inside `jit::build`, while the decision to
-      emit a kernel (and its capture list) is made earlier, in the bytecode compiler,
-      which knows only function NAMES (`jit_fns`, `func_names`) and no signatures.
-      Closing it means giving the bytecode compiler a mixed-signature table — i.e. moving
-      or duplicating `mixed_fn_sig`'s inference — which is a compiler↔JIT contract change,
-      not a local edit. Worth it (this is `map(i => escape(...))`, the k2/mandelbrot
-      shape), but it should be designed rather than bolted on.
+      Three pieces:
+      * `MixedSig` lost its `FuncId` (ids moved to a parallel `mixed_ids` map), which makes
+        signature inference module-free — so `mixed_fn_sigs(program)` is now a pure AST
+        function, the twin of `int_eligible_fns`, and the bytecode compiler holds the table
+        it needs to type a call. Pinned by
+        `the_pure_mixed_sig_table_matches_what_the_jit_specializes`, which checks it names
+        exactly what the JIT specializes — including the unannotated tail-recursive case
+        (Stage 3j) and excluding the all-`Int` one (the i64 spec's territory).
+      * `infer_mixed_kind` gained a mixed-call arm: argument kinds must EQUAL the callee's
+        parameter kinds (no promoting at the boundary — the same strict rule
+        `infer_typed_env` uses for a mixed sibling).
+      * `gen_value_typed` marshals `Float` args to bits, hands the callee a stack CELL as
+        its poison out-param, folds that cell into the kernel's accumulator, and bitcasts a
+        `Float` result back.
+
+      THE CRUX, AND A BUG CAUGHT ONLY BY THE RAISE CASES: a callee's bail must poison the
+      whole map. `map_body_raises` scanned only for rounders and division *in the body*, so
+      a body that merely CALLS a mixed function was built poison-free, the VM took the
+      non-poison wrapper, and a raising callee was silently swallowed — `[0.0, 0.0, …]`
+      where the other two engines raised "division by zero". A call to any mixed
+      specialization now counts as raising, since its ABI carries a poison pointer precisely
+      because it can bail. All four raise cases (a `/0` at every element, at one element, a
+      NaN comparison, a rounder out of range) failed that way before the fix.
+
+      Also fixed: the poison cell is read through its ADDRESS rather than via
+      `stack_load`/`stack_store`. The callee writes through the pointer, which slot
+      promotion cannot see, so slot-relative accesses can be folded away as "loads what was
+      stored" — zero.
+
+      HONEST COST: the callee path is **0.06s against the inline twin's 0.02s**, because any
+      mixed callee can bail, so the kernel is "raising" and the poison FFI wrappers are
+      SERIAL. Parallelizing them needs per-chunk poison cells (sound — a map has no
+      cross-element dependency and poison is a monotonic flag); recorded below as the next
+      lever, and it would lift the rounder kernels from Stage 3v too.
+
+- [ ] **Parallelize the poison FFI wrappers.** `run_map_poison` and `run_map_range_poison`
+      are serial, so every RAISING kernel — the Stage 3v rounders and the Stage 3y mixed
+      callees — gives up the chunked-parallel path. Measured cost: a float-parameter callee
+      is 0.06s where its inline twin is 0.02s. The fix is per-chunk poison cells reduced
+      with `|`: a map has no cross-element dependency, and poison is monotonic, so chunks
+      cannot race. The one behaviour change is that a poisoned run no longer stops at the
+      first bad chunk — harmless, since the whole output is discarded either way.
 
 - [ ] **Two spelling inversions still open** (two others from this sweep are now Stage 3r).
       At 10M elements; a declining JIT runs the bytecode loop, so "VM" means the JIT time

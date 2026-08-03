@@ -54,9 +54,10 @@ pub use ffi::*;
 
 const MAX_ARITY: usize = 6;
 
-/// The two scalar specializations.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum NumKind {
+/// The two scalar specializations. `pub` because [`mixed_fn_sigs`] hands its table to the
+/// bytecode compiler, which types calls by these kinds.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum NumKind {
     Int,
     Float,
 }
@@ -350,6 +351,14 @@ pub fn build(
     // (bits ABI — see [`MixedFn`]); the prologue bitcasts Float params, the epilogue
     // bitcasts a Float result.
     let mut compiled_mixed: Vec<(String, FuncId, u16, bool, usize)> = Vec::new();
+    // Hoisted out of the block below so the MAP kernels can call these specializations too
+    // (a `Float`-parameter callee inside a map body): the sigs to marshal by, and their ids.
+    let mut mixed_sigs: HashMap<&str, MixedSig> = HashMap::new();
+    let mut mixed_ids: HashMap<&str, FuncId> = HashMap::new();
+    // The same signatures in the OWNED, name-keyed shape the map analyses take — the twin of
+    // what the bytecode compiler computed via `mixed_fn_sigs`, so compile gate and build gate
+    // are reading one table.
+    let msig_table: MixedSigTable = mixed_fn_sigs(program);
     {
         // PHASE 1 — eligibility + declaration, in program order. Each accepted
         // function's signature enters `mixed_sigs` immediately, so a LATER mixed body
@@ -358,7 +367,6 @@ pub fn build(
         // functions qualify only in the tail-loopable shape; non-recursive ones
         // compile straight-line with the same walker/codegen.
         let recursive = recursive_funcs(&funcs);
-        let mut mixed_sigs: HashMap<&str, MixedSig> = HashMap::new();
         let mut mixed_defs: Vec<(&FnDef, u16, Vec<NumKind>, NumKind)> = Vec::new();
         for f in &funcs {
             let Some((mask, param_kinds, ret_kind)) =
@@ -381,8 +389,8 @@ pub fn build(
             else {
                 continue;
             };
-            mixed_sigs
-                .insert(f.name, MixedSig { id, params: param_kinds.clone(), ret: ret_kind });
+            mixed_sigs.insert(f.name, MixedSig { params: param_kinds.clone(), ret: ret_kind });
+            mixed_ids.insert(f.name, id);
             mixed_defs.push((f, mask, param_kinds, ret_kind));
         }
 
@@ -390,7 +398,7 @@ pub fn build(
         let mut ctx = module.make_context();
         let mut bctx = FunctionBuilderContext::new();
         for (f, mask, param_kinds, ret_kind) in mixed_defs {
-            let id = mixed_sigs[f.name].id;
+            let id = mixed_ids[f.name];
             let n_slots = f.params.len() + 1;
             ctx.func.signature.call_conv = CallConv::SystemV;
             for _ in 0..n_slots {
@@ -450,6 +458,7 @@ pub fn build(
                 poison_blk,
                 poison_ptr,
                 sigs: &mixed_sigs,
+                ids: &mixed_ids,
             };
             gen_tail_mixed(&mut builder, f.body, &mut vars, &mut env, &mut module, &tl);
             builder.seal_block(hdr);
@@ -530,34 +539,34 @@ pub fn build(
     // the VM picks by the array's element type at runtime. `filter`/fused stay `Int`.
     let map_ids = define_array_kernels(
         &mut module, map_kernels, "map", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        None, false,
+        None, false, &msig_table, &mixed_ids,
     );
     let map_f64_ids = define_array_kernels(
         &mut module, map_kernels, "mapf", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
-        None, false,
+        None, false, &msig_table, &mixed_ids,
     );
     // The mixed `Int`-source → `Float` specialization (`range.map(j => j*0.001)`): reads
     // `i64`, writes `f64`. `elem_kind` is ignored when mixed (the body is typed per node).
     let map_mixed_ids = define_array_kernels(
         &mut module, map_kernels, "mapm", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        Some(NumKind::Float), false,
+        Some(NumKind::Float), false, &msig_table, &mixed_ids,
     );
     // Its VALUE-SCALAR variant: the same stored kernels, with captures riding as f64 bits —
     // dispatched when a runtime `Float` capture makes the Int-proven marshal decline.
     let map_mixed_value_ids = define_array_kernels(
         &mut module, map_kernels, "mapmv", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        Some(NumKind::Float), true,
+        Some(NumKind::Float), true, &msig_table, &mixed_ids,
     );
     // The Int-ROOTED mixed specialization: i64 in, i64 OUT, Float intermediates
     // (`to_int(to_float(i) * 1.5)`). Same ABI as the plain i64 kernel, so it rides the same
     // FFI wrappers, dispatch marshalling, and in-place reuse.
     let map_mixed_int_ids = define_array_kernels(
         &mut module, map_kernels, "mapmi", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        Some(NumKind::Int), false,
+        Some(NumKind::Int), false, &msig_table, &mixed_ids,
     );
     let filter_ids = define_array_kernels(
         &mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        None, false,
+        None, false, &msig_table, &mixed_ids,
     );
     let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns);
 
@@ -754,6 +763,9 @@ fn define_array_kernels(
     // The VALUE-SCALAR variant of the plain mixed map ("mapmv"): captures load as `f64`
     // bits and type `Float`, admitted by the `MixT` analysis instead of the Int-proven one.
     value_scalars: bool,
+    // The mixed specializations a kernel body may CALL, and their codegen identities.
+    msigs: &MixedSigTable,
+    mixed_ids: &HashMap<&str, FuncId>,
 ) -> Vec<Option<FuncId>> {
     let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
     let mut ctx = module.make_context();
@@ -783,7 +795,7 @@ fn define_array_kernels(
             // analysis's `Scalar`s, while this specialization's are `ScalarValue`; the kinds
             // are a per-specialization loading decision, not an identity.
             !indexed
-                && map_body_raises(&k.body, user_fns) == k.raises
+                && map_body_raises(&k.body, user_fns, msigs) == k.raises
                 && mixed_map_value_scalar_eligible(&k.body, &k.binder, user_fns).is_some_and(
                     |c| {
                         c.len() == k.captures.len()
@@ -795,7 +807,7 @@ fn define_array_kernels(
             // same drift guard as the capture list: re-derive from the body and require the
             // stored flag to match, or the VM would call a 5-param kernel through a 4-param
             // wrapper.
-            map_body_raises(&k.body, user_fns) == k.raises
+            map_body_raises(&k.body, user_fns, msigs) == k.raises
                 && if indexed {
                 // Synthetic `$aff*` naming is a deterministic function of the body (dedup
                 // by printed form), so the re-derived capture list — `$aff` slots included
@@ -806,7 +818,7 @@ fn define_array_kernels(
                 // Same drift guard as the indexed arms: re-derive the capture list and require
                 // it to equal the stored one, so codegen's `caps[j]` and the VM's marshal order
                 // cannot disagree.
-                mixed_map_eligible(&k.body, &k.binder, eligible, user_fns)
+                mixed_map_eligible(&k.body, &k.binder, eligible, user_fns, msigs)
                     .is_some_and(|c| c == k.captures)
             }
         } else if mixed_root == Some(NumKind::Int) {
@@ -818,8 +830,8 @@ fn define_array_kernels(
             // Int-rooted body has shown up in no probe, and its bounds discharge would be
             // unexercised safety code.
             !indexed
-                && map_body_raises(&k.body, user_fns) == k.raises
-                && mixed_map_int_root_eligible(&k.body, &k.binder, eligible, user_fns)
+                && map_body_raises(&k.body, user_fns, msigs) == k.raises
+                && mixed_map_int_root_eligible(&k.body, &k.binder, eligible, user_fns, msigs)
                     .is_some_and(|c| c == k.captures)
                 && map_kernel_captures(&k.body, &k.binder, eligible).is_none()
         } else if matches!(elem_kind, NumKind::Float) {
@@ -861,7 +873,7 @@ fn define_array_kernels(
         };
         let done = define_array_kernel(
             module, &mut ctx, &mut bctx, id, k, is_filter, fn_ids, elem_kind, mixed_root,
-            value_scalars,
+            value_scalars, msigs, mixed_ids,
         );
         ids.push(done.map(|()| id));
     }
@@ -2477,10 +2489,11 @@ pub fn mixed_map_eligible(
     binder: &str,
     fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
+    msigs: &MixedSigTable,
 ) -> Option<Vec<Capture>> {
     let mut uses_binder = false;
     let mut caps: Vec<Capture> = Vec::new();
-    let root = infer_mixed_kind(body, binder, &mut uses_binder, &mut caps, fns, user_fns)?;
+    let root = infer_mixed_kind(body, binder, &mut uses_binder, &mut caps, fns, user_fns, msigs)?;
     (root == NumKind::Float && uses_binder && caps.len() <= MAX_CAPTURES).then_some(caps)
 }
 
@@ -2505,28 +2518,35 @@ const RAISING_ROUNDERS: &[&str] = &["floor", "ceil", "round", "trunc"];
 /// function), so it does not count. Over-approximates on an `Int`-typed argument (where the
 /// builtin is the identity and cannot raise): the kernel then carries a poison slot it never
 /// sets, which costs one dead store and nothing else.
-pub fn map_body_raises(e: &Expr, user_fns: &HashSet<&str>) -> bool {
+pub fn map_body_raises(e: &Expr, user_fns: &HashSet<&str>, msigs: &MixedSigTable) -> bool {
     match e {
         Expr::Call { name, args, .. } => {
-            (RAISING_ROUNDERS.contains(&name.as_str())
-                && args.len() == 1
-                && !user_fns.contains(name.as_str()))
-                || args.iter().any(|a| map_body_raises(a, user_fns))
+            // A call to a MIXED specialization always counts: its ABI carries a poison
+            // pointer precisely because it can bail — a NaN comparison anywhere in its body,
+            // or a `/0`. The kernel must therefore be built with the poison signature so the
+            // callee's flag has somewhere to land, even when the map body itself contains no
+            // rounder and no division. (Without this the kernel is built poison-free, the VM
+            // calls the non-poison wrapper, and a raising callee is silently swallowed.)
+            (msigs.contains_key(name.as_str()) && user_fns.contains(name.as_str()))
+                || (RAISING_ROUNDERS.contains(&name.as_str())
+                    && args.len() == 1
+                    && !user_fns.contains(name.as_str()))
+                || args.iter().any(|a| map_body_raises(a, user_fns, msigs))
         }
         // Any `/`: the interpreter raises on a zero divisor. Over-approximates on a nonzero
         // literal divisor (which cannot raise) — that costs a dead poison slot, nothing else.
         Expr::Binary { op: BinOp::Div, .. } => true,
         Expr::Binary { left, right, .. } => {
-            map_body_raises(left, user_fns) || map_body_raises(right, user_fns)
+            map_body_raises(left, user_fns, msigs) || map_body_raises(right, user_fns, msigs)
         }
-        Expr::Unary { expr, .. } => map_body_raises(expr, user_fns),
+        Expr::Unary { expr, .. } => map_body_raises(expr, user_fns, msigs),
         Expr::Index { recv, index, .. } => {
-            map_body_raises(recv, user_fns) || map_body_raises(index, user_fns)
+            map_body_raises(recv, user_fns, msigs) || map_body_raises(index, user_fns, msigs)
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
-            map_body_raises(cond, user_fns)
-                || map_body_raises(then_branch, user_fns)
-                || map_body_raises(else_branch, user_fns)
+            map_body_raises(cond, user_fns, msigs)
+                || map_body_raises(then_branch, user_fns, msigs)
+                || map_body_raises(else_branch, user_fns, msigs)
         }
         _ => false,
     }
@@ -2537,10 +2557,11 @@ pub fn mixed_map_int_root_eligible(
     binder: &str,
     fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
+    msigs: &MixedSigTable,
 ) -> Option<Vec<Capture>> {
     let mut uses_binder = false;
     let mut caps: Vec<Capture> = Vec::new();
-    let root = infer_mixed_kind(body, binder, &mut uses_binder, &mut caps, fns, user_fns)?;
+    let root = infer_mixed_kind(body, binder, &mut uses_binder, &mut caps, fns, user_fns, msigs)?;
     (root == NumKind::Int && uses_binder && caps.len() <= MAX_CAPTURES).then_some(caps)
 }
 
@@ -2557,6 +2578,7 @@ fn infer_mixed_kind(
     caps: &mut Vec<Capture>,
     fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
+    msigs: &MixedSigTable,
 ) -> Option<NumKind> {
     match e {
         Expr::Int(_) => Some(NumKind::Int),
@@ -2588,25 +2610,47 @@ fn infer_mixed_kind(
                 return None;
             }
             for a in args {
-                if infer_mixed_kind(a, binder, uses_binder, caps, fns, user_fns)? != NumKind::Int {
+                if infer_mixed_kind(a, binder, uses_binder, caps, fns, user_fns, msigs)? != NumKind::Int {
                     return None;
                 }
             }
             Some(NumKind::Int)
         }
+        // A user function with a MIXED specialization — the `Float`-parameter callee. Tried
+        // AFTER the i64 arm above (an all-`Int` function has no mixed form, so the two never
+        // compete) and before the builtins, so a user shadow still wins. Argument kinds must
+        // EQUAL the callee's parameter kinds: its specialization was compiled for exactly
+        // those, and there is no promoting at the boundary — the same strict rule
+        // `infer_typed_env` uses for a mixed sibling call. The kernel marshals to the bits
+        // ABI and shares its poison cell, so a NaN-compare or `/0` inside the callee bails
+        // the whole map exactly as it bails a mixed function.
+        Expr::Call { name, args, .. }
+            if user_fns.contains(name.as_str()) && msigs.contains_key(name.as_str()) =>
+        {
+            let (params, ret) = &msigs[name.as_str()];
+            if args.len() != params.len() {
+                return None;
+            }
+            for (a, &want) in args.iter().zip(params) {
+                if infer_mixed_kind(a, binder, uses_binder, caps, fns, user_fns, msigs)? != want {
+                    return None;
+                }
+            }
+            Some(*ret)
+        }
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns)?;
+                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs)?;
                     Some(NumKind::Float) // sqrt always returns Float
                 }
                 // `to_float` is the explicit Int->Float conversion: always Float, and the typed
                 // codegen emits the same `fcvt_from_sint` promotion it already emits for `sqrt`.
                 ("to_float", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns)?;
+                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs)?;
                     Some(NumKind::Float)
                 }
-                ("abs", 1) => infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns), // preserves kind
+                ("abs", 1) => infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs), // preserves kind
                 // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
                 // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
                 // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
@@ -2614,7 +2658,7 @@ fn infer_mixed_kind(
                 // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
                 // RAISE when the result leaves i64 range and therefore still need a poison path.
                 ("to_int" | "sign", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns)?;
+                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs)?;
                     Some(NumKind::Int)
                 }
                 // The RAISING rounders: `Float` in, `Int` out, and an out-of-i64-range result
@@ -2627,14 +2671,14 @@ fn infer_mixed_kind(
                 // analysis types every operand `Int` or genuine `Float` — value scalars ride
                 // as `i64` here — so there is no unpromoted-scalar case to refuse.)
                 ("floor" | "ceil" | "round" | "trunc", 1) => {
-                    match infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns)? {
+                    match infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs)? {
                         NumKind::Int => Some(NumKind::Int), // identity on Int
                         NumKind::Float => Some(NumKind::Int),
                     }
                 }
                 ("min" | "max", 2) => {
-                    let ka = infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns)?;
-                    let kb = infer_mixed_kind(&args[1], binder, uses_binder, caps, fns, user_fns)?;
+                    let ka = infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs)?;
+                    let kb = infer_mixed_kind(&args[1], binder, uses_binder, caps, fns, user_fns, msigs)?;
                     if ka == kb { Some(ka) } else { None }
                 }
                 _ => None,
@@ -2654,8 +2698,8 @@ fn infer_mixed_kind(
             }
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns)?;
-            let rk = infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns)?;
+            let lk = infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns, msigs)?;
+            let rk = infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns, msigs)?;
             Some(if lk == NumKind::Float || rk == NumKind::Float {
                 NumKind::Float
             } else {
@@ -2668,8 +2712,8 @@ fn infer_mixed_kind(
         // interpreter raises on `/0` where native `fdiv` yields inf). This is what lets
         // `ceil(to_float(i) / 4.0)` compile instead of forcing the `* 0.25` spelling.
         Expr::Binary { op: BinOp::Div, left, right, .. } => {
-            infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns)?;
-            infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns)?;
+            infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns, msigs)?;
+            infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns, msigs)?;
             Some(NumKind::Float)
         }
         // The i64-closed integer ops (`%`, `//`, bitwise, shifts) — the SAME safe subset as
@@ -2691,8 +2735,8 @@ fn infer_mixed_kind(
             if !op_ok {
                 return None;
             }
-            let lk = infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns)?;
-            let rk = infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns)?;
+            let lk = infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns, msigs)?;
+            let rk = infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns, msigs)?;
             if lk == NumKind::Int && rk == NumKind::Int {
                 Some(NumKind::Int)
             } else {
@@ -3273,10 +3317,55 @@ fn tail_loopable_set<'a>(funcs: &[FnDef<'a>]) -> HashSet<&'a str> {
 /// A mixed specialization visible to OTHER mixed bodies (declared before any body is
 /// defined, so `escape` can call `step`): its Cranelift id, per-param kinds, and result
 /// kind (`Int` placeholder for a body whose every path re-loops).
+/// A mixed specialization's numeric SIGNATURE — parameter kinds and return kind, with no
+/// codegen identity attached. Deliberately id-free so the inference that produces it
+/// ([`mixed_fn_sigs`]) needs no `JITModule` and can therefore run at BYTECODE-COMPILE time,
+/// where the decision to emit a kernel guard is made. `build` keeps the `FuncId`s in a
+/// parallel map (`mixed_ids`), keyed by the same names.
+#[derive(Clone)]
 struct MixedSig {
-    id: FuncId,
     params: Vec<NumKind>,
     ret: NumKind,
+}
+
+/// Every user function that gets a MIXED specialization, with its parameter kinds and
+/// return kind. Pure over the AST — the twin of [`int_eligible_fns`], and the table the
+/// bytecode compiler needs in order to type a call to a `Float`-parameter function inside a
+/// map body (it knows only NAMES otherwise). Computed identically here and inside `build`,
+/// so the compile-time guard decision matches what the JIT will actually compile.
+///
+/// Program order matters and is preserved: each accepted signature is visible to LATER
+/// functions, so `fn escape(...) = step(...)` sees `step` (the define-before-use rule
+/// guarantees callees precede callers).
+pub type MixedSigTable = std::collections::HashMap<String, (Vec<NumKind>, NumKind)>;
+
+pub fn mixed_fn_sigs(program: &[Stmt]) -> MixedSigTable {
+    let funcs: Vec<FnDef> = program
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::Func { name, params, body, .. } => Some(FnDef { name, params, body }),
+            _ => None,
+        })
+        .collect();
+    let int_eligible = eligible_set(&funcs, NumKind::Int);
+    let tail_loop = tail_loopable_set(&funcs);
+    let recursive = recursive_funcs(&funcs);
+    let user_fns: HashSet<&str> = funcs.iter().map(|f| f.name).collect();
+    let mut sigs: HashMap<&str, MixedSig> = HashMap::new();
+    let mut out = std::collections::HashMap::new();
+    for f in &funcs {
+        let Some((_, params, ret)) =
+            mixed_fn_sig(f, &tail_loop, &recursive, &int_eligible, &sigs, &user_fns)
+        else {
+            continue;
+        };
+        // A body whose every path re-loops never returns; `Int` is the same placeholder
+        // `build` uses, so the two tables agree.
+        let ret = ret.unwrap_or(NumKind::Int);
+        sigs.insert(f.name, MixedSig { params: params.clone(), ret });
+        out.insert(f.name.to_string(), (params, ret));
+    }
+    out
 }
 
 /// Bottom-up kind of an expression over a **typed environment** (parameter and `let`
@@ -4501,6 +4590,8 @@ fn define_array_kernel<'a>(
     elem_kind: NumKind,
     mixed_root: Option<NumKind>,
     value_scalars: bool,
+    msigs: &MixedSigTable,
+    mixed_ids: &HashMap<&str, FuncId>,
 ) -> Option<()> {
     // Element + capture values are `i64` (map over an `Int` array) or `f64` (map over a
     // `Float` array); the buffer pointers and length are always `i64`. Filter is `Int`.
@@ -4661,8 +4752,16 @@ fn define_array_kernel<'a>(
                     .map(|c| c.name.as_str())
                     .collect()
             };
+            // The cell a mixed CALLEE writes its poison flag into (its ABI wants a pointer;
+            // ours is a register accumulator). One slot per kernel, reset before each call.
+            let cell = b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                8,
+                3,
+            ));
+            let mixed_ctx = MixedCallCtx { sigs: msigs, ids: mixed_ids, poison_cell: cell };
             let (r, kind) =
-                gen_value_typed(&mut b, &k.body, &vars, &k.binder, &f64_scalars, fn_ids, module, poison_var);
+                gen_value_typed(&mut b, &k.body, &vars, &k.binder, &f64_scalars, fn_ids, module, &mixed_ctx, poison_var);
             // The build gate re-derived the root via the same analysis this codegen mirrors,
             // so a mismatch here is a twin-drift bug, not a runtime condition.
             debug_assert!(kind == root, "mixed map root drifted between analysis and codegen");
@@ -5125,7 +5224,7 @@ fn gen_value_env<'a>(
             if let Some(sig) = tl.sigs.get(name.as_str()) {
                 // A mixed sibling: marshal args to the bits ABI (Float → raw bits in
                 // i64 slots), pass OUR poison pointer as its trailing slot, call.
-                let fref = module.declare_func_in_func(sig.id, b.func);
+                let fref = module.declare_func_in_func(tl.ids[name.as_str()], b.func);
                 let mut argv: Vec<ClValue> = Vec::with_capacity(args.len() + 1);
                 for (a, &k) in args.iter().zip(&sig.params) {
                     let (v, ak) = gen_value_env(b, a, vars, env, module, tl);
@@ -5329,6 +5428,9 @@ struct MixedTail<'p> {
     /// The mixed siblings this body may call (all declared before any body is
     /// defined, so a later function can call an earlier one — `escape` → `step`).
     sigs: &'p HashMap<&'p str, MixedSig>,
+    /// Their codegen identities, keyed by the same names — parallel to `sigs`, which is
+    /// id-free so its inference can also run at bytecode-compile time.
+    ids: &'p HashMap<&'p str, FuncId>,
 }
 
 /// Generate a mixed tail-recursive body as a native loop — [`gen_tail`]'s typed sibling,
@@ -5700,6 +5802,16 @@ fn gen_arm_cond<'a>(
 /// "`i64` arithmetic until a float enters, then `as f64`" behavior bit-for-bit, including
 /// an `i64` wrap that happens *before* the float promotion. Only the binder (an `i64`
 /// element), int/float literals, and `+ - *` reach here (guaranteed by `mixed_map_eligible`).
+/// Everything a map kernel needs in order to CALL a mixed specialization: the signatures to
+/// marshal by, their codegen identities, and a stack cell to hand the callee as its poison
+/// out-param (the kernel's own poison is a register accumulator, and the mixed ABI wants a
+/// pointer). Bundled so the walker's signature stays readable.
+struct MixedCallCtx<'c> {
+    sigs: &'c MixedSigTable,
+    ids: &'c HashMap<&'c str, FuncId>,
+    poison_cell: cranelift_codegen::ir::StackSlot,
+}
+
 fn gen_value_typed<'a>(
     b: &mut FunctionBuilder,
     e: &'a Expr,
@@ -5708,6 +5820,7 @@ fn gen_value_typed<'a>(
     f64_scalars: &HashSet<&str>,
     fn_ids: &HashMap<&'a str, FuncId>,
     module: &mut JITModule,
+    mixed: &MixedCallCtx,
     // The kernel's poison accumulator (`i64`, 0 = clean). The raising-rounder arm ORs 1 into
     // it on any out-of-i64-range result; every kernel declares the variable (a non-raising
     // body just never touches it) so this needs no `Option` plumbing.
@@ -5742,15 +5855,15 @@ fn gen_value_typed<'a>(
                 _ => unreachable!("ineligible index receiver reached mixed codegen"),
             };
             let base = b.use_var(vars[name]);
-            let (idx, ik) = gen_value_typed(b, index, vars, binder, f64_scalars, fn_ids, module, poison);
+            let (idx, ik) = gen_value_typed(b, index, vars, binder, f64_scalars, fn_ids, module, mixed, poison);
             debug_assert!(matches!(ik, NumKind::Int), "non-i64 index reached mixed codegen");
             let off = b.ins().imul_imm(idx, 8);
             let addr = b.ins().iadd(base, off);
             (b.ins().load(F64, MemFlags::trusted(), addr, 0), NumKind::Float)
         }
         Expr::Binary { op, left, right, .. } => {
-            let (lv, lk) = gen_value_typed(b, left, vars, binder, f64_scalars, fn_ids, module, poison);
-            let (rv, rk) = gen_value_typed(b, right, vars, binder, f64_scalars, fn_ids, module, poison);
+            let (lv, lk) = gen_value_typed(b, left, vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+            let (rv, rk) = gen_value_typed(b, right, vars, binder, f64_scalars, fn_ids, module, mixed, poison);
             // `/` is ALWAYS float division in Helix (`10 / 2 == 5.0`), so it takes the f64
             // branch even for two `Int` operands.
             if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div) {
@@ -5832,10 +5945,52 @@ fn gen_value_typed<'a>(
             let fref = module.declare_func_in_func(fid, b.func);
             let argv: Vec<ClValue> = args
                 .iter()
-                .map(|a| gen_value_typed(b, a, vars, binder, f64_scalars, fn_ids, module, poison).0)
+                .map(|a| gen_value_typed(b, a, vars, binder, f64_scalars, fn_ids, module, mixed, poison).0)
                 .collect();
             let call = b.ins().call(fref, &argv);
             (b.inst_results(call)[0], NumKind::Int)
+        }
+        // A user function with a MIXED specialization. Its ABI is all-`i64` BIT slots plus a
+        // trailing `*mut i8` poison pointer (see `MixedFn`), so `Float` arguments are
+        // bitcast in and a `Float` result bitcast out. We hand it a stack CELL, then fold
+        // that cell into this kernel's poison accumulator: a NaN compare or `/0` inside the
+        // callee therefore poisons the whole map, and the VM discards the output and
+        // re-runs on bytecode for the exact interpreter error — the same contract as a
+        // rounder leaving i64 range.
+        Expr::Call { name, args, .. } if mixed.sigs.contains_key(name.as_str()) => {
+            let (params, ret) = &mixed.sigs[name.as_str()];
+            let fref = module.declare_func_in_func(mixed.ids[name.as_str()], b.func);
+            // Zero the cell and read it back through its ADDRESS, not via `stack_store`/
+            // `stack_load`: the callee writes through the pointer, which the slot-promotion
+            // pass cannot see, so slot-relative accesses can be folded away as
+            // "loads what was stored" (0). Explicit memory traffic keeps the write visible.
+            let cell = mixed.poison_cell;
+            let cell_ptr = b.ins().stack_addr(I64, cell, 0);
+            let zero8 = b.ins().iconst(I8, 0);
+            b.ins().store(MemFlags::new(), zero8, cell_ptr, 0);
+            let mut argv: Vec<ClValue> = Vec::with_capacity(args.len() + 1);
+            for (a, &want) in args.iter().zip(params) {
+                let (v, ak) =
+                    gen_value_typed(b, a, vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+                debug_assert!(ak == want, "mixed-call arg kind drifted from the callee sig");
+                argv.push(match ak {
+                    NumKind::Int => v,
+                    NumKind::Float => b.ins().bitcast(I64, MemFlags::new(), v),
+                });
+            }
+            argv.push(cell_ptr);
+            let call = b.ins().call(fref, &argv);
+            let raw = b.inst_results(call)[0];
+            let flag = b.ins().load(I8, MemFlags::new(), cell_ptr, 0);
+            let flag64 = b.ins().uextend(I64, flag);
+            let pv = b.use_var(poison);
+            let npv = b.ins().bor(pv, flag64);
+            b.def_var(poison, npv);
+            let v = match ret {
+                NumKind::Int => raw,
+                NumKind::Float => b.ins().bitcast(F64, MemFlags::new(), raw),
+            };
+            (v, *ret)
         }
         // The pure builtins (eligibility guaranteed the names + arities, and same-kind
         // `min`/`max`): `sqrt` promotes its arg to f64 (fsqrt → Float); `abs` is `iabs`
@@ -5843,7 +5998,7 @@ fn gen_value_typed<'a>(
         // (via f64 compare, as the interpreter) or `f64`.
         Expr::Call { name, args, .. } => match name.as_str() {
             "sqrt" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
             }
@@ -5851,7 +6006,7 @@ fn gen_value_typed<'a>(
             // `f64` via `fcvt_from_sint` (the interpreter's `*i as f64`), and an `f64`
             // passes through unchanged.
             "to_float" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (af, NumKind::Float)
             }
@@ -5875,7 +6030,7 @@ fn gen_value_typed<'a>(
             //   * An `Int` argument is the identity (`floor(2) == 2`), matching the
             //     interpreter, and cannot raise.
             "floor" | "ceil" | "round" | "trunc" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
                 if ak == NumKind::Int {
                     return (av, NumKind::Int);
                 }
@@ -5908,7 +6063,7 @@ fn gen_value_typed<'a>(
                 (b.ins().fcvt_to_sint_sat(I64, rounded), NumKind::Int)
             }
             "abs" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
                 match ak {
                     NumKind::Int => (b.ins().iabs(av), NumKind::Int),
                     NumKind::Float => (b.ins().fabs(av), NumKind::Float),
@@ -5917,7 +6072,7 @@ fn gen_value_typed<'a>(
             // `to_int`: saturating float->int, the identity on an `Int`. `fcvt_to_sint_sat`
             // matches the interpreter exactly -- NaN to 0, +-inf to the i64 extremes.
             "to_int" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
                 match ak {
                     NumKind::Int => (av, NumKind::Int),
                     NumKind::Float => (b.ins().fcvt_to_sint_sat(I64, av), NumKind::Int),
@@ -5927,7 +6082,7 @@ fn gen_value_typed<'a>(
             // through to 0 -- which is what the interpreter returns for NaN (it compares
             // rather than using `signum`, which would propagate NaN).
             "sign" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
                 let one = b.ins().iconst(I64, 1);
                 let neg = b.ins().iconst(I64, -1);
                 let zero = b.ins().iconst(I64, 0);
@@ -5951,8 +6106,8 @@ fn gen_value_typed<'a>(
                 (b.ins().select(gt, one, lo), NumKind::Int)
             }
             "min" | "max" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, poison);
-                let (cv, _ck) = gen_value_typed(b, &args[1], vars, binder, f64_scalars, fn_ids, module, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+                let (cv, _ck) = gen_value_typed(b, &args[1], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
                 let le = name == "min";
                 let cc = if le { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
                 match ak {

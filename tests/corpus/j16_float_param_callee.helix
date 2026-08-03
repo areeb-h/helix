@@ -1,0 +1,74 @@
+# A map body CALLING a Float-parameter user function (Stage 3y) — the last shape where naming
+# something cost two orders of magnitude: 2.09s against 0.02s for the identical body inline, at
+# 20M elements, annotated or inferred.
+#
+# Why it needed more than the earlier call work: there is deliberately NO standalone f64
+# specialization of a user function, because a Float-argument function can still return an Int
+# (`fn g(x: Float) = if x > 2.0 then 1 else 0` below), so f64-monomorphic codegen would diverge
+# from the interpreter on RESULT TYPE. The only thing callable is the MIXED specialization,
+# whose ABI is all-i64 bit slots plus a trailing poison pointer. The kernel therefore marshals
+# Floats to bits, hands the callee a stack cell as its poison out-param, and folds that cell
+# into its own accumulator.
+#
+# THE CRUX — and the bug this file would have caught — is that a callee's bail must poison the
+# WHOLE map. `map_body_raises` originally scanned only for rounders and division IN THE BODY,
+# so a body that merely CALLS a mixed function was built poison-free and a raising callee was
+# silently swallowed. Those raise cases live in the Rust test (they stop a program); what is
+# pinned here is every accepting shape, including the ones that must DECLINE and still be right.
+
+# ---- values ----
+
+fn g(x: Float) = x * 2.0 + 1.0
+print((0..6).map(i => g(to_float(i))))
+
+# unannotated: the parameter kinds are inferred, and must reach the same signature table
+fn h(x) = x * 2.0 + 1.0
+print((0..6).map(i => h(to_float(i))))
+
+# mixed argument kinds
+fn lin(a: Float, b: Int) = a * to_float(b) + 1.0
+print((0..6).map(i => lin(to_float(i), 3)))
+
+# a Float-argument function returning Int — the exact reason no plain f64 spec exists
+fn over(x: Float) = if x > 2.0 then 1 else 0
+print((0..6).map(i => over(to_float(i))))
+
+# a callee calling an earlier callee (define-before-use guarantees the order)
+fn inner(x: Float) = x * 2.0
+fn outer(x: Float) = inner(x) + 1.0
+print((0..6).map(i => outer(to_float(i))))
+
+# a captured scalar alongside the call
+c = 2.5
+print((0..6).map(i => inner(to_float(i)) + c))
+
+# a rounder wrapped around the call (both poison sources share one accumulator)
+fn scale(x: Float) = x * 1.5
+print((0..6).map(i => floor(scale(to_float(i)))))
+
+# a division inside the callee, with a safe divisor
+fn div(x: Float, d: Float) = x / d
+print((0..6).map(i => div(to_float(i), 4.0)))
+
+# a tail-recursive Float callee, which compiles as a native loop
+fn spin(x: Float, n: Int) = if n <= 0 then x else spin(x * 1.5, n - 1)
+print((0..5).map(i => spin(to_float(i), 2)))
+
+# ---- declines that must still be exact ----
+
+# argument kinds must EQUAL the parameter kinds — no promoting at the call boundary
+print((0..4).map(i => inner(i) + 0.0))
+
+# an i64 callee still takes the i64 call path, unchanged
+fn twice(x) = x * 2 + 1
+print((0..5).map(i => twice(i) * 0.5))
+
+# a user function shadowing a builtin name must win over the inline lowering
+fn sqrt(x: Float) = x + 100.0
+print((0..4).map(i => sqrt(to_float(i))))
+
+# ---- degenerate and non-range sources ----
+
+print((0..0).map(i => inner(to_float(i))))
+print((4..0).map(i => inner(to_float(i))))
+print([1, 2, 3].map(i => inner(to_float(i))))

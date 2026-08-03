@@ -135,7 +135,7 @@ impl super::Compiler {
                 // per-element bytecode loop. The captures ride as `i64` and the VM re-checks
                 // each is really an `Int` before dispatch — see `mixed_map_eligible`.
                 .or_else(|| {
-                    crate::jit::mixed_map_eligible(body, &params[0], &fns, &user_fns)
+                    crate::jit::mixed_map_eligible(body, &params[0], &fns, &user_fns, &self.mixed_sigs)
                         .map(|c| (c, Vec::new(), Vec::new()))
                 })
                 // The Int-ROOTED mixed body — `to_int(to_float(it) * 1.5)`, which previously
@@ -143,7 +143,7 @@ impl super::Compiler {
                 // analysis rejected (the i64 analysis in particular ran first, so a plain
                 // i64-closed body never lands here).
                 .or_else(|| {
-                    crate::jit::mixed_map_int_root_eligible(body, &params[0], &fns, &user_fns)
+                    crate::jit::mixed_map_int_root_eligible(body, &params[0], &fns, &user_fns, &self.mixed_sigs)
                         .map(|c| (c, Vec::new(), Vec::new()))
                 })
         } else {
@@ -154,7 +154,7 @@ impl super::Compiler {
         };
         // Computed here, while `user_fns` is still borrowable — the capture-push loop below
         // needs `&mut self`, which would end the borrow.
-        let kernel_raises = crate::jit::map_body_raises(body, &user_fns);
+        let kernel_raises = crate::jit::map_body_raises(body, &user_fns, &self.mixed_sigs);
         let kernel_guard: Option<(usize, u32)> = if let Some((caps, index_bounds, synth_exprs)) =
             captures
         {
