@@ -659,12 +659,76 @@ pub fn write_value(buf: &mut String, v: &Value, line: usize, col: usize) -> Resu
         Value::Array(_) | Value::Tuple(_) | Value::Record(_) | Value::DataFrame(_) => {
             buf.push_str(&display_value(v, line, col)?);
         }
+        // The shapes that dominate interpolation, appended DIRECTLY. `write!(buf, "{}",
+        // value)` costs two nested `fmt::Arguments` dispatches — one to reach
+        // `Display for Value`, which then does `write!(f, "{}", inner)` for the scalar —
+        // plus the `Formatter`'s width/fill/precision checks on each. These five arms
+        // produce byte-for-byte what those `write!`s produce (see `Display for Value`),
+        // so this is the same output on a shorter road.
+        Value::Str(s) | Value::Dna(s) => buf.push_str(s),
+        Value::Int(i) => push_i64(buf, *i),
+        Value::Bool(b) => buf.push_str(if *b { "true" } else { "false" }),
+        Value::Missing => buf.push_str("missing"),
         // Writing a scalar's `Display` into a `String` is infallible.
         other => {
             let _ = write!(buf, "{}", other);
         }
     }
     Ok(())
+}
+
+/// `"00", "01", … "99"` laid end to end — built by the compiler rather than typed out,
+/// so it cannot be mistyped. Indexing it at `2 * n` gives the two digits of `n < 100`.
+const DIGIT_PAIRS: [u8; 200] = {
+    let mut t = [0u8; 200];
+    let mut n = 0;
+    while n < 100 {
+        t[n * 2] = b'0' + (n / 10) as u8;
+        t[n * 2 + 1] = b'0' + (n % 10) as u8;
+        n += 1;
+    }
+    t
+};
+
+/// Append an `i64` in decimal — exactly the bytes `write!("{}", i)` writes.
+/// `unsigned_abs` is what makes `i64::MIN` work: negating it would overflow, so the
+/// sign is emitted first and the magnitude is accumulated as `u64`.
+fn push_i64(buf: &mut String, i: i64) {
+    if i < 0 {
+        buf.push('-');
+    }
+    let mut m = i.unsigned_abs();
+    // Digits fall out least-significant first, so they are staged in a fixed buffer
+    // (a u64 is at most 20 digits) and copied out in one `push_str`. Two at a time:
+    // a 19-digit value takes 10 divisions instead of 19, which is why this beats the
+    // formatter on long integers as well as short ones.
+    let mut digits = [0u8; 20];
+    let mut n = digits.len();
+    while m >= 100 {
+        let p = (m % 100) as usize * 2;
+        m /= 100;
+        n -= 2;
+        digits[n] = DIGIT_PAIRS[p];
+        digits[n + 1] = DIGIT_PAIRS[p + 1];
+    }
+    if m < 10 {
+        n -= 1;
+        digits[n] = b'0' + m as u8;
+    } else {
+        let p = m as usize * 2;
+        n -= 2;
+        digits[n] = DIGIT_PAIRS[p];
+        digits[n + 1] = DIGIT_PAIRS[p + 1];
+    }
+    match std::str::from_utf8(&digits[n..]) {
+        Ok(s) => buf.push_str(s),
+        // Unreachable — every byte staged above is `b'0'..=b'9'` — but the formatter
+        // is right here and total, so there is no reason to make this a panic.
+        Err(_) => {
+            use std::fmt::Write as _;
+            let _ = write!(buf, "{}", i);
+        }
+    }
 }
 
 /// Element rendering inside a collection: strings are quoted (matching `Display`),

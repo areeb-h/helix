@@ -5476,3 +5476,216 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         );
         assert_eq!(run_vm("(0..50000).map(it % 5000).unique().length()"), Ok("5000".to_string()));
     }
+
+    /// Interpolation renders a scalar by appending it DIRECTLY to the output buffer
+    /// rather than routing it through `write!(buf, "{}", value)` — two nested
+    /// `fmt::Arguments` dispatches per hole. That is only sound if the short road
+    /// writes byte-for-byte what the formatter writes, so this asserts exactly that,
+    /// for every kind that has a fast arm and every kind that does not, against
+    /// `Display` itself as the reference.
+    ///
+    /// One case only fails under overflow checks: writing `(-i) as u64` instead of
+    /// `unsigned_abs()` wraps `i64::MIN` back to itself, whose `as u64` happens to be
+    /// the right magnitude — so a release build prints the correct digits by accident.
+    /// `cargo test --bin helix` (dev profile) catches it; `--profile gate` cannot.
+    #[test]
+    fn a_directly_appended_scalar_is_byte_identical_to_its_formatter() {
+        let mut cases: Vec<Value> = vec![
+            Value::Int(0),
+            Value::Int(1),
+            Value::Int(-1),
+            Value::Int(9),
+            Value::Int(10),
+            Value::Int(99),
+            Value::Int(100),
+            // the boundaries of the two-digit-at-a-time loop, and of i64 itself
+            Value::Int(i64::MAX),
+            Value::Int(i64::MIN), // negating this overflows — `unsigned_abs` is why it works
+            Value::Int(i64::MIN + 1),
+            Value::Int(-9223372036854775807),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Missing,
+            Value::Unit,
+            Value::Str(std::rc::Rc::new(String::new())),
+            Value::Str(std::rc::Rc::new("plain".to_string())),
+            // a string is written RAW here (quoting happens only inside a container)
+            Value::Str(std::rc::Rc::new("has \"quotes\" and \\ and \n".to_string())),
+            Value::Str(std::rc::Rc::new("ünïcödé — 中文 — 🧬".to_string())),
+            Value::Dna(std::rc::Rc::new("ATGC".to_string())),
+            // no fast arm: these must still go through the formatter unchanged
+            Value::Float(0.0),
+            Value::Float(-0.0),
+            Value::Float(1.5),
+            Value::Float(f64::INFINITY),
+            Value::Float(f64::NAN),
+            Value::Tuple(std::rc::Rc::new(vec![Value::Int(1), Value::Int(2)])),
+        ];
+        // Every digit count from 1 to 19, both signs, plus the neighbours of each power
+        // of ten — where the pair loop's odd/even tail branch changes.
+        let mut p: i64 = 1;
+        for _ in 0..19 {
+            for d in [-1i64, 0, 1] {
+                cases.push(Value::Int(p + d));
+                cases.push(Value::Int(-(p + d)));
+            }
+            p = p.saturating_mul(10);
+        }
+        // A deterministic sweep so the interior of each length is covered too.
+        let mut s: u64 = 0x2545F4914F6CDD1D;
+        for _ in 0..4000 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            cases.push(Value::Int(s as i64));
+            cases.push(Value::Int((s % 1_000_000) as i64));
+        }
+        for v in &cases {
+            let mut buf = String::new();
+            assert!(
+                crate::value::write_value(&mut buf, v, 1, 1).is_ok(),
+                "write_value failed on {v:?}"
+            );
+            assert_eq!(buf, format!("{v}"), "direct append != Display for {v:?}");
+        }
+        // Appending must never clobber what is already in the buffer, and the same
+        // value written twice must produce the same bytes twice.
+        let mut buf = "prefix:".to_string();
+        assert!(crate::value::write_value(&mut buf, &Value::Int(i64::MIN), 1, 1).is_ok());
+        assert!(crate::value::write_value(&mut buf, &Value::Int(7), 1, 1).is_ok());
+        assert_eq!(buf, format!("prefix:{}7", i64::MIN));
+    }
+
+    /// The VM builds an interpolated string by reading its hole values IN PLACE off the
+    /// value stack and truncating once at the end — it no longer `split_off`s them into
+    /// a throwaway `Vec` per string. That leaves the operands on the stack across the
+    /// fallible middle of the op, so what this pins is the unwind: a hole that raises,
+    /// caught by `try`, must leave the stack exactly as deep as it was, and execution
+    /// must carry on correctly afterwards. A leak or an over-truncation here corrupts
+    /// every later operand, so the cases keep computing after the catch.
+    #[test]
+    fn an_interpolation_that_raises_midway_unwinds_the_stack_exactly() {
+        for (src, want) in [
+            // baseline: the shapes themselves, on both engines
+            ("z = 3\n\"a{z}b\"", "a3b"),
+            ("z = 3\n\"{z}{z}{z}\"", "333"),
+            ("\"{1 + 1}\"", "2"),
+            ("z = 0 - 5\n\"n={z}\"", "n=-5"),
+            // a hole raises: the FIRST one, with nothing yet written
+            ("d = 0\nr = try \"{1 // d}\"\nr.ok", "false"),
+            // ...and a LATER one, with earlier holes already on the stack
+            ("d = 0\nr = try \"x{1}y{2}z{1 // d}\"\nr.ok", "false"),
+            // the value stack must be intact afterwards — this is the actual point
+            ("d = 0\nr = try \"x{1}y{1 // d}\"\n2 + 3", "5"),
+            ("d = 0\nr = try \"x{1}y{1 // d}\"\n[1, 2, 3].sum()", "6"),
+            ("d = 0\nr = try \"{1 // d}\"\n\"ok{4 + 4}\"", "ok8"),
+            // nested: the raise happens inside a call inside a hole
+            ("fn bad(x) = x // 0\nd = 1\nr = try \"a{bad(d)}b\"\nr.ok", "false"),
+            ("fn bad(x) = x // 0\nd = 1\nr = try \"a{bad(d)}b\"\n7 * 6", "42"),
+            // an interpolation nested inside another interpolation's hole
+            ("z = 2\n\"<{\"[{z}]\"}>\"", "<[2]>"),
+            ("d = 0\nz = 2\nr = try \"<{\"[{z // d}]\"}>\"\nr.ok", "false"),
+            // An interpolation NESTED in an expression that already has operands on the
+            // stack: `base` is non-zero here, so consuming one slot too many silently
+            // eats the neighbour. Each case reads a value stacked BEFORE the hole.
+            ("x = 5\n[11, \"{x}\", 22][0]", "11"),
+            ("x = 5\n[11, \"{x}\", 22][2]", "22"),
+            ("x = 5\n[11, \"{x}\", 22].length()", "3"),
+            ("fn g(a, b, c) = a * 100 + c\nx = 5\ng(1, \"{x}\", 3)", "103"),
+            ("x = 5\na, b, c = (11, \"a{x}b\", 22)\na * 100 + c", "1122"),
+            ("x = 5\n7 + \"{x}{x}\".length()", "9"),
+            ("x = 5\n[[1, 2], [\"{x}\"], [3]].length()", "3"),
+            ("x = 5\n{a: 11, b: \"{x}\", c: 22}.a", "11"),
+            ("x = 5\n{a: 11, b: \"{x}\", c: 22}.c", "22"),
+            // two interpolations side by side inside one enclosing expression
+            ("x = 5\ny = 6\n[9, \"{x}\", \"{y}\", 8][3]", "8"),
+            // ...and the same shapes with a hole that RAISES, caught, then the
+            // neighbours still read correctly
+            ("d = 0\nr = try [11, \"{1 // d}\", 22]\nr.ok", "false"),
+            ("d = 0\nr = try [11, \"{1 // d}\", 22]\n[11, 22][1]", "22"),
+            ("fn g(a, b, c) = a * 100 + c\nd = 0\nr = try g(1, \"{1 // d}\", 3)\n1 + 2", "3"),
+            // a format-spec failure raises from the OTHER arm of the same op
+            ("s = \"text\"\nr = try \"{s:.2f}\"\nr.ok", "false"),
+            ("s = \"text\"\nr = try \"a{1}b{s:.2f}\"\n9 - 4", "5"),
+            // and a spec that works still works
+            ("x = 1.005\n\"{x:.2f}\"", "1.00"),
+            // 50 catches in a row must not drift the stack a slot at a time: every one
+            // of them raises, and the map that wraps them still returns 50 elements.
+            (
+                "d = 0\n(0..50).map(x => if (try \"{x}{1 // d}\").ok then 1 else 0).sum()",
+                "0",
+            ),
+            ("d = 0\n(0..50).map(x => (try \"{x}{1 // d}\").ok).length()", "50"),
+            // a caught raise, then real work, repeated — the stack must not grow
+            (
+                "d = 0\n(0..50).map(x => do {\n  r = try \"{x}{1 // d}\"\n  x * 2\n}).sum()",
+                "2450",
+            ),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+
+
+        // A consumed operand that is never truncated sits BELOW the result, where no
+        // later op reads it — the program still answers correctly while the stack grows
+        // without bound. Only the DEPTH shows it, so compare against the same program
+        // with the holes removed: 50 interpolations must leave the stack exactly as
+        // deep as 50 constants do.
+        let depth = |src: &str| -> usize {
+            let toks = lexer::lex(src).expect("lex");
+            let ast = parser::parse(toks).expect("parse");
+            let prog = bytecode::compile_with_types(&ast, None).expect("compile");
+            match exec(&prog, None) {
+                Ok(stack) => stack.len(),
+                Err(e) => panic!("`{src}` failed: {e:?}"),
+            }
+        };
+        for (holes, plain) in [
+            ("(0..50).map(x => \"{x}\").length()", "(0..50).map(x => \"c\").length()"),
+            (
+                "(0..50).map(x => \"a{x}b{x}c\").length()",
+                "(0..50).map(x => \"abc\").length()",
+            ),
+            (
+                "d = 0\n(0..50).map(x => (try \"{x}{1 // d}\").ok).length()",
+                "d = 0\n(0..50).map(x => (try \"c\").ok).length()",
+            ),
+            (
+                "x = 1\n[9, \"{x}\", \"{x}\", 8].length()",
+                "x = 1\n[9, \"c\", \"c\", 8].length()",
+            ),
+        ] {
+            assert_eq!(
+                depth(holes),
+                depth(plain),
+                "interpolation leaked or over-consumed stack slots in `{holes}`"
+            );
+        }
+    }
+
+    /// The other early exit out of the middle of `Op::Interp` is the length cap, and it
+    /// leaves the same operands on the stack as a raising hole does. IGNORED because
+    /// `MAX_STRING_LEN` is 1 GB: tripping it costs gigabytes of memcpy and peak RSS per
+    /// engine — the naive `s = "{s}{s}"` doubling version of this ran 220 SECONDS, which
+    /// does not belong in a gate that has to stay fast enough to run constantly. The
+    /// stack discipline it would check is already pinned by the raising-hole cases
+    /// above, which take the identical `return Err` out of the identical place.
+    ///
+    ///     cargo test --profile gate --bin helix -- --ignored the_interpolation_length_cap
+    #[test]
+    #[ignore = "allocates ~2 GB per engine to reach the 1 GB cap"]
+    fn the_interpolation_length_cap_fires_identically_on_both_engines() {
+        // One doubling straight past the cap, rather than thirty from one byte.
+        let half = 1usize << 29;
+        let boom = format!("s = \"x\".repeat({half})\n\"{{s}}{{s}}{{s}}\".length()");
+        let (tw, vm) = (run_tw(&boom), run_vm(&boom));
+        assert_eq!(tw, vm, "engines disagree on the interpolation length cap");
+        let msg = vm.unwrap_err();
+        assert!(msg.contains("interpolated string exceeds"), "got: {msg}");
+        // ...and caught, the program keeps running on a stack of the right depth.
+        let caught = format!("s = \"x\".repeat({half})\nr = try \"{{s}}{{s}}{{s}}\"\nr.ok");
+        assert_eq!(run_tw(&caught), run_vm(&caught), "engines disagree on the caught cap");
+        assert_eq!(run_vm(&caught), Ok("false".to_string()));
+    }

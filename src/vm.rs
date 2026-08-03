@@ -1115,13 +1115,26 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.push(crate::interp::eval_index(&recv, &idx, line, col)?);
             }
             Op::Interp(parts) => {
-                let holes = parts
-                    .iter()
-                    .filter(|p| matches!(p, crate::ast::InterpPart::Expr(..)))
-                    .count();
-                let vals: Vec<Value> = stack.split_off(stack.len() - holes);
-                let mut s = String::new();
-                let mut vi = 0;
+                // The hole values are READ IN PLACE off the stack and dropped in one
+                // `truncate` at the end. `split_off` minted a fresh `Vec<Value>` for
+                // every string built — one malloc/free per element of a 5M `map`, for
+                // a buffer that never outlives the op. Leaving the operands on the
+                // stack through the fallible middle is safe: `Handler` records the
+                // stack depth at `try` entry and the catch truncates back to it, so an
+                // error here unwinds exactly as it did before.
+                let mut holes = 0usize;
+                let mut cap = 0usize;
+                for p in parts.iter() {
+                    match p {
+                        crate::ast::InterpPart::Lit(t) => cap += t.len(),
+                        crate::ast::InterpPart::Expr(..) => holes += 1,
+                    }
+                }
+                let base = stack.len() - holes;
+                // One sized allocation instead of growing from empty: the literals are
+                // known exactly and a rendered scalar is usually well under 16 bytes.
+                let mut s = String::with_capacity(cap + holes * 16);
+                let mut vi = base;
                 for part in parts.iter() {
                     match part {
                         crate::ast::InterpPart::Lit(t) => s.push_str(t),
@@ -1132,10 +1145,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             let (el, ec) = e.position();
                             match spec {
                                 Some(fs) => s.push_str(
-                                    &fs.apply(&vals[vi]).map_err(|m| HelixError::new(m, el, ec))?,
+                                    &fs.apply(&stack[vi]).map_err(|m| HelixError::new(m, el, ec))?,
                                 ),
                                 // Hot path: format scalars straight into `s`, no throwaway String.
-                                None => crate::value::write_value(&mut s, &vals[vi], el, ec)?,
+                                None => crate::value::write_value(&mut s, &stack[vi], el, ec)?,
                             }
                             vi += 1;
                         }
@@ -1154,6 +1167,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         .hint("build large text incrementally or write it to a file instead."));
                     }
                 }
+                stack.truncate(base);
                 stack.push(Value::Str(std::rc::Rc::new(s)));
             }
             Op::MakeTuple(n) => {
