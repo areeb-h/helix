@@ -1053,35 +1053,34 @@ fn array_method(
             Ok(Value::Dict(Rc::new(map)))
         }
         "unique" => {
-            // Distinct values in first-seen order. O(n) for string/DNA arrays.
+            // Distinct values in first-seen order. Text and `Int`/`missing` arrays are
+            // O(n) on the same keys `frequencies` uses — the two operations report the
+            // same identities by construction, so `xs.unique().length()` can never
+            // disagree with `xs.frequencies().length()`. Anything else keeps the O(n^2)
+            // `values_equal` scan, which is the only thing that can express the
+            // cross-type numeric collapse (`1 == 1.0`); see `IntKey`.
             no_args(name)?;
-            let mut out: Vec<Value> = Vec::new();
-            if items.iter().all(|v| matches!(v, Value::Str(_) | Value::Dna(_))) {
-                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                for v in items.iter() {
-                    if seen.insert(v.to_string()) {
-                        out.push(v.clone());
-                    }
-                }
-            } else if items.iter().all(|v| matches!(v, Value::Int(_))) {
-                // Ints are hashable — O(n), not the O(n^2) `values_equal` scan below
-                // (`range(50_000).unique()` was ~1.25 billion comparisons). Only all-Int:
-                // a Float path would mishandle `1 == 1.0` cross-type collapse and -0.0/NaN.
-                let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-                for v in items.iter() {
-                    if let Value::Int(n) = v
-                        && seen.insert(*n)
-                    {
-                        out.push(v.clone());
-                    }
-                }
+            let out: Vec<Value> = if items.iter().all(|v| matches!(v, Value::Str(_) | Value::Dna(_)))
+            {
+                // Borrowed keys: the old `HashSet<String>` minted a fresh `String` for
+                // every element just to probe the set — 5M allocations to find 10k
+                // distinct words.
+                let mut seen: std::collections::HashSet<(bool, &str)> =
+                    std::collections::HashSet::new();
+                items.iter().filter(|v| seen.insert(text_key(v))).cloned().collect()
+            } else if items.iter().all(|v| matches!(v, Value::Int(_) | Value::Missing)) {
+                // `range(50_000).unique()` was ~1.25 billion `values_equal` comparisons.
+                let mut seen: std::collections::HashSet<IntKey> = std::collections::HashSet::new();
+                items.iter().filter(|v| seen.insert(int_key(v))).cloned().collect()
             } else {
+                let mut out: Vec<Value> = Vec::new();
                 for v in items.iter() {
                     if !out.iter().any(|u| values_equal(u, v)) {
                         out.push(v.clone());
                     }
                 }
-            }
+                out
+            };
             Ok(Value::array(out))
         }
         // `xs.concat(a, b, …)` — append the elements of each array argument. The
@@ -1381,44 +1380,88 @@ fn array_method(
     }
 }
 
-/// Value-count histogram, sorted by count desc then value asc — the shared core
-/// of `top`/`frequencies`. String/DNA arrays (k-mer spectra) take a fast ~O(n)
-/// hash path; everything else falls back to the value-equality scan (which honors
-/// cross-type numeric equality, e.g. `1 == 1.0`), preserving exact semantics.
-/// Insertion order is preserved before the sort, matching the old `top`.
-fn value_histogram(items: &[Value]) -> Vec<(Value, i64)> {
+/// The hash key of a text value, BORROWED from the array so probing the table mints
+/// no `String`. The DNA-ness is part of the key because `values_equal` does **not**
+/// equate `dna("AT")` with `"AT"`: it has a `(Str, Str)` arm and a `(Dna, Dna)` arm,
+/// and the cross pair falls to `_ => false` — which is what `contains`/`index_of`
+/// report. Keying on the bytes alone silently merged them, so `[dna("AT"), "AT"]`
+/// had `unique().length() == 1` while `index_of("AT") == 1` said they were distinct.
+fn text_key(v: &Value) -> (bool, &str) {
+    match v {
+        Value::Dna(s) => (true, s.as_str()),
+        Value::Str(s) => (false, s.as_str()),
+        _ => unreachable!("callers guard with an `all(Str | Dna)` kind check"),
+    }
+}
+
+/// The hash key of an `Int`-or-`missing` array. `values_equal` treats all missings as
+/// one identity and never equates a missing with an integer (ADR 0001), and integers
+/// compare as exact `i64` — so these two variants reproduce its classes EXACTLY.
+/// An array holding any `Float` or `Rational` may not use this key: `values_equal`
+/// collapses `1 == 1.0` across types, and above 2^53 that collapse is not even
+/// transitive (`9007199254740993` and `…92` are both equal to `9007199254740992.0`
+/// but not to each other), so no hash key can reproduce it. Those keep the scan.
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+enum IntKey {
+    N(i64),
+    Missing,
+}
+
+fn int_key(v: &Value) -> IntKey {
+    match v {
+        Value::Int(n) => IntKey::N(*n),
+        Value::Missing => IntKey::Missing,
+        _ => unreachable!("callers guard with an `all(Int | Missing)` kind check"),
+    }
+}
+
+/// One pass, ONE hash probe per element, first-seen order preserved. `key` must
+/// reproduce `values_equal`'s equivalence classes exactly over `items` — every
+/// caller establishes that with an `all(...)` kind check before picking a key.
+///
+/// No `with_capacity(items.len())`: distinct keys are usually FAR fewer than elements
+/// (a k-mer spectrum is the design centre), and reserving one bucket per element built
+/// a 5M-bucket table — whose control bytes alone are memset — to hold 10k entries.
+/// Growth is amortized O(1), and dropping the reserve measured faster in BOTH regimes:
+/// 0.33s -> 0.068s at 10k-distinct/5M, and 1.83s -> 1.75s (-200 MB) even when every
+/// element is distinct, which is the only case the reserve could have helped.
+fn tally<'a, K: Eq + std::hash::Hash>(
+    items: &'a [Value],
+    key: impl Fn(&'a Value) -> K,
+) -> Vec<(Value, i64)> {
+    use std::collections::hash_map::Entry;
+    let mut idx: std::collections::HashMap<K, usize> = std::collections::HashMap::new();
     let mut counts: Vec<(Value, i64)> = Vec::new();
-    if items.iter().all(|v| matches!(v, Value::Str(_) | Value::Dna(_))) {
-        // Key by the string's own bytes, BORROWED from `items`. The previous
-        // `HashMap<String, _>` minted a fresh `String` for every element just to probe
-        // the table — 5M allocations to build a 10k-key histogram. This changes no key:
-        // the old key was `v.to_string()`, which for both `Str(s)` and `Dna(s)` is
-        // exactly `s`, so the same elements collide into the same entry (a `Str` and a
-        // `Dna` with equal text shared one bucket before and still do), insertion order
-        // is unchanged, and the sort below is untouched — same output, same order.
-        //
-        // No `with_capacity(items.len())` either: distinct keys are usually FAR fewer
-        // than elements (a k-mer spectrum is the design centre), and reserving one
-        // bucket per element built a 5M-bucket table — whose control bytes alone are
-        // memset — to hold 10k entries. Growth is amortized O(1), and dropping the
-        // reserve measured faster in BOTH regimes: 0.33s -> 0.068s at 10k-distinct/5M,
-        // and 1.83s -> 1.75s (-200 MB) even when every element is distinct, which is
-        // the only case the reserve could have helped.
-        let mut idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for v in items.iter() {
-            let k: &str = match v {
-                Value::Str(s) | Value::Dna(s) => s.as_str(),
-                _ => unreachable!("guarded by the `all` above"),
-            };
-            match idx.get(k) {
-                Some(&i) => counts[i].1 += 1,
-                None => {
-                    idx.insert(k, counts.len());
-                    counts.push((v.clone(), 1));
-                }
+    for v in items.iter() {
+        let next = counts.len();
+        match idx.entry(key(v)) {
+            Entry::Occupied(e) => counts[*e.get()].1 += 1,
+            Entry::Vacant(e) => {
+                e.insert(next);
+                counts.push((v.clone(), 1));
             }
         }
+    }
+    counts
+}
+
+/// Value-count histogram, sorted by count desc then value asc — the shared core of
+/// `top`/`frequencies`. Text arrays (k-mer spectra) and `Int`/`missing` arrays take a
+/// ~O(n) hash path; everything else falls back to the value-equality scan, which
+/// honors cross-type numeric equality (`1 == 1.0`) that no hash key can express.
+/// Insertion order is preserved before the sort, matching the old `top`.
+///
+/// The `Int` path is not a micro-optimization: the scan is O(n × distinct), so a 5M
+/// histogram over 10k distinct integers ran 2.5e10 `values_equal` calls — 41.7s, versus
+/// 0.06s for the SAME histogram spelled with string keys. `unique` had had an all-Int
+/// hash path for exactly this reason; `frequencies` never got one.
+fn value_histogram(items: &[Value]) -> Vec<(Value, i64)> {
+    let mut counts = if items.iter().all(|v| matches!(v, Value::Str(_) | Value::Dna(_))) {
+        tally(items, text_key)
+    } else if items.iter().all(|v| matches!(v, Value::Int(_) | Value::Missing)) {
+        tally(items, int_key)
     } else {
+        let mut counts: Vec<(Value, i64)> = Vec::new();
         for v in items.iter() {
             if let Some(e) = counts.iter_mut().find(|(k, _)| values_equal(k, v)) {
                 e.1 += 1;
@@ -1426,7 +1469,8 @@ fn value_histogram(items: &[Value]) -> Vec<(Value, i64)> {
                 counts.push((v.clone(), 1));
             }
         }
-    }
+        counts
+    };
     counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_string().cmp(&b.0.to_string())));
     counts
 }

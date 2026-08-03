@@ -5365,3 +5365,114 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
         assert_eq!(vm, Ok("-9223372036854775808".to_string()), "`{src}`");
     }
+
+    /// The set-like operations (`unique`, `frequencies`, `top`) answer on `values_equal`
+    /// identity (ADR 0001). Two of them take a hash path when the array's kinds admit a
+    /// key that reproduces those classes EXACTLY; this pins that the key is exact, that
+    /// the kinds it refuses are refused, and that `unique` and `frequencies` can never
+    /// report different identities for the same array.
+    ///
+    /// The `Int` key exists because the fallback is O(n x distinct): a 5M histogram over
+    /// 10k distinct integers ran 2.5e10 comparisons — 41.7s, against 0.06s for the SAME
+    /// histogram spelled with string keys. The last case here is a scale pin; if the
+    /// hash path stops being taken it still PASSES, but it stalls for seconds.
+    #[test]
+    fn set_like_operations_hash_exactly_the_identities_they_report() {
+        for (src, want) in [
+            // ---- Int: the new hash path. Count desc, then value ASC BY DECIMAL STRING,
+            // which is the pre-existing sort — "10" sorts before "2".
+            ("[3, 1, 3, 2, 1, 3].frequencies()", "[(3, 3), (1, 2), (2, 1)]"),
+            ("[10, 2, 10, 2].frequencies()", "[(10, 2), (2, 2)]"),
+            ("[3, 1, 3, 2, 1, 3].unique()", "[3, 1, 2]"),
+            // negative and extreme i64 keys are exact, not bucketed through a float
+            ("[0 - 1, 0 - 1, 1].frequencies()", "[(-1, 2), (1, 1)]"),
+            (
+                "[9223372036854775807, 0 - 9223372036854775807].unique().length()",
+                "2",
+            ),
+            // ---- `missing` joins the Int key: all missings are ONE identity, and a
+            // missing is never an integer.
+            ("[missing, 1, missing].frequencies()", "[(missing, 2), (1, 1)]"),
+            ("[missing, 1, missing].unique()", "[missing, 1]"),
+            ("[missing, missing].frequencies()", "[(missing, 2)]"),
+            ("[0, missing, 0].frequencies()", "[(0, 2), (missing, 1)]"),
+            // ---- A Float anywhere REFUSES the Int key and keeps the scan, because
+            // `values_equal` collapses 1 == 1.0 across types...
+            ("[1, 1.0, 2].frequencies()", "[(1, 2), (2, 1)]"),
+            ("[1, 1.0, 2].unique()", "[1, 2]"),
+            // ...and above 2^53 that collapse is not even TRANSITIVE, so no hash key
+            // could reproduce it: both integers equal the float, but not each other.
+            // (Order-dependent by nature — the scan is the definition here.)
+            (
+                "[9007199254740993, 9007199254740992.0, 9007199254740992].frequencies()",
+                "[(9007199254740993, 2), (9007199254740992, 1)]",
+            ),
+            ("[9007199254740993, 9007199254740992].unique().length()", "2"),
+            // ---- Text: `dna("AT")` and `"AT"` are DIFFERENT identities. `values_equal`
+            // has same-kind arms only, so the cross pair is false — which is what
+            // `contains`/`index_of` have always reported. Keying on the bytes alone
+            // merged them, and `unique().length()` disagreed with `index_of`.
+            ("[dna(\"AT\"), \"AT\"].index_of(\"AT\")", "1"),
+            ("[dna(\"AT\"), \"AT\"].unique().length()", "2"),
+            ("[dna(\"AT\"), \"AT\"].frequencies().length()", "2"),
+            // (a `Str` inside a tuple prints quoted, a `Dna` bare — so the split shows)
+            ("[dna(\"AT\"), dna(\"AT\"), \"AT\"].frequencies()", "[(AT, 2), (\"AT\", 1)]"),
+            // homogeneous text is untouched
+            ("[\"AT\", \"TG\", \"AT\"].frequencies()", "[(\"AT\", 2), (\"TG\", 1)]"),
+            ("[\"AT\", \"TG\", \"AT\"].unique()", "[\"AT\", \"TG\"]"),
+            // ATG TGC GCA CAT ATG TGC -> 4 distinct
+            ("dna(\"ATGCATGC\").kmers(3).frequencies().length()", "4"),
+            // ---- `top` shares the histogram, so it inherits the same identities.
+            ("[3, 1, 3, 2, 1, 3].top(2)", "[(3, 3), (1, 2)]"),
+            ("[missing, 1, missing].top(1)", "[(missing, 2)]"),
+            // ---- empty and singleton
+            ("[].frequencies()", "[]"),
+            ("[7].frequencies()", "[(7, 1)]"),
+            // ---- kinds with no key at all keep the scan
+            ("[(1, 2), (1, 2), (3, 4)].frequencies()", "[((1, 2), 2), ((3, 4), 1)]"),
+            ("[true, false, true].frequencies()", "[(true, 2), (false, 1)]"),
+            ("[[1], [1], [2]].unique().length()", "2"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+
+        // `unique` and `frequencies` must agree on HOW MANY identities an array has, for
+        // every kind mix above — they pick their keys independently, so this is the
+        // property that catches one path being fixed without the other.
+        for src in [
+            "[3, 1, 3, 2, 1, 3]",
+            "[missing, 1, missing, 0 - 1]",
+            "[1, 1.0, 2]",
+            "[dna(\"AT\"), \"AT\", dna(\"AT\")]",
+            "[9007199254740993, 9007199254740992.0, 9007199254740992]",
+            "[true, false, true]",
+            "[]",
+        ] {
+            let a = format!("{src}.unique().length()");
+            let b = format!("{src}.frequencies().length()");
+            assert_eq!(run_vm(&a), run_vm(&b), "unique/frequencies disagree on `{src}`");
+            assert_eq!(run_tw(&a), run_vm(&a), "engines disagree on `{a}`");
+        }
+
+        // Scale pin: 50k elements over 5000 distinct integers. The hash path is a few
+        // milliseconds; the O(n x distinct) scan is ~1.25e8 `values_equal` calls and
+        // takes seconds. Same shape in text, which has always been hashed.
+        let ints = "(0..50000).map(it % 5000).frequencies()";
+        assert_eq!(run_vm(&format!("{ints}.length()")), Ok("5000".to_string()));
+        assert_eq!(run_vm(&format!("{ints}[0]")), Ok("(0, 10)".to_string()));
+        let text = "(0..50000).map(\"w{it % 5000}\").frequencies()";
+        assert_eq!(run_vm(&format!("{text}.length()")), Ok("5000".to_string()));
+        // Every count is 10 and every distinct key is present, on both spellings — a
+        // key that dropped or merged buckets would move the length or the counts.
+        assert_eq!(
+            run_vm(&format!("{ints}.map((v, c) => c).unique()")),
+            Ok("[10]".to_string())
+        );
+        assert_eq!(
+            run_vm(&format!("{text}.map((v, c) => c).unique()")),
+            Ok("[10]".to_string())
+        );
+        assert_eq!(run_vm("(0..50000).map(it % 5000).unique().length()"), Ok("5000".to_string()));
+    }
