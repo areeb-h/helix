@@ -307,6 +307,22 @@ fn int_scalar_caps(cap_vals: &[Value]) -> Option<Vec<i64>> {
     cap_vals.iter().map(|v| if let Value::Int(i) = v { Some(*i) } else { None }).collect()
 }
 
+/// Marshal captures as `f64` BITS for the value-scalar mixed kernel ("mapmv"): an `Int` is
+/// promoted (the interpreter performs the same promotion at the use site — the `MixT`
+/// analysis admitted each capture only where a genuine float forces it), a `Float` passes
+/// its bits through, anything else declines. The exact `ScalarValue` marshalling
+/// `map_index_caps` already uses, extracted for the unindexed variant.
+fn value_scalar_caps(cap_vals: &[Value]) -> Option<Vec<i64>> {
+    cap_vals
+        .iter()
+        .map(|v| match v {
+            Value::Int(i) => Some((*i as f64).to_bits() as i64),
+            Value::Float(f) => Some(f.to_bits() as i64),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The lazy-range `map` fast path: run the kernel over counter values GENERATED per chunk instead
 /// of over a materialized buffer. `None` means no specialization matched, and the caller falls
 /// back to the ordinary route (which materializes, exactly as before).
@@ -360,9 +376,32 @@ fn try_map_range(
         if !k.index_bounds.is_empty()
             && let Some(c) = map_index_caps(k, cap_vals, Some(rng), true)
         {
+            // An indexed body can now RAISE too (division since Stage 3x): same poison
+            // routing as the unindexed arm.
+            if k.raises {
+                let out = unsafe {
+                    crate::jit::run_map_kernel_range_mixed_poison(p, start, step, len, &c)
+                };
+                return out.map(Value::float_array);
+            }
             let out = unsafe { crate::jit::run_map_kernel_mixed_range(p, start, step, len, &c) };
             return Some(Value::float_array(out));
         }
+    }
+    // The VALUE-SCALAR variant: reached when the Int-proven marshal above declined because
+    // some capture is a runtime `Float`. Same ABI as the mixed kernel; captures ride as f64
+    // bits via `value_scalar_caps`.
+    if let Some(p) = j.map_kernel_mixed_value(kidx)
+        && k.index_bounds.is_empty()
+        && let Some(c) = value_scalar_caps(cap_vals)
+    {
+        if k.raises {
+            let out =
+                unsafe { crate::jit::run_map_kernel_range_mixed_poison(p, start, step, len, &c) };
+            return out.map(Value::float_array);
+        }
+        let out = unsafe { crate::jit::run_map_kernel_mixed_range(p, start, step, len, &c) };
+        return Some(Value::float_array(out));
     }
     // The Int-ROOTED mixed specialization (i64 out through Float intermediates). Its ABI is
     // the plain i64 kernel's, so the i64 range runner produces the `Ints` result directly —
@@ -1723,15 +1762,26 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                             None => Pick::No,
                                         }
                                     }
-                                    // The Int-ROOTED mixed specialization: same ABI as the
-                                    // i64 kernel, so it RIDES `Pick::I64` — including the
-                                    // dead-buffer in-place reuse — and produces `Ints`.
-                                    _ => match (j.map_kernel_mixed_int(kidx), int_scalar_caps(&cap_vals)) {
-                                        (Some(p), Some(c)) if k.index_bounds.is_empty() => {
-                                            Pick::I64(p, c)
+                                    _ if !k.index_bounds.is_empty() => Pick::No,
+                                    // Unindexed, and the Int-proven marshal declined (some
+                                    // capture is a runtime `Float`). Try the VALUE-SCALAR
+                                    // variant — same ABI as the mixed kernel, caps as f64
+                                    // bits — then the Int-ROOTED one, which shares the i64
+                                    // kernel's ABI and so rides `Pick::I64`, dead-buffer
+                                    // reuse included.
+                                    _ => {
+                                        let vs = j
+                                            .map_kernel_mixed_value(kidx)
+                                            .zip(value_scalar_caps(&cap_vals));
+                                        let mi = j
+                                            .map_kernel_mixed_int(kidx)
+                                            .zip(int_scalar_caps(&cap_vals));
+                                        match (vs, mi) {
+                                            (Some((p, c)), _) => Pick::Mixed(p, c),
+                                            (None, Some((p, c))) => Pick::I64(p, c),
+                                            (None, None) => Pick::No,
                                         }
-                                        _ => Pick::No,
-                                    },
+                                    }
                                 }
                             }
                             ArrayData::Floats(_) => {

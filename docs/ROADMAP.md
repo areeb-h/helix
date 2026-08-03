@@ -1480,11 +1480,44 @@ motivates this phase.
 
       THE ENGAGEMENT ASSERTION EARNED ITS KEEP AGAIN: every map value case passes on VM
       fallback alone, and the assertion is what exposed that a FLOAT-variable divisor
-      (`d = 4.0`) still declines — the plain mixed analysis carries captures as Int-proven
-      scalars (Stage 3m's contract), so only Int variables and literals engage (measured:
-      0.24s / 0.06s against 3.48s VM at 20M). Closing that means `ScalarValue` captures in
-      the PLAIN mixed analysis — the `MixT` machinery the indexed analysis already has —
-      recorded here as the next lever in this family.
+      (`d = 4.0`) still declined — the plain mixed analysis carries captures as Int-proven
+      scalars (Stage 3m's contract), so only Int variables and literals engaged (measured:
+      0.24s / 0.06s against 3.48s VM at 20M). Closed by Stage 3x below.
+
+- [x] **Stage 3x — value-scalar captures in the plain mixed map: the last spelling that
+      declined now compiles.** A FLOAT variable in a mixed body (`d = 4.0`) fell to the VM
+      while the identical `d = 4` and the literal ran native — 3.48s against 0.04s at 20M.
+      The cause was Stage 3m's contract: the plain mixed analysis types captures `Int` and
+      the dispatch proves them `Int`, so a runtime `Float` had nowhere to go.
+
+      The fix is a SECOND specialization of the same stored kernel ("mapmv"), not a new
+      analysis: `mixed_map_value_scalar_eligible` reuses `infer_mixed_kind_indexed` (the
+      `MixT` walker the indexed kernel already uses) restricted to unindexed bodies with a
+      non-empty, all-scalar capture list, then relabels every capture `ScalarValue`. The
+      kernel loads them as `f64` bits; `value_scalar_caps` marshals an `Int` by promoting
+      and a `Float` by passing bits through. Dispatch order is unchanged — the Int-proven
+      marshal is tried first, and this variant only catches what it declines — so no
+      existing shape moves. Measured after: float-var, int-var and literal all **0.04s**,
+      byte-identical results.
+
+      The build gate compares captures by NAME AND ORDER only, not kind: the stored kinds
+      are the plain analysis's `Scalar`s while this specialization's are `ScalarValue`, and
+      the kind is a per-specialization loading decision rather than an identity.
+
+      `infer_mixed_kind_indexed` also gained a `Div` arm. Unlike `+ - *` it is safe for ANY
+      operand mix including an unpromoted value scalar, because `/` promotes both operands
+      in BOTH engines (`10 / 2 == 5.0`) — the promotion the interpreter performs at that
+      node is exactly the one the kernel performs.
+
+      THE GUARD IS `mix_combine`, and the sabotage that proves it took two refinements —
+      recorded because the obvious probes prove NOTHING. `c = 2^53+1; map(i => to_float(c * i))`
+      does not discriminate: `c` is an `Int` at runtime, so the Int-proven marshal wins and
+      the value-scalar path is never reached. Multiplier 2 does not discriminate either —
+      `(2^53+1) * 2` rounds identically from both directions. The case that works has BOTH a
+      `Float` capture (to force the path) and a large `Int` capture inside an integer
+      product: `c = 9007199254740993; d = 2.5; map(i => to_float(c * i) + d)`. Forcing
+      `(SFloat, Int)` to combine yields `27021597764222980.0` on the JIT against
+      `27021597764222984.0` on the other two engines, at element 3.
 
 - [x] ~~**k2 mandelbrot: CAUSE IDENTIFIED — a float division by a NON-LITERAL declines the
       whole enclosing function to the VM.**~~ Closed by Stage 3w above. `row`'s body computes

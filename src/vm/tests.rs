@@ -4467,6 +4467,68 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         }
     }
 
+    /// The VALUE-SCALAR mixed map: captures ride as `f64` bits instead of Int-proven `i64`s,
+    /// so a `Float` variable in a mixed body compiles instead of declining. `d = 4.0;
+    /// map(i => to_float(i) / d)` went 3.48s → 0.05s at 20M, matching the `d = 4` and
+    /// literal spellings exactly.
+    ///
+    /// THE GUARD IS `mix_combine`, and constructing a case that exercises it took two
+    /// refinements — recorded here because the obvious probes prove nothing:
+    ///   * `c = 2^53+1; map(i => to_float(c * i))` does NOT discriminate: `c` is an `Int` at
+    ///     runtime, so the Int-proven marshal wins and this never reaches the value-scalar
+    ///     path at all.
+    ///   * Multiplier 2 does NOT discriminate either: `(2^53+1) * 2` rounds to the same f64
+    ///     from both directions. Multiplier 3 is the smallest that separates them.
+    /// The case below has BOTH: a `Float` capture to force the value-scalar path, and a large
+    /// `Int` capture used in an integer product. Forcing `(SFloat, Int)` to combine yields
+    /// `27021597764222980.0` on the JIT against `27021597764222984.0` on the other two.
+    #[test]
+    fn a_float_capture_compiles_as_a_value_scalar_and_unpromoted_scalars_decline() {
+        for (src, want) in [
+            ("d = 4.0\n(0..6).map(i => to_float(i) / d)", "[0.0, 0.25, 0.5, 0.75, 1.0, 1.25]"),
+            ("c = 2.5\n(0..6).map(i => to_float(i) * c)", "[0.0, 2.5, 5.0, 7.5, 10.0, 12.5]"),
+            // An INT variable through the same body — the Int-proven marshal still wins.
+            ("d = 4\n(0..6).map(i => to_float(i) / d)", "[0.0, 0.25, 0.5, 0.75, 1.0, 1.25]"),
+            ("a = 2.5\nb = 1.5\n(0..6).map(i => to_float(i) * a + b)", "[1.5, 4.0, 6.5, 9.0, 11.5, 14.0]"),
+            ("d = 4.0\n(0..8).map(i => ceil(to_float(i) / d))", "[0, 1, 1, 1, 1, 2, 2, 2]"),
+            ("fn dbl(x) = x * 2\nd = 4.0\n(0..6).map(i => to_float(dbl(i)) / d)", "[0.0, 0.5, 1.0, 1.5, 2.0, 2.5]"),
+            // THE DISCRIMINATING CASE (see the doc comment). A Float capture forces the
+            // value-scalar path; the Int capture must stay `i64` inside `c * i`.
+            (
+                "c = 9007199254740993\nd = 2.5\n(0..5).map(i => to_float(c * i) + d)",
+                "[2.5, 9007199254740994.0, 18014398509481988.0, 27021597764222984.0, 36028797018963968.0]",
+            ),
+            // Degenerate and non-range sources.
+            ("d = 4.0\n(0..0).map(i => to_float(i) / d)", "[]"),
+            ("d = 4.0\n(4..0).map(i => to_float(i) / d)", "[]"),
+            ("d = 4.0\n[1, 2, 3].map(i => to_float(i) / d)", "[0.25, 0.5, 0.75]"),
+            // Neighbours this must not disturb.
+            ("c = 7\n(0..5).map(j => ((c * j) % 100) * 0.5)", "[0.0, 3.5, 7.0, 10.5, 14.0]"),
+            ("a = [1.5, 2.5, 3.5]\nc = 2.0\n(0..3).map(i => c * a[i])", "[3.0, 5.0, 7.0]"),
+            ("(0..5).map(i => to_int(to_float(i) * 1.5))", "[0, 1, 3, 4, 6]"),
+            ("(0..5).map(i => to_float(i) * 0.5)", "[0.0, 0.5, 1.0, 1.5, 2.0]"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // A Float capture with a zero divisor still raises exactly (poison through the
+        // value-scalar kernel).
+        let src = "d = 0.0\n(0..4).map(i => to_float(i) / d)";
+        let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+        assert!(tw.is_err(), "`{src}` should raise");
+        assert_eq!(tw, vm);
+        assert_eq!(vm, jit);
+
+        crate::jit::reset_native_call_count();
+        assert!(run_vm_jit("d = 4.0\n(0..64).map(i => to_float(i) / d).sum()").is_ok());
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the value-scalar mixed kernel never reached native code"
+        );
+    }
+
     /// Non-literal float divisors compile — in mixed FUNCTION bodies behind an IMMEDIATE
     /// poison bail, and in mixed MAP bodies behind the accumulated poison. This single
     /// literal-only restriction was k2's entire 5.3×: `row`'s `2.7 / to_float(g)` declined

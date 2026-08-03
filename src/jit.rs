@@ -137,6 +137,10 @@ pub struct Jit {
     /// Same ABI as `map_ptrs` — `fn(*const i64, *mut i64, i64, *const i64)` — so it shares
     /// the i64 kernel's runners and in-place reuse. Same index as `map_ptrs`.
     map_ptrs_mixed_int: Vec<Option<*const u8>>,
+    /// The VALUE-SCALAR variant of the plain mixed kernel: captures ride as `f64` BITS
+    /// (an `Int` promoted at marshal, a `Float` passed through), dispatched when a runtime
+    /// `Float` capture makes the Int-proven marshal decline. Same ABI as `map_ptrs_mixed`.
+    map_ptrs_mixed_value: Vec<Option<*const u8>>,
     /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len) -> i64` (kept count)
     /// filter kernels, indexed by [`crate::bytecode::Op::TryJitFilter`]'s `kernel_idx`.
     filter_ptrs: Vec<Option<*const u8>>,
@@ -173,6 +177,10 @@ impl Jit {
     /// intermediates) for site `idx`.
     pub fn map_kernel_mixed_int(&self, idx: usize) -> Option<*const u8> {
         self.map_ptrs_mixed_int.get(idx).copied().flatten()
+    }
+    /// The value-scalar variant of the mixed map kernel for site `idx`.
+    pub fn map_kernel_mixed_value(&self, idx: usize) -> Option<*const u8> {
+        self.map_ptrs_mixed_value.get(idx).copied().flatten()
     }
     /// The native filter kernel for site `idx`, if one compiled.
     pub fn filter_kernel(&self, idx: usize) -> Option<*const u8> {
@@ -521,26 +529,35 @@ pub fn build(
     // `map` compiles two specializations — `i64` (Int source) and `f64` (Float source);
     // the VM picks by the array's element type at runtime. `filter`/fused stay `Int`.
     let map_ids = define_array_kernels(
-        &mut module, map_kernels, "map", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int, None,
+        &mut module, map_kernels, "map", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        None, false,
     );
     let map_f64_ids = define_array_kernels(
-        &mut module, map_kernels, "mapf", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float, None,
+        &mut module, map_kernels, "mapf", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
+        None, false,
     );
     // The mixed `Int`-source → `Float` specialization (`range.map(j => j*0.001)`): reads
     // `i64`, writes `f64`. `elem_kind` is ignored when mixed (the body is typed per node).
     let map_mixed_ids = define_array_kernels(
         &mut module, map_kernels, "mapm", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        Some(NumKind::Float),
+        Some(NumKind::Float), false,
+    );
+    // Its VALUE-SCALAR variant: the same stored kernels, with captures riding as f64 bits —
+    // dispatched when a runtime `Float` capture makes the Int-proven marshal decline.
+    let map_mixed_value_ids = define_array_kernels(
+        &mut module, map_kernels, "mapmv", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        Some(NumKind::Float), true,
     );
     // The Int-ROOTED mixed specialization: i64 in, i64 OUT, Float intermediates
     // (`to_int(to_float(i) * 1.5)`). Same ABI as the plain i64 kernel, so it rides the same
     // FFI wrappers, dispatch marshalling, and in-place reuse.
     let map_mixed_int_ids = define_array_kernels(
         &mut module, map_kernels, "mapmi", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        Some(NumKind::Int),
+        Some(NumKind::Int), false,
     );
     let filter_ids = define_array_kernels(
-        &mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, &user_fns, NumKind::Int, None,
+        &mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        None, false,
     );
     let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns);
 
@@ -587,6 +604,7 @@ pub fn build(
         && map_f64_ids.iter().all(|r| r.is_none())
         && map_mixed_ids.iter().all(|r| r.is_none())
         && map_mixed_int_ids.iter().all(|r| r.is_none())
+        && map_mixed_value_ids.iter().all(|r| r.is_none())
         && filter_ids.iter().all(|r| r.is_none())
         && fused_ids.iter().all(|r| r.is_none())
         && scan_ids.iter().all(|r| r.is_none())
@@ -622,6 +640,7 @@ pub fn build(
     let map_ptrs_f64 = finalize(map_f64_ids, &module);
     let map_ptrs_mixed = finalize(map_mixed_ids, &module);
     let map_ptrs_mixed_int = finalize(map_mixed_int_ids, &module);
+    let map_ptrs_mixed_value = finalize(map_mixed_value_ids, &module);
     let filter_ptrs = finalize(filter_ids, &module);
     let fused_ptrs = finalize(fused_ids, &module);
     let scan_ptrs = finalize(scan_ids, &module);
@@ -634,6 +653,7 @@ pub fn build(
         map_ptrs_f64,
         map_ptrs_mixed,
         map_ptrs_mixed_int,
+        map_ptrs_mixed_value,
         filter_ptrs,
         fused_ptrs,
         scan_ptrs,
@@ -731,6 +751,9 @@ fn define_array_kernels(
     user_fns: &HashSet<&str>,
     elem_kind: NumKind,
     mixed_root: Option<NumKind>,
+    // The VALUE-SCALAR variant of the plain mixed map ("mapmv"): captures load as `f64`
+    // bits and type `Float`, admitted by the `MixT` analysis instead of the Int-proven one.
+    value_scalars: bool,
 ) -> Vec<Option<FuncId>> {
     let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
     let mut ctx = module.make_context();
@@ -753,6 +776,20 @@ fn define_array_kernels(
             !indexed
                 && filter_kernel_eligible(&k.body, &k.binder, eligible)
                     .is_some_and(|c| c == k.captures)
+        } else if mixed_root == Some(NumKind::Float) && value_scalars {
+            // The value-scalar variant: unindexed only, and the `MixT` analysis must admit
+            // the body (each capture used only where a genuine float promotes it). Compared
+            // by NAMES AND ORDER against the stored list — the stored kinds are the plain
+            // analysis's `Scalar`s, while this specialization's are `ScalarValue`; the kinds
+            // are a per-specialization loading decision, not an identity.
+            !indexed
+                && map_body_raises(&k.body, user_fns) == k.raises
+                && mixed_map_value_scalar_eligible(&k.body, &k.binder, user_fns).is_some_and(
+                    |c| {
+                        c.len() == k.captures.len()
+                            && c.iter().zip(&k.captures).all(|(a, b)| a.name == b.name)
+                    },
+                )
         } else if mixed_root == Some(NumKind::Float) {
             // `raises` decides the built SIGNATURE (poison out-param or not), so it gets the
             // same drift guard as the capture list: re-derive from the body and require the
@@ -824,6 +861,7 @@ fn define_array_kernels(
         };
         let done = define_array_kernel(
             module, &mut ctx, &mut bctx, id, k, is_filter, fn_ids, elem_kind, mixed_root,
+            value_scalars,
         );
         ids.push(done.map(|()| id));
     }
@@ -2709,6 +2747,43 @@ pub fn mixed_map_captures_indexed(
     }
 }
 
+/// The VALUE-SCALAR variant of the plain mixed map: an unindexed `Int`→`Float` body whose
+/// free scalars ride as **f64 bits** (`ScalarValue`) instead of proven-`Int` `i64`s. This is
+/// the second specialization of the same stored kernel: the plain analysis
+/// ([`mixed_map_eligible`]) types captures `Int` and its dispatch declines when one is a
+/// runtime `Float` — so `d = 4.0; map(i => to_float(i) / d)` ran on the VM (3.48s against
+/// 0.24s for `d = 4` at 20M) while producing identical values. Here the [`MixT`] analysis
+/// admits a capture only where a genuine float promotes it (`mix_combine`'s sabotage-proven
+/// rule), which is exactly when riding as f64 matches the interpreter bit for bit.
+///
+/// Returns the ordered captures (all relabeled `ScalarValue`), or `None`. Bounds and synth
+/// must be EMPTY — an indexed body belongs to [`mixed_map_captures_indexed`] — and the list
+/// must be non-empty, since a capture-free body is already the plain kernel's territory.
+/// The build gate compares NAMES AND ORDER against the stored list (the stored kinds are the
+/// plain analysis's `Scalar`s; the kinds here are what this specialization loads by).
+pub fn mixed_map_value_scalar_eligible(
+    body: &Expr,
+    binder: &str,
+    user_fns: &HashSet<&str>,
+) -> Option<Vec<Capture>> {
+    let mut caps: Vec<Capture> = Vec::new();
+    let mut bounds: Vec<IndexBound> = Vec::new();
+    let mut synth: Vec<(String, Expr)> = Vec::new();
+    let root = infer_mixed_kind_indexed(body, binder, &mut caps, &mut bounds, &mut synth, user_fns)?;
+    if root == MixT::GFloat
+        && bounds.is_empty()
+        && synth.is_empty()
+        && !caps.is_empty()
+        && caps.len() <= MAX_CAPTURES
+        && caps.iter().all(|c| c.kind == CaptureKind::Scalar)
+    {
+        relabel_value_scalars(&mut caps, &bounds, &synth);
+        Some(caps)
+    } else {
+        None
+    }
+}
+
 /// The kernel-vs-interpreter type of an indexed-mixed subexpression. The mixed kernel
 /// evaluates integer subexpressions in `i64` and promotes at the first FLOAT, exactly like
 /// the interpreter's `arith` — so the two agree bit-for-bit ONLY if they promote at the same
@@ -2860,6 +2935,17 @@ fn infer_mixed_kind_indexed(
             let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, synth, user_fns)?;
             let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, synth, user_fns)?;
             mix_combine(lk, rk)
+        }
+        // `/` promotes BOTH operands in BOTH engines (even `Int / Int` is a float divide,
+        // `10 / 2 == 5.0`), so unlike `+ - *` it is safe for ANY operand mix — including an
+        // unpromoted value scalar, which is precisely the promotion the interpreter also
+        // performs at this node. Result is a genuine float. A zero divisor poisons
+        // (`map_body_raises` counts every `/`, so a dividing kernel always carries the
+        // poison accumulator `gen_value_typed`'s Div arm ORs into).
+        Expr::Binary { op: BinOp::Div, left, right, .. } => {
+            infer_mixed_kind_indexed(left, binder, caps, bounds, synth, user_fns)?;
+            infer_mixed_kind_indexed(right, binder, caps, bounds, synth, user_fns)?;
+            Some(MixT::GFloat)
         }
         Expr::Binary {
             op: op @ (BinOp::Mod | BinOp::FloorDiv | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr),
@@ -4414,6 +4500,7 @@ fn define_array_kernel<'a>(
     fn_ids: &HashMap<&'a str, FuncId>,
     elem_kind: NumKind,
     mixed_root: Option<NumKind>,
+    value_scalars: bool,
 ) -> Option<()> {
     // Element + capture values are `i64` (map over an `Int` array) or `f64` (map over a
     // `Float` array); the buffer pointers and length are always `i64`. Filter is `Int`.
@@ -4497,6 +4584,10 @@ fn define_array_kernel<'a>(
                 //   * ArrayI64/ArrayF64 → a base POINTER, always `i64`.
                 use crate::bytecode::CaptureKind as CK;
                 let ty = match cap.kind {
+                    // The value-scalar variant loads EVERY scalar cap as `f64` bits — the
+                    // stored kinds are the plain analysis's `Scalar`s, but this
+                    // specialization's marshal promotes each to f64 at dispatch.
+                    CK::Scalar | CK::ScalarValue if mixed && value_scalars => F64,
                     CK::ScalarValue if mixed => F64,
                     CK::Scalar | CK::ScalarValue => elem_ty,
                     CK::ArrayI64 | CK::ArrayF64 => I64,
@@ -4559,13 +4650,17 @@ fn define_array_kernel<'a>(
         // root kind out); the plain map uses the monomorphized `elem_kind` codegen.
         let r = if let Some(root) = mixed_root {
             // The `ScalarValue` caps ride as `f64` in this kernel — hand their names to the
-            // typed codegen so its `Ident` arm types them `Float` (the prologue loaded them F64).
-            let f64_scalars: HashSet<&str> = k
-                .captures
-                .iter()
-                .filter(|c| c.kind == crate::bytecode::CaptureKind::ScalarValue)
-                .map(|c| c.name.as_str())
-                .collect();
+            // typed codegen so its `Ident` arm types them `Float` (the prologue loaded them
+            // F64). In the value-scalar variant EVERY capture rides that way.
+            let f64_scalars: HashSet<&str> = if value_scalars {
+                k.captures.iter().map(|c| c.name.as_str()).collect()
+            } else {
+                k.captures
+                    .iter()
+                    .filter(|c| c.kind == crate::bytecode::CaptureKind::ScalarValue)
+                    .map(|c| c.name.as_str())
+                    .collect()
+            };
             let (r, kind) =
                 gen_value_typed(&mut b, &k.body, &vars, &k.binder, &f64_scalars, fn_ids, module, poison_var);
             // The build gate re-derived the root via the same analysis this codegen mirrors,

@@ -398,10 +398,10 @@ Results are identical at every thread count, pinned by `thread_count_changes_cpu
    byte-identical, and the `/0` cases raise the interpreter's exact error on all
    three engines — including from a loop capped at a billion iterations, which
    errors at once instead of spinning natively. The kernel was never rewritten:
-   the idiomatic spelling is the thing that got fast. One residue is recorded: a
-   FLOAT-variable divisor in a *map* body still falls back (captures ride as
-   Int-proven scalars — the ScalarValue gap, in the roadmap); Int variables and
-   literals engage. Holding the pixel count fixed and raising
+   the idiomatic spelling is the thing that got fast. The follow-on residue —
+   a FLOAT-variable divisor in a *map* body — is also closed now (a second
+   specialization loads captures as f64 bits): float-variable, int-variable and
+   literal divisors all measure **0.04s** at 20M, byte-identical. Holding the pixel count fixed and raising
    the iteration cap: at cap=100 (as shipped) Helix is 10× behind C, at cap=1,000
    it is 1.4×, and at cap=10,000 it is **1.0×** — at cap=100,000 Helix is slightly
    ahead. So the generated loop matches or beats gcc, and the whole gap is ≈250 ns
