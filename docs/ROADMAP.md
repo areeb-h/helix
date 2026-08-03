@@ -1415,6 +1415,92 @@ motivates this phase.
       x ≥ 92234, so the plain counter raises late and the reversed one early; a division
       raises at exactly one index), and every one of them fails under that sabotage.
 
+- [x] **Stage 4a — `frequencies()`/`top()` over integers were O(n × distinct): 39.2s → 0.11s.**
+      Found by the standing method — compare a program against its own equivalent spelling.
+      The SAME 5M histogram over 10k distinct keys ran **0.06s spelled with string keys and
+      41.7s spelled with integer keys**, a 600× inversion, because `value_histogram` had a
+      hash path for text and a LINEAR SCAN for everything else (2.5e10 `values_equal` calls).
+      `unique` had had an all-Int hash path since `range(50_000).unique()` was found to be
+      ~1.25 billion comparisons; `frequencies`/`top` never got one.
+
+      A CORRECTNESS FIX rode along, and it is user-visible. The text key was the string's
+      bytes alone, so `dna("AT")` and `"AT"` shared a bucket — but `values_equal` has a
+      `(Str, Str)` arm and a `(Dna, Dna)` arm and no cross arm, so the pair is FALSE, which
+      is what `contains`/`index_of` always reported:
+
+      | before | after |
+      | --- | --- |
+      | `[dna("AT"), "AT"].index_of("AT")` → `1` | unchanged |
+      | `[dna("AT"), "AT"].unique().length()` → `1` | → `2` |
+
+      ADR 0001 names those four as one family answering on `values_equal` identity; now they
+      do. Homogeneous text — every k-mer spectrum — is untouched.
+
+      **Why the Int key stops at `Int | missing`.** `values_equal` collapses `1 == 1.0` across
+      types, and above 2^53 that collapse is not even TRANSITIVE: `9007199254740993` and
+      `…92` both equal `9007199254740992.0` but not each other. No hash key can reproduce
+      that, so any array holding a `Float` or `Rational` keeps the scan. `missing` joins the
+      key because it is one identity that is never an integer — provably exact. **Float-only
+      arrays remain a known gap** (`-0.0` and NaN need care, and NaN is not even reflexive);
+      they are the same scan they always were.
+
+      Pinned by `set_like_operations_hash_exactly_the_identities_they_report` (26 cases, plus
+      a loop asserting `unique` and `frequencies` report the same identity count for every
+      kind mix — they choose keys independently, so that is what catches one being fixed
+      without the other). All four semantic guards fail under sabotage; the control —
+      dropping `missing` from `unique`'s key, a speed change with no semantic content —
+      correctly still passes.
+
+- [x] **Stage 4b — interpolated strings skip the per-string `Vec` and the nested formatter:
+      4–8%.** `Op::Interp` was calling `split_off`, minting a `Vec<Value>` per string built,
+      and every hole went through `write!(buf, "{}", value)` — two nested `fmt::Arguments`
+      dispatches, one to reach `Display for Value` and one for the scalar inside it. Holes are
+      now read in place off the value stack (safe: `Handler` records the depth at `try` entry
+      and the catch truncates back to it), and `Int`/`Str`/`Dna`/`Bool`/`missing` are appended
+      directly.
+
+      MEASURED — interleaved, median child CPU over 21 runs, 5M elements:
+
+      | shape | formatter | direct | change |
+      | --- | --- | --- | --- |
+      | short ints `"w{n<1e4}"` | 0.630s | 0.578s | **−8.3%** |
+      | long ints `"{19 digits}"` | 0.565s | 0.540s | **−4.4%** |
+      | k7 wordcount | 0.741s | 0.693s | **−6.5%** |
+
+      The digit loop emits TWO digits per division against a compile-time-built pair table.
+      A one-digit loop was tried and REJECTED on the numbers: it beats the pair table on short
+      integers (−10.1%) but LOSES to the formatter on 19-digit ones (+5.6%), because std
+      formats two digits at a time. The pair table is the only variant never worse than what
+      it replaces. Removing `split_off` measured as no change on its own — the allocator
+      serves that little Vec from a thread cache — and stays because it is strictly less work.
+
+- [ ] **k7 wordcount is ~80% string construction, and the next lever is `Rc<str>`.**
+      Stage-by-stage at 5M (child CPU, median of 21 interleaved runs): `scan` 0.02s, `+ int
+      map` ~0s, **`+ string map` 0.61s**, `+ frequencies` 0.75s. Of that 0.59s of string
+      building, ~0.22s is the interpreted closure call per element (a body returning a
+      *constant* string costs that much) and the rest is formatting and allocation.
+      **`Value::Str` is `Rc<String>`, so every word costs an `Rc` box AND a heap buffer** —
+      two allocations where one would do. That refactor, not more formatter tuning, is what
+      is left: Stage 4b took the 4–8% that was there. k7 is now 3.0× slower than C (0.64s vs
+      0.21s) and 2.4× FASTER than CPython.
+
+- [ ] **A stale `target/release` silently poisoned every published ratio, and wall clock
+      cannot resolve small effects on this machine.** Two process lessons worth as much as
+      the code:
+
+      * `bench/kernels/run.sh` picks up whatever `target/release/helix` exists. The
+        2026-07-18 table was taken against a binary that then went four days stale while a
+        dozen JIT stages landed — nothing warned, the anchor gate still passed (outputs right,
+        just slow), and **k7 stayed published at 7.0× slower than C and "also loses to
+        CPython" when it was really 3.0× and beating CPython**, the scan kernel (Stage 3t)
+        having fixed it weeks earlier. Rebuild before regenerating.
+      * Wall clock here swings ~15% run to run; two honest best-of-3 runs of the SAME binary
+        on k7 came out **1.7× apart**, once because a 125-second allocation-heavy probe ran
+        immediately before. That fabricated a "1.12s → 0.79s" improvement in `c82c191` which
+        did not exist and is corrected in `9f50966`. Small effects need child CPU time,
+        variants run INTERLEAVED, and a median — and even then between-session drift is ~7%,
+        so only within-session ratios are quotable.
+
 - [ ] **Two spelling inversions still open** (two others from this sweep are now Stage 3r).
       At 10M elements; a declining JIT runs the bytecode loop, so "VM" means the JIT time
       equals it.

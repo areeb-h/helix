@@ -1,8 +1,18 @@
-# Kernel benchmark results — 2026-07-18 (HEAD `4cddbbc`+)
+# Kernel benchmark results — 2026-08-03 (HEAD `9f50966`)
 
 Regenerate with `./run.sh` from this directory. Every number below was produced
 by that script on a quiet machine, after the anchor gate confirmed that all
 languages of a kernel print byte-identical output.
+
+> **The whole table was re-measured on 2026-08-03 and several ratios moved a lot.**
+> The previous table was taken on 2026-07-18 against a `target/release` binary
+> that then went four days stale while a dozen JIT stages landed. **k7 in
+> particular was published at 7.0× slower than C and losing to CPython; it is
+> 3.0× slower than C and beats CPython by 2.4×** — most of that from the native
+> `scan` kernel (Stage 3t), which k7 uses and which postdated the old number. A
+> published ratio measured against a binary you have since improved is not a
+> conservative estimate, it is a wrong one. **Rebuild `target/release` before
+> quoting this file.**
 
 **Machine**: AMD Ryzen 7 7700X (6 cores visible to WSL2), Ubuntu 24.04 on WSL2.
 **Toolchains**: gcc 13.3.0 (`-O3 -march=native`, plus `-ffp-contract=off` /
@@ -20,38 +30,40 @@ never do — a wall-clock win bought with 2.5× the cores is not a codegen win.
 
 | # | Kernel | Helix | C | Rust | Go | CPython | NumPy | Helix vs C |
 |---|--------|-------|---|------|-----|---------|-------|------------|
-| k1 | dot 50M i64 | 0.16s (254%) | **0.10s** | 0.13s | 0.57s | 8.78s | 0.28s | **1.6× slower** (≈4× per-core; see k1 note) |
-| k2 | mandelbrot 1200² | **0.08s** (96%) | 0.08s | **0.07s** | **0.07s** | 6.85s | — | **~tie with C** (was 5.3× slower at 0.42s — see caveat 7) |
-| k3 | basel 1e8 | 0.09s (94%) | **0.06s** | 0.09s | 0.10s | 10.36s | 0.48s | **1.5× slower** (ties Rust, beats Go) |
-| k4 | allpairs 15k | 0.01s (313%) | **<0.01s** | <0.01s | 0.05s | 9.99s | 0.17s | **slower** (timer-grain; ~7× per the audit) |
-| k5 | montecarlo 1e8 | 0.51s (108%) | 0.25s | **0.22s** | 0.26s | 44.60s | — | **2.0× slower** |
-| k6 | sieve π(10⁷) | **0.01s** (105%) | 0.01s | 0.01s | 0.02s | 0.60s | 0.06s | ~tie (**delegation** — beats NumPy 6×) |
-| k7 | wordcount 5M | 1.39s (108%) | **0.20s**† | 0.24s | 0.21s | 1.37s | 1.79s | **7.0× slower** (also loses to CPython) |
-| k8 | matmul 1024³ (build + GEMM) | **0.04s** (120%) | — | — | — | — | 0.07s (471% CPU) | **1.75× FASTER than NumPy** (was 4.4× slower at 0.31s — see below) |
-| k9 | matmul 512³ (naive) | 0.49s (109%) | 0.39s | 0.33s | **0.32s** | 15.45s | — | **1.3× slower** |
-| k9m | matmul 512³ (map-temp) | 0.48s (108%) | 0.39s | 0.33s | **0.32s** | 15.45s | — | **1.2× slower** (was **27.12s / 75×** — see below) |
+| k1 | dot 50M i64 | **0.08s** (337%) | 0.11s | 0.13s | 0.53s | 9.71s | 0.30s | **1.4× faster on wall clock, for 2.5× the CPU** (0.27 vs 0.11 core-s) — see k1 note |
+| k2 | mandelbrot 1200² | **0.08s** (94%) | 0.08s | 0.08s | 0.08s | 6.23s | — | **tie with C**, single-threaded (was 5.3× slower at 0.42s) |
+| k3 | basel 1e8 | 0.09s (96%) | **0.07s** | 0.09s | 0.09s | 9.46s | 0.46s | **1.3× slower** (ties Rust and Go) |
+| k4 | allpairs 15k | 0.01s (272%) | **0.00s** | 0.00s | 0.05s | 4.37s | 0.11s | **at timer grain** — not a measurement; ~7× per the audit |
+| k5 | montecarlo 1e8 | 0.62s (109%) | 0.27s | **0.24s** | 0.29s | 40.59s | — | **2.3× slower** |
+| k6 | sieve π(10⁷) | 0.02s (86%) | **0.01s** | 0.01s | 0.02s | 0.63s | 0.06s | ~tie (**delegation** — beats NumPy 3×) |
+| k7 | wordcount 5M | 0.64s (99%) | **0.21s** | 0.26s | 0.23s | 1.51s | 2.04s | **3.0× slower** — but now **2.4× faster than CPython** |
+| k8 | matmul 1024³ (build + GEMM) | **0.04s** (157%) | — | — | — | — | 0.07s (442%) | **1.75× FASTER than NumPy**, on a third of the cores |
+| k9 | matmul 512³ (naive) | 0.51s (98%) | **0.33s** | 0.37s | 0.34s | 17.21s | — | **1.5× slower** |
+| k9m | matmul 512³ (map-temp) | 0.54s (99%) | **0.33s** | 0.37s | 0.34s | 17.21s | — | **1.6× slower** (was **27.12s / 75×** — see below) |
 
-† k7's C entry came out of the suite run at **5.75s with 3% CPU** — a starved process, not a
-slow one, and not a measurement. Re-run alone it is 0.20s at 108% CPU across five consecutive
-runs, which is the number recorded. Any row whose `%CPU` is far from ~100% (for the
-single-threaded references) or far from its usual value (for Helix) should be treated the same
-way: re-measured, not published.
+**Read differences under ~20% as noise.** These are best-of-3 wall clock, and this
+machine swings ~15% run to run: two honest wall-clock runs of the *same* binary on
+k7 once disagreed by **1.7×**. Everything in the table moved a little between the
+July and August runs, references included (C's k9 went 0.39s → 0.33s with no code
+change). Only gaps of 2× and up are safe to reason about, which is why the
+paragraphs below quote child CPU time and interleaved runs when the effect is small.
 
-**Helix loses to C on every kernel in this suite**, though k9 (both spellings) is
-now within 1.4× and k3 beats Rust and Go. The one place it stands out is k6,
-where it wins by *not doing the work* — calling a native `primes()` builtin, the
-same way NumPy wins by calling BLAS. The honest counterpart is
-`k6_sieve_trial.helix` (pure-Helix trial division): **88.31s**, i.e. ~4400×
-slower than the builtin and ~8800× slower than C's sieve. That gap is the
-kernel's whole point.
+**Helix loses to C on seven of nine comparable kernels**, ties on k2, and leads k1
+only by spending 3.4× the CPU. k9 is within 1.5× and k3 ties Rust and Go. The one
+place it stands out is k6, where it wins by *not doing the work* — calling a native
+`primes()` builtin, the same way NumPy wins by calling BLAS. The honest counterpart
+is `k6_sieve_trial.helix` (pure-Helix trial division): **83.02s**, i.e. ~4000×
+slower than the builtin and ~8000× slower than C's sieve. That gap is the kernel's
+whole point.
 
 **Against NumPy the picture is different, and k8 has now flipped.** k8 is
-0.04s vs 0.07s (**1.75× faster**) and k6 wins 6×; those are the two kernels with a
-NumPy reference where Helix leads. Both wins deserve the same caveat as NumPy's
-own: k6 delegates to a builtin, and k8's win is a *whole-program* one — Helix
-beats NumPy on build + convert + GEMM together while still losing the isolated
-GEMM to OpenBLAS (~1.8×). It is a real end-to-end result, not a claim that faer
-beats OpenBLAS.
+0.04s vs 0.07s (**1.75× faster**), k6 wins 3×, and k7 — the kernel Helix is worst
+at against C — still beats NumPy by 3.2× and CPython by 2.4×. Those are the three
+kernels with a NumPy reference where Helix leads. Each deserves the same caveat as
+NumPy's own: k6 delegates to a builtin, and k8's win is a *whole-program* one —
+Helix beats NumPy on build + convert + GEMM together while still losing the
+isolated GEMM to OpenBLAS (~1.8×). It is a real end-to-end result, not a claim
+that faer beats OpenBLAS.
 
 **What changed since 2026-07-17, and what did not.** One number in this table
 moved materially: **k9 map-temp, 27.12s → 0.50s (54×)**, which also erases the
@@ -65,21 +77,24 @@ is the only kernel in this suite that writes one*. The other eight already used
 shapes the JIT compiled. So the suite confirms the fix and simultaneously shows
 that this suite under-covers the new capability — the shapes it most helps (BLAS-1
 vector ops, sums of a computed vector) have no kernel here yet. That gap is
-**The suite also under-covers the JIT's builtin surface.** A separate audit of all 22 numeric
-builtins found **17 that block compilation outright** — a builtin outside the JIT's subset does
-not slow a loop down, it forces the *entire* loop onto the bytecode VM. `to_float`, `to_int` and
-`sign` have since been lowered (132–308× each, measured off-suite); `floor`/`ceil`/`round`/
-`trunc`/`clamp` still block because they can *raise*, and a kernel cannot. None of that is
-visible in the nine kernels here, because none of them uses a blocked builtin in a hot loop. See
-[docs/jit-builtin-coverage.md](../../docs/jit-builtin-coverage.md) for the standing table, the
-reason for each exclusion, and how to re-run the audit.
-
 tracked as k10, not papered over: measured off-suite on this same release binary,
 the identical expression before and after the arc (n=5M, min-of-4), a **SAXPY sum**
 (`Σ a*x[i]+y[i]`) went **0.64s → 0.02s** and a **vector-add sum** (`Σ a[i]+b[i]`)
 **0.66s → 0.02s** — both ≈32×. Those are Helix-vs-Helix numbers and are
 deliberately **not** in the scorecard: with no C/Rust/Go reference they say nothing
 about how Helix compares to anything, only that it improved.
+
+**The suite also under-covers the JIT's builtin surface.** A separate audit of all
+22 numeric builtins found **17 that block compilation outright** — a builtin outside
+the JIT's subset does not slow a loop down, it forces the *entire* loop onto the
+bytecode VM. `to_float`, `to_int` and `sign` were lowered first (132–308× each), and
+`floor`/`ceil`/`round`/`trunc` followed once the poison mechanism let a *raising*
+builtin live in a kernel (32–58×). **`clamp` is the one still blocked**: it mixes
+runtime-typed operands like `min`/`max` and has a second raise condition (`lo > hi`),
+so it needs its own design. None of that is visible in the nine kernels here,
+because none of them uses a blocked builtin in a hot loop. See
+[docs/jit-builtin-coverage.md](../../docs/jit-builtin-coverage.md) for the standing
+table, the reason for each exclusion, and how to re-run the audit.
 
 ## k9: 72× → 1.4×, and the map-temp spelling from 75× to parity
 
@@ -258,7 +273,25 @@ say so rather than dropping the row.
 - **k7 wordcount** — string building + hashing. Helix (632 MB) and NumPy (913 MB)
   materialize the whole corpus; C (2.1 MB), Rust (3.0 MB), Go (7.7 MB) and
   CPython (11.0 MB) stream one word at a time. For Helix this is *also* an
-  allocator benchmark, unlike for the streaming four.
+  allocator benchmark, unlike for the streaming four. **Where its 0.64s goes**,
+  measured by adding one stage at a time (child CPU, median of 21 interleaved
+  runs, 5M elements):
+
+  | cumulative program | CPU | this stage costs |
+  |---|---|---|
+  | `scan` alone (xorshift stream) | 0.02s | 0.02s — native kernel, Stage 3t |
+  | `+ .map(s => …% 10000)` (ints) | 0.02s | ~0 — compiled, stays native |
+  | `+ .map(s => "w{…}")` (strings) | 0.61s | **0.59s — building 5M strings** |
+  | `+ .frequencies()` | 0.75s | 0.14s — hashing 5M keys into 10k buckets |
+
+  So k7 is **~80% string construction**, and only ~18% hashing. Of that 0.59s,
+  0.22s is the map machinery itself (a `.map(s => "w")` returning a *constant*
+  costs that much — the body is not JIT-able, so every element takes an
+  interpreted closure call), and the rest is per-string formatting and allocation.
+  Two allocations per string are structural: `Value::Str` is `Rc<String>`, so
+  every word costs an `Rc` box *and* a heap buffer. **The next real lever is
+  `Rc<str>`** (one allocation), not more formatter tuning — the formatter work in
+  `9f50966` bought 4–8% and that is roughly all that was there to get.
 - **k8 matmul (GEMM)** — **the row title is misleading and the gap is not the GEMM.**
   Isolated GEMM at n=2048: faer ~0.11s vs OpenBLAS ~0.061s, so OpenBLAS is ~1.8×
   faster — but that ~1.8× was levied on a small slice of k8, and the row was never
@@ -416,3 +449,19 @@ Results are identical at every thread count, pinned by `thread_count_changes_cpu
    of one suite run at 5.75s with 3% CPU — a starved process. Re-run alone it is
    0.20s at 108% across five consecutive runs, which is what the table records.
    Re-measure such rows rather than publishing them.
+9. **A stale `target/release` silently poisons every ratio in the table.** The
+   2026-07-18 numbers were taken against a binary that then sat unchanged for four
+   days while a dozen JIT stages landed. Nothing warned: `run.sh` picks up whatever
+   `target/release/helix` happens to be, the anchor gate still passed (the outputs
+   were right, just slowly), and **k7 stayed published at 7.0× slower than C and
+   "also loses to CPython" when it was in fact 3.0× and beating CPython by 2.4×**.
+   The scan kernel (Stage 3t) had made it fast weeks earlier. Rebuild before
+   regenerating, and treat any ratio whose binary you cannot date as unmeasured.
+10. **Wall clock on this machine cannot resolve anything under ~15%.** Two honest
+   best-of-3 wall-clock runs of the *same* binary on k7 came out 1.7× apart, once
+   because a 125-second allocation-heavy job had run immediately before. That
+   fabricated a "1.12s → 0.79s" improvement in commit `c82c191` that did not exist;
+   `9f50966` corrects it. Small effects need child CPU time
+   (`getrusage(RUSAGE_CHILDREN)`), variants run **interleaved** rather than one
+   after the other, and a median rather than a min. Even so, between-session drift
+   on k7 is ~7%, so only within-session interleaved ratios are quotable.
