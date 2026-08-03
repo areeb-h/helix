@@ -500,20 +500,41 @@ pub unsafe fn run_filter_kernel_range(
 ///
 /// SAFETY: `ptr` is a finalized `extern "C" fn(*const S, *mut D, i64, *const i64, *mut i64)`
 /// matching `S`/`D` from `define_array_kernel` with the poison signature.
-unsafe fn run_map_poison<S, D: Copy + Default>(
+unsafe fn run_map_poison<S: Sync, D: Copy + Default + Send>(
     ptr: *const u8,
     src: &[S],
     caps: &[i64],
 ) -> Option<Vec<D>> {
     note_native_call();
-    let mut dst: Vec<D> = vec![D::default(); src.len()];
-    if src.is_empty() {
+    let n = src.len();
+    let mut dst: Vec<D> = vec![D::default(); n];
+    if n == 0 {
         return Some(dst);
     }
     let f: extern "C" fn(*const S, *mut D, i64, *const i64, *mut i64) =
         unsafe { std::mem::transmute(ptr) };
-    let mut poison: i64 = 0;
-    f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, caps.as_ptr(), &mut poison);
+    // PARALLEL past the threshold, with a poison cell PER CHUNK reduced by `|`. Sound for
+    // the same reason the non-poison map is: chunk `k` reads and writes only its own index
+    // range, so the output is byte-identical to the sequential run; and poison is a
+    // monotonic flag, so OR-reducing it is order-independent. Every chunk runs even after
+    // one poisons — the whole output is discarded either way, so the early exit the serial
+    // form had bought nothing but a branch.
+    let poison = if n >= crate::interp::PAR_MATH_THRESHOLD {
+        use rayon::prelude::*;
+        const CH: usize = 1 << 14;
+        src.par_chunks(CH)
+            .zip(dst.par_chunks_mut(CH))
+            .map(|(s, d)| {
+                let mut p: i64 = 0;
+                f(s.as_ptr(), d.as_mut_ptr(), s.len() as i64, caps.as_ptr(), &mut p);
+                p
+            })
+            .reduce(|| 0i64, |a, b| a | b)
+    } else {
+        let mut p: i64 = 0;
+        f(src.as_ptr(), dst.as_mut_ptr(), n as i64, caps.as_ptr(), &mut p);
+        p
+    };
     (poison == 0).then_some(dst)
 }
 
@@ -544,7 +565,7 @@ pub unsafe fn run_map_kernel_mixed_poison(
 ///
 /// SAFETY: as [`run_map_poison`]; the element formula is `Value::range_at`'s verbatim in
 /// `i128`, identical to `run_map_kernel_range`'s.
-unsafe fn run_map_range_poison<D: Copy + Default>(
+unsafe fn run_map_range_poison<D: Copy + Default + Send>(
     ptr: *const u8,
     start: i64,
     step: i64,
@@ -560,18 +581,38 @@ unsafe fn run_map_range_poison<D: Copy + Default>(
         unsafe { std::mem::transmute(ptr) };
     const CH: usize = 1 << 14;
     let at = |j: usize| -> i64 { (start as i128 + step as i128 * j as i128) as i64 };
-    let mut scratch: Vec<i64> = Vec::with_capacity(CH.min(len));
-    let mut poison: i64 = 0;
-    for base in (0..len).step_by(CH) {
-        let n = CH.min(len - base);
-        scratch.clear();
-        scratch.extend((0..n).map(|k| at(base + k)));
-        f(scratch.as_ptr(), dst[base..].as_mut_ptr(), n as i64, caps.as_ptr(), &mut poison);
-        if poison != 0 {
-            return None;
+    // Each chunk generates its own counter values and carries its own poison cell, reduced
+    // by `|` — see [`run_map_poison`] for why that is sound and order-independent. The
+    // per-chunk scratch is a fresh 16K buffer (128 KB) rather than one reused across the
+    // loop: workers cannot share it, and the allocation is amortized over 16K elements of
+    // native work.
+    let poison = if len >= crate::interp::PAR_MATH_THRESHOLD {
+        use rayon::prelude::*;
+        dst.par_chunks_mut(CH)
+            .enumerate()
+            .map(|(ci, d)| {
+                let base = ci * CH;
+                let scratch: Vec<i64> = (0..d.len()).map(|k| at(base + k)).collect();
+                let mut p: i64 = 0;
+                f(scratch.as_ptr(), d.as_mut_ptr(), d.len() as i64, caps.as_ptr(), &mut p);
+                p
+            })
+            .reduce(|| 0i64, |a, b| a | b)
+    } else {
+        let mut scratch: Vec<i64> = Vec::with_capacity(CH.min(len));
+        let mut p: i64 = 0;
+        for base in (0..len).step_by(CH) {
+            let n = CH.min(len - base);
+            scratch.clear();
+            scratch.extend((0..n).map(|k| at(base + k)));
+            f(scratch.as_ptr(), dst[base..].as_mut_ptr(), n as i64, caps.as_ptr(), &mut p);
+            if p != 0 {
+                break; // nothing downstream can un-poison it; the output is discarded
+            }
         }
-    }
-    Some(dst)
+        p
+    };
+    (poison == 0).then_some(dst)
 }
 
 /// SAFETY: as [`run_map_range_poison`] with `D = i64`.

@@ -4467,6 +4467,62 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         }
     }
 
+    /// The poison FFI wrappers run PARALLEL, with a poison cell per chunk reduced by `|`.
+    /// Every raising kernel — the rounders, dividing bodies, and mixed callees — had been
+    /// giving up the chunked-parallel path: a float-parameter callee measured 0.06s where its
+    /// non-raising twin measured 0.02s. Now 0.03s.
+    ///
+    /// The risk the reduce introduces is a poison raised in ONE chunk being lost. Every case
+    /// here is sized past `PAR_MATH_THRESHOLD` and raises in a chosen chunk — early, late, or
+    /// at exactly one index.
+    ///
+    /// A LESSON FROM THE SABOTAGE, recorded so the cases are not "simplified" back: probes
+    /// written as `floor(if i == K then 1e19 else …)` prove NOTHING here. `if` is not in the
+    /// mixed analysis, so a conditional body declines to the bytecode loop and raises
+    /// correctly however broken the reduce is — three such probes passed happily against a
+    /// reduce hard-wired to return 0. Every case below is straight-line arithmetic that
+    /// raises only on a chosen index range, and all of them fail under that sabotage.
+    #[test]
+    fn the_parallel_poison_reduce_never_loses_a_chunks_bail() {
+        // `floor(x * 1e14)` leaves i64 range at x >= 92234, so the plain counter raises in
+        // the LATE chunks and the reversed one in the EARLY chunks. A division raises at
+        // exactly one index — the sharpest single-chunk case.
+        for src in [
+            "(0..200000).map(i => floor(to_float(i) * 100000000000000.0)).count()",
+            "(0..200000).map(i => floor(to_float(200000 - i) * 100000000000000.0)).count()",
+            "(0..200000).map(i => 1.0 / to_float(100000 - i)).count()",
+            "(0..200000).map(i => 1.0 / to_float(100 - i)).count()",
+            "(0..200000).map(i => 1.0 / to_float(199999 - i)).count()",
+            "fn g(x: Float, d: Float) = x / d\n(0..200000).map(i => g(1.0, to_float(100000 - i))).count()",
+            "fn g(x: Float) = if x > 1.0 then 1.0 else 0.0\n(0..200000).map(i => g(sqrt(to_float(100000 - i)))).count()",
+            // A materialized (non-range) source takes the other wrapper.
+            "src = (0..200000).map(i => i * 2)\nsrc.map(i => floor(to_float(i) * 100000000000000.0)).count()",
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert!(tw.is_err(), "`{src}` should raise");
+            assert_eq!(tw, vm, "tree-walker and VM disagree on the error for `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on the error for `{src}`");
+        }
+        // Clean runs at the same size must NOT poison, and must be exact at the chunk
+        // boundaries the parallel split introduces (16384, and 32768 = the threshold itself).
+        for (src, want) in [
+            ("a = (0..200000).map(i => floor(to_float(i) * 1.5))\n[a[16383], a[16384], a[32767], a[32768], a[199999]]",
+             "[24574, 24576, 49150, 49152, 299998]"),
+            ("d = 4.0\na = (0..200000).map(i => to_float(i) / d)\n[a[199999]]", "[49999.75]"),
+            ("fn g(x: Float) = x * 2.0 + 1.0\na = (0..200000).map(i => g(to_float(i)))\n[a[0], a[199999]]",
+             "[1.0, 399999.0]"),
+            // Straddling the threshold in both directions.
+            ("a = (0..32767).map(i => floor(to_float(i) * 1.5))\n[a[32766], a.count()]", "[49149, 32767]"),
+            ("a = (0..32768).map(i => floor(to_float(i) * 1.5))\n[a[32767], a.count()]", "[49150, 32768]"),
+            ("src = (0..200000).map(i => i * 2)\n[src.map(i => floor(to_float(i) * 0.5))[199999]]", "[199999]"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+    }
+
     /// A map body may CALL a `Float`-parameter user function — the last shape where naming
     /// something cost two orders of magnitude (2.09s against 0.02s inline at 20M, annotated
     /// or inferred). The kernel marshals to the mixed bits ABI, hands the callee a stack

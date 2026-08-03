@@ -1384,13 +1384,36 @@ motivates this phase.
       cross-element dependency and poison is a monotonic flag); recorded below as the next
       lever, and it would lift the rounder kernels from Stage 3v too.
 
-- [ ] **Parallelize the poison FFI wrappers.** `run_map_poison` and `run_map_range_poison`
-      are serial, so every RAISING kernel — the Stage 3v rounders and the Stage 3y mixed
-      callees — gives up the chunked-parallel path. Measured cost: a float-parameter callee
-      is 0.06s where its inline twin is 0.02s. The fix is per-chunk poison cells reduced
-      with `|`: a map has no cross-element dependency, and poison is monotonic, so chunks
-      cannot race. The one behaviour change is that a poisoned run no longer stops at the
-      first bad chunk — harmless, since the whole output is discarded either way.
+- [x] **Stage 3z — the poison FFI wrappers run parallel.** Every RAISING kernel (the Stage
+      3v rounders, dividing bodies, the Stage 3y mixed callees) had been giving up the
+      chunked-parallel path, because `run_map_poison` / `run_map_range_poison` were serial.
+      Now each chunk carries its own poison cell and they are reduced with `|`.
+
+      MEASURED at 20M elements:
+
+      | shape | before | after | non-raising twin |
+      | --- | --- | --- | --- |
+      | `fn g(x: Float)` callee | 0.06s | **0.03s** | 0.02s |
+      | `round(to_float(i) * 0.5)` | 0.03s | **0.02s** | — |
+      | `floor(to_float(i) * 1.5)` | 0.03s | **0.02s** | — |
+      | `to_float(i) / d` | 0.03s | **0.02s** | — |
+
+      Sound for the same reason the non-poison map is: chunk *k* reads and writes only its
+      own index range, so output is byte-identical to the sequential run, and poison is a
+      MONOTONIC flag, so OR-reducing it is order-independent. The one behaviour change is
+      that a poisoned run no longer stops at the first bad chunk — harmless, since the whole
+      output is discarded either way. The serial path (below `PAR_MATH_THRESHOLD`) keeps its
+      early exit.
+
+      A PROBE LESSON, recorded so the test's cases are not "simplified" back into the
+      obvious form: a raise targeted with `floor(if i == K then 1e19 else …)` proves NOTHING
+      about the reduce. `if` is not in the mixed analysis, so a conditional body declines to
+      the bytecode loop and raises correctly however broken the parallel reduce is — three
+      such probes passed happily against a reduce hard-wired to return 0. The cases in
+      `the_parallel_poison_reduce_never_loses_a_chunks_bail` are all straight-line arithmetic
+      that raises only on a chosen index range (`floor(x * 1e14)` leaves i64 range at
+      x ≥ 92234, so the plain counter raises late and the reversed one early; a division
+      raises at exactly one index), and every one of them fails under that sabotage.
 
 - [ ] **Two spelling inversions still open** (two others from this sweep are now Stage 3r).
       At 10M elements; a declining JIT runs the bytecode loop, so "VM" means the JIT time
