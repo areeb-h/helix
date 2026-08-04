@@ -1581,6 +1581,65 @@ motivates this phase.
       (Also open: the sieve's in-place marking loop, the one genuinely inexpressible
       algorithm — `k6_sieve_trial` is 83s against 0.02s for the `primes()` builtin.)
 
+- [x] **Stage 4e — `concat` over packed numeric arrays stopped boxing: 83.9s → 5.1s.**
+      The general path did three passes per call — `to_values()` boxes the receiver,
+      `to_vec()` clones it, `array_sniff` unboxes the result — moving 16 bytes per element
+      twice to append to a buffer of 8-byte elements. Fast path sits beside the
+      `enumerate` one in `call_method` (it needs the `Rc`, before `to_values()`): both
+      sides `Ints`/`Range` → one `Vec<i64>` and a memcpy; same for `Floats`. Mixed
+      Int/Float falls through, so `[1].concat([2.0])` stays `[1, 2.0]`.
+
+      | n | before | after |
+      | --- | --- | --- |
+      | 20,000 | 1.83s | **0.05s** |
+      | 40,000 | 14.18s | **0.13s** |
+      | 80,000 | 83.94s | **5.10s** |
+
+      **Still O(n²)** — the receiver is copied every call, and what remains is exactly
+      memcpy bandwidth (the uneven curve is the L2 cliff: 640 KB a copy at n=80k against
+      320 KB at 40k). An O(1) append needs the receiver's `Rc` to be unique, and it never
+      is: the caller's binding holds one reference and the evaluated receiver on the stack
+      holds another. See the liveness item below.
+
+- [ ] **`dot` SILENTLY LOSES PRECISION ON INTEGER ARRAYS — a wrong answer, not a style
+      choice.** Found by the standing method (a program against its own equivalent
+      spelling). At n = 1,000,000:
+
+      | spelling | result |
+      | --- | --- |
+      | `xs.dot(xs)` | `333332833333127552.0` |
+      | `xs.zip(xs).map((a, b) => a * b).sum()` | `333332833333500000` |
+      | `xs.map(it * it).sum()` | `333332833333500000` |
+      | exact (Python) | `333332833333500000` |
+
+      **Off by 372,448**, and the result is a `Float` where every sibling reduction over
+      `Int`s returns an `Int` — `sum`, `product` and `reduce` all do. `[1,2,3].dot([4,5,6])`
+      is `32.0`, not `32`. The cause is that `dot` goes through `f64` unconditionally,
+      so it starts losing integers above 2^53 while the two equivalent spellings stay
+      exact (`sum` promotes to `i128`).
+
+      The fix is an `Int` fast path summing in `i128` exactly as `sum` does. It is a
+      USER-VISIBLE type change for integer inputs (`32.0` → `32`), which is why it is
+      recorded here rather than slipped in: it wants its own commit, a decision recorded
+      against `docs/integer-semantics.md`, and a check of whether any corpus program or
+      example depends on the `Float`.
+
+- [ ] **`argmax`/`argmin` are ~7.7x slower than `index_of(max())`** at n=1M (0.13s against
+      0.02s) for the same answer — the idiomatic spelling losing to the manual one, which
+      is the exact defect signature this project hunts. They desugar through
+      `enumerate` + `reduce` over tuples, which no kernel compiles. Same root cause as the
+      15x gap measured for `xs.enumerate().filter(...)` against a plain `filter`: a lazy
+      `Enumerate` still hands the body a TUPLE, and tuples are not packed.
+
+- [ ] **LAST-USE LIVENESS — the prerequisite for `while`/`for` syntax and for an O(1)
+      append.** Today the final read of a binding clones its `Rc`, so an accumulator is
+      always shared at the moment it is extended and can never be mutated in place. If the
+      compiler knew a read was a binding's LAST, it could MOVE instead — leaving the `Rc`
+      unique, which is the same uniqueness check the map kernels already use to reuse a
+      dead buffer (Stage 3o). That single change makes `acc.concat([x])` O(1) amortized,
+      which is what turns an imperative loop from a diverging trap into ordinary code.
+      Until then, adding `while` would hand users a familiar name for the 8,500x shape.
+
 - [ ] **Two spelling inversions still open** (two others from this sweep are now Stage 3r).
       At 10M elements; a declining JIT runs the bytecode loop, so "VM" means the JIT time
       equals it.
