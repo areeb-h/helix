@@ -5689,3 +5689,133 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         assert_eq!(run_tw(&caught), run_vm(&caught), "engines disagree on the caught cap");
         assert_eq!(run_vm(&caught), Ok("false".to_string()));
     }
+
+    /// `position`, and the `take_while`/`drop_while` built on it, SHORT-CIRCUIT. They used
+    /// to desugar to `map(p).index_of(Bool(want))`, which ran the predicate over every
+    /// element and materialized one `Value` per element to find an index that is usually
+    /// near the front. Measured before the change, on a 90M range:
+    ///
+    ///     (0..90_000_000).take_while(it < 5)   24.33s   2.12 GB
+    ///     (0..90_000_000).position(it > 5)      5.03s   2.12 GB
+    ///     (0..90_000_000).any(it > 5)           0.07s     14 MB   <- already lazy
+    ///
+    /// After: 0.02s / 15.6 MB and 0.00s / 15.5 MB. Even when NOTHING can be skipped the
+    /// intermediate array is gone — a full-scan `take_while` over 10M went 287 MB -> 17.7 MB.
+    ///
+    /// What this test pins is that the answers did not move. The arms reproduce
+    /// `index_of`'s comparison exactly rather than approximately: `values_equal` is false
+    /// for every non-`Bool` against a `Bool`, so a `missing` result — or an outright
+    /// non-boolean one — is SKIPPED, neither a match nor an error. That is deliberately
+    /// unlike `any`/`all`, which do reject a non-boolean test.
+    #[test]
+    fn position_and_the_while_verbs_short_circuit_without_moving_any_answer() {
+        for (src, want) in [
+            // ---- position
+            ("[5, 6, 7].position(it > 5)", "1"),
+            ("[5, 6, 7].position(it > 99)", "missing"),
+            ("[5, 6, 7].position(it > 0)", "0"),
+            ("[].position(it > 0)", "missing"),
+            ("missing.position(it > 0)", "missing"),
+            // a non-boolean or `missing` result never matches and never raises
+            ("[5, 6, 7].position(it)", "missing"),
+            ("[5, 6, 7].position(it * 2)", "missing"),
+            ("[5, missing, 7].position(it > 6)", "2"),
+            ("[missing].position(it > 0)", "missing"),
+            // multi-parameter binders, and a named predicate as a bare identifier
+            ("[[1, 2], [3, 4]].position((a, b) => b == 4)", "1"),
+            ("[[1, 2], [3, 4]].position((a, b) => a > 9)", "missing"),
+            // A BARE named predicate does not bind here, and did not before either:
+            // `wrap_bound_fn_arg` only reaches the general method branch, not the
+            // desugared verbs, so `big` is the implicit-`it` body — the function VALUE,
+            // which is not `Bool(true)`, so nothing ever matches. Recorded as it is
+            // rather than quietly fixed: making it bind is a separate change from making
+            // it fast, and `map`/`any`/`all` accepting it is the inconsistency to settle.
+            ("fn big(x) = x > 5\n[1, 9, 2].position(big)", "missing"),
+            ("fn big(x) = x > 5\n[1, 9, 2].position(x => big(x))", "1"),
+            // ---- take_while / drop_while
+            ("[1, 2, 3, 9, 4].take_while(it < 5)", "[1, 2, 3]"),
+            ("[1, 2, 3, 9, 4].drop_while(it < 5)", "[9, 4]"),
+            ("[1, 2, 3].take_while(it < 99)", "[1, 2, 3]"),
+            ("[1, 2, 3].drop_while(it < 99)", "[]"),
+            ("[1, 2, 3].take_while(it < 0)", "[]"),
+            ("[1, 2, 3].drop_while(it < 0)", "[1, 2, 3]"),
+            ("[].take_while(it < 5)", "[]"),
+            ("missing.take_while(it < 5)", "missing"),
+            // a `missing` element's test is `missing`, which is not `false`, so the run
+            // CONTINUES through it — the prefix keeps the hole
+            ("[1, missing, 3].take_while(it < 2)", "[1, missing]"),
+            ("[1, missing, 3].drop_while(it < 2)", "[3]"),
+            ("[1, 2, 3].take_while(it)", "[1, 2, 3]"),
+            ("[[1, 2], [3, 4]].take_while((a, b) => a < 3)", "[[1, 2]]"),
+            // ---- lazy and stepped ranges, and composition with other verbs
+            ("(0..10).position(it > 6)", "7"),
+            ("(0..10).take_while(it < 4)", "[0, 1, 2, 3]"),
+            ("(0..10).drop_while(it < 4)", "[4, 5, 6, 7, 8, 9]"),
+            ("range(0, 20, 3).position(it > 8)", "3"),
+            ("range(0, 20, 3).take_while(it < 10)", "[0, 3, 6, 9]"),
+            ("(0..20).filter(it % 2 == 0).take_while(it < 9)", "[0, 2, 4, 6, 8]"),
+            ("(0..20).take_while(it < 9).sum()", "36"),
+            ("(0..20).drop_while(it < 9).first()", "9"),
+            ("fn f(xs) = xs.take_while(it < 3)\nf([1, 2, 5])", "[1, 2]"),
+            ("[[1, 2, 9], [4, 5]].map(r => r.take_while(it < 5))", "[[1, 2], [4]]"),
+            ("[[1, 2, 9], [4, 5]].map(r => r.position(it > 3))", "[2, 0]"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+
+        // SHORT-CIRCUITING IS OBSERVABLE, and this is the one intended behaviour change.
+        // A predicate that raises on an element PAST the stopping point used to abort the
+        // whole program, because the desugar evaluated it everywhere. It is now never
+        // evaluated there. `any`/`all` have always behaved this way, so the four early-exit
+        // verbs finally agree with each other.
+        for (src, want) in [
+            // 100 // 4 = 25, not > 50 -> the run ends at index 0; the `0` is never divided
+            ("[4, 1, 0].take_while(100 // it > 50)", "[]"),
+            // 100 // 1 = 100 > 90 -> index 1 wins; the `0` is never divided
+            ("[4, 1, 0].position(100 // it > 90)", "1"),
+            ("[4, 1, 0].drop_while(100 // it > 50)", "[4, 1, 0]"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // ...and a predicate that raises AT or BEFORE the stopping point still raises,
+        // identically on both engines — short-circuiting must not swallow a real error.
+        for src in ["[0, 1].take_while(100 // it > 50)", "[0, 1].position(100 // it > 50)"] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.unwrap_err();
+            assert!(msg.contains("division by zero"), "`{src}` got: {msg}");
+        }
+
+        // Errors keep their wording, and a non-array receiver now names the verb the user
+        // actually wrote — the old desugar reported `map`, which appears nowhere in the
+        // source they typed.
+        for (src, needle) in [
+            ("[1, 2].position()", "takes one predicate function"),
+            ("[1, 2].position(it > 0, it < 5)", "takes one predicate function"),
+            ("[1, 2].take_while()", "takes one predicate function"),
+            ("5.position(it > 0)", "type Int has no method `position`"),
+            ("\"abc\".position(it)", "no method `position`"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.unwrap_err();
+            assert!(msg.contains(needle), "`{src}` got: {msg}");
+        }
+
+        // Scale: 50M elements answered from the first handful. Under the materializing
+        // desugar this allocated ~800 MB and took seconds; a regression shows up as the
+        // gate suddenly needing both. The `.length()` on the result stays O(1) because a
+        // lazy range's `take` is O(1).
+        for (src, want) in [
+            ("(0..50000000).take_while(it < 3).length()", "3"),
+            ("(0..50000000).position(it > 2)", "3"),
+            ("(0..50000000).drop_while(it < 3).first()", "3"),
+            ("(0..50000000).any(it > 2)", "true"),
+        ] {
+            assert_eq!(run_vm(src), Ok(want.to_string()), "`{src}`");
+        }
+    }

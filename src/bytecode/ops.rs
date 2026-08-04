@@ -164,6 +164,11 @@ pub enum Op {
     /// sets the seen-missing slot; a non-boolean errors. Fields: (is_all, sm_slot,
     /// short_target).
     CompBoolTest(bool, u32, u32),
+    /// `position`'s per-element test: pop the predicate result and, if it is exactly
+    /// `Bool(want)`, jump to `short_target` with the running index in `idx_slot`.
+    /// Anything else — `false`, `missing`, or a non-boolean — falls through, which is
+    /// what makes this identical to the `map(p).index_of(Bool(want))` it replaced.
+    CompFindTest { want: bool, idx_slot: u32, short_target: u32 },
     /// Begin a comprehension over a fused `range`: pop `[start, end]`, validate as
     /// integers and cap-check (identically to a materialized `range`), then push a
     /// lazy range iterator — no array is allocated. `CompNext` drives it like any

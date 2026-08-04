@@ -351,6 +351,116 @@ impl super::Compiler {
         Ok(())
     }
 
+    /// `position(p)` / `position(p, want)` — the first index whose predicate result is
+    /// exactly `Bool(want)`, else `missing`. SHORT-CIRCUITS, which is the whole point:
+    /// this replaced a `map(p).index_of(Bool(want))` desugar that ran the predicate over
+    /// every element and materialized one `Value` per element, so
+    /// `(0..90_000_000).take_while(it < 5)` cost 17.4s and 2.1 GB to answer `5`.
+    ///
+    /// The loop is `compile_any_all`'s with one extra local: a running index, bumped once
+    /// per element and read at the short-circuit landing. Anything that is not
+    /// `Bool(want)` — `false`, `missing`, or a non-boolean — falls through WITHOUT an
+    /// error, because that is what `index_of` did (`values_equal` is `false` for every
+    /// non-`Bool` against a `Bool`). `[5, 6, 7].position(it)` is `missing`, not a type
+    /// error, and the walker's arm says the same.
+    pub(super) fn compile_position(
+        &mut self,
+        b: &mut Builder,
+        recv: &Expr,
+        args: &[Expr],
+        line: usize,
+        col: usize,
+    ) -> R<()> {
+        if args.is_empty() || args.len() > 2 {
+            return self.raise_after_recv(
+                b,
+                recv,
+                "`position` takes exactly one expression".to_string(),
+                "e.g. `xs.position(it > 0)`.".to_string(),
+                line,
+                col,
+            );
+        }
+        // `want` is `true` from source; the two-argument form is generated only by the
+        // `take_while`/`drop_while` desugar, whose literal is always a `Bool`.
+        let want = match args.get(1) {
+            None => true,
+            Some(Expr::Bool(w)) => *w,
+            Some(_) => {
+                return self.raise_after_recv(
+                    b,
+                    recv,
+                    "`position` takes exactly one expression".to_string(),
+                    "e.g. `xs.position(it > 0)`.".to_string(),
+                    line,
+                    col,
+                )
+            }
+        };
+        let (params, body) = crate::interp::comprehension_params(&args[0]);
+        if params.is_empty() {
+            return self.raise_after_recv(
+                b,
+                recv,
+                "`position`'s function needs at least one parameter".to_string(),
+                "e.g. `xs.position(it > 0)`.".to_string(),
+                line,
+                col,
+            );
+        }
+
+        self.compile_expr(b, recv)?;
+        let init_at = b.emit(Op::CompInit(CompKind::Position, 0), line, col);
+
+        b.scopes.push(Vec::new());
+        let saved_next = b.next_slot;
+        let (binder, destruct) = Self::declare_binder_pattern(b, &params);
+        // running index, zero before the first element (name unforgeable in source)
+        let zk = b.add_const(Value::Int(0));
+        b.emit(Op::Const(zk), line, col);
+        let ix = b.declare_local("$ix");
+        b.emit(Op::StoreLocal(ix), line, col);
+
+        let loop_start = b.code.len() as u32;
+        let next_at = b.emit(Op::CompNext(binder, 0, false), line, col);
+        if let Some(slots) = &destruct {
+            b.emit(Op::LoadLocal(binder), line, col);
+            b.emit(Op::DestructureBind(slots.clone()), line, col);
+        }
+        self.compile_expr(b, body)?;
+        let test_at = b.emit(Op::CompFindTest { want, idx_slot: ix, short_target: 0 }, line, col);
+        b.emit(Op::Jump(loop_start), line, col);
+
+        // exhausted without a match → `missing`
+        let exhausted = b.code.len() as u32;
+        b.code[next_at] = Op::CompNext(binder, exhausted, false);
+        b.emit(Op::CompEndDiscard, line, col);
+        let mk = b.add_const(Value::Missing);
+        b.emit(Op::Const(mk), line, col);
+        let jdone1 = b.emit(Op::Jump(0), line, col);
+
+        // short-circuit landing → the index that matched
+        let short = b.code.len() as u32;
+        b.code[test_at] = Op::CompFindTest { want, idx_slot: ix, short_target: short };
+        b.emit(Op::CompEndDiscard, line, col);
+        b.emit(Op::LoadLocal(ix), line, col);
+        let jdone2 = b.emit(Op::Jump(0), line, col);
+
+        // `missing` receiver propagates (ADR 0001), like every other comprehension
+        let missing_at = b.code.len() as u32;
+        b.code[init_at] = Op::CompInit(CompKind::Position, missing_at);
+        let mk2 = b.add_const(Value::Missing);
+        b.emit(Op::Const(mk2), line, col);
+
+        let done = b.code.len() as u32;
+        b.code[jdone1] = Op::Jump(done);
+        b.code[jdone2] = Op::Jump(done);
+
+        b.scopes.pop();
+        b.next_slot = saved_next;
+        Ok(())
+    }
+
     /// Detect + emit the native attempt for a **parallel nested reduce** (#31):
     /// `range(os,oe).map(i => range(is,ie).reduce(init, (acc,j) => rbody))` where the inner
     /// reduce captures EXACTLY the outer binder `i` (a scalar). The inner bounds/init must be

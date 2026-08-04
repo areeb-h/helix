@@ -2385,6 +2385,27 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::CompEndDiscard => {
                 iters.pop();
             }
+            Op::CompFindTest { want, idx_slot, short_target } => {
+                // ADR 0024: this `unwrap` cannot fire. `CompFindTest` is emitted at
+                // exactly one site — `compile_position`, immediately after
+                // `compile_expr(body)` — and compiling an expression always leaves
+                // exactly one value on the stack. Identical to `CompBoolTest` below,
+                // which is emitted the same way for the same reason.
+                let v = stack.pop().unwrap();
+                let base = frames[fi].base;
+                // The index BEFORE the bump is the one that matched.
+                let i = match &locals[base + *idx_slot as usize] {
+                    Value::Int(n) => *n,
+                    // Unreachable: the slot is initialized to `Int(0)` and only ever
+                    // written here. Treated as "no match yet" rather than panicking.
+                    _ => 0,
+                };
+                if matches!(v, Value::Bool(b) if b == *want) {
+                    frames[fi].ip = *short_target as usize;
+                } else {
+                    locals[base + *idx_slot as usize] = Value::Int(i + 1);
+                }
+            }
             Op::CompBoolTest(is_all, sm_slot, short_target) => {
                 let v = stack.pop().unwrap();
                 match v {

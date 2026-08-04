@@ -68,6 +68,36 @@ impl super::Interp {
                 })?;
                 Ok(Value::array_sniff(out))
             }
+            // First index whose predicate result is EXACTLY `Bool(want)` (`want` is
+            // `true` from source; `false` only from the `take_while`/`drop_while`
+            // desugar), or `missing` if no element matches. Short-circuits.
+            //
+            // This was `map(p).index_of(Bool(want))`, and the arms below reproduce that
+            // comparison exactly rather than approximately: `values_equal` is `false` for
+            // every non-`Bool` against a `Bool`, so a `missing` result — and an outright
+            // non-boolean one — is SKIPPED, not an error and not a match.
+            // `[5, 6, 7].position(it)` is `missing`, not a type error, and stays so.
+            // That is deliberately unlike `any`/`all`, which do reject a non-boolean test.
+            "position" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(comp_arity(name, "(it > 0)", line, col));
+                }
+                let want = match args.get(1) {
+                    None => true,
+                    Some(Expr::Bool(b)) => *b,
+                    // Unreachable from source: `desugar_position` rejects two arguments.
+                    Some(_) => return Err(comp_arity(name, "(it > 0)", line, col)),
+                };
+                let (params, body) = comprehension_params(&args[0]);
+                comp_needs_binder(&params, name, "e.g. `xs.position(it > 0)`.", line, col)?;
+                let mut i: i64 = 0;
+                let found = self.eval_pattern_loop(&params, &items, body, line, col, |_el, r| {
+                    let hit = matches!(r, Value::Bool(b) if b == want);
+                    i += 1;
+                    Ok(hit.then(|| Value::Int(i - 1)))
+                })?;
+                Ok(found.unwrap_or(Value::Missing))
+            }
             "any" | "all" => {
                 if args.len() != 1 {
                     return Err(comp_arity(name, "(it > 0)", line, col));

@@ -2840,12 +2840,17 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // +3 (52 → 55): `TryJitScan`'s three operand pops. Emitted at exactly one compiler
         // site, which pushes `[start, end, init]` immediately before the op — proven at the
         // call site in `vm.rs`.
-        ("src/vm.rs", 55),
+        // 56: +1 for `CompFindTest`'s operand pop, proved at the site — it is emitted at
+        // exactly one place, right after the predicate body is compiled, so the stack
+        // always holds that value. Same shape and same proof as `CompBoolTest` beside it.
+        ("src/vm.rs", 56),
         ("src/bytecode.rs", 2),
         ("src/bytecode/comprehensions.rs", 0),
         ("src/bytecode/ops.rs", 0),
         ("src/lexer.rs", 0),
-        ("src/parser.rs", 7),
+        // 6: `desugar_position` no longer pops its predicate out of the arg vector — it
+        // passes the args through untouched, so the `unwrap` went with it.
+        ("src/parser.rs", 6),
         ("src/bio.rs", 0),
         ("src/value.rs", 0),
         ("src/jit.rs", 1),

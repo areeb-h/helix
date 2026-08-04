@@ -48,6 +48,8 @@ pub enum CompKind {
     Reduce,
     Any,
     All,
+    /// `position` — the first index whose predicate result is exactly `Bool(want)`.
+    Position,
 }
 
 impl CompKind {
@@ -59,6 +61,7 @@ impl CompKind {
             CompKind::Reduce => "reduce",
             CompKind::Any => "any",
             CompKind::All => "all",
+            CompKind::Position => "position",
         }
     }
 }
@@ -1355,6 +1358,9 @@ impl Compiler {
                 }
                 if matches!(n, "any" | "all") {
                     return self.compile_any_all(b, recv, name, args, *line, *col);
+                }
+                if n == "position" {
+                    return self.compile_position(b, recv, args, *line, *col);
                 }
 
                 // 3. `select`/`group` are DataFrame-only column verbs. A

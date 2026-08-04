@@ -351,6 +351,16 @@ impl super::Checker {
                     }
                 }
             }
+            // `position` binds `it` like the others, but deliberately does NOT
+            // `require_boolish` its body: it answers "the first index whose result is
+            // exactly `Bool(want)`", so a non-boolean body is not an error, it simply
+            // never matches. `[5, 6, 7].position(it)` is `missing`, and was `missing`
+            // back when this desugared to `map(p).index_of(true)`.
+            "position" => {
+                let (params, body) = comprehension_params(&args[0..1]);
+                self.with_pattern(&params, el.clone(), body)?;
+                Ok(Type::Int)
+            }
             "reduce" | "scan" => {
                 if args.len() != 2 {
                     return Ok(Type::Unknown); // malformed → runtime errors; don't false-positive
