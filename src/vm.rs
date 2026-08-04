@@ -559,6 +559,22 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
         .iter()
         .map(|n| jit.and_then(|j| j.lookup(n)))
         .collect();
+    // Tail loops compiled with the globals they read as trailing parameters. The capture
+    // NAMES are resolved to global slots once, here, so the hot path is an index — and a
+    // name that is not a global disables the specialization rather than guessing at it.
+    let cap_for_idx: Vec<Option<(*const u8, Vec<usize>, usize)>> = program
+        .func_names
+        .iter()
+        .map(|n| {
+            let j = jit?;
+            let (ptr, caps, arity) = j.capture_loop(n)?;
+            let slots: Option<Vec<usize>> = caps
+                .iter()
+                .map(|c| program.global_names.iter().position(|g| g == c))
+                .collect();
+            Some((ptr, slots?, arity))
+        })
+        .collect();
     // A throwaway interpreter purely as the host for builtin dispatch (`print`,
     // math fns, `read_csv`, …) — builtins are pure functions of their args.
     let mut host = Interp::new();
@@ -871,6 +887,41 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             } else {
                                 Value::Int(r)
                             });
+                            return Ok(());
+                        }
+                    }
+                }
+                // A tail loop that reads globals. Tried after the capture-free
+                // specializations, so a function that compiled without captures keeps its
+                // cheaper entry point. Every argument must be `Int` (same rule as the i64
+                // path) AND every captured global must be `Int` right now — a global that
+                // is missing, a Float, or not yet initialized declines to the VM, which
+                // handles it correctly as always. Reading the globals HERE is what makes
+                // this sound: nothing else runs during the native call, so a capture is
+                // loop-invariant for the whole loop.
+                if let Some((ptr, slots, arity)) = &cap_for_idx[idx]
+                    && nargs == *arity
+                {
+                    let tail = &stack[start..];
+                    if tail.iter().all(|v| matches!(v, Value::Int(_))) {
+                        let mut iargs: Vec<i64> = Vec::with_capacity(nargs + slots.len());
+                        for v in tail {
+                            if let Value::Int(n) = v {
+                                iargs.push(*n);
+                            }
+                        }
+                        let all_int_caps = slots.iter().all(|s| {
+                            if let Some(Value::Int(n)) = globals.get(*s) {
+                                iargs.push(*n);
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        if all_int_caps {
+                            stack.truncate(start);
+                            let r = unsafe { crate::jit::call_i64(*ptr, &iargs) };
+                            stack.push(Value::Int(r));
                             return Ok(());
                         }
                     }

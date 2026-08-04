@@ -119,6 +119,11 @@ pub struct NativeFn {
 pub struct Jit {
     _module: JITModule,
     by_name: HashMap<String, NativeFn>,
+    /// Tail loops compiled with the globals they read appended as trailing `i64`
+    /// parameters: name -> (entry point, those globals in parameter order, real arity).
+    /// Dispatched only from the VM's `CallFn`, which resolves the names to global slots
+    /// once and declines if any of them is not an `Int` at call time.
+    cap_fns: HashMap<String, (*const u8, Vec<String>, usize)>,
     /// Native `extern "C" fn(i64,i64,i64)->i64` reduce loops, indexed by the
     /// `loop_idx` of [`crate::bytecode::Op::TryJitReduce`]. `None` for a site that
     /// the JIT declined (kept as a slot so indices stay aligned with the compiler).
@@ -157,6 +162,11 @@ pub struct Jit {
 impl Jit {
     pub fn lookup(&self, name: &str) -> Option<NativeFn> {
         self.by_name.get(name).copied()
+    }
+    /// The capture-taking tail-loop entry point for `name`, with the globals it expects
+    /// appended after its real parameters.
+    pub fn capture_loop(&self, name: &str) -> Option<(*const u8, &[String], usize)> {
+        self.cap_fns.get(name).map(|(p, c, a)| (*p, c.as_slice(), *a))
     }
     /// The native reduce loop for site `idx`, if one compiled.
     pub fn reduce_loop(&self, idx: usize) -> Option<*const u8> {
@@ -340,6 +350,101 @@ pub fn build(
             module.clear_context(&mut ctx);
 
             compiled.push((f.name.to_string(), kind, fn_ids[f.name], f.params.len()));
+        }
+    }
+
+    // TAIL LOOPS THAT READ A GLOBAL. `value_eligible`'s `Ident` arm admits only
+    // parameters, so one global read anywhere in a tail-recursive function dropped the
+    // whole loop to the bytecode VM — measured at 10M iterations, 0.01s compiled against
+    // 0.80s interpreted. These compile with the globals appended as trailing `i64`
+    // parameters, which the VM reads and marshals at dispatch.
+    //
+    // Like the MIXED specializations below, they are dispatched ONLY from the VM's
+    // `CallFn`: they live outside `fn_ids` / `int_eligible`, so no kernel and no other
+    // native can call them with the wrong signature, and `int_eligible_fns` — the
+    // bytecode compiler's view of what a kernel may call — is untouched.
+    let mut compiled_caps: Vec<(String, FuncId, Vec<String>, usize)> = Vec::new();
+    {
+        let cap_loops = tail_loop_captures(&funcs, &int_eligible, kind);
+        if !cap_loops.is_empty() {
+            let mut ctx = module.make_context();
+            let mut bctx = FunctionBuilderContext::new();
+            for (fname, caps) in &cap_loops {
+                let Some(f) = funcs.iter().find(|g| g.name == *fname) else {
+                    continue;
+                };
+                let nparams = f.params.len();
+                let total = nparams + caps.len();
+                let mut sig = module.make_signature();
+                sig.call_conv = CallConv::SystemV;
+                for _ in 0..total {
+                    sig.params.push(AbiParam::new(kind.cl_type()));
+                }
+                sig.returns.push(AbiParam::new(kind.cl_type()));
+                let id = module
+                    .declare_function(&format!("{fname}$caploop"), Linkage::Local, &sig)
+                    .ok()?;
+
+                ctx.func.signature.call_conv = CallConv::SystemV;
+                for _ in 0..total {
+                    ctx.func.signature.params.push(AbiParam::new(kind.cl_type()));
+                }
+                ctx.func.signature.returns.push(AbiParam::new(kind.cl_type()));
+
+                let mut builder = FunctionBuilder::new(&mut ctx.func, &mut bctx);
+                let entry = builder.create_block();
+                builder.append_block_params_for_function_params(entry);
+                builder.switch_to_block(entry);
+                builder.seal_block(entry);
+
+                // Parameters first, then the captures — the order `tail_loop_captures`
+                // returned them in, which is the order the VM marshals.
+                let mut vars: HashMap<&str, Variable> = HashMap::new();
+                let mut param_vars: Vec<Variable> = Vec::with_capacity(nparams);
+                for i in 0..total {
+                    let pv = builder.block_params(entry)[i];
+                    let var = builder.declare_var(kind.cl_type());
+                    builder.def_var(var, pv);
+                    let name: &str =
+                        if i < nparams { f.params[i].0.as_str() } else { caps[i - nparams] };
+                    vars.insert(name, var);
+                    if i < nparams {
+                        param_vars.push(var);
+                    }
+                }
+
+                let hdr = builder.create_block();
+                let exit = builder.create_block();
+                let ret = builder.declare_var(kind.cl_type());
+                let zero = match kind {
+                    NumKind::Int => builder.ins().iconst(I64, 0),
+                    NumKind::Float => builder.ins().f64const(0.0),
+                };
+                builder.def_var(ret, zero);
+                builder.ins().jump(hdr, &[]);
+                builder.switch_to_block(hdr);
+                // `params` is the REAL parameters only. `gen_tail`'s back-edge zips the
+                // self-call's arguments against this slice, so the trailing capture
+                // variables are never rebound — which is exactly right: a global cannot
+                // change while native code is running, so a capture is loop-invariant.
+                let tl = TailLoop { self_name: f.name, params: &param_vars, hdr, exit, ret };
+                gen_tail(&mut builder, f.body, &mut vars, &fn_ids, &mut module, kind, &tl);
+                builder.seal_block(hdr);
+                builder.switch_to_block(exit);
+                builder.seal_block(exit);
+                let rv = builder.use_var(ret);
+                builder.ins().return_(&[rv]);
+                builder.finalize();
+
+                module.define_function(id, &mut ctx).ok()?;
+                module.clear_context(&mut ctx);
+                compiled_caps.push((
+                    fname.to_string(),
+                    id,
+                    caps.iter().map(|c| c.to_string()).collect(),
+                    nparams,
+                ));
+            }
         }
     }
 
@@ -608,6 +713,7 @@ pub fn build(
 
     if compiled.is_empty()
         && compiled_mixed.is_empty()
+        && compiled_caps.is_empty()
         && reduce_ids.iter().all(|r| r.is_none())
         && map_ids.iter().all(|r| r.is_none())
         && map_f64_ids.iter().all(|r| r.is_none())
@@ -641,6 +747,14 @@ pub fn build(
         entry.mixed = Some(MixedFn { ptr, float_mask, ret_float });
     }
 
+    // name -> (entry point, the globals to marshal in order, real arity)
+    let cap_fns: HashMap<String, (*const u8, Vec<String>, usize)> = compiled_caps
+        .into_iter()
+        .map(|(name, id, caps, arity)| {
+            (name, (module.get_finalized_function(id), caps, arity))
+        })
+        .collect();
+
     let finalize = |ids: Vec<Option<FuncId>>, module: &JITModule| -> Vec<Option<*const u8>> {
         ids.into_iter().map(|id| id.map(|id| module.get_finalized_function(id))).collect()
     };
@@ -657,6 +771,7 @@ pub fn build(
     Some(Jit {
         _module: module,
         by_name,
+        cap_fns,
         reduce_ptrs,
         map_ptrs,
         map_ptrs_f64,
@@ -3303,6 +3418,133 @@ fn on_mutual_cycle(i: usize, funcs: &[FnDef]) -> bool {
 /// `TailCallFn` loop would (identical semantics), it does not overflow. Pure and
 /// deterministic — `eligible_set` (read by both the bytecode compiler and the JIT build)
 /// and `build`'s codegen branch call it identically, so all sites always agree.
+/// The free identifiers of `e` — the names it reads that it does not itself bind.
+///
+/// Correct by construction over exactly the forms [`value_eligible`] ACCEPTS, which is
+/// all that is needed: its catch-all is `false`, so for any other expression the body is
+/// ineligible and its capture list is never consulted. Within that set, binders occur in
+/// only two places — `Let` bindings and `Match` arm patterns — and both are handled here
+/// the same way `value_eligible` handles them (a `Let` binding is in scope for the
+/// bindings after it and for the body; an arm's pattern names are in scope for its guard
+/// and body). First-appearance order, no duplicates: the order IS the parameter order of
+/// the compiled specialization, so it must be deterministic.
+fn free_idents<'a>(e: &'a Expr, bound: &HashSet<&'a str>, out: &mut Vec<&'a str>) {
+    match e {
+        Expr::Ident { name, .. } => {
+            let n = name.as_str();
+            if !bound.contains(n) && !out.contains(&n) {
+                out.push(n);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            free_idents(left, bound, out);
+            free_idents(right, bound, out);
+        }
+        Expr::Unary { expr, .. } => free_idents(expr, bound, out),
+        // The callee NAME is a function, not a value — only the arguments are reads.
+        Expr::Call { args, .. } => {
+            for a in args {
+                free_idents(a, bound, out);
+            }
+        }
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            free_idents(cond, bound, out);
+            free_idents(then_branch, bound, out);
+            free_idents(else_branch, bound, out);
+        }
+        Expr::Let { bindings, body } => {
+            let mut bound2 = bound.clone();
+            for (n, v) in bindings {
+                free_idents(v, &bound2, out);
+                bound2.insert(n.as_str());
+            }
+            free_idents(body, &bound2, out);
+        }
+        Expr::Match { scrutinee, arms, .. } => {
+            free_idents(scrutinee, bound, out);
+            for arm in arms {
+                let mut bound2 = bound.clone();
+                // Exactly what `match_eligible` binds: a single `Bind` pattern. Literal,
+                // `Or` and wildcard patterns bind no names, and any richer pattern makes
+                // the arm ineligible there, so nothing else can be in scope here.
+                if let crate::ast::Pattern::Bind(n) = &arm.pattern {
+                    bound2.insert(n.as_str());
+                }
+                if let Some(g) = &arm.guard {
+                    free_idents(g, &bound2, out);
+                }
+                free_idents(&arm.body, &bound2, out);
+            }
+        }
+        // Literals bind and read nothing; anything else makes the body ineligible.
+        _ => {}
+    }
+}
+
+/// Tail-self-recursive functions that would be `i64`-eligible IF the globals they read
+/// were parameters, together with those globals in parameter order.
+///
+/// This is the loop counterpart of the capture work the map/filter/reduce kernels got:
+/// `value_eligible`'s `Ident` arm admits only parameters, so ONE global read anywhere in
+/// a function — condition or body, it made no difference — dropped the entire loop to the
+/// bytecode VM. Measured at 10M iterations: 0.01s compiled against 0.80s interpreted, an
+/// 80x penalty for naming a bound instead of passing it.
+///
+/// Deliberately ADDITIVE. `eligible_set` is untouched, so `int_eligible_fns` — which the
+/// bytecode compiler reads to decide whether a kernel may CALL a user function — still
+/// describes exactly the functions whose ABI is `params.len()` arguments. A capture-taking
+/// function is compiled under its own entry point that only the VM's `CallFn` dispatches
+/// to, so no kernel can call it with the wrong signature. Its own calls still resolve
+/// against `eligible`, i.e. only to capture-free functions, so there is no transitive
+/// capture set to close over.
+fn tail_loop_captures<'a>(
+    funcs: &[FnDef<'a>],
+    eligible: &HashSet<&'a str>,
+    kind: NumKind,
+) -> Vec<(&'a str, Vec<&'a str>)> {
+    let tail_loop = tail_loopable_set(funcs);
+    let mut out = Vec::new();
+    for f in funcs {
+        // Only loops, and only ones the plain analysis already rejected — a function
+        // that compiled without captures keeps its existing, cheaper entry point.
+        if !tail_loop.contains(f.name) || eligible.contains(f.name) || f.params.len() > MAX_ARITY {
+            continue;
+        }
+        let params: HashSet<&str> = f.params.iter().map(|(n, _)| n.as_str()).collect();
+        let mut caps = Vec::new();
+        free_idents(f.body, &params, &mut caps);
+        // No free names → it was rejected for some other reason (a `/`, a Float, an
+        // ineligible callee), and captures cannot rescue it.
+        if caps.is_empty() || caps.len() > MAX_CAPTURES {
+            continue;
+        }
+        // A capture that names a user FUNCTION is not a global read — `free_idents` never
+        // records a callee, but a function used as a value would be, and it is not an i64.
+        if caps.iter().any(|c| funcs.iter().any(|g| g.name == *c)) {
+            continue;
+        }
+        // Now ask the REAL predicate whether the body is eligible once those names are
+        // treated as parameters. Same function the capture-free path uses, so the two
+        // cannot drift apart on what `i64`-closed means.
+        let mut widened = params.clone();
+        for c in &caps {
+            widened.insert(c);
+        }
+        // The SELF-call must be treated as eligible while re-checking. `eligible` cannot
+        // contain `f` — `f` is here precisely because it was rejected — but `gen_tail`
+        // lowers a tail self-call to a parameter rebind and a jump, never to a call
+        // instruction, so it needs no entry in `fn_ids` and no compiled callee. Every
+        // self-call is in tail position by `tail_loopable_set`, which is what makes that
+        // lowering total.
+        let mut callable = eligible.clone();
+        callable.insert(f.name);
+        if value_eligible(f.body, &callable, &widened, kind) {
+            out.push((f.name, caps));
+        }
+    }
+    out
+}
+
 fn tail_loopable_set<'a>(funcs: &[FnDef<'a>]) -> HashSet<&'a str> {
     funcs
         .iter()

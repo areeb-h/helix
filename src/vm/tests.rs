@@ -5819,3 +5819,127 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             assert_eq!(run_vm(src), Ok(want.to_string()), "`{src}`");
         }
     }
+
+    /// A tail-self-recursive function may READ GLOBALS and still compile to a native loop.
+    ///
+    /// `value_eligible`'s `Ident` arm admits only parameters, so one global read anywhere
+    /// in the function — condition or body, it made no difference — dropped the entire
+    /// loop to the bytecode VM. This is the same capture defect the map/filter/reduce
+    /// kernels were fixed for, on the most fundamental construct in the language: a tail
+    /// loop IS Helix's `while`. Measured at 10M iterations:
+    ///
+    ///     fn go(i, acc) = if i >= 10000000 then acc else go(i + 1, acc + 1)   0.01s
+    ///     n = 10000000                                                        0.80s
+    ///     fn go(i, acc) = if i >= n        then acc else go(i + 1, acc + 1)
+    ///
+    /// — an 80x penalty for naming the bound instead of inlining it. Now both are 0.01s.
+    ///
+    /// The specialization takes the captured globals as trailing `i64` parameters, which
+    /// the VM reads AT DISPATCH. That is what makes it sound: nothing else runs during a
+    /// native call, so a capture is loop-invariant for the whole loop, and a `mut` global
+    /// reassigned between two calls is seen at its current value by each.
+    #[test]
+    fn a_tail_loop_may_read_globals_and_still_compile_to_a_native_loop() {
+        // Every one of these must agree on all three engines. The interesting half is
+        // what a capture can get WRONG: staleness, shadowing, and a non-Int global.
+        for (src, want) in [
+            ("n = 10\nfn go(i, a) = if i >= n then a else go(i + 1, a + i)\ngo(0, 0)", "45"),
+            ("k = 3\nfn go(i, a) = if i >= 10 then a else go(i + 1, a + k)\ngo(0, 0)", "30"),
+            ("a = 2\nb = 100\nfn go(i, c) = if i >= b then c else go(i + a, c + 1)\ngo(0, 0)", "50"),
+            ("n = 7\nfn go(i, a) = if i >= n then a + n else go(i + 1, a + 1)\ngo(0, 0)", "14"),
+            // a PARAMETER of the same name shadows the global — the parameter must win
+            ("n = 999\nfn go(n, a) = if n <= 0 then a else go(n - 1, a + 1)\ngo(4, 0)", "4"),
+            // a `let` inside the body shadows it for the rest of the body
+            ("k = 100\nfn go(i, a) = if i >= 5 then a else do {\n  k = 2\n  go(i + 1, a + k)\n}\ngo(0, 0)", "10"),
+            ("k = 100\nfn go(i, a) = if i >= 5 then a else do {\n  j = 2\n  go(i + 1, a + k + j)\n}\ngo(0, 0)", "510"),
+            // a match arm's binder shadows it inside that arm only
+            ("m = 50\nfn go(i, a) = if i >= 4 then a else go(i + 1, a + match i { 0 => 7, m => m })\ngo(0, 0)", "13"),
+            // A global that is not an `Int` AT DISPATCH declines to the VM, which handles
+            // it correctly as always. These must actually READ the global — an earlier
+            // draft of this test used `if i >= 3` with an unread `n = 4.5`, which has no
+            // captures at all, compiles by the ordinary path, and proves nothing.
+            ("n = 4.5\nfn go(i, a) = if i >= n then a else go(i + 1, a + 1)\ngo(0, 0)", "5"),
+            ("f = 2.0\nfn go(i, a) = if i >= 3 then a else go(i + 1, a + f)\ngo(0, 0.0)", "6.0"),
+            // a `let` binding a name that is NOT a global must not become a capture
+            ("n = 5\nfn go(i, a) = if i >= n then a else do {\n  j = i * 2\n  go(i + 1, a + j)\n}\ngo(0, 0)", "20"),
+            // ...nor a match arm's binder
+            ("n = 4\nfn go(i, a) = if i >= n then a else go(i + 1, a + match i { 0 => 7, q => q })\ngo(0, 0)", "13"),
+            // a global holding a FUNCTION is not an i64 and must not be captured as one
+            ("fn h(x) = x + 1\ng = h\nfn go(i, a) = if i >= 3 then a else go(i + 1, a + 1)\ngo(0, 0)", "3"),
+            // arithmetic keeps the interpreter's exact wrapping
+            ("k = 9223372036854775807\nfn go(i, a) = if i >= 3 then a else go(i + 1, a + k)\ngo(0, 0)", "9223372036854775805"),
+            ("k = 0 - 5\nfn go(i, a) = if i >= 4 then a else go(i + 1, a + k)\ngo(0, 0)", "-20"),
+            ("n = 0\nfn go(i, a) = if i >= n then a else go(i + 1, a + 1)\ngo(0, 0)", "0"),
+            ("k = 3\nfn sq(x) = x * x\nfn go(i, a) = if i >= 5 then a else go(i + 1, a + sq(k))\ngo(0, 0)", "45"),
+            ("k = 2\nfn go(i, a) = if i >= 4 then a else go(i + 1, a + match k { 2 => 10, _ => 0 })\ngo(0, 0)", "40"),
+            ("a = 1\nb = 2\nfn go(i, c) = if i >= 6 then c else go(i + 1, if i % 2 == 0 then c + a else c + b)\ngo(0, 0)", "9"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+
+        // A `mut` global reassigned BETWEEN calls: each call marshals the value that is
+        // current when it dispatches, so the second call must see the new bound. A
+        // specialization that baked the global in at compile time would print [5, 5].
+        let src = "mut n = 5\nfn go(i, a) = if i >= n then a else go(i + 1, a + 1)\n\
+                   x = go(0, 0)\nn = 9\ny = go(0, 0)\n[x, y]";
+        assert_eq!(run_tw(src), run_vm_jit(src), "engines disagree on a reassigned capture");
+        assert_eq!(run_vm_jit(src), Ok("[5, 9]".to_string()));
+
+        // A raise inside the loop still raises, with the interpreter's exact text.
+        let src = "z = 0\nfn go(i, a) = if i >= 3 then a else go(i + 1, a + 100 // z)\ngo(0, 0)";
+        let (tw, jit) = (run_tw(src), run_vm_jit(src));
+        assert_eq!(tw, jit, "engines disagree on a raising capture loop");
+        assert!(jit.unwrap_err().contains("division by zero"));
+
+        // ENGAGEMENT. Agreement is worthless if the JIT simply declined everything, so
+        // assert a native call actually happened for the capture shape — and that the
+        // loop runs natively at a depth that would blow the VM's own recursion guard if
+        // it were not a real loop (frame reuse, no stack growth).
+        crate::jit::reset_native_call_count();
+        let deep = "n = 3000000\nfn go(i, a) = if i >= n then a else go(i + 1, a + 1)\ngo(0, 0)";
+        assert_eq!(run_vm_jit(deep), Ok("3000000".to_string()));
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the capture-taking tail loop never reached native code, so every case above \
+             proves only that the VM still works"
+        );
+
+        // A loop whose body binds names LOCALLY must still compile: if `free_idents`
+        // forgot a `let` or a match-arm binder, that name would be recorded as a capture,
+        // the VM would fail to resolve it to a global, and the whole loop would silently
+        // fall back to the interpreter — right answer, 80x slower. Only engagement can
+        // see that, which is why these two are asserted here and not above. `do { }`
+        // desugars to `let`, so this covers most real loop bodies.
+        for src in [
+            "n = 5\nfn go(i, a) = if i >= n then a else do {\n  j = i * 2\n  go(i + 1, a + j)\n}\ngo(0, 0)",
+            "n = 4\nfn go(i, a) = if i >= n then a else go(i + 1, a + match i { 0 => 7, q => q })\ngo(0, 0)",
+        ] {
+            crate::jit::reset_native_call_count();
+            assert!(run_vm_jit(src).is_ok(), "`{src}`");
+            assert!(
+                crate::jit::native_call_count() > 0,
+                "a locally-bound name was mistaken for a captured global, so this loop \
+                 fell back to the VM: `{src}`"
+            );
+        }
+
+        // ...and the DECLINING shapes must NOT reach native code, or the "declines to the
+        // VM" claim is untested. A Float global READ BY THE LOOP is the boundary case.
+        crate::jit::reset_native_call_count();
+        let float_cap = "n = 4.5\nfn go(i, a) = if i >= n then a else go(i + 1, a + 1)\ngo(0, 0)";
+        assert_eq!(run_vm_jit(float_cap), Ok("5".to_string()));
+        assert_eq!(
+            crate::jit::native_call_count(),
+            0,
+            "a Float capture must decline at dispatch, not be marshalled as an i64"
+        );
+
+        // A `missing` capture reaches the interpreter's exact error, not a marshalled 0.
+        let miss = "n = missing\nfn go(i, a) = if i >= n then a else go(i + 1, a + 1)\ngo(0, 0)";
+        let (tw, jit) = (run_tw(miss), run_vm_jit(miss));
+        assert_eq!(tw, jit, "engines disagree on a `missing` capture");
+        assert!(jit.unwrap_err().contains("`if` condition is `missing`"));
+    }
