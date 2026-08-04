@@ -312,7 +312,20 @@ impl Interp {
             )
             .hint("use `@column` inside a verb like `df.where(...)`, `df.select(...)`, or `df.group(...)`.")),
             Expr::Interp(parts) => {
-                let mut s = String::new();
+                // Same reservation as the VM's `Op::Interp` (literals exactly, four per
+                // hole), so the two engines allocate alike. The walker EVALUATES holes
+                // inside this loop, so `s` cannot be a reused scratch buffer: a hole
+                // whose callee is itself an interpolated string re-enters here and would
+                // clobber the partial result. A local `String` is re-entrant by nature.
+                let mut cap = 0usize;
+                let mut holes = 0usize;
+                for part in parts {
+                    match part {
+                        crate::ast::InterpPart::Lit(t) => cap += t.len(),
+                        crate::ast::InterpPart::Expr(..) => holes += 1,
+                    }
+                }
+                let mut s = String::with_capacity(cap + holes * 4);
                 for part in parts {
                     match part {
                         crate::ast::InterpPart::Lit(t) => s.push_str(t),

@@ -1131,9 +1131,15 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     }
                 }
                 let base = stack.len() - holes;
-                // One sized allocation instead of growing from empty: the literals are
-                // known exactly and a rendered scalar is usually well under 16 bytes.
-                let mut s = String::with_capacity(cap + holes * 16);
+                // One sized allocation instead of growing from empty. The per-hole
+                // estimate is FOUR, not sixteen: `Value::Str` is an `Rc<String>`, so
+                // whatever capacity this asks for is retained for the life of the
+                // string, and asking 16 per hole put `"w{n}"` — five bytes — in a
+                // 32-byte size class instead of an 8-byte one. Measured at 5M strings:
+                // peak RSS 517 MB -> 411 MB, and a ~105-byte-per-string program went
+                // 0.99s -> 0.77s of child CPU. Under-reserving is cheap (push_str grows
+                // amortized); over-reserving is charged to every string that survives.
+                let mut s = String::with_capacity(cap + holes * 4);
                 let mut vi = base;
                 for part in parts.iter() {
                     match part {
