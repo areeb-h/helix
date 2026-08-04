@@ -1501,6 +1501,86 @@ motivates this phase.
         variants run INTERLEAVED, and a median — and even then between-session drift is ~7%,
         so only within-session ratios are quotable.
 
+- [x] **Stage 4c — `position`/`take_while`/`drop_while` stopped materializing: 24.3s and
+      2.1 GB became 0.02s and 15 MB.** Found the standing way — the same question asked
+      four ways over a 90M range: `any` 0.07s/14 MB (already lazy), `position` 5.03s/2.12 GB,
+      `take_while` 24.33s/2.12 GB. The last two desugared to `map(p).index_of(Bool(want))`,
+      running the predicate over EVERY element and boxing one `Value` each to find an index
+      that is almost always near the front.
+
+      `position` is now a first-class comprehension verb in both engines
+      (`CompKind::Position`, `Op::CompFindTest { want, idx_slot, short_target }`, and the
+      walker arm over `eval_pattern_loop`). `take_while`/`drop_while` keep their desugar
+      shape but take the index from `position(p, false)` — a two-argument form the arity
+      check in `desugar_position` makes unwritable from source, so the extra parameter
+      never reaches the surface (ADR 0003).
+
+      Even with NOTHING skippable the intermediate array is gone: a full-scan `take_while`
+      over 10M went 287 MB → 17.7 MB at the same speed.
+
+      The arms reproduce `index_of`'s comparison EXACTLY: `values_equal` is false for every
+      non-`Bool` against a `Bool`, so a `missing` or non-boolean result is SKIPPED —
+      neither a match nor an error. `[5, 6, 7].position(it)` is `missing`, not a type
+      error. Deliberately unlike `any`/`all`, which DO reject a non-boolean test; the
+      walker, the VM and the type checker each had to learn the asymmetry.
+
+      TWO INTENDED BEHAVIOUR CHANGES. A predicate that raises PAST the stopping point no
+      longer aborts (`[4, 1, 0].take_while(100 // it > 50)` was "integer division by zero",
+      is now `[]`) — `any`/`all` always behaved this way, so the four early-exit verbs
+      finally agree. And a non-array receiver names the verb the user wrote:
+      `5.position(it > 0)` said "type Int has no method `map`", leaking a desugar.
+      Verified by differential: 47 shapes on both binaries across all three engines, every
+      case identical except that message. Sabotaged nine ways, all caught.
+
+- [x] **Stage 4d — a tail loop may READ A GLOBAL and still compile: 0.80s → 0.01s (80x).**
+      Helix has no `for` and no `while`; a tail-self-recursive function IS the loop, and
+      the JIT already lowered one to a native loop. It refused for any function that read a
+      global, because `value_eligible`'s `Ident` arm is `locals.contains(name)` and
+      `locals` is the parameter list. Position was irrelevant — condition and body both
+      cost 80x. The same capture defect Stages 3m–3z fixed for the kernels, on the most
+      fundamental construct in the language.
+
+      Additive by design: `eligible_set` is untouched, so `int_eligible_fns` — what the
+      bytecode compiler reads to decide whether a KERNEL may call a user function — still
+      describes only functions whose ABI is `params.len()` arguments. The capture-taking
+      loop compiles under its own entry point (`name$caploop`), outside `fn_ids`, reachable
+      only from the VM's `CallFn`. Same containment the MIXED tail loops already use, and
+      the reason there is no transitive capture set: the body's calls still resolve against
+      `eligible`, i.e. only to capture-free functions.
+
+      Captured globals ride as trailing `i64` params. `gen_tail`'s back-edge zips the
+      self-call's arguments against the REAL parameter slice, so captures are never
+      rebound — correct, since nothing else runs during a native call. The VM reads them AT
+      DISPATCH, so a `mut` global reassigned between calls is current for each
+      (`[5, 9]`, not `[5, 5]`); any non-`Int` global declines to the VM.
+
+      `free_idents` is correct by construction over exactly the forms `value_eligible`
+      accepts — its catch-all is `false`, so anything else is ineligible and the capture
+      list is never consulted; within that set binders occur only in `Let` and `Match`
+      arms. Eligibility is then re-asked through `value_eligible` ITSELF with captures as
+      parameters, so the two cannot drift on what "i64-closed" means.
+
+      TEST LESSON WORTH KEEPING: two sabotages (dropping `let` binders or match-arm binders
+      from `free_idents`) produce the RIGHT ANSWER 80x slower — the phantom capture fails
+      to resolve to a global and the loop falls back to the interpreter. Only an
+      ENGAGEMENT assertion sees that. And an earlier draft's "Float global declines" case
+      used `n = 4.5` with a body reading `if i >= 3`: the global is never read, so there is
+      no capture, the function compiles by the ordinary path, and the case proved nothing.
+      A decline case must READ the global it names.
+
+- [ ] **What the loop findings mean for `for`/`while` SYNTAX.** Recorded because the
+      question will come up again. The capability exists and is fast: 5e8 iterations in
+      0.11s (0.22 ns/iter, ~1 cycle), and Collatz — nested, data-dependent exit, the
+      archetypal `while` — runs 70x faster than the VM. `mut` already ships (ADR 0004);
+      the limit is that assignment is a STATEMENT, so `map(it => total = total + it)` is a
+      parse error. What blocks adding `while` is not semantics but **the absence of an
+      O(1) append**: the only accumulate-into-an-array spelling is `acc.concat([x])`, which
+      measured 1.78s at n=20k, 14.36s at n=40k and 85.69s at n=80k against 0.01s for the
+      comprehension — ~8,500x at n=80k and DIVERGING. `while` would invite exactly that.
+      Fix the append first, then the syntax is sugar over a fast path instead of a trap.
+      (Also open: the sieve's in-place marking loop, the one genuinely inexpressible
+      algorithm — `k6_sieve_trial` is 83s against 0.02s for the `primes()` builtin.)
+
 - [ ] **Two spelling inversions still open** (two others from this sweep are now Stage 3r).
       At 10M elements; a declining JIT runs the bytecode loop, so "VM" means the JIT time
       equals it.
