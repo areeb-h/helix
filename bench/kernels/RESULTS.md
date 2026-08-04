@@ -1,10 +1,11 @@
-# Kernel benchmark results — 2026-08-03 (HEAD `9f50966`)
+# Kernel benchmark results — 2026-08-04 (HEAD `736fe10`)
 
 Regenerate with `./run.sh` from this directory. Every number below was produced
 by that script on a quiet machine, after the anchor gate confirmed that all
 languages of a kernel print byte-identical output.
 
-> **The whole table was re-measured on 2026-08-03 and several ratios moved a lot.**
+> **Re-measured 2026-08-04 against a freshly built `target/release`; the 2026-08-03 run
+> below is what first exposed the problem.**
 > The previous table was taken on 2026-07-18 against a `target/release` binary
 > that then went four days stale while a dozen JIT stages landed. **k7 in
 > particular was published at 7.0× slower than C and losing to CPython; it is
@@ -26,39 +27,43 @@ for the C/Rust references (see "The huge-page correction" below).
 
 Wall-clock seconds, best of 3 (once, for entries over 5s), lower is better.
 `%CPU` is reported because Helix parallelizes some kernels and the references
-never do — a wall-clock win bought with 2.5× the cores is not a codegen win.
+never do — a wall-clock win bought with 2.8× the cores is not a codegen win.
 
 | # | Kernel | Helix | C | Rust | Go | CPython | NumPy | Helix vs C |
 |---|--------|-------|---|------|-----|---------|-------|------------|
-| k1 | dot 50M i64 | **0.08s** (337%) | 0.11s | 0.13s | 0.53s | 9.71s | 0.30s | **1.4× faster on wall clock, for 2.5× the CPU** (0.27 vs 0.11 core-s) — see k1 note |
-| k2 | mandelbrot 1200² | **0.08s** (94%) | 0.08s | 0.08s | 0.08s | 6.23s | — | **tie with C**, single-threaded (was 5.3× slower at 0.42s) |
-| k3 | basel 1e8 | 0.09s (96%) | **0.07s** | 0.09s | 0.09s | 9.46s | 0.46s | **1.3× slower** (ties Rust and Go) |
-| k4 | allpairs 15k | 0.01s (272%) | **0.00s** | 0.00s | 0.05s | 4.37s | 0.11s | **at timer grain** — not a measurement; ~7× per the audit |
-| k5 | montecarlo 1e8 | 0.62s (109%) | 0.27s | **0.24s** | 0.29s | 40.59s | — | **2.3× slower** |
-| k6 | sieve π(10⁷) | 0.02s (86%) | **0.01s** | 0.01s | 0.02s | 0.63s | 0.06s | ~tie (**delegation** — beats NumPy 3×) |
-| k7 | wordcount 5M | 0.64s (99%) | **0.21s** | 0.26s | 0.23s | 1.51s | 2.04s | **3.0× slower** — but now **2.4× faster than CPython** |
-| k8 | matmul 1024³ (build + GEMM) | **0.04s** (157%) | — | — | — | — | 0.07s (442%) | **1.75× FASTER than NumPy**, on a third of the cores |
-| k9 | matmul 512³ (naive) | 0.51s (98%) | **0.33s** | 0.37s | 0.34s | 17.21s | — | **1.5× slower** |
-| k9m | matmul 512³ (map-temp) | 0.54s (99%) | **0.33s** | 0.37s | 0.34s | 17.21s | — | **1.6× slower** (was **27.12s / 75×** — see below) |
+| k1 | dot 50M i64 | **0.08s** (379%) | 0.11s | 0.13s | 0.48s | 9.70s | 0.29s | **1.4x faster on wall clock, for 2.8x the CPU** (0.30 vs 0.11 core-s) — see k1 note |
+| k2 | mandelbrot 1200² | 0.08s (97%) | 0.08s | **0.07s** | **0.07s** | 6.50s | — | **tie with C**, single-threaded (was 5.3x slower at 0.42s) |
+| k3 | basel 1e8 | 0.09s (96%) | **0.06s** | 0.08s | 0.09s | 9.37s | 0.46s | **1.5x slower** (ties Go) |
+| k4 | allpairs 15k | 0.01s (322%) | **0.00s** | 0.00s | 0.05s | 4.56s | 0.12s | **at timer grain** — not a measurement; ~7x per the audit |
+| k5 | montecarlo 1e8 | 0.68s (99%) | 0.28s | **0.24s** | 0.29s | 48.56s | — | **2.4x slower** |
+| k6 | sieve π(10⁷) | 0.02s (89%) | **0.01s** | 0.01s | 0.02s | 0.65s | 0.07s | ~tie (**delegation** — beats NumPy 3.5x) |
+| k7 | wordcount 5M | 0.68s (99%) | **0.23s** | 0.28s | 0.24s | 1.60s | 1.95s | **3.0x slower** — but **2.4x faster than CPython**, 2.9x than NumPy |
+| k8 | matmul 1024³ (build + GEMM) | **0.05s** (155%) | — | — | — | — | 0.08s (457%) | **1.6x FASTER than NumPy**, on a third of the cores |
+| k9 | matmul 512³ (naive) | 0.54s (98%) | 0.36s | 0.34s | **0.25s**† | 17.91s | — | **1.5x slower** |
+| k9m | matmul 512³ (map-temp) | 0.52s (99%) | 0.36s | 0.34s | **0.25s**† | 17.91s | — | **1.4x slower** (was **27.12s / 75x** — see below) |
+
+† Go's k9 came in at **140% CPU**, so that column is not the single-threaded reference the
+others are — the Go runtime found parallelism the C and Rust versions do not use. Its 0.25s
+is not comparable to their 0.34–0.36s, and Helix-vs-C is the honest comparison in that row.
 
 **Read differences under ~20% as noise.** These are best-of-3 wall clock, and this
 machine swings ~15% run to run: two honest wall-clock runs of the *same* binary on
-k7 once disagreed by **1.7×**. Everything in the table moved a little between the
-July and August runs, references included (C's k9 went 0.39s → 0.33s with no code
-change). Only gaps of 2× and up are safe to reason about, which is why the
+k7 once disagreed by **1.7×**. Everything moves a little between runs, references
+included: across the July, 3 August and 4 August runs C's k9 read 0.39s, 0.33s and
+0.36s with no code change, and Go's k9 read 0.32s, 0.34s and 0.25s. Only gaps of 2× and up are safe to reason about, which is why the
 paragraphs below quote child CPU time and interleaved runs when the effect is small.
 
 **Helix loses to C on seven of nine comparable kernels**, ties on k2, and leads k1
-only by spending 3.4× the CPU. k9 is within 1.5× and k3 ties Rust and Go. The one
+only by spending 2.8× the CPU. k9 is within 1.5× of C and k3 within 1.5×, tying Go. The one
 place it stands out is k6, where it wins by *not doing the work* — calling a native
 `primes()` builtin, the same way NumPy wins by calling BLAS. The honest counterpart
-is `k6_sieve_trial.helix` (pure-Helix trial division): **83.02s**, i.e. ~4000×
+is `k6_sieve_trial.helix` (pure-Helix trial division): **88.46s**, i.e. ~4400×
 slower than the builtin and ~8000× slower than C's sieve. That gap is the kernel's
 whole point.
 
 **Against NumPy the picture is different, and k8 has now flipped.** k8 is
-0.04s vs 0.07s (**1.75× faster**), k6 wins 3×, and k7 — the kernel Helix is worst
-at against C — still beats NumPy by 3.2× and CPython by 2.4×. Those are the three
+0.05s vs 0.08s (**1.6× faster**), k6 wins 3.5×, and k7 — the kernel Helix is worst
+at against C — still beats NumPy by 2.9× and CPython by 2.4×. Those are the three
 kernels with a NumPy reference where Helix leads. Each deserves the same caveat as
 NumPy's own: k6 delegates to a builtin, and k8's win is a *whole-program* one —
 Helix beats NumPy on build + convert + GEMM together while still losing the
