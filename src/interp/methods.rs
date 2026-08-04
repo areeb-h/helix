@@ -1432,17 +1432,46 @@ fn array_method(
             if items.iter().any(|v| matches!(v, Value::Missing)) {
                 return Ok(Value::Missing);
             }
-            // Preserve int-ness when all elements (and bounds) are integral.
+            // `lo > hi` is a CALLER ERROR, and it has to be caught here rather than left to
+            // `Ord::clamp`/`f64::clamp`, both of which PANIC on it. `[1, 2, 3].clamp(5, 1)`
+            // aborted the process with a core dump (exit 134) and `try` could not catch it —
+            // an ADR-0024 violation, since user input must never take the host down. The
+            // scalar `clamp(x, lo, hi)` builtin has always had this guard; the array method
+            // did not, so the same mistake was catchable one way and fatal the other. Same
+            // wording and hint as the scalar, so the two agree.
+            if lo > hi {
+                return Err(HelixError::new(
+                    format!("`clamp` needs lo <= hi, got lo = {lo}, hi = {hi}"),
+                    line,
+                    col,
+                )
+                .hint("clamp(x, lo, hi) bounds x to [lo, hi]; pass the low bound before the high one."));
+            }
+            // Preserve int-ness when all elements are integral. Selection is written as
+            // comparisons rather than `.clamp()` for the second reason that method is
+            // unsafe here: it also panics when a bound is NaN, which `lo > hi` cannot
+            // detect (every comparison against NaN is false). Comparisons are total — a NaN
+            // bound simply matches nothing and the element passes through, exactly as the
+            // scalar builtin behaves.
             if items.iter().all(|v| matches!(v, Value::Int(_))) {
                 let (loi, hii) = (lo as i64, hi as i64);
                 let out: Vec<i64> = items
                     .iter()
-                    .map(|v| if let Value::Int(i) = v { (*i).clamp(loi, hii) } else { 0 })
+                    .map(|v| match v {
+                        Value::Int(i) if *i < loi => loi,
+                        Value::Int(i) if *i > hii => hii,
+                        Value::Int(i) => *i,
+                        _ => 0,
+                    })
                     .collect();
                 Ok(Value::int_array(out))
             } else {
                 let xs = numeric_vec(items, "clamp", line, col)?;
-                Ok(Value::float_array(xs.iter().map(|x| x.clamp(lo, hi)).collect()))
+                let out: Vec<f64> = xs
+                    .iter()
+                    .map(|x| if *x < lo { lo } else if *x > hi { hi } else { *x })
+                    .collect();
+                Ok(Value::float_array(out))
             }
         }
         "softmax" => {

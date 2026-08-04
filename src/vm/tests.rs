@@ -6070,3 +6070,57 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             assert!(vm.unwrap_err().contains(needle), "`{src}`");
         }
     }
+
+    /// `xs.clamp(lo, hi)` with `lo > hi` used to ABORT THE PROCESS — SIGABRT, exit 134,
+    /// core dumped — and `try` could not catch it:
+    ///
+    ///     print([1, 2, 3].clamp(5, 1))
+    ///     error: internal error (src/interp/methods.rs:1440): min > max. min = 5, max = 1
+    ///     Aborted (core dumped)
+    ///
+    /// `Ord::clamp` and `f64::clamp` both PANIC when `min > max`, and the array method
+    /// called them without checking. ADR 0024 says user input must never take the host
+    /// down, so this was the most severe class of defect the language can have: not a wrong
+    /// answer but a dead process, from three characters typed in the wrong order.
+    ///
+    /// The SCALAR `clamp(x, lo, hi)` builtin always had the guard. So the identical mistake
+    /// was a clean catchable error one way and fatal the other — which is also why this
+    /// survived: nobody writes the array form by accident in a test.
+    #[test]
+    fn clamp_with_reversed_bounds_raises_instead_of_aborting_the_host() {
+        // The crash case, on every engine, with the scalar's exact wording.
+        for src in [
+            "[1, 2, 3].clamp(5, 1)",
+            "[1.0, 2.0].clamp(5.0, 1.0)",
+            "[1, 2, 3].clamp(0 - 1, 0 - 5)",
+            "(0..10).clamp(9, 2)",
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.unwrap_err();
+            assert!(msg.contains("`clamp` needs lo <= hi"), "`{src}` got: {msg}");
+        }
+        // ...and it is CATCHABLE, which is the whole point — an abort is not.
+        assert_eq!(run_vm("(try [1, 2, 3].clamp(5, 1)).ok"), Ok("false".to_string()));
+        assert_eq!(run_vm("r = try [1, 2, 3].clamp(5, 1)\n1 + 1"), Ok("2".to_string()));
+
+        // Ordinary clamping is unchanged.
+        for (src, want) in [
+            ("[1, 2, 3].clamp(1, 2)", "[1, 2, 2]"),
+            ("[0 - 1, 5, 2, 9].clamp(0, 4)", "[0, 4, 2, 4]"),
+            ("[1.0, 5.0].clamp(2.0, 3.0)", "[2.0, 3.0]"),
+            ("[1, 2, 3].clamp(2, 2)", "[2, 2, 2]"),
+            ("[].clamp(0, 1)", "[]"),
+            ("[1, missing].clamp(0, 5)", "missing"),
+            ("clamp(3, 1, 5)", "3"),
+            // a NaN bound cannot be caught by `lo > hi` (every NaN comparison is false), so
+            // the selection is written as comparisons rather than `.clamp()`, which panics
+            // on a NaN bound too. Nothing matches, so elements pass through.
+            ("[1, 2, 3].clamp(sqrt(0 - 1.0), 5.0)", "[1, 2, 3]"),
+            ("[1.0, 2.0].clamp(0.0, sqrt(0 - 1.0))", "[1.0, 2.0]"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+    }
