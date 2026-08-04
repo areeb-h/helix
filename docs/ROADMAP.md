@@ -1640,6 +1640,104 @@ motivates this phase.
       which is what turns an imperative loop from a diverging trap into ordinary code.
       Until then, adding `while` would hand users a familiar name for the 8,500x shape.
 
+## Deep audit, 2026-08-04 — 44 candidates swept, 11 confirmed under adversarial refutation
+
+Five parallel sweeps (performance inversions, three-engine divergence, memory, robustness,
+semantic consistency), each finding then handed to a separate agent whose instructions were
+to REFUTE it. One was refuted and is recorded as such. Every survivor below was reproduced
+with interleaved child-CPU timing, medians of 15–21, and stdout printed beside each time.
+**Ordered by value, which is not the order they were found in.**
+
+- [x] **`xs.clamp(hi, lo)` ABORTED THE PROCESS** — SIGABRT, exit 134, uncatchable by `try`.
+      `Ord::clamp`/`f64::clamp` panic when `min > max`. The scalar `clamp(x, lo, hi)` builtin
+      always had the guard; the array method did not. **Fixed in `23d8d69`.**
+
+- [ ] **`%`, `//` and `>>` decline the WHOLE enclosing kernel unless the right operand is a
+      positive integer LITERAL — 17–110× CPU, ~50× wall.** The highest-value item open.
+
+      | shape | variable divisor | literal divisor | ratio |
+      | --- | --- | --- | --- |
+      | tail loop `i % m` | 2.233s | 0.020s | **110×** |
+      | reduce `a + k % m` | 1.276s | 0.019s | 67× |
+      | map `k // m` | 1.238s | 0.054s | 23× |
+      | map `k >> s` | 1.192s | 0.049s | 25× |
+      | `MOD = 1000000007` then `% MOD` | 1.333s | 0.061s | 22× |
+
+      Controls in the same interleaved run are CLEAN — `k * m` 0.96×, `k & m` 1.00×, and
+      float `to_float(k) / d` 1.03× — so a variable right operand is not the problem in
+      general. It is these three operators. `HELIX_NOJIT=1` makes both spellings equal, and
+      the JIT-enabled variable spelling equals its own VM time: **the JIT contributes nothing
+      there; the entire gap is the eligibility gate.** Wall clock is worse than CPU (~50×)
+      because the declined body runs boxed AND single-threaded (RSS 286.8 vs 189.8 MB).
+
+      **The gate is a TOKEN test, not a constant test**: `k % (3 + 4)` also declines, 23×.
+      Seven sites share it — src/jit.rs:1208, 1211 (tail loop), 2846 (mixed map), 3116
+      (indexed mixed map), 3158, 3164 (i64 map/filter captures), 3660–3669 (mixed fn bodies)
+      — all testing `matches!(**right, Expr::Int(n) if n > 0)`.
+
+      **The fix already exists for the sibling case.** Stage 3w admitted a non-literal FLOAT
+      divisor behind an immediate poison bail on a runtime zero (src/jit.rs:3649–3658), and
+      that path measures clean above. Same hazard class, half fixed. The extra work over the
+      float case is sign handling: `%` is `rem_euclid`, and `i64::MIN % -1` / `i64::MIN // -1`
+      need the same care the literal path already takes; `>>` must bail outside `0..=63`.
+
+      ROADMAP.md:763–767 does say this exclusion is deliberate, but it documents the
+      correctness rationale for the gate, not parity between the two spellings — and it
+      predates the poison mechanism that dissolves that rationale.
+
+      **A whole class of program has no fast spelling at all**: a divisor read from data can
+      never be a literal. `m = read_int() ?? 7` then `k % m` is 1.150s, permanently on the VM
+      — a histogram whose bucket count is a parameter, a hash whose table size is computed.
+
+- [ ] **`any`, `all`, `position` have no native kernel — ~45× slower than
+      `filter(...).count()` when the scan runs to completion.** `range(20M).any(it < 0)` is
+      0.779s against 0.020s for the same question spelled with `filter`. The distributions do
+      not overlap: the slowest `filter` sample is 28× faster than the fastest `any` sample.
+      Short-circuiting is already correct (Stage 4c); what is missing is the kernel for the
+      case that runs to the end — which is the NORMAL outcome of a validation check.
+      `filter().count()` is confirmed to be a real per-element native loop (linear, ~0.75
+      ns/element), not a folded constant.
+
+- [ ] **`unique`/`frequencies`/`top` are O(n × distinct) on FLOAT arrays** — the same defect
+      Stage 4a fixed for integers, on the element type that is the scientific default.
+      `(0..60000).map(to_float(it)).unique()` takes 3.2s; **stringifying every float and
+      hashing the text is 220× faster** at 0.04s. The Stage 4a comment predicted this ("a
+      Float path would mishandle -0.0/NaN") — the design is: canonicalize `-0.0` to `+0.0`,
+      and give every NaN its own bucket, since NaN is not reflexive and so forms no
+      equivalence class.
+
+- [ ] **A `map` from a Floats array to an Int result compiles NO kernel — 11–25×.** The
+      standard data-cleaning step (`to_int`, `floor` to an index, `sign` of a delta).
+
+- [ ] **`zip` materializes one `Rc`-boxed 2-tuple per element — 132 bytes and 15× CPU.**
+      `a.zip(a).length()` on 5M packed ints costs 0.228s and 645 MB to produce a length.
+      `zip`/`zipmap` is the ONLY spelling Helix offers for an elementwise two-argument
+      function that broadcast cannot express.
+
+- [ ] **`take(k)`/`drop(k)` box the ENTIRE source** (16 B per source element) to keep k.
+      Idiomatic head/tail on a large array. Same root cause family as `zip`.
+
+- [ ] **`min_by`/`max_by`: ~200 ns and ~92 bytes per element** — 1.0s and 531 MB where
+      `min()` is 0.021s and 69 MB. Flat overhead, so invisible below ~100k rows.
+
+- [ ] **`sort_by(key)` is 4.2× `sort()`, and the descending idiom `sort_by(-it)` is 5.5×
+      `sort().reverse()`** for a bit-identical result. Descending is the most common
+      non-identity key, and `sort_by(-it)` is the obvious way to write it.
+
+- [ ] **Three-engine value divergence — `print((try missing.map()).ok)` is `false` on the
+      JIT and VM, `true` on the tree-walker.** A malformed-arity comprehension on a `missing`
+      receiver: the walker propagates `missing` before checking arity, the other two check
+      first. It escapes to a VALUE, laundered into an ordinary boolean, so no error text
+      reveals it. Narrow for users; serious for the differential oracle, which designates the
+      walker as the reference.
+
+- [ ] **`df.join(<non-DataFrame>)` error text differs** between the walker and the other two,
+      and `try` turns it into a String, so it escapes to a value. Low.
+
+- [x] ~~Tuple-accumulator `reduce` is slower than two passes~~ — **REFUTED.** The repro's
+      `xs = range(n)` made both spellings pay range materialization; measured properly they
+      are equal. Recorded because a refuted candidate is worth as much as a confirmed one.
+
 - [ ] **Two spelling inversions still open** (two others from this sweep are now Stage 3r).
       At 10M elements; a declining JIT runs the bytecode loop, so "VM" means the JIT time
       equals it.
