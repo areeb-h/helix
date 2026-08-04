@@ -5943,3 +5943,65 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         assert_eq!(tw, jit, "engines disagree on a `missing` capture");
         assert!(jit.unwrap_err().contains("`if` condition is `missing`"));
     }
+
+    /// `concat` over PACKED numeric arrays skips the general path's boxing. That path
+    /// costs three passes per call — `to_values()` boxes the receiver into a `Vec<Value>`,
+    /// `to_vec()` clones it, and `array_sniff` unboxes the result back to packed — moving
+    /// 16 bytes per element twice to append to a buffer of 8-byte elements.
+    ///
+    /// Measured with `fn build(i, acc) = if i >= n then acc else build(i+1, acc.concat([i*i]))`:
+    ///
+    ///     n = 20_000    1.83s -> 0.05s
+    ///     n = 40_000   14.18s -> 0.13s
+    ///     n = 80_000   83.94s -> 5.10s
+    ///
+    /// STILL O(n^2) — the receiver is copied on every call, and what remains is exactly
+    /// memcpy bandwidth (the 40k -> 80k jump is the L2 cliff at 640 KB a copy). An O(1)
+    /// append needs last-use liveness so the final read of a binding MOVES instead of
+    /// cloning, leaving the `Rc` unique enough to extend in place. Recorded in
+    /// docs/ROADMAP.md as the prerequisite for `while`-style syntax.
+    ///
+    /// What is pinned here is that the fast path answers exactly what the general path
+    /// answered — including every mix that must FALL THROUGH to it.
+    #[test]
+    fn packed_concat_answers_exactly_what_the_boxing_path_answered() {
+        for (src, want) in [
+            // both packed: the fast path
+            ("[1, 2].concat([3])", "[1, 2, 3]"),
+            ("[1, 2].concat([3], [4, 5])", "[1, 2, 3, 4, 5]"),
+            ("[1.0, 2.0].concat([3.0])", "[1.0, 2.0, 3.0]"),
+            // a lazy range on either side materializes to the same integers
+            ("(0..3).concat([9])", "[0, 1, 2, 9]"),
+            ("[9].concat((0..3))", "[9, 0, 1, 2]"),
+            ("range(0, 9, 3).concat([7])", "[0, 3, 6, 7]"),
+            ("(0..3).concat((0..2))", "[0, 1, 2, 0, 1]"),
+            // MIXED kinds must fall through — the general path keeps `1` an Int and
+            // `2.0` a Float rather than promoting either
+            ("[1].concat([2.0])", "[1, 2.0]"),
+            ("[1.0].concat([2])", "[1.0, 2]"),
+            // empty, missing, strings, nesting: all the general path
+            ("[].concat([1])", "[1]"),
+            ("[1].concat([])", "[1]"),
+            ("[1].concat()", "[1]"),
+            ("[1, missing].concat([2])", "[1, missing, 2]"),
+            ("[\"a\"].concat([\"b\"])", "[\"a\", \"b\"]"),
+            ("[[1], [2]].concat([[3]])", "[[1], [2], [3]]"),
+            // the result stays packed, so numeric verbs still take their fast path
+            ("[1].concat([2]).sum()", "3"),
+            ("[1.5].concat([2.5]).mean()", "2.0"),
+            ("(0..1000).concat((0..1000)).length()", "2000"),
+            ("(0..1000).concat([5]).sum()", "499505"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // A non-array argument keeps the general path's exact wording — the fast path
+        // must decline rather than reproduce the message.
+        for src in ["[1].concat(5)", "[1].concat(\"x\")", "[1.0].concat(2.0)"] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.unwrap_err();
+            assert!(msg.contains("`concat` expects arrays"), "`{src}` got: {msg}");
+        }
+    }

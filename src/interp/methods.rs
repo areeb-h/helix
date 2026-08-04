@@ -251,6 +251,85 @@ pub(crate) fn call_method(
                     inner: items.clone(),
                 })));
             }
+            // `concat` over PACKED numeric arrays, before the general path boxes anything.
+            // The general path costs three passes per call: `to_values()` boxes the
+            // receiver into a `Vec<Value>`, `items.to_vec()` clones that, and
+            // `array_sniff` unboxes the result back to packed — 16 bytes per element
+            // moved twice to append to a buffer of 8-byte elements. This is one
+            // allocation and a memcpy per input.
+            //
+            // Same result as the general path by construction: `array_sniff` on an
+            // all-`Int` (all-`Float`) `Vec<Value>` produces exactly `Ints` (`Floats`) with
+            // the same elements in the same order. A `Range` receiver or argument is
+            // included because `to_ints` materializes it to the same integers.
+            //
+            // NOT a complexity fix. `xs.concat([x])` in a loop is still O(n^2) — the
+            // receiver is copied every call — because the receiver is behind a shared
+            // `Rc` (the caller's binding plus the stack value), so it cannot be extended
+            // in place. Making THAT O(1) needs last-use liveness in the compiler so the
+            // final read of a binding moves instead of cloning; see docs/ROADMAP.md.
+            if name == "concat" && !args.is_empty() {
+                if let Some(head) = items.to_ints() {
+                    let mut tails = Vec::with_capacity(args.len());
+                    for a in &args {
+                        match a {
+                            Value::Array(arr) => match arr.to_ints() {
+                                Some(t) => tails.push(t),
+                                None => {
+                                    tails.clear();
+                                    break;
+                                }
+                            },
+                            // A non-array argument is an ERROR, and the general path owns
+                            // its exact wording — fall through rather than duplicate it.
+                            _ => {
+                                tails.clear();
+                                break;
+                            }
+                        }
+                    }
+                    if tails.len() == args.len() {
+                        let total = head.len() + tails.iter().map(|t| t.len()).sum::<usize>();
+                        let mut out: Vec<i64> = Vec::with_capacity(total);
+                        out.extend_from_slice(&head);
+                        for t in &tails {
+                            out.extend_from_slice(t);
+                        }
+                        return Ok(Value::Array(std::rc::Rc::new(
+                            crate::value::ArrayData::Ints(out),
+                        )));
+                    }
+                }
+                if let crate::value::ArrayData::Floats(head) = &**items {
+                    let mut tails: Vec<&Vec<f64>> = Vec::with_capacity(args.len());
+                    for a in &args {
+                        match a {
+                            Value::Array(arr) => match &**arr {
+                                crate::value::ArrayData::Floats(t) => tails.push(t),
+                                _ => {
+                                    tails.clear();
+                                    break;
+                                }
+                            },
+                            _ => {
+                                tails.clear();
+                                break;
+                            }
+                        }
+                    }
+                    if tails.len() == args.len() {
+                        let total = head.len() + tails.iter().map(|t| t.len()).sum::<usize>();
+                        let mut out: Vec<f64> = Vec::with_capacity(total);
+                        out.extend_from_slice(head);
+                        for t in &tails {
+                            out.extend_from_slice(t);
+                        }
+                        return Ok(Value::Array(std::rc::Rc::new(
+                            crate::value::ArrayData::Floats(out),
+                        )));
+                    }
+                }
+            }
             match array_numeric_fast(items, name, &args, line, col)? {
                 // A typed array's numeric reduction reads the packed buffer directly.
                 Some(v) => Ok(v),
