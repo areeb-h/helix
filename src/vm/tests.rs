@@ -6005,3 +6005,68 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             assert!(msg.contains("`concat` expects arrays"), "`{src}` got: {msg}");
         }
     }
+
+    /// `dot` preserves int-ness — the rule `sum`, `cumsum` and `product` already follow,
+    /// and the one `dot` was breaking. It widened to `f64` unconditionally, which made it
+    /// the only integer reduction in the language that could return a WRONG ANSWER:
+    ///
+    ///     xs = (0..1000000)
+    ///     xs.dot(xs)                                333332833333127552.0   <- was
+    ///     xs.map(it * it).sum()                     333332833333500000
+    ///     xs.zip(xs).map((a, b) => a * b).sum()     333332833333500000
+    ///     exact                                     333332833333500000
+    ///
+    /// Off by 372,448, silently, because an f64 cannot hold integers past 2^53. Found by
+    /// comparing a program against its own equivalent spelling — the standing method.
+    #[test]
+    fn dot_stays_exact_on_integers_and_agrees_with_its_equivalent_spellings() {
+        for (src, want) in [
+            // an all-Int dot is an Int, and equals the spellings it is sugar for
+            ("[1, 2, 3].dot([4, 5, 6])", "32"),
+            ("[1, 2, 3].zip([4, 5, 6]).map((a, b) => a * b).sum()", "32"),
+            ("[0 - 2, 3].dot([4, 0 - 5])", "-23"),
+            ("[].dot([])", "0"),
+            ("[7].dot([0])", "0"),
+            // exact past 2^53, where the old f64 path drifted
+            ("(0..1000000).dot((0..1000000))", "333332833333500000"),
+            ("(0..1000000).map(it * it).sum()", "333332833333500000"),
+            ("[94906266, 94906266].dot([94906266, 94906266])", "18014398652125512"),
+            // a Float on EITHER side keeps the float result, unchanged
+            ("[1.0, 2.0].dot([3.0, 4.0])", "11.0"),
+            ("[1, 2].dot([3.0, 4.0])", "11.0"),
+            ("[1.0, 2.0].dot([3, 4])", "11.0"),
+            // `missing` still propagates from either side
+            ("[1, missing].dot([1, 2])", "missing"),
+            ("[1, 2].dot([1, missing])", "missing"),
+            ("missing.dot([1, 2])", "missing"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+
+        // A product that cannot be summed inside an i128 falls back to the SAME f64
+        // expression as before, so those inputs answer exactly what they used to — and
+        // still match the spelling `dot` is sugar for.
+        for src in [
+            "a = [3037000499, 3037000499]\na.dot(a)",
+            "a = [3037000499, 3037000499]\na.zip(a).map((x, y) => x * y).sum()",
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok("18446744061852497920.0".to_string()), "`{src}`");
+        }
+
+        // Errors keep their exact wording AND their precedence: a non-numeric element is
+        // reported before a length mismatch, because the widening still runs first.
+        for (src, needle) in [
+            ("[1, 2].dot([1])", "equal-length"),
+            ("[1, \"a\"].dot([1, 2])", "dot"),
+            ("[1].dot(5)", "expects an array"),
+            ("[1].dot()", "takes one array argument"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert!(vm.unwrap_err().contains(needle), "`{src}`");
+        }
+    }

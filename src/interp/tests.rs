@@ -341,7 +341,11 @@
         assert_eq!(float("linspace(0.0, 1.0, 5)[2]"), 0.5);
         assert!(matches!(last("linspace(0.0, 1.0, 5).count()").unwrap(), Value::Int(5)));
         // vector math
-        assert!(matches!(last("[1, 2, 3].dot([4, 5, 6])").unwrap(), Value::Float(f) if (f - 32.0).abs() < 1e-9));
+        // `dot` preserves int-ness, like `cumsum` and `product` on the next two lines —
+        // it used to be the one integer reduction that widened to `f64` and so could
+        // return a wrong answer past 2^53.
+        assert!(matches!(last("[1, 2, 3].dot([4, 5, 6])").unwrap(), Value::Int(32)));
+        assert!(matches!(last("[1.0, 2.0].dot([3.0, 4.0])").unwrap(), Value::Float(f) if (f - 11.0).abs() < 1e-9));
         assert_eq!(float("[3.0, 4.0].norm()"), 5.0);
         assert!(matches!(last("[1, 2, 3, 4].cumsum()[3]").unwrap(), Value::Int(10)));
         assert!(matches!(last("[1, 2, 3, 4].product()").unwrap(), Value::Int(24)));

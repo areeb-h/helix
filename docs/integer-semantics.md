@@ -61,6 +61,31 @@ approximately right); a hand-written `reduce` uses the ordinary `+` and wraps.
 Both behaviours are defensible on their own; having both is not. This is recorded as a
 gap rather than silently tolerated — see the open question below.
 
+## Reductions over `Int`s stay `Int` — including `dot`
+
+`sum`, `product`, `cumsum`, `min`/`max` and `dot` all return an `Int` when every input
+is an `Int`, promoting to `Float` only when the exact result will not fit an `i64`.
+`dot` did **not** follow this rule until 2026-08-04: it widened to `f64`
+unconditionally, which made it the only integer reduction that could return a *wrong*
+answer rather than a wrapped or promoted one.
+
+```
+xs = (0..1000000)
+xs.dot(xs)                                 333332833333127552.0   <- was, off by 372,448
+xs.map(it * it).sum()                      333332833333500000
+xs.zip(xs).map((a, b) => a * b).sum()      333332833333500000
+```
+
+An `f64` cannot hold integers past 2^53, so the drift was silent. `dot` now accumulates
+in `i128` with checked arithmetic and returns `Int` when the total fits, falling back to
+exactly the previous `f64` expression when a product or the running total overflows an
+`i128`. A `Float` on either side still yields a `Float`, unchanged: `[1, 2].dot([3.0,
+4.0])` is `11.0`.
+
+This is a **user-visible type change**: `[1, 2, 3].dot([4, 5, 6])` was `32.0` and is now
+`32`. It was made because the alternative is a reduction that quietly disagrees with the
+two spellings it is sugar for.
+
 ## Conversions
 
 | expression | result |

@@ -1299,6 +1299,12 @@ fn array_method(
             if items.iter().chain(other.iter()).any(|v| matches!(v, Value::Missing)) {
                 return Ok(Value::Missing);
             }
+            // Whether BOTH sides are `Int` is decided before anything is widened, but the
+            // conversions and the length check still run first and unchanged, so every
+            // error — non-numeric element, mismatched lengths — keeps its exact wording
+            // and its exact precedence.
+            let int_pair = items.iter().all(|v| matches!(v, Value::Int(_)))
+                && other.iter().all(|v| matches!(v, Value::Int(_)));
             let (xs, ys) = (numeric_vec(items, "dot", line, col)?, numeric_vec(&other, "dot", line, col)?);
             if xs.len() != ys.len() {
                 return Err(HelixError::new(
@@ -1306,6 +1312,30 @@ fn array_method(
                     line,
                     col,
                 ));
+            }
+            // Preserve int-ness, the rule `sum` and `cumsum` already follow: an all-`Int`
+            // dot product is an `Int`. Going through `f64` unconditionally made this the
+            // only integer reduction that could return a WRONG answer — at n = 1e6,
+            // `xs.dot(xs)` was 333332833333127552.0 where `xs.map(it * it).sum()` and
+            // `xs.zip(xs).map((a, b) => a * b).sum()` both give the exact 333332833333500000.
+            // Off by 372,448, silently, because f64 cannot hold integers past 2^53.
+            //
+            // `checked` throughout: a single i64*i64 product fits i128, but four of them
+            // need not sum inside one, so overflow falls back to the same `f64` expression
+            // as before — bit-identical to what this returned for such inputs.
+            if int_pair {
+                let wide = items.iter().zip(other.iter()).try_fold(0i128, |acc, (a, b)| {
+                    match (a, b) {
+                        (Value::Int(x), Value::Int(y)) => {
+                            (*x as i128).checked_mul(*y as i128).and_then(|p| acc.checked_add(p))
+                        }
+                        // Unreachable under `int_pair`, and total either way.
+                        _ => None,
+                    }
+                });
+                if let Some(n) = wide.and_then(|w| i64::try_from(w).ok()) {
+                    return Ok(Value::Int(n));
+                }
             }
             Ok(Value::Float(xs.iter().zip(&ys).map(|(a, b)| a * b).sum()))
         }
