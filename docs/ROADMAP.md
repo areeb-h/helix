@@ -1684,6 +1684,33 @@ hazard class, and that path measures clean today (`to_float(k) / d` is 1.03x its
 twin, i.e. no penalty at all). IMMEDIATE bail rather than accumulate-and-store, for the
 reason recorded there: a tail loop can be infinite, so the error cannot wait.
 
+**STAGE 4h ATTEMPTED AND REVERTED (2026-08-04).** Extending the same work to the i64
+MAP/FILTER kernels was implemented and measured at **16.8x** (1.191s -> 0.071s on
+`(0..20M).map(it % m)`, variable and literal spellings finally equal), then reverted:
+`scripts/opfuzz.py` found two defects that the value tests and the gate both missed.
+
+    i64-map  `>>`  operand 63
+        jit  error: internal error (src/jit.rs:5896): entered unreachable
+        vm   0
+    filter   `%`  operand 0
+        jit  (prints nothing, exit 0)
+        vm   error: modulo by zero
+
+The first is a REACHABLE `unreachable!()` — the class that made `xs.clamp(5, 1)`
+core-dump. The second is worse: a poisoned filter kernel does not discard its result, so
+the program prints an empty answer and exits 0 where the interpreter raises.
+
+**THIS CORRECTS THE TWO EARLIER DESIGN NOTES.** `be93c73` said the i64 gates funnel into
+one generator; the correction in `5727ebf` said `gen_value` and `gen_value_typed` were
+that one generator shared by two paths. Both are wrong. **The i64 map path reaches BOTH
+generators depending on the expression, and the FILTER kernel discards differently again.**
+Any next attempt must begin by establishing, empirically, which generator each kernel
+shape actually reaches — not by reasoning from the gate that guards it. The gate
+relaxation, the euclidean lowering and the poison-accumulator guards were each correct;
+what was missing was coverage of every generator the relaxed gate can now reach.
+
+Stage 4g (the mixed path, `9ee76a7`) is unaffected and stays.
+
 **STATUS after Stage 4g (`9ee76a7`).** ONE of the seven gates is done: the mixed FUNCTION
 bodies at src/jit.rs:3660-3669, measured at 2.83s -> 0.05s (57x) on a mixed tail loop with a
 variable modulus. **The commit message for 9ee76a7 says "the MIXED map/function bodies",
