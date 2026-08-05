@@ -6213,3 +6213,71 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             "60k floats that are all +0.0 collapse to one identity"
         );
     }
+
+    /// `-9223372036854775808` is `i64::MIN`, an Int — not a Float that merely prints like
+    /// one. It is the single integer that cannot be written positively (its magnitude is
+    /// one larger than `i64::MAX`), so the lexer degraded the literal to `f64` and the
+    /// negation then applied to a float:
+    ///
+    ///     print(-9223372036854775808)      -9223372036854775808.0   <- was a Float
+    ///     print(-9223372036854775807 - 1)  -9223372036854775808     <- the workaround
+    ///
+    /// Silent, because it prints almost right — the same shape as the `dot` defect fixed
+    /// earlier today. Unary minus now folds into a bare literal, which is what the PATTERN
+    /// parser already did (`Pattern::Int(-v)`); expressions had simply never been taught.
+    #[test]
+    fn negating_a_literal_folds_and_i64_min_stays_an_integer() {
+        for (src, want) in [
+            // the value that could not previously be written at all
+            ("-9223372036854775808", "-9223372036854775808"),
+            ("-9223372036854775808 + 1", "-9223372036854775807"),
+            ("-9223372036854775808 // 2", "-4611686018427387904"),
+            // the old workaround still means the same thing
+            ("-9223372036854775807 - 1", "-9223372036854775808"),
+            ("-9223372036854775808 == -9223372036854775807 - 1", "true"),
+            // an EXPLICIT float keeps its type — the fold reads the digits, not the value
+            ("-9223372036854775808.0", "-9223372036854775808.0"),
+            // ...and a magnitude PAST i64::MIN is still a Float, even though it rounds to
+            // the same f64. Deciding from the `f64` would have accepted this one.
+            ("-9223372036854775809", "-9223372036854775808.0"),
+            // a positive over-large literal is unchanged
+            ("9223372036854775808", "9223372036854775808.0"),
+            // ordinary negatives
+            ("-1", "-1"),
+            ("-1.5", "-1.5"),
+            ("-0.0", "-0.0"),
+            ("3 - -1", "4"),
+            ("x = 3\n-x", "-3"),
+            ("[-1, -2].sum()", "-3"),
+            // POSTFIX BINDS TIGHTER than unary minus, so the fold must not swallow it:
+            // this is `-([1,2,3].sum())`, not `(-[1,2,3]).sum()`.
+            ("-[1, 2, 3].sum()", "-6"),
+            ("-[1, 2, 3][0]", "-1"),
+            // the pattern form, which already folded, still agrees
+            ("match -9223372036854775808 { -9223372036854775808 => 1, _ => 0 }", "1"),
+            ("match -1 { -1 => 7, _ => 0 }", "7"),
+            ("match -1.5 { -1.5 => 7, _ => 0 }", "7"),
+            // i64::MIN's own arithmetic edges keep the semantics documented in
+            // docs/integer-semantics.md
+            ("-9223372036854775808 - 1", "9223372036854775807"),
+            ("to_int(-1.0e30)", "-9223372036854775808"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // The type change is the point, so assert the TYPE and not just the rendering:
+        // a Float would print with a trailing `.0`, and `is_missing`-style probes cannot
+        // see it, but integer division can.
+        // (`%` accepts floats — `-9223372036854775808.0 % 2` is `-0.0` — so it cannot tell
+        // the two apart. Bitwise `&` requires integers and can.)
+        assert_eq!(run_vm("-9223372036854775808 & 1"), Ok("0".to_string()));
+        let float_form = run_vm("-9223372036854775808.0 & 1").unwrap_err();
+        assert!(
+            // the type checker says "bitwise operator `&` needs integers, but got a Float"
+            // and the runtime says "`&` needs two integers"; this harness reaches the
+            // second because it does not run the checker, so match what both contain
+            float_form.contains("integers"),
+            "the explicit-float form must still be a Float; got: {float_form}"
+        );
+    }

@@ -1139,13 +1139,32 @@ impl Parser {
         match self.peek() {
             Tok::Minus => {
                 self.advance();
+                // Was the operand written as an INTEGER whose magnitude overflowed i64?
+                // Recorded before parsing, because the token is gone afterwards.
+                let min_magnitude = matches!(self.peek(), Tok::BigInt(_, true));
                 let e = self.unary()?;
-                Ok(Expr::Unary {
-                    op: UnOp::Neg,
-                    expr: Box::new(e),
-                    line: l,
-                    col: c,
-                })
+                // Fold the sign into a BARE literal, the way the pattern parser already
+                // does. This must happen AFTER the operand is parsed, not by peeking at
+                // the next token: postfix binds tighter than unary minus, so `-1.abs()`
+                // is `-(1.abs())`, and its operand does not come back as a bare literal.
+                match e {
+                    // A literal is always non-negative, so the negation cannot overflow.
+                    Expr::Int(n) => Ok(Expr::Int(-n)),
+                    // `9223372036854775808` does not fit an i64, but its NEGATION is
+                    // exactly `i64::MIN`. Without this, the one integer that cannot be
+                    // written positively could not be written at all: it degraded to an
+                    // f64 and `-9223372036854775808` was a Float that merely printed like
+                    // an integer. `big_int` is what keeps `-9223372036854775808.0`, an
+                    // explicit float, a Float.
+                    Expr::Float(_) if min_magnitude => Ok(Expr::Int(i64::MIN)),
+                    Expr::Float(v) => Ok(Expr::Float(-v)),
+                    other => Ok(Expr::Unary {
+                        op: UnOp::Neg,
+                        expr: Box::new(other),
+                        line: l,
+                        col: c,
+                    }),
+                }
             }
             Tok::Not => {
                 self.advance();
@@ -1554,7 +1573,7 @@ impl Parser {
                 self.advance();
                 Ok(Pattern::Int(v))
             }
-            Tok::Float(v) => {
+            Tok::Float(v) | Tok::BigInt(v, _) => {
                 self.advance();
                 Ok(Pattern::Float(v))
             }
@@ -1581,7 +1600,11 @@ impl Parser {
                         self.advance();
                         Ok(Pattern::Int(-v))
                     }
-                    Tok::Float(v) => {
+                    Tok::BigInt(_, true) => {
+                        self.advance();
+                        Ok(Pattern::Int(i64::MIN))
+                    }
+                    Tok::Float(v) | Tok::BigInt(v, _) => {
                         self.advance();
                         Ok(Pattern::Float(-v))
                     }
@@ -1855,7 +1878,7 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Int(v))
             }
-            Tok::Float(v) => {
+            Tok::Float(v) | Tok::BigInt(v, _) => {
                 self.advance();
                 Ok(Expr::Float(v))
             }

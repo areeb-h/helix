@@ -15,6 +15,15 @@ pub enum Tok {
     // Literals
     Int(i64),
     Float(f64),
+    /// An INTEGER literal whose magnitude exceeded `i64::MAX`, carrying the `f64` it
+    /// degrades to. Distinct from [`Tok::Float`] for exactly one reason: `i64::MIN` has a
+    /// magnitude one larger than `i64::MAX`, so `-9223372036854775808` can only be
+    /// recognised as an integer if the parser knows the operand was written WITHOUT a
+    /// decimal point. Everywhere else it behaves as a float.
+    /// The `bool` is true when NEGATING this exact literal yields `i64::MIN` — decided
+    /// from the digits, not from the `f64`, because 9223372036854775809 also rounds to
+    /// 2^63 and must NOT be mistaken for a value the user can write exactly.
+    BigInt(f64, bool),
     Str(String),
     /// A string containing one or more `{expr}` interpolations.
     InterpStr(Vec<StrSeg>),
@@ -84,7 +93,7 @@ impl Tok {
     pub fn describe(&self) -> String {
         match self {
             Tok::Int(_) => "a number".into(),
-            Tok::Float(_) => "a number".into(),
+            Tok::Float(_) | Tok::BigInt(..) => "a number".into(),
             Tok::Str(_) => "a string".into(),
             Tok::InterpStr(_) => "an interpolated string".into(),
             Tok::Ident(n) => format!("`{}`", n),

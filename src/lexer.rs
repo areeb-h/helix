@@ -383,10 +383,19 @@ fn lex_number(chars: &[char], start: usize) -> (Tok, usize) {
         Tok::Float(text.parse().unwrap_or(0.0))
     } else {
         // An integer literal too large for i64 degrades to its float value
-        // (its actual magnitude) rather than silently becoming 0.
+        // (its actual magnitude) rather than silently becoming 0. It keeps a DISTINCT
+        // token so the parser can still recognise `-9223372036854775808` as `i64::MIN`,
+        // whose magnitude is one larger than `i64::MAX` and so cannot be written
+        // positively. See `Tok::BigInt`.
         match text.parse::<i64>() {
             Ok(i) => Tok::Int(i),
-            Err(_) => Tok::Float(text.parse::<f64>().unwrap_or(0.0)),
+            Err(_) => {
+                // Parsed as i128 so the comparison is on the DIGITS: an f64 test would
+                // accept 9223372036854775809, which rounds to the same 2^63.
+                let is_min_magnitude =
+                    text.parse::<i128>().is_ok_and(|v| v == i64::MAX as i128 + 1);
+                Tok::BigInt(text.parse::<f64>().unwrap_or(0.0), is_min_magnitude)
+            }
         }
     };
     (tok, j - start)
