@@ -1684,6 +1684,34 @@ hazard class, and that path measures clean today (`to_float(k) / d` is 1.03x its
 twin, i.e. no penalty at all). IMMEDIATE bail rather than accumulate-and-store, for the
 reason recorded there: a tail loop can be infinite, so the error cannot wait.
 
+**4h PROBE (2026-08-04): narrowed, and the probe itself was flawed.**
+
+NOT FUSION. A deliberately non-fused shape regresses identically, so `map(...).sum()` was a
+red herring and the standalone MIXED map kernel is what declines:
+
+    n = 20000000
+    xs = (0..n).map(to_float(it % 7))
+    print(xs.length())            0.04s -> 1.58s
+
+Interleaved, warmed, median of 11 child-CPU samples, both binaries present at once:
+`lit % 7` 0.103s -> 1.570s; `var % m` 1.703s -> 1.811s.
+
+**THE PROBE WAS WRONG.** It printed `eligible=Some(0) stored_caps=0` and I read that as the
+capture leg agreeing. The leg is `c == k.captures` — equality of two `Vec<Capture>` — and I
+printed their LENGTHS. The `raises` leg was genuinely established; the capture leg was not.
+The probe program also printed the right answer at n=8, which proves nothing: at that size a
+declined kernel and a compiled one are indistinguishable.
+
+Fourth instance in this thread of resting a conclusion on something ADJACENT to the fact.
+The rule extends to instruments: **print the predicate, not a summary of its inputs.**
+
+**NEXT PROBE, precisely:** in the mixed-Float re-check (:920-937) print
+`map_body_raises(..) == k.raises` and
+`mixed_map_eligible(..).is_some_and(|c| c == k.captures)` as BOOLEANS, plus the final `ok`,
+for `to_float(it % 7)` at a size where the difference shows. If both are true the decline is
+downstream of this branch, and the next thing to instrument is the kernel-pointer lookup at
+dispatch.
+
 **THIRD 4h ATTEMPT — sound, but it DECLINED a body that used to compile.** Scoped per the
 traced wiring: relaxed the MIXED map gate (`infer_mixed_kind`, :2846) whose generator has a
 poison accumulator, left the PLAIN i64 gate alone, added the guarded lowering and the
