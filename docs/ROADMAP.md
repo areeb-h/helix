@@ -1684,6 +1684,33 @@ hazard class, and that path measures clean today (`to_float(k) / d` is 1.03x its
 twin, i.e. no penalty at all). IMMEDIATE bail rather than accumulate-and-store, for the
 reason recorded there: a tail loop can be infinite, so the error cannot wait.
 
+**THE ACTUAL WIRING (traced 2026-08-04), which corrects the note below.** One consumer at
+a time, gate -> codegen -> FFI:
+
+| shape | gate | codegen | FFI | can bail? |
+|---|---|---|---|---|
+| plain map | `map_kernel_captures` (:2463) -> `value_eligible_cap` | `gen_value_typed` (has a `poison` accumulator) | `run_map_poison` -> `Option<Vec<D>>` | **yes** |
+| filter | `filter_kernel_eligible` (:3224) -> `cond_eligible_cap` (:3195) -> `value_eligible_cap` | — | `run_filter_kernel` -> `Vec<i64>` | **no** |
+| fused | `map_kernel_eligible` (:2449) -> `value_eligible` (the 1208/1211 gate) | `gen_value` | — | **no** |
+
+`value_eligible_cap` has exactly TWO consumers and they arrive by different routes: the map
+gate directly, the FILTER gate transitively via `cond_eligible_cap`. Relaxing it therefore
+relaxes filters as a SIDE EFFECT — the real mechanism behind the swallowed `filter % 0`,
+and nothing in the map gate's signature reveals it. The FUSED path is unaffected: it goes
+through `value_eligible`, which 4h never touched.
+
+**This makes the fix smaller than the note below claims.** A `can_raise: bool` threaded
+into `value_eligible_cap`, `true` from `map_kernel_captures` and `false` from
+`cond_eligible_cap`. No FFI change: filters keep their literal-only restriction correctly,
+because they have nowhere to report. **The filter poison port is then a later optional
+stage that buys filters the same win — not a prerequisite.**
+
+**ONE QUESTION TO ANSWER BEFORE WRITING CODE** (guessing it wrong cost the last two
+attempts): the reverted build aborted at `gen_value:5896` for `(0..4).map(it >> d).sum()`,
+yet the fused path uses `value_eligible` and was never relaxed. Something on the plain-map
+route reaches `gen_value` — most likely `gen_value_typed` delegating for a subexpression.
+Find the call; do not infer it.
+
 **WHY 4h IS BLOCKED, established empirically (2026-08-04).** The note below says the next
 attempt must find out which generator each shape reaches rather than reason from the gate.
 Done — and the blocker is deeper than a missing patch:
