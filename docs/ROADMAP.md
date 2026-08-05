@@ -1684,6 +1684,38 @@ hazard class, and that path measures clean today (`to_float(k) / d` is 1.03x its
 twin, i.e. no penalty at all). IMMEDIATE bail rather than accumulate-and-store, for the
 reason recorded there: a tail loop can be infinite, so the error cannot wait.
 
+**THIRD 4h ATTEMPT — sound, but it DECLINED a body that used to compile.** Scoped per the
+traced wiring: relaxed the MIXED map gate (`infer_mixed_kind`, :2846) whose generator has a
+poison accumulator, left the PLAIN i64 gate alone, added the guarded lowering and the
+`map_body_raises` arms.
+
+**Sound:** opfuzz 880 programs x 3 engines, 0 aborts, 0 divergences. Both defects that
+killed attempt two are gone.
+
+**But a 17x REGRESSION**, which the fuzz cannot see and the gate would not catch:
+
+    (0..20M).map(to_float(it % 7))     0.03s -> 1.70s
+
+That is the LITERAL spelling, compiling before and declining after — confirmed by
+`HELIX_NOJIT=1` matching the JIT run (1.60s vs 1.66s), the signature of a kernel never
+built. Reverted.
+
+**Why that is informative:** relaxing a gate cannot make fewer things eligible. `op_ok`
+went from three arms to unconditional `true`. So something DOWNSTREAM is coupled to the
+literal test — most likely one of the three build-time re-checks at :935-960, which
+re-derive the analysis and demand it reproduce exactly what the compiler stored
+(`map_body_raises(&k.body, ..) == k.raises`, plus the capture list). A disagreement drops
+the kernel silently.
+
+**NEXT STEP, one probe:** put an `eprintln!` on each re-check leg at :935-960 and run
+`(0..8).map(to_float(it % 7))`. Whichever leg fails names the coupling. Do this BEFORE more
+codegen — three attempts have been lost to inferring structure instead of observing it, and
+each observation has taken exactly one probe.
+
+**Banked:** Stage 4g (mixed FUNCTION path) shipped at 57x. The guarded euclidean lowering,
+both poison helpers and the `map_body_raises` arms are written and fuzz-clean, waiting only
+on this question.
+
 **THE ANSWER (traced 2026-08-04), which supersedes BOTH notes below and restores the
 original design.** `define_array_kernel` (src/jit.rs:4990) picks the body generator on one
 condition:
