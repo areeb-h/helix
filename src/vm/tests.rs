@@ -6124,3 +6124,92 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             assert_eq!(vm, Ok(want.to_string()), "`{src}`");
         }
     }
+
+    /// `unique`/`frequencies`/`top` over FLOAT arrays were still the O(n × distinct) scan —
+    /// the defect the integer path was rescued from, left on the element type scientific
+    /// data actually uses. Stringifying every float and hashing the TEXT was 220x faster
+    /// than asking the float array directly; measured end to end, 2.91s -> 0.02s (145x) for
+    /// `(0..60000).map(to_float(it)).unique()`.
+    ///
+    /// Floats were excluded on the first pass for two real reasons, and this is how each is
+    /// handled rather than dodged:
+    ///
+    /// * `-0.0 == 0.0` is TRUE but their bits differ, so zero is canonicalized before
+    ///   hashing and the first of the pair seen stays the representative.
+    /// * **NaN is equal to nothing, not even itself.** It therefore belongs to no
+    ///   equivalence class and gets NO key at all: a fresh bucket every time, never entering
+    ///   the table. That is exactly what the `values_equal` scan produced, since `NaN == NaN`
+    ///   is false there too — so `[nan, nan].unique()` has TWO elements, before and after.
+    #[test]
+    fn float_histograms_hash_without_moving_a_single_answer() {
+        for (src, want) in [
+            ("[1.0, 1.0, 2.0].frequencies()", "[(1.0, 2), (2.0, 1)]"),
+            ("[1.0, 2.0, 1.0].unique()", "[1.0, 2.0]"),
+            ("[2.5].frequencies()", "[(2.5, 1)]"),
+            ("[].frequencies()", "[]"),
+            // -0.0 and 0.0 are ONE identity, and the first seen represents it
+            //  is POSITIVE zero in IEEE, so a negative zero has to be built by
+            // multiplication — an earlier draft of this test used the subtraction and was
+            // therefore not testing -0.0 at all.
+            ("nz = 0.0 * (0 - 1.0)
+[0.0, nz].unique().count()", "1"),
+            ("nz = 0.0 * (0 - 1.0)
+[0.0, nz].frequencies()", "[(0.0, 2)]"),
+            ("nz = 0.0 * (0 - 1.0)
+[nz, 0.0].frequencies()", "[(-0.0, 2)]"),
+            // NaN is equal to nothing, so every NaN is its own bucket
+            ("[sqrt(0 - 1.0), sqrt(0 - 1.0)].unique().count()", "2"),
+            ("[sqrt(0 - 1.0), sqrt(0 - 1.0)].frequencies().count()", "2"),
+            ("[1.0, sqrt(0 - 1.0), 1.0].frequencies().count()", "2"),
+            // `missing` is one identity and is never a float
+            ("[1.0, missing, 1.0, missing].frequencies()", "[(1.0, 2), (missing, 2)]"),
+            ("[missing, 1.0].unique()", "[missing, 1.0]"),
+            // infinities are ordinary keys
+            // float  by zero RAISES here (division is total), so an infinity is built
+            // by overflow instead
+            ("big = 1.0e308 * 10.0
+[big, big].frequencies().count()", "1"),
+            ("big = 1.0e308 * 10.0
+[big, 0 - big].unique().count()", "2"),
+            // MIXED Int/Float still falls through to the scan: `values_equal` collapses
+            // 1 == 1.0, and above 2^53 that collapse is not even transitive, so no hash
+            // key can reproduce it
+            ("[1, 1.0].unique().count()", "1"),
+            ("[1, 1.0].frequencies()", "[(1, 2)]"),
+            ("[1.0, 1].frequencies()", "[(1.0, 2)]"),
+            // `top` shares the histogram
+            ("[1.0, 1.0, 2.0].top(1)", "[(1.0, 2)]"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+
+        // `unique` and `frequencies` choose their keys independently, so they must be shown
+        // to report the SAME identity count — that is what catches one being fixed and not
+        // the other, NaN included.
+        for src in [
+            "[1.0, 1.0, 2.0]",
+            "[0.0, 0.0 * (0 - 1.0), 1.0]",
+            "[sqrt(0 - 1.0), sqrt(0 - 1.0), 1.0]",
+            "[1.0, missing, missing]",
+            "[1, 1.0, 2]",
+            "[]",
+        ] {
+            let a = format!("{src}.unique().count()");
+            let b = format!("{src}.frequencies().count()");
+            assert_eq!(run_vm(&a), run_vm(&b), "unique/frequencies disagree on `{src}`");
+            assert_eq!(run_tw(&a), run_vm(&a), "engines disagree on `{a}`");
+        }
+
+        // Scale: 60k distinct floats. Under the scan this was ~1.8e9 `values_equal` calls
+        // and took ~3 seconds; a regression turns this test from instant back into that.
+        let f = "(0..60000).map(to_float(it))";
+        assert_eq!(run_vm(&format!("{f}.unique().count()")), Ok("60000".to_string()));
+        assert_eq!(run_vm(&format!("{f}.frequencies().count()")), Ok("60000".to_string()));
+        assert_eq!(
+            run_vm(&format!("{f}.map(it * 0.0).unique().count()")),
+            Ok("1".to_string()),
+            "60k floats that are all +0.0 collapse to one identity"
+        );
+    }

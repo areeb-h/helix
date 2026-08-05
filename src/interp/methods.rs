@@ -1151,6 +1151,18 @@ fn array_method(
                 // `range(50_000).unique()` was ~1.25 billion `values_equal` comparisons.
                 let mut seen: std::collections::HashSet<IntKey> = std::collections::HashSet::new();
                 items.iter().filter(|v| seen.insert(int_key(v))).cloned().collect()
+            } else if items.iter().all(|v| matches!(v, Value::Float(_) | Value::Missing)) {
+                // Same key as `frequencies` uses, so the two cannot disagree on how many
+                // identities a float array has. A NaN has NO key — it is equal to nothing,
+                // not even itself — so every NaN survives `unique`, which is what the
+                // `values_equal` scan did.
+                let mut seen: std::collections::HashSet<FloatKey> =
+                    std::collections::HashSet::new();
+                items
+                    .iter()
+                    .filter(|v| float_key(v).is_none_or(|k| seen.insert(k)))
+                    .cloned()
+                    .collect()
             } else {
                 let mut out: Vec<Value> = Vec::new();
                 for v in items.iter() {
@@ -1563,16 +1575,59 @@ fn int_key(v: &Value) -> IntKey {
 /// Growth is amortized O(1), and dropping the reserve measured faster in BOTH regimes:
 /// 0.33s -> 0.068s at 10k-distinct/5M, and 1.83s -> 1.75s (-200 MB) even when every
 /// element is distinct, which is the only case the reserve could have helped.
+/// The hash key of a `Float`-or-`missing` array. Two wrinkles that the `Int` key does not
+/// have, and both are why floats were left out of the first pass:
+///
+/// * `-0.0 == 0.0` is TRUE, but their bit patterns differ — so zero is canonicalized and
+///   the first of the pair seen stays the representative, exactly as the scan would leave it.
+/// * **NaN is not equal to itself**, so a NaN belongs to no equivalence class at all. It
+///   gets `None`: no key, no table entry, a fresh bucket every time — which is precisely
+///   what the `values_equal` scan produced, since `NaN == NaN` is false there too.
+///
+/// As with `IntKey`, an array holding BOTH `Int` and `Float` may not use this: `values_equal`
+/// collapses `1 == 1.0`, and above 2^53 that collapse is not transitive.
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+enum FloatKey {
+    Bits(u64),
+    Missing,
+}
+
+fn float_key(v: &Value) -> Option<FloatKey> {
+    match v {
+        Value::Float(f) if f.is_nan() => None,
+        // `+0.0` and `-0.0` compare equal, so they must hash equal.
+        Value::Float(f) => Some(FloatKey::Bits(if *f == 0.0 { 0.0f64 } else { *f }.to_bits())),
+        Value::Missing => Some(FloatKey::Missing),
+        _ => unreachable!("callers guard with an `all(Float | Missing)` kind check"),
+    }
+}
+
+/// One pass, ONE hash probe per element, first-seen order preserved. `key` must reproduce
+/// `values_equal`'s equivalence classes EXACTLY over `items` — every caller establishes that
+/// with an `all(...)` kind check before picking a key. A `None` key means the value is equal
+/// to NOTHING, not even another copy of itself (only NaN), so it takes a fresh bucket and
+/// never enters the table.
+///
+/// No `with_capacity(items.len())`: distinct keys are usually FAR fewer than elements
+/// (a k-mer spectrum is the design centre), and reserving one bucket per element built
+/// a 5M-bucket table — whose control bytes alone are memset — to hold 10k entries.
+/// Growth is amortized O(1), and dropping the reserve measured faster in BOTH regimes:
+/// 0.33s -> 0.068s at 10k-distinct/5M, and 1.83s -> 1.75s (-200 MB) even when every
+/// element is distinct, which is the only case the reserve could have helped.
 fn tally<'a, K: Eq + std::hash::Hash>(
     items: &'a [Value],
-    key: impl Fn(&'a Value) -> K,
+    key: impl Fn(&'a Value) -> Option<K>,
 ) -> Vec<(Value, i64)> {
     use std::collections::hash_map::Entry;
     let mut idx: std::collections::HashMap<K, usize> = std::collections::HashMap::new();
     let mut counts: Vec<(Value, i64)> = Vec::new();
     for v in items.iter() {
         let next = counts.len();
-        match idx.entry(key(v)) {
+        let Some(k) = key(v) else {
+            counts.push((v.clone(), 1));
+            continue;
+        };
+        match idx.entry(k) {
             Entry::Occupied(e) => counts[*e.get()].1 += 1,
             Entry::Vacant(e) => {
                 e.insert(next);
@@ -1595,9 +1650,15 @@ fn tally<'a, K: Eq + std::hash::Hash>(
 /// hash path for exactly this reason; `frequencies` never got one.
 fn value_histogram(items: &[Value]) -> Vec<(Value, i64)> {
     let mut counts = if items.iter().all(|v| matches!(v, Value::Str(_) | Value::Dna(_))) {
-        tally(items, text_key)
+        tally(items, |v| Some(text_key(v)))
     } else if items.iter().all(|v| matches!(v, Value::Int(_) | Value::Missing)) {
-        tally(items, int_key)
+        tally(items, |v| Some(int_key(v)))
+    } else if items.iter().all(|v| matches!(v, Value::Float(_) | Value::Missing)) {
+        // Floats were left out of the first pass and it cost 220x on the element type
+        // scientific data actually uses: `(0..60000).map(to_float(it)).unique()` took 3.2s,
+        // while stringifying every float and hashing the TEXT took 0.04s — the same
+        // O(n × distinct) scan the integer path was rescued from.
+        tally(items, float_key)
     } else {
         let mut counts: Vec<(Value, i64)> = Vec::new();
         for v in items.iter() {
