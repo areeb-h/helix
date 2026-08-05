@@ -390,12 +390,12 @@
                     const EDGE: [&str; 8] = [
                         "(0 - 9223372036854775807 - 1)", // i64::MIN
                         "9223372036854775807",           // i64::MAX
-                        "(0 - 1)",
+                        "(-1)",
                         "0",
                         "1",
                         "2",
                         "9007199254740993",              // 2^53 + 1
-                        "(0 - 9007199254740993)",
+                        "(-9007199254740993)",
                     ];
                     let a = EDGE[pick(rng, EDGE.len() as u64) as usize];
                     let b = EDGE[pick(rng, EDGE.len() as u64) as usize];
@@ -567,7 +567,7 @@
             "isqrt(16)",
             "isqrt(10000000)",
             "isqrt(9223372036854775807)",
-            "isqrt(0 - 4)",                                    // error on all engines
+            "isqrt(-4)",                                    // error on all engines
             "range(2, isqrt(91) + 1).any(d => 91 % d == 0)",  // composite 7*13 -> true
             "range(2, isqrt(97) + 1).all(d => 97 % d != 0)",  // prime -> true
             "range(2, isqrt(2) + 1).all(d => 2 % d != 0)",    // empty divisor range -> true
@@ -611,7 +611,7 @@
             // wrapping i64 multiply through the loop (3^80 mod 2^64 — bit parity)
             "fn dbl(n, acc) = if n <= 0 then acc else dbl(n - 1, acc * 3)\ndbl(80, 1)",
             // zero iterations: base case immediately
-            "fn z(n, acc) = if n <= 0 then acc else z(n - 1, acc + 1)\nz(0 - 5, 42)",
+            "fn z(n, acc) = if n <= 0 then acc else z(n - 1, acc + 1)\nz(-5, 42)",
             // NON-tail recursion untouched: fib still correct (VM/memoized, JIT-excluded)
             "fn fib(n) = if n < 2 then n else fib(n - 1) + fib(n - 2)\nfib(20)",
             // self-call in ARGUMENT position (not a tail shape) — stays on the VM
@@ -651,7 +651,7 @@
             // the mandelbrot escape-time shape: 4 Float params + an Int counter/result,
             // an or-condition mixing an i64 compare with an f64 compare
             "fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) = if i >= 60 or zr * zr + zi * zi > 4.0 then i else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)\nstep(0.0, 0.0, 0.25, 0.35, 0)",
-            "fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) = if i >= 60 or zr * zr + zi * zi > 4.0 then i else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)\nstep(0.0, 0.0, 0.0 - 1.5, 0.02, 0)",
+            "fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) = if i >= 60 or zr * zr + zi * zi > 4.0 then i else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)\nstep(0.0, 0.0, -1.5, 0.02, 0)",
             // Float RESULT, pinned value: 1.0 * 0.5^3 = 0.125 (bit-exact halving)
             "fn geo(x: Float, n: Int) = if n <= 0 then x else geo(x * 0.5, n - 1)\ngeo(1.0, 3)",
             // deeper Float result — engines must agree on the exact f64 bits
@@ -694,13 +694,13 @@
             // POISON THROUGH A CALLEE: the inner fn NaN-poisons; the caller's post-call
             // check must bail the whole chain to bytecode → the interpreter's exact
             // NaN-compare error on every engine (not a garbage-0 result)
-            "fn nn(x: Float, n: Int) = if sqrt(x) > 0.0 then x else nn(x, n - 1)\nfn w2(a: Float, k: Int) = nn(a, k) + 1.0\nw2(0.0 - 1.0, 2)",
+            "fn nn(x: Float, n: Int) = if sqrt(x) > 0.0 then x else nn(x, n - 1)\nfn w2(a: Float, k: Int) = nn(a, k) + 1.0\nw2(-1.0, 2)",
             // the mandelbrot escape shape end-to-end at a small max_iter
-            "fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) = if i >= 40 or zr * zr + zi * zi > 4.0 then i else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)\nfn esc2(px: Int, py: Int) = step(0.0, 0.0, 0.0 - 2.5 + 3.5 * px / 60.0, 0.0 - 1.0 + 2.0 * py / 60.0, 0)\nrange(0, 60).map(py => range(0, 60).map(px => esc2(px, py)).sum()).sum()",
+            "fn step(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) = if i >= 40 or zr * zr + zi * zi > 4.0 then i else step(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)\nfn esc2(px: Int, py: Int) = step(0.0, 0.0, -2.5 + 3.5 * px / 60.0, -1.0 + 2.0 * py / 60.0, 0)\nrange(0, 60).map(py => range(0, 60).map(px => esc2(px, py)).sum()).sum()",
             // NaN POISON (the review-confirmed divergence): the interpreter RAISES on a
             // NaN comparison, so the native loop must bail (unordered fcmp → poison →
             // bytecode fallback → identical error), never silently order the NaN
-            "fn bad(x: Float, n: Int) = if sqrt(x) > 0.0 then n else bad(x, n + 1)\nbad(0.0 - 1.0, 0)",
+            "fn bad(x: Float, n: Int) = if sqrt(x) > 0.0 then n else bad(x, n + 1)\nbad(-1.0, 0)",
             // NaN appearing mid-loop (x goes negative → sqrt(x) is NaN on a later
             // iteration): first iterations run native, the NaN one poisons + re-runs
             // on bytecode → same error as the interpreter
@@ -714,7 +714,7 @@
             "fn ovf(x: Float, n: Int) = if n <= 0 or x * x > 10000000000.0 then x else ovf(x * x, n - 1)\novf(100000.0, 8)",
             // NaN in VALUE position (never compared): produced, bit-round-tripped
             // through the bits ABI, and printed identically
-            "fn nv(x: Float, n: Int) = if n <= 0 then sqrt(x) else nv(x, n - 1)\nnv(0.0 - 4.0, 2)",
+            "fn nv(x: Float, n: Int) = if n <= 0 then sqrt(x) else nv(x, n - 1)\nnv(-4.0, 2)",
             // Int→Float promotion with a HUGE i64 (beyond 2^53): fcvt_from_sint must
             // round exactly like the interpreter's `as f64`
             "fn hp(x: Float, n: Int) = if n <= 0 then x else hp(x + 4611686018427387905, n - 1)\nhp(0.5, 2)",
@@ -773,7 +773,7 @@
             // (3) lazy take/drop must MATCH the dense equivalents exactly
             "range(0, 10).take(3).sum()",
             "range(0, 10).drop(7).sum()",
-            "range(0, 10).take(0 - 5).count()",
+            "range(0, 10).take(-5).count()",
             "range(0, 10).take(99).sum()",
             "range(0, 10).drop(99).count()",
             "range(5, 50, 7).drop(2).first()",
@@ -1515,7 +1515,7 @@
             "a = 9007199254740993\nx = [1.0, 1.0]\n(0..2).map(i => a * 3 + x[i])",
             "a = 9007199254740993\nb = 9007199254740993\nx = [1.0, 1.0]\n(0..2).map(i => a + b + x[i])",
             "a = 9007199254740993\nx = [1.0, 1.0]\n(0..2).map(i => a * i + x[i])",
-            "a = 0.0 - 5.5\nx = [1.0, 2.0]\n(0..2).map(i => abs(a) + x[i])",
+            "a = -5.5\nx = [1.0, 2.0]\n(0..2).map(i => abs(a) + x[i])",
             "a = 2.5\nx = [1.0, 5.0]\n(0..2).map(i => min(a, x[i]))",
         ] {
             assert_eq!(run_vm_jit(src), run_tw(src), "declined shape must match the walker on `{src}`");
@@ -1583,7 +1583,7 @@
             "big = 9007199254740993\n(0..3).reduce(0.0, (s, i) => s + big * i + a[i])",
             "p = 9007199254740993\nq = 9007199254740993\n(0..3).reduce(0.0, (s, i) => s + p + q + a[i])",
             // abs/min do not promote, so an SFloat argument must be refused
-            "c = 0.0 - 5.5\n(0..3).reduce(0.0, (s, i) => s + abs(c) + a[i])",
+            "c = -5.5\n(0..3).reduce(0.0, (s, i) => s + abs(c) + a[i])",
             "c = 2.5\n(0..3).reduce(0.0, (s, i) => s + min(c, a[i]))",
         ] {
             let src = format!("{arrs}{body}");
@@ -1661,7 +1661,7 @@
             // empty, reverse, and negative-start ranges
             ("(3..3).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)", "0.0"),
             ("(3..0).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)", "0.0"),
-            ("((0 - 2)..2).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)", "-3.0"),
+            ("((-2)..2).map(i => i * 1.5).reduce(0.0, (s, x) => s + x)", "-3.0"),
         ] {
             let jit = run_vm_jit(src);
             assert_eq!(jit, run_tw(src), "JIT vs walker on `{src}`");
@@ -1823,7 +1823,7 @@
             ("to_float(9223372036854775807)", "9223372036854775808.0"),
             ("to_float(0 - 9223372036854775807)", "-9223372036854775808.0"),
             // negatives, nesting, composition with sqrt, and to_float of a Float (identity)
-            ("((0 - 5)..5).map(to_float(it) * 1.5).reduce(0.0, (s, x) => s + x)", "-7.5"),
+            ("((-5)..5).map(to_float(it) * 1.5).reduce(0.0, (s, x) => s + x)", "-7.5"),
             ("(0..5).map(to_float(to_float(it))).reduce(0.0, (s, x) => s + x)", "10.0"),
             ("a = [1.5, 2.5, 3.5]\n(0..3).map(to_float(a[it])).reduce(0.0, (s, x) => s + x)", "7.5"),
             // inside a tail-recursive numeric function, inferred and annotated
@@ -1952,20 +1952,20 @@
         for (src, want) in [
             // to_int: truncation toward zero, both signs
             ("(0..6).map(to_int(to_float(it) * 1.5)).reduce(0, (s, x) => s + x)", "21"),
-            ("((0 - 6)..0).map(to_int(to_float(it) * 1.5)).reduce(0, (s, x) => s + x)", "-30"),
+            ("((-6)..0).map(to_int(to_float(it) * 1.5)).reduce(0, (s, x) => s + x)", "-30"),
             // to_int SATURATES rather than raising — the property the lowering depends on
             ("to_int(1.0e30)", "9223372036854775807"),
             ("to_int(0.0 - 1.0e30)", "-9223372036854775808"),
             ("to_int(inf)", "9223372036854775807"),
             ("to_int(0.0 - inf)", "-9223372036854775808"),
             // NaN → 0 for BOTH (sqrt of a negative is how a NaN is reached without raising)
-            ("to_int(sqrt(0.0 - 1.0))", "0"),
-            ("sign(sqrt(0.0 - 1.0))", "0"),
+            ("to_int(sqrt(-1.0))", "0"),
+            ("sign(sqrt(-1.0))", "0"),
             // sign over floats and ints, including the infinities and both zeroes
-            ("((0 - 5)..5).map(sign(to_float(it))).reduce(0, (s, x) => s + x)", "-1"),
-            ("((0 - 5)..5).map(sign(it)).reduce(0, (s, x) => s + x)", "-1"),
-            ("sign(inf) + sign(0.0 - inf)", "0"),
-            ("sign(0.0) + sign(0) + sign(0.0 - 0.0)", "0"),
+            ("((-5)..5).map(sign(to_float(it))).reduce(0, (s, x) => s + x)", "-1"),
+            ("((-5)..5).map(sign(it)).reduce(0, (s, x) => s + x)", "-1"),
+            ("sign(inf) + sign(-inf)", "0"),
+            ("sign(0.0) + sign(0) + sign(-0.0)", "0"),
             // to_int of an Int is the identity
             ("(0..5).map(to_int(it)).reduce(0, (s, x) => s + x)", "10"),
             // inside a reduce body and a tail-recursive function
@@ -2044,8 +2044,8 @@
             ("(5..0).map(it * 2).length()", "0"),
             ("(0..1).map(it * 2)", "[0]"),
             // negative start and negative step
-            ("((0 - 5)..5).map(it * 2)", "[-10, -8, -6, -4, -2, 0, 2, 4, 6, 8]"),
-            ("range(10, 0, 0 - 1).map(it * 2)", "[20, 18, 16, 14, 12, 10, 8, 6, 4, 2]"),
+            ("((-5)..5).map(it * 2)", "[-10, -8, -6, -4, -2, 0, 2, 4, 6, 8]"),
+            ("range(10, 0, -1).map(it * 2)", "[20, 18, 16, 14, 12, 10, 8, 6, 4, 2]"),
             ("range(0, 20, 3).map(it + 1)", "[1, 4, 7, 10, 13, 16, 19]"),
             // the element formula is computed in i128, so a start near i64::MAX cannot overflow
             // before the truncation the interpreter also performs
@@ -2079,8 +2079,8 @@
             ("(0..100000).filter(it < 0).length()", "0"),
             ("(0..100000).filter(it >= 0).length()", "100000"),
             ("(5..5).filter(it > 0).length()", "0"),
-            ("range(20, 0, 0 - 1).filter(it % 3 == 0)", "[18, 15, 12, 9, 6, 3]"),
-            ("((0 - 10)..10).filter(it % 4 == 0)", "[-8, -4, 0, 4, 8]"),
+            ("range(20, 0, -1).filter(it % 3 == 0)", "[18, 15, 12, 9, 6, 3]"),
+            ("((-10)..10).filter(it % 4 == 0)", "[-8, -4, 0, 4, 8]"),
             ("(0..40000).filter(it % 3 == 0).map(it * 2).reduce(0, (s, x) => s + x)", "533346666"),
         ] {
             let jit = run_vm_jit(s);
@@ -2602,7 +2602,7 @@
             "(range(5, 5)).map(i => (range(i + 1, 30)).reduce(0, (acc, j) => acc + i * j)).sum()".to_string(),
             // triangular over a NEGATIVE outer start: start(i) = i+1 goes negative → the union's
             // `inner_lo < 0` declines (the serial path Python-wraps a negative index).
-            format!("a = {aa}\n(range(0 - 5, 40)).map(i => (range(i + 1, 40)).reduce(0, (acc, j) => acc + a[j])).sum()"),
+            format!("a = {aa}\n(range(-5, 40)).map(i => (range(i + 1, 40)).reduce(0, (acc, j) => acc + a[j])).sum()"),
             // whole triangle empty for every i (start always past end) → sum of inits.
             "(range(0, 20)).map(i => (range(i + 100, 30)).reduce(7, (acc, j) => acc + i + j)).sum()".to_string(),
             // tiny triangular, BELOW the parallel threshold → the serial affine route.
@@ -4376,7 +4376,7 @@ fn probe(d) = if d == 0 then h(42) else 0 + probe(d - 1)\nprobe(19998)";
             ("[1, missing].index_of(missing)", "1"),
             // unchanged: numeric coercion and IEEE NaN
             ("1 == 1.0", "true"),
-            ("[1.0, sqrt(0.0 - 1.0)] == [1.0, sqrt(0.0 - 1.0)]", "false"),
+            ("[1.0, sqrt(-1.0)] == [1.0, sqrt(-1.0)]", "false"),
             // lexicographic tuple ordering
             ("(1, 2) < (1, 3)", "true"),
             ("(1, 2) < (1, 2, 3)", "true"), // equal prefix -> length decides
@@ -4568,7 +4568,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         for src in [
             "fn g(x: Float, d: Float) = x / d\n(0..6).map(i => g(to_float(i), 0.0))",
             "fn g(x: Float, d: Float) = x / d\n(0..6).map(i => g(1.0, to_float(3 - i)))",
-            "fn g(x: Float) = if x > 1.0 then 1.0 else 0.0\n(0..4).map(i => g(sqrt(0.0 - to_float(i + 1))))",
+            "fn g(x: Float) = if x > 1.0 then 1.0 else 0.0\n(0..4).map(i => g(sqrt(-to_float(i + 1))))",
             "fn g(x: Float) = to_float(floor(x))\n(0..4).map(i => g(to_float(i) * 1e19))",
         ] {
             let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
@@ -4727,7 +4727,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         // immediate-bail case — accumulate-and-store would spin natively for minutes.
         for src in [
             "fn f(x: Float, d: Float) = x / d\nf(1.5, 0.0)",
-            "fn f(x: Float, d: Float) = x / d\nf(1.5, 0.0 - 0.0)",
+            "fn f(x: Float, d: Float) = x / d\nf(1.5, -0.0)",
             "fn f(a, b) = a / b\nf(10, 0)",
             "fn f(a: Float, n: Int) =\n  if n >= 1000000000 then a\n  else f(a / to_float(0), n + 1)\nf(1.0, 0)",
             "fn f(x: Int, n: Int, acc: Float) =\n  if x >= n then acc\n  else f(x + 1, n, acc + 1.0 / to_float(3 - x))\nf(0, 6, 0.0)",
@@ -4777,19 +4777,19 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("c = 10\n(0..6).map(i => to_int(to_float(i) * 1.5) + c)", "[10, 11, 13, 14, 16, 17]"),
             ("fn f(x) = x * 3\n(0..6).map(i => to_int(to_float(f(i)) * 0.5))", "[0, 1, 3, 4, 6, 7]"),
             ("(1..4).map(i => to_int(to_float(i) * 1e19))", "[9223372036854775807, 9223372036854775807, 9223372036854775807]"),
-            ("(0..3).map(i => to_int(sqrt(0.0 - to_float(i + 1))))", "[0, 0, 0]"),
+            ("(0..3).map(i => to_int(sqrt(-to_float(i + 1))))", "[0, 0, 0]"),
             // Stage 3v: every tie, both signs — half-away-from-zero.
             ("(0..4).map(i => round(to_float(i) + 0.5))", "[1, 2, 3, 4]"),
-            ("(0..4).map(i => round(0.0 - to_float(i) - 0.5))", "[-1, -2, -3, -4]"),
+            ("(0..4).map(i => round(-to_float(i) - 0.5))", "[-1, -2, -3, -4]"),
             // The largest f64 below 0.5: `f64::round` gives 0; the add-0.5 shortcut gives 1.
             ("(0..2).map(i => round(to_float(i) * 0.49999999999999994))", "[0, 0]"),
-            ("(0..4).map(i => floor(0.0 - to_float(i) - 0.5))", "[-1, -2, -3, -4]"),
-            ("(0..4).map(i => ceil(0.0 - to_float(i) - 0.5))", "[0, -1, -2, -3]"),
-            ("(0..4).map(i => trunc(0.0 - to_float(i) - 0.5))", "[0, -1, -2, -3]"),
+            ("(0..4).map(i => floor(-to_float(i) - 0.5))", "[-1, -2, -3, -4]"),
+            ("(0..4).map(i => ceil(-to_float(i) - 0.5))", "[0, -1, -2, -3]"),
+            ("(0..4).map(i => trunc(-to_float(i) - 0.5))", "[0, -1, -2, -3]"),
             ("(0..4).map(i => floor(i) + 1)", "[1, 2, 3, 4]"),
             // Exactly representable MIN is accepted; the poison range check is half-open.
             (
-                "(1..3).map(i => round(to_float(i) * (0.0 - 4.611686018427388e18)))",
+                "(1..3).map(i => round(to_float(i) * (-4.611686018427388e18)))",
                 "[-4611686018427387904, -9223372036854775808]",
             ),
             // A capture, a user call, the Float-rooted variant, and a shadowed `round`.
@@ -4812,7 +4812,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             "(0..5).map(i => round(to_float(i) * 4.0e18))",
             "(1..4).map(i => floor(to_float(i) * 1e19))",
             "(0..5).map(i => i * 2).map(i => round(to_float(i) * 4.0e18))",
-            "(0..3).map(i => round(sqrt(0.0 - to_float(i + 1))))",
+            "(0..3).map(i => round(sqrt(-to_float(i + 1))))",
             "(0..3).map(i => floor(to_float(i) + inf))",
             "(1..3).map(i => round(to_float(i) * 4.611686018427388e18))",
         ] {
@@ -4923,7 +4923,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("a = [10, 20, 30, 40]\n(0..4).map(i => a[i] * 2).reduce(0, (s, x) => s + x)", "200"),
             ("a = [10, 20, 30, 40]\nc = 3\n(0..4).map(i => a[i] * c).reduce(0, (s, x) => s + x)", "300"),
             ("c = 9223372036854775807\n(0..4).map(i => i * c).reduce(0, (s, x) => s + x)", "-6"),
-            ("c = 0 - 7\n(0..6).map(i => i * c).reduce(100, (s, x) => s + x)", "-5"),
+            ("c = -7\n(0..6).map(i => i * c).reduce(100, (s, x) => s + x)", "-5"),
             ("fn f(x) = x * 2\nc = 5\n(0..6).map(i => f(i) + c).reduce(0, (s, x) => s + x)", "60"),
             // THE MASK-DEFEATING CASE: `f` mentions the accumulator's name AND carries a second
             // capture. Fusion must decline (capture safety), and the answer must be the
@@ -4936,7 +4936,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("s = 100\nc = 2\n(0..5).map(i => i * c).reduce(s, (s, x) => s + x)", "120"),
             // OOB inside `f` must produce the fall-through's exact error, not a native load.
             // Negative start Python-wraps in the interpreter, so it must decline and agree.
-            ("a = [10, 20, 30]\nc = 1\n(0 - 1..3).map(i => a[i] * c).reduce(0, (s, x) => s + x)", "90"),
+            ("a = [10, 20, 30]\nc = 1\n(-1..3).map(i => a[i] * c).reduce(0, (s, x) => s + x)", "90"),
             // A Float capture declines to the ordinary path and still answers.
             ("c = 2.5\n(0..5).map(i => i * c).reduce(0, (s, x) => s + x)", "25.0"),
             // Degenerate ranges return `init` untouched.
@@ -5002,7 +5002,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("fn f(x) = x * 9223372036854775807\n(0..4).reduce(0.0, (s, i) => s + to_float(f(i) % 100))", "110.0"),
             ("fn tri(x, acc) = if x <= 0 then acc else tri(x - 1, acc + x)\n(0..5).reduce(0.0, (s, i) => s + to_float(tri(i, 0)))", "20.0"),
             // A user function shadowing a builtin must win over the inline lowering.
-            ("fn abs(x) = x + 1000\n(0..4).reduce(0.0, (s, i) => s + to_float(abs(0 - i)))", "3994.0"),
+            ("fn abs(x) = x + 1000\n(0..4).reduce(0.0, (s, i) => s + to_float(abs(-i)))", "3994.0"),
             ("fn min(a, b) = a\n(0..4).reduce(0.0, (s, i) => s + to_float(min(i, 99)))", "6.0"),
             ("fn sign(x) = x - 1\n(0..4).reduce(0.0, (s, i) => s + to_float(sign(i)))", "2.0"),
             // Declines that must still produce the interpreter's answer.
@@ -5049,7 +5049,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("lo = 2\nhi = 6\n(0..10).filter(it > lo and it < hi)", "[3, 4, 5]"),
             ("a = 1\nb = 8\n(0..10).filter(it < a or it > b)", "[0, 9]"),
             ("k = 3\n(0..10).filter(it > k and it < k * 3)", "[4, 5, 6, 7, 8]"),
-            ("k = 0 - 3\n(0 - 5..5).filter(it > k)", "[-2, -1, 0, 1, 2, 3, 4]"),
+            ("k = -3\n(-5..5).filter(it > k)", "[-2, -1, 0, 1, 2, 3, 4]"),
             // A literal modulus is still required (a variable divisor could be 0, which must
             // raise); combining one with a capture must work.
             ("k = 3\n(0..20).filter(it % 5 == 0 and it > k)", "[5, 10, 15]"),
@@ -5062,11 +5062,11 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             // Degenerate sources, and the all-keep / all-drop extremes of a compacting loop.
             ("k = 3\n(0..0).filter(it > k)", "[]"),
             ("k = 3\n(8..0).filter(it > k)", "[]"),
-            ("k = 0 - 1\n(0..5).filter(it > k)", "[0, 1, 2, 3, 4]"),
+            ("k = -1\n(0..5).filter(it > k)", "[0, 1, 2, 3, 4]"),
             ("k = 100\n(0..5).filter(it > k)", "[]"),
             // Roughly one survivor per chunk, where a wrong output offset shows up at once
             // instead of being absorbed by its neighbours.
-            ("k = 0 - 1\nn = 40000\n(0..n).filter(it % 16384 == 0 and it > k)", "[0, 16384, 32768]"),
+            ("k = -1\nn = 40000\n(0..n).filter(it % 16384 == 0 and it > k)", "[0, 16384, 32768]"),
             ("k = 20000\nn = 40000\n(0..n).filter(it % 8192 == 0 and it < k)", "[0, 8192, 16384]"),
         ] {
             let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
@@ -5075,7 +5075,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             assert_eq!(vm, Ok(want.to_string()), "`{src}`");
         }
         // Chunk-boundary elements read one at a time, straddling `PAR_MATH_THRESHOLD`.
-        let src = "k = 0 - 1\nn = 40000\na = (0..n).filter(it > k)\n\
+        let src = "k = -1\nn = 40000\na = (0..n).filter(it > k)\n\
                    [a[0], a[16383], a[16384], a[32767], a[32768], a[39999]]";
         let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
         assert_eq!(tw, vm, "tree-walker and VM disagree at the chunk boundaries");
@@ -5103,7 +5103,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
     fn a_mixed_map_body_may_call_an_i64_user_function() {
         for (src, want) in [
             // Shadowed builtins: each returns what the genuine builtin would not.
-            ("fn abs(x) = x + 1000\n(0..4).map(i => abs(0 - i) * 0.5)", "[500.0, 499.5, 499.0, 498.5]"),
+            ("fn abs(x) = x + 1000\n(0..4).map(i => abs(-i) * 0.5)", "[500.0, 499.5, 499.0, 498.5]"),
             ("fn min(a, b) = a\n(0..4).map(i => min(i, 99) * 0.5)", "[0.0, 0.5, 1.0, 1.5]"),
             ("fn max(a, b) = a * 10 + b\n(0..3).map(i => max(i, 2) * 0.5)", "[1.0, 6.0, 11.0]"),
             ("fn to_int(x) = x * 7\n(0..3).map(i => to_int(i) * 0.5)", "[0.0, 3.5, 7.0]"),
@@ -5245,7 +5245,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
                 "[0.0, 3.5, 49.0, 2.5]",
             ),
             ("c = 9223372036854775807\n(0..3).map(j => (c + j) * 1.0)", "[9223372036854775808.0, -9223372036854775808.0, -9223372036854775808.0]"),
-            ("c = 0 - 7\n(0..4).map(j => ((c * j) % 100) * 0.5)", "[0.0, 46.5, 43.0, 39.5]"),
+            ("c = -7\n(0..4).map(j => ((c * j) % 100) * 0.5)", "[0.0, 46.5, 43.0, 39.5]"),
             // Exact in `i64` past `f64`'s 2^53: promotion happens once, at the end.
             ("c = 9007199254740993\n(1..3).map(j => (c * j) * 1.0)", "[9007199254740992.0, 18014398509481984.0]"),
             ("c = 9007199254740992\n(1..4).map(j => (c + j) * 1.0)", "[9007199254740992.0, 9007199254740994.0, 9007199254740996.0]"),
@@ -5320,7 +5320,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         // The `sdiv`/`srem` overflow case, which traps in hardware but must wrap here.
         for (expr, want) in [
             (format!("{MIN} // (0 - 1)"), "-9223372036854775808"),
-            (format!("{MIN} % (0 - 1)"), "0"),
+            (format!("{MIN} % (-1)"), "0"),
             (format!("{MIN} / (0 - 1)"), "9223372036854775808.0"),
         ] {
             let (tw, vm, jit) = (run_tw(&expr), run_vm(&expr), run_vm_jit(&expr));
@@ -5359,7 +5359,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
 
         // `MIN // -1` through a native map kernel: the divisor is data, so the kernel —
         // not constant folding — performs the division that would trap.
-        let src = format!("d = (0..2).map(0 - 1)\nd.map({MIN} // it)[0]");
+        let src = format!("d = (0..2).map(-1)\nd.map({MIN} // it)[0]");
         let (tw, vm, jit) = (run_tw(&src), run_vm(&src), run_vm_jit(&src));
         assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
         assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
@@ -5385,7 +5385,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("[10, 2, 10, 2].frequencies()", "[(10, 2), (2, 2)]"),
             ("[3, 1, 3, 2, 1, 3].unique()", "[3, 1, 2]"),
             // negative and extreme i64 keys are exact, not bucketed through a float
-            ("[0 - 1, 0 - 1, 1].frequencies()", "[(-1, 2), (1, 1)]"),
+            ("[-1, -1, 1].frequencies()", "[(-1, 2), (1, 1)]"),
             (
                 "[9223372036854775807, 0 - 9223372036854775807].unique().length()",
                 "2",
@@ -5443,7 +5443,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         // property that catches one path being fixed without the other.
         for src in [
             "[3, 1, 3, 2, 1, 3]",
-            "[missing, 1, missing, 0 - 1]",
+            "[missing, 1, missing, -1]",
             "[1, 1.0, 2]",
             "[dna(\"AT\"), \"AT\", dna(\"AT\")]",
             "[9007199254740993, 9007199254740992.0, 9007199254740992]",
@@ -5570,7 +5570,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("z = 3\n\"a{z}b\"", "a3b"),
             ("z = 3\n\"{z}{z}{z}\"", "333"),
             ("\"{1 + 1}\"", "2"),
-            ("z = 0 - 5\n\"n={z}\"", "n=-5"),
+            ("z = -5\n\"n={z}\"", "n=-5"),
             // a hole raises: the FIRST one, with nothing yet written
             ("d = 0\nr = try \"{1 // d}\"\nr.ok", "false"),
             // ...and a LATER one, with earlier holes already on the stack
@@ -5868,7 +5868,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("fn h(x) = x + 1\ng = h\nfn go(i, a) = if i >= 3 then a else go(i + 1, a + 1)\ngo(0, 0)", "3"),
             // arithmetic keeps the interpreter's exact wrapping
             ("k = 9223372036854775807\nfn go(i, a) = if i >= 3 then a else go(i + 1, a + k)\ngo(0, 0)", "9223372036854775805"),
-            ("k = 0 - 5\nfn go(i, a) = if i >= 4 then a else go(i + 1, a + k)\ngo(0, 0)", "-20"),
+            ("k = -5\nfn go(i, a) = if i >= 4 then a else go(i + 1, a + k)\ngo(0, 0)", "-20"),
             ("n = 0\nfn go(i, a) = if i >= n then a else go(i + 1, a + 1)\ngo(0, 0)", "0"),
             ("k = 3\nfn sq(x) = x * x\nfn go(i, a) = if i >= 5 then a else go(i + 1, a + sq(k))\ngo(0, 0)", "45"),
             ("k = 2\nfn go(i, a) = if i >= 4 then a else go(i + 1, a + match k { 2 => 10, _ => 0 })\ngo(0, 0)", "40"),
@@ -6024,7 +6024,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             // an all-Int dot is an Int, and equals the spellings it is sugar for
             ("[1, 2, 3].dot([4, 5, 6])", "32"),
             ("[1, 2, 3].zip([4, 5, 6]).map((a, b) => a * b).sum()", "32"),
-            ("[0 - 2, 3].dot([4, 0 - 5])", "-23"),
+            ("[-2, 3].dot([4, -5])", "-23"),
             ("[].dot([])", "0"),
             ("[7].dot([0])", "0"),
             // exact past 2^53, where the old f64 path drifted
@@ -6092,7 +6092,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         for src in [
             "[1, 2, 3].clamp(5, 1)",
             "[1.0, 2.0].clamp(5.0, 1.0)",
-            "[1, 2, 3].clamp(0 - 1, 0 - 5)",
+            "[1, 2, 3].clamp(-1, -5)",
             "(0..10).clamp(9, 2)",
         ] {
             let (tw, vm) = (run_tw(src), run_vm(src));
@@ -6107,7 +6107,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         // Ordinary clamping is unchanged.
         for (src, want) in [
             ("[1, 2, 3].clamp(1, 2)", "[1, 2, 2]"),
-            ("[0 - 1, 5, 2, 9].clamp(0, 4)", "[0, 4, 2, 4]"),
+            ("[-1, 5, 2, 9].clamp(0, 4)", "[0, 4, 2, 4]"),
             ("[1.0, 5.0].clamp(2.0, 3.0)", "[2.0, 3.0]"),
             ("[1, 2, 3].clamp(2, 2)", "[2, 2, 2]"),
             ("[].clamp(0, 1)", "[]"),
@@ -6116,8 +6116,8 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             // a NaN bound cannot be caught by `lo > hi` (every NaN comparison is false), so
             // the selection is written as comparisons rather than `.clamp()`, which panics
             // on a NaN bound too. Nothing matches, so elements pass through.
-            ("[1, 2, 3].clamp(sqrt(0 - 1.0), 5.0)", "[1, 2, 3]"),
-            ("[1.0, 2.0].clamp(0.0, sqrt(0 - 1.0))", "[1.0, 2.0]"),
+            ("[1, 2, 3].clamp(sqrt(-1.0), 5.0)", "[1, 2, 3]"),
+            ("[1.0, 2.0].clamp(0.0, sqrt(-1.0))", "[1.0, 2.0]"),
         ] {
             let (tw, vm) = (run_tw(src), run_vm(src));
             assert_eq!(tw, vm, "engines disagree on `{src}`");
@@ -6148,7 +6148,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("[2.5].frequencies()", "[(2.5, 1)]"),
             ("[].frequencies()", "[]"),
             // -0.0 and 0.0 are ONE identity, and the first seen represents it
-            // `0 - 0.0` is POSITIVE zero in IEEE, so writing a negative zero that way
+            // `-0.0` is POSITIVE zero in IEEE, so writing a negative zero that way
             // tests nothing. Unary negation is what produces one — an earlier draft used
             // the subtraction and was therefore not exercising -0.0 at all.
             ("nz = -0.0
@@ -6158,9 +6158,9 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("nz = -0.0
 [nz, 0.0].frequencies()", "[(-0.0, 2)]"),
             // NaN is equal to nothing, so every NaN is its own bucket
-            ("[sqrt(0 - 1.0), sqrt(0 - 1.0)].unique().count()", "2"),
-            ("[sqrt(0 - 1.0), sqrt(0 - 1.0)].frequencies().count()", "2"),
-            ("[1.0, sqrt(0 - 1.0), 1.0].frequencies().count()", "2"),
+            ("[sqrt(-1.0), sqrt(-1.0)].unique().count()", "2"),
+            ("[sqrt(-1.0), sqrt(-1.0)].frequencies().count()", "2"),
+            ("[1.0, sqrt(-1.0), 1.0].frequencies().count()", "2"),
             // `missing` is one identity and is never a float
             ("[1.0, missing, 1.0, missing].frequencies()", "[(1.0, 2), (missing, 2)]"),
             ("[missing, 1.0].unique()", "[missing, 1.0]"),
@@ -6170,7 +6170,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("big = 1.0e308 * 10.0
 [big, big].frequencies().count()", "1"),
             ("big = 1.0e308 * 10.0
-[big, 0 - big].unique().count()", "2"),
+[big, -big].unique().count()", "2"),
             // MIXED Int/Float still falls through to the scan: `values_equal` collapses
             // 1 == 1.0, and above 2^53 that collapse is not even transitive, so no hash
             // key can reproduce it
@@ -6191,7 +6191,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         for src in [
             "[1.0, 1.0, 2.0]",
             "[0.0, -0.0, 1.0]",
-            "[sqrt(0 - 1.0), sqrt(0 - 1.0), 1.0]",
+            "[sqrt(-1.0), sqrt(-1.0), 1.0]",
             "[1.0, missing, missing]",
             "[1, 1.0, 2]",
             "[]",

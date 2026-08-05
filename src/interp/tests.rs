@@ -77,8 +77,8 @@
         // Already at/over the width → returned unchanged (never truncates).
         assert_eq!(s("\"hello\".ljust(3)"), "hello");
         // Negative count/width are clean errors, not panics.
-        assert!(last("\"x\".repeat(0 - 1)").unwrap_err().message.contains("non-negative"));
-        assert!(last("\"x\".rjust(0 - 1)").unwrap_err().message.contains("non-negative"));
+        assert!(last("\"x\".repeat(-1)").unwrap_err().message.contains("non-negative"));
+        assert!(last("\"x\".rjust(-1)").unwrap_err().message.contains("non-negative"));
         // take/drop — first n / all but first n chars (Unicode-correct), clamped.
         assert_eq!(s("\"hello world\".take(5)"), "hello");
         assert_eq!(s("\"hello world\".drop(6)"), "world");
@@ -460,7 +460,7 @@
         assert_eq!(s("n = 7\n\"[{n:04}]\""), "[0007]");
         assert_eq!(s("n = 42\n\"[{n:<6}]\""), "[42    ]"); // left-align
         assert_eq!(s("w = \"hi\"\n\"[{w:>5}]\""), "[   hi]"); // strings right-align on request
-        assert_eq!(s("x = 0.0 - 3.1\n\"{x:07.2f}\""), "-003.10"); // sign before zero-pad
+        assert_eq!(s("x = -3.1\n\"{x:07.2f}\""), "-003.10"); // sign before zero-pad
         // a `:` inside a slice or record literal in the hole is NOT a format spec
         assert_eq!(s("xs = [10, 20, 30]\n\"{xs[1:3]}\""), "[20, 30]");
         // a malformed spec is a parse-time error; a numeric spec on a string errors
@@ -510,7 +510,7 @@
         assert!(matches!(last("[\"b\", \"a\", \"c\"].argsort()[0]").unwrap(), Value::Int(1)));
         // as_int accepts integer-valued floats (least_squares/lll outputs); fractional errors
         assert!(matches!(last("gcd(12.0, 18.0)").unwrap(), Value::Int(6)));
-        assert!(matches!(last("gcd(1.0, 0.0 - 1.0)").unwrap(), Value::Int(1)));
+        assert!(matches!(last("gcd(1.0, -1.0)").unwrap(), Value::Int(1)));
         assert!(last("gcd(1.5, 2)").is_err());
     }
 
@@ -518,8 +518,8 @@
     fn floor_div_log_gcd() {
         // `//` is euclidean integer division, pairing with `%`: a == b*(a//b)+(a%b).
         assert!(matches!(last("7 // 2").unwrap(), Value::Int(3)));
-        assert!(matches!(last("(0 - 7) // 2").unwrap(), Value::Int(-4)));
-        assert!(matches!(last("7 // (0 - 2)").unwrap(), Value::Int(-3)));
+        assert!(matches!(last("(-7) // 2").unwrap(), Value::Int(-4)));
+        assert!(matches!(last("7 // (-2)").unwrap(), Value::Int(-3)));
         assert!(matches!(last("1 + 6 // 2").unwrap(), Value::Int(4))); // // binds like *
         assert!(matches!(last("([7, 8, 9] // 2)[2]").unwrap(), Value::Int(4))); // broadcast
         assert!(matches!(last("7.0 // 2.0").unwrap(), Value::Float(f) if (f - 3.0).abs() < 1e-9));
@@ -532,7 +532,7 @@
         assert!(matches!(last("gcd(12, 18)").unwrap(), Value::Int(6)));
         assert!(matches!(last("gcd(17, 5)").unwrap(), Value::Int(1)));
         assert!(matches!(last("gcd(0, 5)").unwrap(), Value::Int(5)));
-        assert!(matches!(last("gcd(0 - 12, 18)").unwrap(), Value::Int(6)));
+        assert!(matches!(last("gcd(-12, 18)").unwrap(), Value::Int(6)));
     }
 
     #[test]
@@ -541,7 +541,7 @@
         // algorithm Helix's immutable surface delegates to Rust).
         assert_eq!(format!("{}", last("primes(10)").unwrap()), "[2, 3, 5, 7]");
         assert_eq!(format!("{}", last("primes(2)").unwrap()), "[]");
-        assert_eq!(format!("{}", last("primes(0 - 5)").unwrap()), "[]");
+        assert_eq!(format!("{}", last("primes(-5)").unwrap()), "[]");
         assert!(matches!(last("primes(100).count()").unwrap(), Value::Int(25)));
         assert!(matches!(last("primes(1000000).count()").unwrap(), Value::Int(78498)));
         assert!(matches!(last("primes(100).last()").unwrap(), Value::Int(97)));
@@ -570,7 +570,7 @@
         // integer-valued float accepted (like gcd); fractional and negative are errors.
         assert!(matches!(last("isqrt(49.0)").unwrap(), Value::Int(7)));
         assert!(last("isqrt(2.5)").is_err());
-        assert!(last("isqrt(0 - 1)").is_err());
+        assert!(last("isqrt(-1)").is_err());
         assert!(last("isqrt(4, 9)").is_err()); // arity
     }
 
@@ -585,7 +585,7 @@
         assert!(matches!(last("(rational(1,2) / rational(3,4)) == rational(2,3)").unwrap(), Value::Bool(true)));
         // exact power, incl. negative exponent (reciprocal)
         assert!(matches!(last("(rational(2,3) ** 2) == rational(4,9)").unwrap(), Value::Bool(true)));
-        assert!(matches!(last("(rational(2,3) ** (0 - 1)) == rational(3,2)").unwrap(), Value::Bool(true)));
+        assert!(matches!(last("(rational(2,3) ** (-1)) == rational(3,2)").unwrap(), Value::Bool(true)));
         // mixing with Int stays exact; mixing with Float drops to Float (documented)
         assert!(matches!(last("(rational(1,2) + 3) == rational(7,2)").unwrap(), Value::Bool(true)));
         assert!(matches!(last("rational(1,2) + 0.25").unwrap(), Value::Float(f) if (f - 0.75).abs() < 1e-12));
@@ -643,7 +643,7 @@
         ));
         // rational `**` caps the exponent magnitude — no arbitrary-precision blow-up.
         assert!(last("rational(2, 1) ** 100000").is_err());
-        assert!(last("rational(1, 2) ** (0 - 100000)").is_err());
+        assert!(last("rational(1, 2) ** (-100000)").is_err());
         // dividing by a zero rational is a clean error, not a panic.
         assert!(last("rational(1, 2) / rational(0, 1)").is_err());
         // out-of-range align weights are rejected (keeps the i64 accumulator safe).
@@ -928,7 +928,7 @@
     fn robustness_arithmetic_and_reshape_never_panic() {
         // `abs` of an Int i64::MIN must wrap, not panic in debug. The literal
         // `-9223372036854775808` overflows i64 and lexes as a float, so build the Int
-        // value with wrapping arithmetic (0 - i64::MAX - 1 == i64::MIN).
+        // value with wrapping arithmetic (-i64::MAX - 1 == i64::MIN).
         assert!(last("abs(0 - 9223372036854775807 - 1)").is_ok());
         // A reshape whose shape's element count overflows usize errors cleanly rather
         // than panicking on `attempt to multiply with overflow`.
@@ -1344,7 +1344,7 @@
     /// total and return an array.
     #[test]
     fn sort_with_nan_does_not_panic() {
-        let v = last("[3.0, sqrt(0.0 - 1.0), 1.0, 2.0].sort()").unwrap();
+        let v = last("[3.0, sqrt(-1.0), 1.0, 2.0].sort()").unwrap();
         assert!(matches!(v, Value::Array(_)));
     }
 
@@ -1363,7 +1363,7 @@
     fn argmax_argmin_propagate_missing() {
         assert!(matches!(last("argmax([1, missing, 3])").unwrap(), Value::Missing));
         assert!(matches!(last("argmin([1, missing, 3])").unwrap(), Value::Missing));
-        assert!(matches!(last("argmax([3.0, sqrt(0.0 - 1.0), 5.0])").unwrap(), Value::Missing));
+        assert!(matches!(last("argmax([3.0, sqrt(-1.0), 5.0])").unwrap(), Value::Missing));
     }
 
     /// A `reduce`/`scan` binder that reuses a name (`(a, a)` — explicitly legal,
@@ -1411,8 +1411,8 @@
                 other => panic!("expected a string, got {:?}", other),
             }
         }
-        assert_eq!(s("x = 0 - 255\n\"{x:x}\""), "-ff");
-        assert_eq!(s("x = 0 - 2\n\"{x:b}\""), "-10");
+        assert_eq!(s("x = -255\n\"{x:x}\""), "-ff");
+        assert_eq!(s("x = -2\n\"{x:b}\""), "-10");
         assert_eq!(s("s = \"hello\"\n\"{s:.3s}\""), "hel");
     }
 
@@ -1579,11 +1579,11 @@
     #[test]
     fn activations_argmax_softmax() {
         // relu / sigmoid broadcast over scalars, arrays, and tensors
-        assert_eq!(float("relu(0.0 - 2.0)"), 0.0);
+        assert_eq!(float("relu(-2.0)"), 0.0);
         assert_eq!(float("relu(3.0)"), 3.0);
         assert!((float("sigmoid(0.0)") - 0.5).abs() < 1e-12);
-        assert_eq!(float("relu([0.0 - 1.0, 5.0, 0.0 - 2.0]).sum()"), 5.0);
-        assert_eq!(float("relu(tensor([[0.0 - 1.0, 2.0], [3.0, 0.0 - 4.0]])).sum()"), 5.0);
+        assert_eq!(float("relu([-1.0, 5.0, -2.0]).sum()"), 5.0);
+        assert_eq!(float("relu(tensor([[-1.0, 2.0], [3.0, -4.0]])).sum()"), 5.0);
         // argmax / argmin over arrays and tensors → Int index (first on ties)
         assert!(matches!(last("argmax([3.0, 1.0, 9.0, 2.0])").unwrap(), Value::Int(2)));
         assert!(matches!(last("argmin([3.0, 1.0, 9.0, 2.0])").unwrap(), Value::Int(1)));
@@ -1611,7 +1611,7 @@
         // vector: grad sum(v^2) = 2v → summed = 2*(1+2+3) = 12
         assert!((float("let v = variable(tensor([1.0,2.0,3.0])) in gradient((v*v).sum(), v).sum()") - 12.0).abs() < 1e-9);
         // relu gate: grad of sum(relu(z)) counts the positive entries (2 of 3 here)
-        assert!((float("let z = variable(tensor([0.0 - 1.0, 0.5, 2.0])) in gradient(relu(z).sum(), z).sum()") - 2.0).abs() < 1e-9);
+        assert!((float("let z = variable(tensor([-1.0, 0.5, 2.0])) in gradient(relu(z).sum(), z).sum()") - 2.0).abs() < 1e-9);
         // division: d/da (a/b) = 1/b = 0.5
         assert!((float("let a = variable(6.0) in let b = variable(2.0) in gradient(a / b, a)") - 0.5).abs() < 1e-9);
         // gradient w.r.t. an array of leaves returns an array of grads (∂(a*b): [b, a])

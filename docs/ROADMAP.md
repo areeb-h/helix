@@ -1640,6 +1640,43 @@ motivates this phase.
       which is what turns an imperative loop from a diverging trap into ordinary code.
       Until then, adding `while` would hand users a familiar name for the 8,500x shape.
 
+## Syntax gaps, found by probing the parser rather than inferring it (2026-08-04)
+
+Written down because inferring the language from the STYLE of older tests produced a
+confidently wrong claim: that Helix had no unary minus. It has one. What it lacks:
+
+- [ ] **`-9223372036854775808` is a FLOAT, not `i64::MIN`.** The magnitude exceeds
+      `i64::MAX`, so the lexer degrades the literal to `f64` (src/lexer.rs:386, deliberately)
+      and the negation applies to a float. `-9223372036854775807 - 1` gives the correct Int.
+      It prints as `-9223372036854775808.0`, so the type change is visible but easy to miss —
+      the same silent-boundary shape as the `dot` defect. Fix: fold a unary minus into a bare
+      integer literal at parse time. The subtlety is that the fold must happen AFTER the
+      operand is parsed, or `-1.abs()` would become `(-1).abs()` instead of `-(1.abs())`.
+- [ ] **No tuple field access.** `(1, 2).0` is "expected a name after `.`, found a number".
+      `(1, 2)[0]` DOES work, so this is pure sugar, but records use `.name` and the asymmetry
+      surprises.
+- [ ] **No record destructuring.** `a, b = [1, 2]` and tuple destructuring both work;
+      `{a: x} = {a: 7}` does not parse. Records are a core type, so this is an inconsistency
+      rather than a missing nicety.
+- [ ] **No inclusive range.** `(0..3)` is exclusive and `(0..=3)` does not parse, so an
+      inclusive bound must be written `(0..n + 1)`.
+- [ ] **No `~`** (bitwise NOT), though `&`, `|`, `^`, `<<`, `>>` are all present.
+- [ ] **No `+` on strings.** `"a" + "b"` raises, and STRING_METHODS has no `concat`/`join`,
+      so interpolation is the ONLY way to join two strings. Arguably correct under
+      "one obvious way" — recorded so the decision is explicit rather than accidental.
+- [ ] **A bare named predicate binds inconsistently.** `xs.map(f)`/`any(f)`/`all(f)` wrap `f`
+      into `it => f(it)`; `xs.position(f)`, `take_while(f)`, `min_by(f)` do not, and return
+      `missing` instead of erroring. `wrap_bound_fn_arg` (src/parser.rs) only reaches the
+      general method branch, not the desugared verbs. A silent wrong answer.
+
+CONFIRMED PRESENT, so nobody re-derives them: unary `-` and `not`, `**`, `//`, `%`, `and`/`or`,
+`??`, tuple/array/string indexing INCLUDING negative indices, slices with open ends, record
+field access, default arguments (`fn f(x, y = 2)`), parameter and return type annotations,
+multi-line lambdas and `do` blocks, closures, functions as values, match guards and
+or-patterns, trailing commas, `range(3, 0, -1)`, and format specs (`"{x:.2f}"`).
+Absent by design (there is one obvious way instead): `!`, `&&`/`||`, `|>`, `//` comments,
+`return`, and chained comparison, which has its own error message.
+
 ## Deep audit, 2026-08-04 — 44 candidates swept, 11 confirmed under adversarial refutation
 
 Five parallel sweeps (performance inversions, three-engine divergence, memory, robustness,
