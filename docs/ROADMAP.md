@@ -1640,6 +1640,76 @@ motivates this phase.
       which is what turns an imperative loop from a diverging trap into ordinary code.
       Until then, adding `while` would hand users a familiar name for the 8,500x shape.
 
+## Design: admitting a non-literal `%` / `//` / `>>` (the 17-110x item)
+
+Worked out in full on 2026-08-04 so the next pass implements rather than re-derives.
+Everything below is measured or read out of the source, not assumed.
+
+**THE SEMANTICS TO REPRODUCE.** `%` and `//` are EUCLIDEAN, not truncating — verified on
+all three engines:
+
+    7 % -3  ->  1      7 // -3  ->  -2       7 = (-2)(-3) + 1
+    -7 % 3  ->  2      -7 // 3  ->  -3      -7 = (-3)(3)  + 2
+
+    7 % 0, 7 // 0          raise
+    MIN % -1, MIN // -1    do NOT raise (they wrap)
+    1 << 64, 1 >> 64, 1 >> -1   raise
+
+**WHY THE CURRENT LOWERING CANNOT JUST DROP ITS GATE** (src/jit.rs:5789-5822). It is
+correct only because the gate guarantees a POSITIVE constant:
+
+    Mod:      rem = srem(a, b); select(rem < 0, rem + b, rem)          -- `+ b` needs b > 0
+    FloorDiv: q = sdiv(a, b);   select(rem < 0, q - 1, q)              -- `- 1` needs b > 0
+    Shl/Shr:  ishl_imm / sshr_imm with the constant                    -- needs a constant
+
+The general forms are ordinary arithmetic, no new concepts:
+
+    Mod:      rem = srem(a, b); select(rem < 0, rem + abs(b), rem)
+    FloorDiv: q = sdiv(a, b); rem = srem(a, b);
+              adj = select(b > 0, q - 1, q + 1); select(rem < 0, adj, q)
+    Shl/Shr:  the register forms, guarded on the count
+
+**WHAT MUST BAIL, AND WHY.** Cranelift's `srem`/`sdiv` TRAP — they do not merely produce a
+wrong value — on two inputs, so both must be branched around before the instruction:
+
+    b == 0                  -> bail; the VM re-runs and raises the interpreter's exact error
+    a == i64::MIN && b == -1 -> bail; the correct answer WRAPS rather than raising, and the
+                                VM produces it exactly. Astronomically rare, so the branch
+                                costs nothing in practice.
+    shift count outside 0..=63 -> bail
+
+**THE PRECEDENT TO COPY** is Stage 3w, which admitted a non-literal FLOAT divisor behind an
+immediate poison bail (src/jit.rs:3649-3658, the `BinOp::Div` arm of `gen_value_env`). Same
+hazard class, and that path measures clean today (`to_float(k) / d` is 1.03x its literal
+twin, i.e. no penalty at all). IMMEDIATE bail rather than accumulate-and-store, for the
+reason recorded there: a tail loop can be infinite, so the error cannot wait.
+
+**THE SEVEN GATES**, all `matches!(**right, Expr::Int(n) if n > 0)` (shifts `(0..=63)`):
+
+    src/jit.rs:1208, 1211   tail loop
+    src/jit.rs:2846         mixed map
+    src/jit.rs:3116         indexed mixed map
+    src/jit.rs:3158, 3164   i64 map / filter captures
+    src/jit.rs:3660-3669    mixed function bodies
+
+**STAGE IT BY POISON MACHINERY, NOT BY OPERATOR** — this is the part that decides the order:
+
+  * The MIXED map/function paths (2846, 3116, 3660-3669) ALREADY have a poison out-param and
+    a poison block. Those are the cheap ones and should land first; the mixed-function path
+    is also where the k2-class tail loops live.
+  * The i64 MAP/FILTER kernels (3158, 3164) have `run_map_poison` from Stage 3v/3z, so the
+    accumulator exists; the kernel just needs marking as raising.
+  * The PURE-i64 FUNCTION path (1208, 1211) has NO poison in its ABI — a compiled i64
+    function is `fn(i64, ...) -> i64` with nowhere to report a bail. Giving it one is a
+    signature change for every compiled function and should be its own stage, sequenced
+    last. **This is why the 110x tail-loop case is the LAST one to fix, not the first**,
+    even though it is the largest number.
+
+**DO NOT** "fix" this by constant-folding the right operand so `% (3 + 4)` and
+`MOD = 1000000007` pass the existing gate. It would leave the real case — a divisor that
+arrives from data, `m = read_int()`, measured at 1.150s and permanently on the VM — with no
+fast spelling at all, while making the gate look repaired.
+
 ## Syntax gaps, found by probing the parser rather than inferring it (2026-08-04)
 
 Written down because inferring the language from the STYLE of older tests produced a
