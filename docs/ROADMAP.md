@@ -1684,6 +1684,27 @@ hazard class, and that path measures clean today (`to_float(k) / d` is 1.03x its
 twin, i.e. no penalty at all). IMMEDIATE bail rather than accumulate-and-store, for the
 reason recorded there: a tail loop can be infinite, so the error cannot wait.
 
+**STATUS after Stage 4g (`9ee76a7`).** ONE of the seven gates is done: the mixed FUNCTION
+bodies at src/jit.rs:3660-3669, measured at 2.83s -> 0.05s (57x) on a mixed tail loop with a
+variable modulus. **The commit message for 9ee76a7 says "the MIXED map/function bodies",
+which overstates it** — the two mixed MAP gates (2846 and 3116) were NOT touched and still
+require a positive literal. Six gates remain.
+
+**A REFINEMENT TO THE STAGING, learned while doing 4g.** The remaining i64 gates (1208,
+1211, 3158, 3164) all funnel into ONE code generator, `gen_value`, which is shared by the
+i64 FUNCTION path and the i64 MAP-KERNEL path. Those two do not have the same machinery:
+the kernel has `run_map_poison`, the function has no poison in its ABI at all. So they
+cannot be staged independently the way the design first assumed — admitting a non-literal
+operand in `gen_value` requires threading an `Option<Block>` poison target through it, and
+the eligibility gate must then admit non-literals ONLY where that target exists. That is one
+refactor serving both, not two separate stages.
+
+Until it lands, `gen_value`'s `unreachable!()` for a non-literal shift stays protected by
+those four gates. VERIFIED after 4g, since relaxing one gate is exactly how such a thing
+becomes reachable: mixed tail loops and mixed non-tail functions returning `1 << k`,
+`256 >> k`, `7 % d` and `7 // d` in tail position, plus i64 map kernels over `it % 3` and
+`it << 1`, all run correctly on all three engines with no abort.
+
 **THE SEVEN GATES**, all `matches!(**right, Expr::Int(n) if n > 0)` (shifts `(0..=63)`):
 
     src/jit.rs:1208, 1211   tail loop
