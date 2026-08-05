@@ -1684,6 +1684,30 @@ hazard class, and that path measures clean today (`to_float(k) / d` is 1.03x its
 twin, i.e. no penalty at all). IMMEDIATE bail rather than accumulate-and-store, for the
 reason recorded there: a tail loop can be infinite, so the error cannot wait.
 
+**WHY 4h IS BLOCKED, established empirically (2026-08-04).** The note below says the next
+attempt must find out which generator each shape reaches rather than reason from the gate.
+Done — and the blocker is deeper than a missing patch:
+
+**`run_filter_kernel` returns `Vec<i64>`, not `Option<Vec<i64>>`** (src/jit/ffi.rs:667;
+`run_filter_kernel_range` at :460 likewise). **A filter kernel has no poison out-param at
+all**, so it cannot report a bail. That is the entire explanation for the swallowed error:
+the generated code set a poison variable that nothing on the FFI side reads. The guard was
+correct; it had nowhere to report to. Compare `run_map_poison` (:503), which returns
+`Option<Vec<D>>` — map can carry a bail, filter cannot, and reduce/fused go through
+`gen_value`, which takes no poison parameter either.
+
+**And the gate is shared**: `map_kernel_captures` (src/jit.rs:2463) is the single entry
+point and feeds `value_eligible_cap` for map AND filter alike, so relaxing it is unsound by
+construction for one of its two consumers.
+
+So 4h needs, in order:
+  1. a poison out-param for `run_filter_kernel` / `run_filter_kernel_range` — a PORT of what
+     the map kernels already have, not a new design;
+  2. a `can_raise` flag through `map_kernel_captures` into `value_eligible_cap`, so the
+     relaxation reaches only consumers that can report;
+  3. then the gate relaxation and guarded lowering, already written and measured at
+     **16.8x** before the revert.
+
 **STAGE 4h ATTEMPTED AND REVERTED (2026-08-04).** Extending the same work to the i64
 MAP/FILTER kernels was implemented and measured at **16.8x** (1.191s -> 0.071s on
 `(0..20M).map(it % m)`, variable and literal spellings finally equal), then reverted:
