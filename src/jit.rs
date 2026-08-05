@@ -3657,16 +3657,23 @@ fn infer_typed_env(
                 // `/0` error cannot wait for an accumulate-and-store. The VM then discards
                 // the result and re-runs on bytecode, raising the exact error.
                 BinOp::Div => Some(NumKind::Float),
-                BinOp::Mod | BinOp::FloorDiv => (lk == NumKind::Int
-                    && rk == NumKind::Int
-                    && matches!(**right, Expr::Int(n) if n > 0))
-                .then_some(NumKind::Int),
+                // Any `Int` divisor, literal or not. A zero divisor — and the
+                // `(i64::MIN, -1)` pair, which does not raise but WRAPS where native
+                // `srem`/`sdiv` would trap — bail to the poison block, exactly like the
+                // `/` arm below and for the same reason. Naming a modulus used to cost
+                // 17-110x: `MOD = 1000000007` then `% MOD` declined the whole enclosing
+                // kernel, and a divisor arriving from data had no fast spelling at all.
+                BinOp::Mod | BinOp::FloorDiv => {
+                    (lk == NumKind::Int && rk == NumKind::Int).then_some(NumKind::Int)
+                }
                 BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
                     (lk == NumKind::Int && rk == NumKind::Int).then_some(NumKind::Int)
                 }
-                BinOp::Shl | BinOp::Shr => (lk == NumKind::Int
-                    && matches!(**right, Expr::Int(n) if (0..=63).contains(&n)))
-                .then_some(NumKind::Int),
+                // Any `Int` shift count; one outside `0..=63` bails, since the
+                // interpreter raises there and a native shift is undefined.
+                BinOp::Shl | BinOp::Shr => {
+                    (lk == NumKind::Int && rk == NumKind::Int).then_some(NumKind::Int)
+                }
                 _ => None,
             }
         }
@@ -5377,6 +5384,40 @@ fn gen_tail<'a>(
 /// [`infer_typed_env`] node for node: Int⊗Int arms are byte-identical to `gen_value`'s
 /// i64 codegen; a Float side promotes the Int side via `fcvt_from_sint` (the
 /// interpreter's numeric promotion); builtins follow the interpreter's kinds exactly.
+/// Bail to `poison` before a native `srem`/`sdiv` that would TRAP. Two inputs do:
+/// a zero divisor (which the interpreter RAISES on), and `(i64::MIN, -1)` (which the
+/// interpreter does NOT raise on — it wraps — but which traps natively, so the VM has to
+/// produce it). Both are immediate bails rather than accumulate-and-store, for the reason
+/// the `/` arm records: a tail loop can be infinite, so the error cannot wait.
+fn div_guard(b: &mut FunctionBuilder, lv: ClValue, rv: ClValue, poison: Block) {
+    let zero = b.ins().iconst(I64, 0);
+    let is_zero = b.ins().icmp(IntCC::Equal, rv, zero);
+    let min = b.ins().iconst(I64, i64::MIN);
+    let neg1 = b.ins().iconst(I64, -1);
+    let l_min = b.ins().icmp(IntCC::Equal, lv, min);
+    let r_neg1 = b.ins().icmp(IntCC::Equal, rv, neg1);
+    let overflow = b.ins().band(l_min, r_neg1);
+    let bad = b.ins().bor(is_zero, overflow);
+    let cont = b.create_block();
+    b.ins().brif(bad, poison, &[], cont, &[]);
+    b.switch_to_block(cont);
+    b.seal_block(cont);
+}
+
+/// Bail to `poison` when a shift count leaves `0..=63`, which the interpreter raises on
+/// and where a native shift is undefined.
+fn shift_guard(b: &mut FunctionBuilder, rv: ClValue, poison: Block) {
+    let zero = b.ins().iconst(I64, 0);
+    let below = b.ins().icmp(IntCC::SignedLessThan, rv, zero);
+    let sixty_four = b.ins().iconst(I64, 64);
+    let above = b.ins().icmp(IntCC::SignedGreaterThanOrEqual, rv, sixty_four);
+    let bad = b.ins().bor(below, above);
+    let cont = b.create_block();
+    b.ins().brif(bad, poison, &[], cont, &[]);
+    b.switch_to_block(cont);
+    b.seal_block(cont);
+}
+
 fn gen_value_env<'a>(
     b: &mut FunctionBuilder,
     e: &'a Expr,
@@ -5399,32 +5440,62 @@ fn gen_value_env<'a>(
                     BinOp::Add => b.ins().iadd(lv, rv),
                     BinOp::Sub => b.ins().isub(lv, rv),
                     BinOp::Mul => b.ins().imul(lv, rv),
+                    // `%` and `//` are EUCLIDEAN in Helix, not truncating:
+                    //   7 % -3 == 1   7 // -3 == -2      -7 % 3 == 2   -7 // 3 == -3
+                    // The old lowering was correct only because the gate guaranteed a
+                    // POSITIVE constant — adding `rv` back is `rem_euclid` only for
+                    // `rv > 0`, and subtracting one is floor only for `rv > 0`. These are
+                    // the general forms, matching `i64::rem_euclid` / `div_euclid`
+                    // instruction for instruction, wrapping included.
                     BinOp::Mod => {
-                        let rem = b.ins().srem(lv, rv);
+                        div_guard(b, lv, rv, tl.poison_blk);
                         let zero = b.ins().iconst(I64, 0);
-                        let fixed = b.ins().iadd(rem, rv);
+                        let rem = b.ins().srem(lv, rv);
+                        // `wrapping_abs`, which is what `rem_euclid` uses: `abs(i64::MIN)`
+                        // is not representable and wraps back to itself, and the `iadd`
+                        // below wraps with it — so this stays exact for every divisor.
+                        let neg_r = b.ins().ineg(rv);
+                        let r_pos = b.ins().icmp(IntCC::SignedGreaterThan, rv, zero);
+                        let abs_r = b.ins().select(r_pos, rv, neg_r);
+                        let fixed = b.ins().iadd(rem, abs_r);
                         let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
                         b.ins().select(is_neg, fixed, rem)
                     }
                     BinOp::FloorDiv => {
+                        div_guard(b, lv, rv, tl.poison_blk);
+                        let zero = b.ins().iconst(I64, 0);
                         let q = b.ins().sdiv(lv, rv);
                         let rem = b.ins().srem(lv, rv);
-                        let zero = b.ins().iconst(I64, 0);
-                        let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
+                        // `div_euclid`: step the quotient AWAY from zero when the
+                        // remainder is negative — down for a positive divisor, up for a
+                        // negative one. The old `q - 1` was the `rv > 0` half only.
                         let qm1 = b.ins().iadd_imm(q, -1);
-                        b.ins().select(is_neg, qm1, q)
+                        let qp1 = b.ins().iadd_imm(q, 1);
+                        let r_pos = b.ins().icmp(IntCC::SignedGreaterThan, rv, zero);
+                        let adj = b.ins().select(r_pos, qm1, qp1);
+                        let is_neg = b.ins().icmp(IntCC::SignedLessThan, rem, zero);
+                        b.ins().select(is_neg, adj, q)
                     }
                     BinOp::BitAnd => b.ins().band(lv, rv),
                     BinOp::BitOr => b.ins().bor(lv, rv),
                     BinOp::BitXor => b.ins().bxor(lv, rv),
-                    BinOp::Shl => {
-                        let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
-                        b.ins().ishl_imm(lv, n)
-                    }
-                    BinOp::Shr => {
-                        let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
-                        b.ins().sshr_imm(lv, n)
-                    }
+                    // A constant in range keeps the immediate form (no count register,
+                    // no guard); anything else is guarded and shifted by the register.
+                    BinOp::Shl => match **right {
+                        Expr::Int(n) if (0..=63).contains(&n) => b.ins().ishl_imm(lv, n),
+                        _ => {
+                            shift_guard(b, rv, tl.poison_blk);
+                            b.ins().ishl(lv, rv)
+                        }
+                    },
+                    // `>>` on i64 is arithmetic (sign-extending) in Rust -> `sshr`.
+                    BinOp::Shr => match **right {
+                        Expr::Int(n) if (0..=63).contains(&n) => b.ins().sshr_imm(lv, n),
+                        _ => {
+                            shift_guard(b, rv, tl.poison_blk);
+                            b.ins().sshr(lv, rv)
+                        }
+                    },
                     _ => unreachable!("ineligible operator reached mixed-env codegen"),
                 };
                 (v, NumKind::Int)

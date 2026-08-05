@@ -6281,3 +6281,114 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             "the explicit-float form must still be a Float; got: {float_form}"
         );
     }
+
+    /// A NON-LITERAL right operand for `%`, `//`, `<<`, `>>` now compiles in the mixed
+    /// path. It used to decline the WHOLE enclosing kernel, so naming a modulus — the most
+    /// ordinary refactor there is — cost 17-110x:
+    ///
+    ///     fn f(i, n, m, acc: Float) = ... acc + to_float(i % m)     2.83s  <- was
+    ///     fn f(i, n, m, acc: Float) = ... acc + to_float(i % 7)     0.05s
+    ///
+    /// After: 0.05s, a 57x speedup, with the literal spelling unchanged.
+    ///
+    /// TWO THINGS MAKE THIS DELICATE, and both are pinned below.
+    ///
+    /// `%` and `//` are EUCLIDEAN in Helix, not truncating — `7 % -3` is 1 and `-7 // 3`
+    /// is -3 — and the old lowering was correct ONLY because the gate guaranteed a
+    /// positive constant: it added the divisor back (`rem_euclid` only for `d > 0`) and
+    /// subtracted one from the quotient (floor only for `d > 0`).
+    ///
+    /// And native `srem`/`sdiv` TRAP rather than misbehave on two inputs: a zero divisor,
+    /// which the interpreter RAISES on, and `(i64::MIN, -1)`, which the interpreter does
+    /// NOT raise on — it wraps. Both bail to the poison block so the VM re-runs and
+    /// produces the exact behaviour. A shift count outside `0..=63` bails likewise.
+    #[test]
+    fn a_non_literal_modulus_divisor_or_shift_compiles_and_keeps_every_edge() {
+        // A `Float` parameter forces the MIXED path, which is the one this stage changed.
+        // Each helper takes its right operand as a PARAMETER, so none of them is a literal.
+        let h = "\
+fn md(i: Int, d: Int, acc: Float) = if i >= 1 then acc else md(i + 1, d, acc + to_float(7 % d))\n\
+fn mn(i: Int, d: Int, acc: Float) = if i >= 1 then acc else mn(i + 1, d, acc + to_float(0 - 7 % d))\n\
+fn dv(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dv(i + 1, d, acc + to_float(7 // d))\n\
+fn dn(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dn(i + 1, d, acc + to_float((0 - 7) // d))\n\
+fn sl(i: Int, k: Int, acc: Float) = if i >= 1 then acc else sl(i + 1, k, acc + to_float(1 << k))\n\
+fn sr(i: Int, k: Int, acc: Float) = if i >= 1 then acc else sr(i + 1, k, acc + to_float(256 >> k))\n\
+fn sg(i: Int, k: Int, acc: Float) = if i >= 1 then acc else sg(i + 1, k, acc + to_float(-256 >> k))\n\
+fn nn(i: Int, d: Int, acc: Float) = if i >= 1 then acc else nn(i + 1, d, acc + to_float(-7 % d))\n\
+fn nd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else nd(i + 1, d, acc + to_float(-7 // d))\n\
+fn mm(i: Int, d: Int, acc: Float) = if i >= 1 then acc else mm(i + 1, d, acc + to_float(-9223372036854775808 % d))\n\
+fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + to_float(-9223372036854775808 // d))\n";
+
+        for (expr, want) in [
+            // EUCLIDEAN on both signs of the divisor and of the dividend
+            ("md(0, 3, 0.0)", "1.0"),
+            ("md(0, -3, 0.0)", "1.0"),
+            ("dv(0, 3, 0.0)", "2.0"),
+            ("dv(0, -3, 0.0)", "-2.0"),
+            ("dn(0, 3, 0.0)", "-3.0"),
+            ("dn(0, -3, 0.0)", "3.0"),
+            // A NEGATIVE dividend is the only shape where the remainder comes out
+            // negative and the divisor therefore has to be added back as its MAGNITUDE.
+            // Without these the magnitude fix is untested — the sabotage battery caught
+            // exactly that: replacing `abs(d)` with `d` still passed.
+            ("nn(0, -3, 0.0)", "2.0"),
+            ("nn(0, 3, 0.0)", "2.0"),
+            ("nd(0, -3, 0.0)", "3.0"),
+            ("nd(0, 3, 0.0)", "-3.0"),
+            // `>>` is ARITHMETIC (sign-extending). A positive dividend cannot tell an
+            // arithmetic shift from a logical one, so only a negative one pins it.
+            ("sg(0, 2, 0.0)", "-64.0"),
+            ("sg(0, 0, 0.0)", "-256.0"),
+            ("sg(0, 63, 0.0)", "-1.0"),
+            ("md(0, 1, 0.0)", "0.0"),
+            ("dv(0, 1, 0.0)", "7.0"),
+            // shifts in range
+            ("sl(0, 3, 0.0)", "8.0"),
+            ("sl(0, 0, 0.0)", "1.0"),
+            ("sl(0, 63, 0.0)", "-9223372036854775808.0"),
+            ("sr(0, 4, 0.0)", "16.0"),
+            ("sr(0, 63, 0.0)", "0.0"),
+            // `i64::MIN` with -1 does NOT raise — it WRAPS — even though the native
+            // instruction would trap, so this is the bail proving it defers to the VM
+            ("(try (mm(0, -1, 0.0))).ok", "true"),
+            ("(try (dd(0, -1, 0.0))).ok", "true"),
+            ("mm(0, -1, 0.0)", "0.0"),
+            // a zero divisor RAISES, and a shift out of range on either side raises
+            ("(try (md(0, 0, 0.0))).ok", "false"),
+            ("(try (dv(0, 0, 0.0))).ok", "false"),
+            ("(try (sl(0, 64, 0.0))).ok", "false"),
+            ("(try (sl(0, -1, 0.0))).ok", "false"),
+            ("(try (sr(0, 64, 0.0))).ok", "false"),
+        ] {
+            let src = format!("{h}{expr}");
+            let (tw, vm, jit) = (run_tw(&src), run_vm(&src), run_vm_jit(&src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{expr}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{expr}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{expr}`");
+        }
+
+        // The raising cases must carry the interpreter's exact wording, not a generic one.
+        for (expr, needle) in [
+            ("md(0, 0, 0.0)", "modulo by zero"),
+            ("dv(0, 0, 0.0)", "division by zero"),
+            ("sl(0, 64, 0.0)", "shift amount"),
+        ] {
+            let src = format!("{h}{expr}");
+            let (tw, jit) = (run_tw(&src), run_vm_jit(&src));
+            assert_eq!(tw, jit, "engines disagree on `{expr}`");
+            let msg = jit.unwrap_err();
+            assert!(msg.contains(needle), "`{expr}` got: {msg}");
+        }
+
+        // ENGAGEMENT. Every case above would also pass if the JIT had simply declined
+        // them all, so assert a native call actually happened for a VARIABLE right
+        // operand — that is the whole point of the stage.
+        crate::jit::reset_native_call_count();
+        let src = format!("{h}md(0, 3, 0.0)");
+        assert_eq!(run_vm_jit(&src), Ok("1.0".to_string()));
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "a variable modulus never reached native code, so the cases above prove only \
+             that the VM still works"
+        );
+    }
