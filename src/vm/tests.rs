@@ -6148,14 +6148,14 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("[2.5].frequencies()", "[(2.5, 1)]"),
             ("[].frequencies()", "[]"),
             // -0.0 and 0.0 are ONE identity, and the first seen represents it
-            //  is POSITIVE zero in IEEE, so a negative zero has to be built by
-            // multiplication — an earlier draft of this test used the subtraction and was
-            // therefore not testing -0.0 at all.
-            ("nz = 0.0 * (0 - 1.0)
+            // `0 - 0.0` is POSITIVE zero in IEEE, so writing a negative zero that way
+            // tests nothing. Unary negation is what produces one — an earlier draft used
+            // the subtraction and was therefore not exercising -0.0 at all.
+            ("nz = -0.0
 [0.0, nz].unique().count()", "1"),
-            ("nz = 0.0 * (0 - 1.0)
+            ("nz = -0.0
 [0.0, nz].frequencies()", "[(0.0, 2)]"),
-            ("nz = 0.0 * (0 - 1.0)
+            ("nz = -0.0
 [nz, 0.0].frequencies()", "[(-0.0, 2)]"),
             // NaN is equal to nothing, so every NaN is its own bucket
             ("[sqrt(0 - 1.0), sqrt(0 - 1.0)].unique().count()", "2"),
@@ -6190,7 +6190,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         // the other, NaN included.
         for src in [
             "[1.0, 1.0, 2.0]",
-            "[0.0, 0.0 * (0 - 1.0), 1.0]",
+            "[0.0, -0.0, 1.0]",
             "[sqrt(0 - 1.0), sqrt(0 - 1.0), 1.0]",
             "[1.0, missing, missing]",
             "[1, 1.0, 2]",
