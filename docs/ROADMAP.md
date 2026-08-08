@@ -2065,6 +2065,20 @@ with interleaved child-CPU timing, medians of 15–21, and stdout printed beside
       that is a representation change touching `get`/`len`/`to_values` and all three
       engines, so it is sized as a feature, not a patch.
 
+      **A cheap interim fast path for `zip(..).length()/.first()/.count()` DOES NOT WORK —
+      I suggested it and it is wrong.** Measured: `.first()`, `.last()` and `.count()` each
+      cost the SAME 631 MB as `.length()`, because `zip` has already materialized by the
+      time the outer method dispatches. There is nothing to intercept at that layer; the
+      interception has to happen where `zip` itself builds, which is the full variant.
+
+      Two design notes from scoping it, both worth keeping: the variant must be
+      `Zip { a, b, len }` with `len = a.len().min(b.len())` computed ONCE at construction
+      (mirroring `Range { start, step, len }`) — deriving the length recursively through
+      nested zips is exponential; and computing the truncation at construction is not just
+      an optimization but SOUND, because the intercept clones both source `Rc`s, so
+      `strong_count >= 2` from that instant and no in-place `Rc::get_mut` mutation of
+      either buffer can succeed afterwards.
+
 - [x] ~~**`take(k)`/`drop(k)` box the ENTIRE source**~~ — **FIXED** (`8c9319b`). Re-slices
       the packed buffer: `(0..20000000).map(it * 2).take(3).sum()` went 503 MB → 190 MB.
       A lazy `Range` already had this path; a range that has been through `map` is `Ints`,
@@ -2075,9 +2089,94 @@ with interleaved child-CPU timing, medians of 15–21, and stdout printed beside
       invisible below ~100k rows. Same shape as `contains`/`index_of` below but inverted:
       there the closure spelling was the fast one, here it is the slow one.
 
-- [ ] **`sort_by(key)` is 4.2× `sort()`, and the descending idiom `sort_by(-it)` is 5.5×
-      `sort().reverse()`** for a bit-identical result. Descending is the most common
-      non-identity key, and `sort_by(-it)` is the obvious way to write it.
+- [ ] **`sort_by(key)` is 13-17× `sort()`, not 4.2× — and the gap GROWS with n.**
+      Re-measured 2026-08-08 (child CPU medians, interleaved, packed `Ints` receiver):
+
+      | n | `sort()` | `sort_by(it)` | | `sort().reverse()` | `sort_by(-it)` |
+      | --- | --- | --- | --- | --- | --- |
+      | 1M | 0.010s / 48.7 MB | 0.140s / 82.8 MB | 14.0× | 0.010s | 0.190s → 19.0× |
+      | 4M | 0.060s / 94.7 MB | 0.790s / 204.9 MB | 13.2× | 0.060s | 1.040s → 17.3× |
+      | 8M | 0.120s / 156.6 MB | 1.990s / 376.8 MB | 16.6× | 0.130s | — |
+
+      **The doc's 4.2×/5.5× was not wrong when written — the baseline moved under it.**
+      `867462c` made `sort`/`reverse` packed, and `sort_by` could not benefit **because it
+      never calls `sort`**: `desugar_sort_by` (src/parser.rs:76) rewrites it to
+      `$s.map(key).argsort().map($si => $s[$si])`. Three passes, and the fast path is not
+      on any of them.
+
+      Two walls, both traced:
+      1. **`argsort` has no packed path.** It exists only inside `array_method(items:
+         &[Value])` (src/interp/methods.rs:1638), and `array_numeric_fast` — where
+         `sort`/`reverse` now live — has no `argsort` arm, so the key column is boxed at
+         16 B/element. It then sorts INDICES with a stable sort, one closure call and two
+         random-access enum-tag derefs per comparison against a 16-byte stride, where
+         `sort` is `sort_unstable()` over a contiguous `Vec<i64>`. ~60% of the cost and
+         essentially all of the 2.2-2.4× memory. A packed arm mirroring the `sort` one is
+         the fix, and its tie-break must be `.then(a.cmp(&b))` because today's `sort_by`
+         is STABLE — unlike `sort`, a keyed sort has distinguishable elements with equal
+         keys, so stability IS observable here and `sort_unstable` alone would not do.
+      2. **The final gather is unjitable by construction.** `order.map($si => $s[$si])`
+         indexes a captured array from a map body whose binder is an ELEMENT VALUE, not a
+         loop counter, so the bounds obligation cannot be discharged (the rule is stated
+         at src/bytecode/ops.rs:495). ~45% of the cost, and it needs a different mechanism
+         than a fast path.
+
+- [x] ~~**`sort_by(-it)` pays extra for the unary minus**~~ — **FIXED** (`e30f9fe`), and it
+      turned out to be worth far more than `sort_by`. Unary `-` was not JIT-eligible at
+      all: `xs.map(-it)` was 0.45s against 0.04s for `xs.map(0 - it)` at 8M, and
+      `xs.filter(-it > -5)` 0.47s against 0.02s — 11-16×, the idiomatic spelling losing to
+      the clumsy one. `gen_value` had lowered `Neg` all along; only `value_eligible_cap`
+      had never been taught it.
+
+- [ ] **Unary `-` is still missing from ~18 more analyses in jit.rs.** Of the 32 functions
+      there that match on `Expr::Binary`, **20 had no `Expr::Unary` arm**;
+      `value_eligible_cap` was one and is now fixed. The rest are recorded because the
+      sweep is the reusable part — the same "supported in a minority of paths" shape.
+      Notably `gen_value_typed`, `gen_cond` and `gen_cond_env` are CODEGEN functions, so
+      the mixed/float paths cannot simply be admitted: `[1.5].map(-it)` measured unchanged
+      at 0.44s and must stay declined until its codegen can emit the operator. Admitting a
+      shape codegen cannot emit is precisely how this area was reverted three times.
+
+- [ ] **`min`/`max` break ties differently depending on the array's REPRESENTATION.**
+      Verified 2026-08-08 on all three engines (so a semantics inconsistency, not an
+      oracle divergence):
+
+          [0.0, -0.0].min()             ->  0.0
+          [0.0, -0.0][0:2].min()        -> -0.0      (the same array, sliced)
+          [0.0, -0.0].sort().first()    -> -0.0
+          [0.0, -0.0].reduce(inf, (a, b) => if a < b then a else b)  -> -0.0
+
+      The packed path compares with IEEE `<` (where `-0.0 < 0.0` is FALSE, so the first
+      element wins) and the boxed path with `numeric_cmp`/`total_cmp` (where it is TRUE).
+      Consequently `min` is **not permutation-invariant**: `[0.0, -0.0].min()` is `0.0`
+      and `[-0.0, 0.0].min()` is `-0.0`; same for `max`. Only display observes it —
+      `-0.0 == 0.0` is true, and `1.0 / 0.0` raises here rather than yielding a signed
+      infinity — but three spellings of one question giving two answers is the nine-defect
+      shape again. **Which answer is right is a DESIGN CALL**: Python and NumPy return the
+      first element, Julia returns `-0.0`; Helix's own `sort` already uses `total_cmp`, so
+      matching it would make min/max/sort mutually consistent. Recorded rather than
+      changed, because it alters a numeric reduction.
+
+- [ ] **`min_by`/`max_by` with a DESTRUCTURING key return a rebuilt tuple, not the
+      element.** Verified 2026-08-08, all three engines agree:
+
+          [[1,2],[0,3]].min_by((a, b) => a)   ->  (0, 3)   a Tuple
+          [[1,2],[0,3]].min_by(r => r[0])     ->  [0, 3]   an Array
+          [[1,2],[0,3]].min_by((a, b) => a).map(it * 2)
+              -> error: type Tuple has no method `map`
+
+      Two spellings of one query returning different TYPES, and the doc comment states the
+      bug: `desugar_order_by` (src/parser.rs:255-259) builds `Expr::Tuple(params)` and
+      calls it "the tuple of binders, which rebuilds the original element" — true only
+      when the element IS a tuple, and Helix destructures arrays too.
+
+      **The natural fix is not currently expressible**: binding the whole element and
+      destructuring inside the map body needs `a, b = e` in an expression position, and
+      destructuring assignment is a top-level statement only (`do { a, b = e ... }` is
+      `unexpected ','`). The alternatives are a two-pass desugaring
+      (`$o[$o.map(key).argmin()]`, which changes the error text on empty/`missing`
+      receivers and must be checked against it) or capture-avoiding substitution of the
+      binders to `$e[0]`, `$e[1]`. Both want their own commit.
 
 - [x] ~~**Three-engine value divergence — `print((try missing.map()).ok)` is `false` on the
       JIT and VM, `true` on the tree-walker.**~~ — **FIXED** (`comp_shape_check`). It was
@@ -2122,10 +2221,22 @@ with interleaved child-CPU timing, medians of 15–21, and stdout printed beside
       inconsistency. `missing.filter(1, 2)` says "`filter` takes exactly one expression"
       while `[1, 2].filter(1, 2)` and even `[].filter(1, 2)` say "`filter` expects a
       yes/no test". Same for `filter`/`where`/`any`/`all` with a zero-parameter function.
-      `map` and `reduce` do not have this split. Something upstream rewrites the
-      predicate-taking spellings, so their structural checks are not the ones that fire;
-      worth tracing, because "one operation, two spellings, only one checked" is the shape
-      that has produced nine defects here.
+      `map` and `reduce` do not have this split.
+
+      Traced 2026-08-08: the winning error comes from a pass that runs BEFORE engine
+      selection (`types::check`, src/main.rs:831), which is exactly why all three engines
+      agree on it. So the arity checks in the `filter`/`where`/`any`/`all` arms of
+      `eval_comprehension` are largely unreachable on the array path — decoration, with the
+      real check living elsewhere.
+
+      **The obvious fix is REFUTED — do not attempt it.** Hoisting these into the checker
+      converts `try`-CATCHABLE runtime errors into UNCATCHABLE static ones: `types::check`
+      runs before any engine, so a checker error has no `try` frame to land in. Eight
+      programs that exit 0 today, printing `false` from `(try [1, 2].map()).ok` and
+      continuing, would exit 1 with EMPTY stdout. It also changes error text for at least
+      six other receiver types (DataFrame, Tensor, String, Int, Record and friends) whose
+      text is built in src/interp/dataframe_ops.rs:80 and the `unknown_method` path in
+      src/types/signatures.rs. Any real fix has to preserve catchability first.
 
 - [ ] **`df.join(<non-DataFrame>)` error text differs** between the walker and the other two,
       and `try` turns it into a String, so it escapes to a value. Low.
