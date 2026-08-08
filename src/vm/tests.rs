@@ -6661,6 +6661,121 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         }
     }
 
+    /// `cumsum` reads a packed source, and `flatten` concatenates packed columns.
+    ///
+    ///     xs = (0..20000000).map(it * 2)
+    ///     xs.cumsum().last()     645 MB  ->  346 MB
+    ///     [xs].flatten()         797 MB  ->  346 MB
+    ///
+    /// Two different causes, one class. `cumsum` always RETURNED a packed column but
+    /// never had a packed input, so the source was boxed before it was called; `flatten`
+    /// boxed every inner element twice (`to_values()`, then the output vec) only for
+    /// `array_sniff` to unpack the lot again.
+    ///
+    /// The accumulation is deliberately identical to the general path rather than better,
+    /// which is what most of these cases check: `wrapping_add` for ints, and plain `+=`
+    /// for floats — NOT the Neumaier summation `sum`/`mean` use. `[1e16, 1.0, -1e16]` is
+    /// the case that tells them apart (Neumaier would end at `1.0`, plain `+=` at `0.0`),
+    /// so it is the one that would catch an "improvement" that silently diverged.
+    #[test]
+    fn cumsum_and_flatten_work_on_packed_columns() {
+        for (src, want) in [
+            // cumsum, ints
+            ("[1, 2, 3].cumsum()", "[1, 3, 6]"),
+            ("[].cumsum()", "[]"),
+            ("[5].cumsum()", "[5]"),
+            ("[-1, -2, -3].cumsum()", "[-1, -3, -6]"),
+            // i64 overflow WRAPS, exactly as the general path's `wrapping_add` did
+            (
+                "[9223372036854775807, 1].cumsum()",
+                "[9223372036854775807, -9223372036854775808]",
+            ),
+            (
+                "[9223372036854775807, 9223372036854775807].cumsum()",
+                "[9223372036854775807, -2]",
+            ),
+            (
+                "[-9223372036854775808, -1].cumsum()",
+                "[-9223372036854775808, 9223372036854775807]",
+            ),
+            // cumsum, floats — plain `+=`, so the middle term is LOST here. Neumaier
+            // would keep it and end at `1.0`; that difference is the point of this case.
+            (
+                "[1e16, 1.0, -1e16].cumsum()",
+                "[10000000000000000.0, 10000000000000000.0, 0.0]",
+            ),
+            ("[1.5, 2.5, 3.5].cumsum()", "[1.5, 4.0, 7.5]"),
+            (
+                "[0.1, 0.2, 0.3].cumsum()",
+                "[0.1, 0.30000000000000004, 0.6000000000000001]",
+            ),
+            // a NaN poisons the running total from that point on and is never turned
+            // into `missing` — `cumsum` checks only for `missing`, unlike the reductions
+            ("[1.0, inf - inf, 2.0].cumsum()", "[1.0, NaN, NaN]"),
+            ("[1.0, inf, 2.0].cumsum()", "[1.0, inf, inf]"),
+            ("[1.0, inf, -inf].cumsum()", "[1.0, inf, NaN]"),
+            // the accumulator starts at a POSITIVE zero, so these stay positive
+            ("[-0.0, -0.0].cumsum()", "[0.0, 0.0]"),
+            // cumsum on the lazy representations
+            ("(0..5).cumsum()", "[0, 1, 3, 6, 10]"),
+            ("(0..0).cumsum()", "[]"),
+            ("range(0, 20, 3).cumsum()", "[0, 3, 9, 18, 30, 45, 63]"),
+            ("range(10, 0, -2).cumsum()", "[10, 18, 24, 28, 30]"),
+            ("(0..5).reverse().cumsum()", "[4, 7, 9, 10, 10]"),
+            // `Values` arrays keep the general path, including missing propagation
+            ("[1, missing, 3].cumsum()", "missing"),
+            ("[1, 2.5].cumsum()", "[1.0, 3.5]"),
+            ("[2.5, 1].cumsum()", "[2.5, 3.5]"),
+            ("(0..10).map(it * 2).cumsum().last()", "90"),
+            ("[1, 2, 3].cumsum().cumsum()", "[1, 4, 10]"),
+            ("[1, 2, 3].cumsum() == [1, 3, 6]", "true"),
+            // --- flatten -----------------------------------------------------------
+            ("[[1, 2], [3]].flatten()", "[1, 2, 3]"),
+            ("[[1, 2], []].flatten()", "[1, 2]"),
+            ("[[], []].flatten()", "[]"),
+            ("[].flatten()", "[]"),
+            ("[[1.5, 2.5], [3.5]].flatten()", "[1.5, 2.5, 3.5]"),
+            ("[(0..3), (0..2)].flatten()", "[0, 1, 2, 0, 1]"),
+            ("[range(0, 6, 2), [9]].flatten()", "[0, 2, 4, 9]"),
+            // A MIXED nesting must stay boxed: packing it to floats would silently turn
+            // that `1` into a `1.0`.
+            ("[[1], [2.0]].flatten()", "[1, 2.0]"),
+            ("[[2.0], [1]].flatten()", "[2.0, 1]"),
+            ("[[1], [2.0]].flatten().first()", "1"),
+            ("[[1, 2.0]].flatten()", "[1, 2.0]"),
+            // non-array elements, and array/scalar mixtures, keep the general path
+            ("[1, 2, 3].flatten()", "[1, 2, 3]"),
+            ("[[1], 2].flatten()", "[1, 2]"),
+            ("[2, [1]].flatten()", "[2, 1]"),
+            ("[[\"a\"], [\"b\"]].flatten()", "[\"a\", \"b\"]"),
+            ("[[missing], [1]].flatten()", "[missing, 1]"),
+            // flatten is ONE level deep, not recursive
+            ("[[[1]], [[2]]].flatten()", "[[1], [2]]"),
+            // the flattened result must still be packed for the numeric verbs
+            ("[[1, 2], [3]].flatten().sum()", "6"),
+            ("[[1, 2], [3]].flatten().contains(3)", "true"),
+            ("[[1, 2], [3]].flatten() == [1, 2, 3]", "true"),
+            ("[[1.5], [2.5]].flatten().mean()", "2.0"),
+            ("[[3, 1], [2]].flatten().sort()", "[1, 2, 3]"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        for (src, want) in [
+            ("[1, \"a\"].cumsum()", "needs an array of numbers"),
+            ("[3, 1].enumerate().cumsum()", "needs an array of numbers"),
+            ("[1, 2].cumsum(3)", "`cumsum` takes no arguments"),
+            ("(0..5).cumsum(3)", "`cumsum` takes no arguments"),
+            ("[[1, 2], [3]].flatten(9)", "`flatten` takes no arguments"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.expect_err(&format!("`{src}` should error"));
+            assert!(msg.contains(want), "`{src}` said: {msg}");
+        }
+    }
+
     /// `sort`/`reverse` keep a packed array packed, and reversing a range stays lazy.
     ///
     ///     xs = (0..20000000).map(it * 2)

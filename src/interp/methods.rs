@@ -810,6 +810,49 @@ fn array_numeric_fast(
                 ArrayData::Range { .. } => Some(Value::lazy_range(0, 1, 0)),
             });
         }
+        // `cumsum` already RETURNED a packed column; what it never had was a packed
+        // INPUT, so the source was boxed into a `Vec<Value>` before it was even called:
+        // `(0..20000000).map(it * 2).cumsum().last()` cost 645 MB against 186 MB for the
+        // array alone. Same class as `sort`/`reverse`, opposite end of the pipe.
+        //
+        // The accumulation is deliberately identical to the general path rather than
+        // better: `wrapping_add` for ints, and plain `+=` for floats — NOT the Neumaier
+        // summation `sum`/`mean` use, which would give a different (more accurate) result
+        // and break the two paths apart. `cumsum` also checks only for `missing`, never
+        // NaN, so unlike the numeric reductions this must NOT defer on a NaN — a NaN
+        // simply poisons the running total from that point on, exactly as before.
+        "cumsum" => {
+            return Ok(match ad {
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
+                // `to_ints` borrows for `Ints` and computes for `Range`; `None` cannot
+                // happen for either, and deferring is the safe reading of it regardless.
+                ArrayData::Ints(_) | ArrayData::Range { .. } => match ad.to_ints() {
+                    Some(xs) => {
+                        let mut acc = 0i64;
+                        Some(Value::int_array(
+                            xs.iter()
+                                .map(|&i| {
+                                    acc = acc.wrapping_add(i);
+                                    acc
+                                })
+                                .collect(),
+                        ))
+                    }
+                    None => None,
+                },
+                ArrayData::Floats(xs) => {
+                    let mut acc = 0.0;
+                    Some(Value::float_array(
+                        xs.iter()
+                            .map(|&x| {
+                                acc += x;
+                                acc
+                            })
+                            .collect(),
+                    ))
+                }
+            });
+        }
         _ => {}
     }
     if !matches!(
@@ -1348,6 +1391,46 @@ fn array_method(
         "flatten" => {
             if !args.is_empty() {
                 return Err(HelixError::new("`flatten` takes no arguments", line, col));
+            }
+            // Concatenating packed columns needs no boxing at all. The general path below
+            // boxes every inner element twice — once when `to_values()` materializes the
+            // inner array, again into `out` — before `array_sniff` unpacks the lot again:
+            // `[xs].flatten()` on a 20M-element xs cost 797 MB against 186 MB for the
+            // array alone. Here the i64/f64 buffers are appended directly, and the result
+            // is the same packed column `array_sniff` would have arrived at.
+            //
+            // Ints and Floats are kept as separate cases rather than one numeric case,
+            // because a MIXED nesting (`[[1], [2.0]]`) must still reach `array_sniff`, and
+            // `array_sniff` leaves that boxed — packing it to floats here would silently
+            // turn an `Int` element into a `Float`.
+            use crate::value::ArrayData;
+            fn inner(v: &Value) -> Option<&ArrayData> {
+                match v {
+                    Value::Array(a) => Some(&**a),
+                    _ => None,
+                }
+            }
+            let all = |f: fn(&ArrayData) -> bool| {
+                !items.is_empty() && items.iter().all(|v| inner(v).is_some_and(f))
+            };
+            let width = || items.iter().filter_map(inner).map(|a| a.len()).sum();
+            if all(|a| matches!(a, ArrayData::Ints(_) | ArrayData::Range { .. })) {
+                let mut out: Vec<i64> = Vec::with_capacity(width());
+                for a in items.iter().filter_map(inner) {
+                    if let Some(xs) = a.to_ints() {
+                        out.extend_from_slice(&xs);
+                    }
+                }
+                return Ok(Value::int_array(out));
+            }
+            if all(|a| matches!(a, ArrayData::Floats(_))) {
+                let mut out: Vec<f64> = Vec::with_capacity(width());
+                for a in items.iter().filter_map(inner) {
+                    if let ArrayData::Floats(xs) = a {
+                        out.extend_from_slice(xs);
+                    }
+                }
+                return Ok(Value::float_array(out));
             }
             let mut out: Vec<Value> = Vec::with_capacity(items.len());
             for v in items {
