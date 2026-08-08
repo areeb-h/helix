@@ -6547,3 +6547,116 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         // `missing` propagates rather than erroring (ADR 0001), as before.
         assert_eq!(run_vm("[1, 2].take(missing)"), run_tw("[1, 2].take(missing)"));
     }
+
+    /// `contains(v)`/`index_of(v)` scan a PACKED array in place instead of boxing it.
+    ///
+    /// Both answer a scalar, yet both materialized the whole source to do it:
+    ///
+    ///     xs = (0..20000000).map(it * 2)
+    ///     xs.contains(4)        492 MB  ->  186 MB
+    ///     xs.any(it == 4)       186 MB              (the streaming neighbour, for scale)
+    ///
+    /// 306 MB of `Vec<Value>` to settle a question decided by element 2, while the
+    /// closure-taking spellings `any(p)`/`position(p)` already cost nothing extra. One
+    /// operation, two spellings, only one of them fixed — as with `take`/`drop` (packed vs
+    /// lazy `Range`), `clamp`, `dot`, and duplicate record fields.
+    ///
+    /// The scan reuses `values_equal` on the same `Value` the general path would have
+    /// built, so the cases below are really asking whether that reuse held: cross-type
+    /// equality, `missing` identity, and IEEE (NaN equal to nothing, ±0.0 equal to each
+    /// other). Written against `inf`/`inf - inf` because `0.0 / 0.0` is a division-by-zero
+    /// *error* in Helix — an earlier draft used it and tested only the error path.
+    ///
+    /// The JIT is not covered here on purpose: it has no `contains`/`index_of` of its own,
+    /// so all three engines reach this one implementation.
+    #[test]
+    fn contains_and_index_of_scan_a_packed_array_without_boxing_it() {
+        for (src, want) in [
+            // packed Ints
+            ("[1, 2, 3].contains(2)", "true"),
+            ("[1, 2, 3].contains(9)", "false"),
+            ("[1, 2, 3].index_of(2)", "1"),
+            ("[1, 2, 3].index_of(9)", "missing"),
+            ("[7, 7, 7].index_of(7)", "0"), // the FIRST match
+            ("[-9223372036854775808].index_of(-9223372036854775808)", "0"),
+            // cross-type: `1 == 1.0`, so a Float needle matches a packed Int array
+            ("[1, 2, 3].contains(2.0)", "true"),
+            ("[1, 2, 3].index_of(2.0)", "1"),
+            ("[1, 2, 3].contains(2.5)", "false"),
+            ("[1.0, 2.0].contains(2)", "true"),
+            ("[1.0, 2.0].index_of(2)", "1"),
+            // a needle of an unrelated type must miss, not error
+            ("[1, 2, 3].contains(\"2\")", "false"),
+            ("[1, 2, 3].contains(true)", "false"),
+            ("[1, 2, 3].index_of([2])", "missing"),
+            // packed arrays are missing-free, so `missing` is never found in one...
+            ("[1, 2, 3].contains(missing)", "false"),
+            ("[1, 2, 3].index_of(missing)", "missing"),
+            // ...but IS found in a heterogeneous one (identity equality, ADR 0001)
+            ("[1, missing, 3].contains(missing)", "true"),
+            ("[1, missing, 3].index_of(missing)", "1"),
+            // packed Floats, IEEE: NaN equals nothing, not even itself
+            ("[1.5, inf - inf].contains(inf - inf)", "false"),
+            ("[1.5, inf - inf].index_of(inf - inf)", "missing"),
+            // ...and a NaN in the array must not poison the scan for other elements
+            ("[1.5, inf - inf].contains(1.5)", "true"),
+            ("[inf - inf, 2.5].index_of(2.5)", "1"),
+            // infinities equal themselves; the two signs stay distinct
+            ("[inf].contains(inf)", "true"),
+            ("[inf].contains(-inf)", "false"),
+            ("[1.0, inf, -inf].index_of(-inf)", "2"),
+            ("[1, 2].contains(inf)", "false"),
+            // signed zero: -0.0 == 0.0 in IEEE, in both directions and cross-type
+            ("[-0.0].contains(0.0)", "true"),
+            ("[0.0].index_of(-0.0)", "0"),
+            ("[0, 1].index_of(-0.0)", "0"),
+            // lazy Range
+            ("(0..5).contains(3)", "true"),
+            ("(0..5).index_of(3)", "3"),
+            ("(0..5).index_of(9)", "missing"),
+            ("range(0, 20, 3).index_of(9)", "3"),
+            ("range(0, 20, 3).contains(10)", "false"),
+            ("range(10, 0, -2).index_of(6)", "2"),
+            // lazy Enumerate — the needle is a tuple, built one element at a time
+            ("[5, 6, 7].enumerate().contains((1, 6))", "true"),
+            ("[5, 6, 7].enumerate().index_of((1, 6))", "1"),
+            ("[5, 6, 7].enumerate().contains(6)", "false"),
+            // A lazy `Enumerate` over a heterogeneous inner array is the one packed shape
+            // that CAN meet a `missing` — nested inside the tuple, where `values_equal`
+            // reaches it by recursion rather than at the top level. Found by sabotaging
+            // the `missing` rule and asking why the mutation survived.
+            ("[1, missing, 3].enumerate().index_of((1, missing))", "1"),
+            ("[1, missing, 3].enumerate().contains((1, missing))", "true"),
+            ("[1, missing].enumerate().index_of((1, 2))", "missing"),
+            // heterogeneous `Values` arrays defer to the general path, unchanged
+            ("[1, \"a\", true].contains(\"a\")", "true"),
+            ("[1, \"a\", true].index_of(true)", "2"),
+            // empty
+            ("[].contains(1)", "false"),
+            ("[].index_of(1)", "missing"),
+            ("(0..0).index_of(0)", "missing"),
+            // the mapped-range shape the memory regression was found on
+            ("(0..100).map(it * 2).index_of(4)", "2"),
+            ("(0..100).map(it * 2).contains(5)", "false"),
+            ("(0..100).map(it * 2.0).index_of(4.0)", "2"),
+            // a miss composes with `??`, which is the documented idiom
+            ("([1, 2, 3].index_of(9) ?? -1)", "-1"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // A wrong arity defers to the general path, so each method keeps its own (and
+        // differently worded) error rather than acquiring the other's.
+        for (src, want) in [
+            ("[1, 2].contains()", "contains` takes one value to look for"),
+            ("(0..5).contains(1, 2)", "contains` takes one value to look for"),
+            ("[1, 2].index_of()", "index_of` takes 1 argument, got 0"),
+            ("(0..5).index_of(1, 2)", "index_of` takes 1 argument, got 2"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.expect_err(&format!("`{src}` should error"));
+            assert!(msg.contains(want), "`{src}` said: {msg}");
+        }
+    }

@@ -643,6 +643,35 @@ fn array_numeric_fast(
             _ => {}
         }
     }
+    // `contains(v)` / `index_of(v)` answer a SCALAR, but both boxed the entire source to
+    // do it: `(0..20_000_000).map(it * 2).contains(4)` cost 491 MB against 185 MB for the
+    // array alone — 306 MB of `Vec<Value>` built to settle a question decided by element
+    // 2. Their closure-taking neighbours `any(p)` / `position(p)` already stream and cost
+    // nothing extra, so this is one operation with two spellings where only one was fixed:
+    // the same shape as `take`/`drop` (packed vs lazy `Range`), `clamp` (array vs scalar),
+    // `dot` (vs `sum`/`cumsum`), and duplicate record fields (literal vs update).
+    //
+    // The scan calls the SAME `values_equal` on the SAME `Value` the general path would
+    // have built — `to_values()` is `(0..len).map(get)` for every non-`Values`
+    // representation — one stack temporary at a time instead of a heap `Vec` of them. So
+    // cross-type equality (`1 == 1.0`, Rational-vs-Int), `missing` identity equality and
+    // `NaN != NaN` all stay exactly as they were by construction, not by re-derivation;
+    // re-deriving them here is precisely how the second spelling drifts from the first.
+    //
+    // `Values` arrays already hold their `Value`s, so they defer — there is nothing to
+    // avoid materializing, and the general path's `any`/`position` are the same scan.
+    // A wrong arity also defers, so both methods' (differing) arity errors are untouched.
+    if let ("contains" | "index_of", [needle]) = (name, args) {
+        if !matches!(ad, ArrayData::Values(_)) {
+            let hit = (0..ad.len())
+                .position(|i| crate::interp::ops::values_equal(&ad.get(i), needle));
+            return Ok(Some(match (name, hit) {
+                ("contains", h) => Value::Bool(h.is_some()),
+                (_, Some(i)) => Value::Int(i as i64),
+                (_, None) => Value::Missing,
+            }));
+        }
+    }
     if !args.is_empty() {
         return Ok(None);
     }
