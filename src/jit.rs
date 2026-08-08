@@ -2559,6 +2559,15 @@ fn f64_body_eligible(
                 && f64_body_eligible(left, binder, caps, uses_binder, user_fns)
                 && f64_body_eligible(right, binder, caps, uses_binder, user_fns)
         }
+        // Negation of an `f64` is `fneg`, the exact IEEE sign flip the interpreter's `-f`
+        // performs, and this kernel emits through `gen_value`, whose `Neg` arm has lowered
+        // it all along — so this gate was the only thing missing, exactly as in `e30f9fe`.
+        // Note the contrast with the MIXED path, where the codegen arm had to be written
+        // too: which of the pair is missing differs per path, so each is traced and
+        // measured rather than assumed.
+        Expr::Unary { op: UnOp::Neg, expr, .. } => {
+            f64_body_eligible(expr, binder, caps, uses_binder, user_fns)
+        }
         // `sqrt`/`abs`/`min`/`max` (emitted inline by `gen_builtin_f64`) — only the real
         // builtin, never a user function of the same name (which the f64 kernel can't call).
         Expr::Call { name, args, .. } => {
@@ -2698,6 +2707,17 @@ fn infer_mixed_kind(
     match e {
         Expr::Int(_) => Some(NumKind::Int),
         Expr::Float(_) => Some(NumKind::Float),
+        // Negation PRESERVES its operand's kind, so it needs no promotion rule of its own.
+        // Emitted by `gen_value_typed`'s twin arm as `ineg`/`fneg` — wrapping exactly like
+        // the interpreter's `wrapping_neg`, and the exact IEEE sign flip, respectively.
+        //
+        // Admitted here and emitted there in the SAME commit, deliberately: `e30f9fe` fixed
+        // the i64 kernel by adding eligibility alone, because `gen_value` already lowered
+        // `Neg`; this path had NEITHER, and admitting a shape the codegen cannot emit is
+        // how this area was reverted three times before.
+        Expr::Unary { op: UnOp::Neg, expr, .. } => {
+            infer_mixed_kind(expr, binder, uses_binder, caps, fns, user_fns, msigs)
+        }
         // A USER function with an `i64` specialization. Tried BEFORE the builtin arm, so a
         // user function shadowing `abs`/`min`/`max` dispatches to the user's function — the
         // precedence `gen_value` already establishes via its `fn_ids` lookup, and mirrored
@@ -6153,6 +6173,17 @@ fn gen_value_typed<'a>(
     match e {
         Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
         Expr::Float(f) => (b.ins().f64const(*f), NumKind::Float),
+        // The twin of `infer_mixed_kind`'s `Neg` arm. `ineg` wraps like the interpreter's
+        // `wrapping_neg`; `fneg` is its exact IEEE sign flip, so `-0.0` and a NaN payload
+        // behave here as they do everywhere else.
+        Expr::Unary { op: UnOp::Neg, expr, .. } => {
+            let (v, k) =
+                gen_value_typed(b, expr, vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+            match k {
+                NumKind::Int => (b.ins().ineg(v), NumKind::Int),
+                NumKind::Float => (b.ins().fneg(v), NumKind::Float),
+            }
+        }
         Expr::Ident { name, .. } => {
             debug_assert!(
                 name == binder || vars.contains_key(name.as_str()),

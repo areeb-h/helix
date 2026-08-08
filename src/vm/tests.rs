@@ -6784,6 +6784,65 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             crate::jit::native_call_count() > 0,
             "`filter(-it > ..)` did not engage the JIT"
         );
+        // The FLOAT paths, which needed two more gates and one more codegen arm. Two
+        // distinct kernels: `Int`-source → `Float` (the "mixed" one, whose codegen
+        // `gen_value_typed` had no `Neg` arm either) and `Floats`-source → `Floats` (whose
+        // codegen `gen_value` already had one, so only its gate was missing). Which HALF of
+        // the pair was absent differs per path, so each was traced and measured rather than
+        // assumed — the first attempt here fixed only the mixed one and the measurement,
+        // not the reading, is what revealed the other.
+        crate::jit::reset_native_call_count();
+        assert_eq!(
+            run_vm_jit("(0..100000).map(-it * 1.0).sum()").unwrap(),
+            "-4999950000.0"
+        );
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "the Int-source -> Float `map(-it * 1.0)` did not engage the JIT"
+        );
+        // The Floats-source case needs a DELTA, not `> 0`: building the array is itself a
+        // jittable `map`, so a bare `> 0` was satisfied by the construction alone and
+        // survived deleting the gate under test. Count the same program with and without
+        // the negation and require the negating one to run strictly more native calls.
+        crate::jit::reset_native_call_count();
+        let _ = run_vm_jit("ys = (0..100000).map(it * 1.0)\nys.sum()");
+        let without = crate::jit::native_call_count();
+        crate::jit::reset_native_call_count();
+        assert_eq!(
+            run_vm_jit("ys = (0..100000).map(it * 1.0)\nys.map(-it).sum()").unwrap(),
+            "-4999950000.0"
+        );
+        let with_neg = crate::jit::native_call_count();
+        assert!(
+            with_neg > without,
+            "the Floats-source `map(-it)` did not engage the JIT \
+             ({with_neg} native calls with it, {without} without — the building `map` \
+             accounts for the rest)"
+        );
+        // Values AT KERNEL SCALE. Every float case below this point in the table runs on a
+        // handful of elements, which is BELOW the dispatch threshold — so it is checking
+        // the interpreter, not the code just written. These three run at 100k, where the
+        // kernel really executes, and each is chosen to fail if the lowering is wrong:
+        // `fneg` gives element 0 a NEGATIVE zero, where `0.0 - x` would give a positive
+        // one, and where negating the i64 with `fneg` would corrupt the bit pattern.
+        for (src, want) in [
+            (
+                "ys = (0..100000).map(it * 1.0)\nys.map(-it).take(3)",
+                "[-0.0, -1.0, -2.0]",
+            ),
+            (
+                "ys = (0..100000).map(it * 1.0)\nys.map(0.0 - it).take(3)",
+                "[0.0, -1.0, -2.0]", // NOT the same as `-it` at element 0
+            ),
+            ("(0..100000).map(-it * 1.5).take(3)", "[0.0, -1.5, -3.0]"),
+            ("(0..100000).map(-to_float(it)).take(3)", "[-0.0, -1.0, -2.0]"),
+            ("(0..100000).map(-it).take(3)", "[0, -1, -2]"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tw vs vm disagree on `{src}`");
+            assert_eq!(vm, jit, "vm vs jit disagree on `{src}` — KERNEL-SCALE divergence");
+            assert_eq!(jit, Ok(want.to_string()), "`{src}`");
+        }
 
         for (src, want) in [
             // the newly-compiling shapes
@@ -6826,11 +6885,27 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             ("[1, 2].map(if it > 1 then -it else it)", "[1, -2]"),
             ("[5, 6].map(-abs(it))", "[-5, -6]"),
             ("[5, 6].map(abs(-it))", "[5, 6]"),
-            // FLOAT arrays keep the interpreter (the mixed kernel declines) — still correct
+            // FLOAT arrays now compile too, and `fneg` is the EXACT IEEE sign flip — which
+            // is only observable on the zeros, so those are the cases that pin it.
             ("[1.5, 2.5].map(-it)", "[-1.5, -2.5]"),
+            ("[0.0].map(-it)", "[-0.0]"),
+            ("[-0.0].map(-it)", "[0.0]"),
             ("[0.0, -0.0].map(-it)", "[-0.0, 0.0]"),
             ("[inf, -inf].map(-it)", "[-inf, inf]"),
             ("[inf - inf].map(-it)", "[NaN]"),
+            ("[1.5].map(-(it + 1.0))", "[-2.5]"),
+            ("[1.5].map(-it * 2.0)", "[-3.0]"),
+            ("[1.5].map(- -it)", "[1.5]"),
+            ("[2.0].map(-sqrt(it))", "[-1.4142135623730951]"),
+            ("[1.5].map(-abs(it))", "[-1.5]"),
+            ("k = 2.0\n[1.5].map(-it * k)", "[-3.0]"),
+            // Int source, Float result — the mixed kernel. Negating INSIDE `to_float`
+            // versus outside it differ on the zero, and both must match the interpreter.
+            ("(0..5).map(-it * 1.5)", "[0.0, -1.5, -3.0, -4.5, -6.0]"),
+            ("(0..3).map(to_float(-it))", "[0.0, -1.0, -2.0]"),
+            ("(0..3).map(-to_float(it))", "[-0.0, -1.0, -2.0]"),
+            ("[1, 2].map(-it * 1.0)", "[-1.0, -2.0]"),
+            ("[1.5, missing].map(-it)", "[-1.5, missing]"),
             // a `missing` or non-numeric element declines and behaves exactly as before
             ("[1, missing, 3].map(-it)", "[-1, missing, -3]"),
             ("[missing].map(-it)", "[missing]"),
