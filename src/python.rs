@@ -641,7 +641,7 @@ mod imp {
             },
             other => {
                 return Err(HelixError::new(
-                    format!("can't pass a {} to Python yet", other.type_name()),
+                    format!("can't pass {} to Python yet", crate::value::with_article(other.type_name())),
                     line,
                     col,
                 ));

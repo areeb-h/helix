@@ -2089,6 +2089,22 @@ impl Parser {
                         if matches!(self.peek(), Tok::RBrace) {
                             break; // trailing comma
                         }
+                        // A SECOND spread lands here, and used to report "expected a name
+                        // as a record field name, found `...`" — which describes the token
+                        // rather than the problem. One base, so `{...a, ...b}` has no
+                        // meaning to give it.
+                        if matches!(self.peek(), Tok::DotDotDot) {
+                            let (sl, sc) = self.pos();
+                            return Err(HelixError::new(
+                                "a record update takes one `...spread`, not two",
+                                sl,
+                                sc,
+                            )
+                            .hint(
+                                "`{ ...base, field: value }` updates ONE record; there is no \
+                                 merge form, so name the fields you want from the second.",
+                            ));
+                        }
                         let key = self.member_name("as a record field name")?;
                         self.eat(&Tok::Colon, &format!("after field `{}`", key))?;
                         fields.push((key, self.expr()?));

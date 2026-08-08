@@ -6392,3 +6392,61 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
              that the VM still works"
         );
     }
+
+    /// Error text gets the indefinite article right, and a second `...spread` says what is
+    /// actually wrong. Both came out of reading real output rather than tests:
+    ///
+    ///     print((r.x)(1))       `x` is a Int, not a function        <- was
+    ///     print({...a, ...b})   expected a name as a record field name, found `...`
+    ///
+    /// The first reads as unfinished, and `Int` and `Array` are the two type names that hit
+    /// it — which is most type errors in practice. The second describes the TOKEN rather
+    /// than the problem: a record update has one base, so two spreads have no meaning, and
+    /// the old message sent the reader looking for a missing field name.
+    #[test]
+    fn error_text_reads_as_english_and_names_the_real_problem() {
+        // `with_article` is the whole of the first fix; check the boundary directly rather
+        // than only through one message.
+        for (t, want) in [
+            ("Int", "an Int"),
+            ("Array", "an Array"),
+            ("Float", "a Float"),
+            ("String", "a String"),
+            ("Dict", "a Dict"),
+            ("Unit", "a Unit"),
+            ("", "a "),
+        ] {
+            assert_eq!(crate::value::with_article(t), want.to_string());
+        }
+
+        for (src, needle) in [
+            // the case that exposed it
+            ("r = {x: 5}\n(r.x)(1)", "is an Int, not a function"),
+            ("f = 1.5\nf(1)", "is a Float, not a function"),
+            // a second spread names the real problem
+            ("a = {x: 1}\nb = {y: 2}\n{...a, ...b}", "takes one `...spread`, not two"),
+            // ...and a MISPLACED spread keeps its own, different message: these are two
+            // distinct mistakes and the reader should be told which one they made
+            ("a = {x: 1}\n{q: 1, ...a}", "must be the first element"),
+            // the spread base still has to be a record
+            ("d = [(\"a\", 1)].to_dict()\n{...d, x: 1}", "needs a record"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.unwrap_err();
+            assert!(msg.contains(needle), "`{src}` got: {msg}");
+        }
+
+        // No message should say "a Int" or "a Array" again. This is the regression guard:
+        // the fix is mechanical across ~39 sites, so a new one is easy to add by hand.
+        for src in [
+            "r = {x: 5}\n(r.x)(1)",
+            "[1, 2].filter(it)",
+            "\"s\" * 2",
+        ] {
+            if let Err(msg) = run_vm(src) {
+                assert!(!msg.contains("a Int"), "ungrammatical article in: {msg}");
+                assert!(!msg.contains("a Array"), "ungrammatical article in: {msg}");
+            }
+        }
+    }

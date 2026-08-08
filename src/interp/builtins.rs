@@ -1867,7 +1867,7 @@ fn array_to_coldata(
         Value::Array(a) => a,
         other => {
             return Err(HelixError::new(
-                format!("column `{}` must be an array, but got a {}", name, other.type_name()),
+                format!("column `{}` must be an array, but got {}", name, crate::value::with_article(other.type_name())),
                 line,
                 col,
             )
@@ -1877,7 +1877,7 @@ fn array_to_coldata(
     let vals = arr.to_values();
     let mixed = |got: &Value| {
         HelixError::new(
-            format!("column `{}` mixes types (found a {})", name, got.type_name()),
+            format!("column `{}` mixes types (found {})", name, crate::value::with_article(got.type_name())),
             line,
             col,
         )

@@ -89,7 +89,7 @@ fn flatten_into(v: &Value, out: &mut Vec<f64>, line: usize, col: usize) -> Resul
         }
         other => {
             return Err(HelixError::new(
-                format!("a tensor element must be a number, not a {}", other.type_name()),
+                format!("a tensor element must be a number, not {}", crate::value::with_article(other.type_name())),
                 line,
                 col,
             ))
@@ -481,7 +481,7 @@ pub fn method(
                 Value::Tensor(o) => o,
                 o => {
                     return Err(HelixError::new(
-                        format!("`{}` needs a tensor, got a {}", name, o.type_name()),
+                        format!("`{}` needs a tensor, got {}", name, crate::value::with_article(o.type_name())),
                         line,
                         col,
                     ))
@@ -589,7 +589,7 @@ pub fn method(
                 Value::Tensor(b) => b,
                 o => {
                     return Err(HelixError::new(
-                        format!("`solve` needs a tensor right-hand side, got a {}", o.type_name()),
+                        format!("`solve` needs a tensor right-hand side, got {}", crate::value::with_article(o.type_name())),
                         line,
                         col,
                     ))

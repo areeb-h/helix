@@ -637,7 +637,7 @@ fn nums(who: &str, v: &Value, line: usize, col: usize) -> Result<Vec<f64>, Helix
             Value::Float(f) => out.push(*f),
             other => {
                 return Err(HelixError::new(
-                    format!("`{who}` needs numbers, but the array holds a {}", other.type_name()),
+                    format!("`{who}` needs numbers, but the array holds {}", crate::value::with_article(other.type_name())),
                     line,
                     col,
                 ))
@@ -680,7 +680,7 @@ fn io_err(action: &str, path: &str, e: std::io::Error, line: usize, col: usize) 
 
 fn type_err(who: &str, expected: &str, got: &Value, line: usize, col: usize) -> HelixError {
     HelixError::new(
-        format!("`{who}` expects {expected}, but got a {}", got.type_name()),
+        format!("`{who}` expects {expected}, but got {}", crate::value::with_article(got.type_name())),
         line,
         col,
     )

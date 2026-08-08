@@ -57,9 +57,9 @@ impl super::Interp {
                     Value::Bool(false) => Ok(None),
                     other => Err(HelixError::new(
                         format!(
-                            "`{}` expects a yes/no test, but the expression produced a {}",
+                            "`{}` expects a yes/no test, but the expression produced {}",
                             name,
-                            other.type_name()
+                            crate::value::with_article(other.type_name())
                         ),
                         line,
                         col,
@@ -124,9 +124,9 @@ impl super::Interp {
                         }
                         other => Err(HelixError::new(
                             format!(
-                                "`{}` expects a yes/no test, but the expression produced a {}",
+                                "`{}` expects a yes/no test, but the expression produced {}",
                                 name,
-                                other.type_name()
+                                crate::value::with_article(other.type_name())
                             ),
                             line,
                             col,

@@ -147,13 +147,13 @@ impl FormatSpec {
             match v {
                 Value::Int(i) => Ok(*i as f64),
                 Value::Float(f) => Ok(*f),
-                _ => Err(format!("cannot format a {} with a numeric format spec", v.type_name())),
+                _ => Err(format!("cannot format {} with a numeric format spec", crate::value::with_article(v.type_name()))),
             }
         };
         let as_i = |v: &Value| -> Result<i64, String> {
             match v {
                 Value::Int(i) => Ok(*i),
-                _ => Err(format!("cannot format a {} with an integer format spec", v.type_name())),
+                _ => Err(format!("cannot format {} with an integer format spec", crate::value::with_article(v.type_name()))),
             }
         };
         // Render a radix (x/X/b/o) sign-magnitude, like Python's format mini-language:

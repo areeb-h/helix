@@ -62,7 +62,7 @@ fn as_i64(v: &Value, who: &str, line: usize, col: usize) -> Result<i64, HelixErr
     match v {
         Value::Int(i) => Ok(*i),
         other => Err(HelixError::new(
-            format!("`{who}` expects an integer, but got a {}", other.type_name()),
+            format!("`{who}` expects an integer, but got {}", crate::value::with_article(other.type_name())),
             line,
             col,
         )),

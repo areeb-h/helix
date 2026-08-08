@@ -1102,7 +1102,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     Value::Closure(c) => (c.idx as usize, c.upvalues.clone()),
                     other => {
                         return Err(HelixError::new(
-                            format!("`{}` is a {}, not a function", name, other.type_name()),
+                            format!("`{}` is {}, not a function", name, crate::value::with_article(other.type_name())),
                             line,
                             col,
                         )
@@ -1247,7 +1247,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let base = stack.pop().unwrap();
                 let Value::Record(base_fields) = base else {
                     return Err(HelixError::new(
-                        format!("`...` record update needs a record, got a {}", base.type_name()),
+                        format!("`...` record update needs a record, got {}", crate::value::with_article(base.type_name())),
                         line,
                         col,
                     )
@@ -2418,9 +2418,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     other => {
                         return Err(HelixError::new(
                             format!(
-                                "`{}` expects a yes/no test, but the expression produced a {}",
+                                "`{}` expects a yes/no test, but the expression produced {}",
                                 kind.method_name(),
-                                other.type_name()
+                                crate::value::with_article(other.type_name())
                             ),
                             line,
                             col,
@@ -2473,9 +2473,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     other => {
                         return Err(HelixError::new(
                             format!(
-                                "`{}` expects a yes/no test, but the expression produced a {}",
+                                "`{}` expects a yes/no test, but the expression produced {}",
                                 if *is_all { "all" } else { "any" },
-                                other.type_name()
+                                crate::value::with_article(other.type_name())
                             ),
                             line,
                             col,

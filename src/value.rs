@@ -138,8 +138,8 @@ impl DictKey {
             Value::Str(s) => Ok(DictKey::Str(s.clone())),
             Value::Dna(s) => Ok(DictKey::Dna(s.clone())),
             other => Err(format!(
-                "a dict key must be an int, string, bool, or DNA sequence, not a {}",
-                other.type_name()
+                "a dict key must be an int, string, bool, or DNA sequence, not {}",
+                crate::value::with_article(other.type_name())
             )),
         }
     }
@@ -653,6 +653,19 @@ pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, Helix
 /// buffer with no throwaway `String`; collections and frames defer to
 /// `display_value` (their rendering is itself fallible and less hot). The bytes are
 /// identical to `buf.push_str(&display_value(v, …)?)`.
+/// A type name with its indefinite article — "an Int", "a Float". Error text is read far
+/// more often than it is written, and "a Int" is the kind of thing that makes a language
+/// feel unfinished. Vowel-initial names are the common ones (`Int`, `Array`), so this is
+/// not a rare case.
+pub fn with_article(type_name: &str) -> String {
+    // The rule is about SOUND, not spelling. `U` is excluded deliberately: the only
+    // U-initial type name is `Unit`, pronounced with a consonant glide — "a Unit", the
+    // same as "a user". Every other vowel-initial name here (`Int`, `Array`) takes "an".
+    let first = type_name.chars().next().unwrap_or(' ').to_ascii_uppercase();
+    let article = if matches!(first, 'A' | 'E' | 'I' | 'O') { "an" } else { "a" };
+    format!("{article} {type_name}")
+}
+
 pub fn write_value(buf: &mut String, v: &Value, line: usize, col: usize) -> Result<(), HelixError> {
     use std::fmt::Write as _;
     match v {

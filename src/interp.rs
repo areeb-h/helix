@@ -405,7 +405,7 @@ impl Interp {
                 let base_v = self.eval(base)?;
                 let Value::Record(base_fields) = base_v else {
                     return Err(HelixError::new(
-                        format!("`...` record update needs a record, got a {}", base_v.type_name()),
+                        format!("`...` record update needs a record, got {}", crate::value::with_article(base_v.type_name())),
                         *line,
                         *col,
                     )
@@ -509,7 +509,7 @@ impl Interp {
                         }
                         // The name is bound, but not to something callable.
                         other => Err(HelixError::new(
-                            format!("`{}` is a {}, not a function", name, other.type_name()),
+                            format!("`{}` is {}, not a function", name, crate::value::with_article(other.type_name())),
                             *line,
                             *col,
                         )
@@ -555,7 +555,7 @@ impl Interp {
                     // ONE hint string with the VM's CallValue arm — the engines'
                     // errors are compared byte-for-byte.
                     other => Err(HelixError::new(
-                        format!("`{}` is a {}, not a function", label, other.type_name()),
+                        format!("`{}` is {}, not a function", label, crate::value::with_article(other.type_name())),
                         *line,
                         *col,
                     )
@@ -1328,7 +1328,7 @@ fn broadcast_unary(
                     Value::Int(i) => data.push(i as f64),
                     other => {
                         return Err(HelixError::new(
-                            format!("cannot apply this to a tensor (produced a {})", other.type_name()),
+                            format!("cannot apply this to a tensor (produced {})", crate::value::with_article(other.type_name())),
                             0,
                             0,
                         ))

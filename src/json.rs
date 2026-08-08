@@ -117,7 +117,7 @@ fn to_serde(v: &Value) -> Result<serde_json::Value, String> {
             }
             J::Object(m)
         }
-        other => return Err(format!("can't serialize a {} to JSON", other.type_name())),
+        other => return Err(format!("can't serialize {} to JSON", crate::value::with_article(other.type_name()))),
     })
 }
 

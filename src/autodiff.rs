@@ -306,7 +306,7 @@ pub fn node_value(n: &Rc<Node>) -> Value {
 pub fn binary(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
     let bad = |v: &Value| {
         HelixError::new(
-            format!("a tracked value can't be combined with a {}", v.type_name()),
+            format!("a tracked value can't be combined with {}", crate::value::with_article(v.type_name())),
             line,
             col,
         )
@@ -425,7 +425,7 @@ pub fn variable(v: &Value, line: usize, col: usize) -> Result<Value, HelixError>
     match to_arr(v) {
         Some(a) => Ok(Value::Node(leaf(a))),
         None => Err(HelixError::new(
-            format!("`variable` needs a number or tensor, got a {}", v.type_name()),
+            format!("`variable` needs a number or tensor, got {}", crate::value::with_article(v.type_name())),
             line,
             col,
         )),
@@ -476,7 +476,7 @@ fn grad_of(x: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
             Ok(Value::array(out?))
         }
         other => Err(HelixError::new(
-            format!("`gradient` needs a tracked variable (or array of them), got a {}", other.type_name()),
+            format!("`gradient` needs a tracked variable (or array of them), got {}", crate::value::with_article(other.type_name())),
             line,
             col,
         )),

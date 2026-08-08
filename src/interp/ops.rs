@@ -606,9 +606,9 @@ fn num_operand(op: &BinOp, v: &Value, line: usize, col: usize) -> Result<f64, He
     v.as_f64().ok_or_else(|| {
         let err = HelixError::new(
             format!(
-                "operator `{}` needs numbers, but got a {}",
+                "operator `{}` needs numbers, but got {}",
                 op.symbol(),
-                v.type_name()
+                crate::value::with_article(v.type_name())
             ),
             line,
             col,

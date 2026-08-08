@@ -346,7 +346,7 @@ pub(crate) fn call_method(
         Value::Net(h) => net_method(h, name, &args, line, col),
         Value::Record(fields) => record_method(fields, name, &args, line, col),
         other => Err(HelixError::new(
-            format!("a {} has no method `{}`", other.type_name(), name),
+            format!("{} has no method `{}`", crate::value::with_article(other.type_name()), name),
             line,
             col,
         )),
@@ -531,10 +531,10 @@ fn numeric_vec(items: &[Value], who: &str, line: usize, col: usize) -> Result<Ve
             None => {
                 return Err(HelixError::new(
                     format!(
-                        "`{}` needs an array of numbers, but element {} is a {}",
+                        "`{}` needs an array of numbers, but element {} is {}",
                         who,
                         i,
-                        v.type_name()
+                        crate::value::with_article(v.type_name())
                     ),
                     line,
                     col,
@@ -1061,7 +1061,7 @@ fn array_method(
                 Value::Array(a) => a.to_values().into_owned(),
                 v => {
                     return Err(HelixError::new(
-                        format!("`zip` needs an array, but got a {}", v.type_name()),
+                        format!("`zip` needs an array, but got {}", crate::value::with_article(v.type_name())),
                         line,
                         col,
                     )
@@ -1116,9 +1116,9 @@ fn array_method(
                     other => {
                         return Err(HelixError::new(
                             format!(
-                                "`to_dict` needs (key, value) pairs, but element {} is a {}",
+                                "`to_dict` needs (key, value) pairs, but element {} is {}",
                                 i,
-                                other.type_name()
+                                crate::value::with_article(other.type_name())
                             ),
                             line,
                             col,
@@ -1184,9 +1184,9 @@ fn array_method(
                     other => {
                         return Err(HelixError::new(
                             format!(
-                                "`concat` expects arrays, but argument {} is a {}",
+                                "`concat` expects arrays, but argument {} is {}",
                                 k + 1,
-                                other.type_name()
+                                crate::value::with_article(other.type_name())
                             ),
                             line,
                             col,
@@ -1275,8 +1275,8 @@ fn array_method(
                     Value::Dna(s) => Ok(s),
                     other => Err(HelixError::new(
                         format!(
-                            "`{name}` needs an array of DNA sequences, found a {}",
-                            other.type_name()
+                            "`{name}` needs an array of DNA sequences, found {}",
+                            crate::value::with_article(other.type_name())
                         ),
                         line,
                         col,
@@ -1303,7 +1303,7 @@ fn array_method(
                 Value::Array(a) => a.to_values(),
                 Value::Missing => return Ok(Value::Missing),
                 o => return Err(HelixError::new(
-                    format!("`dot` expects an array, but got a {}", o.type_name()),
+                    format!("`dot` expects an array, but got {}", crate::value::with_article(o.type_name())),
                     line,
                     col,
                 )),
@@ -2059,7 +2059,7 @@ fn dna_method(
                 Value::Dna(p) => (**p).clone(),
                 v => {
                     return Err(HelixError::new(
-                        format!("`find` needs a string or DNA pattern, but got a {}", v.type_name()),
+                        format!("`find` needs a string or DNA pattern, but got {}", crate::value::with_article(v.type_name())),
                         line,
                         col,
                     ))
@@ -2078,7 +2078,7 @@ fn dna_method(
                 Value::Dna(p) => (**p).clone(),
                 v => {
                     return Err(HelixError::new(
-                        format!("`find_all` needs a string or DNA pattern, but got a {}", v.type_name()),
+                        format!("`find_all` needs a string or DNA pattern, but got {}", crate::value::with_article(v.type_name())),
                         line,
                         col,
                     ))
@@ -2349,7 +2349,7 @@ fn dna_method(
                 Value::Str(o) => o,
                 v => {
                     return Err(HelixError::new(
-                        format!("`hamming` needs a DNA or string sequence, but got a {}", v.type_name()),
+                        format!("`hamming` needs a DNA or string sequence, but got {}", crate::value::with_article(v.type_name())),
                         line,
                         col,
                     ))
