@@ -34,7 +34,16 @@ use sha2::{Digest, Sha256};
 use crate::error::HelixError;
 
 /// `helix.toml` — the hand-edited manifest.
+///
+/// `deny_unknown_fields` is a SAFETY property here, not tidiness. Serde silently discards
+/// keys it does not know, and the capability gate documents a `[capabilities]` block as its
+/// intended durable source of truth (see `src/capability.rs`) while phase 1b remains
+/// unimplemented. Writing that block therefore looked like it restricted a program's
+/// authority and did nothing at all — the worst shape a security control can have. An
+/// unknown key is now a clear error naming the key, so an unimplemented or misspelled
+/// section fails loudly instead of granting silent trust.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub package: Package,
     /// Declared dependencies, by the name they are imported under.
@@ -43,6 +52,7 @@ pub struct Manifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Package {
     pub name: String,
     #[serde(default = "default_version")]
@@ -1154,4 +1164,37 @@ mod tests {
         assert_eq!(back.packages[0].name, "stats");
         assert_eq!(back.packages[0].sha256, "abc123");
     }
+
+    /// An unknown `helix.toml` key is a hard error, not a silent discard.
+    ///
+    /// This is a SECURITY property. `src/capability.rs` documents a `[capabilities]` block
+    /// as the intended durable source of truth for a program's authority, while phase 1b
+    /// remains unimplemented — so before `deny_unknown_fields`, writing that block looked
+    /// like it restricted the program and did absolutely nothing. A control that appears to
+    /// be enforcing and is not is worse than one that is plainly absent.
+    #[test]
+    fn an_unknown_manifest_key_is_rejected_rather_than_silently_dropped() {
+        // the case that motivated it
+        let e = toml::from_str::<Manifest>(
+            "[package]\nname = \"demo\"\n\n[capabilities]\nfs = \"read\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("capabilities"), "the message must name the key; got: {e}");
+
+        // a typo in a known key is caught by the same rule
+        let e = toml::from_str::<Manifest>("[package]\nnaem = \"demo\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("naem"), "got: {e}");
+
+        // ...and valid manifests are unaffected, with `version` still defaulting
+        let m: Manifest = toml::from_str("[package]\nname = \"demo\"\n").unwrap();
+        assert_eq!(m.package.name, "demo");
+        assert_eq!(m.package.version, "0.1.0");
+        let m: Manifest =
+            toml::from_str("[package]\nname = \"demo\"\nversion = \"0.2.0\"\n").unwrap();
+        assert_eq!(m.package.version, "0.2.0");
+    }
+
 }

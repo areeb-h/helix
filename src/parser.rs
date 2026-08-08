@@ -2105,7 +2105,27 @@ impl Parser {
                                  merge form, so name the fields you want from the second.",
                             ));
                         }
+                        let (kl, kc) = self.pos();
                         let key = self.member_name("as a record field name")?;
+                        // The same duplicate-field rejection the plain record literal does,
+                        // for the same reason: order-independent equality assumes one entry
+                        // per key, so two "equal" records could otherwise disagree on `.a`.
+                        // This branch was missing it, so `{y: 2, y: 3}` was a parse error
+                        // while `{...b, y: 2, y: 3}` was silently accepted with last-wins —
+                        // one mistake, caught in one spelling and not the other.
+                        //
+                        // Overriding a field that came from the BASE is untouched: that is
+                        // the entire purpose of an update, and `{...b, y: 9}` where `b` has
+                        // a `y` stays legal. Only a repeat within THIS field list is a
+                        // duplicate.
+                        if fields.iter().any(|(k, _)| k == &key) {
+                            return Err(HelixError::new(
+                                format!("duplicate field `{}` in record update", key),
+                                kl,
+                                kc,
+                            )
+                            .hint("each field may be given once; the later value would silently win."));
+                        }
                         self.eat(&Tok::Colon, &format!("after field `{}`", key))?;
                         fields.push((key, self.expr()?));
                     }

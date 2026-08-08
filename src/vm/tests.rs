@@ -6450,3 +6450,40 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             }
         }
     }
+
+    /// A duplicate field is rejected in a record UPDATE, not only in a plain literal.
+    /// `{y: 2, y: 3}` was a parse error while `{...b, y: 2, y: 3}` was silently accepted
+    /// with last-wins — the same mistake caught in one spelling and not the other, which is
+    /// the shape of nearly every defect found in this codebase.
+    ///
+    /// ADR 0001 wants one entry per key because order-independent equality assumes it: two
+    /// "equal" records could otherwise disagree on `.a`. The update branch simply never got
+    /// the check the literal branch has.
+    #[test]
+    fn a_duplicate_field_is_rejected_in_a_record_update_too() {
+        for (src, needle) in [
+            ("{y: 2, y: 3}", "duplicate field `y` in record literal"),
+            ("b = {x: 1}\n{...b, y: 2, y: 3}", "duplicate field `y` in record update"),
+            ("b = {x: 1}\n{...b, y: 2, z: 3, y: 4}", "duplicate field `y` in record update"),
+            ("b = {x: 1}\n{...b, a: 1, a: 2, a: 3}", "duplicate field `a` in record update"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.unwrap_err();
+            assert!(msg.contains(needle), "`{src}` got: {msg}");
+        }
+
+        // OVERRIDING A BASE FIELD IS THE POINT OF AN UPDATE and must stay legal — only a
+        // repeat within the update's own field list is a duplicate.
+        for (src, want) in [
+            ("b = {y: 1}\n{...b, y: 9}", "{y: 9}"),
+            ("b = {x: 1, y: 1}\n{...b, y: 9}", "{x: 1, y: 9}"),
+            ("b = {x: 1}\n{...b, y: 2, z: 3}", "{x: 1, y: 2, z: 3}"),
+            ("b = {x: 1}\n{...b}", "{x: 1}"),
+            ("b = {x: 1}\n{...b,}", "{x: 1}"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+    }
