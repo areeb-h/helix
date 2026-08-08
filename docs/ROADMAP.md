@@ -2137,6 +2137,23 @@ with interleaved child-CPU timing, medians of 15–21, and stdout printed beside
       at 0.44s and must stay declined until its codegen can emit the operator. Admitting a
       shape codegen cannot emit is precisely how this area was reverted three times.
 
+- [ ] **`<` orders tuples but `sort`/`min`/`max` refuse them.** Verified 2026-08-09 on all
+      three engines:
+
+          (1, 2) < (2, 1)              ->  true
+          [(2, 1), (1, 9)].sort()      ->  error: `sort` needs an array of all numbers,
+                                              all strings, or all DNA
+          [(2, 1), (1, 9)].min()       ->  error: `min` needs an array of numbers
+
+      One notion of order, two spellings, only one of them implemented — the same shape as
+      the nine before it. It also blocks the natural fix for a real ergonomic wart: a
+      composite sort key today has to be hand-encoded as arithmetic
+      (`0 - (c.w * 100000 + c.uses)`, still present in real code), where `sort_by(c => (c.w,
+      c.uses))` is the obvious spelling and would work the moment `sort` accepted the
+      ordering `<` already defines. Lexicographic tuple comparison is the semantics `<`
+      already implements, so this is extending the reductions to it rather than inventing
+      anything.
+
 - [ ] **`min`/`max` break ties differently depending on the array's REPRESENTATION.**
       Verified 2026-08-08 on all three engines (so a semantics inconsistency, not an
       oracle divergence):
