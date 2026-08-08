@@ -5,6 +5,105 @@
 
 use super::*;
 
+/// Validate a comprehension's SHAPE — its arity, and that its function names a binder —
+/// without evaluating a single argument.
+///
+/// These rules are structural, so the answer cannot depend on the receiver. That is
+/// exactly how the VM and JIT treat them: both decide when they COMPILE the comprehension,
+/// and so reject a malformed call whatever the receiver turns out to be at run time.
+///
+/// The walker reaches the same rules per-arm, AFTER matching the receiver, so a `missing`
+/// receiver used to return early and silence the mistake. `missing.map()` was `missing`
+/// here while `[1, 2].map()` was an error — the same malformed call, an error for one
+/// receiver and a success for another, inconsistent with this engine's own behaviour. Via
+/// `try` it laundered into an ordinary boolean where no error text could reveal it:
+/// `(try missing.map()).ok` was `true` on the walker and `false` on the other two, and the
+/// walker is the oracle's designated reference.
+///
+/// The init expression must NOT be evaluated on this path. All three engines agree that
+/// `missing.reduce(1 / 0, (a, b) => a)` is `missing` while `[].reduce(1 / 0, (a, b) => a)`
+/// divides by zero, so validating by running the comprehension against an empty array —
+/// which is otherwise an appealing way to avoid restating anything — would introduce a new
+/// divergence in place of the one being fixed.
+///
+/// This restates the arms' rules rather than being called by them: several arms need the
+/// values their checks produce (`reduce` its two binder names, `position` its `want` flag)
+/// and would have to re-derive them anyway. Two spellings of one rule is the defect shape
+/// this codebase keeps finding, so the duplication is pinned by a test asserting that a
+/// `missing` receiver and an array receiver produce BYTE-IDENTICAL errors for every
+/// malformed shape — the same "compare a program against its own equivalent spelling"
+/// method that surfaced the divergence.
+fn comp_shape_check(
+    name: &str,
+    args: &[Expr],
+    line: usize,
+    col: usize,
+) -> Result<(), HelixError> {
+    let one = |example: &str, hint: &str| -> Result<(), HelixError> {
+        if args.len() != 1 {
+            return Err(comp_arity(name, example, line, col));
+        }
+        let (params, _) = comprehension_params(&args[0]);
+        comp_needs_binder(&params, name, hint, line, col)
+    };
+    match name {
+        "map" => one(
+            "(it * 2)",
+            "e.g. `xs.map(it * 2)` or `xs.map((a, b) => ...)`.",
+        ),
+        "filter" | "where" => one(
+            "(it > 0)",
+            "e.g. `xs.map(it * 2)` or `xs.map((a, b) => ...)`.",
+        ),
+        "any" | "all" => one(
+            "(it > 0)",
+            "e.g. `xs.any(it > 0)` or `xs.all((a, b) => a < b)`.",
+        ),
+        "position" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(comp_arity(name, "(it > 0)", line, col));
+            }
+            // The second argument is the desugarer's internal `want` flag; anything else
+            // there is unreachable from source, exactly as in the evaluating arm.
+            if !matches!(args.get(1), None | Some(Expr::Bool(_))) {
+                return Err(comp_arity(name, "(it > 0)", line, col));
+            }
+            let (params, _) = comprehension_params(&args[0]);
+            comp_needs_binder(&params, name, "e.g. `xs.position(it > 0)`.", line, col)
+        }
+        "reduce" | "scan" => {
+            if args.len() != 2 {
+                return Err(HelixError::new(
+                    format!("`{name}` takes a starting value and an accumulator function"),
+                    line,
+                    col,
+                )
+                .hint("e.g. `xs.reduce(0, (acc, x) => acc + x)` to sum."));
+            }
+            match &args[1] {
+                Expr::Lambda { params, .. } if params.len() == 2 => Ok(()),
+                Expr::Lambda { params, .. } => Err(HelixError::new(
+                    format!(
+                        "`{name}`'s function needs exactly two parameters, but got {}",
+                        params.len()
+                    ),
+                    line,
+                    col,
+                )
+                .hint("the first is the running accumulator, e.g. `(acc, x) => acc + x`.")),
+                _ => Err(HelixError::new(
+                    format!("`{name}` needs an explicit accumulator function"),
+                    line,
+                    col,
+                )
+                .hint("name both binders: `xs.reduce(0, (acc, x) => acc + x)`.")),
+            }
+        }
+        // Not a comprehension: nothing structural to say about it.
+        _ => Ok(()),
+    }
+}
+
 impl super::Interp {
     pub(super) fn eval_comprehension(
         &mut self,
@@ -16,8 +115,15 @@ impl super::Interp {
     ) -> Result<Value, HelixError> {
         let items = match recv {
             Value::Array(items) => items.clone(),
-            // `missing.map(...)` etc. propagate rather than erroring (ADR 0001).
-            Value::Missing => return Ok(Value::Missing),
+            // `missing.map(...)` etc. propagate rather than erroring (ADR 0001) — but only
+            // when the CALL ITSELF IS WELL FORMED. A malformed one is a mistake in the
+            // program, not a condition in the data, so it is reported whatever the
+            // receiver holds; see `comp_shape_check`. Nothing here is evaluated, so
+            // `missing.reduce(1 / 0, ...)` stays `missing` as all three engines agree.
+            Value::Missing => {
+                comp_shape_check(name, args, line, col)?;
+                return Ok(Value::Missing);
+            }
             other => {
                 return Err(HelixError::new(
                     format!("type {} has no method `{}`", other.type_name(), name),

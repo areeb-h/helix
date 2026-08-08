@@ -2079,12 +2079,53 @@ with interleaved child-CPU timing, medians of 15–21, and stdout printed beside
       `sort().reverse()`** for a bit-identical result. Descending is the most common
       non-identity key, and `sort_by(-it)` is the obvious way to write it.
 
-- [ ] **Three-engine value divergence — `print((try missing.map()).ok)` is `false` on the
-      JIT and VM, `true` on the tree-walker.** A malformed-arity comprehension on a `missing`
-      receiver: the walker propagates `missing` before checking arity, the other two check
-      first. It escapes to a VALUE, laundered into an ordinary boolean, so no error text
-      reveals it. Narrow for users; serious for the differential oracle, which designates the
-      walker as the reference.
+- [x] ~~**Three-engine value divergence — `print((try missing.map()).ok)` is `false` on the
+      JIT and VM, `true` on the tree-walker.**~~ — **FIXED** (`comp_shape_check`). It was
+      broader than recorded: not only `.ok`, but `missing.map()` itself SUCCEEDED on the
+      walker while erroring on the other two, and it affected `filter`/`where`/`any`/`all`/
+      `reduce`/`scan`, not just `map`.
+
+      Arity and the binder requirement are STRUCTURAL — the VM and JIT settle them when
+      they compile the comprehension, so the receiver's runtime value cannot matter. The
+      walker reached the same rules per-arm, after matching the receiver, so the `missing`
+      arm returned first and silenced the mistake. It was inconsistent with ITSELF before
+      it was inconsistent with anything else: `[1, 2].map()` was an error and
+      `missing.map()` was not, for the same malformed call.
+
+      The obvious duplication-free implementation is WRONG, and is worth recording because
+      it is genuinely tempting: validating by running the comprehension against an empty
+      array reuses every rule and restates nothing — but it evaluates the arguments. All
+      three engines agree `missing.reduce(1 / 0, (a, b) => a)` is `missing` while
+      `[].reduce(1 / 0, (a, b) => a)` divides by zero (the init is evaluated only on the
+      array path), so that version would have swapped this divergence for a new one. The
+      check is therefore purely structural, and the sabotage suite includes that mutation
+      specifically so the test pins the reason rather than just the behaviour.
+
+- [ ] **The walker and VM report different errors for `5.map()` — masked from users by the
+      type checker.** Found while testing the fix above. With the checker in front (every
+      CLI path) both say "type Int has no method `map`" and agree. Without it — which is
+      what the unit harness does, since `run_vm`/`run_tw` call
+      `compile_with_types(.., None)` — the VM reaches its compile-time arity check and
+      says "`map` takes exactly one expression" while the walker reaches its receiver-type
+      check and says "type Int has no method `map`".
+
+      Unobservable to users today, and unobservable to `vmparity` too, since that runs
+      end-to-end. That is exactly what makes it worth writing down: it is a real
+      disagreement between two engines of a differential oracle, currently hidden by an
+      earlier phase, and it will surface the moment anything runs an engine without the
+      checker. Deciding which is right is the actual work — the type error reads better,
+      but the arity error is the one that does not depend on the receiver.
+
+- [ ] **A malformed comprehension reports a DIFFERENT error for a `missing` receiver than
+      for an array one** — pre-existing, and present identically on all three engines
+      (verified against the previous binary), so it is not a divergence, just an
+      inconsistency. `missing.filter(1, 2)` says "`filter` takes exactly one expression"
+      while `[1, 2].filter(1, 2)` and even `[].filter(1, 2)` say "`filter` expects a
+      yes/no test". Same for `filter`/`where`/`any`/`all` with a zero-parameter function.
+      `map` and `reduce` do not have this split. Something upstream rewrites the
+      predicate-taking spellings, so their structural checks are not the ones that fire;
+      worth tracing, because "one operation, two spellings, only one checked" is the shape
+      that has produced nine defects here.
 
 - [ ] **`df.join(<non-DataFrame>)` error text differs** between the walker and the other two,
       and `try` turns it into a String, so it escapes to a value. Low.

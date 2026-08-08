@@ -6661,6 +6661,123 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         }
     }
 
+    /// A malformed comprehension is rejected even when the receiver is `missing`.
+    ///
+    /// This was a three-engine VALUE divergence, and the worst kind: it escaped through
+    /// `try` into an ordinary boolean, where no error text could reveal it.
+    ///
+    ///     (try missing.map()).ok     tree-walker: true      VM and JIT: false
+    ///
+    /// `missing.map()` returned `missing` on the walker while `[1, 2].map()` was an error
+    /// — the same malformed call, an error for one receiver and a success for another, so
+    /// the walker was inconsistent with itself before it was inconsistent with anything
+    /// else. Arity and the binder requirement are STRUCTURAL: the VM and JIT settle them
+    /// when they compile the comprehension, so the receiver's runtime value cannot matter.
+    /// The walker reached the same rules per-arm, after matching the receiver, and the
+    /// `missing` arm returned first.
+    ///
+    /// The fix must not evaluate anything. All three engines agree that
+    /// `missing.reduce(1 / 0, ...)` is `missing` while `[].reduce(1 / 0, ...)` divides by
+    /// zero, so validating by running the comprehension against an empty array — the
+    /// tempting way to avoid restating the rules — would have swapped this divergence for
+    /// a new one. That is why `comp_shape_check` is purely structural.
+    #[test]
+    fn a_malformed_comprehension_is_rejected_on_a_missing_receiver_too() {
+        // Every engine must reject these, with the identical message, whatever the
+        // receiver is. `run_tw` vs `run_vm` is the oracle comparison; the walker is the
+        // designated reference, which is precisely why it drifting mattered.
+        for (src, want) in [
+            ("missing.map()", "`map` takes exactly one expression"),
+            ("missing.map(1, 2)", "`map` takes exactly one expression"),
+            ("missing.map(() => 5)", "`map`'s function needs at least one parameter"),
+            ("missing.filter()", "`filter` takes exactly one expression"),
+            (
+                "missing.filter(() => 5)",
+                "`filter`'s function needs at least one parameter",
+            ),
+            ("missing.where()", "`where` takes exactly one expression"),
+            ("missing.any()", "`any` takes exactly one expression"),
+            ("missing.all()", "`all` takes exactly one expression"),
+            (
+                "missing.reduce()",
+                "`reduce` takes a starting value and an accumulator function",
+            ),
+            (
+                "missing.reduce(1)",
+                "`reduce` takes a starting value and an accumulator function",
+            ),
+            (
+                "missing.reduce(0, acc + it)",
+                "`reduce` needs an explicit accumulator function",
+            ),
+            (
+                "missing.reduce(0, (a) => a)",
+                "`reduce`'s function needs exactly two parameters, but got 1",
+            ),
+            (
+                "missing.scan(1)",
+                "`scan` takes a starting value and an accumulator function",
+            ),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.expect_err(&format!("`{src}` should error"));
+            assert!(msg.contains(want), "`{src}` said: {msg}");
+            // ...and the array spelling of the same malformed call reports it too, so the
+            // rejection is a property of the CALL and not of the receiver.
+            let arr = src.replace("missing.", "[1, 2].");
+            assert!(run_vm(&arr).is_err(), "`{arr}` should error");
+            assert_eq!(run_tw(&arr), run_vm(&arr), "engines disagree on `{arr}`");
+        }
+        // A WELL-FORMED call still propagates under ADR 0001 — the fix narrows nothing.
+        // The `1 / 0` cases are the load-bearing ones: they prove no argument is
+        // evaluated on this path, which is what all three engines already agreed on and
+        // what an empty-array validation would have broken.
+        for src in [
+            "missing.map(it * 2)",
+            "missing.filter(it > 0)",
+            "missing.where(it > 0)",
+            "missing.any(it > 0)",
+            "missing.all(it > 0)",
+            "missing.position(it > 0)",
+            "missing.reduce(0, (a, b) => a + b)",
+            "missing.scan(0, (a, b) => a + b)",
+            "missing.map(1 / 0)",
+            "missing.reduce(1 / 0, (a, b) => a)",
+            "missing.scan(1 / 0, (a, b) => a)",
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok("missing".to_string()), "`{src}`");
+        }
+        // A receiver that is neither an array nor `missing` reports the TYPE error rather
+        // than the arity one, and the fix must not reorder that — but it is NOT asserted
+        // through these helpers, because they cannot see it. `run_vm`/`run_tw` call
+        // `compile_with_types(.., None)`, so the type checker the CLI runs first is
+        // skipped; without it the VM reaches its compile-time arity check and the walker
+        // reaches its receiver-type check, and the two report different errors for
+        // `5.map()`. That difference predates this fix, is on a path it does not touch,
+        // and is masked from users by the checker. It is recorded in `docs/ROADMAP.md`
+        // rather than pinned here, where the assertion would only be describing the
+        // harness. End-to-end agreement was verified against the previous binary across
+        // all three engines for `5`, `"ab"`, `[1, 2]` and `(0..3)` receivers.
+        // The escape route that hid it: `try` turns the error into a value, so this is
+        // the exact expression that read `true` on one engine and `false` on two.
+        for src in [
+            "(try missing.map()).ok",
+            "(try missing.filter()).ok",
+            "(try missing.reduce(1)).ok",
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok("false".to_string()), "`{src}`");
+        }
+        assert_eq!(
+            run_tw("(try missing.map(it * 2)).ok"),
+            Ok("true".to_string())
+        );
+    }
+
     /// `cumsum` reads a packed source, and `flatten` concatenates packed columns.
     ///
     ///     xs = (0..20000000).map(it * 2)
