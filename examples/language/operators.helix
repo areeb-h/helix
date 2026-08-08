@@ -1,5 +1,32 @@
 # Operators — arithmetic, comparison, boolean, bitwise, and the `??` default.
 
+## `%` and `//` are EUCLIDEAN, not truncating. The remainder is never negative, and `//`
+## rounds toward negative infinity — so `a // b * b + a % b == a` holds for every sign,
+## which is what makes modular arithmetic behave.
+##
+## This is the single most surprising thing about Helix arithmetic if you arrive from C,
+## Rust, Go or JavaScript, where `%` takes the sign of the LEFT operand. Python and Ruby
+## agree with Helix. The examples below are the whole specification:
+##
+##     >>> 7 % 3
+##     1
+##     >>> -7 % 3
+##     2
+##     >>> 7 % -3
+##     1
+##     >>> -7 // 3
+##     -3
+##     >>> 7 // -3
+##     -2
+##
+## `/` is ALWAYS float division, even between two Ints — so there is no need to write
+## `x * 1.0` to force it. `//` is the integer one.
+##
+##     >>> 7 / 3
+##     2.3333333333333335
+##     >>> 7 // 3
+##     2
+
 # --- arithmetic --- `/` is always float; `**` is power; `%` is euclidean modulo.
 print("arith:", 7 + 3, 7 - 3, 7 * 3, 7 / 3, 7 % 3, 2 ** 10)
 # Integer `**` stays Int when it can; mixing in a float widens the result.

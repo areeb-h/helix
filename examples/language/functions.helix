@@ -1,8 +1,23 @@
 # User-defined functions — run with:  helix examples/functions.helix
 # A function body is an expression (no braces), so it composes with everything.
 
+## The square of a number.
+##
+##     >>> square(7)
+##     49
 fn square(x) = x * x
+
 fn area(w, h) = w * h
+
+## Centre `xs` on its mean and scale by its standard deviation, so the result has mean 0
+## and standard deviation 1. Note that the arithmetic is written as if `xs` were a scalar:
+## `-` and `/` broadcast across the array.
+##
+## `std()` here is the POPULATION standard deviation (dividing by n). Pass `std(1)` for the
+## sample one — which is why the values below are not the z-scores a spreadsheet would give:
+##
+##     >>> normalize([1, 2, 3, 4])
+##     [-1.3416407864998738, -0.4472135954999579, 0.4472135954999579, 1.3416407864998738]
 fn normalize(xs) = (xs - xs.mean()) / xs.std()
 
 print("square 7:", square(7))

@@ -4,6 +4,26 @@
 # that fact instead of letting it silently become a wrong answer.
 #   helix run examples/language/missing-data.helix
 
+## `missing` propagates through arithmetic, and through REDUCTIONS — a sum that met an
+## unknown value is itself unknown, rather than quietly treating it as zero. This is the
+## behaviour that separates "no value here" from NaN and from a default:
+##
+##     >>> [1, missing, 3].sum()
+##     missing
+##     >>> [1, missing, 3].mean()
+##     missing
+##
+## Drop them explicitly when that is what you mean — the point is that the language makes
+## you say so, instead of choosing for you:
+##
+##     >>> [1, missing, 3].drop_missing().sum()
+##     4
+##
+## `??` supplies a default at the point of use, leaving the data untouched:
+##
+##     >>> missing ?? 30
+##     30
+
 # --- Propagation: an unknown input makes an unknown output ---
 print(missing + 1)          # missing
 print(missing * 0)          # missing (0 * unknown is still unknown)

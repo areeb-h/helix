@@ -2972,3 +2972,181 @@ fn thread_count_changes_cpu_not_results() {
         assert_eq!(out.trim(), "9999900000", "HELIX_THREADS={bad:?} changed the result");
     }
 }
+
+/// One documented example, lifted out of a `##` doc comment.
+struct DocExample {
+    line: usize,
+    /// The `>>>` lines, in order. All but the last are setup.
+    code: Vec<String>,
+    /// The plain lines beneath, compared exactly against stdout (or stderr, for an error).
+    expect: Vec<String>,
+    /// Columns of indentation the `>>>` sat at, stripped from the expected lines so the
+    /// block can be indented under the prose without that indent becoming part of the
+    /// expected output. Deeper indentation inside the output itself is preserved.
+    indent: usize,
+}
+
+/// Pull every `>>>` example out of the `##` doc comments in one source file.
+///
+/// The format is deliberately the smallest thing that cannot be ambiguous: inside a `##`
+/// block, a line whose first token is `>>>` is code; consecutive `>>>` lines are one
+/// program; the plain `##` lines that follow are its expected output, ending at a blank
+/// doc line, the next `>>>`, or the end of the block.
+fn doc_examples_in(src: &str) -> Vec<DocExample> {
+    let mut out: Vec<DocExample> = Vec::new();
+    let mut cur: Option<DocExample> = None;
+    for (i, raw) in src.lines().enumerate() {
+        let t = raw.trim_start();
+        // Only `##` lines participate. A plain `#` comment can sit inside an example
+        // block without terminating it being ambiguous, because it is not a doc line.
+        let Some(body) = t.strip_prefix("##") else {
+            if let Some(e) = cur.take() {
+                out.push(e);
+            }
+            continue;
+        };
+        let body = body.strip_prefix(' ').unwrap_or(body);
+        let trimmed = body.trim_start();
+        if let Some(code) = trimmed.strip_prefix(">>>") {
+            let indent = body.len() - trimmed.len();
+            let code = code.trim().to_string();
+            match cur.as_mut() {
+                // A `>>>` directly after previous code (no expected output yet) continues
+                // the same program; one after expected output starts a new example.
+                Some(e) if e.expect.is_empty() => e.code.push(code),
+                _ => {
+                    if let Some(e) = cur.take() {
+                        out.push(e);
+                    }
+                    cur = Some(DocExample {
+                        line: i + 1,
+                        code: vec![code],
+                        expect: Vec::new(),
+                        indent,
+                    });
+                }
+            }
+        } else if let Some(e) = cur.as_mut() {
+            if trimmed.is_empty() {
+                out.push(cur.take().unwrap());
+            } else {
+                // Strip exactly the `>>>` line's indentation, no more — so output that is
+                // itself indented keeps that shape.
+                let mut line = body.trim_end();
+                for _ in 0..e.indent {
+                    line = line.strip_prefix(' ').unwrap_or(line);
+                }
+                e.expect.push(line.to_string());
+            }
+        }
+    }
+    if let Some(e) = cur.take() {
+        out.push(e);
+    }
+    out
+}
+
+/// **Every documented example runs, on all three engines, and must still say what it says.**
+///
+/// This is the difference between Helix's doc comments and Python's docstrings, and it is
+/// the whole reason `##` is worth distinguishing from `#`: a docstring rots silently, and
+/// `doctest` is opt-in and lives off the normal test path. Here an example that has drifted
+/// fails the gate. Better still, it is checked against the tree-walker, the bytecode VM and
+/// the JIT at once — so every documented example also strengthens the differential oracle,
+/// which is something a single-implementation language cannot offer.
+///
+/// The motivation is not hypothetical. Several defects here survived because a COMMENT
+/// recorded an intent the code did not implement — `numeric_cmp` claimed `total_cmp` puts
+/// `NaN` "after `+inf`, as numpy does" and cited `sqrt(-1.0)`, and that example sorts to
+/// the FRONT. Prose cannot be checked; an example can. See `docs/comments-and-docs.md`.
+///
+/// An example runs in the context of its own file, so it may call the thing it documents.
+/// The file's own output is subtracted, so only what the example itself printed is compared.
+#[test]
+fn doc_examples_run_and_agree_on_all_three_engines() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![root.join("examples")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "helix") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+
+    let mut checked = 0usize;
+    for path in &files {
+        let src = std::fs::read_to_string(path).expect("readable example");
+        let examples = doc_examples_in(&src);
+        if examples.is_empty() {
+            continue;
+        }
+        let rel = path.strip_prefix(root).unwrap().to_str().unwrap().replace('\\', "/");
+
+        for ex in examples {
+            // The file itself, then the example. Running the file alone first gives the
+            // baseline to subtract, so an example may sit in a program that prints.
+            let mut prog = src.clone();
+            prog.push('\n');
+            for (i, line) in ex.code.iter().enumerate() {
+                if i + 1 == ex.code.len() && !ex.expect.is_empty() {
+                    prog.push_str(&format!("print({line})\n"));
+                } else {
+                    prog.push_str(line);
+                    prog.push('\n');
+                }
+            }
+            let where_ = format!("{rel}:{}", ex.line);
+
+            let mut rendered: Vec<(String, String)> = Vec::new();
+            for (engine, env) in [
+                ("tree-walker", vec![("HELIX_NOVM", "1")]),
+                ("vm", vec![("HELIX_NOJIT", "1")]),
+                ("jit", vec![]),
+            ] {
+                let (base_out, _, _) = run_source(&src, &env, &format!("docbase_{checked}"));
+                let (out, err, _) = run_source(&prog, &env, &format!("docex_{checked}"));
+                // What the EXAMPLE printed: whatever the file did not.
+                let got = out.strip_prefix(base_out.as_str()).unwrap_or(&out).trim_end();
+                let got = if got.is_empty() && !err.trim().is_empty() {
+                    // An example may document an error; compare its first line.
+                    err.trim().lines().next().unwrap_or("").to_string()
+                } else {
+                    got.to_string()
+                };
+                rendered.push((engine.to_string(), got));
+            }
+            // THE ORACLE FIRST: three engines must agree before the value means anything.
+            for w in rendered.windows(2) {
+                assert_eq!(
+                    w[0].1, w[1].1,
+                    "doc example at {where_} DIVERGES between {} and {}",
+                    w[0].0, w[1].0
+                );
+            }
+            if !ex.expect.is_empty() {
+                let want = ex.expect.join("\n");
+                assert_eq!(
+                    rendered[0].1.trim_end(),
+                    want.trim_end(),
+                    "doc example at {where_} no longer produces what it documents\n  \
+                     code: {}\n",
+                    ex.code.join(" ; ")
+                );
+            }
+            checked += 1;
+        }
+    }
+    // A verifier that silently checks nothing is the failure mode this project keeps
+    // finding, so refuse to pass while finding no examples at all.
+    assert!(
+        checked >= 3,
+        "found only {checked} doc examples — the extractor or the `##` convention is broken"
+    );
+}
