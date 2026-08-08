@@ -69,7 +69,8 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                         col += used;
                     }
                 } else {
-                    let (segs, used, newlines, end_col) = lex_string(&chars, i, line, col)?;
+                    let (segs, used, newlines, end_col) =
+                        lex_string(&chars, i, line, col, '"', false)?;
                     // Plain string if there are no `{expr}` interpolations.
                     let tok = if segs.iter().any(|s| matches!(s, StrSeg::Expr(..))) {
                         Tok::InterpStr(segs)
@@ -90,6 +91,35 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                     } else {
                         col += used;
                     }
+                }
+            }
+            // `'…'` is the same string as `"…"`, interpolation and all — an alternate
+            // delimiter so the other quote can appear inside without escaping, which is
+            // what kills the `\"` pile-up in a conditional inside a hole. `'''…'''` is the
+            // INTERPOLATING multi-line form; `"""…"""` above stays RAW, so the two triples
+            // divide the work rather than competing.
+            '\'' => {
+                let triple = i + 2 < n && chars[i + 1] == '\'' && chars[i + 2] == '\'';
+                let (segs, used, newlines, end_col) =
+                    lex_string(&chars, i, line, col, '\'', triple)?;
+                let tok = if segs.iter().any(|s| matches!(s, StrSeg::Expr(..))) {
+                    Tok::InterpStr(segs)
+                } else {
+                    let mut s = String::new();
+                    for seg in &segs {
+                        if let StrSeg::Lit(t) = seg {
+                            s.push_str(t);
+                        }
+                    }
+                    Tok::Str(s)
+                };
+                push!(tok, start_col);
+                i += used;
+                if newlines > 0 {
+                    line += newlines;
+                    col = end_col;
+                } else {
+                    col += used;
                 }
             }
             c if c.is_ascii_digit() => {
@@ -439,17 +469,36 @@ fn lex_raw_string(
     Ok((content, used, newlines, end_col))
 }
 
-/// Lex a `"..."` into segments, recognizing `{expr}` interpolations (`{{`/`}}`
-/// escape literal braces). Returns (segments, chars_consumed_incl_quotes,
+/// Lex an interpolating string into segments, recognizing `{expr}` interpolations
+/// (`{{`/`}}` escape literal braces). Returns (segments, chars_consumed_incl_quotes,
 /// newlines_inside, end_col).
+///
+/// `quote` is the delimiter — `"` or `'`, which behave IDENTICALLY, so that whichever one
+/// is not being used as the delimiter can appear inside without escaping. That is the whole
+/// point of having two: a conditional inside a hole reads
+/// `"-> {if ok then 'YES' else 'NO'}"` instead of drowning in `\"`.
+///
+/// `triple` selects the three-character delimiter (`'''…'''`), which additionally spans
+/// lines. Note the asymmetry with `"""…"""`, which is RAW and lexed by [`lex_raw_string`]:
+/// raw is the right default for a triple-quoted block holding CSS, JSON, regexes or
+/// Windows paths, so `"""` keeps it, and `'''` is the interpolating multi-line form. Two
+/// delimiters, two jobs, and neither had to change meaning.
 fn lex_string(
     chars: &[char],
     start: usize,
     line: usize,
     col: usize,
+    quote: char,
+    triple: bool,
 ) -> Result<(Vec<StrSeg>, usize, usize, usize), HelixError> {
     let n = chars.len();
-    let mut j = start + 1; // skip opening quote
+    let delim = if triple { 3 } else { 1 };
+    // True when `j` sits on a closing delimiter (all three characters, for a triple).
+    let closes = |chars: &[char], j: usize| -> bool {
+        chars[j] == quote
+            && (!triple || (j + 2 < chars.len() && chars[j + 1] == quote && chars[j + 2] == quote))
+    };
+    let mut j = start + delim; // skip opening quote(s)
     let mut newlines = 0;
     let mut end_col = col + 1;
     let mut segs: Vec<StrSeg> = Vec::new();
@@ -464,12 +513,14 @@ fn lex_string(
     while j < n {
         let c = chars[j];
         match c {
-            '"' => {
+            // A lone `'` inside a `'''` block is literal — only three in a row close it —
+            // so this guard, not a bare `quote` arm, is what makes the triple form work.
+            _ if closes(chars, j) => {
                 flush_lit!();
                 if segs.is_empty() {
                     segs.push(StrSeg::Lit(String::new()));
                 }
-                return Ok((segs, j - start + 1, newlines, end_col + 1));
+                return Ok((segs, j - start + delim, newlines, end_col + delim));
             }
             '\\' => {
                 j += 1;
@@ -482,7 +533,11 @@ fn lex_string(
                     't' => '\t',
                     'r' => '\r',
                     '\\' => '\\',
+                    // BOTH delimiters are escapable in EITHER kind of string. Escaping the
+                    // one you are not delimited by is redundant, not wrong, and accepting
+                    // it means `\"` keeps working in every string it works in today.
                     '"' => '"',
+                    '\'' => '\'',
                     '0' => '\0',
                     '{' => '{',
                     '}' => '}',
@@ -527,7 +582,10 @@ fn lex_string(
                 // `{x:.2f}`). `None` until/unless such a `:` is seen.
                 let mut spec: Option<String> = None;
                 let mut depth = 0i32;
-                let mut in_str = false;
+                // WHICH quote opened the nested string, not merely whether one is open:
+                // with two delimiters a `bool` would treat `'` as ordinary inside a hole,
+                // so `"{f('}')}"` would end the hole at the `}` inside the sub-string.
+                let mut in_str: Option<char> = None;
                 // Push a char into the spec buffer if we're past the `:`, else the expr.
                 macro_rules! push_char {
                     ($ch:expr) => {
@@ -553,6 +611,7 @@ fn lex_string(
                             'r' => '\r',
                             '\\' => '\\',
                             '"' => '"',
+                            '\'' => '\'',
                             '0' => '\0',
                             '{' => '{',
                             '}' => '}',
@@ -566,17 +625,21 @@ fn lex_string(
                                 .hint("supported escapes: \\n \\t \\r \\\\ \\\" \\0 \\{ \\} — strings are UTF-8, paste unicode directly; for literal backslashes use a raw \"\"\"...\"\"\" string."));
                             }
                         };
-                        if nx == '"' {
-                            in_str = !in_str;
+                        if nx == '"' || nx == '\'' {
+                            in_str = match in_str {
+                                None => Some(nx),
+                                Some(q) if q == nx => None,
+                                open => open,
+                            };
                         }
                         push_char!(un);
                         j += 2;
                         end_col += 2;
                         continue;
                     }
-                    if !in_str {
+                    if in_str.is_none() {
                         match e {
-                            '"' => in_str = true,
+                            '"' | '\'' => in_str = Some(e),
                             '(' | '[' | '{' => depth += 1,
                             ')' | ']' => depth -= 1,
                             '}' if depth == 0 => break,
@@ -593,8 +656,8 @@ fn lex_string(
                             }
                             _ => {}
                         }
-                    } else if e == '"' {
-                        in_str = false;
+                    } else if Some(e) == in_str {
+                        in_str = None;
                     }
                     push_char!(e);
                     if e == '\n' {
@@ -626,8 +689,11 @@ fn lex_string(
             }
         }
     }
+    // Name the delimiter the string actually opened with — reporting `"` for an
+    // unterminated `'…'` sends the reader hunting for the wrong character.
+    let d: String = std::iter::repeat_n(quote, delim).collect();
     Err(HelixError::new("unterminated string literal", line, col)
-        .hint("add a closing `\"` to end the string."))
+        .hint(format!("add a closing `{d}` to end the string.")))
 }
 
 /// Decide which newline tokens are real statement terminators and which are

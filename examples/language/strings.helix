@@ -1,6 +1,38 @@
 # String interpolation + the `??` missing-default operator.
 #   helix examples/strings.helix
 #
+## There are four string forms, and the only thing that varies is the DELIMITER and
+## whether interpolation happens. `'...'` and `"..."` are the same string:
+##
+##     >>> 'hi'
+##     hi
+##     >>> 'a' == "a"
+##     true
+##
+## Having both means the quote you are NOT delimited by needs no escaping. That matters
+## most inside an interpolation hole, which is where escaped quotes used to pile up:
+##
+##     >>> "-> {if true then 'YES' else 'NO'}"
+##     -> YES
+##     >>> 'he said "hi"'
+##     he said "hi"
+##
+## `'''...'''` spans lines AND interpolates — use it for a report or a banner:
+##
+##     >>> who = "Ada"
+##     >>> '''hello {who}'''
+##     hello Ada
+##
+## `"""..."""` also spans lines but is RAW: no interpolation, no `\` escapes. That is what
+## you want for CSS, JSON, regexes and Windows paths, which are full of braces and
+## backslashes that would otherwise need doubling:
+##
+##     >>> """{1 + 1}"""
+##     {1 + 1}
+##
+## So: pick the quote that avoids escaping, and pick the triple by whether you want the
+## braces interpreted or left alone.
+#
 # Any string interpolates `{expr}` (no `f` prefix). Use `{{` / `}}` for literal
 # braces. Embedded expressions are type-checked at compile time, like everything.
 

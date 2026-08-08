@@ -6661,6 +6661,89 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         }
     }
 
+    /// `'…'` is an alternate string delimiter, and `'''…'''` the interpolating multi-line
+    /// form — while `"""…"""` stays RAW.
+    ///
+    /// The point is not novelty, it is that the quote you are NOT delimited by needs no
+    /// escaping. A conditional inside a hole was the worst-reading construct in real Helix:
+    ///
+    ///     print("-> {if ok then \"YES\" else \"NO\"}")      # before
+    ///     print("-> {if ok then 'YES' else 'NO'}")         # after
+    ///
+    /// `'` was previously a lexer error ("unexpected character `'`"), so claiming it cannot
+    /// change the meaning of any existing program — which is why this arrives as a lexer
+    /// change with no parser or AST change at all: both forms produce the same `Tok::Str` /
+    /// `Tok::InterpStr`.
+    ///
+    /// The two triples divide the work rather than competing: `"""` is raw (CSS, JSON,
+    /// regexes, Windows paths go in verbatim) and `'''` interpolates. Nothing about `"`
+    /// or `"""` changes, which the second half of this test is here to hold.
+    #[test]
+    fn single_quoted_and_triple_single_quoted_strings() {
+        for (src, want) in [
+            // an ordinary string, identical to the double-quoted one
+            ("'hi'", "hi"),
+            ("''", ""),
+            ("'abc'.length()", "3"),
+            ("'a' == \"a\"", "true"),
+            // interpolation, format specs and brace escapes all behave the same
+            ("'{1 + 1}'", "2"),
+            ("'{3.14159:.2f}'", "3.14"),
+            ("'{{literal}}'", "{literal}"),
+            // THE MOTIVATING CASE: the other quote is literal inside, both ways round
+            ("'he said \"hi\"'", "he said \"hi\""),
+            ("\"it's fine\"", "it's fine"),
+            ("\"-> {if true then 'YES' else 'NO'}\"", "-> YES"),
+            ("'-> {if false then \"YES\" else \"NO\"}'", "-> NO"),
+            // both delimiters escapable in either kind of string
+            ("'a\\'b'", "a'b"),
+            ("'a\\\"b'", "a\"b"),
+            ("\"a\\'b\"", "a'b"),
+            // a `}` inside a NESTED string must not close the interpolation hole — this is
+            // what forced the hole scanner to track WHICH quote opened the nested string
+            // rather than merely whether one was open.
+            ("\"{'}'}\"", "}"),
+            ("'{\"}\"}'", "}"),
+            ("\"{'a}b'.length()}\"", "3"),
+            // ''' — interpolating, multi-line, and a lone quote inside is literal
+            ("'''a\nb'''", "a\nb"),
+            ("'''{1 + 1}'''", "2"),
+            ("''''''", ""),
+            ("'''it's fine'''", "it's fine"),
+            ("'''has \" and ' inside'''", "has \" and ' inside"),
+            // --- and NOTHING about the double-quoted forms moved -------------------
+            ("\"hi\"", "hi"),
+            ("\"{1 + 1}\"", "2"),
+            ("\"\"\"{1 + 1}\"\"\"", "{1 + 1}"), // """ is STILL RAW
+            ("\"\"\"a\nb\"\"\"", "a\nb"),
+            ("\"{{literal}}\"", "{literal}"),
+            ("\"{3.14159:.2f}\"", "3.14"),
+            // the old escaped spelling keeps working — this is the 467-site migration's
+            // safety net, since both spellings must coexist during it
+            ("\"{if true then \\\"Y\\\" else \\\"N\\\"}\"", "Y"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // The single-quoted forms reach the SAME diagnostics as the double-quoted ones.
+        // (That each one's HINT names its own delimiter is asserted in tests/cli.rs, where
+        // stderr is visible — these helpers return only the message.)
+        for (src, want) in [
+            ("'oops", "unterminated string literal"),
+            ("\"oops", "unterminated string literal"),
+            ("'''oops", "unterminated string literal"),
+            ("'\\q'", "unknown string escape `\\q`"),
+            ("'{}'", "empty `{}` interpolation"),
+            ("'{1 +}'", "unexpected"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.expect_err(&format!("`{src}` should error"));
+            assert!(msg.contains(want), "`{src}` said: {msg}");
+        }
+    }
+
     /// Unary `-` compiles into the i64 map/filter kernel, so the IDIOMATIC spelling stops
     /// losing to the clumsy one.
     ///

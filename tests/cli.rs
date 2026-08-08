@@ -2973,6 +2973,27 @@ fn thread_count_changes_cpu_not_results() {
     }
 }
 
+/// An unterminated string names the delimiter it actually opened with.
+///
+/// With three string forms (`"…"`, `'…'`, `'''…'''`) a fixed hint would send the reader
+/// hunting for the wrong character — the message is identical in all three cases, so the
+/// hint is the only thing that distinguishes them.
+#[test]
+fn unterminated_string_hints_name_their_own_delimiter() {
+    for (src, want) in [
+        ("print('oops)", "add a closing `'` to end the string."),
+        ("print(\"oops)", "add a closing `\"` to end the string."),
+        ("print('''oops)", "add a closing `'''` to end the string."),
+    ] {
+        let (_, err, code) = run_source(src, &[], "unterm");
+        assert_eq!(code, Some(1), "`{src}` should fail to lex");
+        assert!(
+            err.contains(want),
+            "`{src}` did not name its own delimiter.\nwanted: {want}\ngot: {err}"
+        );
+    }
+}
+
 /// One documented example, lifted out of a `##` doc comment.
 struct DocExample {
     line: usize,

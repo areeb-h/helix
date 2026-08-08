@@ -71,6 +71,10 @@ Rules, all of them checked by the verifier:
 
 - Examples run in file order and share nothing between blocks. State a block needs, it
   sets up itself.
+- Because an example runs **in its file's scope**, a setup binding must not collide with a
+  name the file already binds — bindings are immutable, so it fails with "`name` is
+  immutable and cannot be reassigned" rather than shadowing. The verifier catches this the
+  first time you run it; the fix is to pick another name.
 
 ## What belongs in which form
 
