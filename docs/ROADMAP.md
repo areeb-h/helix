@@ -2128,14 +2128,29 @@ with interleaved child-CPU timing, medians of 15–21, and stdout printed beside
       the clumsy one. `gen_value` had lowered `Neg` all along; only `value_eligible_cap`
       had never been taught it.
 
-- [ ] **Unary `-` is still missing from ~18 more analyses in jit.rs.** Of the 32 functions
+- [ ] **Unary `-` is still missing from ~16 more analyses in jit.rs.** Of the 32 functions
       there that match on `Expr::Binary`, **20 had no `Expr::Unary` arm**;
-      `value_eligible_cap` was one and is now fixed. The rest are recorded because the
-      sweep is the reusable part — the same "supported in a minority of paths" shape.
-      Notably `gen_value_typed`, `gen_cond` and `gen_cond_env` are CODEGEN functions, so
-      the mixed/float paths cannot simply be admitted: `[1.5].map(-it)` measured unchanged
-      at 0.44s and must stay declined until its codegen can emit the operator. Admitting a
-      shape codegen cannot emit is precisely how this area was reverted three times.
+      `value_eligible_cap` (`e30f9fe`), `infer_mixed_kind` + `gen_value_typed`, and
+      `f64_body_eligible` (`55830b6`) are now fixed — every MAP path compiles `-x`. The
+      rest are recorded because the sweep is the reusable part — the same "supported in a
+      minority of paths" shape. `gen_cond` and `gen_cond_env` remain CODEGEN functions
+      without the arm, so the reduce/tail-loop *condition* positions cannot simply be
+      admitted; admitting a shape codegen cannot emit is how this area was reverted three
+      times.
+
+      **A sabotage-record correction (2026-08-09), because `55830b6`'s commit message
+      understates its own test.** It reports two codegen mutations (`fneg` -> `0.0 - x`,
+      and the Int branch emitting `fneg`) as compiling and producing identical output —
+      "not counting them as caught". Both were MIS-ANCHORED: the mutation script matched a
+      bare `match k { ... fneg ... }` block and replaced the FIRST occurrence, which is
+      the byte-identical arm in `gen_value_env` (tail loops, ~line 5564), not the arm
+      under test in `gen_value_typed` (~6184). Re-anchored on the enclosing call line
+      (unique per function), all three mutations are CAUGHT — the `fsub` ones by the
+      kernel-scale signed-zero cases (`(0..100000).map(-to_float(it)).take(3)` diverges
+      vm-vs-jit at element 0), the Int-branch one by the build. Fourth malformed-mutation
+      instance this session; the standing rule stands: **when a mutation survives, first
+      prove the mutation is real — and when the same match text exists in two functions,
+      an anchor must include a line unique to its function.**
 
 - [ ] **`<` orders tuples but `sort`/`min`/`max` refuse them.** Verified 2026-08-09 on all
       three engines:
@@ -2154,25 +2169,30 @@ with interleaved child-CPU timing, medians of 15–21, and stdout printed beside
       already implements, so this is extending the reductions to it rather than inventing
       anything.
 
-- [ ] **`min`/`max` break ties differently depending on the array's REPRESENTATION.**
-      Verified 2026-08-08 on all three engines (so a semantics inconsistency, not an
-      oracle divergence):
+- [x] ~~**`min`/`max` break ties differently depending on the array's REPRESENTATION.**~~
+      — **FIXED** (2026-08-09). The packed float path now breaks ties with `total_cmp`,
+      exactly as the boxed path's `numeric_cmp` always has, so the same array gives the
+      same answer whatever its representation, `min`/`max` are permutation-invariant, and
+      `min() == sort().first()` / `max() == sort().last()` hold everywhere (absent
+      NaN/missing, which still yield `missing`). `[0.0, -0.0].min()` is now `-0.0` on
+      every spelling — the boxed/sort answer, which also matches Julia.
 
-          [0.0, -0.0].min()             ->  0.0
-          [0.0, -0.0][0:2].min()        -> -0.0      (the same array, sliced)
-          [0.0, -0.0].sort().first()    -> -0.0
-          [0.0, -0.0].reduce(inf, (a, b) => if a < b then a else b)  -> -0.0
+      What tipped this from "design call" to "defect": the choice was never really
+      between Python's answer and Julia's — the boxed path and `sort` had ALREADY chosen
+      `total_cmp`, so the only question was whether an array's internal representation
+      may be observable. It may not; the packed path was the outlier. Distinct non-zero
+      values order identically under `total_cmp` and IEEE `<`, so only signed-zero ties
+      moved; measured no cost at 20M elements (0.09s -> 0.10s, within noise). A sweep of
+      the neighbouring stats (median/quantile/spread/mean/sum) found NO other
+      representation split. Pinned by
+      `min_and_max_do_not_depend_on_the_arrays_representation`; sabotage: the IEEE revert
+      and a min/max swap are caught, and a last-wins-on-bit-identical-ties control
+      correctly survives.
 
-      The packed path compares with IEEE `<` (where `-0.0 < 0.0` is FALSE, so the first
-      element wins) and the boxed path with `numeric_cmp`/`total_cmp` (where it is TRUE).
-      Consequently `min` is **not permutation-invariant**: `[0.0, -0.0].min()` is `0.0`
-      and `[-0.0, 0.0].min()` is `-0.0`; same for `max`. Only display observes it —
-      `-0.0 == 0.0` is true, and `1.0 / 0.0` raises here rather than yielding a signed
-      infinity — but three spellings of one question giving two answers is the nine-defect
-      shape again. **Which answer is right is a DESIGN CALL**: Python and NumPy return the
-      first element, Julia returns `-0.0`; Helix's own `sort` already uses `total_cmp`, so
-      matching it would make min/max/sort mutually consistent. Recorded rather than
-      changed, because it alters a numeric reduction.
+      Still true and still open (pre-existing, unchanged by this): `argmin`/`argmax`
+      desugar through `<` on values, so `xs[xs.argmin()]` can disagree with `xs.min()` on
+      a signed-zero tie (`[0.0, -0.0]`: argmin 0, min -0.0 at index 1). Same family as
+      the tuple-reduce entry above.
 
 - [ ] **`min_by`/`max_by` with a DESTRUCTURING key return a rebuilt tuple, not the
       element.** Verified 2026-08-08, all three engines agree:

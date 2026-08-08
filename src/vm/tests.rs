@@ -6661,6 +6661,64 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         }
     }
 
+    /// `min`/`max` give the same answer whatever the array's REPRESENTATION — the packed
+    /// float path now breaks ties with `total_cmp`, exactly as the boxed path always has.
+    ///
+    /// Before this, the same array answered differently depending on an optimization
+    /// detail the user cannot see:
+    ///
+    ///     [0.0, -0.0].min()          ->  0.0    (packed: IEEE tie, first element won)
+    ///     [0.0, -0.0][0:2].min()     -> -0.0    (boxed: total_cmp, zeros are ordered)
+    ///     [0.0, -0.0].sort().first() -> -0.0
+    ///
+    /// and packed `min` was not even permutation-invariant. Under `total_cmp` the signed
+    /// zeros are ORDERED (`-0.0 < 0.0`), which restores two invariants this test pins:
+    /// the answer is independent of element order, and `min() == sort().first()` /
+    /// `max() == sort().last()` hold on every representation. Distinct non-zero values
+    /// order identically under `total_cmp` and IEEE `<`, so nothing else moves — and a
+    /// NaN never reaches the comparison (the caller defers NaN arrays to the general
+    /// path, which yields `missing` under ADR 0001).
+    #[test]
+    fn min_and_max_do_not_depend_on_the_arrays_representation() {
+        for (src, want) in [
+            // both orders, both verbs, packed
+            ("[0.0, -0.0].min()", "-0.0"),
+            ("[-0.0, 0.0].min()", "-0.0"),
+            ("[0.0, -0.0].max()", "0.0"),
+            ("[-0.0, 0.0].max()", "0.0"),
+            // boxed (sliced) — the spelling that already gave these answers
+            ("[0.0, -0.0][0:2].min()", "-0.0"),
+            ("[-0.0, 0.0][0:2].max()", "0.0"),
+            // the sort invariants
+            ("[0.0, -0.0].min() == [0.0, -0.0].sort().first()", "true"),
+            ("[-0.0, 0.0].max() == [-0.0, 0.0].sort().last()", "true"),
+            // a packed column built by map, zeros produced by arithmetic (not literals)
+            ("(0..2).map(if it == 0 then 1.0 * 0.0 else -1.0 * 0.0).min()", "-0.0"),
+            ("(0..2).map(if it == 0 then -1.0 * 0.0 else 1.0 * 0.0).max()", "0.0"),
+            // nothing else moves: ordinary floats, negatives, infinities, singletons
+            ("[3.5, 1.5, 2.5].min()", "1.5"),
+            ("[-1.5, -2.5].min()", "-2.5"),
+            ("[inf, 1.0].max()", "inf"),
+            ("[-inf, 1.0].min()", "-inf"),
+            ("[0.0].min()", "0.0"),
+            ("[-0.0].max()", "-0.0"),
+            // NaN and missing still yield missing; ints and ranges untouched
+            ("[1.5, inf - inf].min()", "missing"),
+            ("[1.5, missing].max()", "missing"),
+            ("[3, 1, 2].min()", "1"),
+            ("[9007199254740993, 9007199254740992].max()", "9007199254740993"),
+            ("range(10, 0, -2).max()", "10"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // The empty-array error is untouched.
+        let (tw, vm) = (run_tw("[].min()"), run_vm("[].min()"));
+        assert_eq!(tw, vm);
+        assert!(vm.expect_err("empty").contains("empty"), "empty-array error changed");
+    }
+
     /// `'…'` is an alternate string delimiter, and `'''…'''` the interpolating multi-line
     /// form — while `"""…"""` stays RAW.
     ///

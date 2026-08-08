@@ -922,9 +922,28 @@ fn array_float_reduce(xs: &[f64], name: &str, line: usize, col: usize) -> Result
             if xs.is_empty() {
                 empty_guard(&Vec::<f64>::new(), name, line, col)?;
             }
+            // `total_cmp`, NOT IEEE `<`/`>` — the same comparison the boxed path's
+            // `numeric_cmp` makes for floats. Under IEEE, `-0.0` and `0.0` compare EQUAL,
+            // so a first-wins scan returns whichever zero came first and the SAME array
+            // answered differently depending on its representation:
+            //
+            //     [0.0, -0.0].min()          was  0.0   (packed: IEEE tie, first wins)
+            //     [0.0, -0.0][0:2].min()          -0.0  (boxed: total_cmp, no tie)
+            //     [0.0, -0.0].sort().first()      -0.0
+            //
+            // — and packed `min` was not even permutation-invariant ([-0.0, 0.0].min()
+            // was -0.0). Under `total_cmp` the zeros are ORDERED (-0.0 < 0.0), so min is
+            // -0.0 and max is 0.0 regardless of order and of representation, and
+            // `min() == sort().first()` / `max() == sort().last()` hold everywhere. For
+            // every pair of distinct non-zero values `total_cmp` agrees with IEEE `<`, so
+            // nothing else moves. A NaN never reaches here — the caller defers any
+            // NaN-containing array to the general path, which yields `missing` (ADR 0001).
             let mut best = xs[0];
             for &x in &xs[1..] {
-                if (name == "min" && x < best) || (name == "max" && x > best) {
+                let ord = x.total_cmp(&best);
+                if (name == "min" && ord == std::cmp::Ordering::Less)
+                    || (name == "max" && ord == std::cmp::Ordering::Greater)
+                {
                     best = x;
                 }
             }
