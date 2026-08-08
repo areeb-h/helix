@@ -616,6 +616,33 @@ fn array_numeric_fast(
             )
         }));
     }
+    // The same re-slice for a PACKED numeric array. The lazy-`Range` arm above was added
+    // when `range(100000000).take(1)` was found materializing ~1.6 GB to keep one element —
+    // but a range that has been through a `map` is `Ints`/`Floats`, not `Range`, and that
+    // spelling kept boxing the whole source: `(0..20_000_000).map(it * 2).take(3)` cost
+    // 503 MB against 190 MB for the array alone, i.e. 320 MB of `Vec<Value>` to keep three
+    // numbers. One defect, fixed for one representation and not its neighbour.
+    //
+    // Counts are clamped exactly as the arm above and the general path do (negative → 0,
+    // over-take/-drop → the length), and a non-`Int` count defers so the general path's
+    // errors stay identical.
+    if let ("take" | "drop", [Value::Int(n)]) = (name, args) {
+        let slice_ints = |v: &Vec<i64>| -> Value {
+            let k = (*n).max(0).min(v.len() as i64) as usize;
+            let part = if name == "take" { &v[..k] } else { &v[k..] };
+            Value::int_array(part.to_vec())
+        };
+        let slice_floats = |v: &Vec<f64>| -> Value {
+            let k = (*n).max(0).min(v.len() as i64) as usize;
+            let part = if name == "take" { &v[..k] } else { &v[k..] };
+            Value::float_array(part.to_vec())
+        };
+        match ad {
+            ArrayData::Ints(v) => return Ok(Some(slice_ints(v))),
+            ArrayData::Floats(v) => return Ok(Some(slice_floats(v))),
+            _ => {}
+        }
+    }
     if !args.is_empty() {
         return Ok(None);
     }

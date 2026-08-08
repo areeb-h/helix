@@ -6487,3 +6487,63 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             assert_eq!(vm, Ok(want.to_string()), "`{src}`");
         }
     }
+
+    /// `take`/`drop` re-slice a PACKED numeric array instead of boxing the whole source.
+    ///
+    /// A lazy `Range` already had this — added when `range(100000000).take(1)` was found
+    /// materializing ~1.6 GB to keep one element. But a range that has been through a `map`
+    /// is `Ints`, not `Range`, and that spelling kept boxing:
+    ///
+    ///     xs = (0..20000000).map(it * 2)
+    ///     xs.take(3).sum()      503 MB  ->  190 MB
+    ///     xs[0]                 190 MB              (the array alone, for scale)
+    ///
+    /// 320 MB of `Vec<Value>` to keep three numbers. One defect, fixed for one
+    /// representation and not its neighbour — the same shape as `clamp` (array vs scalar),
+    /// `dot` (vs `sum`/`cumsum`), and duplicate fields (literal vs update).
+    #[test]
+    fn take_and_drop_reslice_a_packed_array_without_boxing_it() {
+        for (src, want) in [
+            // Int arrays, including both clamps
+            ("[1, 2, 3, 4, 5].take(0)", "[]"),
+            ("[1, 2, 3, 4, 5].take(2)", "[1, 2]"),
+            ("[1, 2, 3, 4, 5].take(5)", "[1, 2, 3, 4, 5]"),
+            ("[1, 2, 3, 4, 5].take(99)", "[1, 2, 3, 4, 5]"),
+            ("[1, 2, 3, 4, 5].take(-1)", "[]"),
+            ("[1, 2, 3, 4, 5].drop(0)", "[1, 2, 3, 4, 5]"),
+            ("[1, 2, 3, 4, 5].drop(2)", "[3, 4, 5]"),
+            ("[1, 2, 3, 4, 5].drop(5)", "[]"),
+            ("[1, 2, 3, 4, 5].drop(99)", "[]"),
+            ("[1, 2, 3, 4, 5].drop(-1)", "[1, 2, 3, 4, 5]"),
+            // Floats take the same path
+            ("[1.5, 2.5, 3.5].take(2)", "[1.5, 2.5]"),
+            ("[1.5, 2.5, 3.5].drop(2)", "[3.5]"),
+            // heterogeneous arrays are NOT packed and must keep the general path
+            ("[1, \"a\", true].take(2)", "[1, \"a\"]"),
+            ("[1, \"a\", true].drop(2)", "[true]"),
+            // empty, and the lazy-range arm that already existed
+            ("[].take(3)", "[]"),
+            ("[].drop(3)", "[]"),
+            ("(0..5).take(2)", "[0, 1]"),
+            ("(0..5).drop(2)", "[2, 3, 4]"),
+            ("range(0, 20, 3).take(2)", "[0, 3]"),
+            // the result must still be PACKED, or the numeric verbs lose their fast path
+            ("[1, 2, 3, 4, 5].take(2).sum()", "3"),
+            ("[1, 2, 3, 4, 5].drop(2).mean()", "4.0"),
+            ("[1.5, 2.5, 3.5].take(2).sum()", "4.0"),
+            // chained
+            ("[1, 2, 3, 4, 5].drop(1).take(2)", "[2, 3]"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // A non-Int count defers to the general path so its errors are unchanged.
+        for src in ["[1, 2].take(1.5)", "[1, 2].drop(1.5)", "[1, 2].take(\"x\")"] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert!(vm.is_err(), "`{src}` should error");
+        }
+        // `missing` propagates rather than erroring (ADR 0001), as before.
+        assert_eq!(run_vm("[1, 2].take(missing)"), run_tw("[1, 2].take(missing)"));
+    }
