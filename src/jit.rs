@@ -3168,6 +3168,17 @@ fn value_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>
                 && value_eligible_cap(left, eligible, locals, caps)
                 && value_eligible_cap(right, eligible, locals, caps)
         }
+        // Unary negation, admitted for exactly the reason `value_eligible` (the
+        // capture-free twin) already admits it: `gen_value`'s `Neg` arm lowers it to
+        // `ineg`, which wraps precisely like the interpreter's `wrapping_neg`. Nothing in
+        // codegen changes — this gate was simply the only one of the pair that had not
+        // been taught the operator.
+        //
+        // Its absence made the IDIOMATIC spelling lose to the clumsy one, which is the
+        // defect signature this project hunts. At 8M elements, bit-identical results:
+        //     xs.map(-it)        0.43s   vs   xs.map(0 - it)      0.05s
+        //     xs.map(-(it + 1))  0.48s   vs   xs.map((0 - it) - 1) 0.06s
+        Expr::Unary { op: UnOp::Neg, expr, .. } => value_eligible_cap(expr, eligible, locals, caps),
         Expr::Call { name, args, .. } => {
             eligible.contains(name.as_str())
                 && jit_builtin_arity_ok(name, args.len())

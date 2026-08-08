@@ -6661,6 +6661,114 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         }
     }
 
+    /// Unary `-` compiles into the i64 map/filter kernel, so the IDIOMATIC spelling stops
+    /// losing to the clumsy one.
+    ///
+    ///     xs.map(-it)         0.45s  ->  0.04s      xs.map(0 - it)       0.04s
+    ///     xs.filter(-it > -5) 0.47s  ->  0.03s      xs.filter(0 - it > -5) 0.02s
+    ///
+    /// at 8M elements, bit-identical results — an 11-16x gap between two spellings of one
+    /// operation, where `-it` is the one anybody would actually write.
+    ///
+    /// `gen_value` already lowered `Neg` (`ineg`, which wraps exactly like the
+    /// interpreter's `wrapping_neg`); only `value_eligible_cap` had never been taught the
+    /// operator, so the body was rejected before codegen ever saw it. `filter` is fixed by
+    /// the same one arm because `cond_eligible_cap` delegates its comparison operands here.
+    ///
+    /// FLOAT arrays deliberately still decline: that is the mixed kernel, whose codegen
+    /// (`gen_value_typed`) has no `Neg` arm, and admitting a shape that codegen cannot emit
+    /// is how this area got reverted three times before. `[1.5].map(-it)` is covered below
+    /// to prove it stays CORRECT while staying interpreted.
+    #[test]
+    fn unary_minus_compiles_into_the_i64_map_and_filter_kernels() {
+        // ENGAGEMENT FIRST — three engines agreeing proves nothing if the JIT declined and
+        // the VM answered for it. Removing the `value_eligible_cap` arm must fail HERE.
+        crate::jit::reset_native_call_count();
+        assert_eq!(
+            run_vm_jit("(0..100000).map(-it).sum()").unwrap(),
+            "-4999950000"
+        );
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "`map(-it)` did not engage the JIT — the kernel declined and the VM answered"
+        );
+        crate::jit::reset_native_call_count();
+        assert_eq!(
+            run_vm_jit("(0..100000).filter(-it > -10).length()").unwrap(),
+            "10"
+        );
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "`filter(-it > ..)` did not engage the JIT"
+        );
+
+        for (src, want) in [
+            // the newly-compiling shapes
+            ("[1, 2, 3].map(-it)", "[-1, -2, -3]"),
+            ("[1, 2, 3].map(-(it + 1))", "[-2, -3, -4]"),
+            ("[1, 2, 3].map(-it * 3)", "[-3, -6, -9]"),
+            ("[1, 2, 3].map(- -it)", "[1, 2, 3]"),
+            ("(0..5).map(-it)", "[0, -1, -2, -3, -4]"),
+            ("[1, 2, 3].filter(-it > -3)", "[1, 2]"),
+            ("(0..10).filter(-it >= -4)", "[0, 1, 2, 3, 4]"),
+            // `ineg` WRAPS, exactly as the interpreter's `wrapping_neg` does. This is the
+            // case that would expose any disagreement between the two, and it is the only
+            // i64 for which negation is not an involution.
+            (
+                "[-9223372036854775808].map(-it)",
+                "[-9223372036854775808]",
+            ),
+            (
+                "[-9223372036854775808, 0, 9223372036854775807].map(-it)",
+                "[-9223372036854775808, 0, -9223372036854775807]",
+            ),
+            ("[9223372036854775807].map(-it)", "[-9223372036854775807]"),
+            // negation composed with the operators that carry their own guards; `%` and
+            // `//` are EUCLIDEAN here, so the sign of the left operand is observable
+            ("[7, 8].map(-it % 3)", "[2, 1]"),
+            ("[7, 8].map(-(it % 3))", "[-1, -2]"),
+            ("[7, 8].map(-it // 3)", "[-3, -3]"),
+            ("[7, 8].map(-it >> 1)", "[-4, -4]"),
+            ("[7, 8].map(-it & 3)", "[1, 0]"),
+            ("[-7, -8].map(-it % 3)", "[1, 2]"),
+            // captures ride as `caps[i]`, including an i64::MIN one
+            ("k = 5\n[1, 2].map(-it + k)", "[4, 3]"),
+            ("k = 5\n[1, 2].map(-k + it)", "[-4, -3]"),
+            (
+                "k = -9223372036854775808\n[1, 2].map(-k)",
+                "[-9223372036854775808, -9223372036854775808]",
+            ),
+            ("k = 3\n[1, 2, 3, 4].filter(-it > -k)", "[1, 2]"),
+            // nested positions
+            ("[1, 2].map(if it > 1 then -it else it)", "[1, -2]"),
+            ("[5, 6].map(-abs(it))", "[-5, -6]"),
+            ("[5, 6].map(abs(-it))", "[5, 6]"),
+            // FLOAT arrays keep the interpreter (the mixed kernel declines) — still correct
+            ("[1.5, 2.5].map(-it)", "[-1.5, -2.5]"),
+            ("[0.0, -0.0].map(-it)", "[-0.0, 0.0]"),
+            ("[inf, -inf].map(-it)", "[-inf, inf]"),
+            ("[inf - inf].map(-it)", "[NaN]"),
+            // a `missing` or non-numeric element declines and behaves exactly as before
+            ("[1, missing, 3].map(-it)", "[-1, missing, -3]"),
+            ("[missing].map(-it)", "[missing]"),
+            // reduce/scan bodies use a different analysis and are untouched
+            ("[1, 2, 3].reduce(0, (a, b) => a + -b)", "-6"),
+            ("[1, 2, 3].scan(0, (a, b) => a + -b)", "[-1, -3, -6]"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tw vs vm disagree on `{src}`");
+            assert_eq!(vm, jit, "vm vs jit disagree on `{src}`");
+            assert_eq!(jit, Ok(want.to_string()), "`{src}`");
+        }
+        // Negating a non-numeric still raises, with the same text on every engine.
+        for src in ["[1, \"a\"].map(-it)", "[true].map(-it)"] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tw vs vm disagree on `{src}`");
+            assert_eq!(vm, jit, "vm vs jit disagree on `{src}`");
+            assert!(jit.is_err(), "`{src}` should error");
+        }
+    }
+
     /// A malformed comprehension is rejected even when the receiver is `missing`.
     ///
     /// This was a three-engine VALUE divergence, and the worst kind: it escaped through
