@@ -1601,9 +1601,14 @@ motivates this phase.
       is: the caller's binding holds one reference and the evaluated receiver on the stack
       holds another. See the liveness item below.
 
-- [ ] **`dot` SILENTLY LOSES PRECISION ON INTEGER ARRAYS — a wrong answer, not a style
-      choice.** Found by the standing method (a program against its own equivalent
-      spelling). At n = 1,000,000:
+- [x] ~~**`dot` SILENTLY LOSES PRECISION ON INTEGER ARRAYS**~~ — **FIXED** (`736fe10`).
+      `dot` now accumulates in `i128` with `checked_mul`/`checked_add` and returns an `Int`
+      when it fits, so `xs.dot(xs)` is `333332833333500000` and `[1,2,3].dot([4,5,6])` is
+      `32`, matching every equivalent spelling and every sibling reduction. The record of
+      the defect is kept below because the METHOD that found it is the reusable part.
+
+      A wrong answer, not a style choice. Found by the standing method (a program against
+      its own equivalent spelling). At n = 1,000,000:
 
       | spelling | result |
       | --- | --- |
@@ -1618,18 +1623,61 @@ motivates this phase.
       so it starts losing integers above 2^53 while the two equivalent spellings stay
       exact (`sum` promotes to `i128`).
 
-      The fix is an `Int` fast path summing in `i128` exactly as `sum` does. It is a
-      USER-VISIBLE type change for integer inputs (`32.0` → `32`), which is why it is
-      recorded here rather than slipped in: it wants its own commit, a decision recorded
+      The fix was an `Int` fast path summing in `i128` exactly as `sum` does. It is a
+      USER-VISIBLE type change for integer inputs (`32.0` → `32`), which is why it was
+      recorded here rather than slipped in: it got its own commit, a decision recorded
       against `docs/integer-semantics.md`, and a check of whether any corpus program or
-      example depends on the `Float`.
+      example depended on the `Float`.
 
-- [ ] **`argmax`/`argmin` are ~7.7x slower than `index_of(max())`** at n=1M (0.13s against
-      0.02s) for the same answer — the idiomatic spelling losing to the manual one, which
+- [x] **Peak-RSS sweep over 26 array operations — six defects, one shape (2026-08-08).**
+      The instrument matters as much as the result: peak RSS reproduces to ~0.05% where
+      wall clock was swinging 5× on this box under an unrelated dev server, so
+      memory-shaped defects stayed measurable when timing ones did not. Baselines: a
+      20M-element packed `Ints` array is 160 MB, and `xs[0]` reads 185 MB total.
+
+      | op | before | after | |
+      | --- | --- | --- | --- |
+      | `contains(4)` | 491 MB | 186 MB | `6315b83` |
+      | `index_of(4)` | 491 MB | 185 MB | `6315b83` |
+      | `reverse().first()` | 797 MB | 340 MB | `867462c` |
+      | `sort().first()` | 799 MB | 340 MB | `867462c` |
+      | `cumsum().last()` | 645 MB | 340 MB | `d1b7da6` |
+      | `[xs].flatten()` | 797 MB | 339 MB | `d1b7da6` |
+      | `range(100000000).reverse().first()` | 3071 MB / 9.00s | 15 MB / 0.00s | `867462c` |
+      | `range(100000000).sort().first()` | 3071 MB / 3.00s | 15 MB / 0.00s | `867462c` |
+
+      Every one was the SAME SHAPE: one operation with two spellings, only one of them
+      fixed. `contains`/`index_of` boxed 306 MB to answer a scalar while their closure
+      neighbours `any`/`position` already streamed; `sort`/`reverse` returned through
+      `Value::array` where `array_sniff` sat beside it and re-packs. Counting `clamp`
+      (array vs scalar builtin), `dot` (vs `sum`/`cumsum`), duplicate record fields
+      (literal vs update) and `take`/`drop` (packed vs lazy `Range`), that is nine
+      instances, so it is now the primary SEARCH HEURISTIC rather than an observation:
+      list the pairs of spellings for one operation and check the neglected one.
+
+      What stayed flat stayed flat for a reason — `take`, `position`, `any` and indexing
+      were already optimal, and `concat`/`drop` sit at 339 MB because a 20M-element packed
+      RESULT genuinely costs 160 MB on top of the source under eager semantics.
+
+      Two findings came from sabotage rather than from writing the code: a `checked_neg`
+      guard I added for `step == i64::MIN` was DECORATION (`-2^63 == 2^63 (mod 2^64)`, so
+      the wrapping version cannot produce a different answer) and was removed; and the
+      test case for it was too weak to notice, because the range I first used had one
+      element, where the step is never applied.
+
+- [ ] **`argmax`/`argmin` are ~12x slower than `index_of(max())`** at n=1M (0.120s against
+      0.010s) for the same answer — the idiomatic spelling losing to the manual one, which
       is the exact defect signature this project hunts. They desugar through
       `enumerate` + `reduce` over tuples, which no kernel compiles. Same root cause as the
       15x gap measured for `xs.enumerate().filter(...)` against a plain `filter`: a lazy
       `Enumerate` still hands the body a TUPLE, and tuples are not packed.
+
+      **This gap WIDENED from 7.7x to 12x on 2026-08-08, and the cause was my own work**:
+      packing `index_of` (`6315b83`) took the manual spelling from 0.02s to 0.010s and its
+      memory from 56 MB to 40 MB, while `argmax` did not move. Recorded rather than quietly
+      restated, because it is the honest shape of the result — optimizing one spelling of
+      an operation widens its distance from the other unless both are done, which is the
+      same lesson the sweep above kept teaching from the other direction.
 
 - [ ] **LAST-USE LIVENESS — the prerequisite for `while`/`for` syntax and for an O(1)
       append.** Today the final read of a binding clones its `Rc`, so an accumulator is
@@ -2006,15 +2054,26 @@ with interleaved child-CPU timing, medians of 15–21, and stdout printed beside
       standard data-cleaning step (`to_int`, `floor` to an index, `sign` of a delta).
 
 - [ ] **`zip` materializes one `Rc`-boxed 2-tuple per element — 132 bytes and 15× CPU.**
-      `a.zip(a).length()` on 5M packed ints costs 0.228s and 645 MB to produce a length.
-      `zip`/`zipmap` is the ONLY spelling Helix offers for an elementwise two-argument
-      function that broadcast cannot express.
+      `a.zip(a).length()` on 5M packed ints costs 0.20s and 631 MB to produce a length
+      (re-measured 2026-08-08; was 0.228s / 645 MB). `zip`/`zipmap` is the ONLY spelling
+      Helix offers for an elementwise two-argument function that broadcast cannot express.
 
-- [ ] **`take(k)`/`drop(k)` box the ENTIRE source** (16 B per source element) to keep k.
-      Idiomatic head/tail on a large array. Same root cause family as `zip`.
+      Sharpened by the sweep below: **`enumerate` is lazy and `zip` is not**, though both
+      exist only to pair elements into tuples — `a.enumerate().length()` on the same input
+      is **15 MB** against `zip`'s 631 MB. `ArrayData::Enumerate { inner }` is already the
+      precedent, so the fix is a symmetric `Zip { a, b }` variant rather than a fast path;
+      that is a representation change touching `get`/`len`/`to_values` and all three
+      engines, so it is sized as a feature, not a patch.
 
-- [ ] **`min_by`/`max_by`: ~200 ns and ~92 bytes per element** — 1.0s and 531 MB where
-      `min()` is 0.021s and 69 MB. Flat overhead, so invisible below ~100k rows.
+- [x] ~~**`take(k)`/`drop(k)` box the ENTIRE source**~~ — **FIXED** (`8c9319b`). Re-slices
+      the packed buffer: `(0..20000000).map(it * 2).take(3).sum()` went 503 MB → 190 MB.
+      A lazy `Range` already had this path; a range that has been through `map` is `Ints`,
+      and that spelling kept boxing.
+
+- [ ] **`min_by`/`max_by`: ~200 ns and ~92 bytes per element** — 1.02s and 532 MB where
+      `min()` is 0.021s and 69 MB (re-measured 2026-08-08, unchanged). Flat overhead, so
+      invisible below ~100k rows. Same shape as `contains`/`index_of` below but inverted:
+      there the closure spelling was the fast one, here it is the slow one.
 
 - [ ] **`sort_by(key)` is 4.2× `sort()`, and the descending idiom `sort_by(-it)` is 5.5×
       `sort().reverse()`** for a bit-identical result. Descending is the most common
