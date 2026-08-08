@@ -6660,3 +6660,149 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             assert!(msg.contains(want), "`{src}` said: {msg}");
         }
     }
+
+    /// `sort`/`reverse` keep a packed array packed, and reversing a range stays lazy.
+    ///
+    ///     xs = (0..20000000).map(it * 2)
+    ///     xs.sort().first()             796 MB  ->  338 MB
+    ///     xs.reverse().first()          796 MB  ->  338 MB
+    ///     range(100000000).reverse().first()   3071 MB  ->  15 MB
+    ///
+    /// The cost used to be paid twice: a `Vec<Value>` of the whole source to do the work,
+    /// and a result returned through `Value::array` (which, unlike `Value::array_sniff`,
+    /// does not re-pack) that silently stripped the fast path from everything downstream.
+    ///
+    /// So the cases that matter most here are not the orderings — they are the ones that
+    /// keep USING the result, because the change is really "this now comes back packed
+    /// where it came back boxed", and any behaviour that observes representation would
+    /// break there.
+    #[test]
+    fn sort_and_reverse_keep_a_packed_array_packed() {
+        for (src, want) in [
+            // ordering, Ints
+            ("[3, 1, 2].sort()", "[1, 2, 3]"),
+            ("[3, 1, 2].reverse()", "[2, 1, 3]"),
+            ("[2, 2, 1].sort()", "[1, 2, 2]"),
+            ("[-5, 3, -1, 0].sort()", "[-5, -1, 0, 3]"),
+            ("[].sort()", "[]"),
+            ("[].reverse()", "[]"),
+            (
+                "[-9223372036854775808, 9223372036854775807, 0].sort()",
+                "[-9223372036854775808, 0, 9223372036854775807]",
+            ),
+            // `numeric_cmp` compares two Ints as i64 on purpose: widening to f64 would
+            // collapse these three distinct values into one and lose the order.
+            (
+                "[9007199254740993, 9007199254740992, 9007199254740994].sort()",
+                "[9007199254740992, 9007199254740993, 9007199254740994]",
+            ),
+            // ordering, Floats — `total_cmp`, so signed zeros keep a deterministic
+            // position (`-0.0` before `0.0`) rather than comparing equal.
+            ("[3.5, 1.5, 2.5].sort()", "[1.5, 2.5, 3.5]"),
+            ("[0.0, -0.0].sort()", "[-0.0, 0.0]"),
+            ("[-0.0, 0.0].sort()", "[-0.0, 0.0]"),
+            ("[1.0, -0.0, 0.0, -1.0].sort()", "[-1.0, -0.0, 0.0, 1.0]"),
+            ("[1.0, inf, -inf].sort()", "[-inf, 1.0, inf]"),
+            // A NaN never aborts the sort (a non-total comparator would make Rust panic).
+            // Note it lands FIRST here, not after `+inf`: `inf - inf` has its sign bit
+            // set, and `total_cmp` orders by that bit. See `numeric_cmp`.
+            ("[1.0, inf - inf, -inf, 2.0].sort()", "[NaN, -inf, 1.0, 2.0]"),
+            ("[1.0, -(inf - inf), -inf, 2.0].sort()", "[-inf, 1.0, 2.0, NaN]"),
+            ("[1.5, 2.5].reverse().reverse()", "[1.5, 2.5]"),
+            // lazy Range — reversing one is another range, so this stays O(1)
+            ("(0..5).sort()", "[0, 1, 2, 3, 4]"),
+            ("(0..5).reverse()", "[4, 3, 2, 1, 0]"),
+            ("(0..0).reverse()", "[]"),
+            ("(0..0).sort()", "[]"),
+            ("range(5, 0, -1).sort()", "[1, 2, 3, 4, 5]"),
+            ("range(5, 0, -1).sort().first()", "1"),
+            ("range(5, 0, -1).sort().sum()", "15"),
+            ("(0..1).reverse()", "[0]"),
+            ("range(0, 20, 3).reverse()", "[18, 15, 12, 9, 6, 3, 0]"),
+            ("range(10, 0, -2).reverse()", "[2, 4, 6, 8, 10]"),
+            ("range(10, 0, -2).sort()", "[2, 4, 6, 8, 10]"),
+            ("range(0, 20, 3).reverse().reverse()", "[0, 3, 6, 9, 12, 15, 18]"),
+            // ...and the reversed range still answers every verb a range answers
+            ("range(0, 20, 3).reverse().first()", "18"),
+            ("range(0, 20, 3).reverse().last()", "0"),
+            ("range(0, 20, 3).reverse().length()", "7"),
+            ("range(0, 20, 3).reverse().sum()", "63"),
+            ("(0..5).reverse().take(2)", "[4, 3]"),
+            ("(0..5).reverse().drop(3)", "[1, 0]"),
+            ("(0..5).reverse().index_of(3)", "1"),
+            ("(0..5).reverse().enumerate().first()", "(0, 4)"),
+            // A step of `i64::MIN` cannot be negated, so that case materializes instead
+            // of wrapping to a bogus step. This range really does have two elements, and
+            // that matters: a one-element version passes even with a wrapping negation
+            // because the step is never applied. Sabotaging `checked_neg` into
+            // `wrapping_neg` survived the weaker case, which is how the gap was found.
+            (
+                "range(9223372036854775807, -9223372036854775808, -9223372036854775808)",
+                "[9223372036854775807, -1]",
+            ),
+            (
+                "range(9223372036854775807, -9223372036854775808, -9223372036854775808).reverse()",
+                "[-1, 9223372036854775807]",
+            ),
+            (
+                "range(9223372036854775807, -9223372036854775808, -9223372036854775808).reverse().sum()",
+                "9223372036854775806",
+            ),
+            (
+                "range(0, -9223372036854775808, -9223372036854775808).reverse()",
+                "[0]",
+            ),
+            // `Values` and `Enumerate` defer to the general path, unchanged
+            ("[3, 1].enumerate().reverse()", "[(1, 1), (0, 3)]"),
+            ("[1, \"a\"].reverse()", "[\"a\", 1]"),
+            ("[\"b\", \"a\"].sort()", "[\"a\", \"b\"]"),
+            ("[1, 2.5].sort()", "[1, 2.5]"),
+            // --- the result is now PACKED: nothing may observe that ------------------
+            ("[3, 1, 2].sort() == [1, 2, 3]", "true"),
+            ("[[3, 1].sort()] == [[1, 3]]", "true"),
+            ("([3, 1].sort(), 1) == ([1, 3], 1)", "true"),
+            ("[3, 1, 2].sort().sum()", "6"),
+            ("[3, 1, 2].sort().mean()", "2.0"),
+            ("[3, 1, 2].sort().contains(2)", "true"),
+            ("[3, 1, 2].reverse().index_of(1)", "1"),
+            ("[3, 1, 2].sort().take(2)", "[1, 2]"),
+            ("[3, 1, 2].sort().map(it * 2)", "[2, 4, 6]"),
+            ("[3, 1, 2].sort().filter(it > 1)", "[2, 3]"),
+            ("[3, 1, 2].sort().concat([9])", "[1, 2, 3, 9]"),
+            ("[3, 1, 2].sort().cumsum()", "[1, 3, 6]"),
+            ("[3, 1, 2].sort().unique()", "[1, 2, 3]"),
+            ("[3, 1, 2].sort().frequencies()", "[(1, 1), (2, 1), (3, 1)]"),
+            ("[3, 1, 2].sort().argmin()", "0"),
+            ("[3, 1, 2].sort().join(\"-\")", "1-2-3"),
+            ("[3, 1, 2].sort().enumerate().first()", "(0, 1)"),
+            ("[3, 1, 2].reverse().zip([1, 2, 3])", "[(2, 1), (1, 2), (3, 3)]"),
+            ("[3.5, 1.5].sort().std()", "1.0"),
+            ("[1.0, 3.0].reverse().median()", "2.0"),
+            ("[[3, 1].sort(), [2].sort()].flatten()", "[1, 3, 2]"),
+            // the mapped-range shapes the regression was measured on
+            ("(0..10).map(it * 2).sort().first()", "0"),
+            ("(0..10).map(it * 2).reverse().first()", "18"),
+            ("(0..10).map(it * 1.0).reverse().first()", "9.0"),
+            ("(0..10).filter(it % 3 == 0).reverse()", "[9, 6, 3, 0]"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // Every rejection `sort` used to make it still makes — the fast path must not
+        // quietly start accepting an array the general path refuses.
+        for (src, want) in [
+            ("[1, missing].sort()", "cannot sort: the array has missing values"),
+            ("[1, \"a\"].sort()", "all numbers, all strings, or all DNA"),
+            ("[3, 1].enumerate().sort()", "all numbers, all strings, or all DNA"),
+            ("[1, 2].sort(3)", "takes no arguments, got 1"),
+            ("[1, 2].reverse(3)", "takes no arguments, got 1"),
+            ("(0..5).sort(3)", "takes no arguments, got 1"),
+            ("(0..5).reverse(3)", "takes no arguments, got 1"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.expect_err(&format!("`{src}` should error"));
+            assert!(msg.contains(want), "`{src}` said: {msg}");
+        }
+    }

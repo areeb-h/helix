@@ -569,8 +569,16 @@ fn numeric_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
         // `NaN == 1`, yet `3 > 1`). Rust's sort detects such a non-total comparator and
         // *panics* ("comparison function does not implement a total order"), aborting the
         // interpreter on a valid array like `[1.0, sqrt(-1.0), 3.0].sort()`. `total_cmp`
-        // is a genuine total order that places `NaN` at a consistent extreme (after
-        // `+inf`, as numpy does), so `sort`/`argsort` are total and never abort. Reductions
+        // is a genuine total order, so `sort`/`argsort` are total and never abort.
+        //
+        // Where a `NaN` lands is decided by its SIGN BIT, which is worth stating plainly
+        // because an earlier version of this comment claimed "after `+inf`, as numpy
+        // does" and named `sqrt(-1.0)` as the example — and that example sorts to the
+        // FRONT, because the NaN it produces has its sign bit set. Only a positive NaN
+        // sorts last. numpy puts every NaN last regardless of sign, so this does NOT
+        // match numpy; matching it would mean a comparator that normalizes NaN sign, a
+        // semantics change rather than a comment fix. Documented as it behaves.
+        // Reductions
         // (`min`/`max`/`median`) filter `NaN` to `missing` before comparing, so they are
         // unaffected; this only changes where a `NaN` lands in a *sorted* result.
         _ => a.as_f64().unwrap_or(f64::NAN).total_cmp(&b.as_f64().unwrap_or(f64::NAN)),
@@ -717,6 +725,89 @@ fn array_numeric_fast(
                 // O(1) — `range(20M).first()` computes one element, no 160 MB materialization.
                 ArrayData::Range { len, .. } if *len == 0 => Some(Value::Missing),
                 ArrayData::Range { .. } => Some(ad.get(if first { 0 } else { ad.len() - 1 })),
+            });
+        }
+        // `sort`/`reverse` on a packed array stayed packed nowhere: both built a
+        // `Vec<Value>` of the whole source AND returned it through `Value::array`, which
+        // (unlike `Value::array_sniff`) does not re-pack. So the cost was paid twice —
+        // 320 MB of boxing to do the work, and a permanently boxed result that silently
+        // stripped the fast path from everything downstream:
+        //
+        //     xs = (0..20000000).map(it * 2)
+        //     xs.reverse().first()   797 MB  ->  346 MB
+        //     xs.sort().first()      799 MB  ->  346 MB
+        //
+        // Sorting the packed buffer is also the exact comparison `numeric_cmp` performs:
+        // two `Int`s compare as `i64` (deliberately NOT via `f64`, which collapses values
+        // above 2^53), and anything else via `total_cmp`. `sort_unstable` is safe here
+        // where `sort_by` was stable, because elements that compare equal under either
+        // order are indistinguishable — equal `i64`s, and `total_cmp`-equal `f64`s are
+        // bit-identical (`-0.0` and `0.0` are NOT equal under `total_cmp`, so even signed
+        // zeros keep a deterministic position).
+        //
+        // `Values` defers (nothing to unbox) and so does `Enumerate`, whose elements are
+        // tuples — `sort` rejects those, and that rejection is the general path's to make.
+        "sort" | "reverse" => {
+            let rev = name == "reverse";
+            return Ok(match ad {
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
+                ArrayData::Ints(xs) => {
+                    let mut v = xs.clone();
+                    if rev {
+                        v.reverse();
+                    } else {
+                        v.sort_unstable();
+                    }
+                    Some(Value::int_array(v))
+                }
+                ArrayData::Floats(xs) => {
+                    let mut v = xs.clone();
+                    if rev {
+                        v.reverse();
+                    } else {
+                        v.sort_unstable_by(f64::total_cmp);
+                    }
+                    Some(Value::float_array(v))
+                }
+                // Reversing an arithmetic progression is another progression, so this is
+                // O(1) and stays lazy: `range(100000000).reverse().first()` allocates
+                // nothing. The last element is in range by the Range invariant, so the
+                // i128 start math fits i64.
+                //
+                // `wrapping_neg`, and it is exact rather than a shrug. The only step it
+                // does not negate cleanly is `i64::MIN`, which it returns unchanged — and
+                // that is the right step anyway, because `-2^63 == 2^63 (mod 2^64)`, so
+                // adding it and subtracting it are the same operation in the i128-then-
+                // truncate arithmetic `get` uses. Such a range also holds at most two
+                // elements (`start + 2*i64::MIN` cannot fit), so only i=0 and i=1 are ever
+                // evaluated, where the equivalence is exact.
+                //
+                // This started life as a `checked_neg` with a materializing fallback for
+                // the overflow. Sabotaging it to `wrapping_neg` SURVIVED the test — and
+                // the reason was not a weak test but the equivalence above: the fallback
+                // could never produce a different answer. A guard whose removal breaks
+                // nothing is decoration, so it is gone. The two-element `i64::MIN`-step
+                // case is pinned in the test regardless, since that is the behaviour
+                // being relied on here.
+                //
+                // SORTING one is O(1) for the same reason: a range is monotonic, so its
+                // sorted form is either the range itself (ascending step) or exactly that
+                // reverse (descending step). A zero step is rejected at construction
+                // ("`range` step must not be zero"), so there is no third case. Writing it
+                // this way also removed the last `unwrap` here — materializing the range
+                // to sort it needed `to_ints().unwrap()`, which the ADR-0024 never-abort
+                // ratchet rightly refused; the better code has nothing to unwrap.
+                ArrayData::Range { start, step, len } if *len > 0 => Some(if rev || *step < 0 {
+                    Value::lazy_range(
+                        (*start as i128 + *step as i128 * (*len as i128 - 1)) as i64,
+                        step.wrapping_neg(),
+                        *len,
+                    )
+                } else {
+                    Value::lazy_range(*start, *step, *len)
+                }),
+                // An empty range both sorts and reverses to itself.
+                ArrayData::Range { .. } => Some(Value::lazy_range(0, 1, 0)),
             });
         }
         _ => {}
