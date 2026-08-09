@@ -1665,6 +1665,39 @@ motivates this phase.
       test case for it was too weak to notice, because the range I first used had one
       element, where the step is never applied.
 
+- [ ] **THE CALCULUS FRONTIER: a user function called with a COMPUTED float argument
+      never compiles, in ANY spelling — and neither does a function passed as a
+      PARAMETER.** Library feedback (2026-08-09, the `calculus` module's
+      `range(0,n).reduce(0.0, (acc,i) => acc + f(a + (i+0.5)*h))` stayed interpreted at
+      2.6s after the batch that JIT'd its neighbours), reproduced and extended here — five
+      probes at n=4M, engagement read as the JIT-vs-VM child-CPU ratio:
+
+      | shape | JIT | VM | verdict |
+      | --- | --- | --- | --- |
+      | reduce, known i64 fn, bare index `g(i)` | 0.00s | 0.54s | **native** |
+      | reduce, known f64 fn, computed `g(a + (i+0.5)*h)` | 0.49s | 0.59s | interpreted |
+      | MAP spelling of the same | 0.63s | 0.71s | interpreted |
+      | reduce, PARAMETER fn, bare `f(to_float(i))` | 0.49s | 0.49s | interpreted |
+      | MAP spelling with a parameter fn | 0.62s | 0.63s | interpreted |
+
+      Two independent blockers, and the second probe pair matters because it closes the
+      "just respell it" escape: the boundary is SYMMETRIC across map and reduce, so no
+      rewrite rescues the numerical-integration idiom today.
+
+      1. **Computed/f64 call arguments.** Only the bare-loop-index call form compiles
+         (Stage 3r's `to_float(g(i))`). The Stage 3y machinery marshals f64 args across
+         the mixed-call ABI in map bodies, so the marshalling exists; the gate that
+         declines a computed argument has NOT yet been traced to a site — do that before
+         proposing a fix (the three-reverts lesson).
+      2. **Function-valued callees.** Every native call is by `FuncId`, resolved by NAME
+         at compile time; a function arriving as a parameter is an opaque value with no
+         indirect-call machinery behind it. Structural — needs per-callsite
+         specialization, inlining, or native indirect calls. This is the real blocker for
+         a numerics LIBRARY, whose `integrate(f, ...)` can never name its callee.
+
+      The library session's own four-probe diagnosis of this boundary was correct as
+      stated — reproduced here before recording, per the standing rule.
+
 - [ ] **`argmax`/`argmin` are ~12x slower than `index_of(max())`** at n=1M (0.120s against
       0.010s) for the same answer — the idiomatic spelling losing to the manual one, which
       is the exact defect signature this project hunts. They desugar through
