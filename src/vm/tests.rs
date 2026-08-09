@@ -6661,6 +6661,66 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         }
     }
 
+    /// `min_by`/`max_by` return the ORIGINAL element for a destructuring key.
+    ///
+    ///     [[1,2],[0,3]].min_by((a, b) => a)    was  (0, 3)   a Tuple
+    ///                                          now  [0, 3]   the element itself
+    ///
+    /// The old desugar rebuilt `Expr::Tuple(binders)` as "the element", which is only the
+    /// element when the element IS a tuple — Helix destructures Arrays too, so the same
+    /// query returned different TYPES through its two spellings, and the tuple then
+    /// failed downstream (`type Tuple has no method 'map'`). The new desugar indexes the
+    /// bound receiver at `argmin()`/`argmax()` of the mapped keys, so the element comes
+    /// back untouched whatever it is.
+    ///
+    /// The error matrix survives because min_by's errors were always argmin's errors
+    /// wearing a different name (same reduce seed on empty, same "cannot be indexed" on
+    /// missing, same NaN and missing-key comparisons, same FIRST-wins ties) and the key
+    /// map keeps the user's own lambda (same destructure diagnostics) — verified
+    /// byte-for-byte, full stderr, 38 shapes x 3 engines x 2 binaries before writing this.
+    #[test]
+    fn min_by_and_max_by_return_the_original_element_for_a_destructuring_key() {
+        for (src, want) in [
+            ("[[1,2],[0,3]].min_by((a, b) => a)", "[0, 3]"),
+            ("[[1,2],[0,3]].max_by((a, b) => a)", "[1, 2]"),
+            ("[[1,2,3],[0,4,5]].min_by((a, b, c) => a)", "[0, 4, 5]"),
+            ("[(1,2),(0,3)].min_by((a, b) => a)", "(0, 3)"), // tuples: same as before
+            ("[[1,2],[0,3]].min_by((a, b) => a) == [0, 3]", "true"),
+            ("[[1,2],[0,3]].min_by((a, b) => a).map(it * 2)", "[0, 6]"),
+            // the spellings that were already right stay right
+            ("[[1,2],[0,3]].min_by(a => a[0])", "[0, 3]"),
+            ("[[1,2],[0,3]].min_by(it[0])", "[0, 3]"),
+            ("[3, 1, 2].min_by(it)", "1"),
+            ("[3, 1, 2].max_by(it)", "3"),
+            ("[\"b\", \"a\"].min_by(it)", "a"),
+            // ties stay FIRST-wins, both verbs
+            ("[{k:1,v:\"x\"},{k:1,v:\"y\"}].min_by(r => r.k)", "{k: 1, v: \"x\"}"),
+            ("[{k:1,v:\"x\"},{k:1,v:\"y\"}].max_by(r => r.k)", "{k: 1, v: \"x\"}"),
+            // nesting: an inner min_by inside the key of an outer one
+            ("[[3, 1], [2, 9]].min_by(r => r.min_by(it))", "[3, 1]"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // The load-bearing error shapes, one per family (the full matrix was verified
+        // against the previous binary; these pin the text going forward).
+        for (src, want) in [
+            ("[].min_by(it)", "index 0 is out of bounds"),
+            ("missing.min_by((a, b) => a)", "cannot be indexed"),
+            ("[1, missing, 3].min_by(it)", "condition is `missing`"),
+            ("[1.0, inf - inf].min_by(it)", "cannot compare these values"),
+            ("[5, 3].min_by((a, b) => a)", "cannot destructure a value of type Int"),
+            ("[[1],[0]].min_by((a, b) => a)", "lambda expects 2 values"),
+            ("[2, 1].min_by()", "takes exactly one key function"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.expect_err(&format!("`{src}` should error"));
+            assert!(msg.contains(want), "`{src}` said: {msg}");
+        }
+    }
+
     /// `argsort` sorts indices against the PACKED buffer, and on a range it is O(1).
     ///
     ///     xs = (0..5000000).map(it * 3 % 999983)

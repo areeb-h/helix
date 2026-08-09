@@ -250,24 +250,48 @@ fn desugar_order_by(
                 .hint("e.g. `rows.min_by(r => r.score)`."))
             }
         };
-        // The result slot is the *whole* element: the single binder, or — for a
-        // destructuring lambda like `(k, n) => n` over tuple elements — the tuple of
-        // binders, which rebuilds the original element so `max_by` still returns it.
-        let elem = if params.len() == 1 {
-            ident(&params[0])
-        } else {
-            Expr::Tuple(params.iter().map(|p| ident(p)).collect())
-        };
-        let pair = Expr::Tuple(vec![key, elem]);
-        let map = Expr::Method {
-            recv: Box::new(recv),
+        // `min_by`/`max_by` return the element AT the winning key's index:
+        //
+        //     recv.min_by(p => K)  →  let $obe = recv in $obe[$obe.map(p => K).argmin()]
+        //
+        // (with the argmin itself desugared by the recursive call below). An earlier
+        // desugar instead mapped to `(K, elem)` pairs and, for a DESTRUCTURING key like
+        // `(a, b) => K`, rebuilt `elem` as `Expr::Tuple(binders)` — with a comment
+        // claiming that "rebuilds the original element". It does not: Helix destructures
+        // Arrays too, so `[[1,2],[0,3]].min_by((a, b) => a)` returned the Tuple `(0, 3)`
+        // where the single-binder spelling of the same query returned the Array `[0, 3]`
+        // — two spellings, two TYPES. Indexing the bound receiver returns the original
+        // element whatever it is.
+        //
+        // The key map keeps the USER'S lambda, so every destructure diagnostic ("cannot
+        // destructure a value of type Int into 2 parameters", "lambda expects 2 values,
+        // but the element has 3") is produced by the same machinery at the same moment.
+        // And the error matrix beyond that is preserved because min_by's errors were
+        // always argmin's errors wearing a different name: `[].min_by(it)` and
+        // `[].argmin()` both leak the same reduce seed ("index 0 is out of bounds"),
+        // `missing.min_by(it)` and `missing.argmin()` the same "cannot be indexed", NaN
+        // keys the same "cannot compare", missing keys the same "`if` condition is
+        // `missing`", and both break ties FIRST-wins — verified byte-for-byte on all
+        // three engines before this was written.
+        let keys = Expr::Method {
+            recv: Box::new(ident("$obe")),
             name: "map".to_string(),
-            args: vec![Expr::Lambda { params, body: Box::new(pair) }],
+            args: vec![Expr::Lambda { params, body: Box::new(key) }],
             named: vec![],
             line,
             col,
         };
-        (map, 0, 1)
+        let inner = if name == "min_by" { "argmin" } else { "argmax" };
+        let idx_expr = desugar_order_by(keys, inner, Vec::new(), line, col)?;
+        return Ok(Expr::Let {
+            bindings: vec![("$obe".to_string(), recv)],
+            body: Box::new(Expr::Index {
+                recv: Box::new(ident("$obe")),
+                index: Box::new(idx_expr),
+                line,
+                col,
+            }),
+        });
     } else {
         // `argmin`/`argmax()` — pairs are `(index, value)` from `enumerate`.
         if !args.is_empty() {
