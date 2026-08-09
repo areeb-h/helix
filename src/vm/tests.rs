@@ -6661,6 +6661,85 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         }
     }
 
+    /// The f64 (Floats-source) map kernel declines any node the interpreter computes in
+    /// i64 — closing a WRONG-VALUE, JIT-vs-interpreter divergence, the oracle-breaking
+    /// kind.
+    ///
+    ///     k = 4611686018427387904                # 2^62
+    ///     ys = (0..100000).map(it * 1.0)
+    ///     ys.map(it + (k + k)).first()           # was JIT +9.2e18, VM/tw -9.2e18
+    ///
+    /// The interpreter computes an `Int + Int` subexpression in i64 — WRAPPING — and only
+    /// then promotes; the kernel is monomorphic f64, which does not wrap. Same class:
+    /// `k * k` (overflow), pure literal arithmetic (`9223372036854775807 + 1`), `abs` of
+    /// an Int capture (interpreter `abs(Int)` stays Int and wraps at `i64::MIN`), and
+    /// `-k` (interpreter `wrapping_neg`, kernel `fneg` — divergent at exactly `i64::MIN`;
+    /// that one arrived with 55830b6's unary-minus admission, found by probing my own
+    /// commit for the class once the class was identified).
+    ///
+    /// The fix is a promotion proof (`F64Proof`): a node is admitted only where a
+    /// provably-Float operand forces the interpreter to promote — so `it * k`, `it + 2`,
+    /// `-it`, `sqrt(it)` all stay native (measured: still ~0.06s at 8M, kernel speed),
+    /// while the i64-computed shapes decline to the VM, WHICH IS THE SEMANTICS. The mixed
+    /// kernels were already immune (`gen_value_typed` types per node and emits wrapping
+    /// i64 ops for Int subtrees), and probes confirmed the reduce/fused/scan families
+    /// agree — this monomorphic family was the only unsound one.
+    #[test]
+    fn the_f64_map_kernel_declines_what_the_interpreter_computes_in_i64() {
+        for (src, want) in [
+            // Each of these DIVERGED before the fix; the expected value is the
+            // interpreter's (i64-wrapped) answer, now produced by every engine.
+            (
+                "k = 4611686018427387904\nys = (0..100000).map(it * 1.0)\nys.map(it + (k + k)).first()",
+                "-9223372036854775808.0",
+            ),
+            (
+                "k = 3037000500\nys = (0..100000).map(it * 1.0)\nys.map(it + k * k).first()",
+                "-9223372036709301248.0",
+            ),
+            (
+                "k = -9223372036854775808\nys = (0..100000).map(it * 1.0)\nys.map(-k + it).first()",
+                "-9223372036854775808.0",
+            ),
+            (
+                "ys = (0..100000).map(it * 1.0)\nys.map(it + (9223372036854775807 + 1)).first()",
+                "-9223372036854775808.0",
+            ),
+            (
+                "k = -9223372036854775808\nys = (0..100000).map(it * 1.0)\nys.map(it + abs(k)).first()",
+                "-9223372036854775808.0",
+            ),
+            // The SOUND shapes keep their values (and, asserted below, their kernel).
+            ("k = 3\nys = (0..100000).map(it * 1.0)\nys.map(it * k).take(3)", "[0.0, 3.0, 6.0]"),
+            ("ys = (0..100000).map(it * 1.0)\nys.map(it + 2).take(3)", "[2.0, 3.0, 4.0]"),
+            ("ys = (0..100000).map(it * 1.0)\nys.map(-it).take(3)", "[-0.0, -1.0, -2.0]"),
+            ("ys = (0..100000).map(it * 1.0)\nys.map(it - it).take(2)", "[0.0, 0.0]"),
+            ("k = 5.5\nys = (0..100000).map(it * 1.0)\nys.map(k - it).take(2)", "[5.5, 4.5]"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tw vs vm disagree on `{src}`");
+            assert_eq!(vm, jit, "vm vs jit disagree on `{src}` — the divergence is back");
+            assert_eq!(jit, Ok(want.to_string()), "`{src}`");
+        }
+        // The common capture shape must still ENGAGE — a fix that declined everything
+        // would pass every value assertion above at VM speed. Delta-counted, because the
+        // array-building map is itself a kernel.
+        crate::jit::reset_native_call_count();
+        let _ = run_vm_jit("k = 3\nys = (0..100000).map(it * 1.0)\nys.sum()");
+        let without = crate::jit::native_call_count();
+        crate::jit::reset_native_call_count();
+        assert_eq!(
+            run_vm_jit("k = 3\nys = (0..100000).map(it * 1.0)\nys.map(it * k).sum()").unwrap(),
+            "14999850000.0"
+        );
+        let with_cap = crate::jit::native_call_count();
+        assert!(
+            with_cap > without,
+            "`map(it * k)` with an Int capture no longer engages the f64 kernel \
+             ({with_cap} native calls vs {without} for the build alone)"
+        );
+    }
+
     /// `min`/`max` give the same answer whatever the array's REPRESENTATION — the packed
     /// float path now breaks ties with `total_cmp`, exactly as the boxed path always has.
     ///

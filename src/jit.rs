@@ -2527,7 +2527,11 @@ pub fn map_kernel_captures_f64(
 ) -> Option<Vec<String>> {
     let mut caps: Vec<String> = Vec::new();
     let mut uses_binder = false;
+    // The ROOT must be proven `Float` — with `uses_binder` required that is implied (a
+    // Promotable root is a lone leaf), but asserting it directly is what the soundness
+    // argument actually says.
     if f64_body_eligible(body, binder, &mut caps, &mut uses_binder, user_fns)
+        == Some(F64Proof::Float)
         && uses_binder
         && caps.len() <= MAX_CAPTURES
     {
@@ -2537,45 +2541,103 @@ pub fn map_kernel_captures_f64(
     }
 }
 
+/// How a node of an f64-source body relates to the INTERPRETER's arithmetic — the type
+/// that keeps the monomorphic f64 kernel honest about integers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum F64Proof {
+    /// Provably computed in `f64` by the interpreter: the binder (a `Floats` element), a
+    /// float literal, a float builtin, or any operation with such an operand — the
+    /// interpreter promotes the other side on the spot, so the kernel's f64 arithmetic
+    /// matches bit-for-bit.
+    Float,
+    /// An int literal or a capture: EXACT to convert (`as f64`, the very conversion the
+    /// dispatch marshal performs), but only at a node where a `Float` operand forces the
+    /// interpreter to promote it. Anywhere else the interpreter computes in i64.
+    Promotable,
+}
+
+/// The typed eligibility for the f64 (Floats-source) kernel. `None` = ineligible.
+///
+/// The rule that matters is `(Promotable, Promotable) => None`, and it exists because its
+/// absence was a WRONG-VALUE, JIT-vs-interpreter divergence — the oracle-breaking kind:
+///
+///     k = 4611686018427387904            # 2^62, an Int
+///     ys = (0..100000).map(it * 1.0)
+///     ys.map(it + (k + k)).first()       # JIT:  9223372036854775808.0
+///                                        # VM/tw: -9223372036854775808.0
+///
+/// The interpreter computes the `Int + Int` subexpression in i64 — WRAPPING — and only
+/// then promotes; this kernel is monomorphic f64 and computes `f64(k) + f64(k)`, which
+/// does not wrap. Same for `k * k`, for pure literal arithmetic
+/// (`it + (9223372036854775807 + 1)`), and for `-k` (interpreter `wrapping_neg`, kernel
+/// `fneg` — a sign flip, not a wrap, divergent at exactly `i64::MIN`; that one arrived
+/// with the unary-minus admission and is fixed by the same rule). The mixed kernels are
+/// immune by construction — `gen_value_typed` types per node and emits Int subtrees as
+/// wrapping i64 ops — and probes confirmed the reduce/fused/scan families agree; this
+/// monomorphic family was the only unsound one.
+///
+/// A `Promotable` under a `Float` operand is exact: the leaf is converted by `as f64`
+/// once, which is bit-identical to what the interpreter's promotion does at that node,
+/// and to what the dispatch marshal does to an `Int` capture.
 fn f64_body_eligible(
     e: &Expr,
     binder: &str,
     caps: &mut Vec<String>,
     uses_binder: &mut bool,
     user_fns: &HashSet<&str>,
-) -> bool {
+) -> Option<F64Proof> {
     match e {
-        Expr::Int(_) | Expr::Float(_) => true,
+        Expr::Float(_) => Some(F64Proof::Float),
+        Expr::Int(_) => Some(F64Proof::Promotable),
         Expr::Ident { name, .. } => {
             if name == binder {
                 *uses_binder = true;
-            } else if !caps.iter().any(|c| c == name) {
-                caps.push(name.clone());
+                Some(F64Proof::Float)
+            } else {
+                if !caps.iter().any(|c| c == name) {
+                    caps.push(name.clone());
+                }
+                Some(F64Proof::Promotable)
             }
-            true
         }
         Expr::Binary { op, left, right, .. } => {
-            matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
-                && f64_body_eligible(left, binder, caps, uses_binder, user_fns)
-                && f64_body_eligible(right, binder, caps, uses_binder, user_fns)
+            if !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
+                return None;
+            }
+            let l = f64_body_eligible(left, binder, caps, uses_binder, user_fns)?;
+            let r = f64_body_eligible(right, binder, caps, uses_binder, user_fns)?;
+            match (l, r) {
+                // Int OP Int is the interpreter's i64 (wrapping) arithmetic — this kernel
+                // cannot reproduce it, so the body declines to the VM, which is the
+                // semantics. Everything else has a Float operand, so the interpreter
+                // promotes here too.
+                (F64Proof::Promotable, F64Proof::Promotable) => None,
+                _ => Some(F64Proof::Float),
+            }
         }
-        // Negation of an `f64` is `fneg`, the exact IEEE sign flip the interpreter's `-f`
-        // performs, and this kernel emits through `gen_value`, whose `Neg` arm has lowered
-        // it all along — so this gate was the only thing missing, exactly as in `e30f9fe`.
-        // Note the contrast with the MIXED path, where the codegen arm had to be written
-        // too: which of the pair is missing differs per path, so each is traced and
-        // measured rather than assumed.
+        // Negation of a PROVEN f64 is `fneg`, the interpreter's exact IEEE sign flip. A
+        // Promotable operand must decline: the interpreter negates an Int with
+        // `wrapping_neg`, which differs from a sign flip at exactly `i64::MIN`.
         Expr::Unary { op: UnOp::Neg, expr, .. } => {
-            f64_body_eligible(expr, binder, caps, uses_binder, user_fns)
+            (f64_body_eligible(expr, binder, caps, uses_binder, user_fns)? == F64Proof::Float)
+                .then_some(F64Proof::Float)
         }
         // `sqrt`/`abs`/`min`/`max` (emitted inline by `gen_builtin_f64`) — only the real
-        // builtin, never a user function of the same name (which the f64 kernel can't call).
+        // builtin, never a user function of the same name (which the f64 kernel can't
+        // call). Arguments must be PROVEN Float: the interpreter's `abs(Int)` stays Int
+        // (and wraps at `i64::MIN`), and a mixed-type `min`/`max` returns whichever
+        // original operand wins, so its type is runtime-dependent — the same reasons
+        // `infer_mixed_kind` rejects them.
         Expr::Call { name, args, .. } => {
-            jit_float_builtin_arity(name) == Some(args.len())
+            (jit_float_builtin_arity(name) == Some(args.len())
                 && !user_fns.contains(name.as_str())
-                && args.iter().all(|a| f64_body_eligible(a, binder, caps, uses_binder, user_fns))
+                && args.iter().all(|a| {
+                    f64_body_eligible(a, binder, caps, uses_binder, user_fns)
+                        == Some(F64Proof::Float)
+                }))
+            .then_some(F64Proof::Float)
         }
-        _ => false,
+        _ => None,
     }
 }
 
