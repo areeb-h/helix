@@ -2207,13 +2207,34 @@ with interleaved child-CPU timing, medians of 15–21, and stdout printed beside
       calls it "the tuple of binders, which rebuilds the original element" — true only
       when the element IS a tuple, and Helix destructures arrays too.
 
-      **The natural fix is not currently expressible**: binding the whole element and
-      destructuring inside the map body needs `a, b = e` in an expression position, and
-      destructuring assignment is a top-level statement only (`do { a, b = e ... }` is
-      `unexpected ','`). The alternatives are a two-pass desugaring
-      (`$o[$o.map(key).argmin()]`, which changes the error text on empty/`missing`
-      receivers and must be checked against it) or capture-avoiding substitution of the
-      binders to `$e[0]`, `$e[1]`. Both want their own commit.
+      **FIXED (`a5737ce`)** by the two-pass desugaring
+      `let $obe = recv in $obe[$obe.map(key).argmin()]` — and the caveat recorded above
+      ("changes the error text on empty/`missing` receivers") turned out to be FALSE once
+      probed: min_by's errors were always argmin's errors wearing a different name (same
+      reduce seed on empty, same "cannot be indexed" on missing, same NaN/missing-key
+      comparison errors, same first-wins ties), so composing argmin preserved the whole
+      matrix byte-for-byte — verified with full stderr across 38 shapes x 3 engines x 2
+      binaries. The key map keeps the user's own lambda, so the four destructure
+      diagnostics are also untouched. Bonus: when argmin gets its native fast path (the
+      12x item above), min_by/max_by now inherit it for free.
+
+- [ ] **`argsort` and `sort` disagree on `missing` — and on DNA.** Found by the argsort
+      probe matrix (2026-08-09), all three engines agree on each, so these are
+      pair-inconsistencies, not divergences — the eleventh and twelfth instances of the
+      two-spellings shape:
+
+          [1, missing, 2].sort()      -> error: cannot sort: the array has missing values
+          [1, missing, 2].argsort()   -> missing            (propagates, rc=0)
+          [dna("T"), dna("A")].sort()     -> [A, T]
+          [dna("T"), dna("A")].argsort()  -> error: `argsort` needs an array of all
+                                             numbers or all strings
+
+      One ordering question, two spellings, two different missing-policies and two
+      different type domains. Which side is right is a design call (sort's explicit
+      missing error follows ADR-0001's "make dropping visible"; argsort's propagation
+      follows the reduction convention), but they should not differ from each other.
+      `sort_by` inherits argsort's answers, so today `xs.sort()` and `xs.sort_by(it)`
+      also disagree on a missing element and on DNA.
 
 - [x] ~~**Three-engine value divergence — `print((try missing.map()).ok)` is `false` on the
       JIT and VM, `true` on the tree-walker.**~~ — **FIXED** (`comp_shape_check`). It was
