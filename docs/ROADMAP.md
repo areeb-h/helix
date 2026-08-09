@@ -1665,6 +1665,23 @@ motivates this phase.
       test case for it was too weak to notice, because the range I first used had one
       element, where the step is never applied.
 
+- [ ] **A registry-checked method reference — discoverability as a tested artifact.**
+      Motivated by a real miss (2026-08-09): a library session probing the language
+      concluded "Helix has no `scan`" — a primitive that has existed since Stage 3t, with
+      a native kernel — and shipped an unnecessary O(n^2) fallback plus a false "this is
+      inexpressible" caveat on that basis. The fix landed as one `##`-doc-tested example
+      in collections.helix (`3d955f7`), but that is one file catching one miss.
+
+      The structural fix: `src/registry.rs` already enumerates every method name — it is
+      the ground truth. Generate (or hand-write and CHECK) a `docs/reference.md` with one
+      `##`-style executed example per method, plus a gate test that diffs the registry
+      against the reference and FAILS on any method with no documented, executing example.
+      Then a primitive cannot exist undocumented, for the same reason a doc example
+      cannot rot: the gate refuses. The downstream session's own lesson ("probe a
+      capability via the language reference + collections example + a test-suite grep")
+      only works if the reference is complete, and completeness is exactly what a
+      registry diff can enforce.
+
 - [ ] **THE CALCULUS FRONTIER: a user function called with a COMPUTED float argument
       never compiles, in ANY spelling — and neither does a function passed as a
       PARAMETER.** Library feedback (2026-08-09, the `calculus` module's
