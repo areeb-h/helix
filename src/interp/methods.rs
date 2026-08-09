@@ -810,6 +810,48 @@ fn array_numeric_fast(
                 ArrayData::Range { .. } => Some(Value::lazy_range(0, 1, 0)),
             });
         }
+        // `argsort` sorts INDICES by the values they point at, so the general path paid
+        // twice: `to_values()` boxed the whole column (16 B/element), then every
+        // comparison chased a `Value` enum through two random-access derefs. The packed
+        // arm sorts the same indices against the raw buffer.
+        //
+        // STABILITY IS OBSERVABLE HERE, unlike `sort`: the output is indices, so equal
+        // keys must keep their original order exactly as the general path's stable
+        // `sort_by` does. `sort_unstable_by` + a `.then(a.cmp(&b))` index tie-break
+        // reproduces a stable sort exactly (no two index pairs ever compare Equal).
+        //
+        // Floats compare by `total_cmp`, which is what `numeric_cmp` does for two floats
+        // — so NaN (by sign bit) and signed zeros land exactly where the general path
+        // puts them, and no NaN deferral is needed or wanted (argsort, like `sort`, has
+        // NaN placement semantics rather than a `missing` answer).
+        //
+        // A RANGE needs no comparisons at all: it is strictly monotonic (zero step is
+        // rejected at construction), so its argsort is the identity permutation for an
+        // ascending step and the reversal for a descending one — both lazy, O(1).
+        "argsort" => {
+            return Ok(match ad {
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
+                ArrayData::Ints(xs) => {
+                    let mut idx: Vec<i64> = (0..xs.len() as i64).collect();
+                    idx.sort_unstable_by(|&a, &b| {
+                        xs[a as usize].cmp(&xs[b as usize]).then(a.cmp(&b))
+                    });
+                    Some(Value::int_array(idx))
+                }
+                ArrayData::Floats(xs) => {
+                    let mut idx: Vec<i64> = (0..xs.len() as i64).collect();
+                    idx.sort_unstable_by(|&a, &b| {
+                        xs[a as usize].total_cmp(&xs[b as usize]).then(a.cmp(&b))
+                    });
+                    Some(Value::int_array(idx))
+                }
+                ArrayData::Range { step, len, .. } => Some(if *step > 0 || *len == 0 {
+                    Value::lazy_range(0, 1, *len)
+                } else {
+                    Value::lazy_range(*len as i64 - 1, -1, *len)
+                }),
+            });
+        }
         // `cumsum` already RETURNED a packed column; what it never had was a packed
         // INPUT, so the source was boxed into a `Vec<Value>` before it was even called:
         // `(0..20000000).map(it * 2).cumsum().last()` cost 645 MB against 186 MB for the

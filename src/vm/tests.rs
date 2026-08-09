@@ -6661,6 +6661,78 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         }
     }
 
+    /// `argsort` sorts indices against the PACKED buffer, and on a range it is O(1).
+    ///
+    ///     xs = (0..5000000).map(it * 3 % 999983)
+    ///     xs.argsort().first()                    209 MB -> 113 MB  (= sort's footprint)
+    ///     range(50000000, 0, -1).argsort()       1165 MB / 0.47s -> 15 MB / 0.00s
+    ///
+    /// STABILITY IS OBSERVABLE here, unlike `sort`: the output is indices, so equal keys
+    /// must keep original order exactly as the general path's stable `sort_by` does.
+    /// `sort_unstable_by` + `.then(a.cmp(&b))` reproduces that exactly — and the test
+    /// pins it at 1000 elements, because a tiny array is insertion-sorted and accidentally
+    /// stable, so a small case cannot catch a dropped tie-break. Floats compare by
+    /// `total_cmp` (what `numeric_cmp` does), so NaN lands by SIGN BIT and signed zeros
+    /// are strictly ordered, exactly as before. A range is strictly monotonic, so its
+    /// argsort is the identity (ascending) or the reversal (descending) — lazy, O(1).
+    /// `Values` defers, keeping `missing`-propagation, strings, mixed numerics, and every
+    /// error byte-identical; `sort_by` rides on argsort and was verified unchanged across
+    /// its whole probe matrix (40 shapes x 3 engines x 2 binaries, 0 mismatches).
+    #[test]
+    fn argsort_reads_the_packed_buffer_and_is_lazy_on_ranges() {
+        for (src, want) in [
+            ("[3, 1, 2].argsort()", "[1, 2, 0]"),
+            // stability at small scale...
+            ("[2, 1, 2, 1].argsort()", "[1, 3, 0, 2]"),
+            ("[5, 3, 5, 3, 5, 3].argsort()", "[1, 3, 5, 0, 2, 4]"),
+            // ...and at a scale where an unstable sort would actually reorder ties
+            ("(0..1000).map(it % 2).argsort().take(4)", "[0, 2, 4, 6]"),
+            ("(0..1000).map(it % 2).argsort().drop(500).take(3)", "[1, 3, 5]"),
+            // floats: total order — NaN by sign bit, signed zeros strictly ordered
+            ("[3.5, 1.5, 2.5].argsort()", "[1, 2, 0]"),
+            ("[0.0, -0.0].argsort()", "[1, 0]"),
+            ("[-0.0, 0.0].argsort()", "[0, 1]"),
+            ("[1.0, inf - inf, 2.0].argsort()", "[1, 0, 2]"),
+            ("[1.0, -(inf - inf), 2.0].argsort()", "[0, 2, 1]"),
+            ("[inf, -inf, 1.0].argsort()", "[1, 2, 0]"),
+            // exact i64 above 2^53 — an f64 collapse would give [0, 1] (stable tie)
+            ("[9007199254740993, 9007199254740992].argsort()", "[1, 0]"),
+            // lazy ranges, both step signs, empty — and the result composes
+            ("(0..5).argsort()", "[0, 1, 2, 3, 4]"),
+            ("range(10, 0, -2).argsort()", "[4, 3, 2, 1, 0]"),
+            ("(0..0).argsort()", "[]"),
+            ("range(10, 0, -2).argsort().sum()", "10"),
+            // deferrals: missing propagates, strings work, mixed numerics exact
+            ("[1, missing, 2].argsort()", "missing"),
+            ("[\"b\", \"a\"].argsort()", "[1, 0]"),
+            ("[1, 2.5, 0].argsort()", "[2, 0, 1]"),
+            ("[].argsort()", "[]"),
+            // sort_by rides on argsort: stability with distinguishable elements
+            (
+                "[{k: 2, v: \"x\"}, {k: 1, v: \"y\"}, {k: 2, v: \"z\"}].sort_by(r => r.k)",
+                "[{k: 1, v: \"y\"}, {k: 2, v: \"x\"}, {k: 2, v: \"z\"}]",
+            ),
+            ("[1.0, inf - inf, 2.0].sort_by(it)", "[NaN, 1.0, 2.0]"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // Errors unchanged: DNA refused (unlike `sort` — pre-existing), non-sortables,
+        // arity.
+        for (src, want) in [
+            ("[dna(\"T\"), dna(\"A\")].argsort()", "all numbers or all strings"),
+            ("[1, \"a\"].argsort()", "all numbers or all strings"),
+            ("[true, false].argsort()", "all numbers or all strings"),
+            ("[1, 2].argsort(1)", "`argsort` takes no arguments"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.expect_err(&format!("`{src}` should error"));
+            assert!(msg.contains(want), "`{src}` said: {msg}");
+        }
+    }
+
     /// The f64 (Floats-source) FILTER kernel: `ys.filter(it < 5.0)` runs native, closing
     /// the last "no kernel at all" gap in the filter family — measured 0.39s -> 0.03s at
     /// 8M elements, now equal to the Int filter.
