@@ -2843,7 +2843,10 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // 56: +1 for `CompFindTest`'s operand pop, proved at the site — it is emitted at
         // exactly one place, right after the predicate body is compiled, so the stack
         // always holds that value. Same shape and same proof as `CompBoolTest` beside it.
-        ("src/vm.rs", 56),
+        // 56 -> 57: the f64 filter dispatch's `stack.pop().unwrap()`, proven by the
+        // `stack.last()` pattern match immediately above it (same argument as the Ints
+        // arm's pop).
+        ("src/vm.rs", 57),
         ("src/bytecode.rs", 2),
         ("src/bytecode/comprehensions.rs", 0),
         ("src/bytecode/ops.rs", 0),

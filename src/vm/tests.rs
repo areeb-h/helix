@@ -6661,6 +6661,121 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         }
     }
 
+    /// The f64 (Floats-source) FILTER kernel: `ys.filter(it < 5.0)` runs native, closing
+    /// the last "no kernel at all" gap in the filter family — measured 0.39s -> 0.03s at
+    /// 8M elements, now equal to the Int filter.
+    ///
+    /// The delicate part is NaN, because the interpreter RAISES on a NaN operand in an
+    /// ordering comparison ("cannot compare these values") while `==`/`!=` are IEEE. A
+    /// kernel cannot raise, so each Float ordering comparison ORs `fcmp Unordered` into a
+    /// poison register; the kernel returns -1 when it is set and the dispatch falls back
+    /// to the bytecode loop, which raises the exact error at the exact element. That
+    /// covers a NaN produced INSIDE the predicate from clean inputs (`it - it` over an
+    /// `inf` element) — which no source pre-scan could have seen — and costs nothing on
+    /// clean data. `==`/`!=` need no poison and keep IEEE semantics native.
+    ///
+    /// Comparisons take the same `F64Proof` rule as the map: at least one side proven
+    /// Float, so `k1 < k2` over two Int captures (the interpreter's EXACT i64 comparison,
+    /// which f64 cannot reproduce above 2^53) declines to the VM.
+    #[test]
+    fn the_f64_filter_kernel_compiles_and_preserves_nan_errors() {
+        // ENGAGEMENT, on a program whose ONLY kernel is the float filter. This is the
+        // two-empty-checks lesson from the scan work: a build gate missing the new pass
+        // would leave this program permanently interpreted, correct at VM speed, and only
+        // this assertion would ever notice.
+        crate::jit::reset_native_call_count();
+        assert_eq!(
+            run_vm_jit("[1.5, 5.0, 7.5].filter(it < 5.0)").unwrap(),
+            "[1.5]"
+        );
+        assert!(
+            crate::jit::native_call_count() > 0,
+            "a float-filter-only program did not engage the JIT — a build or store gate \
+             is missing the f64 filter pass"
+        );
+
+        for (src, want) in [
+            // boundaries, at the exact edge
+            ("[1.5, 5.0, 7.5].filter(it <= 5.0)", "[1.5, 5.0]"),
+            ("[1.5, 5.0, 7.5].filter(it > 5.0)", "[7.5]"),
+            ("[1.5, 5.0, 7.5].filter(it >= 5.0)", "[5.0, 7.5]"),
+            ("[1.5, 5.0, 7.5].filter(it == 5.0)", "[5.0]"),
+            ("[1.5, 5.0, 7.5].filter(it != 5.0)", "[1.5, 7.5]"),
+            // signed zero: -0.0 < 0.0 is FALSE under IEEE, on every engine
+            ("[-0.0, 0.0, 1.0].filter(it < 0.0)", "[]"),
+            ("[-0.0, 0.0, 1.0].filter(it <= 0.0)", "[-0.0, 0.0]"),
+            // kernel scale, arithmetic, and/or, negation
+            (
+                "ys = (0..100000).map(it * 1.0)\nys.filter(it < 5.0)",
+                "[0.0, 1.0, 2.0, 3.0, 4.0]",
+            ),
+            (
+                "ys = (0..100000).map(it * 1.0)\nys.filter(it > 2.0 and it < 6.0)",
+                "[3.0, 4.0, 5.0]",
+            ),
+            (
+                "ys = (0..100000).map(it * 1.0)\nys.filter(it < 2.0 or it > 99997.0)",
+                "[0.0, 1.0, 99998.0, 99999.0]",
+            ),
+            ("ys = (0..100000).map(it * 1.0)\nys.filter(-it > -3.0)", "[0.0, 1.0, 2.0]"),
+            // captures: Float passthrough, Int promoted exactly as the interpreter does
+            (
+                "k = 3.0\nys = (0..100000).map(it * 1.0)\nys.filter(it < k)",
+                "[0.0, 1.0, 2.0]",
+            ),
+            (
+                "k = 3\nys = (0..100000).map(it * 1.0)\nys.filter(it < k)",
+                "[0.0, 1.0, 2.0]",
+            ),
+            // int literal sides are promoted
+            ("ys = (0..100000).map(it * 1.0)\nys.filter(it == 3)", "[3.0]"),
+            // NaN through ==/!= is IEEE, natively: NaN == NaN false, NaN != NaN true
+            ("ys = [1.0, inf - inf, 3.0]\nys.filter(it == it)", "[1.0, 3.0]"),
+            ("ys = [1.0, inf - inf, 3.0]\nys.filter(it != it)", "[NaN]"),
+            // infinities are ORDERED — no poison, native
+            ("[1.0, inf, -inf].filter(it > 0.0)", "[1.0, inf]"),
+            ("[1.0, inf, -inf].filter(it < 0.0)", "[-inf]"),
+            // the (P, P) rejection: two huge Int captures compare EXACTLY in i64 on the
+            // VM; an f64 comparison would call them equal. The pair must actually
+            // COLLAPSE under `as f64` for this to discriminate — 2^53 and 2^53 + 1 do
+            // (+1 rounds down, ties-to-even), where an earlier draft's 2^53+1 vs 2^53+2
+            // did not (+2 is even, exactly representable), and a sabotage admitting
+            // (P, P) sailed through it.
+            (
+                "k1 = 9007199254740992\nk2 = 9007199254740993\n[1.0, 2.0].filter(k1 < k2)",
+                "[1.0, 2.0]",
+            ),
+            // the result stays PACKED for the numeric verbs
+            ("ys = (0..100000).map(it * 1.0)\nys.filter(it < 5.0).sum()", "10.0"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tw vs vm disagree on `{src}`");
+            assert_eq!(vm, jit, "vm vs jit disagree on `{src}`");
+            assert_eq!(jit, Ok(want.to_string()), "`{src}`");
+        }
+        // NaN meeting an ORDERING comparison raises, with the interpreter's text, on
+        // every engine — the kernel poisons and the bytecode loop supplies the error.
+        for src in [
+            "ys = [1.0, inf - inf, 3.0]\nys.filter(it < 5.0)",
+            "ys = (0..100000).map(if it == 50000 then inf - inf else it * 1.0)\nys.filter(it < 5.0)",
+            // NaN produced INSIDE the predicate from clean inputs — unfindable by any
+            // source pre-scan, which is why the poison lives in the comparison itself
+            "ys = [1.0, inf, 3.0]\nys.filter(it - it < 1.0)",
+            "ys = [1.0, inf, 3.0]\nys.filter(it * 0.0 < 1.0)",
+            // a NaN CAPTURE poisons the first comparison
+            "k = inf - inf\nys = (0..100000).map(it * 1.0)\nys.filter(it < k)",
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tw vs vm disagree on `{src}`");
+            assert_eq!(vm, jit, "vm vs jit disagree on `{src}`");
+            let msg = jit.expect_err(&format!("`{src}` should error"));
+            assert!(
+                msg.contains("cannot compare these values"),
+                "`{src}` said: {msg}"
+            );
+        }
+    }
+
     /// The f64 (Floats-source) map kernel declines any node the interpreter computes in
     /// i64 — closing a WRONG-VALUE, JIT-vs-interpreter divergence, the oracle-breaking
     /// kind.

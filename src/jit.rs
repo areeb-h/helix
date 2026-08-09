@@ -150,6 +150,10 @@ pub struct Jit {
     /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len) -> i64` (kept count)
     /// filter kernels, indexed by [`crate::bytecode::Op::TryJitFilter`]'s `kernel_idx`.
     filter_ptrs: Vec<Option<*const u8>>,
+    /// The f64 (`Floats`-source) filter kernels — same index as `filter_ptrs`. The
+    /// predicate POISONS (returns -1) when an ordering comparison meets a NaN, because
+    /// the interpreter raises there; the dispatch then falls back to the bytecode loop.
+    filter_ptrs_f64: Vec<Option<*const u8>>,
     /// Native fused-pipeline kernels (one of three signatures by shape — see
     /// [`define_fused_kernel`]), indexed by [`crate::bytecode::Op::TryJitFused`]'s
     /// `kernel_idx`.
@@ -196,6 +200,10 @@ impl Jit {
     /// The native filter kernel for site `idx`, if one compiled.
     pub fn filter_kernel(&self, idx: usize) -> Option<*const u8> {
         self.filter_ptrs.get(idx).copied().flatten()
+    }
+    /// The native f64 (`Floats`-source) filter kernel for site `idx`, if one compiled.
+    pub fn filter_kernel_f64(&self, idx: usize) -> Option<*const u8> {
+        self.filter_ptrs_f64.get(idx).copied().flatten()
     }
     /// The native fused-pipeline kernel for site `idx`, if one compiled.
     pub fn fused_kernel(&self, idx: usize) -> Option<*const u8> {
@@ -673,6 +681,15 @@ pub fn build(
         &mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
         None, false, &msig_table, &mixed_ids,
     );
+    // The f64 (`Floats`-source) filter specialization — the same dual-build pattern as
+    // "map"/"mapf", from the same stored kernels. The predicate compiles under the
+    // `F64Proof` comparison subset; a NaN meeting an ordering comparison poisons at run
+    // time (the kernel returns -1) and the dispatch falls back to the bytecode loop for
+    // the interpreter's exact error.
+    let filter_f64_ids = define_array_kernels(
+        &mut module, filter_kernels, "filterf", true, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
+        None, false, &msig_table, &mixed_ids,
+    );
     let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns);
 
     // `scan` (prefix-fold) loops — SERIAL kernels (see `define_scan_loop`). Same defensive
@@ -721,6 +738,7 @@ pub fn build(
         && map_mixed_int_ids.iter().all(|r| r.is_none())
         && map_mixed_value_ids.iter().all(|r| r.is_none())
         && filter_ids.iter().all(|r| r.is_none())
+        && filter_f64_ids.iter().all(|r| r.is_none())
         && fused_ids.iter().all(|r| r.is_none())
         && scan_ids.iter().all(|r| r.is_none())
     {
@@ -765,6 +783,7 @@ pub fn build(
     let map_ptrs_mixed_int = finalize(map_mixed_int_ids, &module);
     let map_ptrs_mixed_value = finalize(map_mixed_value_ids, &module);
     let filter_ptrs = finalize(filter_ids, &module);
+    let filter_ptrs_f64 = finalize(filter_f64_ids, &module);
     let fused_ptrs = finalize(fused_ids, &module);
     let scan_ptrs = finalize(scan_ids, &module);
 
@@ -779,6 +798,7 @@ pub fn build(
         map_ptrs_mixed_int,
         map_ptrs_mixed_value,
         filter_ptrs,
+        filter_ptrs_f64,
         fused_ptrs,
         scan_ptrs,
     })
@@ -900,9 +920,18 @@ fn define_array_kernels(
         // permanent, not a v1 gap.
         let indexed = !k.index_bounds.is_empty();
         let ok = if is_filter {
+            // Two filter specializations from the same stored kernel, like "map"/"mapf":
+            // the i64 pass re-checks under the Int comparison subset, the f64 pass under
+            // the `F64Proof` one. Each requires its re-derived capture list to equal the
+            // stored one, so codegen's `caps[j]` and the VM's marshal order cannot drift.
             !indexed
-                && filter_kernel_eligible(&k.body, &k.binder, eligible)
-                    .is_some_and(|c| c == k.captures)
+                && if matches!(elem_kind, NumKind::Float) {
+                    filter_kernel_eligible_f64(&k.body, &k.binder, user_fns)
+                        .is_some_and(|c| c == k.captures)
+                } else {
+                    filter_kernel_eligible(&k.body, &k.binder, eligible)
+                        .is_some_and(|c| c == k.captures)
+                }
         } else if mixed_root == Some(NumKind::Float) && value_scalars {
             // The value-scalar variant: unindexed only, and the `MixT` analysis must admit
             // the body (each capture used only where a genuine float promotes it). Compared
@@ -3329,6 +3358,71 @@ pub fn filter_kernel_eligible(
     }
 }
 
+/// Like [`filter_kernel_eligible`] but for a **`Floats`-source** predicate: comparisons
+/// over the [`F64Proof`] expression subset, combined with `and`/`or`. Each comparison
+/// needs at least one PROVEN-Float side — two `Promotable` sides would be the
+/// interpreter's exact i64 comparison (`k1 < k2` on Int captures), which f64 cannot
+/// reproduce above 2^53.
+///
+/// NaN is handled at RUN time, deliberately not here. The interpreter RAISES on a NaN
+/// operand in an ordering comparison ("cannot compare these values") and is IEEE for
+/// `==`/`!=`; the kernel therefore accumulates an `Unordered` flag per ordering
+/// comparison (see [`gen_cond`]) and returns -1, and the dispatch falls back to the
+/// bytecode loop for the exact error at the exact element. That covers NaN produced
+/// INSIDE the predicate too (`it - it < 1.0` over an `inf` element), which no source
+/// pre-scan could see — and costs nothing on clean data.
+pub fn filter_kernel_eligible_f64(
+    body: &Expr,
+    binder: &str,
+    user_fns: &HashSet<&str>,
+) -> Option<Vec<Capture>> {
+    let mut names: Vec<String> = Vec::new();
+    let mut uses_binder = false;
+    if cond_eligible_f64(body, binder, &mut names, &mut uses_binder, user_fns)
+        && names.len() <= MAX_CAPTURES
+    {
+        Some(
+            names
+                .into_iter()
+                .map(|name| Capture { name, kind: CaptureKind::Scalar })
+                .collect(),
+        )
+    } else {
+        None
+    }
+}
+
+fn cond_eligible_f64(
+    e: &Expr,
+    binder: &str,
+    caps: &mut Vec<String>,
+    uses_binder: &mut bool,
+    user_fns: &HashSet<&str>,
+) -> bool {
+    match e {
+        Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
+            cond_eligible_f64(left, binder, caps, uses_binder, user_fns)
+                && cond_eligible_f64(right, binder, caps, uses_binder, user_fns)
+        }
+        Expr::Binary {
+            op: BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne,
+            left,
+            right,
+            ..
+        } => {
+            let l = f64_body_eligible(left, binder, caps, uses_binder, user_fns);
+            let r = f64_body_eligible(right, binder, caps, uses_binder, user_fns);
+            // At least one side proven Float: the interpreter then promotes the other
+            // side AT the comparison, exactly as the marshal's `as_f64` does.
+            matches!(
+                (l, r),
+                (Some(F64Proof::Float), Some(_)) | (Some(_), Some(F64Proof::Float))
+            )
+        }
+        _ => false,
+    }
+}
+
 fn eligible_set<'a>(funcs: &[FnDef<'a>], kind: NumKind) -> HashSet<&'a str> {
     // Exclude every function on a recursion *cycle* — directly self-recursive OR
     // mutually recursive. A JIT'd function recurses on the native stack with no
@@ -5073,7 +5167,10 @@ fn define_array_kernel<'a>(
         let dstp = b.use_var(dst_var);
         let daddr = b.ins().iadd(dstp, woff);
         b.ins().store(MemFlags::trusted(), elem, daddr, 0);
-        let keep = gen_cond(&mut b, &k.body, &mut vars, fn_ids, module, NumKind::Int);
+        // `elem_kind` selects the comparison family (icmp for the i64 pass, fcmp for the
+        // f64 one); the poison variable is only ever written by Float ordering
+        // comparisons, so the i64 pass leaves it dead exactly as before.
+        let keep = gen_cond(&mut b, &k.body, &mut vars, fn_ids, module, elem_kind, Some(poison_var));
         let keep64 = b.ins().uextend(I64, keep);
         let wv2 = b.use_var(w_var);
         let nw = b.ins().iadd(wv2, keep64);
@@ -5134,7 +5231,19 @@ fn define_array_kernel<'a>(
     }
     if is_filter {
         let wv = b.use_var(w_var);
-        b.ins().return_(&[wv]);
+        // The f64 filter reports an accumulated NaN poison as -1 — the runner maps it to
+        // `None` and the dispatch falls back to the bytecode loop, which raises the
+        // interpreter's "cannot compare these values" at the exact element. The i64 pass
+        // never writes the poison variable, so its return is the plain count as before.
+        let ret = if !mixed && matches!(elem_kind, NumKind::Float) {
+            let pv = b.use_var(poison_var);
+            let bad = b.ins().icmp_imm(IntCC::NotEqual, pv, 0);
+            let neg1 = b.ins().iconst(I64, -1);
+            b.ins().select(bad, neg1, wv)
+        } else {
+            wv
+        };
+        b.ins().return_(&[ret]);
     } else {
         b.ins().return_(&[]);
     }
@@ -5290,7 +5399,7 @@ fn define_fused_kernel<'a>(
             FusionStage::Filter { binder, body: bexpr } => {
                 let mut vars: HashMap<&'a str, Variable> = HashMap::new();
                 vars.insert(binder.as_str(), cur_var);
-                let keep = gen_cond(&mut b, bexpr, &mut vars, fn_ids, module, NumKind::Int);
+                let keep = gen_cond(&mut b, bexpr, &mut vars, fn_ids, module, NumKind::Int, None);
                 let accept = b.create_block();
                 b.ins().brif(keep, accept, &[], cont, &[]);
                 b.switch_to_block(accept);
@@ -5421,7 +5530,7 @@ fn gen_tail<'a>(
         Expr::If { cond, then_branch, else_branch, .. } => {
             let then_b = b.create_block();
             let else_b = b.create_block();
-            let cv = gen_cond(b, cond, vars, fn_ids, module, kind);
+            let cv = gen_cond(b, cond, vars, fn_ids, module, kind, None);
             b.ins().brif(cv, then_b, &[], else_b, &[]);
             b.switch_to_block(then_b);
             b.seal_block(then_b);
@@ -6017,7 +6126,7 @@ fn gen_value<'a>(
             let else_b = b.create_block();
             let merge_b = b.create_block();
 
-            let cv = gen_cond(b, cond, vars, fn_ids, module, kind);
+            let cv = gen_cond(b, cond, vars, fn_ids, module, kind, None);
             b.ins().brif(cv, then_b, &[], else_b, &[]);
 
             let rvar = b.declare_var(kind.cl_type());
@@ -6191,7 +6300,7 @@ fn gen_arm_cond<'a>(
         Pattern::Wildcard | Pattern::Bind(_) => None,
         _ => unreachable!("ineligible match pattern reached codegen"),
     };
-    let g = guard.as_ref().map(|g| gen_cond(b, g, vars, fn_ids, module, NumKind::Int));
+    let g = guard.as_ref().map(|g| gen_cond(b, g, vars, fn_ids, module, NumKind::Int, None));
     match (pat, g) {
         (Some(p), Some(g)) => b.ins().band(p, g),
         (Some(p), None) => p,
@@ -6553,21 +6662,30 @@ fn gen_cond<'a>(
     fn_ids: &HashMap<&str, FuncId>,
     module: &mut JITModule,
     kind: NumKind,
+    // The f64 FILTER's NaN accumulator. The interpreter RAISES on a NaN operand in an
+    // ordering comparison; a kernel cannot raise, so each Float `<`/`<=`/`>`/`>=` ORs an
+    // `fcmp Unordered` (either operand NaN) into this variable, the filter returns -1
+    // when it is set, and the dispatch falls back to the bytecode loop for the exact
+    // error at the exact element. `==`/`!=` are IEEE in both worlds and need no poison.
+    // `None` at the `if`-condition call sites, whose analyses admit no Float comparisons.
+    poison: Option<Variable>,
 ) -> ClValue {
     match e {
         // `and`/`or` combine two i1 conditions. Handled before the comparison arm
         // because a nested `and`/`or` is itself an `Expr::Binary` and would otherwise
         // fall into the comparison `match op` and hit its `unreachable!`. Non-short-
-        // circuit `band`/`bor` is exact here: both operands are pure i64 comparisons, so
-        // evaluating the RHS eagerly is observationally identical to short-circuiting.
+        // circuit `band`/`bor` is exact for i64 comparisons; for the f64 filter it is
+        // CONSERVATIVE — a NaN in a branch the interpreter might have short-circuited
+        // past still sets the poison, which only costs a fall-back to the bytecode loop
+        // (the semantics), never a wrong answer.
         Expr::Binary { op: BinOp::And, left, right, .. } => {
-            let l = gen_cond(b, left, vars, fn_ids, module, kind);
-            let r = gen_cond(b, right, vars, fn_ids, module, kind);
+            let l = gen_cond(b, left, vars, fn_ids, module, kind, poison);
+            let r = gen_cond(b, right, vars, fn_ids, module, kind, poison);
             b.ins().band(l, r)
         }
         Expr::Binary { op: BinOp::Or, left, right, .. } => {
-            let l = gen_cond(b, left, vars, fn_ids, module, kind);
-            let r = gen_cond(b, right, vars, fn_ids, module, kind);
+            let l = gen_cond(b, left, vars, fn_ids, module, kind, poison);
+            let r = gen_cond(b, right, vars, fn_ids, module, kind, poison);
             b.ins().bor(l, r)
         }
         Expr::Binary { op, left, right, .. } => {
@@ -6592,10 +6710,21 @@ fn gen_cond<'a>(
                         BinOp::Gt => FloatCC::GreaterThan,
                         BinOp::Le => FloatCC::LessThanOrEqual,
                         BinOp::Ge => FloatCC::GreaterThanOrEqual,
+                        // Ordered equal (NaN == x is false) and unordered-or-unequal
+                        // (NaN != x is true) — exactly the interpreter's IEEE `==`/`!=`.
                         BinOp::Eq => FloatCC::Equal,
                         BinOp::Ne => FloatCC::NotEqual,
                         _ => unreachable!("only comparisons reach cond codegen"),
                     };
+                    if let Some(pv) = poison
+                        && matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge)
+                    {
+                        let uno = b.ins().fcmp(FloatCC::Unordered, l, r);
+                        let uno64 = b.ins().uextend(I64, uno);
+                        let old = b.use_var(pv);
+                        let np = b.ins().bor(old, uno64);
+                        b.def_var(pv, np);
+                    }
                     b.ins().fcmp(cc, l, r)
                 }
             }

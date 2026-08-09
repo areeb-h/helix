@@ -151,6 +151,16 @@ impl super::Compiler {
             // VM proves each is an `Int` at dispatch and passes them as a `caps` slice.
             crate::jit::filter_kernel_eligible(body, &params[0], &fns)
                 .map(|c| (c, Vec::new(), Vec::new()))
+                // The f64 (`Floats`-source) predicate — `ys.filter(it < 5.0)` — stored so
+                // the "filterf" build pass can compile its specialization. Tried second, so
+                // a both-eligible predicate (`it > k`) stores the i64 analysis's captures;
+                // both analyses walk left-to-right collecting first appearances, so the
+                // lists coincide, which each build pass's re-check verifies against the
+                // stored list before compiling.
+                .or_else(|| {
+                    crate::jit::filter_kernel_eligible_f64(body, &params[0], &user_fns)
+                        .map(|c| (c, Vec::new(), Vec::new()))
+                })
         };
         // Computed here, while `user_fns` is still borrowable — the capture-push loop below
         // needs `&mut self`, which would end the borrow.

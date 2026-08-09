@@ -2037,6 +2037,37 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             stack.push(arr);
                         }
                     }
+                    // A `Floats` source dispatches the f64 specialization. Captures
+                    // marshal through `as_f64`: an `Int` capture is promoted with exactly
+                    // the conversion the interpreter performs where the (F64Proof-checked)
+                    // predicate uses it, a `Float` passes through, anything else declines
+                    // to the bytecode loop. `None` from the runner means the kernel
+                    // POISONED — an ordering comparison met a NaN — and the bytecode
+                    // fall-through raises the interpreter's exact error at the exact
+                    // element.
+                    if let (Some(j), Some(Value::Array(a))) = (jit, stack.last())
+                        && matches!(&**a, crate::value::ArrayData::Floats(_))
+                        && let Some(fptr) = j.filter_kernel_f64(fkidx)
+                        && let Some(fc) =
+                            fcap_vals.iter().map(|v| v.as_f64()).collect::<Option<Vec<f64>>>()
+                    {
+                        // Cannot fail: the `stack.last()` pattern two lines up proved the
+                        // top exists — the same argument as the Ints arm's pop above.
+                        let arr = stack.pop().unwrap();
+                        if let Value::Array(a) = &arr
+                            && let crate::value::ArrayData::Floats(v) = &**a
+                        {
+                            match unsafe { crate::jit::run_filter_kernel_f64(fptr, v, &fc) } {
+                                Some(out) => {
+                                    stack.push(Value::float_array(out));
+                                    frames[fi].ip = *after as usize;
+                                }
+                                None => stack.push(arr),
+                            }
+                        } else {
+                            stack.push(arr);
+                        }
+                    }
                 }
             }
             Op::TryJitScan { loop_idx, after } => {

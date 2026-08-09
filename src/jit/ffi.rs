@@ -664,6 +664,37 @@ pub unsafe fn run_scan_kernel_range(
     dst
 }
 
+/// Run a native f64 filter kernel over `src`, or `None` if the kernel POISONED — an
+/// ordering comparison met a NaN, which the interpreter treats as an error ("cannot
+/// compare these values"), so the caller falls through to the bytecode loop and raises
+/// it at the exact element. Writes to `dst` before the poison are discarded, and `src`
+/// was never mutated, so the re-run sees pristine input. SERIAL, like
+/// [`run_filter_kernel`], to preserve element order.
+///
+/// SAFETY: `ptr` is a finalized
+/// `extern "C" fn(*const f64, *mut f64, i64, *const f64) -> i64` filter kernel from
+/// `define_array_kernel`'s "filterf" pass; `dst` is allocated here with `src.len()`
+/// slots, the most the kernel can write; `caps` is a valid slice the kernel only reads.
+pub unsafe fn run_filter_kernel_f64(
+    ptr: *const u8,
+    src: &[f64],
+    caps: &[f64],
+) -> Option<Vec<f64>> {
+    note_native_call();
+    let mut dst = vec![0f64; src.len()];
+    if src.is_empty() {
+        return Some(dst);
+    }
+    let f: extern "C" fn(*const f64, *mut f64, i64, *const f64) -> i64 =
+        unsafe { std::mem::transmute(ptr) };
+    let kept = f(src.as_ptr(), dst.as_mut_ptr(), src.len() as i64, caps.as_ptr());
+    if kept < 0 {
+        return None;
+    }
+    dst.truncate(kept as usize);
+    Some(dst)
+}
+
 pub unsafe fn run_filter_kernel(ptr: *const u8, src: &[i64], caps: &[i64]) -> Vec<i64> {
     note_native_call();
     let mut dst = vec![0i64; src.len()];
