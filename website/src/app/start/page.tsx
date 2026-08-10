@@ -62,11 +62,12 @@ export default function StartPage() {
               Honest status: build from source today
             </div>
             <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-400">
-              The one-line installer is written and the release workflow is prepared, but
-              prebuilt binaries activate with the first tagged release. Until then the
-              installer <em>source-builds</em>, so you need a Rust toolchain either way.
-              We would rather tell you that here than have <code>curl | sh</code> surprise
-              you with a ten-minute compile.
+              Both one-line installers are written and verified, and the release pipeline
+              is proven end-to-end — but the repository is still private, and a private
+              repo returns 404 to an unauthenticated <code>curl</code> for both the
+              installer script and the release assets. So until it is published, the
+              source build below is the real path, and it needs a Rust toolchain. We would
+              rather say that here than hand you a command that cannot work.
             </p>
           </div>
 

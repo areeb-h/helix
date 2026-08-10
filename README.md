@@ -59,11 +59,13 @@ BLAS; the core links nothing external beyond the C runtime). It's ~60 MB because
 Polars engine, yet starts instantly.
 
 ```sh
-# one-line install — prebuilt binary for your platform, or a source build as a fallback
-curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | sh
-
-# or, with a Rust toolchain, from a checkout:
+# from a checkout, with a Rust toolchain — the path that works TODAY:
 cargo install --path .
+
+# once the repo is public and a release is published, on macOS/Linux:
+curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | sh
+# …and on Windows (PowerShell, no admin needed):
+irm https://raw.githubusercontent.com/areeb-h/helix/main/install.ps1 | iex
 ```
 
 ```sh
@@ -75,9 +77,19 @@ helix emit-hbc script.helix  # compile to a .hbc bytecode container (portable co
 helix help                   # all commands
 ```
 
-> Prebuilt one-line installs activate once the project ships a tagged GitHub release (the
-> [release workflow](.github/workflows/release.yml) is prepared); until then the installer
-> source-builds, which requires Rust.
+> **The one-line installs need the repository to be PUBLIC, not just released.** Verified
+> 2026-08-10 against the live repo: while it is private, both
+> `raw.githubusercontent.com/.../install.sh` and
+> `github.com/.../releases/latest/download/...` return **404** to an unauthenticated
+> client — so the commands above cannot work for anyone but the owner, no matter how many
+> releases are tagged. Publishing also removes the other blocker: GitHub Actions is free
+> with unlimited standard-runner minutes on public repositories, and the `v0.1.0` release
+> run was cancelled by an Actions **billing** failure rather than by anything in the build.
+>
+> The release pipeline itself is verified end-to-end locally: the 64 MB binary packages to
+> a 21 MB tarball, `SHA256SUMS` is produced in the exact format the installers parse, and
+> the installer's verifier accepts the real artifact while rejecting both a one-byte
+> corruption and a missing checksum entry. Nothing is waiting on code.
 
 ## A tour
 
