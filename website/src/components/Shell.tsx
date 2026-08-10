@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { SearchDialog } from "./Search";
+import { buildIndex } from "@/lib/search";
 
 export function Shell({
   children,
@@ -20,11 +22,12 @@ export function Shell({
             </span>
           </Link>
           <nav className="flex gap-6 text-sm text-zinc-400">
-            <Link href="/start" className="hover:text-zinc-100">Get started</Link>
-            <Link href="/tour" className="hover:text-zinc-100">Tour</Link>
-            <Link href="/reference" className="hover:text-zinc-100">Reference</Link>
+            <Link href="/start" className="hidden hover:text-zinc-100 sm:inline">Get started</Link>
+            <Link href="/tour" className="hidden hover:text-zinc-100 sm:inline">Tour</Link>
+            <Link href="/reference" className="hidden hover:text-zinc-100 md:inline">Reference</Link>
+            <Link href="/playground" className="hidden hover:text-zinc-100 md:inline">Playground</Link>
             <Link href="/docs" className="hover:text-zinc-100">Docs</Link>
-            <Link href="/bench" className="hover:text-zinc-100">Benchmarks</Link>
+            <SearchDialog index={buildIndex()} />
           </nav>
         </div>
       </header>

@@ -119,3 +119,35 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: helix-x86_64-unknown-linux-musl.tar.gz
+
+  # Publish SHA256SUMS covering every uploaded artifact. Runs LAST, after all build
+  # jobs, and derives the hashes from what is actually attached to the release — so the
+  # file cannot describe a build that was never published, and a re-run regenerates it
+  # from the real assets rather than from one job's local copy.
+  #
+  # install.sh / install.ps1 REFUSE to install without this file matching (unless
+  # HELIX_NO_VERIFY=1): a one-line installer that cannot verify what it downloaded
+  # should say so, not shrug.
+  checksums:
+    name: publish SHA256SUMS
+    needs: [build, build-pgo, build-musl]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download every release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist && cd dist
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'helix-*.tar.gz' --pattern 'helix-*.zip'
+          ls -la
+      - name: Compute checksums
+        run: |
+          cd dist
+          sha256sum helix-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Upload SHA256SUMS
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SHA256SUMS
