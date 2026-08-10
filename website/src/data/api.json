@@ -1,0 +1,1583 @@
+{
+  "builtins": [
+    {
+      "category": "output",
+      "effect": "pure",
+      "name": "print",
+      "pure": false
+    },
+    {
+      "category": "output",
+      "effect": "pure",
+      "name": "emit",
+      "pure": false
+    },
+    {
+      "category": "output",
+      "effect": "pure",
+      "name": "write",
+      "pure": false
+    },
+    {
+      "category": "output",
+      "effect": "pure",
+      "name": "elog",
+      "pure": false
+    },
+    {
+      "category": "time",
+      "effect": "pure",
+      "name": "sleep",
+      "pure": false
+    },
+    {
+      "category": "net",
+      "effect": "net",
+      "name": "listen",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_csv",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_parquet",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_text",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_json",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_dir",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "file_exists",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-write",
+      "name": "remove_file",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-write",
+      "name": "mkdir",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_fasta",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_fastq",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_vcf",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_bcf",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_sam",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_bam",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_gff",
+      "pure": false
+    },
+    {
+      "category": "io",
+      "effect": "fs-read",
+      "name": "read_bed",
+      "pure": false
+    },
+    {
+      "category": "net",
+      "effect": "net",
+      "name": "http_get",
+      "pure": false
+    },
+    {
+      "category": "net",
+      "effect": "net",
+      "name": "http_post",
+      "pure": false
+    },
+    {
+      "category": "net",
+      "effect": "net",
+      "name": "http_request",
+      "pure": false
+    },
+    {
+      "category": "net",
+      "effect": "net",
+      "name": "http_stream",
+      "pure": false
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "dna",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "range",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "tensor",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "zeros",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "ones",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "eye",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "to_array",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "to_dataframe",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "to_tensor",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "dataframe",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "sqrt",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "cbrt",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "abs",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "exp",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "ln",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "log10",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "log2",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "log",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "sin",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "cos",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "tan",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "asin",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "acos",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "atan",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "atan2",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "sinh",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "cosh",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "tanh",
+      "pure": true
+    },
+    {
+      "category": "nn",
+      "effect": "pure",
+      "name": "relu",
+      "pure": true
+    },
+    {
+      "category": "nn",
+      "effect": "pure",
+      "name": "sigmoid",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "argmax",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "argmin",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "floor",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "ceil",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "round",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "trunc",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "sign",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "is_nan",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "is_finite",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "is_infinite",
+      "pure": true
+    },
+    {
+      "category": "time",
+      "effect": "pure",
+      "name": "clock_monotonic",
+      "pure": false
+    },
+    {
+      "category": "input",
+      "effect": "pure",
+      "name": "read_int",
+      "pure": false
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "degrees",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "radians",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "hypot",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "min",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "max",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "clamp",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "erf",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "gcd",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "isqrt",
+      "pure": true
+    },
+    {
+      "category": "math",
+      "effect": "pure",
+      "name": "primes",
+      "pure": true
+    },
+    {
+      "category": "conversion",
+      "effect": "pure",
+      "name": "chr",
+      "pure": true
+    },
+    {
+      "category": "conversion",
+      "effect": "pure",
+      "name": "ord",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "rational",
+      "pure": true
+    },
+    {
+      "category": "conversion",
+      "effect": "pure",
+      "name": "numerator",
+      "pure": true
+    },
+    {
+      "category": "conversion",
+      "effect": "pure",
+      "name": "denominator",
+      "pure": true
+    },
+    {
+      "category": "conversion",
+      "effect": "pure",
+      "name": "to_float",
+      "pure": true
+    },
+    {
+      "category": "conversion",
+      "effect": "pure",
+      "name": "to_int",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "dict",
+      "pure": true
+    },
+    {
+      "category": "linalg",
+      "effect": "pure",
+      "name": "lll",
+      "pure": true
+    },
+    {
+      "category": "linalg",
+      "effect": "pure",
+      "name": "lll_exact",
+      "pure": true
+    },
+    {
+      "category": "autodiff",
+      "effect": "pure",
+      "name": "variable",
+      "pure": true
+    },
+    {
+      "category": "autodiff",
+      "effect": "pure",
+      "name": "value_of",
+      "pure": true
+    },
+    {
+      "category": "autodiff",
+      "effect": "pure",
+      "name": "gradient",
+      "pure": true
+    },
+    {
+      "category": "bio",
+      "effect": "pure",
+      "name": "align",
+      "pure": true
+    },
+    {
+      "category": "crypto",
+      "effect": "pure",
+      "name": "sha256",
+      "pure": true
+    },
+    {
+      "category": "crypto",
+      "effect": "pure",
+      "name": "hmac_sha256",
+      "pure": true
+    },
+    {
+      "category": "encoding",
+      "effect": "pure",
+      "name": "base64_encode",
+      "pure": true
+    },
+    {
+      "category": "encoding",
+      "effect": "pure",
+      "name": "base64_decode",
+      "pure": true
+    },
+    {
+      "category": "encoding",
+      "effect": "pure",
+      "name": "hex_encode",
+      "pure": true
+    },
+    {
+      "category": "encoding",
+      "effect": "pure",
+      "name": "hex_decode",
+      "pure": true
+    },
+    {
+      "category": "crypto",
+      "effect": "pure",
+      "name": "aes_keygen",
+      "pure": false
+    },
+    {
+      "category": "crypto",
+      "effect": "pure",
+      "name": "aes_encrypt",
+      "pure": false
+    },
+    {
+      "category": "crypto",
+      "effect": "pure",
+      "name": "aes_decrypt",
+      "pure": true
+    },
+    {
+      "category": "crypto",
+      "effect": "pure",
+      "name": "ed25519_keygen",
+      "pure": false
+    },
+    {
+      "category": "crypto",
+      "effect": "pure",
+      "name": "ed25519_sign",
+      "pure": true
+    },
+    {
+      "category": "crypto",
+      "effect": "pure",
+      "name": "ed25519_verify",
+      "pure": true
+    },
+    {
+      "category": "random",
+      "effect": "pure",
+      "name": "random",
+      "pure": true
+    },
+    {
+      "category": "random",
+      "effect": "pure",
+      "name": "randn",
+      "pure": true
+    },
+    {
+      "category": "random",
+      "effect": "pure",
+      "name": "random_int",
+      "pure": true
+    },
+    {
+      "category": "constructor",
+      "effect": "pure",
+      "name": "linspace",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "mse",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "rmse",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "mae",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "r2_score",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "aic",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "bic",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "accuracy",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "precision",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "recall",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "f1_score",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "confusion_matrix",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "normal_cdf",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "normal_pdf",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "correlation",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "t_test",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "linear_regression",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "multiple_regression",
+      "pure": true
+    },
+    {
+      "category": "stats",
+      "effect": "pure",
+      "name": "least_squares",
+      "pure": true
+    },
+    {
+      "category": "assert",
+      "effect": "pure",
+      "name": "assert",
+      "pure": false
+    },
+    {
+      "category": "assert",
+      "effect": "pure",
+      "name": "assert_eq",
+      "pure": false
+    },
+    {
+      "category": "assert",
+      "effect": "pure",
+      "name": "assert_close",
+      "pure": false
+    }
+  ],
+  "effects": [
+    "pure",
+    "fs-read",
+    "fs-write",
+    "net",
+    "process",
+    "env"
+  ],
+  "helix_version": "0.1.0",
+  "methods": {
+    "Array": [
+      {
+        "effect": "pure",
+        "name": "mean"
+      },
+      {
+        "effect": "pure",
+        "name": "std"
+      },
+      {
+        "effect": "pure",
+        "name": "median"
+      },
+      {
+        "effect": "pure",
+        "name": "var"
+      },
+      {
+        "effect": "pure",
+        "name": "quantile"
+      },
+      {
+        "effect": "pure",
+        "name": "summary"
+      },
+      {
+        "effect": "pure",
+        "name": "sum"
+      },
+      {
+        "effect": "pure",
+        "name": "min"
+      },
+      {
+        "effect": "pure",
+        "name": "max"
+      },
+      {
+        "effect": "pure",
+        "name": "count"
+      },
+      {
+        "effect": "pure",
+        "name": "length"
+      },
+      {
+        "effect": "pure",
+        "name": "index_of"
+      },
+      {
+        "effect": "pure",
+        "name": "normalize"
+      },
+      {
+        "effect": "pure",
+        "name": "sort"
+      },
+      {
+        "effect": "pure",
+        "name": "reverse"
+      },
+      {
+        "effect": "pure",
+        "name": "first"
+      },
+      {
+        "effect": "pure",
+        "name": "last"
+      },
+      {
+        "effect": "pure",
+        "name": "map"
+      },
+      {
+        "effect": "pure",
+        "name": "filter"
+      },
+      {
+        "effect": "pure",
+        "name": "where"
+      },
+      {
+        "effect": "pure",
+        "name": "reduce"
+      },
+      {
+        "effect": "pure",
+        "name": "scan"
+      },
+      {
+        "effect": "pure",
+        "name": "any"
+      },
+      {
+        "effect": "pure",
+        "name": "all"
+      },
+      {
+        "effect": "pure",
+        "name": "take"
+      },
+      {
+        "effect": "pure",
+        "name": "drop"
+      },
+      {
+        "effect": "pure",
+        "name": "take_while"
+      },
+      {
+        "effect": "pure",
+        "name": "drop_while"
+      },
+      {
+        "effect": "pure",
+        "name": "position"
+      },
+      {
+        "effect": "pure",
+        "name": "zip"
+      },
+      {
+        "effect": "pure",
+        "name": "enumerate"
+      },
+      {
+        "effect": "pure",
+        "name": "top"
+      },
+      {
+        "effect": "pure",
+        "name": "frequencies"
+      },
+      {
+        "effect": "pure",
+        "name": "unique"
+      },
+      {
+        "effect": "pure",
+        "name": "drop_missing"
+      },
+      {
+        "effect": "pure",
+        "name": "join"
+      },
+      {
+        "effect": "pure",
+        "name": "concat"
+      },
+      {
+        "effect": "pure",
+        "name": "flatten"
+      },
+      {
+        "effect": "pure",
+        "name": "min_by"
+      },
+      {
+        "effect": "pure",
+        "name": "max_by"
+      },
+      {
+        "effect": "pure",
+        "name": "argmin"
+      },
+      {
+        "effect": "pure",
+        "name": "argmax"
+      },
+      {
+        "effect": "pure",
+        "name": "zipmap"
+      },
+      {
+        "effect": "pure",
+        "name": "sort_by"
+      },
+      {
+        "effect": "pure",
+        "name": "zscores"
+      },
+      {
+        "effect": "pure",
+        "name": "iqr"
+      },
+      {
+        "effect": "pure",
+        "name": "spread"
+      },
+      {
+        "effect": "pure",
+        "name": "standard_error"
+      },
+      {
+        "effect": "pure",
+        "name": "coefficient_of_variation"
+      },
+      {
+        "effect": "pure",
+        "name": "dot"
+      },
+      {
+        "effect": "pure",
+        "name": "norm"
+      },
+      {
+        "effect": "pure",
+        "name": "cumsum"
+      },
+      {
+        "effect": "pure",
+        "name": "product"
+      },
+      {
+        "effect": "pure",
+        "name": "argsort"
+      },
+      {
+        "effect": "pure",
+        "name": "clamp"
+      },
+      {
+        "effect": "pure",
+        "name": "softmax"
+      },
+      {
+        "effect": "pure",
+        "name": "bootstrap"
+      },
+      {
+        "effect": "pure",
+        "name": "contains"
+      },
+      {
+        "effect": "pure",
+        "name": "mean_gc"
+      },
+      {
+        "effect": "pure",
+        "name": "total_length"
+      },
+      {
+        "effect": "pure",
+        "name": "bar_chart"
+      },
+      {
+        "effect": "pure",
+        "name": "histogram"
+      },
+      {
+        "effect": "pure",
+        "name": "line_chart"
+      },
+      {
+        "effect": "pure",
+        "name": "sparkline"
+      },
+      {
+        "effect": "pure",
+        "name": "scatter"
+      },
+      {
+        "effect": "pure",
+        "name": "svg_bar"
+      },
+      {
+        "effect": "pure",
+        "name": "svg_line"
+      },
+      {
+        "effect": "fs-write",
+        "name": "write_csv"
+      },
+      {
+        "effect": "fs-write",
+        "name": "write_tsv"
+      },
+      {
+        "effect": "fs-write",
+        "name": "write_json"
+      },
+      {
+        "effect": "pure",
+        "name": "to_html"
+      },
+      {
+        "effect": "pure",
+        "name": "to_markdown"
+      },
+      {
+        "effect": "pure",
+        "name": "to_table"
+      },
+      {
+        "effect": "pure",
+        "name": "to_dict"
+      },
+      {
+        "effect": "fs-write",
+        "name": "write_fasta"
+      },
+      {
+        "effect": "fs-write",
+        "name": "write_fastq"
+      },
+      {
+        "effect": "pure",
+        "name": "shuffle"
+      },
+      {
+        "effect": "pure",
+        "name": "sample"
+      },
+      {
+        "effect": "pure",
+        "name": "choice"
+      }
+    ],
+    "DataFrame": [
+      {
+        "effect": "pure",
+        "name": "where"
+      },
+      {
+        "effect": "pure",
+        "name": "filter"
+      },
+      {
+        "effect": "pure",
+        "name": "select"
+      },
+      {
+        "effect": "pure",
+        "name": "sort"
+      },
+      {
+        "effect": "pure",
+        "name": "group"
+      },
+      {
+        "effect": "pure",
+        "name": "with"
+      },
+      {
+        "effect": "pure",
+        "name": "join"
+      },
+      {
+        "effect": "pure",
+        "name": "vstack"
+      },
+      {
+        "effect": "pure",
+        "name": "unique"
+      },
+      {
+        "effect": "pure",
+        "name": "column"
+      },
+      {
+        "effect": "pure",
+        "name": "head"
+      },
+      {
+        "effect": "pure",
+        "name": "count"
+      },
+      {
+        "effect": "pure",
+        "name": "columns"
+      },
+      {
+        "effect": "pure",
+        "name": "cache"
+      },
+      {
+        "effect": "fs-write",
+        "name": "write_csv"
+      },
+      {
+        "effect": "fs-write",
+        "name": "write_tsv"
+      },
+      {
+        "effect": "fs-write",
+        "name": "write_json"
+      },
+      {
+        "effect": "fs-write",
+        "name": "write_parquet"
+      },
+      {
+        "effect": "pure",
+        "name": "to_html"
+      },
+      {
+        "effect": "pure",
+        "name": "to_markdown"
+      },
+      {
+        "effect": "pure",
+        "name": "to_table"
+      }
+    ],
+    "Dict": [
+      {
+        "effect": "pure",
+        "name": "get"
+      },
+      {
+        "effect": "pure",
+        "name": "contains"
+      },
+      {
+        "effect": "pure",
+        "name": "has"
+      },
+      {
+        "effect": "pure",
+        "name": "keys"
+      },
+      {
+        "effect": "pure",
+        "name": "values"
+      },
+      {
+        "effect": "pure",
+        "name": "items"
+      },
+      {
+        "effect": "pure",
+        "name": "insert"
+      },
+      {
+        "effect": "pure",
+        "name": "remove"
+      },
+      {
+        "effect": "pure",
+        "name": "count"
+      },
+      {
+        "effect": "pure",
+        "name": "length"
+      }
+    ],
+    "Dna": [
+      {
+        "effect": "pure",
+        "name": "gc_content"
+      },
+      {
+        "effect": "pure",
+        "name": "reverse_complement"
+      },
+      {
+        "effect": "pure",
+        "name": "complement"
+      },
+      {
+        "effect": "pure",
+        "name": "kmers"
+      },
+      {
+        "effect": "pure",
+        "name": "windows"
+      },
+      {
+        "effect": "pure",
+        "name": "codons"
+      },
+      {
+        "effect": "pure",
+        "name": "kmer_counts"
+      },
+      {
+        "effect": "pure",
+        "name": "canonical_kmer_counts"
+      },
+      {
+        "effect": "pure",
+        "name": "align"
+      },
+      {
+        "effect": "pure",
+        "name": "find"
+      },
+      {
+        "effect": "pure",
+        "name": "find_all"
+      },
+      {
+        "effect": "pure",
+        "name": "gc_skew"
+      },
+      {
+        "effect": "pure",
+        "name": "longest_homopolymer"
+      },
+      {
+        "effect": "pure",
+        "name": "length"
+      },
+      {
+        "effect": "pure",
+        "name": "count"
+      },
+      {
+        "effect": "pure",
+        "name": "at_content"
+      },
+      {
+        "effect": "pure",
+        "name": "base_counts"
+      },
+      {
+        "effect": "pure",
+        "name": "hamming"
+      }
+    ],
+    "GroupBy": [
+      {
+        "effect": "pure",
+        "name": "mean"
+      },
+      {
+        "effect": "pure",
+        "name": "sum"
+      },
+      {
+        "effect": "pure",
+        "name": "min"
+      },
+      {
+        "effect": "pure",
+        "name": "max"
+      },
+      {
+        "effect": "pure",
+        "name": "count"
+      },
+      {
+        "effect": "pure",
+        "name": "std"
+      }
+    ],
+    "Net": [
+      {
+        "effect": "net",
+        "name": "accept"
+      },
+      {
+        "effect": "net",
+        "name": "poll"
+      },
+      {
+        "effect": "pure",
+        "name": "request"
+      },
+      {
+        "effect": "net",
+        "name": "respond"
+      },
+      {
+        "effect": "net",
+        "name": "sse"
+      },
+      {
+        "effect": "net",
+        "name": "send"
+      },
+      {
+        "effect": "pure",
+        "name": "next"
+      },
+      {
+        "effect": "pure",
+        "name": "status"
+      },
+      {
+        "effect": "pure",
+        "name": "close"
+      },
+      {
+        "effect": "pure",
+        "name": "accept_poll"
+      },
+      {
+        "effect": "pure",
+        "name": "poll_request"
+      },
+      {
+        "effect": "pure",
+        "name": "is_open"
+      },
+      {
+        "effect": "pure",
+        "name": "wait"
+      }
+    ],
+    "Record": [
+      {
+        "effect": "pure",
+        "name": "get"
+      },
+      {
+        "effect": "pure",
+        "name": "has"
+      },
+      {
+        "effect": "pure",
+        "name": "keys"
+      },
+      {
+        "effect": "pure",
+        "name": "values"
+      },
+      {
+        "effect": "pure",
+        "name": "items"
+      }
+    ],
+    "String": [
+      {
+        "effect": "pure",
+        "name": "upper"
+      },
+      {
+        "effect": "pure",
+        "name": "lower"
+      },
+      {
+        "effect": "pure",
+        "name": "count"
+      },
+      {
+        "effect": "pure",
+        "name": "length"
+      },
+      {
+        "effect": "pure",
+        "name": "reverse"
+      },
+      {
+        "effect": "pure",
+        "name": "trim"
+      },
+      {
+        "effect": "pure",
+        "name": "split"
+      },
+      {
+        "effect": "pure",
+        "name": "replace"
+      },
+      {
+        "effect": "pure",
+        "name": "contains"
+      },
+      {
+        "effect": "pure",
+        "name": "starts_with"
+      },
+      {
+        "effect": "pure",
+        "name": "ends_with"
+      },
+      {
+        "effect": "pure",
+        "name": "take"
+      },
+      {
+        "effect": "pure",
+        "name": "drop"
+      },
+      {
+        "effect": "pure",
+        "name": "repeat"
+      },
+      {
+        "effect": "pure",
+        "name": "ljust"
+      },
+      {
+        "effect": "pure",
+        "name": "rjust"
+      },
+      {
+        "effect": "pure",
+        "name": "center"
+      },
+      {
+        "effect": "pure",
+        "name": "phred"
+      },
+      {
+        "effect": "pure",
+        "name": "parse_json"
+      },
+      {
+        "effect": "pure",
+        "name": "to_float"
+      },
+      {
+        "effect": "pure",
+        "name": "to_int"
+      },
+      {
+        "effect": "fs-write",
+        "name": "write_to"
+      },
+      {
+        "effect": "fs-write",
+        "name": "append_to"
+      }
+    ],
+    "Tensor": [
+      {
+        "effect": "pure",
+        "name": "shape"
+      },
+      {
+        "effect": "pure",
+        "name": "ndim"
+      },
+      {
+        "effect": "pure",
+        "name": "count"
+      },
+      {
+        "effect": "pure",
+        "name": "sum"
+      },
+      {
+        "effect": "pure",
+        "name": "mean"
+      },
+      {
+        "effect": "pure",
+        "name": "min"
+      },
+      {
+        "effect": "pure",
+        "name": "max"
+      },
+      {
+        "effect": "pure",
+        "name": "flatten"
+      },
+      {
+        "effect": "pure",
+        "name": "reshape"
+      },
+      {
+        "effect": "pure",
+        "name": "transpose"
+      },
+      {
+        "effect": "pure",
+        "name": "t"
+      },
+      {
+        "effect": "pure",
+        "name": "matmul"
+      },
+      {
+        "effect": "pure",
+        "name": "dot"
+      },
+      {
+        "effect": "pure",
+        "name": "norm"
+      },
+      {
+        "effect": "pure",
+        "name": "det"
+      },
+      {
+        "effect": "pure",
+        "name": "inv"
+      },
+      {
+        "effect": "pure",
+        "name": "solve"
+      },
+      {
+        "effect": "pure",
+        "name": "softmax"
+      }
+    ]
+  },
+  "universal_methods": [
+    "is_missing",
+    "to_json"
+  ]
+}

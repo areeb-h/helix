@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "sync:api": "../target/release/helix describe > src/data/api.json || ../target/gate/helix describe > src/data/api.json"
   },
   "dependencies": {
     "marked": "^18.0.9",
