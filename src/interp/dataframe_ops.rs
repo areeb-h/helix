@@ -82,6 +82,9 @@ pub(crate) fn df_column_verb(
             }
             let columns = lf.column_names(line, col)?;
             let pred = dataframe::ast_to_colexpr(&args[0], &columns, resolve_var)?;
+            // Before any backend sees it. A predicate that is provably not a condition
+            // ABORTED the process on the lazy CSV-scan path — see `validate_predicate`.
+            crate::backend::validate_predicate(&pred, line, col)?;
             Ok(Value::dataframe(lf.filter(&pred, line, col)?))
         }
         "select" => {

@@ -814,6 +814,94 @@ fn run_modules(
     r
 }
 
+/// A `where`/`filter` predicate that is not a condition must be a clean Helix error — on a
+/// frame read from a FILE, which is the only shape that ever aborted.
+///
+/// `read_csv(f).where(1)` used to exit 134, `Aborted (core dumped)`, on all three engines,
+/// uncatchable by `try` (the build is `panic = "abort"`), spilling an absolute cargo-registry
+/// path and a `polars-stream` source line — after `helix check` had said `ok`. ADR-0024 says
+/// that cannot happen; it did.
+///
+/// TWO THINGS THIS TEST GETS RIGHT THAT THE OBVIOUS VERSION DOES NOT:
+///
+/// 1. **It reads a file.** Every DataFrame fixture in `tests/corpus/` builds its frame with
+///    `dataframe({…})`, and that eager path returned a clean error for the very same
+///    predicate. The abort lived only on the lazy CSV-scan path. Written the way the existing
+///    fixtures are written, this test passes while the bug remains.
+/// 2. **It covers the whole family, not the literal.** `not 1`, `1 and true` and `1 + 1` all
+///    aborted too, so a guard that only rejected `Lit(Int)` would leave three of six live.
+///    `1.5` and `"x"` never aborted — they failed through a different engine path — and are
+///    included so the fix is a single Helix diagnostic rather than one message per dtype.
+///
+/// The determinism assertion is the second bug: `where(@a > 0 and 1)` produced two DIFFERENT
+/// error texts across runs of one engine, which made the byte-identity oracle unenforceable
+/// on this path. The guard fires before the backend, so the text is now fixed.
+#[test]
+fn a_non_boolean_filter_predicate_is_an_error_not_an_abort() {
+    let dir = std::env::temp_dir().join("helix_predguard");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let csv = dir.join("f.csv");
+    std::fs::write(&csv, "a,b,flag\n1,2,true\n3,4,false\n5,6,true\n").unwrap();
+    let csv_path = csv.to_str().unwrap().replace('\\', "/");
+
+    let engines: [&[(&str, &str)]; 3] = [&[], &[("HELIX_NOJIT", "1")], &[("HELIX_NOVM", "1")]];
+
+    // The six shapes that aborted, plus two that failed noisily through another path.
+    for (i, pred) in ["1", "0", "-1", "1 + 1", "not 1", "1 and true", "1.5", "\"x\""]
+        .iter()
+        .enumerate()
+    {
+        for verb in ["where", "filter"] {
+            let src =
+                format!("df = read_csv(\"{csv_path}\")\nprint(df.{verb}({pred}).count())\n");
+            for (e, env) in engines.iter().enumerate() {
+                let (out, err, code) =
+                    run_source(&src, env, &format!("predguard_{i}_{verb}_{e}"));
+                // The whole point: exit 1, not a signal. `Some(1)` also excludes `None`,
+                // which is what a killed-by-signal process reports.
+                assert_eq!(code, Some(1), "`{verb}({pred})` engine {e}: stderr:\n{err}");
+                assert!(
+                    err.contains("filter predicate must be a condition"),
+                    "`{verb}({pred})` engine {e} gave: {err}"
+                );
+                // No engine internals may reach the user (ADR-0012 says none escape the seam).
+                for leak in [".cargo", "polars", "panicked at", "internal error", "SchemaMismatch"] {
+                    assert!(!err.contains(leak), "`{verb}({pred})` leaked `{leak}`: {err}");
+                }
+                assert!(out.is_empty(), "`{verb}({pred})` printed before failing: {out:?}");
+            }
+        }
+    }
+
+    // Predicates that ARE conditions still work, and a bare column is still the backend's
+    // business — the guard must not have turned `@flag` into a false positive.
+    for (pred, want) in [("@a > 1", "2"), ("@flag", "2"), ("not @flag", "1"), ("true", "3")] {
+        let src = format!("df = read_csv(\"{csv_path}\")\nprint(df.where({pred}).count())\n");
+        let (out, err, code) = run_source(&src, &[], &format!("predok_{}", pred.len()));
+        assert_eq!(code, Some(0), "`where({pred})` should run; stderr:\n{err}");
+        assert_eq!(out.trim(), want, "`where({pred})`");
+    }
+    // An unknown column is still a column error, not a predicate error.
+    let src = format!("df = read_csv(\"{csv_path}\")\nprint(df.where(@nope).count())\n");
+    let (_, err, code) = run_source(&src, &[], "predguard_unknown_col");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("nope"), "{err}");
+
+    // DETERMINISM. Twelve runs, one engine, must give one outcome — this program used to
+    // flip between two different error texts.
+    let src = format!("df = read_csv(\"{csv_path}\")\nprint(df.where(@a > 0 and 1).count())\n");
+    // The SAME tag every time — `run_source` names the temp file after it, and the file name
+    // appears in the rendered error, so varying the tag would compare two different programs.
+    let first = run_source(&src, &[], "predguard_det");
+    for i in 1..12 {
+        let again = run_source(&src, &[], "predguard_det");
+        assert_eq!(again, first, "error text is not deterministic across runs (run {i})");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn module_program_runs_and_matches_engines() {
     // The committed multi-file example: shapes.helix imports geometry.helix.

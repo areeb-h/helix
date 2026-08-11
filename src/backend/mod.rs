@@ -231,6 +231,89 @@ pub fn validate_columns_exist(
     Ok(())
 }
 
+/// Validate that a `where`/`filter` predicate is a CONDITION, before any backend sees it.
+///
+/// THIS EXISTS BECAUSE `read_csv(f).where(1)` ABORTED THE PROCESS. Not errored — aborted:
+/// exit 134, `Aborted (core dumped)`, on all three engines, uncatchable by `try` (the build
+/// is `panic = "abort"`, so `catch_unwind` is a no-op), after `helix check` printed `ok`. It
+/// also spilled an absolute cargo-registry path and a `polars-stream-0.54.4` source line into
+/// the user's terminal. That is a direct falsification of ADR-0024's never-abort promise,
+/// reachable from a one-character typo on the flagship data path.
+///
+/// WHY NOTHING CAUGHT IT. Two blind spots lined up. The unwrap-budget ratchet counts
+/// panicking calls under `src/` only, so a panic inside a dependency is invisible to it. And
+/// every DataFrame fixture in `tests/corpus/` builds its frame with `dataframe({…})` — the
+/// EAGER half of the dispatch, which returns a clean error for the very same predicate. The
+/// abort lives only on the lazy CSV-scan path, where Polars pushes the predicate into a scan
+/// node that panics on a non-boolean. A regression test written the way all five existing
+/// fixtures are written passes while the bug remains, so the fixture must call `read_csv`.
+///
+/// WHY HERE AND NOT IN `backend/polars.rs`. ADR-0012 puts Helix's totality at the seam, and
+/// this check needs nothing engine-specific: a filter predicate that is provably not a
+/// condition is wrong for every backend, so validating it beside [`validate_columns_exist`]
+/// means no future backend can forget. It also has the side effect of making the two
+/// dispatch halves agree — the eager path's message was Polars' own
+/// ``filter predicate must be of type `Boolean`, got `i32` ``, which names a dtype no Helix
+/// program can spell.
+///
+/// WHAT IT PROVES, AND WHAT IT DOES NOT. `Col` is deliberately UNKNOWN: `df.where(@flag)` on
+/// a boolean column is legitimate, and a bare column's type needs the schema. Everything a
+/// bare column reaches is therefore left to the backend, which errors cleanly on it today
+/// (verified: `where(@a)` on an Int column exits 1, `where(@a + 1)` exits 1). What is
+/// rejected here is the family that has no schema question at all — a literal, arithmetic, a
+/// negation of one — which is exactly the family that aborted: `1`, `0`, `-1`, `1 + 1`,
+/// `not 1`, `1 and true`.
+pub fn validate_predicate(pred: &ColExpr, line: usize, col: usize) -> Result<(), HelixError> {
+    /// `Some(true)` = provably a condition, `Some(false)` = provably not one, `None` =
+    /// depends on the frame's schema, so it is the backend's business.
+    fn shape(e: &ColExpr) -> Option<bool> {
+        match e {
+            // A bare column may be a Boolean column; only the schema knows.
+            ColExpr::Col(_) => None,
+            ColExpr::Lit(Value::Bool(_)) => Some(true),
+            ColExpr::Lit(_) => Some(false),
+            // Comparisons always yield a condition, whatever their operands are.
+            ColExpr::Binary(
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
+                ..
+            ) => Some(true),
+            // `and`/`or` are conditions only if both sides are. `1 and true` is the shape
+            // that aborted, and it is caught here rather than by the literal arm.
+            ColExpr::Binary(BinOp::And | BinOp::Or, l, r) => match (shape(l), shape(r)) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            },
+            // Arithmetic, bitwise and the rest are values, never conditions.
+            ColExpr::Binary(..) => Some(false),
+            // `not` preserves its operand's verdict: `not 1` is as wrong as `1`.
+            ColExpr::Unary(UnOp::Not, inner) => shape(inner),
+            ColExpr::Unary(..) => Some(false),
+        }
+    }
+    if shape(pred) != Some(false) {
+        return Ok(());
+    }
+    // Name what the user actually wrote, in Helix's vocabulary — never the engine's.
+    // `a value of type X` rather than `a X` on purpose: it matches the phrasing already used
+    // elsewhere ("a value of type Missing cannot be indexed") and sidesteps the article bug
+    // that "a Int" would be.
+    let what = match pred {
+        ColExpr::Lit(v) => format!("a value of type {}", v.type_name()),
+        ColExpr::Unary(UnOp::Not, _) => "`not` applied to a value, not to a condition".to_string(),
+        ColExpr::Unary(..) => "an arithmetic expression".to_string(),
+        ColExpr::Binary(BinOp::And | BinOp::Or, ..) => {
+            "an `and`/`or` over something that is not a condition".to_string()
+        }
+        ColExpr::Binary(..) => "an arithmetic expression".to_string(),
+        ColExpr::Col(_) => unreachable!("a bare column is never provably non-boolean"),
+    };
+    Err(
+        HelixError::new(format!("a filter predicate must be a condition, but this is {what}"), line, col)
+            .hint("compare a column, e.g. `.where(@age > 40)`, or name a boolean column, e.g. `.where(@is_adult)`."),
+    )
+}
+
 /// Validate join keys against both frames' schemas (shared by every backend) so a
 /// typo reads as a clean Helix error rather than an engine's lazy-plan dump.
 pub fn validate_join_keys(
