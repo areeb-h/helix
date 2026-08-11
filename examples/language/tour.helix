@@ -23,8 +23,8 @@ print("first:", xs[0], "last:", xs[-1])
 
 # --- Multi-line dot-chains read top to bottom ---
 result = [10, 5, 8, 3, 9]
-    .sort()
-    .reverse()
+  .sort()
+  .reverse()
 print("top scores:", result)
 
 # --- DNA sequences ---

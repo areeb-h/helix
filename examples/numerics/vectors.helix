@@ -28,4 +28,3 @@ print("clamp:  ", [-2, 5, 12, 0].clamp(0, 10))
 # --- standardize (z-scores): zero mean, unit standard deviation ---
 data = [10.0, 12.0, 14.0, 16.0, 18.0]
 print("zscores:", data.zscores().map(z => round(z, 2)))
-

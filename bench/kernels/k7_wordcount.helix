@@ -57,8 +57,8 @@
 # the honest statement is the memory structure above, which reproduces to within ~7%.
 n = read_int() ?? 5000000
 words = (0..n).scan(88172645463325252, (s, i) => do {
-    a = s ^ (s << 13)
-    b = a ^ ((a >> 7) & 144115188075855871)
-    b ^ (b << 17)
-  }).map(s => "w{((s >> 11) & 9007199254740991) % 10000}")
+  a = s ^ (s << 13)
+  b = a ^ ((a >> 7) & 144115188075855871)
+  b ^ (b << 17)
+}).map(s => "w{((s >> 11) & 9007199254740991) % 10000}")
 print(words.frequencies().map((w, c) => c).reduce(0, (a, x) => if x > a then x else a))

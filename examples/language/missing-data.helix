@@ -39,7 +39,7 @@ print({a: missing} == {a: missing})       # missing
 print([1, missing] == [1, 2])             # missing
 # ...unless a definite difference decides it first (Kleene logic):
 print({a: 1, b: missing} == {a: 2, b: missing})  # false — `a` differs, so it is
-                                                 # certainly not equal
+# certainly not equal
 
 # --- Kleene boolean logic: `and`/`or` short-circuit on a DETERMINED answer ---
 print(missing and false)    # false — false wins regardless of the unknown
@@ -71,6 +71,6 @@ print([missing, 1, missing].frequencies())  # [(missing, 2), (1, 1)]
 print([1, missing].contains(missing))       # true
 
 # --- Sorting refuses rather than inventing an order ---
-r = try [3, missing, 1].sort()
+r = try[3, missing, 1].sort()
 print(r.error)              # cannot sort: the array has missing values
 print([3, missing, 1].drop_missing().sort())

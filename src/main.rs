@@ -18,6 +18,7 @@ mod capability;
 mod chart;
 mod dataframe;
 mod error;
+mod fmt;
 mod gff;
 mod hbc;
 mod http;
@@ -195,6 +196,8 @@ fn run() -> ExitCode {
         },
         // `helix check <script>…` — load + type-check, produce nothing, run nothing.
         Some("check") => run_check(&args),
+        // `helix fmt <script>… [--check]` — normalize whitespace; never change a token.
+        Some("fmt") => run_fmt(&args),
         // `helix build <script> [-o name]` — bundle a program into a standalone exe.
         Some("build") => run_build(&args),
         // `helix emit-hbc <script> [--entry NAME] [-o out.hbc]` — compile to a `.hbc`
@@ -514,6 +517,92 @@ fn run_check(args: &[String]) -> ExitCode {
     })
 }
 
+/// `helix fmt <script>… [--check]` — format in place, or report which files would change.
+///
+/// NO OTHER FLAGS, EVER. Not "none yet" — none by design. See `src/fmt.rs` for why, but the
+/// short version is that every option is a future argument, and the two tools that took the
+/// other road (rustfmt's ~90 options, most nightly-only; prettier, which calls four of its
+/// own "historical artifacts" and has frozen the set) both regret it publicly.
+///
+/// It only needs the file to LEX, never to parse, so it works on a half-written file — which
+/// is the moment a formatter is most wanted and the moment prettier, rustfmt, black and
+/// gofmt all refuse.
+fn run_fmt(args: &[String]) -> ExitCode {
+    let mut check_only = false;
+    let mut paths: Vec<&str> = Vec::new();
+    for a in args.iter().skip(2) {
+        match a.as_str() {
+            "--check" => check_only = true,
+            other if other.starts_with('-') => {
+                eprintln!("error: unknown option `{other}` for `helix fmt`");
+                eprintln!("  the only option is `--check`; `helix fmt` has no style settings.");
+                return ExitCode::FAILURE;
+            }
+            other => paths.push(other),
+        }
+    }
+    if paths.is_empty() {
+        eprintln!("error: `helix fmt` needs at least one script path, e.g. `helix fmt main.helix`");
+        return ExitCode::FAILURE;
+    }
+    let mut resolved = Vec::with_capacity(paths.len());
+    for p in paths {
+        match resolve_script(p) {
+            Ok(path) => resolved.push(path),
+            Err(msg) => {
+                eprint!("{msg}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    let mut changed = 0usize;
+    let mut failed = 0usize;
+    for path in &resolved {
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read `{}`: {e}", path.display());
+                failed += 1;
+                continue;
+            }
+        };
+        let out = match fmt::format_source(&src) {
+            Ok(s) => s,
+            // A LEX error is the one thing that stops it: there is no token stream to be
+            // faithful to. A PARSE error is fine and is formatted like anything else.
+            Err(e) => {
+                eprint!("{}", e.render(&src, &path.display().to_string()));
+                failed += 1;
+                continue;
+            }
+        };
+        if out == src {
+            continue;
+        }
+        changed += 1;
+        if check_only {
+            println!("would reformat {}", path.display());
+        } else if let Err(e) = std::fs::write(path, &out) {
+            eprintln!("error: cannot write `{}`: {e}", path.display());
+            failed += 1;
+        } else {
+            println!("formatted {}", path.display());
+        }
+    }
+    if failed > 0 {
+        return ExitCode::FAILURE;
+    }
+    if check_only && changed > 0 {
+        eprintln!("{changed} file(s) would be reformatted");
+        return ExitCode::FAILURE;
+    }
+    if !check_only && changed == 0 {
+        println!("already formatted");
+    }
+    ExitCode::SUCCESS
+}
+
 /// `helix build <script> [-o name]` — bundle a single-file program into a standalone
 /// executable (see `src/bundle.rs`). Runs on the big stack: the build path loads and
 /// type-checks the program, both of which recurse over the AST.
@@ -755,6 +844,7 @@ fn print_help() {
          helix run <script>       run a script (`.helix` optional: `helix run main`)\n    \
          helix eval \"<code>\"       run a one-liner\n    \
          helix check <script>…    type-check without running (fast; takes many paths)\n    \
+         helix fmt <script>…      format (no options; `--check` reports instead of writing)\n    \
          helix build <script>     bundle a program into a standalone executable\n    \
          helix emit-hbc <script>  compile to a .hbc bytecode container (for ctype's hvm)\n    \
          helix repl               start an interactive session\n    \

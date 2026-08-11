@@ -13,7 +13,7 @@ print(count_down(1000000, 0))       # 500000500000
 fn collatz_len(n, steps) =
   if n == 1 then steps
   else let next = if n % 2 == 0 then n // 2 else 3 * n + 1 in
-       collatz_len(next, steps + 1)
+  collatz_len(next, steps + 1)
 print(collatz_len(27, 0))           # 111
 
 fn parity(n) = match n {

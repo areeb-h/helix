@@ -17,7 +17,7 @@ fn fit_degree(x, y, degree) = do {
   f     = least_squares(feats, y)
   k     = degree + 1                                # parameters incl. intercept
   {degree: degree, rss: f.rss, r2: f.r_squared,
-   aic: aic(f.rss, y.count(), k), bic: bic(f.rss, y.count(), k)}
+    aic: aic(f.rss, y.count(), k), bic: bic(f.rss, y.count(), k)}
 }
 
 models = [1, 2, 3, 4].map(d => fit_degree(x, y, d))

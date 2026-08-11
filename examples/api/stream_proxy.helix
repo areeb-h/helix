@@ -29,7 +29,7 @@ served = range(0, 1000000).map(i => do {
   up = http_stream({
     method: "POST",
     url: "http://127.0.0.1:11434/api/generate",
-    body: { model: "llama3", prompt: req.body, stream: true }.to_json(),
+    body: {model: "llama3", prompt: req.body, stream: true}.to_json(),
     timeout_ms: 30000
   })
 
@@ -41,11 +41,11 @@ served = range(0, 1000000).map(i => do {
     line = up.next()
     if line.is_missing() then
       0
-    else do {
-      tok = (try line.parse_json()).value ?? { response: "" }
-      c.send(tok.response)   # push this token to the browser as an SSE event
-      0
-    }
+      else do {
+        tok = (try line.parse_json()).value ?? {response: ""}
+        c.send(tok.response)   # push this token to the browser as an SSE event
+        0
+      }
   })
 
   # Free the upstream socket immediately whether we hit EOF or the budget — no need

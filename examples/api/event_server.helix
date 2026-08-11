@@ -15,7 +15,7 @@
 #   conn.is_open()           whether the connection is still open
 #   conn.respond(resp)       reply, keeping the connection open for the next request
 
-fn handle(req) = { status: 200, text: "hello from the event loop\n" }
+fn handle(req) = {status: 200, text: "hello from the event loop\n"}
 
 # One tick: wait for readiness, accept any new connection, then serve every connection that
 # has a request ready — dropping the ones that have closed. Tail-recursive => constant space.
@@ -26,10 +26,10 @@ fn loop(l, conns) = do {
   active = live.filter(c => do {
     req = c.poll_request()
     if req.is_missing() then c.is_open()          # not ready (keep) or closed (drop)
-    else do {
-      sent = c.respond(handle(req))               # served — keep the connection alive
-      c.is_open()
-    }
+      else do {
+        sent = c.respond(handle(req))               # served — keep the connection alive
+        c.is_open()
+      }
   })
   loop(l, active)
 }

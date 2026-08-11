@@ -26,7 +26,7 @@ print("polarity:", polarity(0), polarity(7), polarity(-4))
 # Record and tuple patterns destructure nested data. The killer case: pulling a
 # value out of a `try` result with no `.ok`/`.value` plumbing (see also
 # error-handling.helix).
-fn safe_div(a, b) = match try (a / b) {
+fn safe_div(a, b) = match try(a / b) {
   {ok: true, value: v} => v,
   _                    => 0.0,
 }

@@ -29,8 +29,8 @@ patients = read_csv("examples/data/patients.csv")
 print("median patient age:", patients.column("age").median())
 print("resting-hr summary: ", patients.column("resting_hr").summary())
 print(
-    "r(age, hr) in cohort:",
-    correlation(patients.column("age"), patients.column("resting_hr")),
+  "r(age, hr) in cohort:",
+  correlation(patients.column("age"), patients.column("resting_hr")),
 )
 
 # Inferential statistics: is a treatment's effect distinguishable from a control?

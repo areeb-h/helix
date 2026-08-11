@@ -12,8 +12,8 @@ print("average of passers:", passing.mean())
 
 # map builds a new array; chains read top-to-bottom.
 curved = scores
-    .map(it + 5)
-    .where(it <= 100)
+  .map(it + 5)
+  .where(it <= 100)
 print("curved & capped:", curved)
 
 # reduce names both binders explicitly — the accumulator and each element.

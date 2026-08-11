@@ -82,6 +82,7 @@ helix run script             # run a script (`.helix` optional)
 helix eval "print(1 + 2)"    # a one-liner
 helix repl                   # interactive session
 helix check script.helix     # type-check without running (takes many paths)
+helix fmt script.helix       # format — no options, and it cannot change your program
 helix build script.helix     # compile to a standalone executable (no toolchain needed)
 helix emit-hbc script.helix  # compile to a .hbc bytecode container (portable core-bytecode artifact)
 helix help                   # all commands
@@ -269,6 +270,31 @@ clippy + the full test suite + the VM/tree-walker parity diff + the whole-tree t
 optimized-but-fast profile. **Do not use `cargo test --release`** — that profile's fat LTO links
 Polars, noodles and Cranelift as one LLVM unit, which costs about twenty minutes per build and
 changes no test's outcome.
+
+## The formatter
+
+`helix fmt` **cannot change your program, and that is checked rather than hoped.** It never
+runs the parser: it reads the token stream, re-emits each token's source bytes verbatim, and
+decides only the whitespace between them — so `lex(fmt(x))` equals `lex(x)` token-for-token,
+asserted over every `.helix` file in this repository as a property test.
+
+Three consequences follow from that one constraint, and each is a thing another language's
+formatter gets wrong:
+
+- **It never reflows, and never edits a byte inside a comment.** The author owns line breaks
+  and prose; fmt owns indentation and inter-token spacing. This project already refuses
+  `cargo fmt` for exactly the failure that avoids — 1280 diffs, mostly re-indented
+  hand-wrapped comments. Aligned columns survive too: where a space is required you may use
+  more, and fmt keeps what you wrote.
+- **It formats a file that does not parse.** It only needs the file to lex. That is the
+  moment a formatter is most useful and the moment prettier, rustfmt, black and gofmt all
+  refuse — mid-edit.
+- **It has no configuration.** No config file, no width flag, no `# fmt: off`. Every other
+  tool's escape hatch exists to get away from reflowing, and there is nothing here to escape.
+
+There are no stylistic lints anywhere in the toolchain, by construction: style is not a
+choice, so it cannot be a warning. `helix check` covers meaning, `helix fmt` covers layout,
+and the two do not overlap.
 
 ## Contributing
 

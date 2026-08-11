@@ -13,9 +13,9 @@ n = 5000000
 # No intermediate array is built: `map` + `filter` + `reduce` become a single
 # pass, so this touches memory once.
 total = range(0, n)
-    .map(i => i * 2)
-    .filter(it % 3 == 0)
-    .reduce(0, (acc, x) => acc + x)
+  .map(i => i * 2)
+  .filter(it % 3 == 0)
+  .reduce(0, (acc, x) => acc + x)
 print("fused sum:      ", total)
 
 # --- 2. Element-wise array math is data-parallel across cores ---
@@ -53,10 +53,10 @@ fn escape(zr: Float, zi: Float, cr: Float, ci: Float, i: Int) =
   else escape(zr * zr - zi * zi + cr, 2.0 * zr * zi + ci, cr, ci, i + 1)
 
 mandel = range(0, 200)
-    .map(y => range(0, 200)
-        .map(x => escape(0.0, 0.0, (x * 1.0) * 0.015 - 2.1, (y * 1.0) * 0.015 - 1.5, 0))
-        .sum())
-    .sum()
+  .map(y => range(0, 200)
+      .map(x => escape(0.0, 0.0, (x * 1.0) * 0.015 - 2.1, (y * 1.0) * 0.015 - 1.5, 0))
+      .sum())
+  .sum()
 print("mandelbrot sum: ", mandel)
 
 # --- 6. Delegating to a real library beats a clever loop ---

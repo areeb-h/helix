@@ -84,6 +84,14 @@ pub enum Tok {
     FatArrow, // =>
     Pipe,     // | (match-pattern alternatives)
 
+    /// A `#` comment, INCLUDING the `#` and everything to end of line, verbatim.
+    ///
+    /// Produced ONLY by [`crate::lexer::lex_trivia`]; [`crate::lexer::lex`] drops these, so
+    /// the parser never sees one and nothing about compilation changes. It exists so that
+    /// `helix fmt` and the parser share ONE scanner — a second lexer written for the
+    /// formatter would drift from the real one, and then the formatter would accept programs
+    /// the compiler rejects.
+    Comment(String),
     Newline,
     Eof,
 }
@@ -148,6 +156,7 @@ impl Tok {
             Tok::Arrow => "`->`".into(),
             Tok::FatArrow => "`=>`".into(),
             Tok::Pipe => "`|`".into(),
+            Tok::Comment(_) => "a comment".into(),
             Tok::Newline => "end of line".into(),
             Tok::Eof => "end of file".into(),
         }
@@ -158,5 +167,20 @@ impl Tok {
 pub struct Token {
     pub tok: Tok,
     pub line: usize,
+    /// 1-based CHARACTER column — not a byte offset. `src/error.rs` pads its caret with
+    /// `" ".repeat(col - 1)`, which is only right in characters, so a 2-byte `π` counts once
+    /// here. That is why [`Token::start`] exists separately rather than being derived.
     pub col: usize,
+    /// Byte offset of this token's first byte in the source.
+    ///
+    /// Needed because `Tok` is LOSSY for every literal: escapes are already resolved and the
+    /// delimiter is gone (`"a"`, `'a'` and `'''a'''` all produce `Tok::Str("a")`, and
+    /// `a == b` is `true` for the first two), `{{` is already collapsed, and `lex_number`
+    /// discards the digit text so `1e3` becomes `1000.0` and `1e300` a 301-digit decimal.
+    /// Anything that reprints from `Tok` therefore rewrites the user's source. `helix fmt`
+    /// copies `src[start..end]` instead, which is what makes it impossible for it to change
+    /// a literal.
+    pub start: usize,
+    /// Byte offset one past this token's last byte.
+    pub end: usize,
 }

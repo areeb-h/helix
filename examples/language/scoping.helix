@@ -10,8 +10,8 @@ fn scale(n) = n * factor        # `factor` here means the global, always
 
 fn tricky(factor) = scale(2)    # this `factor` is a LOCAL of `tricky`...
 print(tricky(999))              # 20 — ...so `scale` still uses the global 10.
-                                # (Dynamic scoping would print 1998 — a classic
-                                # source of action-at-a-distance bugs.)
+# (Dynamic scoping would print 1998 — a classic
+# source of action-at-a-distance bugs.)
 
 # --- Locals shadow globals within their own scope, and only there ---
 x = "global"

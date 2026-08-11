@@ -43,4 +43,4 @@ n = read_int() ?? 15000
 pts = (range(0, n)).map(i => (i * 2654435761) % 1000)
 print((range(0, n)).map(i =>
   (range(i + 1, n)).reduce(0, (acc, j) => acc + abs(pts[i] - pts[j]))
-).sum())
+  ).sum())

@@ -8,8 +8,8 @@
 xs = random(1000000, 1)          # 1M uniforms in [0,1), seed 1
 ys = random(1000000, 2)          # a second, independent stream
 inside = range(0, 1000000)
-    .filter(j => xs[j] * xs[j] + ys[j] * ys[j] < 1.0)
-    .count()
+  .filter(j => xs[j] * xs[j] + ys[j] * ys[j] < 1.0)
+  .count()
 print("pi (builtin RNG): {(4.0 * inside) / 1000000.0:.4f}")
 
 # --- 2. A hand-written xorshift64: bit-exact with any other implementation ---
@@ -21,18 +21,18 @@ print("pi (builtin RNG): {(4.0 * inside) / 1000000.0:.4f}")
 fn mc(state: Int, n: Int, hits: Int) =
   if n == 0 then hits
   else
-    let s1 = state ^ (state << 13) in
-    let s2 = s1 ^ ((s1 >> 7) & 144115188075855871) in     # (1<<57)-1
-    let s3 = s2 ^ (s2 << 17) in
-    let x = (s3 >> 11) & 9007199254740991 in              # 53 significant bits
-    let t1 = x ^ (x << 13) in
-    let t2 = t1 ^ ((t1 >> 7) & 144115188075855871) in
-    let t3 = t2 ^ (t2 << 17) in
-    let y = (t3 >> 11) & 9007199254740991 in
-    let fx = (x * 1.0) * 0.00000000000000011102230246251565 in   # 2^-53
-    let fy = (y * 1.0) * 0.00000000000000011102230246251565 in
-    if fx * fx + fy * fy < 1.0 then mc(t3, n - 1, hits + 1)
-    else mc(t3, n - 1, hits)
+  let s1 = state ^ (state << 13) in
+  let s2 = s1 ^ ((s1 >> 7) & 144115188075855871) in     # (1<<57)-1
+  let s3 = s2 ^ (s2 << 17) in
+  let x = (s3 >> 11) & 9007199254740991 in              # 53 significant bits
+  let t1 = x ^ (x << 13) in
+  let t2 = t1 ^ ((t1 >> 7) & 144115188075855871) in
+  let t3 = t2 ^ (t2 << 17) in
+  let y = (t3 >> 11) & 9007199254740991 in
+  let fx = (x * 1.0) * 0.00000000000000011102230246251565 in   # 2^-53
+  let fy = (y * 1.0) * 0.00000000000000011102230246251565 in
+  if fx * fx + fy * fy < 1.0 then mc(t3, n - 1, hits + 1)
+  else mc(t3, n - 1, hits)
 
 hits = mc(88172645463325252, 2000000, 0)
 print("pi (xorshift64):  {(4.0 * (hits * 1.0)) / 2000000.0:.4f}")

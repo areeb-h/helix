@@ -37,10 +37,10 @@ print(describe(missing))
 print(describe(42))
 
 # Tuple and record patterns destructure nested data...
-print(match (1, (2, 3)) { (a, (b, c)) => a + b + c, _ => 0 })
+print(match (1, (2, 3)) {(a, (b, c)) => a + b + c, _ => 0})
 
 # ...and the natural fit: destructuring a `try` result, no `.ok`/`.value` plumbing.
-fn safe_div(a, b) = match try (a / b) {
+fn safe_div(a, b) = match try(a / b) {
   {ok: true, value: v} => v,
   {ok: false} => 0,
 }

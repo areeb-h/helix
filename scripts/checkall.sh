@@ -32,3 +32,13 @@ if [ "${#files[@]}" -eq 0 ]; then
 fi
 
 "$BIN" check "${files[@]}"
+
+# And the formatter, over the same set. `--check` writes nothing; it lists what would change
+# and exits non-zero. This is a real gate rather than an aspirational one because the tree was
+# formatted in the same commit that added `helix fmt` — a `--check` job that has never been
+# green is a badge saying "we do not run this".
+#
+# It is safe to gate on precisely because fmt cannot change a program: it re-emits every
+# token's source bytes and alters only the whitespace between them, so `lex(fmt(x))` equals
+# `lex(x)` token-for-token. That identity is asserted over this same file set as a unit test.
+"$BIN" fmt --check "${files[@]}"

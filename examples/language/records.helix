@@ -10,9 +10,9 @@ print("{patient.name} is {patient.age}, dx {patient.diagnosis}")
 
 # Records compose with everything — arrays of records, records of arrays:
 cohort = [
-    {name: "Ada", age: 41},
-    {name: "Ben", age: 38},
-    {name: "Cara", age: 55},
+  {name: "Ada", age: 41},
+  {name: "Ben", age: 38},
+  {name: "Cara", age: 55},
 ]
 print("names: {cohort.map(it.name)}")
 print("mean age: {cohort.map(it.age).mean()}")

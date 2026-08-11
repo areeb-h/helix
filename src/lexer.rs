@@ -15,9 +15,41 @@
 use crate::error::HelixError;
 use crate::token::{StrSeg, Tok, Token};
 
+/// The compiler's token stream: comments dropped, newlines cooked (see [`cook_newlines`]).
+///
+/// A thin filter over [`lex_trivia`] rather than a second scan — ONE scanner, so `helix fmt`
+/// can never disagree with the parser about what a program's tokens are.
 pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
+    let raw = lex_trivia(src)?;
+    Ok(cook_newlines(
+        raw.into_iter().filter(|t| !matches!(t.tok, Tok::Comment(_))).collect(),
+    ))
+}
+
+/// Everything in the source, in order: comments as [`Tok::Comment`], every newline
+/// uncooked, and a byte span on every token.
+///
+/// This is what `helix fmt` reads. It exists because the compiler's view is deliberately
+/// lossy in three ways a formatter cannot tolerate — comments are gone, the newlines that
+/// survive have already been filtered by context, and `Tok` has thrown away every literal's
+/// original spelling. The formatter copies `src[tok.start..tok.end]` for each token and
+/// decides only what goes BETWEEN them, which is what makes it unable to change a program.
+pub fn lex_trivia(src: &str) -> Result<Vec<Token>, HelixError> {
     let chars: Vec<char> = src.chars().collect();
     let n = chars.len();
+    // Char index -> byte offset, with a sentinel at `n` for end-of-input. Built once: the
+    // scanner walks CHARS (and `col` counts characters, which `error.rs`'s caret padding
+    // depends on), so byte offsets cannot be derived from either and are tabulated instead.
+    let byte_of: Vec<usize> = {
+        let mut v = Vec::with_capacity(n + 1);
+        let mut b = 0usize;
+        for c in &chars {
+            v.push(b);
+            b += c.len_utf8();
+        }
+        v.push(b);
+        v
+    };
     let mut i = 0;
     let mut line = 1;
     let mut col = 1;
@@ -29,6 +61,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                 tok: $t,
                 line,
                 col: $c,
+                // Filled in by the span fix-up at the bottom of the loop, which is the only
+                // place both ends of the token are known.
+                start: 0,
+                end: 0,
             });
         }};
     }
@@ -36,6 +72,13 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
     while i < n {
         let c = chars[i];
         let start_col = col;
+        // Where this iteration's token(s) start, in chars and in the token list. Every arm
+        // consumes exactly one token's worth of input and pushes at most one token, so
+        // fixing spans up after the match covers every arm uniformly — including the
+        // sub-lexers (strings, numbers) that advance `i` by a `used` count the arm itself
+        // never spells out.
+        let start_i = i;
+        let pushed_from = raw.len();
         match c {
             ' ' | '\t' | '\r' => {
                 i += 1;
@@ -48,11 +91,24 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                 col = 1;
             }
             '#' => {
-                // comment to end of line
+                // comment to end of line — kept as a token here, dropped by `lex`
+                let from = i;
                 while i < n && chars[i] != '\n' {
                     i += 1;
                     col += 1;
                 }
+                // A CRLF file would otherwise put the `\r` INSIDE the comment token, and
+                // then `helix fmt` — which must not change a byte of a comment — would look
+                // like it had, because the line-trailing whitespace it strips is part of the
+                // comment's text. Leave the `\r` outside, where it is ordinary whitespace.
+                if i > from && chars[i - 1] == '\r' {
+                    i -= 1;
+                    col -= 1;
+                }
+                // Verbatim, `#` included. `helix fmt` never looks inside this string — the
+                // author owns prose — and `##` doc comments carry load-bearing whitespace
+                // that the doc-example extractor reads by column.
+                push!(Tok::Comment(chars[from..i].iter().collect()), start_col);
             }
             '"' => {
                 // A triple-quoted RAW string `"""…"""` is literal — no `{…}` interpolation
@@ -329,15 +385,25 @@ pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
                 return Err(err);
             }
         }
+        // The span fix-up. `start_i` is where this iteration began and `i` is where it ended,
+        // so `byte_of[start_i]..byte_of[i]` is exactly the token's bytes — for every arm,
+        // including the ones that advance by a sub-lexer's `used` count. Whitespace arms push
+        // nothing and this does nothing.
+        for t in &mut raw[pushed_from..] {
+            t.start = byte_of[start_i];
+            t.end = byte_of[i];
+        }
     }
 
     raw.push(Token {
         tok: Tok::Eof,
         line,
         col,
+        start: byte_of[n],
+        end: byte_of[n],
     });
 
-    Ok(cook_newlines(raw))
+    Ok(raw)
 }
 
 fn single(
@@ -348,7 +414,7 @@ fn single(
     i: &mut usize,
     c: &mut usize,
 ) {
-    raw.push(Token { tok, line, col });
+    raw.push(Token { tok, line, col, start: 0, end: 0 });
     *i += 1;
     *c += 1;
 }
@@ -367,11 +433,11 @@ fn two_or_one(
     cp: &mut usize,
 ) {
     if i + 1 < chars.len() && chars[i + 1] == second {
-        raw.push(Token { tok: two, line, col });
+        raw.push(Token { tok: two, line, col, start: 0, end: 0 });
         *ip += 2;
         *cp += 2;
     } else {
-        raw.push(Token { tok: one, line, col });
+        raw.push(Token { tok: one, line, col, start: 0, end: 0 });
         *ip += 1;
         *cp += 1;
     }
