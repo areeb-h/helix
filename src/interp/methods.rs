@@ -230,6 +230,29 @@ pub(crate) fn call_method(
     if matches!(recv, Value::Missing) {
         return Ok(Value::Missing);
     }
+    // `$arg_extreme(want_max)` — the packed kernel behind `argmin`/`argmax`. Unwritable from
+    // source (`$` does not lex), absent from `registry::ARRAY_METHODS` so it never appears in
+    // `helix doc`, `helix describe` or an unknown-method hint, and answering `missing` means
+    // DECLINE — the desugar's `??` then runs the tuple reduce that ran before.
+    //
+    // ITS POSITION IS LOAD-BEARING. Sitting AFTER the missing-propagation return above is
+    // what makes `missing.argmax()` decline for free and keep leaking "a value of type
+    // Missing cannot be indexed" from the reduce seed. Hand-writing a Missing case above the
+    // rule would RE-DERIVE that behaviour instead of preserving it, which is precisely how a
+    // second spelling drifts from the first.
+    //
+    // Living in `call_method` means both `vm.rs` and `interp.rs` reach it, so one
+    // implementation serves all three engines by construction. (The JIT never sees method
+    // calls at all.)
+    if name == "$arg_extreme" {
+        let want_max = matches!(args.first(), Some(Value::Bool(true)));
+        return Ok(match recv {
+            Value::Array(items) => {
+                packed_arg_extreme(items, want_max).map_or(Value::Missing, Value::Int)
+            }
+            _ => Value::Missing,
+        });
+    }
     // If a method argument is tracked (autodiff) but the receiver is a plain number
     // or tensor, lift the receiver into the graph too — so `X.matmul(w)` differentiates
     // through `w` even though `X` is a constant.
@@ -591,6 +614,69 @@ fn numeric_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
 /// `Float` array containing `NaN` — so the caller's general, missing/NaN-aware path
 /// runs and the result matches the untyped array exactly. Typed arrays are
 /// missing-free by construction, so no missing check is needed here.
+/// The index of the largest (`want_max`) or smallest element of a PACKED array, or `None`
+/// to decline — which sends `argmin`/`argmax` back to the tuple reduce their desugar
+/// produces, so a declined shape keeps its exact error text and caret column.
+///
+/// This is the whole of the `argmin`/`argmax` fix: those methods never reach runtime as
+/// names (they are rewritten at parse time into `enumerate` + a reduce over tuples), so the
+/// only way to give them a kernel is to give the desugar a verb that DOES reach here.
+///
+/// THE COMPARISON RULES DIFFER BY TYPE AND THAT IS DELIBERATE. They mirror
+/// [`crate::interp::ops`]'s `<`/`>`, which is what the reduce this replaces actually
+/// evaluates — NOT `total_cmp`, which every neighbouring packed arm (`sort`, `argsort`,
+/// `min`, `max`) uses:
+///
+/// * Ints compare with exact `i64` ordering. `total_cmp` on an `as f64` cast would lose
+///   precision above 2^53, and a comment in `ops.rs` records that exact bug.
+/// * Floats compare with IEEE `>`/`<`, under which `0.0` and `-0.0` are EQUAL. So
+///   `[0.0, -0.0].argmin()` and `[-0.0, 0.0].argmin()` both answer 0 — first-wins keeps
+///   index 0 either way. A `total_cmp` kernel would order the zeros and answer 1 for two
+///   of those four shapes, silently changing results under a performance commit. Whether
+///   that IEEE answer is the right one is a separate, recorded, open question; reproducing
+///   it is this change's job.
+/// * ANY NaN declines. `[sqrt(-1.0)].argmax()` — one element, no comparison to make —
+///   still raises "cannot compare these values (NaN?)" today, because the reduce compares
+///   the seed against the first element. Note the opposite convention two arms above:
+///   packed `sort`/`argsort` deliberately do NOT defer on NaN, because they have NaN
+///   *placement* semantics rather than a raise.
+///
+/// Ties are first-wins (`[2,2,2].argmax()` → 0), so the scan must update only on a STRICT
+/// improvement. A range needs no comparisons at all: it is strictly monotonic (a zero step
+/// is rejected at construction), so the answer is an endpoint. Every empty array declines —
+/// the empty error belongs to the reduce seed, and only the reduce can say it with the
+/// right column.
+fn packed_arg_extreme(ad: &crate::value::ArrayData, want_max: bool) -> Option<i64> {
+    use crate::value::ArrayData;
+    fn scan<T: Copy>(xs: &[T], better: impl Fn(T, T) -> bool) -> i64 {
+        let mut best = 0usize;
+        for i in 1..xs.len() {
+            if better(xs[i], xs[best]) {
+                best = i;
+            }
+        }
+        best as i64
+    }
+    match ad {
+        // Boxed and lazy-pair arrays keep the general path: their elements are `Value`s,
+        // so there is no packed buffer to scan and nothing to win.
+        ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
+        ArrayData::Ints(xs) if !xs.is_empty() => Some(if want_max {
+            scan(xs, |a, b| a > b)
+        } else {
+            scan(xs, |a, b| a < b)
+        }),
+        ArrayData::Floats(xs) if !xs.is_empty() && !xs.iter().any(|f| f.is_nan()) => {
+            Some(if want_max { scan(xs, |a, b| a > b) } else { scan(xs, |a, b| a < b) })
+        }
+        ArrayData::Range { step, len, .. } if *len > 0 => {
+            Some(if (*step > 0) == want_max { *len as i64 - 1 } else { 0 })
+        }
+        // Empties (in every representation) and float arrays holding a NaN.
+        _ => None,
+    }
+}
+
 fn array_numeric_fast(
     ad: &crate::value::ArrayData,
     name: &str,

@@ -284,6 +284,21 @@ impl super::Checker {
             }
             return Ok(Type::String);
         }
+        // `$arg_extreme` — the internal packed kernel `argmin`/`argmax` desugar to. It is
+        // unwritable from source, so no user program can reach this arm; the checker sees it
+        // only because it is the left operand of the desugar's `??`.
+        //
+        // IT MUST NOT INSPECT THE RECEIVER. `"abc".argmax()` and `tensor(…).argmax()` are
+        // COMPILE errors today ("type String has no method `enumerate`", with the full
+        // method-list hint), and they come from the right-hand side of that `??`. Typing this
+        // side by receiver would either reject them here with a different message or, worse,
+        // stop the checker before it reaches the arm that produces the real one.
+        //
+        // `Type::Int` for a value that can be `missing` follows `index_of`, which does the
+        // same thing for the same reason.
+        if name == "$arg_extreme" {
+            return Ok(Type::Int);
+        }
         match &rt {
             // Permissive: any method on Unknown/Missing receiver is Unknown.
             Type::Unknown | Type::Missing => Ok(Type::Unknown),

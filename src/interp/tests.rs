@@ -21,6 +21,100 @@
         }
     }
 
+    /// `argmin`/`argmax` must actually ROUTE through the packed kernel — and `min_by`/`max_by`
+    /// must inherit it by composition.
+    ///
+    /// This assertion exists because the kernel is byte-identical to the path it replaces, by
+    /// design. That is the point of it, and it is also why no behavioural test can tell
+    /// whether it ran: delete the `??` wiring in `desugar_order_by` and every answer in the
+    /// suite stays correct, only 70x slower. The AST is the only place the routing is visible
+    /// without a timing test, and this repo has none (they are flaky, and the box these run on
+    /// swings +-15%).
+    #[test]
+    fn argmin_argmax_route_through_the_packed_kernel() {
+        let dump = |src: &str| {
+            let toks = crate::lexer::lex(src).expect("lex");
+            format!("{:?}", crate::parser::parse(toks).expect("parse"))
+        };
+        for src in [
+            "xs = [3, 1, 2]\nprint(xs.argmax())",
+            "xs = [3, 1, 2]\nprint(xs.argmin())",
+            // min_by/max_by compose through the recursive desugar, so they inherit it.
+            "xs = [{s: 1}, {s: 9}]\nprint(xs.max_by(r => r.s))",
+            "xs = [{s: 1}, {s: 9}]\nprint(xs.min_by(r => r.s))",
+        ] {
+            assert!(
+                dump(src).contains("$arg_extreme"),
+                "no longer routed through the packed kernel: {src}"
+            );
+        }
+    }
+
+    /// The kernel ENGAGES on packed shapes and DECLINES on exactly the ones whose error text
+    /// belongs to the desugar. `missing` is the decline signal.
+    ///
+    /// Three rules here are easy to "clean up" into bugs, so each is pinned:
+    ///   * ties are FIRST-wins, so the scan must improve strictly (`>` not `>=`);
+    ///   * floats compare by IEEE, under which `0.0 == -0.0`, so both orders of a signed-zero
+    ///     pair answer 0 — `total_cmp` (what the neighbouring packed `sort`/`argsort` arms
+    ///     use) would answer 1 for half of them and silently change results;
+    ///   * any NaN, and every empty array, declines — a one-element NaN array still raises
+    ///     through the desugar even though there is nothing to compare.
+    #[test]
+    fn arg_extreme_kernel_engages_and_declines_exactly() {
+        let k = |v: Value, want_max: bool| {
+            call_method(&v, "$arg_extreme", vec![Value::Bool(want_max)], 0, 0).expect("no error")
+        };
+        let idx = |v: Value, want_max: bool| match k(v, want_max) {
+            Value::Int(i) => Some(i),
+            Value::Missing => None,
+            other => panic!("kernel returned {other:?}"),
+        };
+
+        // ENGAGES — packed ints, floats and ranges.
+        assert_eq!(idx(Value::int_array(vec![3, 1, 2]), true), Some(0));
+        assert_eq!(idx(Value::int_array(vec![3, 1, 2]), false), Some(1));
+        assert_eq!(idx(Value::int_array(vec![2, 2, 2]), true), Some(0), "ties are first-wins");
+        assert_eq!(idx(Value::int_array(vec![2, 2, 2]), false), Some(0), "ties are first-wins");
+        assert_eq!(idx(Value::int_array(vec![7]), true), Some(0));
+        assert_eq!(idx(Value::int_array(vec![i64::MAX, i64::MIN]), true), Some(0));
+        // Exact i64 above 2^53 — an `as f64` comparison would call these equal.
+        assert_eq!(idx(Value::int_array(vec![9007199254740993, 9007199254740992]), true), Some(0));
+        assert_eq!(idx(Value::float_array(vec![1.0, 3.0, 2.0]), true), Some(1));
+        assert_eq!(idx(Value::float_array(vec![1.0, 3.0, 2.0]), false), Some(0));
+        // IEEE: the zeros are EQUAL, so first-wins keeps index 0 in both orders, both ways.
+        for pair in [vec![0.0, -0.0], vec![-0.0, 0.0]] {
+            for want_max in [true, false] {
+                assert_eq!(
+                    idx(Value::float_array(pair.clone()), want_max),
+                    Some(0),
+                    "signed-zero tie must stay first-wins ({pair:?}, want_max={want_max})"
+                );
+            }
+        }
+        // A range is monotonic: the answer is an endpoint, with no comparisons at all.
+        assert_eq!(idx(Value::lazy_range(0, 1, 10), true), Some(9));
+        assert_eq!(idx(Value::lazy_range(0, 1, 10), false), Some(0));
+        assert_eq!(idx(Value::lazy_range(10, -1, 10), true), Some(0));
+        assert_eq!(idx(Value::lazy_range(10, -1, 10), false), Some(9));
+
+        // DECLINES — and each decline is a shape whose error the desugar owns.
+        assert_eq!(idx(Value::float_array(vec![1.0, f64::NAN, 3.0]), true), None, "NaN");
+        assert_eq!(idx(Value::float_array(vec![f64::NAN]), true), None, "lone NaN still raises");
+        assert_eq!(idx(Value::int_array(vec![]), true), None, "empty");
+        assert_eq!(idx(Value::float_array(vec![]), true), None, "empty");
+        assert_eq!(idx(Value::lazy_range(0, 1, 0), true), None, "empty range");
+        assert_eq!(idx(Value::array(vec![Value::Int(1), Value::Missing]), true), None, "boxed");
+        assert_eq!(
+            idx(Value::array(vec![Value::Str(std::rc::Rc::new("a".into()))]), true),
+            None,
+            "strings order fine, but through the general path"
+        );
+        // A non-array receiver declines too, so `7.argmax()` keeps its own compile error.
+        assert_eq!(idx(Value::Int(7), true), None);
+        assert_eq!(idx(Value::Bool(true), true), None);
+    }
+
     /// Run a program and return the value of its final statement.
     fn last(src: &str) -> Result<Value, HelixError> {
         let tokens = crate::lexer::lex(src)?;

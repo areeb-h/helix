@@ -214,7 +214,11 @@ fn desugar_order_by(
 ) -> Result<Expr, HelixError> {
     use crate::ast::BinOp;
     let by = name == "min_by" || name == "max_by";
-    let op = if name == "min_by" || name == "argmin" { BinOp::Lt } else { BinOp::Gt };
+    // `argmax`/`max_by` take the greater element, `argmin`/`min_by` the lesser. Captured as a
+    // bool as well as a `BinOp` because `BinOp` is neither `Copy` nor `PartialEq`, and the
+    // packed kernel below needs the same decision after `op` has been moved into the lambda.
+    let want_max = !(name == "min_by" || name == "argmin");
+    let op = if want_max { BinOp::Gt } else { BinOp::Lt };
 
     let ident = |n: &str| Expr::Ident { name: n.to_string(), line, col };
     let index = |e: Expr, i: i64| Expr::Index {
@@ -298,8 +302,10 @@ fn desugar_order_by(
             return Err(HelixError::new(format!("`{name}` takes no arguments"), line, col)
                 .hint("use `min_by`/`max_by` to order by a key."));
         }
+        // The receiver is bound to `$oba` below and referenced twice — once by the packed
+        // kernel, once by this enumerate — so it is evaluated exactly once either way.
         let enumd = Expr::Method {
-            recv: Box::new(recv),
+            recv: Box::new(ident("$oba")),
             name: "enumerate".to_string(),
             args: vec![],
             named: vec![],
@@ -334,9 +340,53 @@ fn desugar_order_by(
         line,
         col,
     };
-    Ok(Expr::Let {
+    // The tuple reduce above is the ONLY implementation `argmin`/`argmax` had, and it cost
+    // 11x the manual `index_of(max())` spelling at n=1e6 and 24x at n=1e7 — the gap widening
+    // with n because the price is one heap-allocated `Tuple` per element. No engine can help:
+    // the JIT's reduce lowering wants a pure i64 scalar body and this accumulator is a tuple,
+    // so all three engines walk the same allocations.
+    //
+    //     xs.argmax()  →  let $oba = xs in $oba.$arg_extreme(true) ?? <the reduce above>
+    //
+    // `$arg_extreme` is unwritable from source (`$` does not lex), so it is an internal verb
+    // in the same family as the `$ob`/`$obe` binders already here and `desugar_position`'s
+    // hidden flag argument. It answers `missing` to DECLINE, and the `??` then runs the
+    // byte-identical AST that ran before — so every declined shape keeps its exact error
+    // text, caret column and help line, produced by the same machinery at the same moment.
+    // That is what preserves the leaks this desugar is known for, including
+    // `missing.argmax()` → "a value of type Missing cannot be indexed" and `[].argmax()` →
+    // "index 0 is out of bounds for length 0"; both are the reduce seed talking, and only
+    // the real reduce says them with the right column.
+    //
+    // `missing` is safe as the decline sentinel for a precise reason: the METHOD spelling of
+    // argmin/argmax returns an Int or raises — never `missing` (verified across the whole
+    // 63-shape matrix on all three engines). A future change that makes it propagate
+    // `missing` (the free-function `argmax(xs)` already does, which is its own open
+    // divergence) must confront this collision first.
+    //
+    // `min_by`/`max_by` inherit the fast path for free: they compose through the recursive
+    // `desugar_order_by(keys, inner, …)` call above, and the key `map` produces a packed
+    // column, so the kernel takes it.
+    let slow = Expr::Let {
         bindings: vec![("$ob".to_string(), src)],
         body: Box::new(index(reduced, ret_idx)),
+    };
+    Ok(Expr::Let {
+        bindings: vec![("$oba".to_string(), recv)],
+        body: Box::new(Expr::Binary {
+            op: BinOp::Coalesce,
+            left: Box::new(Expr::Method {
+                recv: Box::new(ident("$oba")),
+                name: "$arg_extreme".to_string(),
+                args: vec![Expr::Bool(want_max)],
+                named: vec![],
+                line,
+                col,
+            }),
+            right: Box::new(slow),
+            line,
+            col,
+        }),
     })
 }
 
