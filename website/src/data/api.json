@@ -783,7 +783,7 @@
     "process",
     "env"
   ],
-  "helix_version": "0.1.0",
+  "helix_version": "0.1.1",
   "methods": {
     "Array": [
       {

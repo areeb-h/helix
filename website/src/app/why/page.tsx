@@ -197,7 +197,7 @@ missing ?? 30                         # 30 — a default at the point of use`}
           <ul className="mt-4 space-y-3 text-[15px] leading-relaxed text-zinc-400">
             <li>
               <strong className="text-zinc-200">Not production-ready.</strong> Version
-              0.1.0, one maintainer. The language is stable enough to write real programs
+              0.1.1, one maintainer. The language is stable enough to write real programs
               in; the ecosystem does not exist yet.
             </li>
             <li>

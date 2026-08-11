@@ -272,5 +272,6 @@ changes no test's outcome.
 [CONTRIBUTING.md](CONTRIBUTING.md) covers the gate, the one non-negotiable rule (three engines,
 byte-identical, on values *and* error text), and what a good change looks like. Security issues
 go through [SECURITY.md](SECURITY.md) instead — privately, via GitHub's advisory form.
+Release history, including what went wrong with `v0.1.0`, is in [CHANGELOG.md](CHANGELOG.md).
 
 Licensed [MIT](LICENSE).

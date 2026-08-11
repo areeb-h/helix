@@ -186,7 +186,7 @@ export default function StartPage() {
               {
                 cmd: ["helix repl"],
                 out: [
-                  "Helix 0.1.0 — interactive session. Type an expression and press Enter; Ctrl-D to exit.",
+                  "Helix 0.1.1 — interactive session. Type an expression and press Enter; Ctrl-D to exit.",
                   "helix> 1 + 1",
                   "2",
                   "helix> [3, 1, 2].sort()",
