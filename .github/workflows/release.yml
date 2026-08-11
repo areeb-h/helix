@@ -21,10 +21,27 @@ name: release
 # So: `create-release` makes ONE draft, every build job uploads into it, and `publish`
 # runs only when all of them succeeded. Any failure now leaves a draft — invisible,
 # uninstallable, and re-runnable — instead of a broken public artifact.
+#
+# And run it with `workflow_dispatch` first: the default is a DRY RUN that builds and
+# smoke-tests all six platforms while writing nothing at all. Every claim this file makes
+# can be checked before a tag exists to check it against.
 on:
   push:
     tags: ["v*"]
+  # A DRY RUN builds and smoke-tests every platform and writes nothing to the repository —
+  # the only way to find out whether this file works without publishing something to find
+  # out with. v0.1.0 was that experiment, run on the public release page.
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and smoke-test every platform without creating or touching a release"
+        type: boolean
+        default: true
+
+# One expression, used by every step that would write to the repository. A tag push never
+# has `inputs`, so it is always a real release.
+env:
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
 
 # No workflow-scope permissions: each job requests exactly what it needs. Only the jobs
 # that touch the release get `contents: write`. The risk today is low (the only triggers
@@ -44,7 +61,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Dry run — nothing is created
+        if: env.DRY_RUN == 'true'
+        run: echo "dry run - skipping release creation"
       - uses: softprops/action-gh-release@v2
+        if: env.DRY_RUN != 'true'
         with:
           draft: true
           generate_release_notes: true
@@ -105,6 +126,7 @@ jobs:
           Compress-Archive -Path "target/${{ matrix.target }}/release/helix.exe" -DestinationPath "helix-${{ matrix.target }}.zip"
       - name: Upload to the draft release
         uses: softprops/action-gh-release@v2
+        if: env.DRY_RUN != 'true'
         with:
           draft: true   # must stay set, or this upload would publish a half-built release
           files: |
@@ -162,6 +184,7 @@ jobs:
         run: tar -czf "helix-x86_64-unknown-linux-gnu.tar.gz" -C "target/x86_64-unknown-linux-gnu/release" helix
       - name: Upload to the draft release
         uses: softprops/action-gh-release@v2
+        if: env.DRY_RUN != 'true'
         with:
           draft: true
           files: helix-x86_64-unknown-linux-gnu.tar.gz
@@ -205,6 +228,7 @@ jobs:
         run: tar -czf "helix-x86_64-unknown-linux-musl.tar.gz" -C "target/x86_64-unknown-linux-musl/release" helix
       - name: Upload to the draft release
         uses: softprops/action-gh-release@v2
+        if: env.DRY_RUN != 'true'
         with:
           draft: true
           files: helix-x86_64-unknown-linux-musl.tar.gz
@@ -222,6 +246,10 @@ jobs:
   publish:
     name: checksums + publish
     needs: [build, build-pgo, build-musl]
+    # Job-level `if` cannot read `env`, so the DRY_RUN expression is spelled out here.
+    # A dry run has nothing to download, checksum, or publish — every platform above
+    # already built and smoke-tested, which is the whole point of the exercise.
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
