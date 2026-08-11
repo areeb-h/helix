@@ -82,17 +82,26 @@ jobs:
         run: bash scripts/vmparity.sh
         env:
           BIN: ./target/gate/helix
+      # Every gate above RUNS its programs, so none of them can cover a benchmark that
+      # needs a generated fixture first — which is how nine `bench/` programs came to
+      # still use the `io.`/`bio.`/`stats.` namespaces ADR-0017 removed, and how v0.1.0's
+      # release died in its PGO training step. Type-checking needs no fixture, so this
+      # covers every tracked `.helix` in ~0.03s. See scripts/checkall.sh.
+      - name: Type-check every Helix program in the repo
+        run: bash scripts/checkall.sh
+        env:
+          BIN: ./target/gate/helix
 
   # The project's stated minimum supported Rust version must actually compile, or the
   # claim in Cargo.toml is decoration. Check only — the suite runs on stable above.
   #
-  # ADVISORY until observed green: whether 1.96 still builds the current dependency tree
-  # has not been verified locally, and asserting an unchecked claim as a gate is how a
-  # badge starts lying. Promote to blocking after the first green run.
+  # BLOCKING as of run 31456823902, which is the condition this job was written with:
+  # it shipped advisory because 1.96 building the current dependency tree had never been
+  # verified, and asserting an unchecked claim as a gate is how a badge starts lying. It
+  # has now been observed green, so the claim is checked and the gate is real.
   msrv:
-    name: MSRV (advisory until observed green)
+    name: MSRV (rust-version in Cargo.toml)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Read rust-version from Cargo.toml

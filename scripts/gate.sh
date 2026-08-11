@@ -54,5 +54,11 @@ log "vmparity (BIN=$BIN)"
 if [ ! -x "$BIN" ]; then cargo build "${TEST_ARGS[@]}" >/dev/null 2>&1 || rc=1; fi
 BIN="$BIN" bash scripts/vmparity.sh 2>&1 | tail -2
 
+# Everything above RUNS its programs, so none of it covers a `bench/` program that needs
+# a generated fixture before it will start — which is how nine of them rotted against
+# ADR-0017's namespace flattening until a release build tripped over one. ~30 ms.
+log "checkall (every .helix type-checks)"
+BIN="$BIN" bash scripts/checkall.sh 2>&1 | tail -1 || rc=1
+
 log "GATE_RC=$rc"
 exit "$rc"

@@ -2,8 +2,8 @@
 # (Smith-Waterman, affine gaps) and summarise the scores. `seq.align(target,
 # "local")` runs a native Gotoh DP and returns {score, cigar, query, target, ...};
 # every other language hand-rolls the three-state recurrence below.
-ref = bio.read_fasta("data/ref.fa")[0].seq
-qs  = bio.read_fasta("data/queries.fa")
+ref = read_fasta("data/ref.fa")[0].seq
+qs  = read_fasta("data/queries.fa")
 scores = qs.map(q => q.seq.align(ref, "local").score)
 print("total={scores.sum()}")
 print("hits={scores.where(it >= 40).count()}")

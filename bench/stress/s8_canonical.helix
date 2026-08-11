@@ -2,7 +2,7 @@
 # A k-mer and its reverse complement collapse to one entry (the lexicographically
 # smaller). `canonical_kmer_counts` does it natively on the 2-bit-packed code
 # (complement = bits XOR 3, then reversed) — one method vs everyone else's loop.
-seq = bio.read_fasta("data/genome.fa")[0].seq
+seq = read_fasta("data/genome.fa")[0].seq
 counts = seq.canonical_kmer_counts(10)
 vals = counts.map((kmer, c) => c)
 print("distinct={counts.count()}")

@@ -8,22 +8,50 @@ name: release
 # target where the Cranelift JIT exists and cargo-pgo is fully supported — and that job
 # is the SOLE publisher of the gnu asset (a regression gate guarantees PGO >= plain).
 # A static musl artifact (`build-musl`) is the maximum-portability / distroless build.
+#
+# THE RELEASE IS BUILT AS A DRAFT AND PUBLISHED LAST. v0.1.0 taught this the expensive
+# way: six build jobs each called `action-gh-release`, so six of them raced to CREATE the
+# release for the same tag (the musl job's log shows it creating one and then retrying
+# "release is not yet discoverable by tag" twice before its upload died). Two jobs failed,
+# `checksums` was skipped for a failed `needs:` — and what the world saw was a published
+# v0.1.0 carrying four of six platforms, no Linux x86_64 build at all, and no SHA256SUMS,
+# which `install.sh` refuses to install without. A public release that nobody can install
+# from is worse than no release.
+#
+# So: `create-release` makes ONE draft, every build job uploads into it, and `publish`
+# runs only when all of them succeeded. Any failure now leaves a draft — invisible,
+# uninstallable, and re-runnable — instead of a broken public artifact.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
-# No workflow-scope permissions: each job requests exactly what it needs. Only the four
-# jobs that attach artifacts to the release get `contents: write`. The risk today is low
-# (the only triggers are a `v*` tag push and workflow_dispatch, both of which already
-# require repo write access) — but once the repository is public, a workflow's token is
-# worth attacking, and defence in depth here is free.
+# No workflow-scope permissions: each job requests exactly what it needs. Only the jobs
+# that touch the release get `contents: write`. The risk today is low (the only triggers
+# are a `v*` tag push and workflow_dispatch, both of which already require repo write
+# access) — but a public repository's workflow token is worth attacking, and defence in
+# depth here is free.
 permissions:
   contents: read
 
 jobs:
+  # ONE writer creates the release, before any build starts. This is the whole fix for
+  # the v0.1.0 race: `action-gh-release` creates-if-missing, so N jobs starting at once
+  # means N creation attempts for one tag.
+  create-release:
+    name: create draft release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+
   build:
     name: build ${{ matrix.target }}
+    needs: create-release
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write   # uploads release assets
@@ -32,10 +60,14 @@ jobs:
       matrix:
         include:
           # NB: x86_64-unknown-linux-gnu is published by `build-pgo` below, not here.
+          # `smoke` marks the targets the runner can actually EXECUTE (host == target):
+          # a binary that links but will not start is a release-day bug, and running it
+          # once costs nothing. The cross-compiled ones cannot be run here, and claiming
+          # otherwise would be the kind of unearned confidence this project audits out.
           - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, cross: true }
           - { os: macos-latest,   target: x86_64-apple-darwin }
-          - { os: macos-latest,   target: aarch64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: macos-latest,   target: aarch64-apple-darwin, smoke: true }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, smoke: true }
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
@@ -50,6 +82,19 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
       - name: Build (core, release)
         run: cargo build --release --target ${{ matrix.target }}
+      - name: Smoke test (unix)
+        if: matrix.smoke && runner.os != 'Windows'
+        run: |
+          BIN="target/${{ matrix.target }}/release/helix"
+          test "$("$BIN" eval 'print(6 * 7)')" = "42"
+          "$BIN" version
+      - name: Smoke test (windows)
+        if: matrix.smoke && runner.os == 'Windows'
+        run: |
+          $bin = "target/${{ matrix.target }}/release/helix.exe"
+          $out = & $bin eval 'print(6 * 7)'
+          if ($out.Trim() -ne "42") { throw "smoke test failed: got '$out'" }
+          & $bin version
       - name: Package (unix)
         if: runner.os != 'Windows'
         run: |
@@ -58,9 +103,10 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           Compress-Archive -Path "target/${{ matrix.target }}/release/helix.exe" -DestinationPath "helix-${{ matrix.target }}.zip"
-      - name: Upload to release
+      - name: Upload to the draft release
         uses: softprops/action-gh-release@v2
         with:
+          draft: true   # must stay set, or this upload would publish a half-built release
           files: |
             helix-${{ matrix.target }}.tar.gz
             helix-${{ matrix.target }}.zip
@@ -69,8 +115,15 @@ jobs:
   # thin LTO (throwaway), train on the representative bench/crosslang workloads, then
   # optimize keeping the project's fat-LTO release profile + the merged profile. A
   # regression gate ensures the PGO binary is never slower than a plain release.
+  #
+  # The training workload is ordinary Helix source, so it can go stale against the
+  # language — and it did: v0.1.0's training run died on `bench/crosslang/b3_groupby.helix`
+  # still calling `io.read_csv(…)`, a spelling ADR-0017 removed. `scripts/checkall.sh`
+  # now type-checks every `.helix` in the repository on every push, so that class of
+  # failure is caught at PR time rather than at release time.
   build-pgo:
     name: build x86_64-unknown-linux-gnu (PGO)
+    needs: create-release
     runs-on: ubuntu-latest
     permissions:
       contents: write   # uploads release assets
@@ -93,6 +146,11 @@ jobs:
             bench/crosslang/train.sh --scale 0.25
       - name: Optimize build (PGO + fat LTO)
         run: cargo pgo optimize build -- --target x86_64-unknown-linux-gnu
+      - name: Smoke test
+        run: |
+          BIN="target/x86_64-unknown-linux-gnu/release/helix"
+          test "$("$BIN" eval 'print(6 * 7)')" = "42"
+          "$BIN" version
       - name: Plain-release baseline (for the gate)
         run: cargo build --release --target x86_64-unknown-linux-gnu --target-dir target/baseline
       - name: Regression gate (PGO must not regress vs plain release)
@@ -102,15 +160,17 @@ jobs:
             target/x86_64-unknown-linux-gnu/release/helix --scale 0.25
       - name: Package
         run: tar -czf "helix-x86_64-unknown-linux-gnu.tar.gz" -C "target/x86_64-unknown-linux-gnu/release" helix
-      - name: Upload to release
+      - name: Upload to the draft release
         uses: softprops/action-gh-release@v2
         with:
+          draft: true
           files: helix-x86_64-unknown-linux-gnu.tar.gz
 
   # Static musl artifact — maximum portability / air-gapped / the distroless image base.
   # mimalloc (default-on) replaces musl's slow default allocator so it stays glibc-fast.
   build-musl:
     name: build x86_64-unknown-linux-musl
+    needs: create-release
     runs-on: ubuntu-latest
     permissions:
       contents: write   # uploads release assets
@@ -124,29 +184,49 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build (musl static, mimalloc)
         run: cargo build --release --target x86_64-unknown-linux-musl
+      # The whole point of this artifact is that it needs no shared libraries. Assert it,
+      # rather than trusting the target triple: a stray dynamic dependency here would
+      # only show up on the air-gapped machine that has no way to satisfy it.
+      - name: Smoke test + assert it is actually static
+        run: |
+          BIN="target/x86_64-unknown-linux-musl/release/helix"
+          test "$("$BIN" eval 'print(6 * 7)')" = "42"
+          "$BIN" version
+          file "$BIN"
+          # `ldd` EXITS NON-ZERO on a static binary, and GitHub runs these steps under
+          # `bash -e -o pipefail` — so `ldd … | grep …` would fail the step precisely when
+          # the build is correct. Capture first, match after.
+          out="$(ldd "$BIN" 2>&1 || true)"
+          case "$out" in
+            *"not a dynamic executable"*|*"statically linked"*) echo "static: ok" ;;
+            *) echo "musl build is NOT static:" >&2; echo "$out" >&2; exit 1 ;;
+          esac
       - name: Package
         run: tar -czf "helix-x86_64-unknown-linux-musl.tar.gz" -C "target/x86_64-unknown-linux-musl/release" helix
-      - name: Upload to release
+      - name: Upload to the draft release
         uses: softprops/action-gh-release@v2
         with:
+          draft: true
           files: helix-x86_64-unknown-linux-musl.tar.gz
 
-  # Publish SHA256SUMS covering every uploaded artifact. Runs LAST, after all build
-  # jobs, and derives the hashes from what is actually attached to the release — so the
-  # file cannot describe a build that was never published, and a re-run regenerates it
-  # from the real assets rather than from one job's local copy.
+  # THE GATE. Publish SHA256SUMS and flip the draft to a real release — but only after
+  # every build job succeeded, and only after verifying that every platform this workflow
+  # claims to ship is actually attached. `needs:` already fails the job if a build failed;
+  # the explicit asset list catches the subtler case where a job "succeeded" without
+  # uploading what it was supposed to.
   #
-  # install.sh / install.ps1 REFUSE to install without this file matching (unless
-  # HELIX_NO_VERIFY=1): a one-line installer that cannot verify what it downloaded
-  # should say so, not shrug.
-  checksums:
-    name: publish SHA256SUMS
+  # install.sh / install.ps1 REFUSE to install without SHA256SUMS matching (unless
+  # HELIX_NO_VERIFY=1): a one-line installer that cannot verify what it downloaded should
+  # say so, not shrug. That makes this file part of the release, not a nicety — which is
+  # exactly why publishing is gated on it existing.
+  publish:
+    name: checksums + publish
     needs: [build, build-pgo, build-musl]
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # uploads release assets
+      contents: write
     steps:
-      - name: Download every release asset
+      - name: Download every draft asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -155,12 +235,32 @@ jobs:
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern 'helix-*.tar.gz' --pattern 'helix-*.zip'
           ls -la
+      - name: Assert every advertised platform is present
+        run: |
+          cd dist
+          missing=0
+          for want in \
+            helix-x86_64-unknown-linux-gnu.tar.gz \
+            helix-x86_64-unknown-linux-musl.tar.gz \
+            helix-aarch64-unknown-linux-gnu.tar.gz \
+            helix-x86_64-apple-darwin.tar.gz \
+            helix-aarch64-apple-darwin.tar.gz \
+            helix-x86_64-pc-windows-msvc.zip
+          do
+            if [ ! -s "$want" ]; then echo "MISSING $want" >&2; missing=1; fi
+          done
+          [ "$missing" -eq 0 ] || { echo "refusing to publish an incomplete release" >&2; exit 1; }
       - name: Compute checksums
         run: |
           cd dist
           sha256sum helix-* > SHA256SUMS
           cat SHA256SUMS
-      - name: Upload SHA256SUMS
+      # Uploading SHA256SUMS and clearing `draft` in one step: the release becomes visible
+      # at the same moment the file the installers need becomes available, so there is no
+      # window in which someone can fetch a release that `install.sh` would then refuse.
+      - name: Publish (upload SHA256SUMS and undraft)
         uses: softprops/action-gh-release@v2
         with:
+          draft: false
+          make_latest: true
           files: dist/SHA256SUMS

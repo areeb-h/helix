@@ -89,20 +89,28 @@ Then: `helix run script.helix`, `helix repl`, `helix eval "print(1 + 2)"`.
 ## Status / implementation
 
 - **Implemented — CLI** (`src/main.rs`): `helix run <script>`, `helix eval "<code>"`,
-  `helix repl`, `helix version`, `helix help` — plus the `helix <script.helix>`
-  shorthand and the legacy `-V`/`-h` flags (backward compatible; tested).
+  `helix check <script>…`, `helix repl`, `helix version`, `helix help` — plus the
+  `helix <script>` shorthand, the optional `.helix` extension, and the legacy `-V`/`-h`
+  flags (backward compatible; tested).
 - **Implemented — `cargo install --path .`** places a release `helix` on the PATH
   today (the source-install path for anyone with Rust).
-- **Implemented — `install.sh`** — the eventual `curl | sh` one-liner: detects
-  OS/arch, attempts to download a prebuilt release asset, and falls back to a source
-  build. Usable now in from-source mode.
+- **Implemented — `install.sh` / `install.ps1`** — the `curl | sh` and `irm | iex`
+  one-liners: detect OS/arch, download the prebuilt release asset, verify it against
+  the published `SHA256SUMS`, and fall back to a source build.
 - **Implemented — `.github/workflows/release.yml`** — cross-compiles the
-  self-contained core for linux (x86_64/aarch64), macOS (x86_64/aarch64), and Windows
-  (x86_64) and attaches the binaries to a GitHub Release on a `vX.Y.Z` tag. **Activates
-  once the repository is on GitHub and a tag is pushed**; nothing else requires wiring.
-- **Pending — Hosting** — the repository is not yet on GitHub, so no releases exist to
-  download; the one-liner therefore source-builds for now. Pushing to GitHub and
-  tagging switches it to prebuilt downloads.
+  self-contained core for linux (x86_64 gnu + musl, aarch64), macOS (x86_64/aarch64),
+  and Windows (x86_64) and attaches the binaries to a GitHub Release on a `vX.Y.Z` tag.
+- **Implemented — Hosting** — the repository is public at `github.com/areeb-h/helix`,
+  and both installer scripts fetch (probed 2026-08-11: HTTP 200).
+- **Pending — a complete release.** `v0.1.0` shipped four of six platforms and no
+  `SHA256SUMS`, so the one-liners cannot install from it: the PGO job died training on
+  a benchmark that had gone stale against the language, the musl job died mid-upload in
+  a six-way race to create the same release, and the checksum job was skipped for a
+  failed dependency. Fixed on 2026-08-11 — the stale programs are repaired and
+  `scripts/checkall.sh` type-checks every `.helix` on every push; the release is now
+  created ONCE as a draft and published only after every platform and `SHA256SUMS` are
+  attached, so a partial release can no longer become visible. The next tag is the
+  first installable one.
 
 ## Toolchain & version management (research-backed)
 

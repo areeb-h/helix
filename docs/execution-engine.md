@@ -164,7 +164,8 @@ demand** (`run_on_big_stack`, or a scoped thread in `run_source`). A normal
 
 The differential oracle is the load-bearing idea of the whole project: a JIT is thousands
 of lines of code generation standing between a program and its answer, so two simpler
-implementations run beside it and all three must agree. Five gates enforce that.
+implementations run beside it and all three must agree. Five gates enforce that, and a
+sixth covers the ground none of them can reach.
 
 - **Unit parity tests** (`src/vm.rs`): a battery of programs is run on the engines and
   their results compared (`parity_scalar_and_control_flow`,
@@ -185,6 +186,19 @@ implementations run beside it and all three must agree. Five gates enforce that.
   shapes, checked for byte-identical agreement. Engagement matters as much as agreement —
   a fuzzer passes trivially if the JIT silently declined, so tests assert
   `native_call_count() > 0` before trusting a comparison.
+
+Every one of those gates **runs** its programs, which is a blind spot: a Helix program that
+needs a generated fixture before it will start cannot be in any of them. That is not
+hypothetical — nine `bench/` programs still called `io.read_csv` / `bio.read_fasta` /
+`stats.correlation` long after ADR-0017 flattened those namespaces, and the thing that
+finally noticed was `v0.1.0`'s release pipeline dying in its PGO training step. So:
+
+- **Whole-tree type-check** (`scripts/checkall.sh`): `helix check` over every tracked
+  `.helix` outside `tests/corpus/` — 85 programs in ~30 ms, because type-checking needs no
+  fixture, no data and no network. It proves only that they compile, which is exactly the
+  property the running gates could not cover. `tests/corpus/` is excluded on purpose: a
+  dozen of those files are negative fixtures that must *not* compile, and their exact error
+  text is already pinned on all three engines.
 
 **This is not decorative.** Defects the oracle has caught, each found because one engine
 answered differently: a signed-zero comparison that made a packed `min`/`max` disagree

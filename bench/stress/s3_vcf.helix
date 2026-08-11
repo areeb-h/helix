@@ -1,7 +1,7 @@
 # S3 — VCF analysis: read 200k variants, keep QUAL > 50, count per gene.
 # `read_vcf` lifts every INFO key to its own column; `@qual`/`@GENE` are the
 # unambiguous column sigil — predicates and grouping read straight off the schema.
-v = bio.read_vcf("data/variants.vcf")
+v = read_vcf("data/variants.vcf")
 pass = v.where(@qual > 50.0)
 print("total={v.count()}")
 print("pass={pass.count()}")

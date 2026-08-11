@@ -12,8 +12,9 @@ const NAV = [
   { href: "#hello", label: "2 · Hello, Helix" },
   { href: "#real", label: "3 · Something real" },
   { href: "#repl", label: "4 · The REPL" },
-  { href: "#build", label: "5 · Ship a binary" },
-  { href: "#project", label: "6 · Projects & tests" },
+  { href: "#check", label: "5 · Check it" },
+  { href: "#build", label: "6 · Ship a binary" },
+  { href: "#project", label: "7 · Projects & tests" },
   { href: "#next", label: "Where next" },
 ];
 
@@ -43,7 +44,7 @@ export default function StartPage() {
           From nothing to a shipped binary
         </h1>
         <p className="mt-4 text-lg leading-relaxed text-zinc-400">
-          Six steps, about ten minutes. Every command below shows{" "}
+          Seven steps, about ten minutes. Every command below shows{" "}
           <span className="text-zinc-200">the output you should actually see</span> — so if
           your terminal disagrees, you know at that step rather than three steps later.
         </p>
@@ -72,10 +73,15 @@ export default function StartPage() {
             ]}
           />
           <p className="text-[13px] leading-relaxed text-zinc-500">
-            No transcript shown here yet, deliberately: the v0.1.0 binaries are still
-            building, so nobody has run this against a published release — and every other
-            output on this page was captured from a real run. It gets pasted in once it is
-            real.
+            <strong className="text-amber-400/90">This does not work yet</strong>, and every
+            other output on this page was captured from a real run, so there is no
+            transcript here to show. <code>v0.1.0</code>&rsquo;s release pipeline published
+            four of six platforms and no <code>SHA256SUMS</code>; the installer refuses to
+            install what it cannot verify, so it correctly declines. The three causes are
+            fixed and the next tag produces the first installable release — at which point
+            a real transcript replaces this paragraph. Until then,{" "}
+            <code className="text-zinc-400">cargo install --path .</code> below is the
+            working path.
           </p>
 
           <p className="mt-5 text-[15px] leading-relaxed text-zinc-400">
@@ -193,8 +199,43 @@ export default function StartPage() {
         </section>
 
         {/* ---------------------------------------------------------------- 5 */}
+        <section id="check" className="mt-14 scroll-mt-24">
+          <StepHead n={5} title="Check before you run" />
+          <p className="mt-3 text-[15px] leading-relaxed text-zinc-400">
+            <code>helix check</code> answers &ldquo;does this still compile?&rdquo; without
+            running a line of it — the same front end <code>helix run</code> uses, stopped
+            just before execution. Give it as many paths as you like; the whole of this
+            repository&rsquo;s 85 programs check in about 30&nbsp;ms.
+          </p>
+          <Terminal
+            steps={[
+              { cmd: ["helix check hello"], out: ["ok   hello.helix"] },
+              {
+                cmd: ["helix check hello.helix report.helix"],
+                out: [
+                  "ok   hello.helix",
+                  "FAIL report.helix",
+                  "error: `totl` is not defined",
+                  "  --> report.helix:3:7",
+                  "  |",
+                  "3 | print(totl)",
+                  "  |       ^",
+                  "help: assign it first, e.g. `totl = ...`.",
+                  "checked 2 files, 1 failed",
+                ],
+              },
+            ]}
+          />
+          <p className="text-[13px] leading-relaxed text-zinc-500">
+            It is a <em>type</em> check, not a promise: a program that checks clean can
+            still fail at run time. And it never executes anything, so it is safe to point
+            at code you have not read.
+          </p>
+        </section>
+
+        {/* ---------------------------------------------------------------- 6 */}
         <section id="build" className="mt-14 scroll-mt-24">
-          <StepHead n={5} title="Ship a standalone binary" />
+          <StepHead n={6} title="Ship a standalone binary" />
           <p className="mt-3 text-[15px] leading-relaxed text-zinc-400">
             <code>helix build</code> bundles a script into an executable that runs on a
             machine with no Helix, no toolchain, and no runtime installed.
@@ -222,9 +263,9 @@ export default function StartPage() {
           </p>
         </section>
 
-        {/* ---------------------------------------------------------------- 6 */}
+        {/* ---------------------------------------------------------------- 7 */}
         <section id="project" className="mt-14 scroll-mt-24">
-          <StepHead n={6} title="Projects and tests" />
+          <StepHead n={7} title="Projects and tests" />
           <p className="mt-3 text-[15px] leading-relaxed text-zinc-400">
             When one file stops being enough: <code>helix new</code> writes a manifest, and{" "}
             <code>helix test</code> runs every <code>*_test.helix</code> beside your code.

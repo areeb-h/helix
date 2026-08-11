@@ -1,2 +1,2 @@
 # B3 — read a 1M-row CSV and group-by-mean (Polars lazy, multi-threaded).
-print(io.read_csv("data/big.csv").group(@group).mean(@value))
+print(read_csv("data/big.csv").group(@group).mean(@value))

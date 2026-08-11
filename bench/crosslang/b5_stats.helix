@@ -1,5 +1,5 @@
 # B5 — correlation + linear regression over 1M points (deterministic data).
 x = (0..1000000)
 y = (0..1000000).map((it * 2) + (it % 7))
-print(stats.correlation(x, y))
-print(stats.linear_regression(x, y))
+print(correlation(x, y))
+print(linear_regression(x, y))

@@ -61,34 +61,38 @@ Polars engine, yet starts instantly.
 # from a checkout, with a Rust toolchain — the path that works TODAY:
 cargo install --path .
 
-# once the repo is public and a release is published, on macOS/Linux:
+# once a complete release is published, on macOS/Linux:
 curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | sh
 # …and on Windows (PowerShell, no admin needed):
 irm https://raw.githubusercontent.com/areeb-h/helix/main/install.ps1 | iex
 ```
 
 ```sh
-helix run script            # run a script ( optional)
+helix run script             # run a script (`.helix` optional)
 helix eval "print(1 + 2)"    # a one-liner
 helix repl                   # interactive session
+helix check script.helix     # type-check without running (takes many paths)
 helix build script.helix     # compile to a standalone executable (no toolchain needed)
 helix emit-hbc script.helix  # compile to a .hbc bytecode container (portable core-bytecode artifact)
 helix help                   # all commands
 ```
 
-> **The one-line installs need the repository to be PUBLIC, not just released.** Verified
-> 2026-08-10 against the live repo: while it is private, both
-> `raw.githubusercontent.com/.../install.sh` and
-> `github.com/.../releases/latest/download/...` return **404** to an unauthenticated
-> client — so the commands above cannot work for anyone but the owner, no matter how many
-> releases are tagged. Publishing also removes the other blocker: GitHub Actions is free
-> with unlimited standard-runner minutes on public repositories, and the `v0.1.0` release
-> run was cancelled for account reasons unrelated to the build.
+> **`cargo install --path .` is the path that works today; the one-liners do not yet.**
+> The repository is public, so both installer scripts fetch fine (probed 2026-08-11:
+> `install.sh` and `install.ps1` return **200**). What is missing is a complete release.
+> `v0.1.0`'s pipeline published **four of six** platforms and no `SHA256SUMS`: its PGO job
+> died training on a benchmark that had gone stale against the language, its musl job died
+> mid-upload in a six-way race to create the same release, and the checksum job was skipped
+> for a failed dependency. Probed against the live release today,
+> `releases/latest/download/helix-x86_64-unknown-linux-gnu.tar.gz` and `.../SHA256SUMS`
+> both return **404** — and the installers correctly refuse to install anything they cannot
+> verify, so even the platforms that *did* publish are not installable.
 >
-> The release pipeline itself is verified end-to-end locally: the 64 MB binary packages to
-> a 21 MB tarball, `SHA256SUMS` is produced in the exact format the installers parse, and
-> the installer's verifier accepts the real artifact while rejecting both a one-byte
-> corruption and a missing checksum entry. Nothing is waiting on code.
+> All three causes are fixed rather than worked around: the stale programs are repaired and
+> `scripts/checkall.sh` now type-checks every `.helix` in the repository on every push; the
+> release is built as a **draft** by a single creator and only published once every platform
+> and `SHA256SUMS` are attached. The next tag produces the first installable release. This
+> note goes away when a real install transcript replaces it.
 
 ## A tour
 

@@ -3252,3 +3252,105 @@ fn the_helix_extension_is_optional_but_never_guessed_over_a_real_file() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `helix check` — type-check without running. Three properties, each of which the
+/// command is useless without:
+///
+/// 1. **It never executes anything.** A checker with side effects is not a checker; you
+///    cannot point it at a stranger's file. Pinned with a program whose only observable
+///    behaviour is a `print` and a file write — after `check`, neither happened.
+/// 2. **It agrees with `run` about what compiles.** `check_file_capture` is
+///    `run_file_capture` minus the execution, so the same program must get the same
+///    verdict and the same rendered diagnostic from both.
+/// 3. **A batch does not stop at the first failure.** `scripts/checkall.sh` passes all 85
+///    tracked programs at once; a gate that reported only the first broken one would need
+///    85 runs to clear a tree, so every file is checked and the count is reported.
+#[test]
+fn check_type_checks_without_running_anything() {
+    let dir = std::env::temp_dir().join("helix_check_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
+
+    let sentinel = dir.join("side_effect.txt");
+    w(
+        "good.helix",
+        &format!(
+            "print(\"EXECUTED\")\n\"x\".write_to(\"{}\")\n",
+            sentinel.to_str().unwrap().replace('\\', "/")
+        ),
+    );
+    w("bad.helix", "print(undefined_name)\n");
+    w("alsobad.helix", "print([1, 2].no_such_method())\n");
+    // NOT a type error: immutable reassignment is enforced by the VM at run time (see
+    // `immutable_reassignment_errors_on_the_vm`). `check` is a TYPE check, not a proof
+    // that the program will run — pinned below so the boundary stays honest.
+    w("runtime_only.helix", "x = 1\nx = 2\nprint(x)\n");
+
+    let at = |args: &[&str]| -> (String, String, Option<i32>) {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_helix"));
+        cmd.current_dir(&dir).args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = cmd.output().expect("spawn helix");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.code(),
+        )
+    };
+
+    // (1) A clean program checks clean — and is NOT run.
+    let (out, err, code) = at(&["check", "good.helix"]);
+    assert_eq!(code, Some(0), "clean program should check: {err}");
+    assert!(out.contains("ok"), "expected an ok line, got {out:?}");
+    assert!(!out.contains("EXECUTED"), "`check` executed the program: {out:?}");
+    assert!(!sentinel.exists(), "`check` let the program write a file");
+    // The extension is optional here exactly as it is for `run`.
+    assert_eq!(at(&["check", "good"]).2, Some(0));
+
+    // (2) The verdict and the diagnostic match `helix run`'s. Not "an error" — the same
+    // error: a second front end that phrased things differently would drift from this one.
+    for prog in ["bad.helix", "alsobad.helix"] {
+        let (_, cerr, ccode) = at(&["check", prog]);
+        let (rout, rerr, rcode) = at(&["run", prog]);
+        assert_eq!(ccode, Some(1), "`check {prog}` should fail");
+        assert_eq!(rcode, Some(1), "`run {prog}` should fail");
+        assert_eq!(cerr, rerr, "`check {prog}` and `run {prog}` disagree on the diagnostic");
+        assert!(rout.is_empty(), "run leaked output before the error: {rout:?}");
+    }
+
+    // THE BOUNDARY, stated rather than implied: `check` is a type check. A program that
+    // only fails at run time — here, reassigning an immutable binding, which the VM
+    // enforces — checks CLEAN and then fails when run. Passing `check` means "this
+    // compiles", never "this works".
+    assert_eq!(at(&["check", "runtime_only.helix"]).2, Some(0));
+    let (_, rerr, rcode) = at(&["run", "runtime_only.helix"]);
+    assert_eq!(rcode, Some(1));
+    assert!(rerr.contains("immutable"), "expected the runtime error: {rerr}");
+
+    // (3) A batch checks EVERY file and reports the count — it does not stop at the first
+    // failure, and the summary is the number CI reads.
+    let (out, _, code) = at(&["check", "good.helix", "bad.helix", "alsobad.helix"]);
+    assert_eq!(code, Some(1), "a batch with failures must exit non-zero");
+    assert_eq!(out.matches("FAIL").count(), 2, "both failures should be listed: {out:?}");
+    assert!(out.contains("ok   good.helix"), "the good file should still be reported: {out:?}");
+    assert!(out.contains("checked 3 files, 2 failed"), "summary: {out:?}");
+    assert!(!sentinel.exists(), "batch `check` executed the program");
+
+    // A batch that is entirely clean exits 0.
+    let (out, _, code) = at(&["check", "good.helix", "good"]);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("checked 2 files, 0 failed"), "{out:?}");
+
+    // Usage errors: no path, an unknown flag, a missing file.
+    let (_, err, code) = at(&["check"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("needs at least one script path"), "{err}");
+    let (_, err, code) = at(&["check", "--jit"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("unknown option"), "{err}");
+    let (_, err, code) = at(&["check", "nope"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("cannot read"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

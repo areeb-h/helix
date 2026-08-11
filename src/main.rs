@@ -193,6 +193,8 @@ fn run() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        // `helix check <script>…` — load + type-check, produce nothing, run nothing.
+        Some("check") => run_check(&args),
         // `helix build <script> [-o name]` — bundle a program into a standalone exe.
         Some("build") => run_build(&args),
         // `helix emit-hbc <script> [--entry NAME] [-o out.hbc]` — compile to a `.hbc`
@@ -441,6 +443,77 @@ fn run_source(code: &str, filename: &str) -> ExitCode {
     }
 }
 
+/// `helix check <script>…` — load and type-check, running nothing and writing nothing.
+/// The fast "does this still compile?" answer every serious toolchain has (`cargo
+/// check`, `tsc --noEmit`, `go vet`).
+///
+/// It exists because the release pipeline broke on a file nothing ever compiled:
+/// `bench/crosslang/b3_groupby.helix` still said `io.read_csv(…)`, a spelling the
+/// language had removed, and a PGO training run was the first thing to notice. The
+/// existing gates all *run* their programs — `cargo test` over `tests/corpus`,
+/// `scripts/vmparity.sh` over `examples/` — so neither can cover a benchmark that
+/// needs a 250 MB generated fixture first. Type-checking needs no fixture, so it can
+/// cover every `.helix` in the repository, which is now what `scripts/checkall.sh`
+/// does.
+///
+/// SEVERAL PATHS IN ONE PROCESS, deliberately: `helix check $(git ls-files '*.helix')`
+/// is that whole-repo gate, and paying process startup plus one 2 GiB stack thread
+/// once rather than 149 times is the difference between a gate people run and a gate
+/// people skip.
+///
+/// The diagnostics are `helix run`'s own, not a second opinion — [`check_file_capture`]
+/// is [`run_file_capture`] with the execution removed. A file that checks clean here
+/// and still fails when run therefore failed for a *runtime* reason.
+fn run_check(args: &[String]) -> ExitCode {
+    let mut paths: Vec<&str> = Vec::new();
+    for a in args.iter().skip(2) {
+        if a.starts_with('-') {
+            eprintln!("error: unknown option `{a}` for `helix check`");
+            return ExitCode::FAILURE;
+        }
+        paths.push(a);
+    }
+    if paths.is_empty() {
+        eprintln!("error: `helix check` needs at least one script path, e.g. `helix check main.helix`");
+        return ExitCode::FAILURE;
+    }
+    // Resolve every path BEFORE checking any of them, so a typo in the last argument is
+    // reported immediately rather than after the first 148 files have been checked.
+    let mut resolved = Vec::with_capacity(paths.len());
+    for p in paths {
+        match resolve_script(p) {
+            Ok(path) => resolved.push(path),
+            Err(msg) => {
+                eprint!("{msg}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    // One big-stack thread for the whole batch: the loader and the checker both recurse
+    // over the AST, and spawning that thread per file would dominate the run.
+    run_on_big_stack(move || {
+        let mut failed = 0usize;
+        for path in &resolved {
+            match check_file_capture(path) {
+                Ok(()) => println!("ok   {}", path.display()),
+                Err(rendered) => {
+                    failed += 1;
+                    println!("FAIL {}", path.display());
+                    eprint!("{rendered}");
+                }
+            }
+        }
+        if resolved.len() > 1 {
+            println!("checked {} files, {failed} failed", resolved.len());
+        }
+        if failed == 0 {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        }
+    })
+}
+
 /// `helix build <script> [-o name]` — bundle a single-file program into a standalone
 /// executable (see `src/bundle.rs`). Runs on the big stack: the build path loads and
 /// type-checks the program, both of which recurse over the AST.
@@ -681,6 +754,7 @@ fn print_help() {
          helix <script>           run a script (shorthand; `.helix` optional)\n    \
          helix run <script>       run a script (`.helix` optional: `helix run main`)\n    \
          helix eval \"<code>\"       run a one-liner\n    \
+         helix check <script>…    type-check without running (fast; takes many paths)\n    \
          helix build <script>     bundle a program into a standalone executable\n    \
          helix emit-hbc <script>  compile to a .hbc bytecode container (for ctype's hvm)\n    \
          helix repl               start an interactive session\n    \
@@ -774,6 +848,20 @@ fn run_file_capture(path: &std::path::Path) -> Result<(), String> {
     // Errors render against the spans the loader produced, so a cross-module error
     // points at the dependency's own source and line (not the entry file).
     run_program(&loaded.stmts, &loaded.spans, loaded.multi_module)
+}
+
+/// Load, namespace-resolve and type-check a file WITHOUT running it, returning the
+/// rendered error. Must be called on the big stack.
+///
+/// This is deliberately [`run_file_capture`] with the execution removed: the same
+/// loader, the same `types::check`, the same `render_err`. Writing a second front end
+/// for `helix check` would let the two drift, and a checker that disagrees with the
+/// runtime is worse than no checker.
+fn check_file_capture(path: &std::path::Path) -> Result<(), String> {
+    let loaded = module::load(path)?;
+    types::check(&loaded.stmts)
+        .map(|_| ())
+        .map_err(|e| render_err(e, &loaded.spans, loaded.multi_module))
 }
 
 /// `helix test [path]` — discover and run test files (any file named `*_test.helix`

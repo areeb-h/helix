@@ -1,4 +1,4 @@
 # B6 — read a 50k-variant VCF and take the mean QUAL. NOTE: a full spec-compliant
 # parse (typed CHROM/POS/REF/ALT/QUAL/FILTER + INFO), not a one-field split — see
 # the README caveat before comparing to the Python number.
-print(bio.read_vcf("data/big.vcf").column("qual").mean())
+print(read_vcf("data/big.vcf").column("qual").mean())

@@ -1,7 +1,7 @@
 # S2 — FASTQ: per-read GC content + Phred quality decoding over 200k reads.
 # `read_fastq` yields {id, seq:Dna, qual, length}; `.seq.gc_content()` and
 # `.qual.phred().mean()` are first-class — the whole analysis is array verbs.
-reads = bio.read_fastq("data/reads.fq")
+reads = read_fastq("data/reads.fq")
 gc = reads.map(it.seq.gc_content()).mean()
 q  = reads.map(it.qual.phred().mean()).mean()
 print("reads={reads.count()}")

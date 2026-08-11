@@ -10,7 +10,7 @@ pystat   = python.import("statistics")
 
 # (1) DataFrame bridge (Arrow, zero-copy): read a VCF natively, hand the frame
 #     straight to a Python call — it arrives as a Python polars.DataFrame.
-df = bio.read_vcf("data/variants.vcf")
+df = read_vcf("data/variants.vcf")
 print("native rows:        {df.count()}")
 print("seen by python len: {builtins.len(df)}")
 
