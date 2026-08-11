@@ -68,20 +68,30 @@ export default function StartPage() {
                 cmd: [
                   "curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | sh",
                 ],
+                out: [
+                  "helix-install: downloading https://github.com/areeb-h/helix/releases/latest/download/helix-x86_64-unknown-linux-gnu.tar.gz",
+                  "helix-install: checksum ok (helix-x86_64-unknown-linux-gnu.tar.gz)",
+                  "helix-install: installed helix -> /home/areeb/.local/bin/helix",
+                  "helix 0.1.1",
+                  'helix-install: done. try:  helix eval "print(1 + 2)"   or   helix repl',
+                ],
                 note: "It prints each step: which artifact it fetched, the checksum result, and where it installed. A checksum MISMATCH aborts rather than warning. HELIX_MUSL=1 fetches the fully-static build; HELIX_INSTALL_DIR changes the location.",
               },
             ]}
           />
           <p className="text-[13px] leading-relaxed text-zinc-500">
-            <strong className="text-amber-400/90">This does not work yet</strong>, and every
-            other output on this page was captured from a real run, so there is no
-            transcript here to show. <code>v0.1.0</code>&rsquo;s release pipeline published
-            four of six platforms and no <code>SHA256SUMS</code>; the installer refuses to
-            install what it cannot verify, so it correctly declines. The three causes are
-            fixed and the next tag produces the first installable release — at which point
-            a real transcript replaces this paragraph. Until then,{" "}
-            <code className="text-zinc-400">cargo install --path .</code> below is the
-            working path.
+            That is a real run against the published <code>v0.1.1</code> release, not a
+            mock-up. The <code>checksum ok</code> line is the one that matters: the installer
+            verifies every artifact against the release&rsquo;s <code>SHA256SUMS</code> and
+            aborts on a mismatch rather than warning about it. <code>v0.1.0</code> shipped
+            four of six platforms and no checksum file, so the installer correctly refused —
+            see the <Link
+              href="https://github.com/areeb-h/helix/blob/main/CHANGELOG.md"
+              className="text-emerald-400 underline-offset-2 hover:underline"
+            >
+              changelog
+            </Link>{" "}
+            for what went wrong and what now prevents it.
           </p>
 
           <p className="mt-5 text-[15px] leading-relaxed text-zinc-400">

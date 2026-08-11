@@ -58,13 +58,23 @@ BLAS; the core links nothing external beyond the C runtime). It's ~60 MB because
 Polars engine, yet starts instantly.
 
 ```sh
-# from a checkout, with a Rust toolchain — the path that works TODAY:
-cargo install --path .
-
-# once a complete release is published, on macOS/Linux:
+# macOS / Linux — downloads the binary for your platform and verifies its SHA-256:
 curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | sh
-# …and on Windows (PowerShell, no admin needed):
+
+# Windows (PowerShell, no admin needed):
 irm https://raw.githubusercontent.com/areeb-h/helix/main/install.ps1 | iex
+
+# or from a checkout, with a Rust toolchain:
+cargo install --path .
+```
+
+```
+$ curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | sh
+helix-install: downloading https://github.com/areeb-h/helix/releases/latest/download/helix-x86_64-unknown-linux-gnu.tar.gz
+helix-install: checksum ok (helix-x86_64-unknown-linux-gnu.tar.gz)
+helix-install: installed helix -> /home/areeb/.local/bin/helix
+helix 0.1.1
+helix-install: done. try:  helix eval "print(1 + 2)"   or   helix repl
 ```
 
 ```sh
@@ -77,22 +87,15 @@ helix emit-hbc script.helix  # compile to a .hbc bytecode container (portable co
 helix help                   # all commands
 ```
 
-> **`cargo install --path .` is the path that works today; the one-liners do not yet.**
-> The repository is public, so both installer scripts fetch fine (probed 2026-08-11:
-> `install.sh` and `install.ps1` return **200**). What is missing is a complete release.
-> `v0.1.0`'s pipeline published **four of six** platforms and no `SHA256SUMS`: its PGO job
-> died training on a benchmark that had gone stale against the language, its musl job died
-> mid-upload in a six-way race to create the same release, and the checksum job was skipped
-> for a failed dependency. Probed against the live release today,
-> `releases/latest/download/helix-x86_64-unknown-linux-gnu.tar.gz` and `.../SHA256SUMS`
-> both return **404** — and the installers correctly refuse to install anything they cannot
-> verify, so even the platforms that *did* publish are not installable.
->
-> All three causes are fixed rather than worked around: the stale programs are repaired and
-> `scripts/checkall.sh` now type-checks every `.helix` in the repository on every push; the
-> release is built as a **draft** by a single creator and only published once every platform
-> and `SHA256SUMS` are attached. The next tag produces the first installable release. This
-> note goes away when a real install transcript replaces it.
+`HELIX_MUSL=1` fetches the fully-static build (verified `static-pie linked`);
+`HELIX_INSTALL_DIR` changes where it lands. A checksum **mismatch aborts** rather than
+warning — the installer will not install what it cannot verify.
+
+> **Use `v0.1.1` or later.** `v0.1.0` is published but nothing can be installed from it: its
+> pipeline uploaded four of six platforms and no `SHA256SUMS`, so the installers correctly
+> refuse even the platforms that did upload. All three causes are fixed rather than worked
+> around — see [CHANGELOG.md](CHANGELOG.md). `releases/latest` resolves to `v0.1.1`, so the
+> commands above pick it up without you doing anything.
 
 ## A tour
 

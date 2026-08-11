@@ -102,15 +102,30 @@ Then: `helix run script.helix`, `helix repl`, `helix eval "print(1 + 2)"`.
   and Windows (x86_64) and attaches the binaries to a GitHub Release on a `vX.Y.Z` tag.
 - **Implemented — Hosting** — the repository is public at `github.com/areeb-h/helix`,
   and both installer scripts fetch (probed 2026-08-11: HTTP 200).
-- **Pending — a complete release.** `v0.1.0` shipped four of six platforms and no
-  `SHA256SUMS`, so the one-liners cannot install from it: the PGO job died training on
-  a benchmark that had gone stale against the language, the musl job died mid-upload in
-  a six-way race to create the same release, and the checksum job was skipped for a
-  failed dependency. Fixed on 2026-08-11 — the stale programs are repaired and
-  `scripts/checkall.sh` type-checks every `.helix` on every push; the release is now
-  created ONCE as a draft and published only after every platform and `SHA256SUMS` are
-  attached, so a partial release can no longer become visible. The next tag is the
-  first installable one.
+- **Implemented — `v0.1.1` is the first installable release** (2026-08-11). All six
+  platforms plus `SHA256SUMS`; `releases/latest` resolves to it. End-to-end verified by
+  running the published one-liner, not by inspecting the workflow:
+
+  ```
+  helix-install: downloading https://github.com/areeb-h/helix/releases/latest/download/helix-x86_64-unknown-linux-gnu.tar.gz
+  helix-install: checksum ok (helix-x86_64-unknown-linux-gnu.tar.gz)
+  helix-install: installed helix -> /home/areeb/.local/bin/helix
+  helix 0.1.1
+  ```
+
+  `HELIX_MUSL=1` and `HELIX_INSTALL_DIR` were exercised in the same pass; the musl
+  artifact reports `static-pie linked`.
+
+  **What `v0.1.0` cost, kept as the record.** It shipped four of six platforms and no
+  `SHA256SUMS`, so the one-liners could install nothing at all: the PGO job died training
+  on a benchmark that had gone stale against the language, the musl job died mid-upload in
+  a six-way race to create the same release, and the checksum job was skipped for a failed
+  dependency. All three are fixed at the cause — the stale programs are repaired and
+  `scripts/checkall.sh` type-checks every `.helix` on every push; the release is created
+  ONCE as a draft and published only after every platform and `SHA256SUMS` are attached, so
+  a partial release can no longer become visible; and `workflow_dispatch` has a dry run that
+  builds and smoke-tests all six targets while writing nothing, which is how this pipeline
+  was checked before the tag rather than after.
 
 ## Toolchain & version management (research-backed)
 
