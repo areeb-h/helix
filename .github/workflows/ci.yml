@@ -1,0 +1,144 @@
+name: ci
+
+# Until now the ONLY workflow was `release.yml`, which fires on a `v*` tag. Nothing ran on
+# a push or a pull request — so the repository opened to contributors with no automated
+# checking at all, and a PR could break every engine without CI saying a word. This is the
+# first thing a public project needs, ahead of any feature.
+#
+# It mirrors `scripts/gate.sh` (the local gate) rather than inventing a second definition
+# of "green": clippy, the full suite, and the three-engine parity diff. If the two ever
+# disagree, the local gate is the one people actually run, so this file follows it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default; no job here needs to write to the repository.
+permissions:
+  contents: read
+
+# A new push to the same branch/PR cancels the previous run — CI minutes are finite even
+# when they are free, and a superseded result is not worth waiting for.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fast feedback: formatting and lints finish in well under a minute, so they run as
+  # their own job and a badly-formatted PR gets an answer without waiting for the suite.
+  # ADVISORY, deliberately, and this is measured rather than assumed: as of the commit
+  # that added this file, `cargo fmt --all --check` reports 1280 diffs and clippy reports
+  # 9 warnings. Making either one blocking today would paint main red on the first run —
+  # a badge that means "we never ran this".
+  #
+  # The fix is NOT a whole-tree reformat. This codebase's comment layout is deliberate and
+  # hand-wrapped, and reformatting every file for zero functional gain would also collide
+  # with in-flight work. So these report, a contributor sees them, and the counts above are
+  # the baseline to drive down before either becomes a gate.
+  lint:
+    name: fmt + clippy (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: helix-ci
+      - name: rustfmt (report only)
+        run: cargo fmt --all --check || true
+      - name: clippy (report only)
+        run: cargo clippy --all-targets 2>&1 | tail -40
+
+  # The real gate. `--profile gate` is opt-level 3 without LTO: the differential fuzzers
+  # and perf-sensitive tests run at full speed, but a rebuild does not pay the ~20-minute
+  # fat-LTO link that `--release` would. Optimization level does not change any test's
+  # pass/fail, so this is a faithful gate — see scripts/gate.sh for the reasoning.
+  test:
+    name: tests + example parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: helix-ci
+      - name: Build the binary the parity diff needs
+        run: cargo build --profile gate --bin helix
+      - name: Test suite
+        run: cargo test --profile gate
+      # JIT vs tree-walker over every example. Full THREE-engine agreement is covered
+      # inside `cargo test` above (the pinned corpus and the doc-example gate both run
+      # all three); this script is the end-to-end diff across real programs.
+      - name: Example parity (JIT vs tree-walker)
+        run: bash scripts/vmparity.sh
+        env:
+          BIN: ./target/gate/helix
+
+  # The project's stated minimum supported Rust version must actually compile, or the
+  # claim in Cargo.toml is decoration. Check only — the suite runs on stable above.
+  #
+  # ADVISORY until observed green: whether 1.96 still builds the current dependency tree
+  # has not been verified locally, and asserting an unchecked claim as a gate is how a
+  # badge starts lying. Promote to blocking after the first green run.
+  msrv:
+    name: MSRV (advisory until observed green)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          V=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "MSRV declared as $V"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: helix-msrv
+      - run: cargo check --all-targets
+
+  # A known-vulnerable dependency is a production problem regardless of how good the
+  # language is. Advisory-only: it reports, and does not block a merge on an advisory
+  # with no available fix.
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: helix-audit
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
+  # The website renders docs/, examples/ and bench/ straight from this repository, so a
+  # change to those files can break the build. Catching that here keeps the site
+  # deployable from any commit on main.
+  website:
+    name: website build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - run: npm ci
+        working-directory: website
+      - run: npm run build
+        working-directory: website
