@@ -1,0 +1,57 @@
+# `cargo audit` configuration — the four advisories this dependency tree cannot currently
+# resolve, each with the reason and the condition that clears it.
+#
+# WHY IGNORE ANYTHING AT ALL. A gate that is always red is not a gate; the job was running
+# `continue-on-error: true`, which means nobody would ever notice a NEW advisory appearing
+# among the permanently-failing ones. Listing the known-and-stuck ones here lets the job
+# BLOCK, which is the only state in which it does any work. Every entry below is dated and
+# carries the version that would remove it, so this file is a to-do list, not a silencer.
+#
+# Two advisories were closed rather than listed (2026-08-11):
+#   crossbeam-epoch 0.9.18 -> 0.9.20   RUSTSEC-2026-0204
+#   quinn-proto     0.11.14 -> 0.11.16 RUSTSEC-2026-0185
+# The rule is: fix if a fix is reachable, list only if it is not.
+
+[advisories]
+ignore = [
+    # ---------------------------------------------------------------- quick-xml
+    # RUSTSEC-2026-0194 — quadratic time checking a start tag for duplicate attributes.
+    # RUSTSEC-2026-0195 — unbounded namespace-declaration allocation in `NsReader`.
+    # Both 7.5 (high), both fixed in quick-xml >= 0.41.
+    #
+    # NOT REACHED FROM HELIX'S OWN CODE, but NOT provably unreachable either, and the
+    # honest reason for the ignore is the second sentence, not the first: quick-xml comes
+    # from `object_store`, which parses the XML that S3/Azure/GCS list APIs return.
+    # `polars-io`'s `cloud` feature is pulled in transitively by `file_cache` <- polars-
+    # stream <- polars-lazy, so that code IS compiled into the binary. Helix never asks
+    # Polars to read a cloud URL today, but "we do not call it" is a weaker claim than a
+    # version bump, and it is not offered as one.
+    #
+    # THERE IS NO FIX REACHABLE FROM HERE. `object_store 0.13.2` requires `quick-xml ^0.39`,
+    # so `cargo update --precise 0.41.0` is rejected by the resolver. Probed 2026-08-11:
+    # polars 0.55.2 — the newest release — still resolves object_store 0.13.2 and
+    # quick-xml 0.39.4, so upgrading Polars does not help. Clears when `object_store`
+    # ships a release on quick-xml >= 0.41 and Polars picks it up.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+
+    # ---------------------------------------------------------------- pyo3
+    # RUSTSEC-2026-0176 — out-of-bounds read in `nth`/`nth_back` for PyList/PyTuple iterators.
+    # RUSTSEC-2026-0177 — missing `Sync` bound on `PyCFunction::new_closure` closures.
+    # Both fixed in pyo3 >= 0.29.
+    #
+    # NOT IN THE SHIPPED BINARY: pyo3 is behind the off-by-default `python` feature, so
+    # every release artifact this project publishes links no libpython and contains no
+    # pyo3. It affects only a `--features python` build.
+    #
+    # THE FIX IS A COUPLED UPGRADE, not a version bump. Probed 2026-08-11: pyo3 0.29 needs
+    # pyo3-polars 0.28, which requires polars ^0.55 — and pinning polars at our 0.54.4
+    # while asking for pyo3-polars 0.28 resolves BOTH polars 0.54.4 and 0.55.2 into one
+    # graph. Two Polars versions is worse than the advisory: `pyo3-polars` would be handing
+    # Python a 0.55 DataFrame while Helix holds a 0.54 one, which is exactly the interchange
+    # this crate exists to make safe. Clears with the polars 0.54 -> 0.55 upgrade, tracked
+    # separately because it is an API migration across the DataFrame layer, not a lockfile
+    # change.
+    "RUSTSEC-2026-0176",
+    "RUSTSEC-2026-0177",
+]

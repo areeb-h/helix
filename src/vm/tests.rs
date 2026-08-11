@@ -4633,6 +4633,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
     ///     path at all.
     ///   * Multiplier 2 does NOT discriminate either: `(2^53+1) * 2` rounds to the same f64
     ///     from both directions. Multiplier 3 is the smallest that separates them.
+    ///
     /// The case below has BOTH: a `Float` capture to force the value-scalar path, and a large
     /// `Int` capture used in an integer product. Forcing `(SFloat, Int)` to combine yields
     /// `27021597764222980.0` on the JIT against `27021597764222984.0` on the other two.

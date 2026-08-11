@@ -682,9 +682,9 @@ impl super::Compiler {
                 let user_fns = self.user_fn_set();
                 if matches!(init, Expr::Float(_)) {
                     match crate::jit::reduce_jit_f64_range_captures(init, body, pa, pb, &fns, &user_fns) {
-                        Some((b, caps, bnds, synth)) => {
-                            synth_exprs = synth;
-                            (Some(vec![b]), caps, bnds, true)
+                        Some(c) => {
+                            synth_exprs = c.synth;
+                            (Some(vec![c.body]), c.caps, c.bounds, true)
                         }
                         None => match crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &fns, &user_fns) {
                             Some(b) => (Some(vec![b]), Vec::new(), Vec::new(), true),
@@ -871,7 +871,7 @@ impl super::Compiler {
         let fns = self.jit_fn_set();
         let (bodies, captures, bounds, synth, float) = if matches!(init, Expr::Float(_)) {
             match crate::jit::reduce_jit_f64_range_captures(init, &new_body, pa, MR_COUNTER, &fns, &user_fns) {
-                Some((bd, caps, bnds, syn)) => (vec![bd], caps, bnds, syn, true),
+                Some(c) => (vec![c.body], c.caps, c.bounds, c.synth, true),
                 None => match crate::jit::reduce_jit_f64_range_body(init, &new_body, pa, MR_COUNTER, &fns, &user_fns) {
                     Some(bd) => (vec![bd], Vec::new(), Vec::new(), Vec::new(), true),
                     None => return Ok(false),

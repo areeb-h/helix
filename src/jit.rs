@@ -1832,6 +1832,18 @@ fn record_index_term(
 /// (so this never competes with the capture-free [`reduce_jit_f64_range_body`]). Returns the
 /// body + the ordered captures, or `None`. (The VM confirms each capture is a `Floats` array
 /// and pre-checks its bounds at dispatch, falling back otherwise.)
+pub struct F64RangeCaptures {
+    /// The body to lower.
+    pub body: Expr,
+    /// The ordered captures the VM marshals into the kernel's argument block.
+    pub caps: Vec<Capture>,
+    /// Index bounds the VM pre-checks at dispatch (empty on the f64 path, which
+    /// range-checks its array caps inline).
+    pub bounds: Vec<IndexBound>,
+    /// Synthetic `$aff{k}` terms the compiler evaluates once in the enclosing scope.
+    pub synth: Vec<(String, Expr)>,
+}
+
 pub fn reduce_jit_f64_range_captures(
     init: &Expr,
     body: &Expr,
@@ -1839,7 +1851,7 @@ pub fn reduce_jit_f64_range_captures(
     pb: &str,
     fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
-) -> Option<(Expr, Vec<Capture>, Vec<IndexBound>, Vec<(String, Expr)>)> {
+) -> Option<F64RangeCaptures> {
     if !matches!(init, Expr::Float(_)) {
         return None;
     }
@@ -1858,7 +1870,12 @@ pub fn reduce_jit_f64_range_captures(
         // INDEX scalars (an `a[k]` index, an affine `base`/`coef`, incl. names inside a
         // synthetic `$aff` term) stay `Scalar` — `i64`, since an index is an integer.
         relabel_value_scalars(&mut out.caps, &out.bounds, &out.synth);
-        Some((body.clone(), out.caps, out.bounds, out.synth))
+        Some(F64RangeCaptures {
+            body: body.clone(),
+            caps: out.caps,
+            bounds: out.bounds,
+            synth: out.synth,
+        })
     } else {
         None
     }
@@ -5199,8 +5216,16 @@ fn define_array_kernel<'a>(
                 3,
             ));
             let mixed_ctx = MixedCallCtx { sigs: msigs, ids: mixed_ids, poison_cell: cell };
-            let (r, kind) =
-                gen_value_typed(&mut b, &k.body, &vars, &k.binder, &f64_scalars, fn_ids, module, &mixed_ctx, poison_var);
+            let mut cx = TypedCtx {
+                vars: &vars,
+                binder: &k.binder,
+                f64_scalars: &f64_scalars,
+                fn_ids,
+                module,
+                mixed: &mixed_ctx,
+                poison: poison_var,
+            };
+            let (r, kind) = gen_value_typed(&mut b, &k.body, &mut cx);
             // The build gate re-derived the root via the same analysis this codegen mirrors,
             // so a mismatch here is a twin-drift bug, not a runtime condition.
             debug_assert!(kind == root, "mixed map root drifted between analysis and codegen");
@@ -6327,19 +6352,30 @@ struct MixedCallCtx<'c> {
     poison_cell: cranelift_codegen::ir::StackSlot,
 }
 
+/// Everything [`gen_value_typed`] threads through its recursion unchanged. Bundled for the
+/// same reason [`MixedCallCtx`] is: the walker calls itself fourteen times, and repeating
+/// seven identical arguments at each one buries the single argument that actually differs.
+struct TypedCtx<'a, 'c> {
+    /// Kernel-local Cranelift variables, keyed by the name the body uses.
+    vars: &'c HashMap<&'a str, Variable>,
+    /// The map/filter binder — an `i64` element, never a capture.
+    binder: &'c str,
+    /// Captures the prologue loaded as `F64`, so the `Ident` arm types them `Float`.
+    f64_scalars: &'c HashSet<&'a str>,
+    /// Monomorphized user functions this kernel may call directly.
+    fn_ids: &'c HashMap<&'a str, FuncId>,
+    module: &'c mut JITModule,
+    mixed: &'c MixedCallCtx<'c>,
+    /// The kernel's poison accumulator (`i64`, 0 = clean). The raising-rounder arm ORs 1 into
+    /// it on any out-of-i64-range result; every kernel declares the variable (a non-raising
+    /// body just never touches it) so this needs no `Option` plumbing.
+    poison: Variable,
+}
+
 fn gen_value_typed<'a>(
     b: &mut FunctionBuilder,
     e: &'a Expr,
-    vars: &HashMap<&'a str, Variable>,
-    binder: &str,
-    f64_scalars: &HashSet<&str>,
-    fn_ids: &HashMap<&'a str, FuncId>,
-    module: &mut JITModule,
-    mixed: &MixedCallCtx,
-    // The kernel's poison accumulator (`i64`, 0 = clean). The raising-rounder arm ORs 1 into
-    // it on any out-of-i64-range result; every kernel declares the variable (a non-raising
-    // body just never touches it) so this needs no `Option` plumbing.
-    poison: Variable,
+    cx: &mut TypedCtx<'a, '_>,
 ) -> (ClValue, NumKind) {
     match e {
         Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
@@ -6349,7 +6385,7 @@ fn gen_value_typed<'a>(
         // behave here as they do everywhere else.
         Expr::Unary { op: UnOp::Neg, expr, .. } => {
             let (v, k) =
-                gen_value_typed(b, expr, vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+                gen_value_typed(b, expr, cx);
             match k {
                 NumKind::Int => (b.ins().ineg(v), NumKind::Int),
                 NumKind::Float => (b.ins().fneg(v), NumKind::Float),
@@ -6357,14 +6393,14 @@ fn gen_value_typed<'a>(
         }
         Expr::Ident { name, .. } => {
             debug_assert!(
-                name == binder || vars.contains_key(name.as_str()),
-                "unbound ident reached mixed codegen"
+                name == cx.binder || cx.vars.contains_key(name.as_str()),
+                "unbound ident reached cx.mixed codegen"
             );
-            let var = b.use_var(vars[name.as_str()]);
+            let var = b.use_var(cx.vars[name.as_str()]);
             // A `ScalarValue` cap rides as `f64` in this kernel (SAXPY's coefficient), so its
             // slot IS a float — the prologue loaded it `F64`. Everything else here (the binder,
             // an index scalar) is an `i64` element.
-            if f64_scalars.contains(name.as_str()) {
+            if cx.f64_scalars.contains(name.as_str()) {
                 (var, NumKind::Float)
             } else {
                 (var, NumKind::Int)
@@ -6378,18 +6414,18 @@ fn gen_value_typed<'a>(
         Expr::Index { recv, index, .. } => {
             let name = match &**recv {
                 Expr::Ident { name, .. } => name.as_str(),
-                _ => unreachable!("ineligible index receiver reached mixed codegen"),
+                _ => unreachable!("ineligible index receiver reached cx.mixed codegen"),
             };
-            let base = b.use_var(vars[name]);
-            let (idx, ik) = gen_value_typed(b, index, vars, binder, f64_scalars, fn_ids, module, mixed, poison);
-            debug_assert!(matches!(ik, NumKind::Int), "non-i64 index reached mixed codegen");
+            let base = b.use_var(cx.vars[name]);
+            let (idx, ik) = gen_value_typed(b, index, cx);
+            debug_assert!(matches!(ik, NumKind::Int), "non-i64 index reached cx.mixed codegen");
             let off = b.ins().imul_imm(idx, 8);
             let addr = b.ins().iadd(base, off);
             (b.ins().load(F64, MemFlags::trusted(), addr, 0), NumKind::Float)
         }
         Expr::Binary { op, left, right, .. } => {
-            let (lv, lk) = gen_value_typed(b, left, vars, binder, f64_scalars, fn_ids, module, mixed, poison);
-            let (rv, rk) = gen_value_typed(b, right, vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+            let (lv, lk) = gen_value_typed(b, left, cx);
+            let (rv, rk) = gen_value_typed(b, right, cx);
             // `/` is ALWAYS float division in Helix (`10 / 2 == 5.0`), so it takes the f64
             // branch even for two `Int` operands.
             if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div) {
@@ -6426,7 +6462,7 @@ fn gen_value_typed<'a>(
                         let n = if let Expr::Int(n) = **right { n } else { unreachable!() };
                         b.ins().sshr_imm(lv, n)
                     }
-                    _ => unreachable!("ineligible operator reached mixed codegen"),
+                    _ => unreachable!("ineligible operator reached cx.mixed codegen"),
                 };
                 (v, NumKind::Int)
             } else {
@@ -6449,12 +6485,12 @@ fn gen_value_typed<'a>(
                         let zero = b.ins().f64const(0.0);
                         let is_zero = b.ins().fcmp(FloatCC::Equal, rf, zero);
                         let bad = b.ins().uextend(I64, is_zero);
-                        let pv = b.use_var(poison);
+                        let pv = b.use_var(cx.poison);
                         let npv = b.ins().bor(pv, bad);
-                        b.def_var(poison, npv);
+                        b.def_var(cx.poison, npv);
                         b.ins().fdiv(lf, rf)
                     }
-                    _ => unreachable!("ineligible operator reached mixed codegen"),
+                    _ => unreachable!("ineligible operator reached cx.mixed codegen"),
                 };
                 (v, NumKind::Float)
             }
@@ -6466,12 +6502,12 @@ fn gen_value_typed<'a>(
         // specialization was compiled under, so the result is an `i64` and types as `Int`:
         // the enclosing expression then promotes it at the first `Float` exactly where the
         // interpreter does.
-        Expr::Call { name, args, .. } if fn_ids.contains_key(name.as_str()) => {
-            let fid = fn_ids[name.as_str()];
-            let fref = module.declare_func_in_func(fid, b.func);
+        Expr::Call { name, args, .. } if cx.fn_ids.contains_key(name.as_str()) => {
+            let fid = cx.fn_ids[name.as_str()];
+            let fref = cx.module.declare_func_in_func(fid, b.func);
             let argv: Vec<ClValue> = args
                 .iter()
-                .map(|a| gen_value_typed(b, a, vars, binder, f64_scalars, fn_ids, module, mixed, poison).0)
+                .map(|a| gen_value_typed(b, a, cx).0)
                 .collect();
             let call = b.ins().call(fref, &argv);
             (b.inst_results(call)[0], NumKind::Int)
@@ -6483,22 +6519,22 @@ fn gen_value_typed<'a>(
         // callee therefore poisons the whole map, and the VM discards the output and
         // re-runs on bytecode for the exact interpreter error — the same contract as a
         // rounder leaving i64 range.
-        Expr::Call { name, args, .. } if mixed.sigs.contains_key(name.as_str()) => {
-            let (params, ret) = &mixed.sigs[name.as_str()];
-            let fref = module.declare_func_in_func(mixed.ids[name.as_str()], b.func);
+        Expr::Call { name, args, .. } if cx.mixed.sigs.contains_key(name.as_str()) => {
+            let (params, ret) = &cx.mixed.sigs[name.as_str()];
+            let fref = cx.module.declare_func_in_func(cx.mixed.ids[name.as_str()], b.func);
             // Zero the cell and read it back through its ADDRESS, not via `stack_store`/
             // `stack_load`: the callee writes through the pointer, which the slot-promotion
             // pass cannot see, so slot-relative accesses can be folded away as
             // "loads what was stored" (0). Explicit memory traffic keeps the write visible.
-            let cell = mixed.poison_cell;
+            let cell = cx.mixed.poison_cell;
             let cell_ptr = b.ins().stack_addr(I64, cell, 0);
             let zero8 = b.ins().iconst(I8, 0);
             b.ins().store(MemFlags::new(), zero8, cell_ptr, 0);
             let mut argv: Vec<ClValue> = Vec::with_capacity(args.len() + 1);
             for (a, &want) in args.iter().zip(params) {
                 let (v, ak) =
-                    gen_value_typed(b, a, vars, binder, f64_scalars, fn_ids, module, mixed, poison);
-                debug_assert!(ak == want, "mixed-call arg kind drifted from the callee sig");
+                    gen_value_typed(b, a, cx);
+                debug_assert!(ak == want, "cx.mixed-call arg kind drifted from the callee sig");
                 argv.push(match ak {
                     NumKind::Int => v,
                     NumKind::Float => b.ins().bitcast(I64, MemFlags::new(), v),
@@ -6509,9 +6545,9 @@ fn gen_value_typed<'a>(
             let raw = b.inst_results(call)[0];
             let flag = b.ins().load(I8, MemFlags::new(), cell_ptr, 0);
             let flag64 = b.ins().uextend(I64, flag);
-            let pv = b.use_var(poison);
+            let pv = b.use_var(cx.poison);
             let npv = b.ins().bor(pv, flag64);
-            b.def_var(poison, npv);
+            b.def_var(cx.poison, npv);
             let v = match ret {
                 NumKind::Int => raw,
                 NumKind::Float => b.ins().bitcast(F64, MemFlags::new(), raw),
@@ -6524,7 +6560,7 @@ fn gen_value_typed<'a>(
         // (via f64 compare, as the interpreter) or `f64`.
         Expr::Call { name, args, .. } => match name.as_str() {
             "sqrt" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], cx);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
             }
@@ -6532,7 +6568,7 @@ fn gen_value_typed<'a>(
             // `f64` via `fcvt_from_sint` (the interpreter's `*i as f64`), and an `f64`
             // passes through unchanged.
             "to_float" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], cx);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (af, NumKind::Float)
             }
@@ -6556,7 +6592,7 @@ fn gen_value_typed<'a>(
             //   * An `Int` argument is the identity (`floor(2) == 2`), matching the
             //     interpreter, and cannot raise.
             "floor" | "ceil" | "round" | "trunc" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], cx);
                 if ak == NumKind::Int {
                     return (av, NumKind::Int);
                 }
@@ -6583,13 +6619,13 @@ fn gen_value_typed<'a>(
                 let in_range = b.ins().band(ge_min, lt_lim);
                 let bad_i8 = b.ins().bxor_imm(in_range, 1);
                 let bad = b.ins().uextend(I64, bad_i8);
-                let pv = b.use_var(poison);
+                let pv = b.use_var(cx.poison);
                 let npv = b.ins().bor(pv, bad);
-                b.def_var(poison, npv);
+                b.def_var(cx.poison, npv);
                 (b.ins().fcvt_to_sint_sat(I64, rounded), NumKind::Int)
             }
             "abs" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], cx);
                 match ak {
                     NumKind::Int => (b.ins().iabs(av), NumKind::Int),
                     NumKind::Float => (b.ins().fabs(av), NumKind::Float),
@@ -6598,7 +6634,7 @@ fn gen_value_typed<'a>(
             // `to_int`: saturating float->int, the identity on an `Int`. `fcvt_to_sint_sat`
             // matches the interpreter exactly -- NaN to 0, +-inf to the i64 extremes.
             "to_int" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], cx);
                 match ak {
                     NumKind::Int => (av, NumKind::Int),
                     NumKind::Float => (b.ins().fcvt_to_sint_sat(I64, av), NumKind::Int),
@@ -6608,7 +6644,7 @@ fn gen_value_typed<'a>(
             // through to 0 -- which is what the interpreter returns for NaN (it compares
             // rather than using `signum`, which would propagate NaN).
             "sign" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], cx);
                 let one = b.ins().iconst(I64, 1);
                 let neg = b.ins().iconst(I64, -1);
                 let zero = b.ins().iconst(I64, 0);
@@ -6632,8 +6668,8 @@ fn gen_value_typed<'a>(
                 (b.ins().select(gt, one, lo), NumKind::Int)
             }
             "min" | "max" => {
-                let (av, ak) = gen_value_typed(b, &args[0], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
-                let (cv, _ck) = gen_value_typed(b, &args[1], vars, binder, f64_scalars, fn_ids, module, mixed, poison);
+                let (av, ak) = gen_value_typed(b, &args[0], cx);
+                let (cv, _ck) = gen_value_typed(b, &args[1], cx);
                 let le = name == "min";
                 let cc = if le { FloatCC::LessThanOrEqual } else { FloatCC::GreaterThanOrEqual };
                 match ak {
@@ -6649,9 +6685,9 @@ fn gen_value_typed<'a>(
                     }
                 }
             }
-            _ => unreachable!("ineligible call reached mixed codegen"),
+            _ => unreachable!("ineligible call reached cx.mixed codegen"),
         },
-        _ => unreachable!("ineligible node reached mixed codegen"),
+        _ => unreachable!("ineligible node reached cx.mixed codegen"),
     }
 }
 

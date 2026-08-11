@@ -669,16 +669,16 @@ fn array_numeric_fast(
     // `Values` arrays already hold their `Value`s, so they defer — there is nothing to
     // avoid materializing, and the general path's `any`/`position` are the same scan.
     // A wrong arity also defers, so both methods' (differing) arity errors are untouched.
-    if let ("contains" | "index_of", [needle]) = (name, args) {
-        if !matches!(ad, ArrayData::Values(_)) {
-            let hit = (0..ad.len())
-                .position(|i| crate::interp::ops::values_equal(&ad.get(i), needle));
-            return Ok(Some(match (name, hit) {
-                ("contains", h) => Value::Bool(h.is_some()),
-                (_, Some(i)) => Value::Int(i as i64),
-                (_, None) => Value::Missing,
-            }));
-        }
+    if let ("contains" | "index_of", [needle]) = (name, args)
+        && !matches!(ad, ArrayData::Values(_))
+    {
+        let hit =
+            (0..ad.len()).position(|i| crate::interp::ops::values_equal(&ad.get(i), needle));
+        return Ok(Some(match (name, hit) {
+            ("contains", h) => Value::Bool(h.is_some()),
+            (_, Some(i)) => Value::Int(i as i64),
+            (_, None) => Value::Missing,
+        }));
     }
     if !args.is_empty() {
         return Ok(None);
@@ -2725,7 +2725,7 @@ fn packed_kmer_counts(s: &str, k: usize, canonical: bool) -> Vec<Value> {
             let mut km = String::with_capacity(k);
             for i in 0..k {
                 let b = (c >> (2 * (k - 1 - i))) & 3;
-                km.push([b'A', b'C', b'G', b'T'][b as usize] as char);
+                km.push(b"ACGT"[b as usize] as char);
             }
             Value::Tuple(Rc::new(vec![Value::Str(Rc::new(km)), Value::Int(n as i64)]))
         })

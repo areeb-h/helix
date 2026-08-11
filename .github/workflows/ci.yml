@@ -6,8 +6,17 @@ name: ci
 # first thing a public project needs, ahead of any feature.
 #
 # It mirrors `scripts/gate.sh` (the local gate) rather than inventing a second definition
-# of "green": clippy, the full suite, and the three-engine parity diff. If the two ever
-# disagree, the local gate is the one people actually run, so this file follows it.
+# of "green": clippy, the full suite, the parity diff, and the whole-tree type-check. If
+# the two ever disagree, the local gate is the one people actually run, so this file
+# follows it.
+#
+# ALL FIVE JOBS NOW BLOCK. Three of them shipped advisory — clippy on 9 warnings, MSRV
+# unverified, `cargo audit` on 6 advisories — each with a written condition for promotion,
+# because asserting an unchecked claim as a gate is how a badge starts lying. Those
+# conditions have been met: the clippy warnings are fixed, MSRV was observed green on run
+# 31456823902, and audit is green with four unfixable advisories documented in
+# `.cargo/audit.toml`. Only `cargo fmt` still reports without blocking, and that one is
+# deliberate rather than pending — see the `lint` job.
 
 on:
   push:
@@ -29,21 +38,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Fast feedback: formatting and lints finish in well under a minute, so they run as
-  # their own job and a badly-formatted PR gets an answer without waiting for the suite.
-  # ADVISORY, deliberately, and this is measured rather than assumed: as of the commit
-  # that added this file, `cargo fmt --all --check` reports 1280 diffs and clippy reports
-  # 9 warnings. Making either one blocking today would paint main red on the first run —
-  # a badge that means "we never ran this".
+  # Fast feedback: lints finish in well under a minute, so they run as their own job and a
+  # PR gets an answer without waiting for the suite.
   #
-  # The fix is NOT a whole-tree reformat. This codebase's comment layout is deliberate and
-  # hand-wrapped, and reformatting every file for zero functional gain would also collide
-  # with in-flight work. So these report, a contributor sees them, and the counts above are
-  # the baseline to drive down before either becomes a gate.
+  # CLIPPY BLOCKS; RUSTFMT DOES NOT. Both numbers were measured rather than assumed. When
+  # this file was written clippy reported 9 warnings, so it shipped advisory with the count
+  # recorded as the baseline to drive down — that is now done (collapsible `if`, a byte
+  # string, a 4-tuple return type replaced by `F64RangeCaptures`, and `gen_value_typed`'s
+  # nine arguments bundled into `TypedCtx`), and `-D warnings` is the gate.
+  #
+  # rustfmt still reports 1280 diffs, and that is NOT a backlog to burn down — this
+  # codebase's comment layout is deliberately hand-wrapped, and reformatting every file for
+  # zero functional gain would destroy it. A whole-tree `cargo fmt` is not planned, so the
+  # step reports and moves on rather than pretending to be a gate that will one day close.
   lint:
-    name: fmt + clippy (advisory)
+    name: clippy (blocking) + fmt (report)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -52,10 +62,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: helix-ci
-      - name: rustfmt (report only)
+      - name: rustfmt (report only — see the comment above)
         run: cargo fmt --all --check || true
-      - name: clippy (report only)
-        run: cargo clippy --all-targets 2>&1 | tail -40
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
 
   # The real gate. `--profile gate` is opt-level 3 without LTO: the differential fuzzers
   # and perf-sensitive tests run at full speed, but a rebuild does not pay the ~20-minute
@@ -119,12 +129,18 @@ jobs:
       - run: cargo check --all-targets
 
   # A known-vulnerable dependency is a production problem regardless of how good the
-  # language is. Advisory-only: it reports, and does not block a merge on an advisory
-  # with no available fix.
+  # language is.
+  #
+  # BLOCKING, which required first making it green. It shipped `continue-on-error: true`
+  # and immediately went red on six advisories — and a job that is permanently red is
+  # strictly worse than no job, because a SEVENTH advisory would appear among the six and
+  # nobody would look. Two were closed by upgrading (crossbeam-epoch, quinn-proto); the
+  # four that have no fix reachable from this dependency tree are listed in
+  # `.cargo/audit.toml`, each with the blocking crate and the condition that clears it.
+  # Nothing is silenced without a written reason, and a NEW advisory now fails CI.
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
