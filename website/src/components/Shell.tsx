@@ -22,8 +22,9 @@ export function Shell({
             </span>
           </Link>
           <nav className="flex gap-6 text-sm text-zinc-400">
+            <Link href="/why" className="hidden hover:text-zinc-100 sm:inline">Why</Link>
             <Link href="/start" className="hidden hover:text-zinc-100 sm:inline">Get started</Link>
-            <Link href="/tour" className="hidden hover:text-zinc-100 sm:inline">Tour</Link>
+            <Link href="/tour" className="hidden hover:text-zinc-100 md:inline">Tour</Link>
             <Link href="/reference" className="hidden hover:text-zinc-100 md:inline">Reference</Link>
             <Link href="/playground" className="hidden hover:text-zinc-100 md:inline">Playground</Link>
             <Link href="/docs" className="hover:text-zinc-100">Docs</Link>

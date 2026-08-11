@@ -1,15 +1,35 @@
 # Execution engine
 
-Helix provides **two execution engines** behind one surface, selected per program:
+Helix provides **three execution engines** behind one surface, selected per program:
 
 ```
-lex → parse → type-check ─┬─ bytecode::compile ─ Ok  → vm::run        (fast path)
-                          └─ bytecode::compile ─ Err → Interp::run    (tree-walker)
+lex → parse → type-check ─┬─ bytecode::compile ─ Ok  ─┬─ jit::build ─ Some → native kernels
+                          │                           └─ jit::build ─ None → vm::run
+                          └─ bytecode::compile ─ Err ────────────────────── → Interp::run
 ```
 
-`run_source` tries the bytecode compiler first. If it returns `Unsupported`
-(some construct isn't compiled yet), the program runs on the tree-walker
-instead. `HELIX_NOVM=1` forces the tree-walker (for A/B comparison).
+`run_source` tries the bytecode compiler first. If it returns `Unsupported` (some
+construct isn't compiled yet), the program runs on the tree-walker instead. Within the VM,
+eligible numeric `map`/`filter`/`reduce`/`scan` bodies and tail-recursive functions are
+compiled to native code by the Cranelift JIT and dispatched at run time; anything
+ineligible falls through to the bytecode loop, always, and never to a wrong answer.
+
+Two environment variables select an engine explicitly, and the whole correctness story
+rests on them:
+
+| variable | engine |
+| --- | --- |
+| *(none)* | JIT where eligible, VM otherwise |
+| `HELIX_NOJIT=1` | bytecode VM only |
+| `HELIX_NOVM=1` | tree-walking interpreter |
+
+All three must produce **byte-identical** output — values *and* error text — for every
+program. That is enforced in CI, not asserted here: see [Correctness gates](#correctness-gates).
+
+> **This document was written when there were two engines and has been corrected rather
+> than rewritten.** Sections below that reason about "the two engines" are describing the
+> VM-vs-tree-walker relationship, which is unchanged and still the foundation the JIT sits
+> on. Where a section predates the JIT entirely it says so.
 
 ## Rationale for two engines
 
@@ -142,14 +162,36 @@ demand** (`run_on_big_stack`, or a scoped thread in `run_source`). A normal
 
 ## Correctness gates
 
-- **Unit parity tests** (`src/vm.rs`): a battery of programs is run on *both*
-  engines and their results compared (`parity_scalar_and_control_flow`,
-  `parity_functions_and_recursion`). `deep_recursion_is_iterative` proves the
-  heap-frame design; `errors_propagate` proves runtime errors still fire.
-- **All-examples diff** (`scripts/vmparity.sh`): every `examples/*.helix` must
-  produce identical output under both engines. (The DataFrame example differs
-  only in Polars' nondeterministic group-by row order; both runs use the
-  tree-walker there, since DataFrame methods do not yet compile.)
+The differential oracle is the load-bearing idea of the whole project: a JIT is thousands
+of lines of code generation standing between a program and its answer, so two simpler
+implementations run beside it and all three must agree. Five gates enforce that.
+
+- **Unit parity tests** (`src/vm.rs`): a battery of programs is run on the engines and
+  their results compared (`parity_scalar_and_control_flow`,
+  `parity_functions_and_recursion`). `deep_recursion_is_iterative` proves the heap-frame
+  design; `errors_propagate` proves runtime errors still fire.
+- **All-examples diff** (`scripts/vmparity.sh`): every `examples/*.helix` must produce
+  identical output under both engines. (The DataFrame example differs only in Polars'
+  nondeterministic group-by row order; both runs use the tree-walker there, since
+  DataFrame methods do not yet compile.)
+- **The pinned corpus** (`tests/corpus/`): each program is run on all three engines and
+  its output compared against a checked-in `.expected` file, so a change that alters
+  behaviour identically on all three — which parity alone would accept — still fails.
+- **Executed documentation** (`doc_examples_run_and_agree_on_all_three_engines`,
+  `tests/cli.rs`): every `>>>` example in a `##` doc comment is extracted, run on all
+  three engines, and compared against the output written beside it. A documented example
+  that has drifted fails the build. See [Comments & doc-tests](comments-and-docs.md).
+- **Differential fuzzing** (`scripts/opfuzz.py`): operators × operand shapes × compilation
+  shapes, checked for byte-identical agreement. Engagement matters as much as agreement —
+  a fuzzer passes trivially if the JIT silently declined, so tests assert
+  `native_call_count() > 0` before trusting a comparison.
+
+**This is not decorative.** Defects the oracle has caught, each found because one engine
+answered differently: a signed-zero comparison that made a packed `min`/`max` disagree
+with the boxed path; an integer subexpression that wrapped in the interpreter and did not
+in a monomorphic f64 kernel; a malformed comprehension that errored on two engines and
+silently returned `missing` on the third, laundered through `try` into an ordinary boolean
+where no error text could reveal it.
 
 ## Measurements
 

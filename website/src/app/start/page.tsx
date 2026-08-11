@@ -57,44 +57,60 @@ export default function StartPage() {
             instantly.
           </p>
 
-          <div className="mt-5 rounded-xl border border-amber-900/50 bg-amber-950/20 p-4">
-            <div className="text-sm font-semibold text-amber-300">
-              Honest status: build from source today
-            </div>
-            <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-400">
-              Both one-line installers are written and verified, and the release pipeline
-              is proven end-to-end — but the repository is still private, and a private
-              repo returns 404 to an unauthenticated <code>curl</code> for both the
-              installer script and the release assets. So until it is published, the
-              source build below is the real path, and it needs a Rust toolchain. We would
-              rather say that here than hand you a command that cannot work.
-            </p>
-          </div>
-
           <p className="mt-5 text-[15px] leading-relaxed text-zinc-400">
-            With{" "}
-            <a
-              href="https://rustup.rs"
-              className="text-emerald-400 underline-offset-2 hover:underline"
-            >
-              Rust installed
-            </a>
-            , from a checkout:
+            <strong className="text-zinc-200">macOS and Linux.</strong> Downloads the
+            binary for your platform, checks its SHA-256, and puts it on your PATH:
           </p>
           <Terminal
             steps={[
               {
-                cmd: ["cargo install --path .", "helix version"],
-                out: ["helix 0.1.0"],
-                note: "First build takes a few minutes — it compiles the JIT and the DataFrame engine.",
+                cmd: [
+                  "curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | sh",
+                ],
+                note: "It prints each step: which artifact it fetched, the checksum result, and where it installed. A checksum MISMATCH aborts rather than warning. HELIX_MUSL=1 fetches the fully-static build; HELIX_INSTALL_DIR changes the location.",
               },
             ]}
           />
           <p className="text-[13px] leading-relaxed text-zinc-500">
-            No Rust? <code className="text-zinc-400">cargo build --release</code> then use{" "}
-            <code className="text-zinc-400">./target/release/helix</code> directly — the
-            binary needs nothing installed to run.
+            No transcript shown here yet, deliberately: the v0.1.0 binaries are still
+            building, so nobody has run this against a published release — and every other
+            output on this page was captured from a real run. It gets pasted in once it is
+            real.
           </p>
+
+          <p className="mt-5 text-[15px] leading-relaxed text-zinc-400">
+            <strong className="text-zinc-200">Windows.</strong> PowerShell, no admin
+            rights — it installs to your user profile and updates your user PATH:
+          </p>
+          <Terminal
+            steps={[
+              {
+                cmd: [
+                  "irm https://raw.githubusercontent.com/areeb-h/helix/main/install.ps1 | iex",
+                ],
+                note: "Verifies with Get-FileHash, installs to %LOCALAPPDATA%\\Helix\\bin, and adds it to your user PATH — no admin prompt. Open a new terminal afterwards for PATH to take effect.",
+              },
+            ]}
+          />
+
+          <div className="mt-5 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+            <div className="text-sm font-semibold text-zinc-100">
+              Or build it yourself
+            </div>
+            <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-400">
+              With{" "}
+              <a
+                href="https://rustup.rs"
+                className="text-emerald-400 underline-offset-2 hover:underline"
+              >
+                Rust
+              </a>{" "}
+              installed, from a checkout:{" "}
+              <code className="text-zinc-300">cargo install --path .</code>. Takes a few
+              minutes — it compiles the JIT and the DataFrame engine. The installers fall
+              back to exactly this if no prebuilt binary matches your platform.
+            </p>
+          </div>
         </section>
 
         {/* ---------------------------------------------------------------- 2 */}

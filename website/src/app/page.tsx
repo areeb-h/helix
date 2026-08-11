@@ -28,12 +28,18 @@ export default function Home() {
               three engines, one answer
             </span>
           </div>
-          <nav className="flex items-center gap-6 text-sm text-zinc-400">
+          <nav className="flex items-center gap-5 text-sm text-zinc-400">
+            <Link href="/why" className="hover:text-zinc-100">Why</Link>
             <Link href="/start" className="hover:text-zinc-100">Get started</Link>
-            <Link href="/tour" className="hover:text-zinc-100">Tour</Link>
-            <Link href="/reference" className="hover:text-zinc-100">Reference</Link>
+            <Link href="/tour" className="hidden hover:text-zinc-100 md:inline">Tour</Link>
+            <Link href="/reference" className="hidden hover:text-zinc-100 md:inline">Reference</Link>
             <Link href="/docs" className="hover:text-zinc-100">Docs</Link>
-            <Link href="/bench" className="hover:text-zinc-100">Benchmarks</Link>
+            <a
+              href="https://github.com/areeb-h/helix"
+              className="rounded-lg border border-zinc-700 px-3 py-1.5 hover:border-zinc-500 hover:text-zinc-100"
+            >
+              GitHub
+            </a>
           </nav>
         </div>
       </header>
@@ -63,12 +69,23 @@ export default function Home() {
                 Get started →
               </Link>
               <Link
-                href="/tour"
+                href="/why"
                 className="rounded-lg border border-zinc-700 px-5 py-2.5 text-sm font-semibold text-zinc-300 transition hover:border-zinc-500"
               >
-                Take the tour
+                Why three engines?
               </Link>
             </div>
+
+            <p className="mt-5 text-[13px] leading-relaxed text-zinc-500">
+              Helix loses to single-threaded C on seven of nine benchmark kernels, and{" "}
+              <Link
+                href="/bench"
+                className="text-zinc-400 underline decoration-zinc-700 underline-offset-2 hover:text-emerald-400"
+              >
+                the benchmark page says so first
+              </Link>
+              . A suite that only reports wins is marketing.
+            </p>
 
             <div className="mt-6 flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
               <code className="flex-1 font-mono text-[13px] text-zinc-300">
