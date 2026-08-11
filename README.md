@@ -262,4 +262,15 @@ cargo build --release
 ```
 
 Requires a recent Rust toolchain. For fast iteration during development, `scripts/gate.sh` runs
-clippy + the full test suite + the VM/tree-walker parity diff on an optimized-but-fast profile.
+clippy + the full test suite + the VM/tree-walker parity diff + the whole-tree type-check on an
+optimized-but-fast profile. **Do not use `cargo test --release`** — that profile's fat LTO links
+Polars, noodles and Cranelift as one LLVM unit, which costs about twenty minutes per build and
+changes no test's outcome.
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the gate, the one non-negotiable rule (three engines,
+byte-identical, on values *and* error text), and what a good change looks like. Security issues
+go through [SECURITY.md](SECURITY.md) instead — privately, via GitHub's advisory form.
+
+Licensed [MIT](LICENSE).
