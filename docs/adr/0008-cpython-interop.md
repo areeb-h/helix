@@ -128,7 +128,8 @@ the GIL is a mutex (false under 3.14+).
 
 ### D9 — Distribution: spike on ambient Python, commit to bundling
 
-Mojo's most prominent shipped failure is a runtime *"can't locate libpython."*
+A widely-reported failure mode in Python-adjacent toolchains is a runtime
+*"can't locate libpython."*
 Accordingly, the v1 spike links the **ambient** Python (the user `pip install`s
 their own dependencies) but **fails loudly at startup**, never cryptically
 mid-program. The committed end-state is to **bundle a relocatable CPython**

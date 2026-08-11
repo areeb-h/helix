@@ -29,7 +29,10 @@ The Helix principles that constrain the answer:
 - **No new value type unless it earns its keep.** Records already model heterogeneous
   results (ADR 0003).
 - **Memory-safe, self-contained, lean core** (ADR 0011): every dependency is justified
-  against the "samtools speed without the segfaults, no system libs" pitch.
+  against the "C-toolchain speed without C's memory-safety class of bug, and no
+  system libraries to install" pitch. (Stated about the LANGUAGE class, not about any
+  named project: singling out samtools/htslib would be an unsourced swipe at the tool
+  this field is built on, and Helix has no CVE analysis to back it.)
 - **`missing`-aware, great errors** (ADR 0001).
 
 ## Prior approaches and their documented shortcomings

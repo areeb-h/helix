@@ -49,7 +49,8 @@ Python-interop story.
    secondary "now install X" step. This matches Go/Rust/uv and improves on
    Python/node/php.
 
-2. **Managed Python for interop.** Mojo's most prominent shipped failure is a
+2. **Managed Python for interop.** A widely-reported failure mode in Python-adjacent
+   toolchains is a
    runtime *"can't locate libpython."* Helix follows what **uv does for
    Python toolchains**: when interop is wanted, `helix` downloads and manages a
    relocatable CPython (python-build-standalone) and pins it in the project's

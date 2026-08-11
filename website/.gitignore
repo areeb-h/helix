@@ -30,8 +30,13 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files. Only the *.local ones hold secrets and stay out of git; Next's own
+# convention is that .env.development is committed — and it must be here, because it
+# carries HELIX_PLAYGROUND=1, which is what makes the playground work on a fresh clone.
+# It contains no secret: see the comment in the file explaining why the opt-in exists.
+.env*.local
+.env
+.env.production
 
 # vercel
 .vercel

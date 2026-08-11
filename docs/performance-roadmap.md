@@ -167,7 +167,9 @@ The structural advantage no incumbent has: **one type system and one deferred
 expression graph** that fans out to three best-in-class engines.
 
 1. **Tabular → Polars/Arrow** (today): lazy optimizer, columnar, multicore —
-   already **8–11× faster than pandas**; 50M-row query ~0.2s. The checker must lower
+   already **8–11× faster than raw Python-Polars** (docs/benchmarks.md states plainly
+   that pandas and DuckDB have NOT been measured — an earlier draft of this line said
+   "pandas", which no run in this repo supports); 50M-row query ~0.2s. The checker must lower
    to *lazy* frames so pushdown and fusion carry through.
 2. **Scalar/control → type-specialized JIT** (Track B): Mojo demonstrated 78–119×
    over CPython from type specialization, native SIMD, and no GC.

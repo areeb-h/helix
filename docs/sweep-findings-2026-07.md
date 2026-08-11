@@ -24,7 +24,15 @@ regressions" section).
 - `i64::MIN % -1` / `// -1` process abort → `wrapping_*_euclid` (`ops.rs` + `vm.rs`), tri-engine `0` / `i64::MIN`.
 - Walker capture filter (name-based `!globals.contains`) skipping locals that shadow globals — now mutability-aware; shadow probes agree tri-engine.
 
-## ⚠ Live divergence INTRODUCED by the uncommitted capture change
+## ~~⚠ Live divergence INTRODUCED by the uncommitted capture change~~ — RESOLVED
+
+> **RESOLVED (verified 2026-08-11).** The repro below now agrees on all three engines —
+> walker, VM and JIT each print `1 / 1`. The `DfJoin` extra-arg divergence noted further
+> down is likewise fixed (`tests/corpus/d4_join_arity.expected`, `src/vm.rs`). The section
+> is kept because the INVESTIGATION is the useful part; the defect is not live, and this
+> page is not a counterexample to the bit-identity claim.
+
+The historical report follows.
 
 `interp.rs:564` snapshots **immutable** globals at closure creation, but `mut n = 100`
 legally re-declares an immutable global, and the VM reads globals live:

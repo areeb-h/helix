@@ -8,3 +8,20 @@
 *~
 .DS_Store
 COMMIT_MSG.tmp
+
+# Secrets — root-scope, not relying on a subdirectory .gitignore existing.
+# A public repo makes an accidental commit permanent, so these are belt-and-braces.
+.env
+.env.*
+!website/.env.development
+*.pem
+*.key
+*.p12
+.netrc
+
+# Dependency and build trees anywhere in the tree
+**/node_modules/
+**/.venv/
+**/target/
+**/.next/
+**/__pycache__/

@@ -22,35 +22,34 @@ The JIT compiles pure-numeric `map` / `filter` / `reduce` kernels over ranges an
 arrays — including **array-indexed reductions** (`a[j]`) and **nested reductions** (a `map` of a
 `reduce`) — to native code, and auto-parallelizes across cores above a size threshold.
 
-A 50-million-element **dot product** (best of 3, wall-seconds; every language prints the
-identical result):
+**Against single-threaded C, Helix loses more often than it wins — and that is the honest
+headline.** From [`bench/kernels/RESULTS.md`](bench/kernels/RESULTS.md), ten kernels where
+every language must print byte-identical output before a timing counts, on a
+page-size-equalized machine:
 
-| dtype | **Helix (JIT)** | C `-O3` | Rust | Go | NumPy | CPython |
-|---|---|---|---|---|---|---|
-| `i64` | **~0.34 s** | 0.47 | 0.47 | 0.46 | 0.94 | 9.4 |
-| `f64` | **0.36 s** | 0.47 | 0.47 | 0.48 | 1.5 | 9.4 |
+| # | kernel | Helix | C | vs C |
+|---|---|---|---|---|
+| k1 | dot, 50M i64 | **0.08 s** (379% CPU) | 0.11 s | faster on wall clock, for **2.8× the CPU** |
+| k2 | mandelbrot 1200² | 0.08 s (97%) | 0.08 s | **tie**, single-threaded |
+| k3 | basel 1e8 | 0.09 s (96%) | 0.06 s | 1.5× slower |
+| k5 | montecarlo 1e8 | 0.68 s (99%) | 0.28 s | 2.4× slower |
+| k6 | sieve π(10⁷) | 0.02 s (89%) | 0.01 s | ~tie (delegated; 3.5× over NumPy) |
+| k7 | wordcount 5M | 0.68 s (99%) | 0.23 s | 3.0× slower — but **2.4× faster than CPython** |
+| k8 | matmul build + GEMM | **0.05 s** (155%) | — | **1.6× faster than NumPy** |
 
-A 900-million-pair **O(N²) all-pairs reduction** (`range(n).map(i => range(n).reduce(…))` — the
-distance-matrix / N-body shape):
+**Helix loses to C on seven of nine comparable kernels**, ties on k2, and leads k1 only by
+spending 2.8× the cores. Where it does win — k8 against NumPy, k6 against NumPy, k7 against
+CPython — those are the comparisons that reflect who actually uses this.
 
-| | **Helix (JIT)** | C `-O3` (1 thread) | C (OpenMP) | Go | NumPy | interpreted |
-|---|---|---|---|---|---|---|
-| wall | **0.06 s** (~569% CPU) | 0.08 | 0.01 | 0.17 | 0.25 | ~12 s |
+> **Two older benchmark documents overstate this.** `docs/jit-benchmarks.md` published C
+> baselines that were **wrong by ~4.4×** — the C reference was not getting transparent huge
+> pages — and every "≈ C" or "beats 1-thread C" conclusion drawn from it is void. That
+> document is kept for its engineering history (what each JIT lever did) and carries a
+> banner saying so. `RESULTS.md` is the page-fair suite and the only benchmark source that
+> should be quoted.
 
-The single-threaded reduction is memory-bandwidth-bound *at parity with C*; Helix pulls ahead on
-totals by **auto-parallelizing** array construction and outer loops across cores — a real win, but
-an honest one: the C/Rust/Go baselines here are single-threaded, and Helix does not yet
-auto-vectorize (SIMD), which is why threaded+vectorized C-OpenMP is still faster on the last kernel.
-Array-indexed all-pairs — a genuine **distance matrix** over encoded data (`abs(codes[i]-codes[j])`,
-for phylogenetics / clustering) — runs a native inner reduce *and* now parallelizes its outer loop:
-**225M pairs in 0.03 s, edging single-threaded SIMD C (0.04 s)** and ~700× over the interpreter.
-Honestly, that's a multi-core win, not a per-core one — Helix uses all cores where C here is one
-thread; a threaded+vectorized C would still lead, since Helix's JIT doesn't auto-vectorize yet (the
-one remaining lever, and a safe one for integer kernels).
-Full methodology, per-language source, and the load-bearing caveats:
-**[docs/jit-benchmarks.md](docs/jit-benchmarks.md)**. DataFrame throughput (a 50M-row
-filter→group→sort→head in ~0.2 s from Parquet) is measured separately in
-[docs/benchmarks.md](docs/benchmarks.md).
+DataFrame throughput (a 50M-row filter→group→sort→head in ~0.2 s from Parquet) is measured
+separately in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Install
 
@@ -84,7 +83,7 @@ helix help                   # all commands
 > client — so the commands above cannot work for anyone but the owner, no matter how many
 > releases are tagged. Publishing also removes the other blocker: GitHub Actions is free
 > with unlimited standard-runner minutes on public repositories, and the `v0.1.0` release
-> run was cancelled by an Actions **billing** failure rather than by anything in the build.
+> run was cancelled for account reasons unrelated to the build.
 >
 > The release pipeline itself is verified end-to-end locally: the 64 MB binary packages to
 > a 21 MB tarball, `SHA256SUMS` is produced in the exact format the installers parse, and

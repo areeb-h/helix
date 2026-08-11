@@ -29,7 +29,7 @@ strong static typing with extensive inference; educational errors; memory effici
 
 ## Implementation stages
 
-Each stage delivered working, tested code (the test count grew from 44 to 130+).
+Each stage delivered working, tested code (the test count grew from 44 to the ~540 cases the gate runs today: 412 unit + 127 CLI, as of 2026-08-11).
 
 1. **Core interpreter** — lexer → parser → AST → tree-walking interpreter. Immutable
    bindings and `mut`, Int/Float/String/Bool/Array/Dna/Function, word-based booleans,
@@ -152,7 +152,9 @@ Zero `unsafe` outside one contained function — the JIT's native-call boundary
 mutability implies no `Rc` cycles, which implies an acyclic value graph freed
 deterministically. Backed by a `Rc::strong_count` test and flat-RSS measurement. The
 full argument is in [memory-safety.md](memory-safety.md). For the computational biology
-flagship this property delivers samtools-class speed without memory-safety faults.
+flagship this property targets C-toolchain speed without C's memory-safety class of
+bug. (Deliberately not phrased as a comparison to samtools: that would be an unsourced
+claim about a specific, excellent project.)
 
 ---
 
@@ -190,7 +192,7 @@ These limitations are tracked in [ROADMAP.md](ROADMAP.md).
   (v1 done).
 - **Adoption** ([ROADMAP §7](ROADMAP.md), [adoption.md](adoption.md)): modules (done) →
   CPython interop v1 (done) → zero-copy Arrow/DLPack sharing → package manager → Jupyter.
-- **Correctness and safety:** leak-free and parity-tested at every engine boundary; 130+
+- **Correctness and safety:** leak-free and parity-tested at every engine boundary; ~540
   tests, zero warnings, maintained as a gate.
 
 ---
