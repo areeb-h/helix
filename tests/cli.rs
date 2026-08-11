@@ -3174,3 +3174,81 @@ fn doc_examples_run_and_agree_on_all_three_engines() {
         "found only {checked} doc examples — the extractor or the `##` convention is broken"
     );
 }
+
+/// The `.helix` extension is optional: `helix run hello` finds `hello.helix`.
+///
+/// The interesting cases are the ones where it must NOT guess. Resolution APPENDS the
+/// extension rather than substituting it, so `helix run notes.txt` runs `notes.txt` — it
+/// never silently runs a `notes.helix` sitting beside it, which `with_extension("helix")`
+/// would have done. And an exact file always wins, so an extensionless script still runs
+/// and a directory cannot shadow a same-named script next to it.
+#[test]
+fn the_helix_extension_is_optional_but_never_guessed_over_a_real_file() {
+    let dir = std::env::temp_dir().join("helix_extopt_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("adir")).unwrap();
+    let w = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
+
+    w("hello.helix", "print(\"from-helix\")\n");
+    w("plain", "print(\"from-plain\")\n");
+    w("both", "print(\"exact\")\n");
+    w("both.helix", "print(\"withext\")\n");
+    // A non-Helix file whose stem also has a .helix beside it — the substitution trap.
+    w("notes.txt", "this is not helix\n");
+    w("notes.helix", "print(\"MUST-NOT-RUN\")\n");
+
+    let at = |args: &[&str]| -> (String, String, Option<i32>) {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_helix"));
+        cmd.current_dir(&dir).args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = cmd.output().expect("spawn helix");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+            out.status.code(),
+        )
+    };
+
+    // Resolution works, with and without the extension, and via the bare shorthand.
+    for args in [
+        vec!["run", "hello.helix"],
+        vec!["run", "hello"],
+        vec!["hello"],
+    ] {
+        let (out, err, code) = at(&args);
+        assert_eq!(code, Some(0), "`{args:?}` failed: {err}");
+        assert_eq!(out.trim(), "from-helix", "`{args:?}`");
+    }
+
+    // An exact file wins over the same stem plus `.helix`.
+    assert_eq!(at(&["run", "plain"]).0.trim(), "from-plain");
+    assert_eq!(at(&["run", "both"]).0.trim(), "exact");
+    assert_eq!(at(&["run", "both.helix"]).0.trim(), "withext");
+
+    // THE TRAP: `notes.txt` exists, so it is what runs — it fails to parse, and
+    // `notes.helix` is never executed.
+    let (out, err, code) = at(&["run", "notes.txt"]);
+    assert_eq!(code, Some(1), "notes.txt should fail to parse");
+    assert!(!out.contains("MUST-NOT-RUN"), "ran notes.helix instead of notes.txt!");
+    assert!(!err.contains("MUST-NOT-RUN"), "ran notes.helix instead of notes.txt!");
+    assert!(err.contains("notes.txt"), "error should point at notes.txt: {err}");
+
+    // Missing and directory get distinct, actionable errors.
+    let (_, err, code) = at(&["run", "nope"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("cannot read"), "{err}");
+    assert!(err.contains("nope.helix"), "error should list what it looked for: {err}");
+
+    // ...but a path that ALREADY ends in `.helix` must not be told we looked for
+    // `nope.helix.helix` — that reads as the tool being confused about its own
+    // filenames. Caught by an existing test when the first version did exactly that.
+    let (_, err, code) = at(&["run", "nope.helix"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("cannot read"), "{err}");
+    assert!(!err.contains(".helix.helix"), "doubled extension in help: {err}");
+
+    let (_, err, code) = at(&["run", "adir"]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("is a directory"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

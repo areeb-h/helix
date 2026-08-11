@@ -446,7 +446,14 @@ fn run_source(code: &str, filename: &str) -> ExitCode {
 /// type-checks the program, both of which recurse over the AST.
 fn run_build(args: &[String]) -> ExitCode {
     let entry = match args.get(2) {
-        Some(p) if !p.starts_with('-') => p.clone(),
+        // The `.helix` extension is optional here exactly as it is for `run`.
+        Some(p) if !p.starts_with('-') => match resolve_script(p) {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(msg) => {
+                eprint!("{msg}");
+                return ExitCode::FAILURE;
+            }
+        },
         _ => {
             eprintln!("error: `helix build` needs a script path, e.g. `helix build main.helix -o tool`");
             return ExitCode::FAILURE;
@@ -497,7 +504,13 @@ fn run_build(args: &[String]) -> ExitCode {
 /// source-attributed error. Runs on the big stack (the front-end recurses over the AST).
 fn run_emit_hbc(args: &[String]) -> ExitCode {
     let entry = match args.get(2) {
-        Some(p) if !p.starts_with('-') => p.clone(),
+        Some(p) if !p.starts_with('-') => match resolve_script(p) {
+            Ok(path) => path.to_string_lossy().into_owned(),
+            Err(msg) => {
+                eprint!("{msg}");
+                return ExitCode::FAILURE;
+            }
+        },
         _ => {
             eprintln!(
                 "error: `helix emit-hbc` needs a script path, e.g. `helix emit-hbc main.helix --entry compute -o main.hbc`"
@@ -665,8 +678,8 @@ fn print_help() {
     println!(
         "Helix {} — a scientific programming language\n\n\
          USAGE:\n    \
-         helix <script.helix>     run a script (shorthand)\n    \
-         helix run <script>       run a script\n    \
+         helix <script>           run a script (shorthand; `.helix` optional)\n    \
+         helix run <script>       run a script (`.helix` optional: `helix run main`)\n    \
          helix eval \"<code>\"       run a one-liner\n    \
          helix build <script>     bundle a program into a standalone executable\n    \
          helix emit-hbc <script>  compile to a .hbc bytecode container (for ctype's hvm)\n    \
@@ -686,7 +699,56 @@ fn print_help() {
     );
 }
 
+/// Resolve a user-supplied script path, letting the `.helix` extension be omitted:
+/// `helix run hello` finds `hello.helix`.
+///
+/// Three rules, each chosen for a reason:
+///
+/// 1. **An exact file wins.** If the path names a real file it is used unchanged, so an
+///    extensionless script (or one with any other extension) still runs, and a directory
+///    holding `hello` cannot shadow a `hello.helix` beside it.
+/// 2. **The extension is APPENDED, never substituted.** `format!("{path}.helix")`, not
+///    `with_extension("helix")` — the latter REPLACES, so `helix run notes.txt` would
+///    silently run `notes.helix`, a different file the user did not name.
+/// 3. **A directory is its own error.** Naming a directory is a different mistake from
+///    naming nothing, and saying so beats "no such file" when the thing plainly exists.
+///
+/// Returns the rendered error, so callers just print it.
+fn resolve_script(path: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(path);
+    if p.is_file() {
+        return Ok(p.to_path_buf());
+    }
+    let with_ext = std::path::PathBuf::from(format!("{path}.helix"));
+    if with_ext.is_file() {
+        return Ok(with_ext);
+    }
+    if p.is_dir() {
+        return Err(format!(
+            "error: cannot read `{path}`: it is a directory, not a script\n\
+             help: name a file inside it, e.g. `{path}/main.helix` (or `{path}/main`)\n"
+        ));
+    }
+    // Only mention the appended candidate when one was actually tried. Saying "looked for
+    // `x.helix` and `x.helix.helix`" to someone who already typed the extension is noise
+    // that makes the tool look confused about its own filenames.
+    if p.extension().is_some_and(|e| e == "helix") {
+        return Err(format!("error: cannot read `{path}`: no such file\n"));
+    }
+    Err(format!(
+        "error: cannot read `{path}`: no such file\n\
+         help: looked for `{path}` and `{path}.helix`\n"
+    ))
+}
+
 fn run_file(path: &str) -> ExitCode {
+    let path = &match resolve_script(path) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(msg) => {
+            eprint!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
     // Record how to re-run this entry file, so a sharded `listen(port, shards)` can
     // launch identical worker interpreters that re-load the same program.
     serve::set_rerun(serve::Rerun::File(std::path::PathBuf::from(path)));

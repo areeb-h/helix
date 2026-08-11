@@ -68,7 +68,7 @@ irm https://raw.githubusercontent.com/areeb-h/helix/main/install.ps1 | iex
 ```
 
 ```sh
-helix run script.helix       # run a script
+helix run script            # run a script ( optional)
 helix eval "print(1 + 2)"    # a one-liner
 helix repl                   # interactive session
 helix build script.helix     # compile to a standalone executable (no toolchain needed)

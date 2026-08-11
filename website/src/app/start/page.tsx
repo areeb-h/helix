@@ -124,11 +124,11 @@ export default function StartPage() {
           </FileBlock>
           <Terminal
             steps={[
-              { cmd: ["helix run hello.helix"], out: ["Hello, Helix!"] },
+              { cmd: ["helix run hello"], out: ["Hello, Helix!"] },
               {
-                cmd: ["helix hello.helix"],
+                cmd: ["helix hello"],
                 out: ["Hello, Helix!"],
-                note: "The `run` is optional — a bare .helix path works too.",
+                note: "Both the `.helix` extension and the `run` are optional — `helix run hello.helix` works too, and an exact file always wins over an appended extension.",
               },
               {
                 cmd: ['helix eval "print([1, 2, 3].sum())"'],
@@ -202,7 +202,7 @@ export default function StartPage() {
           <Terminal
             steps={[
               {
-                cmd: ["helix build hello.helix"],
+                cmd: ["helix build hello"],
                 out: ["built standalone executable: hello"],
               },
               { cmd: ["./hello"], out: ["Hello, Helix!"] },
