@@ -150,6 +150,36 @@ jobs:
       - run: cargo install cargo-audit --locked
       - run: cargo audit
 
+  # NON-DEFAULT FEATURES. Every other job in this file builds the default feature set, which
+  # means `src/python.rs` — 700 lines of CPython interop behind the off-by-default `python`
+  # feature — was compiled by NOTHING. `cargo build`, `cargo clippy --all-targets` and
+  # `cargo check --all-targets` all pass with a non-exhaustive match in that file.
+  #
+  # That is not hypothetical: adding a variant to `ArrayData` produced 15 compile errors, 14
+  # of which CI would have caught and the 15th of which was in `python.rs`. It was found by
+  # running `cargo check --features python` by hand, and this job is so that nobody has to.
+  #
+  # `check` rather than `build`: it type-checks the file, which is the whole point, without
+  # needing a libpython to link against.
+  features:
+    name: non-default features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: helix-features
+      - name: python interop
+        run: cargo check --features python
+      # `managed` (verified HTTPS downloads for runtimes/packages/toolchains) is the other
+      # off-by-default feature, and is likewise built by no other job.
+      - name: managed runtimes
+        run: cargo check --features managed
+      # And the allocator-debugging build, which is what `--no-default-features` is for.
+      - name: no default features
+        run: cargo check --no-default-features
+
   # The website renders docs/, examples/ and bench/ straight from this repository, so a
   # change to those files can break the build. Catching that here keeps the site
   # deployable from any commit on main.

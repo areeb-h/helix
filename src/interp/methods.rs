@@ -274,6 +274,47 @@ pub(crate) fn call_method(
                     inner: items.clone(),
                 })));
             }
+            // `zip(ys)` is `enumerate`'s symmetric twin and was the one that never got the
+            // treatment: `a.zip(a).length()` on a 5M range cost **631 MB** against the
+            // enumerate analogue's 15 MB, because the general path below materialized a
+            // `Vec` of `Rc<Vec<Value>>` tuples before anything downstream could decline it.
+            //
+            // IT HAS TO BE HERE, not in `array_numeric_fast`, and not one line further down.
+            // `array_method(&items.to_values(), …)` further down IS the 631 MB; every
+            // "cheap interim fast path" placed after it measures identically (zip.first(),
+            // zip.last(), zip.count() and zip.length() were all ~646 MB, to within 0.1%).
+            // And like `enumerate`, it needs the receiver's `Rc` to share rather than copy,
+            // which `array_numeric_fast`'s `&ArrayData` cannot give.
+            //
+            // ERROR ORDER IS PRESERVED DELIBERATELY: `arity` first (so `zip()` and
+            // `zip(a, b)` keep their arity error), then the argument-type check with the
+            // identical message and hint the eager arm produces. Firing only when
+            // `args.len() == 1` would swallow the arity error.
+            if name == "zip" {
+                arity("zip", &args, 1, line, col)?;
+                let b = match &args[0] {
+                    Value::Array(b) => b.clone(),
+                    v => {
+                        return Err(HelixError::new(
+                            format!(
+                                "`zip` needs an array, but got {}",
+                                crate::value::with_article(v.type_name())
+                            ),
+                            line,
+                            col,
+                        )
+                        .hint("e.g. `xs.zip(ys)` pairs elements positionally."))
+                    }
+                };
+                // `min` ONCE, here — see the variant's invariant 1. Truncation to the
+                // shorter side is thereby a stored fact rather than a re-derived one.
+                let len = items.len().min(b.len());
+                return Ok(Value::Array(std::rc::Rc::new(crate::value::ArrayData::Zip {
+                    a: items.clone(),
+                    b,
+                    len,
+                })));
+            }
             // `concat` over PACKED numeric arrays, before the general path boxes anything.
             // The general path costs three passes per call: `to_values()` boxes the
             // receiver into a `Vec<Value>`, `items.to_vec()` clones that, and
@@ -785,6 +826,10 @@ fn array_numeric_fast(
                 // tuple: ~1 GB for `range(10000000).enumerate().count()`).
                 ArrayData::Range { len, .. } => Some(Value::Int(*len as i64)),
                 ArrayData::Enumerate { inner } => Some(Value::Int(inner.len() as i64)),
+                // The FROZEN len (see the variant's invariant 1) — never a recomputed
+                // `min(a.len(), b.len())`, which is exponential on `z = z.zip(z)`. This is
+                // the line that turns `a.zip(a).length()` on 5M from 631 MB into ~16 MB.
+                ArrayData::Zip { len, .. } => Some(Value::Int(*len as i64)),
             });
         }
         "first" | "last" => {
@@ -797,6 +842,14 @@ fn array_numeric_fast(
                     Value::Missing
                 } else {
                     ad.get(if first { 0 } else { inner.len() - 1 })
+                }),
+                // READ THE STORED `len`, NOT `a.len()`. On `[1,2,3,4].zip([10,20])` those are
+                // 4 and 2; indexing at 3 would read `b[3]` out of bounds and abort the
+                // runtime — which ADR-0024 forbids outright.
+                ArrayData::Zip { len, .. } => Some(if *len == 0 {
+                    Value::Missing
+                } else {
+                    ad.get(if first { 0 } else { *len - 1 })
                 }),
                 ArrayData::Ints(xs) => Some(if xs.is_empty() {
                     Value::Missing
@@ -836,7 +889,7 @@ fn array_numeric_fast(
         "sort" | "reverse" => {
             let rev = name == "reverse";
             return Ok(match ad {
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => None,
                 ArrayData::Ints(xs) => {
                     let mut v = xs.clone();
                     if rev {
@@ -916,7 +969,7 @@ fn array_numeric_fast(
         // ascending step and the reversal for a descending one — both lazy, O(1).
         "argsort" => {
             return Ok(match ad {
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => None,
                 ArrayData::Ints(xs) => {
                     let mut idx: Vec<i64> = (0..xs.len() as i64).collect();
                     idx.sort_unstable_by(|&a, &b| {
@@ -951,7 +1004,7 @@ fn array_numeric_fast(
         // simply poisons the running total from that point on, exactly as before.
         "cumsum" => {
             return Ok(match ad {
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => None,
                 // `to_ints` borrows for `Ints` and computes for `Range`; `None` cannot
                 // happen for either, and deferring is the safe reading of it regardless.
                 ArrayData::Ints(_) | ArrayData::Range { .. } => match ad.to_ints() {
@@ -990,7 +1043,7 @@ fn array_numeric_fast(
         return Ok(None);
     }
     match ad {
-        ArrayData::Values(_) | ArrayData::Enumerate { .. } => Ok(None),
+        ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => Ok(None),
         ArrayData::Ints(xs) => array_int_reduce(xs, name, line, col).map(Some),
         // A reduction consumes every element, so materialize the range once (bit-identical to
         // reducing the equivalent `Int` array); still lazy for the O(1) methods above.

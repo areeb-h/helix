@@ -486,9 +486,16 @@ fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
             // A range operand is densified to `Ints` before `typed_broadcast`, so it never reaches
             // here; decline (→ the accessor-based general path) rather than wrongly promote to Float.
             ArrayData::Range { .. } => None,
-            // Tuple-yielding `enumerate` is not a float view either — the accessor-based
-            // general path handles it.
-            ArrayData::Values(_) | ArrayData::Enumerate { .. } => None,
+            // Tuple-yielding `enumerate` and `zip` are not float views either — the
+            // accessor-based general path handles them.
+            //
+            // THIS IS THE ONE ARM WHERE A WRONG ANSWER IS SILENT. Every other Zip arm in the
+            // tree either defers to a slower correct path or is checked by an error string.
+            // If a tuple-yielding variant ever returned `Some` here, `xs.zip(ys) + 1` would
+            // stop raising "operator `+` needs numbers, but got a Tuple" and start doing
+            // arithmetic over reinterpreted memory. It is written first, and pinned by tests
+            // that assert the error rather than the value.
+            ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => None,
         }
     }
     // `/` is always float; a zero divisor must raise the *same* error as the scalar

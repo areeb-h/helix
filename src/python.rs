@@ -585,8 +585,16 @@ mod imp {
                         }
                         PyList::new(py, elems).map_err(|e| py_err(py, e, line, col))?.into_any()
                     }
-                    // A lazy `enumerate` materializes its `(index, element)` tuples to cross.
-                    ArrayData::Enumerate { .. } => {
+                    // A lazy `enumerate` or `zip` materializes its tuples to cross. There is
+                    // no lazy form on the Python side, so this is the boundary where the
+                    // representation stops being an optimization.
+                    //
+                    // CI NEVER BUILDS THIS FILE — every job is default-feature, and `cargo
+                    // build`, `cargo clippy --all-targets` and `cargo check --all-targets`
+                    // all pass with this arm missing. It was found by running
+                    // `cargo check --features python` by hand, which is the only thing that
+                    // finds it.
+                    ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {
                         let vs = items.to_values();
                         let mut elems = Vec::with_capacity(vs.len());
                         for it in vs.iter() {

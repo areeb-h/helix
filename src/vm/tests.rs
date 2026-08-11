@@ -832,6 +832,77 @@
         }
     }
 
+    /// Lazy `zip()` (`ArrayData::Zip`) — the same two-part proof `enumerate` gets above, for
+    /// the same reason. All three engines share the one lazy representation, so cross-engine
+    /// agreement CANNOT catch a lazy-vs-dense divergence; only the dense-literal pairs can.
+    ///
+    /// Two properties beyond enumerate's are pinned here because they are Zip's alone:
+    ///
+    /// * **Truncation is stored, not re-derived.** `len` is frozen at `min(a.len(), b.len())`
+    ///   when the Zip is built. `first`/`last` must read THAT length — reading `a.len()` on
+    ///   `[1,2,3,4].zip([10,20])` would index `b[3]` out of bounds and abort the runtime,
+    ///   which ADR-0024 forbids. Both truncation directions are covered.
+    /// * **A zip is not a float view.** Its elements are tuples, so `f64_view` must decline —
+    ///   the one arm in this change where a wrong answer would be silent rather than loud.
+    ///   `zip + 1` staying an ERROR is the assertion that guards it, so these cases assert on
+    ///   the error text, not on a value.
+    #[test]
+    fn zip_lazy_matches_dense_and_across_engines() {
+        let cases = [
+            "[1, 2, 3].zip([10, 20, 30]).map((x, y) => x * y).sum()",
+            "[1, 2, 3].zip([10, 20]).length()",
+            "[10, 20].zip([1, 2, 3]).length()",
+            "[1, 2, 3, 4].zip([10, 20]).last()",
+            "[1, 2, 3].zip([10, 20]).first()",
+            "[].zip([1, 2]).count()",
+            "[1, 2].zip([]).count()",
+            "[1, 2].zip([3, 4]).zip([5, 6]).length()",
+            "[1.5, 2.5].zip([2.0, 4.0]).map((x, y) => x * y).sum()",
+            "[1, 2, 3].zip([10, 20, 30]).filter((x, y) => y > 15).map((x, y) => x).sum()",
+            "[1, 2].zip([3, 4]).reverse().first()",
+            "range(5).zip(range(3)).length()",
+            // The i128-overflow equivalence `dot` relies on — the tuple elements must be
+            // produced in the same order and with the same types or this drifts.
+            "let a = [3037000499, 3037000499] in a.zip(a).map((x, y) => x * y).sum()",
+        ];
+        for src in cases {
+            assert_eq!(run_tw(src), run_vm(src), "tw vs vm: {src}");
+            assert_eq!(run_tw(src), run_vm_jit(src), "tw vs jit: {src}");
+        }
+        // Lazy zip vs the DENSE tuple array literal — must be indistinguishable.
+        let pairs = [
+            (
+                "[1, 2, 3].zip([10, 20, 30]).map((x, y) => x * 100 + y).sum()",
+                "[(1, 10), (2, 20), (3, 30)].map((x, y) => x * 100 + y).sum()",
+            ),
+            // Truncation, both directions — the dense side is written SHORT on purpose.
+            ("[1, 2, 3, 4].zip([10, 20]).last()", "[(1, 10), (2, 20)].last()"),
+            ("[10, 20].zip([1, 2, 3]).last()", "[(10, 1), (20, 2)].last()"),
+            ("[1, 2, 3].zip([10, 20]).length()", "[(1, 10), (2, 20)].length()"),
+            ("[1, 2].zip([3, 4]).reverse().first()", "[(1, 3), (2, 4)].reverse().first()"),
+            ("[1, 2].zip([3, 4]).sort()", "[(1, 3), (2, 4)].sort()"),
+            ("[1, 2].zip([3, 4]).sum()", "[(1, 3), (2, 4)].sum()"),
+            ("[1, 2].zip([3, 4]).contains((2, 4))", "[(1, 3), (2, 4)].contains((2, 4))"),
+        ];
+        for (lazy, dense) in pairs {
+            assert_eq!(run_vm(lazy), run_vm(dense), "lazy vs dense (vm): {lazy}");
+            assert_eq!(run_tw(lazy), run_tw(dense), "lazy vs dense (tw): {lazy}");
+        }
+        // THE SILENT ARM. A zip yields tuples, so arithmetic over it must RAISE — if
+        // `f64_view` ever accepted one, this would start computing over reinterpreted
+        // memory and no value-comparing test would notice.
+        for src in [
+            "[1, 2].zip([3, 4]) + 1",
+            "[1, 2].zip([3, 4]) + [1, 2]",
+            "[1, 2].zip([3, 4]) * 2.0",
+            "sqrt([1.0, 2.0].zip([3.0, 4.0]))",
+            "abs([1, 2].zip([3, 4]))",
+        ] {
+            assert_eq!(run_tw(src), run_vm(src), "tw vs vm: {src}");
+            assert!(run_vm(src).is_err(), "a zip is not a numeric array: {src}");
+        }
+    }
+
     /// Type-directed routing: DataFrame column-verbs (`where`/`select`/`sort`/
     /// `group`) compile and run on the VM (not the tree-walker), matching the
     /// oracle. Locks in Phase 4 of the one-engine collapse.

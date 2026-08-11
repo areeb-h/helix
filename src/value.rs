@@ -188,6 +188,27 @@ pub enum ArrayData {
     /// lazy fast path materializes via [`ArrayData::to_values`] and stays bit-identical
     /// across all three engines. `inner` shares the receiver's `Rc` (no element copy).
     Enumerate { inner: std::rc::Rc<ArrayData> },
+    /// A **lazy** `zip()`: element `i` is the tuple `(a[i], b[i])`, produced on demand —
+    /// [`Enumerate`](ArrayData::Enumerate)'s symmetric twin, and for the same reason.
+    /// `a.zip(a).length()` on a 5M range cost **631 MB** where the enumerate analogue cost
+    /// 15 MB, because `zip` materialized a `Vec<Value>` of `Rc<Vec<Value>>` tuples before
+    /// anything downstream could decline it. Both exist only to pair elements.
+    ///
+    /// Behaviourally IDENTICAL to that materialized tuple array by construction:
+    /// `to_values()` IS `(0..len).map(get)`, and `get(i)` builds exactly the tuple the eager
+    /// path built.
+    ///
+    /// TWO INVARIANTS, both load-bearing:
+    ///
+    /// 1. **`len` is `min(a.len(), b.len())`, computed ONCE at construction.** Not derived on
+    ///    demand: `z = z.zip(z)` is legal, and a recursive `min` over a doubling chain is
+    ///    exponential. It is also what makes truncation ("zip stops at the shorter side")
+    ///    a stored fact rather than a re-derived one — `first`/`last` must read this `len`,
+    ///    never `a.len()`, or a truncating zip indexes `b` out of bounds and aborts.
+    /// 2. **Both `Rc`s are clones held for this value's lifetime.** So every `Rc::get_mut`
+    ///    in-place optimizer in the tree declines on both sources, and neither buffer's
+    ///    contents nor length can change underneath the frozen `len`.
+    Zip { a: std::rc::Rc<ArrayData>, b: std::rc::Rc<ArrayData>, len: usize },
 }
 
 impl ArrayData {
@@ -198,6 +219,8 @@ impl ArrayData {
             ArrayData::Floats(v) => v.len(),
             ArrayData::Range { len, .. } => *len,
             ArrayData::Enumerate { inner } => inner.len(),
+            // The FROZEN length — see the variant's invariant 1. Never `a.len().min(b.len())`.
+            ArrayData::Zip { len, .. } => *len,
         }
     }
 
@@ -221,6 +244,11 @@ impl ArrayData {
             // to the materialized `Value::Tuple([Int(i), inner[i]])`.
             ArrayData::Enumerate { inner } => {
                 Value::Tuple(std::rc::Rc::new(vec![Value::Int(i as i64), inner.get(i)]))
+            }
+            // Lazy `zip`: the `(a[i], b[i])` pair, built on demand — identical to the
+            // materialized `Value::Tuple([a[i], b[i]])` the eager path built.
+            ArrayData::Zip { a, b, .. } => {
+                Value::Tuple(std::rc::Rc::new(vec![a.get(i), b.get(i)]))
             }
         }
     }
@@ -253,7 +281,7 @@ impl ArrayData {
             ArrayData::Values(v) => Cow::Borrowed(v),
             ArrayData::Ints(v) => Cow::Owned(v.iter().map(|&n| Value::Int(n)).collect()),
             ArrayData::Floats(v) => Cow::Owned(v.iter().map(|&f| Value::Float(f)).collect()),
-            ArrayData::Range { .. } | ArrayData::Enumerate { .. } => {
+            ArrayData::Range { .. } | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {
                 Cow::Owned((0..self.len()).map(|i| self.get(i)).collect())
             }
         }

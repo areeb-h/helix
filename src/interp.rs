@@ -1428,7 +1428,9 @@ fn apply_float_fn(
                 ArrayData::Range { .. } => Ok(Value::float_array(
                     a.to_ints().unwrap().iter().map(|&x| f(x as f64)).collect(),
                 )),
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } => scalar_fallback(&Value::Array(a)),
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {
+                    scalar_fallback(&Value::Array(a))
+                }
             }
         }
         Value::Tensor(t) => {
@@ -1472,7 +1474,9 @@ fn apply_round_fn(
             ArrayData::Ints(xs) => Ok(Value::int_array(xs.clone())),
             // Rounding whole numbers is a no-op — return the range unchanged (it is already `Int`).
             ArrayData::Range { .. } => Ok(Value::Array(ad.clone())),
-            ArrayData::Values(_) | ArrayData::Enumerate { .. } => round_box(name, f, v, line, col),
+            ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {
+                round_box(name, f, v, line, col)
+            }
         },
         // A tensor stays a whole-valued FLOAT tensor, so apply the f64 rounding
         // function directly — no i64 conversion, meaning `round(tensor([1e30]))`
@@ -1558,7 +1562,9 @@ pub(crate) fn apply_abs(v: Value, line: usize, col: usize) -> Result<Value, Heli
                 ArrayData::Range { .. } => Ok(Value::int_array(
                     a.to_ints().unwrap().iter().map(|&x| x.wrapping_abs()).collect(),
                 )),
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } => boxed(&Value::Array(a)),
+                ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {
+                    boxed(&Value::Array(a))
+                }
             }
         }
         other => boxed(&other),
@@ -1587,7 +1593,7 @@ pub(crate) fn apply_sign(v: &Value, line: usize, col: usize) -> Result<Value, He
                     ad.to_ints().unwrap().iter().map(|&x| x.signum()).collect(),
                 ));
             }
-            ArrayData::Values(_) | ArrayData::Enumerate { .. } => {}
+            ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {}
         }
     }
     broadcast_unary(v, &|s| match s {
