@@ -289,12 +289,24 @@ fn diff_lockfiles(stored: &Lockfile, current: &Lockfile) -> Vec<String> {
     out
 }
 
-/// A content hash of a package's source tree: the sha256 over every `.helix` file
-/// (sorted by relative path), each contributing its path and bytes. Deterministic
-/// across machines, so the lockfile detects any change to a dependency's source.
+/// A content hash of a package's tree: the sha256 over every file (sorted by relative
+/// path), each contributing its path and bytes. Deterministic across machines, so the
+/// lockfile detects any change to a dependency.
+///
+/// EVERY file, not just `.helix`. Hashing only source left everything else a package
+/// ships — a reference CSV, a FASTA, a lookup table — outside the lock, so swapping it
+/// changed every answer the dependency gave while `helix verify` stayed green. ADR 0013
+/// sells bit-identical reproducibility; a dependency is its content, not just its code.
+///
+/// Dot-entries are skipped. `.git` is the reason: pack filenames differ between clones of
+/// the same commit, so hashing it would make the lock depend on how the tree was fetched
+/// rather than on what is in it. The same exclusion covers editor and cache state.
+/// Non-regular entries (symlinks, fifos, devices) are not hashed either — they are not
+/// content, and the tarball unpacker already rejects them outright (see the threat model
+/// below), so a published package cannot contain one.
 pub fn hash_tree(dir: &Path) -> Result<String, HelixError> {
     let mut files: Vec<PathBuf> = Vec::new();
-    collect_helix_files(dir, &mut files)?;
+    collect_package_files(dir, &mut files)?;
     files.sort();
     let mut hasher = Sha256::new();
     for f in &files {
@@ -310,16 +322,24 @@ pub fn hash_tree(dir: &Path) -> Result<String, HelixError> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn collect_helix_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HelixError> {
+fn collect_package_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), HelixError> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| err(format!("could not read directory `{}`: {e}", dir.display())))?;
     for entry in entries {
         let entry = entry.map_err(|e| err(format!("could not read a directory entry: {e}")))?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_helix_files(&path, out)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("helix") {
-            out.push(path);
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        // `file_type` does NOT follow symlinks, which is what we want: a symlink is
+        // neither a directory to descend into (it could point outside the package, or at
+        // its own ancestor and loop forever) nor a file whose bytes are the package's.
+        let ft = entry
+            .file_type()
+            .map_err(|e| err(format!("could not inspect `{}`: {e}", entry.path().display())))?;
+        if ft.is_dir() {
+            collect_package_files(&entry.path(), out)?;
+        } else if ft.is_file() {
+            out.push(entry.path());
         }
     }
     Ok(())
@@ -817,6 +837,42 @@ mod tests {
         std::fs::write(base.join("dep/lib.helix"), "fn f(x) = x + 2\n").unwrap();
         let (lock3, _) = resolve(&base.join("app")).unwrap();
         assert_ne!(lock3.packages[0].sha256, h1, "hash must track source changes");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The lock covers a package's DATA, not just its code. Hashing only `.helix` left
+    /// everything else a package ships outside the lock, so a reference table could be
+    /// swapped — changing every answer the dependency gives — while `helix verify`
+    /// reported "all match". ADR 0013 sells bit-identical reproducibility; that claim is
+    /// only worth anything if it covers what the dependency actually reads.
+    #[test]
+    fn the_lock_hash_covers_every_file_a_package_ships() {
+        let base = std::env::temp_dir().join(format!("helix_pkgdata_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("dep/data")).unwrap();
+        std::fs::create_dir_all(base.join("app")).unwrap();
+        std::fs::write(base.join("dep/lib.helix"), "fn f(x) = x\n").unwrap();
+        std::fs::write(base.join("dep/data/rates.csv"), "name,value\nbase,10\n").unwrap();
+        std::fs::write(
+            base.join("app/helix.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n",
+        )
+        .unwrap();
+
+        let h1 = resolve(&base.join("app")).unwrap().0.packages[0].sha256.clone();
+        // The DATA file changes; not one byte of code does.
+        std::fs::write(base.join("dep/data/rates.csv"), "name,value\nbase,999999\n").unwrap();
+        let h2 = resolve(&base.join("app")).unwrap().0.packages[0].sha256.clone();
+        assert_ne!(h2, h1, "a swapped data file must change the lock hash");
+
+        // A dot-entry does not: `.git` pack filenames differ between clones of the same
+        // commit, so hashing it would pin how the tree was fetched rather than what is
+        // in it — a lock that fails on a fresh clone protects nobody.
+        std::fs::create_dir_all(base.join("dep/.git")).unwrap();
+        std::fs::write(base.join("dep/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let h3 = resolve(&base.join("app")).unwrap().0.packages[0].sha256.clone();
+        assert_eq!(h3, h2, "dot-entries must not affect the hash");
 
         let _ = std::fs::remove_dir_all(&base);
     }
