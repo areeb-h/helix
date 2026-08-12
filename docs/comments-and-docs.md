@@ -24,10 +24,22 @@ new syntax.
 fn rc(s) = s.reverse_complement()
 ```
 
-That block is not decoration. `doc_examples_run_and_agree_on_all_three_engines`
-(`tests/cli.rs`) extracts every `>>>` line, runs it, and compares the result against the
-expected output written beneath it — under the tree-walker, the bytecode VM, and the JIT.
-A doc comment whose example has drifted **fails the build**.
+That block is not decoration. `helix test` extracts every `>>>` line, runs it, and compares
+the result against the expected output written beneath it — under the tree-walker, the
+bytecode VM, and the JIT. A doc comment whose example has drifted **fails the build**.
+
+This holds for **your** code, not just Helix's own: `helix test` runs the examples in the
+modules under the path you give it, with no framework to install and nothing to wire up.
+(Helix's own source is checked by the same extractor from
+`doc_examples_run_and_agree_on_all_three_engines` in `tests/cli.rs` — one implementation,
+included by path, because two would drift and a drifted example-finder reports success
+forever.)
+
+Examples are taken from files that contain **only definitions** — the same property that
+makes a file importable. Running a module to set up its example cannot re-send an email or
+rewrite a file, and its own output is empty, so nothing has to be subtracted from the
+example's. A script with top-level statements is skipped, and `helix test` says so rather
+than passing over it quietly.
 
 Python's docstrings rot silently. `doctest` exists, but it is opt-in, lives outside the
 normal test path, and most projects never wire it up; nothing checks that the prose still

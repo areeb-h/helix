@@ -17,6 +17,7 @@ mod bytecode;
 mod capability;
 mod chart;
 mod dataframe;
+mod doctest;
 mod error;
 mod fmt;
 mod gff;
@@ -1009,14 +1010,23 @@ fn cli_test(args: &[String]) -> ExitCode {
             collect_test_files(&root, &mut files);
         }
         files.sort();
-        if files.is_empty() {
-            println!("no tests found (looked for `*_test.helix` under {})", root.display());
-            return ExitCode::SUCCESS;
-        }
-        println!("running {} test file{}", files.len(), if files.len() == 1 { "" } else { "s" });
         // Display paths relative to the search root (its parent when the root is a single
         // file, so the file's own name still shows).
         let base = if root.is_file() { root.parent().unwrap_or(&root) } else { root.as_path() };
+        // Doc examples count as tests, so "nothing to run" must account for them — a
+        // library of documented modules with no `*_test.helix` beside them is a real
+        // project shape, and reporting "no tests found" over a dozen live examples would
+        // be the same lie this pass is removing everywhere else.
+        if files.is_empty() && !any_doc_examples(&root) {
+            println!(
+                "no tests found (looked for `*_test.helix`, and for `>>>` doc examples, under {})",
+                root.display()
+            );
+            return ExitCode::SUCCESS;
+        }
+        if !files.is_empty() {
+            println!("running {} test file{}", files.len(), plural(files.len()));
+        }
         let mut failed = 0usize;
         for f in &files {
             let shown = f.strip_prefix(base).unwrap_or(f).display();
@@ -1061,8 +1071,25 @@ fn cli_test(args: &[String]) -> ExitCode {
                 }
             }
         }
-        let passed = files.len() - failed;
+        // Then the documented examples. `docs/comments-and-docs.md` promises that a
+        // documented example is executed and must still say what it says — a promise that
+        // until now held only for Helix's OWN source, checked by a `cargo test` a user of
+        // the language cannot run. For a library author it was decoration.
+        let (doc_ok, doc_failed, skipped) = run_doc_examples(&root, base);
+        // A doc example is a test: it counts in the same totals, so the summary never
+        // reads `0 passed` over a screen of green.
+        let passed = (files.len() - failed) + doc_ok;
         println!();
+        if skipped > 0 {
+            // Never silently: a runner that quietly checks less than you think is the
+            // failure this whole commit is about.
+            println!(
+                "note: skipped doc examples in {skipped} file{} with top-level statements \
+                 — running those would re-run the script's side effects",
+                plural(skipped)
+            );
+        }
+        let failed = failed + doc_failed;
         if failed == 0 {
             println!("{passed} passed");
             ExitCode::SUCCESS
@@ -1071,6 +1098,158 @@ fn cli_test(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     })
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Is there at least one `>>>` example anywhere under `root`? Cheap text scan, used only
+/// to decide whether "no tests found" is honest.
+fn any_doc_examples(root: &std::path::Path) -> bool {
+    let mut sources = Vec::new();
+    if root.is_file() {
+        sources.push(root.to_path_buf());
+    } else {
+        collect_helix_files(root, &mut sources);
+    }
+    sources.iter().any(|p| {
+        std::fs::read_to_string(p)
+            .map(|s| !doctest::doc_examples_in(&s).is_empty())
+            .unwrap_or(false)
+    })
+}
+
+/// Run every `>>>` example in the `##` doc comments of the modules under `root`, on all
+/// three engines, comparing against the output written beneath it. Returns
+/// `(passed, failed, skipped)`.
+///
+/// Only files that are **definitions only** are used — the same rule that makes a file
+/// importable (ADR 0019). Two reasons, and both matter: a module has no top-level side
+/// effects, so running it to set up an example cannot re-send an email or rewrite a file;
+/// and its own output is empty, so the example's output needs no baseline subtraction.
+/// A script with top-level statements is skipped and counted, never silently passed over.
+///
+/// Each example runs as a synthesized file written BESIDE its source, so the module's own
+/// relative imports resolve exactly as they normally would, and is removed immediately
+/// after. The three engines must agree before the value is compared at all — an example
+/// that diverges is a defect in the language, not in the documentation.
+fn run_doc_examples(root: &std::path::Path, base: &std::path::Path) -> (usize, usize, usize) {
+    let mut sources = Vec::new();
+    if root.is_file() {
+        sources.push(root.to_path_buf());
+    } else {
+        collect_helix_files(root, &mut sources);
+    }
+    sources.sort();
+
+    let (mut ok, mut failed, mut skipped) = (0usize, 0usize, 0usize);
+    for path in &sources {
+        let Ok(src) = std::fs::read_to_string(path) else { continue };
+        let examples = doctest::doc_examples_in(&src);
+        if examples.is_empty() {
+            continue;
+        }
+        if !is_definitions_only(&src) {
+            skipped += 1;
+            continue;
+        }
+        let dir = path.parent().unwrap_or(std::path::Path::new("."));
+        let shown = path.strip_prefix(base).unwrap_or(path).display().to_string();
+        for (i, ex) in examples.iter().enumerate() {
+            let where_ = format!("{shown}:{}", ex.line);
+            let tmp = dir.join(format!(".helix_doc_{}_{i}.helix", std::process::id()));
+            if std::fs::write(&tmp, doctest::example_program(&src, ex)).is_err() {
+                skipped += 1;
+                continue;
+            }
+            let results: Vec<(&str, String)> = [
+                ("tree-walker", vec![("HELIX_NOVM", "1")]),
+                ("vm", vec![("HELIX_NOJIT", "1")]),
+                ("jit", vec![]),
+            ]
+            .iter()
+            .map(|(engine, env)| (*engine, run_example_once(&tmp, env)))
+            .collect();
+            let _ = std::fs::remove_file(&tmp);
+
+            // THE ORACLE FIRST: three engines must agree before the value means anything.
+            if let Some((e, _)) = results.iter().find(|(_, o)| *o != results[0].1) {
+                failed += 1;
+                println!("  FAIL  {where_} (doc)");
+                println!("        engines disagree: {} vs {}", results[0].0, e);
+                println!("        {}: {}", results[0].0, results[0].1);
+                println!("        {}: {}", e, results.iter().find(|(n, _)| n == e).unwrap().1);
+                continue;
+            }
+            let got = results[0].1.trim_end();
+            let want = ex.expect.join("\n");
+            if !ex.expect.is_empty() && got != want.trim_end() {
+                failed += 1;
+                println!("  FAIL  {where_} (doc)");
+                println!("        code:     {}", ex.code.join(" ; "));
+                println!("        expected: {}", want.trim_end());
+                println!("        got:      {got}");
+            } else {
+                ok += 1;
+                println!("  ok    {where_} (doc)");
+            }
+        }
+    }
+    (ok, failed, skipped)
+}
+
+/// Run one synthesized example file in a child `helix` and return what it produced:
+/// stdout, or — when stdout is empty and it failed — the first line of stderr, so an
+/// example may document an error the same way it documents a value.
+fn run_example_once(path: &std::path::Path, env: &[(&str, &str)]) -> String {
+    let Ok(exe) = std::env::current_exe() else { return String::new() };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("run").arg(path).stdin(std::process::Stdio::null());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    match cmd.output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+            if stdout.is_empty() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                stderr.trim().lines().next().unwrap_or("").to_string()
+            } else {
+                stdout
+            }
+        }
+        Err(e) => format!("error: could not run the example: {e}"),
+    }
+}
+
+/// Does this file contain only definitions — no top-level statement that would *run*?
+/// The same property that makes a file importable, checked here by parsing rather than
+/// by pattern-matching text. A file that does not parse has no runnable examples either,
+/// so it answers `false` and is reported as skipped.
+fn is_definitions_only(src: &str) -> bool {
+    match lexer::lex(src).and_then(parser::parse) {
+        Ok(stmts) => !stmts.iter().any(|s| matches!(s, ast::Stmt::Expr(_))),
+        Err(_) => false,
+    }
+}
+
+/// Recursively collect every `.helix` file under `dir`, skipping hidden directories.
+fn collect_helix_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            collect_helix_files(&path, out);
+        } else if name.ends_with(".helix") {
+            out.push(path);
+        }
+    }
 }
 
 /// Recursively collect `*_test.helix` files under `dir`, skipping hidden directories

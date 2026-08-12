@@ -3079,6 +3079,75 @@ fn helix_test_fails_a_file_that_asserts_nothing() {
     assert!(!out.contains("without asserting anything"), "out:\n{out}");
 }
 
+/// `helix test` runs the USER's `>>>` doc examples. `docs/comments-and-docs.md` sells
+/// "a documented example is executed, on all three engines, every time" — and that was
+/// true only of Helix's own source, checked by a `cargo test` nobody outside this repo
+/// can run. For a library author writing `##  >>> …`, the examples were decoration.
+#[test]
+fn helix_test_runs_the_users_own_doc_examples() {
+    let dir = std::env::temp_dir().join("helix_userdoc");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let lib = dir.join("lib.helix");
+    let doc = |expect: &str| {
+        format!(
+            "## Doubles a number.\n\
+             ##\n\
+             ##     >>> double(21)\n\
+             ##     {expect}\n\
+             export fn double(x) = x * 2\n"
+        )
+    };
+
+    // A correct example passes and counts as a test.
+    std::fs::write(&lib, doc("42")).unwrap();
+    let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "stderr: {err}\nout: {out}");
+    assert!(out.contains("(doc)") && out.contains("1 passed"), "out:\n{out}");
+
+    // A DRIFTED example fails, naming both sides. This is the entire value proposition.
+    std::fs::write(&lib, doc("999")).unwrap();
+    let (out, _, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "out:\n{out}");
+    assert!(out.contains("expected: 999") && out.contains("got:      42"), "out:\n{out}");
+
+    // An example resolves its module's own imports, because it runs beside the source.
+    std::fs::write(dir.join("dep.helix"), "export fn tri(x) = x * 3\n").unwrap();
+    std::fs::write(
+        &lib,
+        "import dep\n\
+## Triples, then adds one.\n\
+##\n\
+##     >>> bump(2)\n\
+##     7\n\
+export fn bump(x) = dep.tri(x) + 1\n",
+    )
+    .unwrap();
+    let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "stderr: {err}\nout: {out}");
+    assert!(out.contains("1 passed"), "out:\n{out}");
+
+    // A SCRIPT's examples are skipped — running it would re-run its side effects — and
+    // the skip is REPORTED. A runner that quietly checks less than you think is the
+    // failure mode this whole area is about.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("script.helix"),
+        "## Doubles.\n\
+##\n\
+##     >>> double(21)\n\
+##     42\n\
+fn double(x) = x * 2\n\
+print(\"a side effect\")\n",
+    )
+    .unwrap();
+    let (out, _, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "out:\n{out}");
+    assert!(out.contains("skipped doc examples in 1 file"), "out:\n{out}");
+}
+
 /// A deep `x => x => ...` lambda chain must hit the parser depth cap with a
 /// clean error — lambda bodies were the one expr() recursion that skipped the
 /// depth counter, so 2000 nestings overflowed the native stack (SIGABRT).
@@ -3503,78 +3572,13 @@ fn unterminated_string_hints_name_their_own_delimiter() {
     }
 }
 
-/// One documented example, lifted out of a `##` doc comment.
-struct DocExample {
-    line: usize,
-    /// The `>>>` lines, in order. All but the last are setup.
-    code: Vec<String>,
-    /// The plain lines beneath, compared exactly against stdout (or stderr, for an error).
-    expect: Vec<String>,
-    /// Columns of indentation the `>>>` sat at, stripped from the expected lines so the
-    /// block can be indented under the prose without that indent becoming part of the
-    /// expected output. Deeper indentation inside the output itself is preserved.
-    indent: usize,
-}
-
-/// Pull every `>>>` example out of the `##` doc comments in one source file.
-///
-/// The format is deliberately the smallest thing that cannot be ambiguous: inside a `##`
-/// block, a line whose first token is `>>>` is code; consecutive `>>>` lines are one
-/// program; the plain `##` lines that follow are its expected output, ending at a blank
-/// doc line, the next `>>>`, or the end of the block.
-fn doc_examples_in(src: &str) -> Vec<DocExample> {
-    let mut out: Vec<DocExample> = Vec::new();
-    let mut cur: Option<DocExample> = None;
-    for (i, raw) in src.lines().enumerate() {
-        let t = raw.trim_start();
-        // Only `##` lines participate. A plain `#` comment can sit inside an example
-        // block without terminating it being ambiguous, because it is not a doc line.
-        let Some(body) = t.strip_prefix("##") else {
-            if let Some(e) = cur.take() {
-                out.push(e);
-            }
-            continue;
-        };
-        let body = body.strip_prefix(' ').unwrap_or(body);
-        let trimmed = body.trim_start();
-        if let Some(code) = trimmed.strip_prefix(">>>") {
-            let indent = body.len() - trimmed.len();
-            let code = code.trim().to_string();
-            match cur.as_mut() {
-                // A `>>>` directly after previous code (no expected output yet) continues
-                // the same program; one after expected output starts a new example.
-                Some(e) if e.expect.is_empty() => e.code.push(code),
-                _ => {
-                    if let Some(e) = cur.take() {
-                        out.push(e);
-                    }
-                    cur = Some(DocExample {
-                        line: i + 1,
-                        code: vec![code],
-                        expect: Vec::new(),
-                        indent,
-                    });
-                }
-            }
-        } else if let Some(e) = cur.as_mut() {
-            if trimmed.is_empty() {
-                out.push(cur.take().unwrap());
-            } else {
-                // Strip exactly the `>>>` line's indentation, no more — so output that is
-                // itself indented keeps that shape.
-                let mut line = body.trim_end();
-                for _ in 0..e.indent {
-                    line = line.strip_prefix(' ').unwrap_or(line);
-                }
-                e.expect.push(line.to_string());
-            }
-        }
-    }
-    if let Some(e) = cur.take() {
-        out.push(e);
-    }
-    out
-}
+// THE extractor, not a copy of it: the same file `helix test` uses to run a user's doc
+// examples. The crate has no library target, so `#[path]` is how an integration test
+// shares source with the binary. Two extractors could drift, and the failure mode of a
+// drifted one is silent — it finds nothing and reports success.
+#[path = "../src/doctest.rs"]
+mod doctest;
+use doctest::{doc_examples_in, example_program};
 
 /// **Every documented example runs, on all three engines, and must still say what it says.**
 ///
@@ -3622,16 +3626,7 @@ fn doc_examples_run_and_agree_on_all_three_engines() {
         for ex in examples {
             // The file itself, then the example. Running the file alone first gives the
             // baseline to subtract, so an example may sit in a program that prints.
-            let mut prog = src.clone();
-            prog.push('\n');
-            for (i, line) in ex.code.iter().enumerate() {
-                if i + 1 == ex.code.len() && !ex.expect.is_empty() {
-                    prog.push_str(&format!("print({line})\n"));
-                } else {
-                    prog.push_str(line);
-                    prog.push('\n');
-                }
-            }
+            let prog = example_program(&src, &ex);
             let where_ = format!("{rel}:{}", ex.line);
 
             let mut rendered: Vec<(String, String)> = Vec::new();
