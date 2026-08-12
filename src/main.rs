@@ -1020,7 +1020,36 @@ fn cli_test(args: &[String]) -> ExitCode {
         let mut failed = 0usize;
         for f in &files {
             let shown = f.strip_prefix(base).unwrap_or(f).display();
+            // Per file, so one file's assertions can't vouch for the next one's.
+            crate::interp::ASSERTIONS_RUN.store(0, std::sync::atomic::Ordering::Relaxed);
             match run_file_capture(f) {
+                Ok(())
+                    if crate::interp::ASSERTIONS_RUN
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        == 0 =>
+                {
+                    // Ran clean and checked nothing. Reporting `ok` here is how a whole
+                    // suite of `fn test_*` definitions that nobody calls reads as green.
+                    failed += 1;
+                    println!("  FAIL  {shown}");
+                    println!("        this file ran to completion without asserting anything");
+                    let looks_like_fn_tests =
+                        std::fs::read_to_string(f).map(|s| s.contains("fn test_")).unwrap_or(false);
+                    if looks_like_fn_tests {
+                        println!(
+                            "        it defines `fn test_…`, but `helix test` runs a file \
+                             top to bottom — nothing calls them."
+                        );
+                        println!(
+                            "        call them (`test_parses()`), or assert at the top level."
+                        );
+                    } else {
+                        println!(
+                            "        add an `assert`, `assert_eq`, or `assert_close` at the \
+                             top level."
+                        );
+                    }
+                }
                 Ok(()) => println!("  ok    {shown}"),
                 Err(rendered) => {
                     failed += 1;

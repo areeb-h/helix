@@ -52,9 +52,12 @@ fn is_const_default(e: &Expr) -> bool {
 /// `sigs` carries the enclosing program's function signatures (defined-so-far), so a call
 /// inside the hole resolves named arguments and defaults exactly as it would outside — an
 /// interpolated `"{greet(name, loud: true)}"` is the same call as a bare one.
-fn parse_expression(src: &str, depth: usize, sigs: &HashMap<String, FnSig>) -> Result<Expr, HelixError> {
+/// Returns the hole's expression plus any `do {}` binding names it contained, so the
+/// enclosing parser can fold them into its own list — otherwise an interpolated
+/// `"{do { n = 1 … }}"` would be the one place the mut-global shadow check does not reach.
+fn parse_expression(src: &str, depth: usize, sigs: &HashMap<String, FnSig>) -> Result<(Expr, Vec<DoBinding>), HelixError> {
     let tokens = crate::lexer::lex(src)?;
-    let mut p = Parser { toks: tokens, pos: 0, depth, fn_sigs: (*sigs).clone() };
+    let mut p = Parser { toks: tokens, pos: 0, depth, fn_sigs: (*sigs).clone(), do_bindings: Vec::new() };
     p.skip_newlines();
     let e = p.expr()?;
     p.skip_newlines();
@@ -66,7 +69,7 @@ fn parse_expression(src: &str, depth: usize, sigs: &HashMap<String, FnSig>) -> R
             c,
         ));
     }
-    Ok(e)
+    Ok((e, p.do_bindings))
 }
 
 /// `recv.sort_by(key)` - sort `recv` ascending by `key(element)`. Desugars to
@@ -231,26 +234,50 @@ fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize
 /// untouched; mapping to a constant via a bare name was meaningless anyway. Works for a
 /// top-level `fn` or a function-valued variable (the call resolves either).
 ///
+/// A DOTTED path is wrapped the same way: `xs.map(util.double)` → `xs.map(it => util.double(it))`.
+/// An imported module's function is the ordinary way to pass a library function to `map`, and
+/// without this it silently produced `[<function/1>, <function/1>, …]` — an array of the
+/// function value, exit 0, no diagnostic. The rewrite is `Field{recv, name}` →
+/// `Method{recv, name, args:[it]}`, which is exactly how `util.double(it)` parses anyway.
+///
+/// A path ROOTED AT `it` is never wrapped, because that is a real body: `xs.map(it.name)`
+/// projects a field out of each element and must stay a projection.
+///
 /// Restricted to the array-EXCLUSIVE higher-order methods (`map`/`any`/`all`). `filter`/
 /// `where` are deliberately NOT wrapped: they are also DataFrame column-verbs, where
 /// `df.where(strong)` is a bare *column* reference, not a function — and parse time can't
 /// tell the receiver apart. For an array `filter`/`where` with a named predicate, use an
 /// explicit lambda (`xs.filter(x => is_valid(x))`).
 fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Expr> {
-    if matches!(name, "map" | "any" | "all")
-        && args.len() == 1
-        && let Expr::Ident { name: f, .. } = &args[0]
-        && f != "it"
-    {
-        let call = Expr::Call {
+    if !matches!(name, "map" | "any" | "all") || args.len() != 1 {
+        return args;
+    }
+    let it = || Expr::Ident { name: "it".to_string(), line: l, col: c };
+    let body = match &args[0] {
+        Expr::Ident { name: f, .. } if f != "it" => {
+            Expr::Call { name: f.clone(), args: vec![it()], line: l, col: c }
+        }
+        Expr::Field { recv, name: f, .. } if !path_rooted_at_it(recv) => Expr::Method {
+            recv: recv.clone(),
             name: f.clone(),
-            args: vec![Expr::Ident { name: "it".to_string(), line: l, col: c }],
+            args: vec![it()],
+            named: vec![],
             line: l,
             col: c,
-        };
-        return vec![Expr::Lambda { params: vec!["it".to_string()], body: Box::new(call) }];
+        },
+        _ => return args,
+    };
+    vec![Expr::Lambda { params: vec!["it".to_string()], body: Box::new(body) }]
+}
+
+/// Is this dotted path rooted at the implicit binder `it` (`it.a.b`)? Such a path is a
+/// projection out of each element, not a function to apply — see [`wrap_bound_fn_arg`].
+fn path_rooted_at_it(e: &Expr) -> bool {
+    match e {
+        Expr::Ident { name, .. } => name == "it",
+        Expr::Field { recv, .. } => path_rooted_at_it(recv),
+        _ => false,
     }
-    args
 }
 
 /// `recv.position(p)` → the first index where `p` holds, or `missing`. Just
@@ -474,9 +501,70 @@ const TYPE_NAMES: &[&str] = &[
     "Int", "Float", "Num", "String", "Bool", "Array", "Tensor", "DataFrame", "Dna",
 ];
 
+/// One user-written `do {}` binding: its name and where it was written.
+type DoBinding = (String, usize, usize);
+
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
-    let mut p = Parser { toks: tokens, pos: 0, depth: 0, fn_sigs: HashMap::new() };
-    p.program()
+    let mut p = Parser {
+        toks: tokens,
+        pos: 0,
+        depth: 0,
+        fn_sigs: HashMap::new(),
+        do_bindings: Vec::new(),
+    };
+    let program = p.program()?;
+    reject_do_binding_over_mut_global(&program, &p.do_bindings)?;
+    Ok(program)
+}
+
+/// A `do {}` binding may not reuse the name of a `mut` global.
+///
+/// `do {}` bindings are immutable — the block desugars to `let … in` — so
+///
+///     mut n = 0
+///     fn bump() = do { n = n + 1
+///                      n }
+///
+/// binds a NEW local `n` from the global's value and throws it away at the end of the
+/// block: `bump()` twice printed `1`, `1`, and the global stayed `0`. Exit 0, no
+/// diagnostic. Nobody writes that intending a shadow, and the `mut` is what proves it —
+/// the author declared the name mutable and then wrote what looks like an assignment.
+///
+/// Only `mut` globals are rejected. Shadowing an *immutable* global stays legal, and so
+/// does an explicit `let n = … in …`: both are unambiguous about binding rather than
+/// updating. The parser can decide this alone because it sees the whole file — the
+/// top-level statements and every `do {}` binding in it, whatever their order.
+fn reject_do_binding_over_mut_global(
+    program: &[Stmt],
+    do_bindings: &[DoBinding],
+) -> Result<(), HelixError> {
+    let mut muts: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for s in program {
+        match s {
+            Stmt::Assign { name, mutable: true, .. } => {
+                muts.insert(name.as_str());
+            }
+            Stmt::Destructure { names, mutable: true, .. } => {
+                muts.extend(names.iter().map(String::as_str));
+            }
+            _ => {}
+        }
+    }
+    for (name, line, col) in do_bindings {
+        if muts.contains(name.as_str()) {
+            return Err(HelixError::new(
+                format!("`{name}` is a mutable global; this binding would shadow it, not update it"),
+                *line,
+                *col,
+            )
+            .hint(format!(
+                "`do {{}}` bindings are immutable, so `{name} = …` here creates a NEW local \
+                 `{name}` and the global keeps its old value. Return the new value and assign \
+                 it where the global lives (`{name} = step({name})`), or rename the local."
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Caps how deeply expressions may nest. Every recursive descent path (groups,
@@ -495,6 +583,11 @@ struct Parser {
     /// named arguments and defaults at call sites (a function is defined before it
     /// is called, so its signature is known by the time its calls are parsed).
     fn_sigs: HashMap<String, FnSig>,
+    /// Every user-written `do {}` binding, collected as the file is parsed and checked
+    /// against the top-level `mut` globals once the whole program is known. See
+    /// [`reject_do_binding_over_mut_global`]. Generated `$do<N>` bindings are not
+    /// recorded: they are throwaway names the user never wrote.
+    do_bindings: Vec<DoBinding>,
 }
 
 impl Parser {
@@ -1864,9 +1957,11 @@ impl Parser {
                 _ => None,
             };
             if let Some(name) = binding_name {
+                let (bl, bc) = self.pos();
                 self.advance(); // IDENT
                 self.advance(); // =
                 let value = self.expr()?;
+                self.do_bindings.push((name.clone(), bl, bc));
                 bindings.push((name, value));
                 self.skip_newlines();
                 continue;
@@ -2059,8 +2154,15 @@ impl Parser {
                             // error inside it carries snippet-relative positions (line 1).
                             // Relocate it to the interpolated string's real position so
                             // the caret points at the user's actual source, not line 1.
-                            let mut e = parse_expression(&src, self.depth, &self.fn_sigs)
-                                .map_err(|err| HelixError { line: l, col: c, ..err })?;
+                            let (mut e, hole_do_bindings) =
+                                parse_expression(&src, self.depth, &self.fn_sigs)
+                                    .map_err(|err| HelixError { line: l, col: c, ..err })?;
+                            // Fold the hole's `do {}` bindings into this parser's list, at
+                            // the string's real position for the same reason the error and
+                            // the AST below are relocated: the snippet's own positions are
+                            // line-1 relative and would point at unrelated source.
+                            self.do_bindings
+                                .extend(hole_do_bindings.into_iter().map(|(n, _, _)| (n, l, c)));
                             // Relocate the *retained AST* too, not just the parse error:
                             // a RUNTIME error inside a hole (div-by-zero, format-spec
                             // mismatch, missing method) reports the hole expression's

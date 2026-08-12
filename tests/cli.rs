@@ -2940,6 +2940,145 @@ fn unbounded_mutual_recursion_raises_instead_of_crashing() {
     }
 }
 
+/// Passing an imported module's function to `map`/`any`/`all` APPLIES it. Only a bare
+/// `Ident` used to be wrapped into `it => f(it)`, so a dotted path fell through to the
+/// implicit-`it` body rule and mapped every element to the function VALUE:
+/// `[<function/1>, <function/1>, <function/1>]`, exit 0, no diagnostic. Passing a library
+/// function to `map` is the ordinary way to use a library.
+#[test]
+fn map_over_a_module_function_applies_it() {
+    let dir = std::env::temp_dir().join("helix_modmap");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("util.helix"),
+        "export fn double(x) = x * 2\nexport fn is_big(x) = x > 2\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.helix");
+    std::fs::write(
+        &entry,
+        "import util\n\
+print([1, 2, 3].map(util.double))\n\
+print([1, 2, 3].any(util.is_big))\n\
+rows = [{a: 1}, {a: 2}]\n\
+print(rows.map(it.a))\n",
+    )
+    .unwrap();
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run(&[entry.to_str().unwrap()], env, "");
+        assert_eq!(code, Some(0), "env {env:?} stderr: {err}");
+        // Line 3 is the guard that must NOT regress: `it.a` is a projection, not a call.
+        assert_eq!(
+            out.lines().collect::<Vec<_>>(),
+            vec!["[2, 4, 6]", "true", "[1, 2]"],
+            "env {env:?}"
+        );
+    }
+}
+
+/// A `do {}` binding may not reuse a `mut` global's name. The block desugars to
+/// `let … in`, so `n = n + 1` bound a NEW immutable local and discarded it: `bump()`
+/// twice printed `1`, `1`, and the global stayed `0` — exit 0, no diagnostic.
+#[test]
+fn do_binding_may_not_shadow_a_mut_global() {
+    let bad = "mut n = 0\nfn bump() = do {\n  n = n + 1\n  n\n}\nprint(bump())\nprint(bump())\nprint(n)\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (_, err, code) = run_source(bad, env, "do_mut_shadow");
+        assert_eq!(code, Some(1), "env {env:?} stderr: {err}");
+        assert!(err.contains("would shadow it, not update it"), "env {env:?} stderr: {err}");
+    }
+    // What must stay legal: both spellings that are unambiguous about binding.
+    for (src, want, tag) in [
+        // `do {}` over an IMMUTABLE global — shadowing is the documented behaviour.
+        ("n = 5\nfn f() = do {\n  n = 1\n  n + 1\n}\nprint(f(), n)\n", "2 5", "do_imm"),
+        // An explicit `let` over a `mut` global — the author wrote `let`, so they mean bind.
+        ("mut n = 5\nfn f() = let n = 1 in n + 1\nprint(f(), n)\n", "2 5", "let_mut"),
+        // Unrelated bindings in a file that has a mut global.
+        ("mut n = 5\nfn f() = do {\n  a = 1\n  a + n\n}\nprint(f())\n", "6", "unrelated"),
+    ] {
+        let (out, err, code) = run_source(src, &[], tag);
+        assert_eq!(code, Some(0), "{tag} stderr: {err}");
+        assert_eq!(out.trim(), want, "{tag}");
+    }
+}
+
+/// Two different modules that share a basename both bind that name; the LAST import
+/// silently won, so `shared.who()` answered `B` with no diagnostic and reordering the
+/// two import lines changed the program's output.
+#[test]
+fn two_modules_with_the_same_basename_are_rejected() {
+    let dir = std::env::temp_dir().join("helix_modclash");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("a")).unwrap();
+    std::fs::create_dir_all(dir.join("b")).unwrap();
+    std::fs::write(dir.join("a/shared.helix"), "export fn who() = \"A\"\n").unwrap();
+    std::fs::write(dir.join("b/shared.helix"), "export fn who() = \"B\"\n").unwrap();
+
+    let clash = dir.join("clash.helix");
+    std::fs::write(&clash, "import a.shared\nimport b.shared\nprint(shared.who())\n").unwrap();
+    let (_, err, code) = run(&[clash.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "stderr: {err}");
+    assert!(err.contains("already bound to a different module"), "stderr: {err}");
+
+    // Aliasing is the fix the hint names, and it must work.
+    let aliased = dir.join("aliased.helix");
+    std::fs::write(
+        &aliased,
+        "import a.shared as x\nimport b.shared as y\nprint(x.who(), y.who())\n",
+    )
+    .unwrap();
+    let (out, err, code) = run(&[aliased.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "A B");
+
+    // Importing the SAME module twice binds the same thing — still fine.
+    let twice = dir.join("twice.helix");
+    std::fs::write(&twice, "import a.shared\nimport a.shared\nprint(shared.who())\n").unwrap();
+    let (out, err, code) = run(&[twice.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "A");
+}
+
+/// A test file that runs to completion without asserting anything FAILS. Reporting `ok`
+/// is how a whole file of `fn test_*` definitions that nobody calls reads as green — the
+/// worst answer a test runner can give, because it is indistinguishable from real
+/// coverage. `helix test` runs a file top to bottom; it has no collection phase.
+#[test]
+fn helix_test_fails_a_file_that_asserts_nothing() {
+    let dir = std::env::temp_dir().join("helix_vacuous");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // The pytest habit: defined, never called.
+    std::fs::write(
+        dir.join("habit_test.helix"),
+        "fn test_reverse() = assert([1, 2].reverse() == [2, 1], \"reversed\")\n",
+    )
+    .unwrap();
+    let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "stderr: {err}\nout: {out}");
+    assert!(out.contains("without asserting anything"), "out:\n{out}");
+    // The diagnostic names the actual mistake rather than a generic one.
+    assert!(out.contains("nothing calls them"), "out:\n{out}");
+
+    // Calling it passes, and so does asserting at the top level.
+    std::fs::write(
+        dir.join("habit_test.helix"),
+        "fn test_reverse() = assert([1, 2].reverse() == [2, 1], \"reversed\")\ntest_reverse()\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("plain_test.helix"), "assert_eq(1 + 1, 2)\n").unwrap();
+    let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "stderr: {err}\nout: {out}");
+    assert!(out.contains("2 passed"), "out:\n{out}");
+
+    // A real assertion failure is still a failure, not a vacuity report.
+    std::fs::write(dir.join("plain_test.helix"), "assert(1 == 2, \"nope\")\n").unwrap();
+    let (out, _, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "out: {out}");
+    assert!(!out.contains("without asserting anything"), "out:\n{out}");
+}
+
 /// A deep `x => x => ...` lambda chain must hit the parser depth cap with a
 /// clean error — lambda bodies were the one expr() recursion that skipped the
 /// depth counter, so 2000 nestings overflowed the native stack (SIGABRT).

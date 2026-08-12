@@ -307,11 +307,51 @@ impl Loader {
                                 ))
                                 .render(&src, &fname));
                             }
+                            // Two modules exporting the same name, both imported
+                            // selectively, silently resolved to whichever came last.
+                            if let Some((_, prev)) = selected_names.iter().find(|(m, _)| m == n)
+                                && *prev != dep_idx
+                            {
+                                return Err(HelixError::new(
+                                    format!("`{n}` is already imported from another module"),
+                                    *line,
+                                    *col,
+                                )
+                                .hint(format!(
+                                    "two modules cannot supply the same name — import the \
+                                     module itself and qualify the use (`{}.{n}`).",
+                                    segments.join(".")
+                                ))
+                                .render(&src, &fname));
+                            }
                             selected_names.push((n.clone(), dep_idx));
                         }
                     }
                     // Whole module: reached through the alias (`alias.member`).
-                    None => imports.push((alias.clone(), dep_idx)),
+                    None => {
+                        // `import a.shared` + `import b.shared` both bind `shared` — the
+                        // LAST one silently won, so `shared.who()` returned B's answer with
+                        // no diagnostic, and swapping the two import lines changed the
+                        // program's output. An import binds a name like anything else, so a
+                        // collision between two different modules is an error. Importing the
+                        // SAME module twice stays fine: it binds the same thing.
+                        if let Some((_, prev)) = imports.iter().find(|(a, _)| *a == *alias)
+                            && *prev != dep_idx
+                        {
+                            return Err(HelixError::new(
+                                format!("`{alias}` is already bound to a different module"),
+                                *line,
+                                *col,
+                            )
+                            .hint(format!(
+                                "`import a.{alias}` and `import b.{alias}` both bind `{alias}` \
+                                 — alias one of them: `import {} as <name>`.",
+                                segments.join(".")
+                            ))
+                            .render(&src, &fname));
+                        }
+                        imports.push((alias.clone(), dep_idx));
+                    }
                 }
             }
         }

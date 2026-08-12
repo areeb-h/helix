@@ -6,6 +6,14 @@
 
 use super::*;
 
+/// How many assertions this process has executed, counted at the one dispatch point the
+/// tree-walker and the VM share. `helix test` reads it to fail a test file that ran to
+/// completion without asserting anything — a file whose checks all sit inside `test_*`
+/// functions nobody calls used to report `ok`, which is the worst possible answer from a
+/// test runner. Not reset by `helix run`; `cli_test` resets it per file.
+pub static ASSERTIONS_RUN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 impl super::Interp {
     pub(crate) fn call_builtin(
         &mut self,
@@ -18,6 +26,11 @@ impl super::Interp {
         // process authority first. A no-op under the default `Off` mode and for `pure`
         // builtins; logs (audit) or denies (enforce) an ungranted access otherwise.
         crate::capability::gate(name, &args, line, col)?;
+        // Counted before the arm runs, so a FAILING assertion counts too: the file fails
+        // on the raise, and "asserted nothing" must not also be reported about it.
+        if matches!(name, "assert" | "assert_eq" | "assert_close") {
+            ASSERTIONS_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         match name {
             "print" => {
                 // Rich rendering on a terminal (tables, color, elision, grouped

@@ -1725,5 +1725,7 @@ pub(crate) use methods::*;
 mod tests;
 
 mod builtins;
+/// Re-exported for `helix test`, which fails a file that asserted nothing.
+pub(crate) use builtins::ASSERTIONS_RUN;
 
 mod comprehensions;
