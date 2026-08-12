@@ -2846,38 +2846,53 @@ fn infer_mixed_kind(
         // It is kept because the alternative is CONSTRUCTING ill-typed IR and relying on the
         // builder to refuse it, and a builder that panics instead of erroring would breach
         // ADR-0024's never-abort guarantee. Cheaper to never build it.
-        Expr::Call { name, args, .. }
-            if fns.contains(name.as_str()) && user_fns.contains(name.as_str()) =>
-        {
-            if !jit_builtin_arity_ok(name, args.len()) {
-                return None;
-            }
+        // ONE ARM FOR EVERY USER CALL, because two of them could not both be tried.
+        //
+        // This used to be two arms: an i64 one guarded by `fns.contains(name)`, and a mixed
+        // one guarded by `msigs.contains_key(name)` below it, with a comment asserting that
+        // "an all-`Int` function has no mixed form, so the two never compete". THAT WAS
+        // FALSE, and it cost 66x on the shape this JIT exists for:
+        //
+        //     fn f(x: Float) -> Float = x * x            (0..20M).map(i => f(to_float(i)))
+        //     fn f(x: Float) -> Float = x * x * 1.0       the SAME call site
+        //
+        // 1.85s and 0.028s. `fns` means "i64-closed BODY", not "Int parameters" — and
+        // `x * x` is i64-closed, so the first `f` is in BOTH sets. The i64 arm claimed the
+        // call site by name, typed `to_float(i)` as Float, and returned None. Rust match arms
+        // cannot fall through, so the mixed arm twenty lines below was unreachable for
+        // exactly the callee that needed it. Adding a redundant `* 1.0` to the CALLEE — which
+        // does nothing to the call site — pushed `f` out of `fns` and let the mixed arm see
+        // it. That is a two-character difference with a 66x cost and no feedback.
+        //
+        // Merged, the priority is unchanged where it used to apply and defined where it did
+        // not: all-Int arguments to an i64-closed function still take the i64 path first;
+        // anything else gets the mixed specialization if the argument kinds EQUAL the
+        // callee's parameter kinds. That equality is strict on purpose — the specialization
+        // was compiled for exactly those kinds and there is no promoting at the boundary,
+        // the same rule `infer_typed_env` uses for a mixed sibling call.
+        //
+        // Every argument is typed EXACTLY ONCE, into a `Vec`, before anything is decided.
+        // Walking them twice would be fine for `record_cap` (which dedupes by name) but is
+        // not a property worth relying on for `uses_binder` or for whatever capture-order
+        // logic arrives next.
+        Expr::Call { name, args, .. } if user_fns.contains(name.as_str()) => {
+            let mut kinds = Vec::with_capacity(args.len());
             for a in args {
-                if infer_mixed_kind(a, binder, uses_binder, caps, fns, user_fns, msigs)? != NumKind::Int {
+                kinds.push(infer_mixed_kind(a, binder, uses_binder, caps, fns, user_fns, msigs)?);
+            }
+            let all_int = kinds.iter().all(|k| *k == NumKind::Int);
+            if all_int && fns.contains(name.as_str()) {
+                if !jit_builtin_arity_ok(name, args.len()) {
                     return None;
                 }
+                return Some(NumKind::Int);
             }
-            Some(NumKind::Int)
-        }
-        // A user function with a MIXED specialization — the `Float`-parameter callee. Tried
-        // AFTER the i64 arm above (an all-`Int` function has no mixed form, so the two never
-        // compete) and before the builtins, so a user shadow still wins. Argument kinds must
-        // EQUAL the callee's parameter kinds: its specialization was compiled for exactly
-        // those, and there is no promoting at the boundary — the same strict rule
-        // `infer_typed_env` uses for a mixed sibling call. The kernel marshals to the bits
-        // ABI and shares its poison cell, so a NaN-compare or `/0` inside the callee bails
-        // the whole map exactly as it bails a mixed function.
-        Expr::Call { name, args, .. }
-            if user_fns.contains(name.as_str()) && msigs.contains_key(name.as_str()) =>
-        {
-            let (params, ret) = &msigs[name.as_str()];
-            if args.len() != params.len() {
+            // The MIXED specialization — the `Float`-parameter callee. The kernel marshals
+            // to the bits ABI and shares its poison cell, so a NaN-compare or `/0` inside
+            // the callee bails the whole map exactly as it bails a mixed function.
+            let (params, ret) = msigs.get(name.as_str())?;
+            if kinds.len() != params.len() || kinds.iter().zip(params).any(|(k, w)| k != w) {
                 return None;
-            }
-            for (a, &want) in args.iter().zip(params) {
-                if infer_mixed_kind(a, binder, uses_binder, caps, fns, user_fns, msigs)? != want {
-                    return None;
-                }
             }
             Some(*ret)
         }
@@ -6502,26 +6517,56 @@ fn gen_value_typed<'a>(
         // specialization was compiled under, so the result is an `i64` and types as `Int`:
         // the enclosing expression then promotes it at the first `Float` exactly where the
         // interpreter does.
-        Expr::Call { name, args, .. } if cx.fn_ids.contains_key(name.as_str()) => {
-            let fid = cx.fn_ids[name.as_str()];
-            let fref = cx.module.declare_func_in_func(fid, b.func);
-            let argv: Vec<ClValue> = args
-                .iter()
-                .map(|a| gen_value_typed(b, a, cx).0)
-                .collect();
-            let call = b.ins().call(fref, &argv);
-            (b.inst_results(call)[0], NumKind::Int)
-        }
-        // A user function with a MIXED specialization. Its ABI is all-`i64` BIT slots plus a
-        // trailing `*mut i8` poison pointer (see `MixedFn`), so `Float` arguments are
-        // bitcast in and a `Float` result bitcast out. We hand it a stack CELL, then fold
-        // that cell into this kernel's poison accumulator: a NaN compare or `/0` inside the
-        // callee therefore poisons the whole map, and the VM discards the output and
-        // re-runs on bytecode for the exact interpreter error — the same contract as a
-        // rounder leaving i64 range.
-        Expr::Call { name, args, .. } if cx.mixed.sigs.contains_key(name.as_str()) => {
+        // ONE ARM, MERGED IN LOCKSTEP WITH `infer_mixed_kind`'s. These two must decide the
+        // same way for the same call, and until now they could not: both were split into an
+        // i64 arm and a mixed arm, guarded by set membership, and a function can be in BOTH
+        // sets (`fn f(x: Float) -> Float = x * x` has a Float specialization AND an i64-closed
+        // body). The analysis fix admits those calls; if codegen still took its i64 arm first
+        // it would emit an `i64` call with `f64` arguments.
+        //
+        // The selection rule is character-for-character the analysis's: all-Int arguments to a
+        // function with an i64 specialization take the direct call; anything else takes the
+        // mixed one. This file records that admitting a shape the codegen cannot emit is how
+        // this area got reverted three times, which is why both halves are in one commit.
+        Expr::Call { name, args, .. }
+            if cx.fn_ids.contains_key(name.as_str())
+                || cx.mixed.sigs.contains_key(name.as_str()) =>
+        {
+            // Generate every argument once, and observe its kind — the values are identical
+            // either way, only the marshalling differs.
+            let argv: Vec<(ClValue, NumKind)> =
+                args.iter().map(|a| gen_value_typed(b, a, cx)).collect();
+            let all_int = argv.iter().all(|(_, k)| *k == NumKind::Int);
+
+            // A USER function the `i64` specialization compiled. Tried first, so a user
+            // function shadowing a builtin name dispatches to the user's — the same
+            // precedence `gen_value`'s `fn_ids` lookup establishes. The result is an `i64`
+            // and types as `Int`: the enclosing expression promotes it at the first `Float`
+            // exactly where the interpreter does.
+            if all_int && cx.fn_ids.contains_key(name.as_str()) {
+                let fid = cx.fn_ids[name.as_str()];
+                let fref = cx.module.declare_func_in_func(fid, b.func);
+                let vals: Vec<ClValue> = argv.iter().map(|(v, _)| *v).collect();
+                let call = b.ins().call(fref, &vals);
+                return (b.inst_results(call)[0], NumKind::Int);
+            }
+
+            // A user function with a MIXED specialization. Its ABI is all-`i64` BIT slots
+            // plus a trailing `*mut i8` poison pointer (see `MixedFn`), so `Float` arguments
+            // are bitcast in and a `Float` result bitcast out. We hand it a stack CELL, then
+            // fold that cell into this kernel's poison accumulator: a NaN compare or `/0`
+            // inside the callee poisons the whole map, and the VM discards the output and
+            // re-runs on bytecode for the exact interpreter error — the same contract as a
+            // rounder leaving i64 range.
             let (params, ret) = &cx.mixed.sigs[name.as_str()];
             let fref = cx.module.declare_func_in_func(cx.mixed.ids[name.as_str()], b.func);
+            // ORDERING CHANGE, AND IT IS SOUND. The cell used to be zeroed BEFORE the
+            // arguments were generated; now the arguments come first, because their kinds
+            // decide which call this is. There is one `poison_cell` per kernel, so a nested
+            // mixed call inside an argument writes the same cell — but it also folds that
+            // write into `cx.poison` immediately after its own call, before returning here,
+            // so nothing is lost by re-zeroing afterwards.
+            //
             // Zero the cell and read it back through its ADDRESS, not via `stack_store`/
             // `stack_load`: the callee writes through the pointer, which the slot-promotion
             // pass cannot see, so slot-relative accesses can be folded away as
@@ -6530,18 +6575,16 @@ fn gen_value_typed<'a>(
             let cell_ptr = b.ins().stack_addr(I64, cell, 0);
             let zero8 = b.ins().iconst(I8, 0);
             b.ins().store(MemFlags::new(), zero8, cell_ptr, 0);
-            let mut argv: Vec<ClValue> = Vec::with_capacity(args.len() + 1);
-            for (a, &want) in args.iter().zip(params) {
-                let (v, ak) =
-                    gen_value_typed(b, a, cx);
-                debug_assert!(ak == want, "cx.mixed-call arg kind drifted from the callee sig");
-                argv.push(match ak {
-                    NumKind::Int => v,
-                    NumKind::Float => b.ins().bitcast(I64, MemFlags::new(), v),
+            let mut vals: Vec<ClValue> = Vec::with_capacity(args.len() + 1);
+            for ((v, ak), &want) in argv.iter().zip(params) {
+                debug_assert!(*ak == want, "mixed-call arg kind drifted from the callee sig");
+                vals.push(match ak {
+                    NumKind::Int => *v,
+                    NumKind::Float => b.ins().bitcast(I64, MemFlags::new(), *v),
                 });
             }
-            argv.push(cell_ptr);
-            let call = b.ins().call(fref, &argv);
+            vals.push(cell_ptr);
+            let call = b.ins().call(fref, &vals);
             let raw = b.inst_results(call)[0];
             let flag = b.ins().load(I8, MemFlags::new(), cell_ptr, 0);
             let flag64 = b.ins().uextend(I64, flag);

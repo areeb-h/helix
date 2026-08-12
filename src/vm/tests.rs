@@ -4255,6 +4255,66 @@
         assert_eq!(format!("{}", vm_val(src)), "1094600");
     }
 
+    /// A user function with a Float specialization must reach the mixed map kernel **even
+    /// when its body also happens to be i64-closed** — the shape at the bottom of every
+    /// numerics library, and the one that used to be 66x slow for no reason a user could see.
+    ///
+    ///     fn f(x: Float) -> Float = x * x           (0..20M).map(i => f(to_float(i)))   1.85s
+    ///     fn f(x: Float) -> Float = x * x * 1.0     the SAME call site                  0.03s
+    ///
+    /// `fns` means "i64-CLOSED BODY", not "Int parameters", so the first `f` was in both the
+    /// i64 set and the mixed table. Two separate `Expr::Call` arms matched on set membership;
+    /// the i64 one won by position, typed the Float argument, and declined — and Rust match
+    /// arms cannot fall through to the mixed arm below.
+    ///
+    /// THIS ASSERTS THE KERNEL EXISTS, not that the answer is right. The answer was always
+    /// right — the VM computed it — so no output comparison can tell whether this regressed.
+    /// Only asking the JIT what it built can, which is why the two spellings are checked
+    /// against each other rather than against a golden.
+    #[test]
+    fn a_float_specialization_is_reached_even_when_the_body_is_i64_closed() {
+        let built = |src: &str| {
+            let toks = lexer::lex(src).unwrap();
+            let ast = parser::parse(toks).unwrap();
+            let prog = bytecode::compile_with_types(&ast, None).unwrap();
+            let jit = crate::jit::build(
+                &ast,
+                &prog.reduce_loops,
+                &prog.map_kernels,
+                &prog.filter_kernels,
+                &prog.fused_kernels,
+                &prog.scan_loops,
+            );
+            // `map_kernels` is non-empty for both spellings; what differs is whether a MIXED
+            // kernel was emitted for index 0.
+            assert!(!prog.map_kernels.is_empty(), "no map kernel was even requested: {src}");
+            jit.as_ref().and_then(|j| j.map_kernel_mixed(0)).is_some()
+        };
+        // The i64-closed body — the one that used to decline.
+        assert!(
+            built("fn f(x: Float) -> Float = x * x\nprint((0..9).map(i => f(to_float(i))).sum())"),
+            "an i64-closed Float callee did not reach the mixed map kernel"
+        );
+        // The float-bodied twin, which always worked — kept so a future change that breaks
+        // BOTH cannot be mistaken for this test simply being wrong about the first.
+        assert!(
+            built("fn f(x: Float) -> Float = x * x * 1.0\nprint((0..9).map(i => f(to_float(i))).sum())"),
+            "the float-bodied callee stopped reaching the mixed map kernel"
+        );
+        // And the values still agree across all three engines, including where an i64 wrap
+        // is observable — the hazard this area has (see the `F64Proof` work): the interpreter
+        // computes Int OP Int in WRAPPING i64 and promotes only at the first genuine float.
+        for src in [
+            "fn f(x: Float) -> Float = x * x\nprint((0..9).map(i => f(to_float(i))).sum())",
+            "fn f(x) = x * 2\nprint([4611686018427387904].map(i => f(i)))",
+            "fn f(x) = x * x\nprint((0..9).map(i => f(i)).sum())",
+            "fn h(a: Float, b) -> Float = a * to_float(b)\nprint((0..5).map(i => h(to_float(i), i)))",
+        ] {
+            assert_eq!(run_tw(src), run_vm(src), "tw vs vm: {src}");
+            assert_eq!(run_tw(src), run_vm_jit(src), "tw vs jit: {src}");
+        }
+    }
+
     /// Division must never be JIT-compiled: native `fdiv` returns inf on /0,
     /// but the interpreter errors — so a `/`-using function falls back and
     /// division by zero still raises (rather than silently producing inf).
