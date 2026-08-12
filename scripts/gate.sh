@@ -37,10 +37,14 @@ fi
 rc=0
 log() { printf '\n=== %s ===\n' "$1"; }
 
-log "clippy (--all-targets)"
+# `-D warnings`, EXACTLY AS CI RUNS IT. Without it this step reported and moved on, so a
+# change could be green here and red there — which is precisely what happened: threading two
+# parameters into a JIT analysis pushed it to 8 arguments, `too_many_arguments` fired only in
+# CI, and the local gate had said RC=0. A gate that disagrees with the gate is not a gate.
+log "clippy (--all-targets -D warnings)"
 CLOG=$(mktemp)
-cargo clippy --all-targets >"$CLOG" 2>&1 || rc=1
-grep -E "error|warning:" "$CLOG" | tail -8 || true
+cargo clippy --all-targets -- -D warnings >"$CLOG" 2>&1 || rc=1
+grep -E "^error|^warning:" "$CLOG" | tail -8 || true
 tail -1 "$CLOG"
 rm -f "$CLOG"
 
