@@ -891,7 +891,7 @@ pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<
         "upper" | "lower" | "reverse" | "trim" | "replace" => Type::String,
         "take" | "drop" | "repeat" | "ljust" | "rjust" | "center" => Type::String,
         "count" | "length" => Type::Int,
-        "split" => Type::Array(Box::new(Type::String)),
+        "split" | "chars" => Type::Array(Box::new(Type::String)),
         "contains" | "starts_with" | "ends_with" => Type::Bool,
         // FASTQ Phred+33 quality string → per-base integer quality scores.
         "phred" => Type::Array(Box::new(Type::Int)),
@@ -962,19 +962,52 @@ pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Typ
 /// `record_method`). `get` is permissive (Unknown — the field value's type isn't statically
 /// known); `has` is Bool; the enumerators are arrays. Static `rec.field` access is typed the
 /// normal way (this is the escape hatch for runtime-unknown shapes).
-pub(super) fn record_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
+pub(super) fn record_method_type(
+    name: &str,
+    fields: &[(String, Type)],
+    line: usize,
+    col: usize,
+) -> Result<Type, HelixError> {
     Ok(match name {
         "get" => Type::Unknown,
         "has" => Type::Bool,
         "keys" => Type::Array(Box::new(Type::String)),
         "values" => Type::Array(Box::new(Type::Unknown)),
         "items" => Type::Array(Box::new(Type::Unknown)),
+        // The name is a FIELD, not one of the five dynamic-access methods. `r.go(3)` is the
+        // object-API spelling everyone writes first, and the generic help — `get`/`has`/
+        // `keys`/`values`/`items` — names none of the three spellings that actually work.
+        // Point at the one that fits what the field holds. (Mirrors `record_method` in
+        // `interp/methods.rs`, which answers when the receiver's shape is only known at
+        // runtime; this arm is the one users hit, because the checker runs first.)
         other => {
-            return Err(HelixError::new(format!("type Record has no method `{other}`"), line, col)
+            return match fields.iter().find(|(f, _)| f == other) {
+                Some((_, held)) => {
+                    let e = HelixError::new(
+                        format!("`{other}` is a field of this record, not a method"),
+                        line,
+                        col,
+                    );
+                    Err(if matches!(held, Type::Function { .. }) {
+                        e.hint(format!(
+                            "it holds a function, so call it through the field: \
+                             `(rec.{other})(…)` — or bind it first, `f = rec.{other}`, \
+                             then `f(…)`."
+                        ))
+                    } else {
+                        e.hint(format!("read it without parentheses: `rec.{other}`."))
+                    })
+                }
+                None => Err(HelixError::new(
+                    format!("type Record has no method `{other}`"),
+                    line,
+                    col,
+                )
                 .hint(
                     "records have dynamic access `get`/`has`/`keys`/`values`/`items` — or use \
                      `rec.field` directly for a known field.",
-                ));
+                )),
+            };
         }
     })
 }

@@ -12,9 +12,20 @@ any runtime error, yielding a record `{ok, value, error}` (`{ok: true, value, er
 missing}` on success; `{ok: false, value: missing, error: <message>}` on failure).
 This is expression-based and reuses records and `missing`, consistent with the
 language's design, and it recovers from failures without aborting the program.
-Programs that use `try` run on the tree-walker (the bytecode VM does not yet
-implement exception handling). A `Result` + `?` propagation form, as discussed below,
-remains future work.
+
+**`try` does not demote to the tree-walker.** It once did — the VM had no error
+recovery, so a `try` anywhere forced the whole program onto the walker and gave up the
+VM, the JIT and memoization with it. Recovery is now native
+(`Op::TryBegin`/`TryOk`/`TryErr` plus the handler unwind), and the claim that it demotes
+outlived the fix. Measured on a 3M-element reduce that the memoizer declines (its body
+reads a `mut` global), min of 3, output asserted each run: 0.009 s without `try`, 0.009 s
+with it, against 0.252 s forced onto the walker — the same 28x, present either way. The
+correction matters because a library author reading the old sentence would avoid the only
+error-handling primitive the language has.
+
+`raise(message[, help])` is the other half: `try` catches a failure, `raise` reports one,
+in the library's own words and with a `help:` line (see `docs/testing.md`). A `Result` +
+`?` propagation form, as discussed below, remains future work.
 
 ## Context
 

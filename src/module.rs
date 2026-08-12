@@ -426,6 +426,7 @@ impl Loader {
 
 /// A module function's call signature, as the loader needs it to resolve a qualified call:
 /// parameter names (to place named arguments) and per-parameter defaults (to fill omissions).
+#[derive(Clone)]
 struct FnSig {
     params: Vec<String>,
     defaults: Vec<Option<Expr>>,
@@ -433,17 +434,41 @@ struct FnSig {
 
 /// The exported-function signatures of a module, keyed by name. Only `export`ed functions are
 /// reachable as `alias.member`, so only those need resolving.
-fn module_fn_sigs(m: &Module) -> HashMap<String, FnSig> {
+///
+/// A FACADE RE-EXPORT counts as one. `export greet = inner.greet` binds the function *value*,
+/// so its signature lived only in `inner` and everything the signature carries — defaults and
+/// named arguments — was lost exactly one hop out:
+///
+///     export greet = inner.greet          # `facade.greet("hi", loud: true)` was an error
+///     export fn greet(name, loud: Bool = false) = inner.greet(name, loud: loud)   # worked
+///
+/// A facade is the ordinary way to give a package one front door, and the wrapper form is
+/// pure duplication that silently rots when the target's parameters change. Following the
+/// alias makes the re-export indistinguishable from the original at the call site.
+/// Terminates because the loader rejects import cycles and modules load dependency-first.
+fn module_fn_sigs(m: &Module, modules: &[Module]) -> HashMap<String, FnSig> {
     let mut sigs = HashMap::new();
     for s in &m.stmts {
-        if let Stmt::Func { name, params, defaults, exported: true, .. } = s {
-            sigs.insert(
-                name.clone(),
-                FnSig {
-                    params: params.iter().map(|(n, _)| n.clone()).collect(),
-                    defaults: defaults.clone(),
-                },
-            );
+        match s {
+            Stmt::Func { name, params, defaults, exported: true, .. } => {
+                sigs.insert(
+                    name.clone(),
+                    FnSig {
+                        params: params.iter().map(|(n, _)| n.clone()).collect(),
+                        defaults: defaults.clone(),
+                    },
+                );
+            }
+            Stmt::Assign { name, exported: true, value, .. } => {
+                if let Expr::Field { recv, name: member, .. } = value
+                    && let Expr::Ident { name: alias, .. } = &**recv
+                    && let Some((_, dep)) = m.imports.iter().find(|(a, _)| a == alias)
+                    && let Some(sig) = module_fn_sigs(&modules[*dep], modules).get(member)
+                {
+                    sigs.insert(name.clone(), sig.clone());
+                }
+            }
+            _ => {}
         }
     }
     sigs
@@ -523,7 +548,7 @@ fn rewrite_module(
         import_sigs: m
             .imports
             .iter()
-            .map(|(_, dep)| (format!("m{dep}"), module_fn_sigs(&modules[*dep])))
+            .map(|(_, dep)| (format!("m{dep}"), module_fn_sigs(&modules[*dep], modules)))
             .collect(),
         selected: m
             .selected

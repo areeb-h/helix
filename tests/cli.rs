@@ -3216,6 +3216,93 @@ r = try go(1)\nprint(r.ok, r.error)\n";
     assert_eq!(out.trim(), "3");
 }
 
+/// Four day-one paper cuts, each of which sent a new user down a wrong path.
+#[test]
+fn day_one_paper_cuts_point_at_the_spelling_that_works() {
+    // (a) `r.go(3)` — the object-API spelling everyone writes first. The old error named
+    // `get`/`has`/`keys`/`values`/`items`, none of which is the fix.
+    let rec = "r = {go: (n => n * 2), size: 3}\n";
+    let (_, err, code) = run_source(&format!("{rec}print(r.go(3))\n"), &[], "rec_fn_field");
+    assert_eq!(code, Some(1), "stderr: {err}");
+    assert!(err.contains("`go` is a field of this record, not a method"), "{err}");
+    assert!(err.contains("(rec.go)(…)"), "the help must name a working spelling: {err}");
+    // A non-function field says the other true thing: drop the parentheses.
+    let (_, err, code) = run_source(&format!("{rec}print(r.size())\n"), &[], "rec_val_field");
+    assert_eq!(code, Some(1), "stderr: {err}");
+    assert!(err.contains("read it without parentheses"), "{err}");
+    // And the three spellings that work still do.
+    let (out, err, code) =
+        run_source(&format!("{rec}g = r.go\nprint((r.go)(3), g(3), r[\"go\"](3))\n"), &[], "rec_ok");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "6 6 6");
+
+    // (b) `mut` in a body said "unexpected `mut`", which reads as "not supported, give up".
+    // The thing the author wants already works, spelled without the keyword.
+    for (src, tag) in [
+        ("fn f() = do {\n  mut n = 0\n  n + 1\n}\nprint(f())\n", "do_mut"),
+        ("fn f() = let mut n = 1 in n\nprint(f())\n", "let_mut"),
+    ] {
+        let (_, err, code) = run_source(src, &[], tag);
+        assert_eq!(code, Some(1), "{tag} stderr: {err}");
+        assert!(err.contains("`mut` declares a top-level binding"), "{tag}: {err}");
+        assert!(err.contains("rebinds by name"), "{tag}: {err}");
+    }
+    // The idiom the help names must actually work.
+    let (out, err, code) = run_source(
+        "fn f() = do {\n  n = 0\n  n = n + 1\n  n = n * 10\n  n\n}\nprint(f())\n",
+        &[],
+        "do_rebind",
+    );
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "10");
+
+    // (c) `chars()`. The old linear-time spelling was `s.replace("", "\t").split("\t")` —
+    // undiscoverable, and WRONG: it yields an empty string at each end.
+    let (out, err, code) = run_source(
+        "print(\"hello\".chars())\nprint(\"héllo\".chars().count())\n\
+print(\"hello\".chars().filter(it != \"l\").count())\n",
+        &[],
+        "chars",
+    );
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.lines().collect::<Vec<_>>(), vec!["[\"h\", \"e\", \"l\", \"l\", \"o\"]", "5", "3"]);
+}
+
+/// A facade re-export keeps the target's defaults and named arguments. `export greet =
+/// inner.greet` binds the function VALUE, so its signature lived only in `inner` and was
+/// lost exactly one hop out — making a package's front door either impossible or a
+/// hand-copied wrapper that rots when the target's parameters change.
+#[test]
+fn a_facade_re_export_keeps_defaults_and_named_arguments() {
+    let dir = std::env::temp_dir().join("helix_facade");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("inner.helix"), "export fn scale(x, by: Int = 2) = x * by\n").unwrap();
+    std::fs::write(dir.join("facade.helix"), "import inner\nexport scale = inner.scale\n").unwrap();
+    // A facade OF a facade, to prove the alias is followed transitively.
+    std::fs::write(dir.join("outer.helix"), "import facade\nexport scale = facade.scale\n").unwrap();
+    // A re-exported non-function value keeps working.
+    std::fs::write(dir.join("konst.helix"), "export LIMIT = 42\n").unwrap();
+    std::fs::write(dir.join("kf.helix"), "import konst\nexport LIMIT = konst.LIMIT\n").unwrap();
+
+    for (module, want) in [("facade", "10\n50"), ("outer", "10\n50")] {
+        let entry = dir.join(format!("use_{module}.helix"));
+        std::fs::write(
+            &entry,
+            format!("import {module}\nprint({module}.scale(5))\nprint({module}.scale(5, by: 10))\n"),
+        )
+        .unwrap();
+        let (out, err, code) = run(&[entry.to_str().unwrap()], &[], "");
+        assert_eq!(code, Some(0), "{module} stderr: {err}");
+        assert_eq!(out.trim().replace("\r\n", "\n"), want, "{module}");
+    }
+    let entry = dir.join("use_k.helix");
+    std::fs::write(&entry, "import kf\nprint(kf.LIMIT)\n").unwrap();
+    let (out, err, code) = run(&[entry.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "42");
+}
+
 /// A deep `x => x => ...` lambda chain must hit the parser depth cap with a
 /// clean error — lambda bodies were the one expr() recursion that skipped the
 /// depth counter, so 2000 nestings overflowed the native stack (SIGABRT).

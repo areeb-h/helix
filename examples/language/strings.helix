@@ -58,3 +58,17 @@ print("present = {age ?? 0}")
 fn greet(who) = "Hi {who}!"
 print(greet("Helix"))
 print([1, 2, 3].map(it * it).map("sq={it}"))
+
+## `chars()` turns a string into an array of one-character strings, so the whole array
+## vocabulary — `map`, `filter`, `reduce`, `enumerate` — applies to text:
+##
+##     >>> "hello".chars()
+##     ["h", "e", "l", "l", "o"]
+##     >>> "hello".chars().filter(it != "l").count()
+##     3
+##
+## It counts Unicode scalars, the same unit as `count`, `reverse`, `take` and `drop`:
+##
+##     >>> "héllo".chars().count()
+##     5
+print("chars:", "hello".chars())

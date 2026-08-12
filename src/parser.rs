@@ -504,6 +504,20 @@ const TYPE_NAMES: &[&str] = &[
 /// One user-written `do {}` binding: its name and where it was written.
 type DoBinding = (String, usize, usize);
 
+/// `mut` written inside a body, where it is not a statement. The bare "unexpected `mut`"
+/// this used to produce read as "mutability is unsupported here, give up"; in fact the
+/// thing the author wants already works, spelled without the keyword — a `do {}` block
+/// rebinds a name by shadowing, line after line. Naming that is the whole fix.
+fn mut_inside_a_body(line: usize, col: usize) -> HelixError {
+    HelixError::new("`mut` declares a top-level binding, so it cannot appear here", line, col)
+        .hint(
+            "a body rebinds by name, with no keyword — `do { n = 0` / `n = n + 1` / `n }` \
+             evaluates to 1, each line shadowing the last. For state that must OUTLIVE the \
+             call, declare `mut` at the top level; to carry state across a sequence, thread \
+             it with `reduce`.",
+        )
+}
+
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
     let mut p = Parser {
         toks: tokens,
@@ -1950,6 +1964,10 @@ impl Parser {
         self.skip_newlines();
         let mut bindings = Vec::new();
         loop {
+            if matches!(self.peek(), Tok::Mut) {
+                let (ml, mc) = self.pos();
+                return Err(mut_inside_a_body(ml, mc));
+            }
             // A binding is `IDENT = expr` — a single `=`, never `==`. Anything else
             // is the block's final result expression.
             let binding_name = match self.peek().clone() {
@@ -2214,6 +2232,10 @@ impl Parser {
                 self.advance();
                 let mut bindings = Vec::new();
                 loop {
+                    if matches!(self.peek(), Tok::Mut) {
+                        let (ml, mc) = self.pos();
+                        return Err(mut_inside_a_body(ml, mc));
+                    }
                     let name = self.ident_name("as a `let` binding")?;
                     self.eat(&Tok::Eq, "in a `let` binding")
                         .map_err(|e| e.hint("`let` looks like `let a = 1, b = 2 in a + b`."))?;

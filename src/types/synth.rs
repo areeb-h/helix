@@ -319,9 +319,10 @@ impl super::Checker {
             }
             // Records get dynamic-access methods (`get`/`has`/`keys`/…) on top of static
             // `rec.field` access — the escape hatch for runtime-unknown shapes (parsed JSON).
-            Type::Record(_) => {
+            Type::Record(fields) => {
+                let fields = fields.clone();
                 self.synth_simple_args(args)?;
-                record_method_type(name, line, col)
+                record_method_type(name, &fields, line, col)
             }
             // A scalar receiver (Int/Float/Bool/…) — no method table at all. This is
             // where `(-1).abs()` lands, so cross the namespace and say that `abs` is

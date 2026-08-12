@@ -577,13 +577,38 @@ fn record_method(
                     .collect(),
             ))
         }
-        _ => Err(unknown_method(
-            "Record",
-            name,
-            &crate::registry::methods_of(crate::registry::RECORD_METHODS),
-            line,
-            col,
-        )),
+        // The name is a FIELD of this record, not one of the five dynamic-access methods.
+        // The generic "no method" help (`get`/`has`/`keys`/`values`/`items`) is useless
+        // here and actively misleading: none of them is what the author wanted. The
+        // object-API spelling `r.go(3)` is what everyone writes first, and every working
+        // alternative — `(r.go)(3)`, `f = r.go`, `r["go"](3)` — went unmentioned.
+        _ => match fields.iter().find(|(s, _)| s.as_str() == name) {
+            Some((_, held)) => {
+                let e = HelixError::new(
+                    format!("`{name}` is a field of this record, not a method"),
+                    line,
+                    col,
+                );
+                Err(if held.type_name() == "Function" {
+                    e.hint(format!(
+                        "it holds a function, so call it through the field: `(rec.{name})(…)` \
+                         — or bind it first, `f = rec.{name}`, then `f(…)`."
+                    ))
+                } else {
+                    e.hint(format!(
+                        "read it without parentheses: `rec.{name}` (it holds {}).",
+                        crate::value::with_article(held.type_name())
+                    ))
+                })
+            }
+            None => Err(unknown_method(
+                "Record",
+                name,
+                &crate::registry::methods_of(crate::registry::RECORD_METHODS),
+                line,
+                col,
+            )),
+        },
     }
 }
 
@@ -2233,6 +2258,22 @@ fn string_method(
         "count" | "length" => {
             arity(0)?;
             Ok(Value::Int(s.chars().count() as i64))
+        }
+        // `chars()` — the string as an array of one-character strings, so the whole array
+        // vocabulary (`map`/`filter`/`reduce`/`enumerate`) applies to text. Without it the
+        // linear-time spelling was `s.replace("", "\t").split("\t")`, which is both
+        // undiscoverable and WRONG — it yields `["", "a", "b", "c", ""]`, with an empty
+        // string at each end. The obvious `s[i]` walk is quadratic (each index counts
+        // scalars from the start), so the only correct spelling was also the hidden one.
+        //
+        // Unicode SCALARS, matching `count`/`length`/`reverse`/`take`/`drop`, which all
+        // measure the same unit. Not bytes, and not grapheme clusters (which need a table
+        // and would disagree with every other method here).
+        "chars" => {
+            arity(0)?;
+            Ok(Value::array(
+                s.chars().map(|c| Value::Str(Rc::new(c.to_string()))).collect::<Vec<_>>(),
+            ))
         }
         "reverse" => {
             arity(0)?;
