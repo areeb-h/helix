@@ -92,6 +92,57 @@ const ALIASES: &[(&str, Target)] = &[
     ("disp", Target::Name("print")),
     // `console.log(...)` parses as a method on the bare name `console`.
     ("console", Target::Name("print")),
+    ("puts", Target::Name("print")),
+    ("fprintf", Target::Name("print")),
+    ("sprintf", Target::Text(
+        "Helix formats by interpolating, with an optional spec: `\"{x:.2f}\"`.",
+    )),
+    // The rest of the foreign-builtin long tail, from an adversarial sweep of 1438 programs
+    // written the way a newcomer would write them. Each of these was reaching NO help at all
+    // — the edit-distance cap correctly refuses to guess `paste` -> `parse`, and refusing is
+    // right, but an exact answer is better than either.
+    ("parseint", Target::Name("to_int")),
+    ("parsefloat", Target::Name("to_float")),
+    ("string", Target::Text(
+        "Helix converts to text by interpolating: `\"{x}\"` (or `x.to_json()` for data).",
+    )),
+    ("toupper", Target::Method("upper")),
+    ("tolower", Target::Method("lower")),
+    ("nchar", Target::Method("length")),
+    ("numel", Target::Method("length")),
+    ("size", Target::Method("length")),
+    ("count", Target::Method("count")),
+    ("seq", Target::Text(
+        "a sequence is `range(start, stop)` or the literal `(0..n)`; step with `range(a, b, step)`.",
+    )),
+    ("paste", Target::Text(
+        "join text by interpolating — `\"{a}{b}\"` — or `xs.join(\", \")` for a list.",
+    )),
+    ("paste0", Target::Text(
+        "join text by interpolating — `\"{a}{b}\"` — or `xs.join(\"\")` for a list.",
+    )),
+    ("nan", Target::Text(
+        "Helix has no `NaN` literal: produce one with `sqrt(0.0 - 1.0)`, and test with `is_nan(x)`.",
+    )),
+    ("inf", Target::Name("inf")),
+    // Namespace objects. `Math.abs(-1)`, `JSON.parse(s)`, `fmt.Println(1)` and `np.array(x)`
+    // all parse as a method on a bare name that does not exist, so the name is what fails.
+    ("math", Target::Text(
+        "Helix's math is free functions, not a namespace: `sqrt(x)`, `abs(x)`, `exp(x)`, `log(x)`.",
+    )),
+    ("json", Target::Text(
+        "JSON is `parse_json(text)` and `value.to_json()` — there is no `JSON` object.",
+    )),
+    ("fmt", Target::Name("print")),
+    ("np", Target::Text(
+        "there is no NumPy to import — arrays and `tensor(...)` are built in, and `map`/`reduce` are methods.",
+    )),
+    ("pd", Target::Text(
+        "there is no pandas to import — `read_csv(path)` returns a DataFrame directly.",
+    )),
+    ("dplyr", Target::Text(
+        "DataFrame verbs are methods: `df.where(@a > 1).select(@b).group(@c).mean(@d)`.",
+    )),
 ];
 
 /// A natural receiver name per type, so a cross-namespace hint reads like code a

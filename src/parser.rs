@@ -73,6 +73,86 @@ fn parse_expression(src: &str, depth: usize, sigs: &HashMap<String, FnSig>) -> R
 /// `let $s = recv in $s.map(key).argsort().map($si => $s[$si])`, reusing the tested
 /// map/argsort/index path so both engines handle it identically (parity by
 /// construction). `$`-prefixed temporaries are unlexable, so they can't collide.
+/// The help for "expected end of line after statement" — named for what the user was
+/// *attempting*, not for what the parser was expecting.
+///
+/// It used to be one canned line: ``each statement goes on its own line; Helix has no `;` ``.
+/// An adversarial sweep of 1438 programs written the way a newcomer would type them found
+/// **109 of them getting that hint on a source containing no semicolon at all** — the single
+/// largest diagnostic defect in the language. `for x in xs:` was told about semicolons.
+///
+/// A WRONG HINT IS WORSE THAN NO HINT: it sends the reader to look for a problem that is not
+/// there, and it costs them the one thing the compiler actually knew. So the semicolon line
+/// is now reserved for a source that HAS a semicolon, and everything else is answered by what
+/// it opened with.
+///
+/// `for`, `while`, `def`, `function`, `lambda`, `return`, `elif`, `switch`, `case`, `end`,
+/// `var` and `const` are NOT keywords in Helix — they lex as ordinary identifiers, which is
+/// exactly why the parse dies one token later with no idea what was meant. Reserving them
+/// would give a better message at the cost of breaking any program that uses one as a
+/// variable name; matching on them here costs nothing and breaks nothing.
+fn statement_boundary_hint(opened_with: &Tok, before: &Tok, found: &Tok) -> &'static str {
+    // The foreign word can be what the statement OPENED with (`for x in xs:`) or the last
+    // thing that parsed BEFORE the failure — `f = lambda x: …` opens with `f`, and
+    // `fn f(x) = return x` opens with `fn`, so in both the word sits in the middle.
+    for tok in [opened_with, before] {
+        if let Tok::Ident(name) = tok {
+            match name.as_str() {
+            "for" => {
+                return "Helix has no `for` loop — iterate with `xs.map(f)`, `xs.filter(p)`, \
+                        `xs.reduce(init, f)`, or a tail-recursive function (which the JIT \
+                        compiles to a real loop)."
+            }
+            "while" => {
+                return "Helix has no `while` — a tail-recursive function IS the loop, and it \
+                        runs in constant space: `fn go(n, acc) = if n == 0 then acc else go(n - 1, acc + n)`."
+            }
+            "def" | "function" | "func" => {
+                return "define a function with `fn name(a, b) = expression` — one expression, \
+                        no braces, no `return`."
+            }
+            "lambda" => return "a lambda is `x => x + 1`; pass it directly, e.g. `xs.map(x => x + 1)`.",
+            "return" => {
+                return "a function body is a single expression, so there is nothing to return \
+                        from: `fn f(x) = x * 2`."
+            }
+            "elif" => return "write `else if`, and remember `if a then b else c` is an EXPRESSION.",
+            "switch" | "case" => {
+                return "use `match x { 0 => \"zero\", _ => \"other\" }` — every arm yields a value."
+            }
+            "end" | "endif" | "endfor" => {
+                return "blocks are delimited by expression structure, not by `end` — there is \
+                        nothing to close."
+            }
+            "var" | "const" | "let" => {
+                return "a binding is just `name = value`; add `mut` to make one reassignable."
+            }
+            // `f"…"` — an f-string. The `f` parses as a name, then the string is the surprise.
+            "f" | "rf" | "fr" if matches!(found, Tok::InterpStr(_) | Tok::Str(_)) => {
+                return "Helix strings already interpolate — drop the `f`: `\"v={x}\"`."
+            }
+                _ => {}
+            }
+        }
+    }
+    // `x := 1` — Go's short declaration. The `x` parses as an expression and the `:` is the
+    // surprise, so the statement neither opens nor ends with anything foreign-looking.
+    if matches!(found, Tok::Colon) {
+        return "a binding is just `name = value`; Helix has no `:=`, and `:` is only for \
+                record fields and format specs.";
+    }
+    // `(int) 3.5`, `v = (float) x` — a C-style cast: a `)` immediately before a value.
+    if matches!(before, Tok::RParen)
+        && matches!(found, Tok::Int(_) | Tok::Float(_) | Tok::Ident(_) | Tok::Str(_))
+    {
+        return "Helix has no C-style casts — convert with `to_int(x)`, `to_float(x)` or `to_str(x)`.";
+    }
+    if matches!(found, Tok::InterpStr(_)) {
+        return "Helix strings already interpolate — write `\"v={x}\"` with no prefix.";
+    }
+    "each statement goes on its own line; Helix has no `;`."
+}
+
 fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Expr, HelixError> {
     if args.len() != 1 {
         return Err(HelixError::new(
@@ -471,6 +551,11 @@ impl Parser {
         let mut stmts = Vec::new();
         self.skip_newlines();
         while !self.at_end() {
+            // What the statement STARTED with, kept for the diagnostic below. `for`, `while`,
+            // `def`, `lambda` and `return` are not keywords here — they lex as ordinary
+            // identifiers — so by the time the parse fails, the only trace of what the user
+            // was actually attempting is this token.
+            let opened_with = self.peek().clone();
             let s = self.statement()?;
             stmts.push(s);
             if self.at_end() {
@@ -481,15 +566,18 @@ impl Parser {
                 self.skip_newlines();
             } else {
                 let (l, c) = self.pos();
+                let found = self.peek().clone();
+                // The token JUST BEFORE the failure matters as much as the one the statement
+                // opened with: `f = lambda x: …` opens with `f`, and `fn f(x) = return x`
+                // opens with `fn` — in both, the foreign word sits in the middle and is the
+                // last thing that parsed.
+                let before = self.toks[self.pos.saturating_sub(1)].tok.clone();
                 return Err(HelixError::new(
-                    format!(
-                        "expected end of line after statement, found {}",
-                        self.peek().describe()
-                    ),
+                    format!("expected end of line after statement, found {}", found.describe()),
                     l,
                     c,
                 )
-                .hint("each statement goes on its own line; Helix has no `;`."));
+                .hint(statement_boundary_hint(&opened_with, &before, &found)));
             }
         }
         Ok(stmts)
@@ -2143,6 +2231,24 @@ impl Parser {
                             break;
                         }
                     }
+                }
+                // A LIST COMPREHENSION is the shape that lands here: `[x * 2 for x in xs]`
+                // parses `x * 2`, then finds `for` where a `,` or `]` belongs. It is the one
+                // Python habit with an exact Helix translation, so say it rather than
+                // reporting a bracket.
+                if let Tok::Ident(w) = self.peek()
+                    && matches!(w.as_str(), "for" | "if")
+                {
+                    let (l, c) = self.pos();
+                    return Err(HelixError::new(
+                        format!("expected `]` to close the array, found `{w}`"),
+                        l,
+                        c,
+                    )
+                    .hint(
+                        "Helix has no list comprehension — `[f(x) for x in xs]` is `xs.map(x => f(x))`, \
+                         and a trailing `if` is `.filter(...)` before it.",
+                    ));
                 }
                 self.eat(&Tok::RBracket, "to close the array")?;
                 Ok(Expr::Array(elems))

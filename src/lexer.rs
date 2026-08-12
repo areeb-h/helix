@@ -80,9 +80,30 @@ pub fn lex_trivia(src: &str) -> Result<Vec<Token>, HelixError> {
         let start_i = i;
         let pushed_from = raw.len();
         match c {
-            ' ' | '\t' | '\r' => {
+            ' ' | '\t' => {
                 i += 1;
                 col += 1;
+            }
+            // A CARRIAGE RETURN ENDS A LINE. In `\r\n` it is ordinary whitespace and the
+            // `\n` does the work; ALONE it is a line ending in its own right — classic Mac
+            // files, and anything that has been through a mangled transfer.
+            //
+            // Treating a lone `\r` as plain whitespace, which is what happened before, makes
+            // the entire file ONE line: `fn f(x) = x * 2\rprint(f(3))` died with "expected
+            // end of line after statement, found `print`" and a caret pointing into a line
+            // that, as far as the user's editor was concerned, had ended. The adversarial
+            // sweep found 30 programs in that state, all with a diagnostic about a problem
+            // that was not there.
+            '\r' => {
+                i += 1;
+                if i < n && chars[i] == '\n' {
+                    // Let the `\n` arm below emit the newline and advance the line counter.
+                    col += 1;
+                } else {
+                    push!(Tok::Newline, start_col);
+                    line += 1;
+                    col = 1;
+                }
             }
             '\n' => {
                 push!(Tok::Newline, start_col);
@@ -373,7 +394,33 @@ pub fn lex_trivia(src: &str) -> Result<Vec<Token>, HelixError> {
             other => {
                 let mut err =
                     HelixError::new(format!("unexpected character `{}`", other), line, col);
-                if !other.is_ascii() {
+                // The characters a newcomer actually types, each answered by what it MEANS
+                // where they learned it. An adversarial sweep of 1438 programs written the
+                // way someone who does not know Helix would write them left 45 of these with
+                // no help at all — and "unexpected character `` ` ``" tells a JavaScript user
+                // nothing about template literals.
+                let foreign = match other {
+                    '`' => Some(
+                        "Helix has no template literals — an ordinary string already interpolates: `\"v={x}\"`.",
+                    ),
+                    '$' => Some(
+                        "Helix has no `$` sigil — a name is just a name, and a string interpolates with `{x}`.",
+                    ),
+                    '&' if false => None, // `&` is a real operator; listed here only to say so
+                    '\\' => Some(
+                        "a backslash outside a string is not an operator — for a literal one, use a raw `\"\"\"…\"\"\"` string.",
+                    ),
+                    '?' => Some("did you mean `??` (use a default when a value is `missing`)?"),
+                    '!' => Some("negation is `not x`, and inequality is `!=`."),
+                    '~' => Some("Helix has no `~`; bitwise NOT is `x ^ -1`, and pattern matching is `match`."),
+                    '{' => Some(
+                        "a record literal is `{name: value}` and needs a receiver; a bare block is not a statement.",
+                    ),
+                    _ => None,
+                };
+                if let Some(h) = foreign {
+                    err = err.hint(h);
+                } else if !other.is_ascii() {
                     // Non-ASCII is fine inside strings, comments, and identifiers
                     // (identifiers are Unicode-alphabetic: `π = 3.14` lexes) — only
                     // OPERATORS are ASCII. (A common cause is an editor/shell

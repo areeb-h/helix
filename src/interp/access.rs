@@ -427,10 +427,24 @@ pub(crate) fn eval_index(recv: &Value, idx: &Value, line: usize, col: usize) -> 
             Ok(Value::Str(Rc::new(ch.to_string())))
         }
         Value::Tensor(t) => tensor::index_first(t, i, line, col),
-        other => Err(HelixError::new(
-            format!("a value of type {} cannot be indexed", other.type_name()),
-            line,
-            col,
-        )),
+        other => {
+            let err = HelixError::new(
+                format!("a value of type {} cannot be indexed", other.type_name()),
+                line,
+                col,
+            );
+            // `df[0]` is the single most common thing a pandas user types, and it was the
+            // largest no-help shape in the adversarial sweep. A frame is columnar and lazy —
+            // there is no row to hand back — so name the two verbs that do what was meant.
+            Err(match other {
+                Value::DataFrame(_) => err.hint(
+                    "a DataFrame is columnar and lazy — take rows with `df.head(n)` and a column with `df.column(\"name\")`.",
+                ),
+                Value::Record(_) => {
+                    err.hint("a record is indexed by FIELD NAME: `r.name`, not `r[0]`.")
+                }
+                _ => err,
+            })
+        }
     }
 }

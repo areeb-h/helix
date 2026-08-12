@@ -731,11 +731,22 @@ impl Checker {
                     Type::Record(_) => Type::Unknown,
                     Type::Unknown | Type::Missing | Type::Tensor => Type::Unknown,
                     other => {
-                        return Err(HelixError::new(
+                        let err = HelixError::new(
                             format!("a value of type {} cannot be indexed", other),
                             *line,
                             *col,
-                        ))
+                        );
+                        // `df[0]` is the first thing a pandas user types, and it was the
+                        // largest single no-help shape in the adversarial sweep. A frame is
+                        // columnar and lazy — there is no row sitting there to hand back —
+                        // so name the two verbs that do what was meant.
+                        return Err(match other {
+                            Type::DataFrame => err.hint(
+                                "a DataFrame is columnar and lazy — take rows with `df.head(n)` \
+                                 and a column with `df.column(\"name\")`.",
+                            ),
+                            _ => err,
+                        });
                     }
                 })
             }

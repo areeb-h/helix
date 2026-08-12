@@ -1005,6 +1005,81 @@ fn count_cannot_answer_for_a_csv_it_cannot_read() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The foreign-syntax diagnostics: every one names what the user was ATTEMPTING.
+///
+/// Before this, all of these landed on one canned line — ``each statement goes on its own
+/// line; Helix has no `;` `` — on sources containing no semicolon. An adversarial sweep of
+/// 1438 newcomer programs found **109 of them** in that state, which made it the largest
+/// diagnostic defect in the language. A wrong hint is worse than no hint: it sends the reader
+/// looking for a problem that is not there and costs them the one thing the compiler knew.
+///
+/// `for`, `while`, `def`, `lambda`, `return` and the rest are NOT keywords here — they lex as
+/// ordinary identifiers, which is exactly why the parse dies a token later with no idea what
+/// was meant. Reserving them would give a better message at the cost of breaking any program
+/// that uses one as a variable name.
+#[test]
+fn foreign_syntax_gets_the_hint_it_actually_needs() {
+    // (program, a phrase the help must contain)
+    let cases = [
+        ("xs = [1, 2, 3]\nfor x in xs:\n    print(x)", "no `for` loop"),
+        ("i = 0\nwhile i < 3:\n    print(i)", "no `while`"),
+        ("def f(x):\n    return x + 1", "fn name(a, b) = expression"),
+        ("f = lambda x: x + 1", "a lambda is `x => x + 1`"),
+        ("fn f(x) = return x", "nothing to return"),
+        ("switch x {\n  case 1: print(1)\n}", "match x {"),
+        ("var x = 1", "add `mut`"),
+        ("const y = 2", "add `mut`"),
+        ("x := 1\nprint(x)", "no `:=`"),
+        ("v = f\"v={1}\"\nprint(v)", "already interpolate"),
+        ("v = (int) 3.5\nprint(v)", "no C-style casts"),
+        ("v = [x * 2 for x in [1, 2]]\nprint(v)", "no list comprehension"),
+        ("v = `hi`\nprint(v)", "no template literals"),
+        ("v = $x\nprint(v)", "no `$` sigil"),
+    ];
+    for (src, want) in cases {
+        let (_, err, code) = run_source(src, &[], &format!("foreign_{}", want.len()));
+        assert_eq!(code, Some(1), "should fail: {src:?}\nstderr: {err}");
+        assert!(
+            err.contains(want),
+            "for {src:?}\n  expected the help to mention {want:?}\n  got: {err}"
+        );
+        // …and it must NOT get the canned semicolon line, since none of these has a `;`.
+        assert!(
+            !err.contains("Helix has no `;`"),
+            "canned semicolon hint on a source with no semicolon: {src:?}\n{err}"
+        );
+    }
+    // The semicolon hint is still exactly right for a source that HAS one.
+    let (_, err, _) = run_source("x = 1; y = 2\n", &[], "foreign_semi");
+    assert!(err.contains("Helix has no `;`"), "{err}");
+}
+
+/// A lone `\r` ends a line. Classic-Mac files, and anything that has been through a mangled
+/// transfer, used to collapse into ONE line — so `fn f(x) = x * 2\rprint(f(3))` died with
+/// "expected end of line after statement, found `print`" and a caret pointing into a line
+/// that, in the user's editor, had ended. Thirty programs in the adversarial sweep were in
+/// that state, every one with a diagnostic about a problem that did not exist.
+#[test]
+fn a_lone_carriage_return_ends_a_line() {
+    let dir = std::env::temp_dir().join("helix_cr_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, bytes, want) in [
+        ("cr.helix", "fn f(x) = x * 2\rprint(f(3))\r", "6"),
+        ("crlf.helix", "x = 1\r\ny = 2\r\nprint(x + y)\r\n", "3"),
+        ("lf.helix", "x = 1\ny = 2\nprint(x + y)\n", "3"),
+        // Mixed, because a half-converted file is the realistic case.
+        ("mixed.helix", "x = 1\ry = 2\r\nprint(x + y)\n", "3"),
+    ] {
+        let p = dir.join(name);
+        std::fs::write(&p, bytes).unwrap();
+        let (out, err, code) = run(&[p.to_str().unwrap()], &[], "");
+        assert_eq!(code, Some(0), "{name}: stderr: {err}");
+        assert_eq!(out.trim(), want, "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn module_program_runs_and_matches_engines() {
     // The committed multi-file example: shapes.helix imports geometry.helix.
