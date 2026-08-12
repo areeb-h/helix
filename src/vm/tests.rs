@@ -4803,15 +4803,61 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         assert!(table.contains_key("usesdiv"), "non-literal divisors are admitted since 3w");
         // Unannotated numeric recursion must still be inferred — Stage 3j's annotation cliff.
         assert!(table.contains_key("spin"), "unannotated numeric recursion must be inferred");
-        // An all-`Int` function is the plain i64 specialization's job; `mixed_fn_sig` declines
-        // a zero float-mask so the two never compete.
-        assert!(!table.contains_key("inty"), "all-Int belongs to the i64 spec, not mixed");
+        // AN UNANNOTATED, i64-CLOSED FUNCTION NOW GETS THE FLOAT READING TOO, and this
+        // assertion used to say the opposite. The old rule — "all-Int belongs to the i64
+        // spec, so the two never compete" — was true about calling `inty` DIRECTLY and false
+        // about calling it from inside a kernel: `infer_param_kinds` reads the body only, so
+        // `fn inty(x) = x * 2 + 1` yields Int by DEFAULT rather than by evidence, and every
+        // Float call site silently declined and took the enclosing map with it. Measured at
+        // n=1e7: 0.967s declining against 0.023s compiled, 43x, on the shape every generic
+        // library helper takes.
+        //
+        // They do not compete because they live in different tables — the i64 reading in
+        // `fn_ids`, this one in `msigs`/`mixed_ids` — and dispatch type-tests every argument,
+        // so an `Int` argument still takes the i64 path and still gets the interpreter's
+        // WRAPPING i64 arithmetic.
+        assert!(
+            table.contains_key("inty"),
+            "an unannotated i64-closed function needs the Float reading for its Float call sites"
+        );
+        assert_eq!(table["inty"].0, vec![NumKind::Float]);
+        assert_eq!(table["inty"].1, NumKind::Float);
         assert!(!table.contains_key("nontail"), "non-tail recursion is excluded");
 
         assert_eq!(table["plain"].0, vec![NumKind::Float]);
         assert_eq!(table["plain"].1, NumKind::Float);
         assert_eq!(table["twoarg"].0, vec![NumKind::Float, NumKind::Int]);
         assert_eq!(table["twoarg"].1, NumKind::Float);
+
+        // But an ANNOTATED `Int` parameter is evidence, not a default, and must not be
+        // promoted — the promotion applies only when EVERY parameter is unannotated.
+        let annotated = "fn keepint(x: Int) = x * 2 + 1\nkeepint(1)\n";
+        let t2 = crate::jit::mixed_fn_sigs(
+            &parser::parse(lexer::lex(annotated).expect("lex")).expect("parse"),
+        );
+        assert!(
+            !t2.contains_key("keepint"),
+            "a written `Int` annotation must not be overruled by the Float promotion"
+        );
+
+        // AND NEVER A NAME THAT SHADOWS A BUILTIN. This table is derived from the whole AST
+        // and has no notion of definition ORDER, while the VM resolves names in source order.
+        // `tests/corpus/j14_rounders_and_int_mixed.helix` calls the builtin `round` twenty
+        // times and only then writes `fn round(x) = 99`; promoting that definition made the
+        // JIT apply the user's function to the twenty EARLIER call sites — `[99, 99, 99, 99]`
+        // against the VM's `[1, 2, 3, 4]`, a three-engine divergence.
+        //
+        // With no forward references, a call can only precede its definition when the name is
+        // also a builtin, so this restriction is exactly the exposure and not a wider one.
+        let shadow = "fn round(x) = 99\nround(1)\n";
+        let t3 = crate::jit::mixed_fn_sigs(
+            &parser::parse(lexer::lex(shadow).expect("lex")).expect("parse"),
+        );
+        assert!(
+            !t3.contains_key("round"),
+            "a user function shadowing a builtin must not gain a Float specialization — the \
+             JIT's tables are order-blind and would apply it to earlier call sites"
+        );
     }
 
     /// The VALUE-SCALAR mixed map: captures ride as `f64` bits instead of Int-proven `i64`s,

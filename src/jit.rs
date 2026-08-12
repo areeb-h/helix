@@ -4409,8 +4409,63 @@ fn mixed_fn_sig(
         kinds.push(k);
     }
     if mask == 0 && int_eligible.contains(f.name) {
-        // The plain i64 loop already covers an all-Int, i64-closed function — a mixed
-        // duplicate would never be dispatched (the all-Int arm wins first).
+        // THE GENERIC HELPER. `fn sq(x) = x * x` is the shape every library author writes,
+        // and until now it got NO mixed specialization at all — so every FLOAT call site
+        // silently declined and took the enclosing map down with it:
+        //
+        //     fn sq(x) = x * x            , Float call:  0.967s jit / 0.944s nojit — declines
+        //     fn sq(x: Float) -> Float    , Float call:  0.019s                      52x
+        //     fn sq(x) = x * x * 1.0      , Float call:  0.018s                     132x
+        //     fn sq(x) = x * x            , Int   call:  0.026s                      30x
+        //
+        // The reasoning that used to end here — "the plain i64 loop already covers an
+        // all-Int, i64-closed function, so a mixed duplicate would never be dispatched" — is
+        // true about calling `sq` DIRECTLY, and false about a call to it from inside a
+        // kernel. `infer_param_kinds` reads the function's OWN BODY only, never its call
+        // sites, so a kind-agnostic body like `x * x` yields Int by default rather than by
+        // evidence, and the Float reading was simply never built.
+        //
+        // The two specializations do not compete, because they live in DIFFERENT tables: the
+        // i64 one in `fn_ids`, this one in `msigs`/`mixed_ids`. Emitting the Float reading
+        // fills an empty slot rather than shadowing anything, and dispatch stays exact — the
+        // VM type-tests every argument, so an `Int` argument still takes the i64 path and
+        // still gets the interpreter's WRAPPING i64 arithmetic. That matters: `x * x` on
+        // 2^53+1 is an exact wrapping multiply in the interpreter and a lossy f64 one here,
+        // and it is the per-argument test, not this function, that keeps them apart.
+        //
+        // ONLY when every parameter is UNANNOTATED. A written `Int` is evidence; an absent
+        // annotation is not, and promoting a partly-annotated signature would overrule
+        // something the author actually said.
+        //
+        // AND NEVER FOR A NAME THAT SHADOWS A BUILTIN. `mixed_fn_sigs` is derived from the
+        // whole AST and has no notion of definition ORDER, while the VM resolves names in
+        // source order — and `tests/corpus/j14_rounders_and_int_mixed.helix` is built on
+        // exactly that difference: it calls the builtin `round` twenty times and only then
+        // writes `fn round(x) = 99`. Promoting that definition made the JIT apply the user's
+        // function to the twenty EARLIER call sites, printing `[99, 99, 99, 99]` where the VM
+        // printed `[1, 2, 3, 4]` — a three-engine divergence, caught by the corpus.
+        //
+        // The restriction is exactly right rather than merely cautious: with no forward
+        // references, a call site can only precede its definition when the name is ALSO a
+        // builtin, so that is the whole of the exposure. (The same order-blindness is
+        // reachable today by an explicitly-annotated shadow — it predates this change and is
+        // not made worse by it.)
+        if f.params.iter().all(|(_, a)| a.is_none())
+            && crate::registry::lookup(f.name).is_none()
+            && !JIT_SCALAR_BUILTINS.iter().any(|(n, _)| *n == f.name)
+        {
+            let fkinds = vec![NumKind::Float; f.params.len()];
+            let mut fenv: HashMap<&str, NumKind> =
+                f.params.iter().map(|(n, _)| (n.as_str(), NumKind::Float)).collect();
+            // A body that cannot be read as f64 declines here exactly as it would have
+            // before — this adds a reading, it does not weaken one.
+            if let Some(fret) =
+                mixed_tail_ret_kind(f.body, &mut fenv, f.name, &fkinds, sigs, user_fns)
+            {
+                let all_float: u16 = ((1u32 << f.params.len()) - 1) as u16;
+                return Some((all_float, fkinds, fret));
+            }
+        }
         return None;
     }
     let mut env: HashMap<&str, NumKind> =

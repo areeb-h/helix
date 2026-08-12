@@ -82,9 +82,34 @@ fn main() -> ExitCode {
     // the data workloads (measured: VCF read 1.48x->1.08x, group-by 1.77x->1.46x).
     // `15` is `mi_option_purge_delay` in mimalloc v3 (the version the crate builds);
     // the enum's `deprecated_*` placeholders keep that index stable across v3 releases.
+    // …but PURGE BY RESET, NOT BY DECOMMIT. `purge_delay = 0` above says "return pages
+    // immediately"; `purge_decommits = 1` (the default) says "and unmap them", so every freed
+    // buffer over mimalloc's large-object threshold costs a full page-fault storm the next
+    // time that memory is touched. Together they made ordinary allocation-heavy code 2.7x
+    // slower and produced an undocumented ~10x cliff at exactly 65,536 i64 elements — 512 KiB,
+    // the threshold — which nothing in the language explains and which a library author would
+    // read as their own bug:
+    //
+    // Two binaries differing only by this option, runs INTERLEAVED, min of 9, on a box at load
+    // average 0.48 — because a first attempt at these numbers was taken at load 9.3 and read
+    // 0.57 s and 0.18 s for the same case in two runs:
+    //
+    //                             decommit      reset            peak RSS
+    //     append 80k               4.710 s      0.470 s   10.0x   20.2 -> 24.6 MB
+    //     append 65k (below cliff) 0.230 s      0.240 s    0.96x  (the cliff is this option)
+    //     map-chains 200k x2000    3.030 s      1.040 s    2.9x   32.2 -> 34.9 MB
+    //     200 sorts of a 100k      0.250 s      0.170 s    1.47x  31.0 -> 29.6 MB
+    //     large array 20M          0.030 s      0.020 s          190.8 -> 191.0 MB
+    //
+    // Reset keeps the RSS win this pair was added for, because the pages are still returned —
+    // they are just madvised rather than unmapped. THE LAST ROW IS THE ONE THAT MATTERS: the
+    // large-array data workloads are why `purge_delay = 0` is here, and their peak RSS is
+    // unchanged. The cost is ~4 MB on small programs, which is not a trade, it is a rounding
+    // error.
     #[cfg(feature = "mimalloc")]
     unsafe {
         libmimalloc_sys::mi_option_set(15, 0);
+        libmimalloc_sys::mi_option_set(5, 0);
     }
     // The bytecode VM — the default engine — recurses on the *heap* (frames in a
     // `Vec`), so it runs on the ordinary main-thread stack. Only the tree-walker
