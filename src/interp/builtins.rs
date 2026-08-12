@@ -163,6 +163,67 @@ impl super::Interp {
                     other => Err(type_err("assert", "a boolean condition", other, line, col)),
                 }
             }
+            // `raise(message[, help])` — a library reporting its CALLER's mistake. The only
+            // mechanism before this was `assert`, which hard-codes "assertion failed: " and
+            // cannot carry a `help:` line, so `route.go("admin")` came back as
+            // "assertion failed: route path must start with '/'" — which reads as a broken
+            // library rather than a rejected argument. ADR 0004 leaves open whether user
+            // errors can be as instructive as the interpreter's own; they can now.
+            //
+            // Caught by `try` like any other error, because it IS one — the same
+            // `HelixError` the runtime raises everywhere else, with no special variant.
+            "raise" => {
+                if args.is_empty() || args.len() > 2 {
+                    return Err(HelixError::new(
+                        format!("`raise` takes 1 or 2 arguments, got {}", args.len()),
+                        line,
+                        col,
+                    ));
+                }
+                let text = |v: &Value| match v {
+                    Value::Str(s) => Ok(s.to_string()),
+                    other => crate::value::display_value(other, line, col),
+                };
+                let e = HelixError::new(text(&args[0])?, line, col);
+                Err(match args.get(1) {
+                    Some(h) => e.hint(text(h)?),
+                    None => e,
+                })
+            }
+            // `source_path(rel)` — `rel` against the directory of the file this call is
+            // WRITTEN in, so a package can read the data it ships no matter where the
+            // process was started. Every path used to resolve against the CWD, which meant
+            // a library could not ship a scoring matrix, a codon table or a reference panel
+            // at all: running the same program from a subdirectory broke it.
+            //
+            // Already-absolute input is returned untouched, so wrapping a user-supplied
+            // path is harmless.
+            "source_path" => {
+                arity(name, &args, 1, line, col)?;
+                let Value::Str(rel) = &args[0] else {
+                    return Err(type_err("source_path", "a string path", &args[0], line, col));
+                };
+                let p = std::path::Path::new(rel.as_str());
+                if p.is_absolute() {
+                    return Ok(Value::Str(rel.clone()));
+                }
+                // `line` is the GLOBAL line in the flattened program, which is exactly what
+                // identifies the module it came from.
+                let dir = crate::module::file_of_line(line)
+                    .and_then(|f| std::path::Path::new(&f).parent().map(|d| d.to_path_buf()));
+                let Some(dir) = dir else {
+                    return Err(HelixError::new(
+                        "`source_path` needs a source file to resolve against",
+                        line,
+                        col,
+                    )
+                    .hint(
+                        "it answers \"where is the file I am written in?\", so it has no \
+                         meaning in the REPL — pass an absolute path instead.",
+                    ));
+                };
+                Ok(Value::Str(dir.join(p).to_string_lossy().into_owned().into()))
+            }
             "assert_eq" => {
                 arity(name, &args, 2, line, col)?;
                 if values_equal(&args[0], &args[1]) {

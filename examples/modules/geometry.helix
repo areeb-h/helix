@@ -9,3 +9,20 @@ export fn area(w, h) = w * h
 export fn perimeter(w, h) = 2 * (w + h)
 
 export fn circle_area(r) = PI * r * r
+
+# A module that ships DATA reads it with `source_path`, which resolves against the
+# directory of the file the call is written in — not the process's working directory.
+# Without it a package cannot read its own files: `read_csv("table.csv")` works only
+# when the program happens to be started from the right place, and breaks the moment
+# a caller runs it from a subdirectory.
+#
+#   export fn codon_table() = read_csv(source_path("codons.csv"))
+#
+# An argument that is already absolute is returned unchanged, so wrapping a
+# caller-supplied path is harmless.
+
+# A module rejects a bad argument with `raise(message[, help])` rather than `assert`:
+# the caller reads the library's own words, plus a `help:` line telling them what to do.
+export fn scaled_area(w, h, factor) =
+  if factor > 0 then area(w, h) * factor
+  else raise("scale factor must be positive", "pass a factor above 0, e.g. `2.0`.")

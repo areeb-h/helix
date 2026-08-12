@@ -26,6 +26,32 @@ r = try assert_eq(total, 100)
 print(r.ok)        # false if it failed
 ```
 
+## Raising a domain error
+
+An assertion says *a check failed*. A library rejecting its caller's argument is saying
+something else, and `raise(message)` — with an optional second argument for the `help:`
+line — says it in the library's own words:
+
+```helix
+export fn go(path) =
+  if path.starts_with("/") then path
+  else raise("route path must start with '/'", "pass a path like \"/admin\".")
+```
+
+```text
+error: route path must start with '/'
+  --> route.helix:3:8
+  |
+3 |   else raise("route path must start with '/'", "pass a path like \"/admin\".")
+  |        ^
+help: pass a path like "/admin".
+```
+
+Written with `assert`, the same rejection reads `assertion failed: route path must start
+with '/'` — which tells the caller the library is broken rather than that their argument
+was wrong, and has nowhere to put the fix. A raised error is an ordinary error: `try`
+catches it, and it exits non-zero when uncaught.
+
 ## Writing and running tests
 
 A test file is a normal Helix file named `*_test.helix`. It can `import` your project's

@@ -3148,6 +3148,74 @@ print(\"a side effect\")\n",
     assert!(out.contains("skipped doc examples in 1 file"), "out:\n{out}");
 }
 
+/// A package can read the data it ships. Every path resolved against the process's
+/// working directory, and nothing exposed a module's own location — so a library could
+/// not carry a scoring matrix, a codon table or a reference panel at all: the same
+/// program worked from the project root and broke from a subdirectory.
+#[test]
+fn source_path_resolves_against_the_file_the_call_is_written_in() {
+    let dir = std::env::temp_dir().join("helix_srcpath");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("lib/codons.csv"), "codon,aa\nATG,M\nTAA,*\n").unwrap();
+    std::fs::write(
+        dir.join("lib/bio.helix"),
+        "export fn table() = read_csv(source_path(\"codons.csv\"))\n",
+    )
+    .unwrap();
+    let entry = dir.join("app.helix");
+    std::fs::write(&entry, "import lib.bio\nprint(bio.table().count())\n").unwrap();
+
+    // The data file sits beside `bio.helix`, two directories from where the entry lives —
+    // and the answer must not depend on where the process was started.
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run(&[entry.to_str().unwrap()], env, "");
+        assert_eq!(code, Some(0), "env {env:?} stderr: {err}");
+        assert_eq!(out.trim(), "2", "env {env:?}");
+    }
+
+    // An absolute path passes through untouched, so wrapping a caller's path is safe.
+    let abs = dir.join("abs.helix");
+    std::fs::write(&abs, "print(source_path(\"/etc/hostname\"))\n").unwrap();
+    let (out, err, code) = run(&[abs.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "/etc/hostname");
+}
+
+/// A library rejecting its caller's argument can say so in its own words. The only
+/// mechanism was `assert`, which hard-codes "assertion failed: " and cannot carry a
+/// `help:` line — so a rejected argument read as a broken library. ADR 0004 leaves open
+/// whether user-raised errors can be as instructive as the interpreter's own.
+#[test]
+fn raise_reports_a_domain_error_with_the_librarys_own_words() {
+    let src = "fn go(path) =\n  \
+if path.starts_with(\"/\") then path\n  \
+else raise(\"route path must start with '/'\", \"pass a path like \\\"/admin\\\".\")\n\
+print(go(\"admin\"))\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (_, err, code) = run_source(src, env, "raise_domain");
+        assert_eq!(code, Some(1), "env {env:?} stderr: {err}");
+        assert!(err.contains("error: route path must start with '/'"), "env {env:?}: {err}");
+        assert!(!err.contains("assertion failed"), "env {env:?}: {err}");
+        assert!(err.contains("help: pass a path like \"/admin\"."), "env {env:?}: {err}");
+    }
+
+    // It is an ORDINARY error: `try` catches it, like any other.
+    let caught = "fn go(n) = raise(\"nope\", \"pass something else.\")\n\
+r = try go(1)\nprint(r.ok, r.error)\n";
+    let (out, err, code) = run_source(caught, &[], "raise_caught");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "false nope");
+
+    // It never returns, so it types in a value position — `if bad then raise(…) else x`
+    // is the shape every guard wants, and `Unit` would have rejected it.
+    let positioned = "fn f(n) = if n > 0 then n else raise(\"must be positive\")\nprint(f(3))\n";
+    let (out, err, code) = run_source(positioned, &[], "raise_pos");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "3");
+}
+
 /// A deep `x => x => ...` lambda chain must hit the parser depth cap with a
 /// clean error — lambda bodies were the one expr() recursion that skipped the
 /// depth counter, so 2000 nestings overflowed the native stack (SIGABRT).

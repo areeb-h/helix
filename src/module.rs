@@ -58,6 +58,38 @@ pub fn locate(spans: &[Span], line: usize) -> (&str, &str, usize) {
     (&span.source, &span.filename, local)
 }
 
+/// `(start_line, filename)` for every loaded file, ascending — the minimum needed to
+/// answer "which file is this line in?" at RUNTIME, which is what `source_path` resolves
+/// against. Published as a process-global by the runner because a builtin is dispatched by
+/// name and receives only its call position; it cannot otherwise know which module it was
+/// written in. Deliberately not the whole `Span` (the sources are large and error
+/// rendering, which does need them, has them already).
+/// A `RwLock` rather than a `OnceLock` because a process can run more than one program:
+/// `helix test` runs every test file in turn, and keeping the first one's map would make
+/// `source_path` in the second resolve against the wrong file. Replaced per program, and
+/// read from whichever thread a builtin happens to run on.
+static FILE_LINES: std::sync::RwLock<Vec<(usize, String)>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// Publish the running program's line→file map. Called once per program, before it runs.
+pub fn set_file_lines(files: Vec<(usize, String)>) {
+    if let Ok(mut w) = FILE_LINES.write() {
+        *w = files;
+    }
+}
+
+/// The absolute path of the file containing global `line`, or `None` when no program is
+/// running with a source on disk (the REPL, a unit test).
+pub fn file_of_line(line: usize) -> Option<String> {
+    let files = FILE_LINES.read().ok()?;
+    files
+        .iter()
+        .rev()
+        .find(|(start, _)| *start <= line)
+        .or_else(|| files.first())
+        .map(|(_, name)| name.clone())
+}
+
 /// The directories searched for a non-local import (`import std.stats`), in priority
 /// order after the importing file's own directory: every `HELIX_PATH` entry, then the
 /// install-relative standard-library locations beside the executable. A stdlib module

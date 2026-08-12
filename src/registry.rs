@@ -75,6 +75,12 @@ pub fn category_of(name: &str) -> &'static str {
         "align" => "bio",
         // Assertions / test helpers.
         "assert" | "assert_eq" | "assert_close" => "assert",
+        // Raising a domain error — a guard like the asserts, minus the condition.
+        "raise" => "assert",
+        // Locating a module's own shipped files. `io` because that is what it exists to
+        // feed: the argument of a `read_*` call that must not depend on the working
+        // directory. It performs no I/O itself, which is why it is `pure`.
+        "source_path" => "io",
         _ => "core",
     }
 }
@@ -236,6 +242,15 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "assert", pure: false },
     BuiltinDef { path: "assert_eq", pure: false },
     BuiltinDef { path: "assert_close", pure: false },
+    // `raise(message[, help])` — the unconditional form. A library reporting a caller's
+    // mistake had only `assert`, which hard-codes "assertion failed: " and cannot carry a
+    // `help:` line, so a domain error read as "this library is broken". Impure for the same
+    // reason as the asserts: raising is the point, and must never be memoized away.
+    BuiltinDef { path: "raise", pure: false },
+    // `source_path(rel)` — `rel` resolved against the directory of the FILE THE CALL IS
+    // WRITTEN IN, so a package can read the data it ships regardless of the process's
+    // working directory. Pure: it only computes a string, and performs no I/O itself.
+    BuiltinDef { path: "source_path", pure: true },
     // (JSON, charts, and format export are now methods: `value.to_json()`,
     // `str.parse_json()`, `xs.bar_chart()`, `data.to_html()`, `df.write_csv(p)`, …)
 ];

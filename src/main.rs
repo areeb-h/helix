@@ -1300,6 +1300,11 @@ fn strip_mangling(s: &str) -> String {
 /// Type-check and run an already-loaded program. On failure returns the rendered,
 /// caret-annotated error (with namespacing prefixes stripped for multi-file runs).
 fn run_program(program: &[ast::Stmt], spans: &[module::Span], multi: bool) -> Result<(), String> {
+    // Publish "which file is this line in?" for `source_path`, which a builtin cannot work
+    // out for itself: it is dispatched by name and receives only its call position.
+    module::set_file_lines(
+        spans.iter().map(|s| (s.start_line, s.filename.clone())).collect(),
+    );
     // The inferred receiver types feed the compiler so it can route
     // receiver-polymorphic methods (DataFrame/Tensor column-verbs) correctly.
     let types = types::check(program).map_err(|e| render_err(e, spans, multi))?;

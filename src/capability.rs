@@ -251,6 +251,8 @@ mod tests {
         let harmless: &[&str] = &[
             "print", "emit", "write", "elog", "read_int", "sleep", "clock_monotonic",
             "aes_keygen", "aes_encrypt", "ed25519_keygen", "assert", "assert_eq", "assert_close",
+            // Raising an error is a control-flow effect, not an fs/net authority.
+            "raise",
         ];
         for b in crate::registry::BUILTINS {
             if b.pure || effect_of(b.path).gated() {

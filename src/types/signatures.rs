@@ -145,6 +145,36 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Unit)
         }
+        // `raise(message[, help])` never returns, so it is compatible with any context —
+        // `Unknown`, not `Unit`, or `if bad then raise("…") else x` would not type.
+        "raise" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(HelixError::new(
+                    format!(
+                        "`raise` takes a message and an optional help line, got {} arguments",
+                        args.len()
+                    ),
+                    line,
+                    col,
+                ));
+            }
+            for (i, a) in args.iter().enumerate() {
+                if !compatible(a, &Type::String) {
+                    let what = if i == 0 { "a string message" } else { "a string help line" };
+                    return Err(type_err("raise", what, a, line, col));
+                }
+            }
+            Ok(Type::Unknown)
+        }
+        "source_path" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            if !compatible(&args[0], &Type::String) {
+                return Err(type_err("source_path", "a string path", &args[0], line, col));
+            }
+            Ok(Type::String)
+        }
         // `assert_eq` accepts any two comparable values; `assert_close` needs numbers
         // (plus an optional tolerance). Equality/closeness is checked at runtime.
         "assert_eq" => {
