@@ -16,7 +16,9 @@ twenty minutes and several gigabytes in one rustc. The `gate` profile keeps `opt
 so the differential fuzzers and perf-sensitive tests run at full speed, and drops LTO. No
 test's pass/fail depends on the optimization level, so it is a faithful gate.
 
-CI runs the same four things, plus the website build and `cargo audit`. All five jobs block.
+CI runs the same four things, plus `cargo audit` and a non-default-feature check
+(`--features python`, `--features managed`, `--no-default-features` — none of which any other
+job builds). All five jobs block.
 
 ## The one rule that is not negotiable
 

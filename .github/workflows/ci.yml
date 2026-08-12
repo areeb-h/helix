@@ -10,7 +10,7 @@ name: ci
 # the two ever disagree, the local gate is the one people actually run, so this file
 # follows it.
 #
-# ALL FIVE JOBS NOW BLOCK. Three of them shipped advisory — clippy on 9 warnings, MSRV
+# ALL FIVE JOBS BLOCK. Three of them shipped advisory — clippy on 9 warnings, MSRV
 # unverified, `cargo audit` on 6 advisories — each with a written condition for promotion,
 # because asserting an unchecked claim as a gate is how a badge starts lying. Those
 # conditions have been met: the clippy warnings are fixed, MSRV was observed green on run
@@ -179,21 +179,3 @@ jobs:
       # And the allocator-debugging build, which is what `--no-default-features` is for.
       - name: no default features
         run: cargo check --no-default-features
-
-  # The website renders docs/, examples/ and bench/ straight from this repository, so a
-  # change to those files can break the build. Catching that here keeps the site
-  # deployable from any commit on main.
-  website:
-    name: website build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: website/package-lock.json
-      - run: npm ci
-        working-directory: website
-      - run: npm run build
-        working-directory: website

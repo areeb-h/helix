@@ -298,6 +298,10 @@ and the two do not overlap.
 
 ## Contributing
 
+The website lives in [areeb-h/helix-site](https://github.com/areeb-h/helix-site), which tracks
+this repository as a submodule and renders `docs/`, `examples/` and `bench/kernels/RESULTS.md`
+verbatim — so a docs change here is a site change there, with no copy in between.
+
 [CONTRIBUTING.md](CONTRIBUTING.md) covers the gate, the one non-negotiable rule (three engines,
 byte-identical, on values *and* error text), and what a good change looks like. Security issues
 go through [SECURITY.md](SECURITY.md) instead — privately, via GitHub's advisory form.
