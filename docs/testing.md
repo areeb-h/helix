@@ -127,7 +127,12 @@ is `/dev/null` for every run, for the same reason `scripts/gate.sh` needs `< /de
 `--selftest` exists because an oracle that never fires is indistinguishable from an oracle
 that is broken: it feeds each oracle a result that must fail (including one genuinely
 non-deterministic program, `clock_monotonic()`, kept out of the corpus for exactly this
-purpose) and checks that each one notices.
+purpose) and checks that each one notices. An empty run is a failure too — a typo'd
+`--filter` would otherwise report "0 failing programs" four times and exit 0, which is the
+shape of a gate that stops gating without anyone noticing.
+
+**It runs in CI**, as a step of the `test` job — 15 seconds against a 25-minute job, and it
+needs the binary that job just built.
 
 ### `scripts/opfuzz.py` — operators against their guards
 

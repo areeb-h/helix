@@ -101,6 +101,21 @@ jobs:
         run: bash scripts/checkall.sh
         env:
           BIN: ./target/gate/helix
+      # 1438 programs written the way someone who does not know Helix would write them —
+      # foreign syntax, byte-level malformation, malformed CSVs, DataFrames built from files.
+      # Every OTHER generator in the tree emits well-formed Helix from the Helix grammar, so
+      # none of them can produce `for x in xs:` or a NUL byte, and none asks whether an error
+      # message is any good.
+      #
+      # Three hard oracles — never-abort, determinism, no-leak — plus a has-help RATCHET.
+      # The first is the dynamic complement to the static unwrap budget: it is what catches a
+      # panic inside a DEPENDENCY, which is where `read_csv(f).where(1)`'s SIGABRT lived and
+      # which the static count structurally cannot see.
+      #
+      # ~15 s for 12,942 process spawns, against a 25-minute job. It is here rather than in
+      # its own job because it needs the binary this job just built.
+      - name: Stranger corpus (never-abort / determinism / no-leak / has-help)
+        run: python3 scripts/stranger.py --bin ./target/gate/helix
 
   # The project's stated minimum supported Rust version must actually compile, or the
   # claim in Cargo.toml is decoration. Check only — the suite runs on stable above.
