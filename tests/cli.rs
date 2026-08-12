@@ -902,6 +902,109 @@ fn a_non_boolean_filter_predicate_is_an_error_not_an_abort() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `count()` on a CSV it cannot read must FAIL, not answer.
+///
+/// A 4-line CSV with one unclosed quote used to give `.count()` == **1** with **exit 0** on
+/// all three engines, while `print(df)`, `df.to_table()` and `df.column("a")` on the very
+/// same handle all exited 1. Polars answers a bare `select(len())` over a CSV scan by
+/// scanning the bytes for record separators and never invoking the field parser, so the
+/// count outlived a file nothing else could read. In a data language, a count that lies with
+/// a zero exit code is worse than any error message.
+///
+/// THREE THINGS THIS TEST GETS RIGHT:
+///
+/// 1. **It reads a real file.** The bug lives entirely on the lazy CSV-scan path; every
+///    `dataframe({...})` fixture in the corpus is eager and returned the right answer all
+///    along. Written the way those fixtures are written, this test passes while the bug
+///    remains — exactly how the `read_csv(f).where(1)` abort survived.
+/// 2. **It has a positive control.** `good.csv` must still count 3, so "make count always
+///    error" does not pass.
+/// 3. **It pins the ragged file as ANSWERABLE.** Extra fields on a row are something real
+///    pipelines emit; `count()`, `column()` and `to_table()` all read it today and must
+///    keep doing so. Only the whole-frame materializers (`print`, `cache`, `write_csv`)
+///    are strict about ragged, and that split is Polars policy — recorded, not "fixed"
+///    here by making `read_csv` reject the file.
+#[test]
+fn count_cannot_answer_for_a_csv_it_cannot_read() {
+    let dir = std::env::temp_dir().join("helix_csv_honesty");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, body: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p.to_str().unwrap().replace('\\', "/")
+    };
+    // Three data rows, and an unclosed quote on the second: unreadable.
+    let bad = write("unclosed.csv", "a,b\n1,2\n\"unclosed,3\n4,5\n");
+    // Three data rows, the second carrying an extra field: readable column-wise.
+    let ragged = write("ragged.csv", "a,b\n1,2\n3,4,5\n6,7\n");
+    let good = write("good.csv", "a,b\n1,2\n3,4\n5,6\n");
+
+    let engines: [(&str, &[(&str, &str)]); 3] =
+        [("jit", &[]), ("vm", &[("HELIX_NOJIT", "1")]), ("tree", &[("HELIX_NOVM", "1")])];
+
+    // Every one of these already failed on the unreadable file EXCEPT the two counts.
+    let readers = [
+        ("count", "print(df.count())"),
+        ("select_count", "print(df.select(a).count())"),
+        ("head_count", "print(df.head(2).count())"),
+        ("column", "print(df.column(\"a\"))"),
+        ("to_table", "print(df.to_table())"),
+        ("print", "print(df)"),
+    ];
+
+    for (label, op) in readers {
+        let src = format!("df = read_csv(\"{bad}\")\n{op}\n");
+        let mut texts = Vec::new();
+        for (ename, env) in engines {
+            let (out, err, code) = run_source(&src, env, &format!("csvhonesty_{label}"));
+            assert_eq!(code, Some(1), "`{label}` on an unreadable CSV ({ename}) must exit 1, \
+                 got {code:?} with stdout {out:?}");
+            assert!(out.trim().is_empty(), "`{label}` ({ename}) printed an answer: {out:?}");
+            assert!(
+                err.contains("unclosed"),
+                "`{label}` ({ename}) must name the offending text; stderr:\n{err}"
+            );
+            texts.push(err);
+        }
+        // ADR-0024: the three engines must agree on the error TEXT, not just on failing.
+        assert_eq!(texts[0], texts[1], "`{label}`: jit and vm disagree on the error text");
+        assert_eq!(texts[0], texts[2], "`{label}`: jit and tree-walker disagree on the error text");
+    }
+
+    // POSITIVE CONTROL — a well-formed file still counts, on every engine, and the count
+    // still agrees with the data. (A "count always errors" fix dies here.)
+    for (ename, env) in engines {
+        let src = format!(
+            "df = read_csv(\"{good}\")\nprint(df.count())\nprint(df.column(\"a\").length())\n"
+        );
+        let (out, err, code) = run_source(&src, env, &format!("csvhonesty_good_{ename}"));
+        assert_eq!(code, Some(0), "good CSV ({ename}); stderr:\n{err}");
+        assert_eq!(out.trim(), "3\n3", "good CSV ({ename}) count/column disagree: {out:?}");
+    }
+
+    // THE INVARIANT, stated directly: whatever `count()` reports, it is the number of
+    // values you actually get back — on a readable file, and on the ragged one too.
+    for (label, path) in [("good", &good), ("ragged", &ragged)] {
+        let src = format!(
+            "df = read_csv(\"{path}\")\nprint(df.count() == df.column(\"a\").length())\n"
+        );
+        let (out, err, code) = run_source(&src, &[], &format!("csvhonesty_inv_{label}"));
+        assert_eq!(code, Some(0), "{label}: stderr:\n{err}");
+        assert_eq!(out.trim(), "true", "{label}: count() != column length");
+    }
+
+    // RECORDED POLICY: a ragged row is still countable and still readable column-wise.
+    // If this ever starts failing, someone made `read_csv` strict — a deliberate decision
+    // that rejects files real pipelines emit, and it belongs in an ADR, not a diff.
+    let src = format!("df = read_csv(\"{ragged}\")\nprint(df.count())\nprint(df.column(\"a\"))\n");
+    let (out, err, code) = run_source(&src, &[], "csvhonesty_ragged");
+    assert_eq!(code, Some(0), "ragged CSV should still be countable; stderr:\n{err}");
+    assert_eq!(out.trim(), "3\n[1, 3, 6]", "ragged CSV: {out:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn module_program_runs_and_matches_engines() {
     // The committed multi-file example: shapes.helix imports geometry.helix.

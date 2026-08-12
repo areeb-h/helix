@@ -24,13 +24,35 @@ use crate::value::Value;
 /// A Polars-backed lazy frame — Helix's default DataFrame engine.
 pub struct PolarsFrame {
     lf: LazyFrame,
+    /// True when the rows of this plan come from a **CSV text scan**.
+    ///
+    /// CSV is the one source where Polars can answer "how many rows?" from a
+    /// machinery that never runs the parser: `select(len())` over a bare CSV scan
+    /// is rewritten to a newline/quote scan of the bytes (`FunctionIR::FastCount`,
+    /// and the 0-width-projection height path behind it). That count can *survive
+    /// a file the parser cannot read*, so `count()` used to answer `1` with exit 0
+    /// for a CSV whose every other operation errored. See `row_count`.
+    ///
+    /// Parquet has no such split — its row count is metadata, and it is the same
+    /// number the reader will produce — so parquet keeps the O(1) count.
+    csv_source: bool,
+}
+
+fn wrap_with(lf: LazyFrame, csv_source: bool) -> Df {
+    Rc::new(PolarsFrame { lf, csv_source })
 }
 
 /// Wrap a Polars `LazyFrame` as a backend-agnostic Helix DataFrame handle. The
-/// single point where a Polars frame becomes a `Df` — used by the CSV/Parquet/VCF
-/// readers and the Python bridge.
+/// single point where a Polars frame becomes a `Df` — used by the Parquet/VCF
+/// readers and the Python bridge. CSV goes through [`wrap_csv_scan`].
 pub fn wrap_lazy(lf: LazyFrame) -> Df {
-    Rc::new(PolarsFrame { lf })
+    wrap_with(lf, false)
+}
+
+/// Wrap a lazy **CSV scan**, marking the plan so `row_count` refuses the
+/// parser-free shortcut (see [`PolarsFrame::csv_source`]).
+fn wrap_csv_scan(lf: LazyFrame) -> Df {
+    wrap_with(lf, true)
 }
 
 /// Wrap an eager Polars `DataFrame` (used by the Python bridge).
@@ -84,7 +106,54 @@ pub fn as_lazyframe(h: &Df, line: usize, col: usize) -> Result<LazyFrame, HelixE
 
 /// Map a Polars error into a friendly Helix error at a source position.
 fn pl<T>(r: PolarsResult<T>, ctx: &str, line: usize, col: usize) -> Result<T, HelixError> {
-    r.map_err(|e| HelixError::new(format!("{}: {}", ctx, e), line, col))
+    r.map_err(|e| {
+        let (msg, hint) = tidy(&e.to_string());
+        let err = HelixError::new(format!("{ctx}: {msg}"), line, col);
+        match hint {
+            Some(h) => err.hint(h),
+            None => err,
+        }
+    })
+}
+
+/// Turn an engine error into a Helix one: the first paragraph, and a Helix-vocabulary hint.
+///
+/// This module's own doc comment promises that "no `polars::` type ever escapes
+/// `backend/polars.rs`" — but the TEXT was escaping wholesale, and an adversarial sweep of
+/// 1438 newcomer programs found six that print a Polars query plan or a block of Polars
+/// keyword arguments into the user's terminal:
+///
+/// ```text
+///   You might want to try:
+///   - increasing `infer_schema_length` (e.g. `infer_schema_length=10000`),
+///   - specifying correct dtype with the `schema_overrides` argument
+///   - setting `ignore_errors` to `True`,
+/// ```
+///
+/// Every one of those is a Polars kwarg with no Helix spelling, so the advice is not merely
+/// noisy — it is un-actionable, and it tells the reader to reach for an API this language does
+/// not have. `Consider setting 'truncate_ragged_lines=true'` is the same shape.
+///
+/// The rule is deliberately blunt: **keep the first paragraph, drop the rest.** Polars puts
+/// the actual failure first and its suggestions after a blank line, so the boundary is
+/// reliable and needs no per-message parsing that would rot at the next upgrade. A Helix hint
+/// replaces the advice where the failure is one a Helix user can act on.
+fn tidy(raw: &str) -> (String, Option<&'static str>) {
+    let first = raw.split("\n\n").next().unwrap_or(raw).trim();
+    // Polars wraps some inner errors in markdown fences; a stray ``` in a terminal is noise.
+    let first = first.trim_matches('`').trim();
+    // One line where the engine used several — a rendered error already carries the source
+    // line and caret beneath it, so a multi-line message reads as two errors.
+    let msg = first.split_whitespace().collect::<Vec<_>>().join(" ");
+    let low = raw.to_lowercase();
+    let hint = if low.contains("not properly escaped") || low.contains("as dtype") {
+        Some("a field is unterminated or has the wrong type for its column — check the quoting around that row.")
+    } else if low.contains("more fields than defined") || low.contains("fewer fields") {
+        Some("a row has a different number of fields than the header — check for a stray or missing separator.")
+    } else {
+        None
+    };
+    (msg, hint)
 }
 
 /// Convert a Helix scalar into a Polars literal expression. Non-scalars are
@@ -184,7 +253,10 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<Df, HelixError> {
         line,
         col,
     )?;
-    Ok(wrap_lazy(lf))
+    // NOTE: this only reads the header and the schema-inference window. Whether the
+    // FILE parses is not knowable here without reading all of it, which is the whole
+    // point of a lazy scan — so the honesty is enforced at `row_count` instead.
+    Ok(wrap_csv_scan(lf))
 }
 
 pub fn read_parquet(path: &str, line: usize, col: usize) -> Result<Df, HelixError> {
@@ -221,6 +293,15 @@ fn anyvalue_to_value(av: &AnyValue) -> Value {
     }
 }
 
+impl PolarsFrame {
+    /// Wrap a plan derived from this one, carrying the CSV-source mark forward:
+    /// `read_csv(f).select(a).count()` reads the same bytes through the same parser
+    /// as `read_csv(f).count()`, so it must be held to the same honesty.
+    fn derive(&self, lf: LazyFrame) -> Df {
+        wrap_with(lf, self.csv_source)
+    }
+}
+
 impl DataHandle for PolarsFrame {
     fn as_any(&self) -> &dyn Any {
         self
@@ -232,12 +313,12 @@ impl DataHandle for PolarsFrame {
 
     fn filter(&self, pred: &ColExpr, _line: usize, _col: usize) -> Result<Df, HelixError> {
         let e = lower(pred)?;
-        Ok(wrap_lazy(self.lf.clone().filter(e)))
+        Ok(self.derive(self.lf.clone().filter(e)))
     }
 
     fn select(&self, names: &[String], _line: usize, _col: usize) -> Result<Df, HelixError> {
         let exprs: Vec<Expr> = names.iter().map(|n| pcol(n.as_str())).collect();
-        Ok(wrap_lazy(self.lf.clone().select(exprs)))
+        Ok(self.derive(self.lf.clone().select(exprs)))
     }
 
     /// Add or replace columns from `name = expr` pairs (`df.with({bmi: weight /
@@ -252,14 +333,12 @@ impl DataHandle for PolarsFrame {
         for (name, ce) in cols {
             exprs.push(lower(ce)?.alias(name.as_str()));
         }
-        Ok(wrap_lazy(self.lf.clone().with_columns(exprs)))
+        Ok(self.derive(self.lf.clone().with_columns(exprs)))
     }
 
     fn sort(&self, names: &[String], _line: usize, _col: usize) -> Result<Df, HelixError> {
         let exprs: Vec<Expr> = names.iter().map(|n| pcol(n.as_str())).collect();
-        Ok(wrap_lazy(
-            self.lf.clone().sort_by_exprs(exprs, SortMultipleOptions::default()),
-        ))
+        Ok(self.derive(self.lf.clone().sort_by_exprs(exprs, SortMultipleOptions::default())))
     }
 
     /// Join on one or more shared key columns (`a.join(b, id)`). `how` is `inner`
@@ -299,7 +378,9 @@ impl DataHandle for PolarsFrame {
         let right_cols = schema_names(&rf.lf, line, col)?;
         super::validate_join_keys(&left_cols, &right_cols, keys, line, col)?;
         let on: Vec<Expr> = keys.iter().map(|k| pcol(k.as_str())).collect();
-        Ok(wrap_lazy(self.lf.clone().join(
+        // CSV-sourced on either side ⇒ CSV-sourced: the joined plan still reads that
+        // file through the parser, so its count must still be the parser's count.
+        let joined = self.lf.clone().join(
             rf.lf.clone(),
             on.clone(),
             on,
@@ -310,12 +391,13 @@ impl DataHandle for PolarsFrame {
             JoinArgs::new(join_type)
                 .with_suffix(Some("_right".into()))
                 .with_coalesce(JoinCoalesce::CoalesceColumns),
-        )))
+        );
+        Ok(wrap_with(joined, self.csv_source || rf.csv_source))
     }
 
     fn head(&self, n: usize) -> Df {
         // Clamp rather than truncate via `as u32` (which wrapped large counts).
-        wrap_lazy(self.lf.clone().limit(n.min(u32::MAX as usize) as u32))
+        self.derive(self.lf.clone().limit(n.min(u32::MAX as usize) as u32))
     }
 
     fn vstack(&self, bottom: &Df, line: usize, col: usize) -> Result<Df, HelixError> {
@@ -351,7 +433,7 @@ impl DataHandle for PolarsFrame {
             line,
             col,
         )?;
-        Ok(wrap_lazy(stacked))
+        Ok(wrap_with(stacked, self.csv_source || bf.csv_source))
     }
 
     fn unique_by(&self, subset: &[String], _line: usize, _col: usize) -> Result<Df, HelixError> {
@@ -365,7 +447,7 @@ impl DataHandle for PolarsFrame {
                 subset.iter().map(|s| PlSmallStr::from_str(s)).collect();
             (Some(Selector::ByName { names, strict: true }), UniqueKeepStrategy::Last)
         };
-        Ok(wrap_lazy(self.lf.clone().unique_stable(sub, keep)))
+        Ok(self.derive(self.lf.clone().unique_stable(sub, keep)))
     }
 
     /// One grouped aggregation: `group(keys).<agg>(value_col)`. Lazy.
@@ -398,13 +480,39 @@ impl DataHandle for PolarsFrame {
         // groups in a hash-dependent order that varies run-to-run — a reproducibility
         // hazard for a scientific language, and the sole cause of the VM/tree-walker
         // parity flakiness on the grouped examples.
-        Ok(wrap_lazy(self.lf.clone().group_by_stable(key_exprs).agg([agg_expr])))
+        Ok(self.derive(self.lf.clone().group_by_stable(key_exprs).agg([agg_expr])))
     }
 
-    /// Row count via a `len()` pushdown — avoids materializing the columns.
+    /// Row count via a `len()` pushdown — no column is materialized.
+    ///
+    /// **The count must come from the same read as the data.** A bare `select(len())`
+    /// over a CSV scan does not: Polars answers it by scanning bytes for record
+    /// separators and never invoking the field parser, so `read_csv(bad).count()`
+    /// returned `1` with exit 0 for a file on which `print(df)`, `df.column("a")`
+    /// and `df.to_table()` all errored. A count that lies with a zero exit code is
+    /// worse than any error message, so for CSV-sourced plans we pin one real column
+    /// into the projection. Polars still streams (the extra output is one scalar, so
+    /// memory stays O(1)); it just can no longer skip the parser. The count itself is
+    /// unchanged for every file that parses.
+    ///
+    /// Cost, measured end-to-end (`helix` process wall time, min of 7) on a 113 MB /
+    /// 3M-row / 4-column CSV: **55 ms → 280 ms**. It is paid only where the shortcut
+    /// was reachable: `where`/`sort`/`group`/`unique` counts already parsed and are
+    /// unchanged, `df.column("a").sum()` on the same file is unchanged at ~0.5 s, and
+    /// `read_parquet(f).count()` stays at 10 ms — a Parquet row count *is* the number
+    /// of rows the reader will produce, so there is nothing there to reconcile.
     fn row_count(&self, line: usize, col: usize) -> Result<usize, HelixError> {
+        let mut exprs = vec![len().alias("n")];
+        if self.csv_source {
+            // Any single column forces the scan through the field parser; the first is
+            // the deterministic choice. `null_count` (not `len`) because the optimizer
+            // folds a column `len` straight back into the parser-free height.
+            if let Some(first) = schema_names(&self.lf, line, col)?.first() {
+                exprs.push(pcol(first.as_str()).null_count().alias("__helix_parsed"));
+            }
+        }
         let df = pl(
-            self.lf.clone().select([len().alias("n")]).collect(),
+            self.lf.clone().select(exprs).collect(),
             "could not count rows",
             line,
             col,
@@ -495,7 +603,12 @@ impl DataHandle for PolarsFrame {
     fn collect_string(&self) -> Result<String, String> {
         match self.lf.clone().collect() {
             Ok(df) => Ok(format!("{}", df)),
-            Err(e) => Err(format!("{}", e)),
+            // Through `tidy` like every other engine error. This one does not go through
+            // `pl` — it returns a `String` across the seam rather than a `HelixError` — so
+            // it was the last place a Polars advice block ("Consider setting
+            // 'truncate_ragged_lines=true'", an option Helix does not have) still reached
+            // the user, on `print(df)` of a ragged CSV.
+            Err(e) => Err(tidy(&e.to_string()).0),
         }
     }
 }
