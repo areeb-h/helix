@@ -4315,6 +4315,68 @@
         }
     }
 
+    /// A map body that BOTH captures a float and calls a user function must reach the mixed
+    /// kernel. That combination is the shape of a numerical derivative — the capture is the
+    /// step size — and it declined while each half worked alone:
+    ///
+    ///     h = 0.001
+    ///     fn f(x: Float) -> Float = x * x
+    ///     (0..10M).map(i => (f(to_float(i) + h) - f(to_float(i))) / h)     1.783 s
+    ///     …the same body with `h` written as the literal 0.001              0.021 s
+    ///
+    /// THE RULE THIS PINS, and it is the one that is easy to relax by accident: a `Float`
+    /// parameter must receive a GENUINE float, never an unpromoted value scalar. A capture
+    /// rides as `f64` in the kernel but may be an `Int` at runtime, so the interpreter would
+    /// keep it `i64` into the call while the kernel hands the callee an `f64` — a divergence
+    /// invisible below 2^53, which is why `f(c)` with a raw `Int` capture must decline rather
+    /// than compile.
+    #[test]
+    fn a_float_capture_and_a_user_call_compile_together() {
+        let built = |src: &str| {
+            let toks = lexer::lex(src).unwrap();
+            let ast = parser::parse(toks).unwrap();
+            let prog = bytecode::compile_with_types(&ast, None).unwrap();
+            let jit = crate::jit::build(
+                &ast,
+                &prog.reduce_loops,
+                &prog.map_kernels,
+                &prog.filter_kernels,
+                &prog.fused_kernels,
+                &prog.scan_loops,
+            );
+            assert!(!prog.map_kernels.is_empty(), "no map kernel requested: {src}");
+            jit.as_ref()
+                .map(|j| {
+                    j.map_kernel_mixed(0).is_some()
+                        || j.map_kernel_mixed_value(0).is_some()
+                        || j.map_kernel_mixed_int(0).is_some()
+                })
+                .unwrap_or(false)
+        };
+        let deriv = "h = 0.001\nfn f(x: Float) -> Float = x * x\n\
+                     print((0..9).map(i => (f(to_float(i) + h) - f(to_float(i))) / h).sum())";
+        assert!(built(deriv), "the derivative shape did not reach a mixed map kernel");
+
+        // Values agree on all three engines — including where an unpromoted capture would
+        // show, which is only past 2^53.
+        for src in [
+            deriv,
+            "h = 0.5\nfn f(x: Float) -> Float = x * 2.0\nprint((0..6).map(i => f(to_float(i) * h)).sum())",
+            "c = 9007199254740993\nfn f(x: Float) -> Float = x * 3.0\n\
+             print((0..3).map(i => f(to_float(c) + to_float(i))))",
+            "c = 9007199254740993\nfn g(x) = x * 3\nprint((0..3).map(i => to_float(g(c)) + to_float(i)))",
+            "a = [1.0, 2.0, 3.0]\nh = 2.0\nfn f(x: Float) -> Float = x * x\n\
+             print((0..3).map(i => f(a[i]) * h))",
+            // Poison still bails to bytecode for the exact interpreter error.
+            "h = 0.0\nfn f(x: Float) -> Float = x * x\nprint((0..4).map(i => f(to_float(i)) / h))",
+            // A raw Int capture into a Float parameter: whatever it does, all three agree.
+            "h = 1.0\nfn f(x: Float) -> Float = x * x\nprint((0..3).map(i => f(h)))",
+        ] {
+            assert_eq!(run_tw(src), run_vm(src), "tw vs vm: {src}");
+            assert_eq!(run_tw(src), run_vm_jit(src), "tw vs jit: {src}");
+        }
+    }
+
     /// Division must never be JIT-compiled: native `fdiv` returns inf on /0,
     /// but the interpreter errors — so a `/`-using function falls back and
     /// division by zero still raises (rather than silently producing inf).

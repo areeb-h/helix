@@ -125,7 +125,7 @@ impl super::Compiler {
                 // the mixed (i64 range → f64 out) specialization from it, and a body BOTH
                 // analyses admit (`a[i] + 1`) got the same list from the i64 one above, so
                 // whichever runs, `caps[j]` and the VM's load order agree.
-                .or_else(|| crate::jit::mixed_map_captures_indexed(body, &params[0], &user_fns))
+                .or_else(|| crate::jit::mixed_map_captures_indexed(body, &params[0], &fns, &user_fns, &self.mixed_sigs))
                 // A **mixed** `Int`-source → `Float` body the i64/f64 analyses both reject —
                 // e.g. `(it % 97) * 1.0` (integer `%`/`//`/bitwise/shift subexpression, float
                 // root), including one that captures free scalars (`(c * it) * 0.5`, which is

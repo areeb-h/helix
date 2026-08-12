@@ -940,7 +940,7 @@ fn define_array_kernels(
             // are a per-specialization loading decision, not an identity.
             !indexed
                 && map_body_raises(&k.body, user_fns, msigs) == k.raises
-                && mixed_map_value_scalar_eligible(&k.body, &k.binder, user_fns).is_some_and(
+                && mixed_map_value_scalar_eligible(&k.body, &k.binder, eligible, user_fns, msigs).is_some_and(
                     |c| {
                         c.len() == k.captures.len()
                             && c.iter().zip(&k.captures).all(|(a, b)| a.name == b.name)
@@ -956,7 +956,7 @@ fn define_array_kernels(
                 // Synthetic `$aff*` naming is a deterministic function of the body (dedup
                 // by printed form), so the re-derived capture list — `$aff` slots included
                 // — must equal the stored one exactly or the build declines.
-                mixed_map_captures_indexed(&k.body, &k.binder, user_fns)
+                mixed_map_captures_indexed(&k.body, &k.binder, eligible, user_fns, msigs)
                     .is_some_and(|(c, bnd, _)| c == k.captures && bnd == k.index_bounds)
             } else {
                 // Same drift guard as the indexed arms: re-derive the capture list and require
@@ -3031,12 +3031,15 @@ pub type MapIndexAnalysis = (Vec<Capture>, Vec<IndexBound>, Vec<(String, Expr)>)
 pub fn mixed_map_captures_indexed(
     body: &Expr,
     binder: &str,
+    fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
+    msigs: &MixedSigTable,
 ) -> Option<MapIndexAnalysis> {
     let mut caps: Vec<Capture> = Vec::new();
     let mut bounds: Vec<IndexBound> = Vec::new();
     let mut synth: Vec<(String, Expr)> = Vec::new();
-    let root = infer_mixed_kind_indexed(body, binder, &mut caps, &mut bounds, &mut synth, user_fns)?;
+    let root =
+        infer_mixed_kind_indexed(body, binder, &mut caps, &mut bounds, &mut synth, fns, user_fns, msigs)?;
     // GFloat root: a genuine `f64` the kernel writes to the output buffer (a bare-`SFloat` root
     // — an un-promoted value scalar — is rejected, matching the interpreter). Non-empty bounds:
     // an unindexed body belongs to the plain i64/f64/mixed analyses, which run first at the
@@ -3066,12 +3069,15 @@ pub fn mixed_map_captures_indexed(
 pub fn mixed_map_value_scalar_eligible(
     body: &Expr,
     binder: &str,
+    fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
+    msigs: &MixedSigTable,
 ) -> Option<Vec<Capture>> {
     let mut caps: Vec<Capture> = Vec::new();
     let mut bounds: Vec<IndexBound> = Vec::new();
     let mut synth: Vec<(String, Expr)> = Vec::new();
-    let root = infer_mixed_kind_indexed(body, binder, &mut caps, &mut bounds, &mut synth, user_fns)?;
+    let root =
+        infer_mixed_kind_indexed(body, binder, &mut caps, &mut bounds, &mut synth, fns, user_fns, msigs)?;
     if root == MixT::GFloat
         && bounds.is_empty()
         && synth.is_empty()
@@ -3135,7 +3141,9 @@ fn infer_mixed_kind_indexed(
     caps: &mut Vec<Capture>,
     bounds: &mut Vec<IndexBound>,
     synth: &mut Vec<(String, Expr)>,
+    fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
+    msigs: &MixedSigTable,
 ) -> Option<MixT> {
     match e {
         Expr::Int(_) => Some(MixT::Int),
@@ -3196,14 +3204,14 @@ fn infer_mixed_kind_indexed(
                 // `sqrt` promotes its argument to `f64` in BOTH engines, so an `SFloat` arg is
                 // safe here and the result is a genuine float.
                 ("sqrt", 1) => {
-                    infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)?;
+                    infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, fns, user_fns, msigs)?;
                     Some(MixT::GFloat)
                 }
                 // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
                 // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
                 // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
                 ("to_float", 1) => {
-                    infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)?;
+                    infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, fns, user_fns, msigs)?;
                     Some(MixT::GFloat)
                 }
                 // `abs`/`min`/`max` do NOT promote (interp `abs(Int)` is `iabs`, `min(Int,Int)`
@@ -3217,25 +3225,92 @@ fn infer_mixed_kind_indexed(
                 // RAISE when the result leaves i64 range and therefore still need a poison path.
                 // An unpromoted value scalar is refused for the same reason `abs` refuses one:
                 // its runtime type is not yet pinned, and `to_int`/`sign` read it directly.
-                ("to_int" | "sign", 1) => match infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)? {
+                ("to_int" | "sign", 1) => match infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, fns, user_fns, msigs)? {
                     MixT::SFloat => None,
                     _ => Some(MixT::Int),
                 },
-("abs", 1) => match infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)? {
+("abs", 1) => match infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, fns, user_fns, msigs)? {
                     MixT::SFloat => None,
                     k => Some(k),
                 },
                 ("min" | "max", 2) => {
-                    let ka = infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, user_fns)?;
-                    let kb = infer_mixed_kind_indexed(&args[1], binder, caps, bounds, synth, user_fns)?;
+                    let ka = infer_mixed_kind_indexed(&args[0], binder, caps, bounds, synth, fns, user_fns, msigs)?;
+                    let kb = infer_mixed_kind_indexed(&args[1], binder, caps, bounds, synth, fns, user_fns, msigs)?;
                     if ka == kb && ka != MixT::SFloat { Some(ka) } else { None }
                 }
                 _ => None,
             }
         }
+        // A USER FUNCTION. Without this arm, a body that BOTH captures a float and calls a
+        // user function declines — and that is exactly the shape of a numerical derivative,
+        // where the captured value is the step size:
+        //
+        //     h = 0.001
+        //     fn f(x: Float) -> Float = x * x
+        //     (0..10M).map(i => (f(to_float(i) + h) - f(to_float(i))) / h)     1.783 s
+        //     …the same body with `h` written as the literal 0.001              0.021 s
+        //
+        // 86x for naming a constant. Both halves already worked on their own — a float
+        // capture with no call, and a user call with no capture (becf927) — so the gap was
+        // only that this walker had no user-call arm at all, and no access to the tables it
+        // would need to type one.
+        //
+        // TWO RULES, AND THE SECOND IS THE SUBTLE ONE:
+        //
+        // * An i64-closed function with all-`Int` arguments returns `Int`, the same priority
+        //   the unindexed walker gives it.
+        // * A `Float` parameter must receive a GENUINE float (`GFloat`), never an `SFloat` —
+        //   the same rule `abs`, `to_int` and `sign` apply two arms above, for the same
+        //   reason. An `SFloat` is a value scalar riding as `f64` that may be an `Int` at
+        //   runtime, and an ANNOTATION IS NOT A COERCION: with `c = 2^53+1` and
+        //   `fn f(x: Float) -> Float = x * x`, the interpreter computes `f(c)` as a WRAPPING
+        //   i64 multiply and answers `18014398509481985` (an Int!), while `f(to_float(c))` is
+        //   an f64 multiply answering `8.1e31`. Handing a callee an unpromoted capture would
+        //   pick the second while the interpreter picks the first.
+        //
+        //   DEFENCE IN DEPTH, and stated as such because sabotage would not break it:
+        //   relaxing this to admit `SFloat` left every probe — including that 2^53 pair —
+        //   byte-identical on all three engines, because the kernel's runtime dispatch
+        //   independently declines when a `ScalarValue` capture turns out to be an `Int`. The
+        //   guard is kept for the reason the sibling check one function up is kept: the
+        //   alternative is CONSTRUCTING ill-typed IR and relying on a later check to refuse
+        //   it, and this file would rather never build it.
+        //
+        //   A capture reaches a callee as a genuine float only once something promoted it,
+        //   which is exactly what `to_float(i) + h` does — so the derivative shape qualifies.
+        //
+        // No codegen work: the value-scalar and indexed variants both lower through
+        // `gen_value_typed`, whose merged call arm already emits both forms.
+        Expr::Call { name, args, .. } if user_fns.contains(name.as_str()) => {
+            let mut kinds = Vec::with_capacity(args.len());
+            for a in args {
+                kinds.push(infer_mixed_kind_indexed(a, binder, caps, bounds, synth, fns, user_fns, msigs)?);
+            }
+            if kinds.iter().all(|k| *k == MixT::Int) && fns.contains(name.as_str()) {
+                return jit_builtin_arity_ok(name, args.len()).then_some(MixT::Int);
+            }
+            let (params, ret) = msigs.get(name.as_str())?;
+            if kinds.len() != params.len() {
+                return None;
+            }
+            for (k, want) in kinds.iter().zip(params) {
+                let ok = match want {
+                    NumKind::Int => *k == MixT::Int,
+                    // NEVER `SFloat` — see above.
+                    NumKind::Float => *k == MixT::GFloat,
+                };
+                if !ok {
+                    return None;
+                }
+            }
+            Some(match ret {
+                NumKind::Int => MixT::Int,
+                NumKind::Float => MixT::GFloat,
+            })
+        }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, synth, user_fns)?;
-            let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, synth, user_fns)?;
+            let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, synth, fns, user_fns, msigs)?;
+            let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, synth, fns, user_fns, msigs)?;
             mix_combine(lk, rk)
         }
         // `/` promotes BOTH operands in BOTH engines (even `Int / Int` is a float divide,
@@ -3245,8 +3320,8 @@ fn infer_mixed_kind_indexed(
         // (`map_body_raises` counts every `/`, so a dividing kernel always carries the
         // poison accumulator `gen_value_typed`'s Div arm ORs into).
         Expr::Binary { op: BinOp::Div, left, right, .. } => {
-            infer_mixed_kind_indexed(left, binder, caps, bounds, synth, user_fns)?;
-            infer_mixed_kind_indexed(right, binder, caps, bounds, synth, user_fns)?;
+            infer_mixed_kind_indexed(left, binder, caps, bounds, synth, fns, user_fns, msigs)?;
+            infer_mixed_kind_indexed(right, binder, caps, bounds, synth, fns, user_fns, msigs)?;
             Some(MixT::GFloat)
         }
         Expr::Binary {
@@ -3263,8 +3338,8 @@ fn infer_mixed_kind_indexed(
             if !op_ok {
                 return None;
             }
-            let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, synth, user_fns)?;
-            let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, synth, user_fns)?;
+            let lk = infer_mixed_kind_indexed(left, binder, caps, bounds, synth, fns, user_fns, msigs)?;
+            let rk = infer_mixed_kind_indexed(right, binder, caps, bounds, synth, fns, user_fns, msigs)?;
             // The i64-closed ops require both operands `Int` — a genuine float or a value
             // scalar is not even valid Helix here (`x[i] % 3` on an f64 array is a type error).
             if lk == MixT::Int && rk == MixT::Int {
