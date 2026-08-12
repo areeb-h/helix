@@ -1741,10 +1741,67 @@ motivates this phase.
       append.** Today the final read of a binding clones its `Rc`, so an accumulator is
       always shared at the moment it is extended and can never be mutated in place. If the
       compiler knew a read was a binding's LAST, it could MOVE instead — leaving the `Rc`
-      unique, which is the same uniqueness check the map kernels already use to reuse a
-      dead buffer (Stage 3o). That single change makes `acc.concat([x])` O(1) amortized,
-      which is what turns an imperative loop from a diverging trap into ordinary code.
-      Until then, adding `while` would hand users a familiar name for the 8,500x shape.
+      unique. That single change makes `acc.concat([x])` O(1) amortized, which is what
+      turns an imperative loop from a diverging trap into ordinary code. Until then, adding
+      `while` would hand users a familiar name for the diverging shape.
+
+      **MEASURED 2026-08-12** at HEAD fb3912f, `target/gate`, load 1.1, each run's output
+      asserted (a program that fails instantly is indistinguishable from a fast one — the
+      first attempt at this measurement did exactly that, with a `reduce` arity error
+      "running" in 5 ms on every engine):
+
+      | n | `reduce([], (acc,i) => acc.concat([i]))` | vs 2x the work |
+      |---|---|---|
+      | 32,000 | 0.075 s | |
+      | 64,000 | 0.223 s | 3.0x |
+      | 128,000 | 1.516 s | 6.8x |
+      | 256,000 | 6.493 s | 4.3x |
+
+      Superlinear, as expected. Note this is already ~10x better than the figure the
+      foundation audit recorded, because `purge_decommits = 0` (the allocator fix) took the
+      constant down — the ALGORITHM is unchanged. A `map` building the same 16,000 elements
+      takes 0.007 s against the append's 0.025 s.
+
+      `Dict.insert` is far worse and visibly quadratic at a tenth the size: 2,000 → 0.021 s,
+      4,000 → 0.069 s (3.2x), 8,000 → 0.251 s (3.6x). ADR 0020 already names its fast path
+      as future work.
+
+      **WHY IT IS NOT A ONE-LINE UNIQUENESS CHECK.** For
+      `range(0,n).reduce([], (acc,i) => acc.concat([i]))` there are THREE live references to
+      the accumulator when `concat` runs: the reduce driver's own, the callee frame's slot
+      (`LoadLocal` clones), and the popped receiver. `Op::Method` already pops, so the
+      receiver is owned; the other two both have to go, and dropping only one leaves the
+      count at 2 and buys nothing. There is no `Rc::make_mut`/`try_unwrap` anywhere in the
+      runtime today — the Stage 3o buffer reuse works on raw `i64` buffers inside the JIT,
+      not on `Rc<ArrayData>`, so this machinery is built from scratch. Four coordinated
+      pieces:
+
+        1. `Op::MoveLocal(slot)` — `std::mem::replace` the frame slot, push the value.
+        2. A rewrite over the FINAL bytecode (where `tco_peephole` already runs, so all
+           jumps are patched): `LoadLocal(s)` → `MoveLocal(s)` when there is EXACTLY ONE
+           `LoadLocal(s)` in the chunk, the chunk contains no backward jump, and `s` is not
+           captured as an upvalue. Loop-freedom is the load-bearing condition — a single
+           TEXTUAL read inside a comprehension's inline loop executes n times, and moving on
+           the first iteration would hand iteration 2 a hole.
+        3. The reduce/scan driver must MOVE the accumulator into the call rather than clone
+           it, or the count never reaches 1.
+        4. `concat` must see the receiver OWNED. It currently takes `&[Value]` — the `Rc` is
+           already gone by the time it runs — so the fast path has to sit in `Op::Method`
+           ahead of the generic dispatch, or `call_method` has to take the receiver by value.
+           For a packed `ArrayData::Ints` receiver the win compounds: today `concat` boxes
+           every element via `to_values()`, extends, then re-packs in `array_sniff` — three
+           passes where the fast path is a `Vec::extend`.
+
+      The TREE-WALKER needs no change: this is purely a performance property, so the oracle
+      keeps comparing identical values and the scope halves.
+
+      **THE RISK THAT DECIDES THE ORDER OF WORK.** A wrong liveness answer moves a slot that
+      is read again, and the second read sees a hole — a silent wrong answer, in a language
+      whose whole premise is a differential oracle, and in the one area where the corpus is
+      least likely to have a matching shape. So the rewrite lands with the narrowest rule
+      that fixes the accumulator (parameter slot, single read, receiver of a `Method`,
+      loop-free chunk, no upvalues) and widens only against tests, rather than starting
+      general and pruning.
 
 ## Design: admitting a non-literal `%` / `//` / `>>` (the 17-110x item)
 
