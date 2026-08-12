@@ -298,6 +298,13 @@ pub struct Compiler {
     /// Set while emitting a fused pipeline's fall-through, so the recompiled chain takes
     /// the ordinary per-stage path instead of re-triggering fusion (which would loop).
     no_fuse: bool,
+    /// Nesting depth of function/lambda bodies being compiled; 0 means top level.
+    ///
+    /// This is what keeps a forward reference *scoped*. The tree-walker binds a top-level
+    /// `fn` when execution REACHES it, so a peer's body may call it (bodies run after the
+    /// whole file is walked) but a top-level statement above it may not. A slot reserved by
+    /// PASS ONE and not yet filled is therefore visible only while `body_depth > 0`.
+    body_depth: usize,
     /// User functions the JIT can compile to pure `i64` natives — so a kernel/fused body
     /// may *call* them. Computed once (identically to `jit::build`) so the compile-time
     /// guard decision matches what the JIT will actually compile.
@@ -342,10 +349,54 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         fused_kernels: Vec::new(),
         scan_loops: Vec::new(),
         no_fuse: false,
+        body_depth: 0,
         jit_fns: crate::jit::int_eligible_fns(program),
         mixed_sigs: crate::jit::mixed_fn_sigs(program),
         types,
     };
+
+    // PASS ONE: reserve a function-table slot for every top-level `fn`, before compiling any
+    // body. `compile_func` already reserved its OWN index before compiling its own body, so
+    // that a recursive self-call could resolve; this is the same trick widened to peers, and
+    // it is what makes mutual recursion compile:
+    //
+    //     fn even(n) = if n == 0 then true else odd(n - 1)
+    //     fn odd(n)  = if n == 0 then false else even(n - 1)
+    //
+    // Without it, `odd` had no index when `even`'s body was compiled, so the call lowered to
+    // a raise — while the TREE-WALKER ran the same program fine, because it resolves names at
+    // call time. Two engines disagreeing about whether a program exists is the worst shape of
+    // divergence this project can have, and it was hidden behind a front-end error that fired
+    // first.
+    //
+    // Only the first `fn` of a given name reserves; a later one appends its own slot when
+    // `compile_func` finds no free reservation, which preserves today's duplicate-definition
+    // behaviour exactly.
+    //
+    // A name that SHADOWS A BUILTIN never reserves. Reserving it would make the shadow
+    // retroactive — the walker resolves such a name at call time, so every call above the
+    // definition reaches the builtin and only calls below reach the user's function:
+    //
+    //     print(round(1.4))     # 1  -- the builtin
+    //     fn round(x) = 99
+    //     print(round(1.4))     # 99 -- the user's
+    //
+    // `tests/corpus/j14_rounders_and_int_mixed.helix` is exactly this program (it calls the
+    // builtin `round` twenty times, then defines `fn round(x) = 99` at line 55) and it
+    // caught the retroactive reading: `[99, 99, 99, 99]` where the walker says `[1, 2, 3, 4]`.
+    // Order-blind reservation cannot express "builtin until here, user's after", so a
+    // shadowing name keeps the source-order path it has always had. The exclusion costs only
+    // mutual recursion BETWEEN TWO BUILTIN NAMES, which resolves to the builtins anyway.
+    for stmt in program {
+        if let Stmt::Func { name, params, .. } = stmt
+            && !c.func_names.iter().any(|n| n == name)
+            && crate::registry::lookup(name).is_none()
+        {
+            c.func_names.push(name.clone());
+            c.func_arity.push(params.len() as u32);
+            c.funcs.push(None);
+        }
+    }
 
     let mut main = Builder::new();
     for stmt in program {
@@ -361,7 +412,19 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
     };
     c.funcs[0] = Some(main_chunk);
 
-    let funcs: Vec<Chunk> = c.funcs.into_iter().map(|f| f.unwrap()).collect();
+    // A slot reserved by PASS ONE stays empty when the definition statement was *rejected*
+    // rather than compiled: `fn inf(x) = ...` over the seeded immutable `inf`, or over a
+    // user global bound earlier in the file. That arm emits a raise at the definition point
+    // and returns without a body, and PASS ONE cannot predict it — a user global only enters
+    // `globals` as compilation reaches its binding, so the collision is not knowable before
+    // the walk. The slot must still hold a chunk, because indices are baked into every
+    // emitted `Call`; it just has to be one that cannot answer.
+    let funcs: Vec<Chunk> = (0..c.funcs.len())
+        .map(|i| match c.funcs[i].take() {
+            Some(chunk) => chunk,
+            None => rejected_fn_chunk(&c.func_names[i], c.func_arity[i]),
+        })
+        .collect();
     let memo_set = memoizable_fns(program);
     let memoizable: Vec<bool> = c
         .func_names
@@ -399,6 +462,34 @@ fn as_range_call(e: &Expr) -> Option<(Option<&Expr>, &Expr)> {
             };
         }
     None
+}
+
+/// The chunk installed for a function slot that PASS ONE reserved and no definition ever
+/// filled — see the call site in [`compile_with_types`]. Nothing should reach it: execution
+/// stops at the raise the rejected definition emitted, and a call written ABOVE that
+/// definition resolves to the colliding global, which wins `resolve`. It raises the same
+/// error the definition point does, so that if a path here is ever found the result is that
+/// error rather than a wrong answer or a panic in the compiler.
+fn rejected_fn_chunk(name: &str, arity: u32) -> Chunk {
+    let mut b = Builder::new();
+    b.emit(
+        Op::raise(
+            std::rc::Rc::new(format!("`{name}` is immutable and cannot be reassigned")),
+            std::rc::Rc::new(format!(
+                "declare it as mutable up front with `mut {name} = ...` if it needs to change."
+            )),
+        ),
+        0,
+        0,
+    );
+    b.emit(Op::Return, 0, 0);
+    Chunk {
+        code: b.code,
+        consts: b.consts,
+        pos: b.pos,
+        n_params: arity,
+        n_locals: b.max_slot.max(arity),
+    }
 }
 
 /// Tail-call peephole: rewrite every `CallFn` whose control-flow successor leads straight to
@@ -568,10 +659,28 @@ impl Compiler {
         if let Some(i) = self.globals.iter().position(|g| g == name) {
             return Some(NameRef::Global(i as u32));
         }
-        if let Some(i) = self.func_names.iter().position(|f| f == name) {
+        if let Some(i) = self.func_names.iter().position(|f| f == name)
+            && self.fn_slot_visible(i)
+        {
             return Some(NameRef::Func(i as u32));
         }
         None
+    }
+
+    /// Can a `fn` slot be named from where we are compiling right now?
+    ///
+    /// A filled slot always can — its definition is behind us. An *unfilled* one is a PASS
+    /// ONE reservation for a definition still ahead, and it is nameable only from inside a
+    /// body (`body_depth > 0`), because a body does not run until the whole file is bound.
+    /// At top level the walker would raise "not a known function", so we must not resolve:
+    ///
+    ///     print(f(1))       # walker: error -- `f` is not a known function
+    ///     fn f(x) = x + 1
+    ///
+    /// The slot a function reserved for ITSELF is unfilled while its own body compiles, and
+    /// stays visible by the same rule — which is what has always made self-recursion resolve.
+    fn fn_slot_visible(&self, i: usize) -> bool {
+        self.body_depth > 0 || self.funcs[i].is_some()
     }
 
     /// Is `name` bound to a *user* value/function (local, captured upvalue,
@@ -582,7 +691,11 @@ impl Compiler {
             || b.upvalues.iter().any(|(n, _)| n == name)
             || b.enclosing.iter().any(|(n, _)| n == name)
             || self.globals.iter().any(|g| g == name)
-            || self.func_names.iter().any(|f| f == name)
+            || self
+                .func_names
+                .iter()
+                .position(|f| f == name)
+                .is_some_and(|i| self.fn_slot_visible(i))
     }
 
     /// `as_range_call`, but only when `range` is the *builtin* (not shadowed by a
@@ -639,7 +752,16 @@ impl Compiler {
                     // assignment silently created a global that shadowed the fn
                     // in `resolve` while previously compiled calls kept hitting
                     // the original — an engine divergence.
-                    if self.func_names.iter().any(|f| f == name) {
+                    // `fn_slot_visible` matters here: a PASS ONE reservation for a `fn`
+                    // defined LATER must not reject an assignment written above it, since
+                    // the walker has not bound that name yet either (`mut f = 5` above
+                    // `fn f(x) = ...` reassigns the mutable global when the `fn` is reached).
+                    if self
+                        .func_names
+                        .iter()
+                        .position(|f| f == name)
+                        .is_some_and(|i| self.fn_slot_visible(i))
+                    {
                         b.emit(
                             Op::raise(
                                 std::rc::Rc::new(format!(
@@ -695,13 +817,14 @@ impl Compiler {
                         return Ok(());
                     }
                     let arity = params.len() as u32;
-                    let idx = self.funcs.len() as u32; // compile_func pushes here
-                    self.compile_func(name, params, body)?;
+                    // `compile_func` may fill a slot reserved by the pre-pass rather than
+                    // appending, so take the index from it instead of guessing `funcs.len()`.
+                    let idx = self.compile_func(name, params, body)?;
                     b.emit(Op::MakeFunc { idx, arity }, *line, *col);
                     b.emit(Op::StoreGlobal(i as u32), *line, *col);
                     return Ok(());
                 }
-                self.compile_func(name, params, body)
+                self.compile_func(name, params, body).map(|_| ())
             }
             Stmt::Expr(e) => {
                 self.compile_expr(b, e)?;
@@ -715,7 +838,11 @@ impl Compiler {
                 // `mut` or plain — see the Assign arm for why.
                 for name in names {
                     if !self.globals.iter().any(|g| g == name)
-                        && self.func_names.iter().any(|f| f == name)
+                        && self
+                            .func_names
+                            .iter()
+                            .position(|f| f == name)
+                            .is_some_and(|i| self.fn_slot_visible(i))
                     {
                         b.emit(
                             Op::raise(
@@ -787,19 +914,38 @@ impl Compiler {
         name: &str,
         params: &[(String, Option<crate::ast::TypeAnn>)],
         body: &Expr,
-    ) -> R<()> {
-        // Reserve the function's index *before* compiling its body so recursive
-        // self-calls resolve.
-        let idx = self.funcs.len();
-        self.func_names.push(name.to_string());
-        self.func_arity.push(params.len() as u32);
-        self.funcs.push(None);
+    ) -> R<u32> {
+        // Take the slot `reserve_top_level_fns` set aside for this name if there is one —
+        // that pre-pass is what lets a body call a peer defined BELOW it. Otherwise reserve
+        // one here, which is the original behaviour and still the right one for a second
+        // `fn` of the same name (the first definition already filled the reserved slot, so
+        // this finds none free and appends, exactly as before).
+        //
+        // Either way the index exists before the body is compiled, which is what made
+        // recursive SELF-calls resolve and now makes mutual ones resolve too.
+        let idx = match self
+            .func_names
+            .iter()
+            .position(|n| n == name)
+            .filter(|&i| self.funcs[i].is_none())
+        {
+            Some(i) => i,
+            None => {
+                self.func_names.push(name.to_string());
+                self.func_arity.push(params.len() as u32);
+                self.funcs.push(None);
+                self.funcs.len() - 1
+            }
+        };
 
         let mut fb = Builder::new();
         for (pname, _) in params {
             fb.declare_local(pname);
         }
-        self.compile_expr(&mut fb, body)?;
+        self.body_depth += 1;
+        let compiled = self.compile_expr(&mut fb, body);
+        self.body_depth -= 1;
+        compiled?;
         fb.emit(Op::Return, 0, 0);
         tco_peephole(&mut fb.code);
 
@@ -811,7 +957,7 @@ impl Compiler {
             n_locals: fb.max_slot,
         };
         self.funcs[idx] = Some(chunk);
-        Ok(())
+        Ok(idx as u32)
     }
 
     /// Compile an anonymous lambda body into its own chunk (like [`Self::compile_func`]
@@ -836,6 +982,13 @@ impl Compiler {
         for p in params {
             fb.declare_local(p);
         }
+        // Deliberately does NOT bump `body_depth`: a lambda inherits the depth of wherever it
+        // is written. Inside a `fn` body it is already >0, so `xs.map(x => peer(x))` sees a
+        // peer defined below. Written at TOP LEVEL it stays 0, because a top-level lambda can
+        // be called immediately — `print((x => f(x))(1))` above `fn f` must keep raising, as
+        // the walker does. (The converse, a top-level lambda called only after the
+        // definition, still does not resolve; that gap predates PASS ONE and is unchanged by
+        // it, since at depth 0 the visible set is exactly "definitions compiled so far".)
         self.compile_expr(&mut fb, body)?;
         fb.emit(Op::Return, 0, 0);
         tco_peephole(&mut fb.code);

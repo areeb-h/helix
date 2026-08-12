@@ -864,8 +864,16 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       have no rounder arm yet; same mechanism would apply).
 
 - [ ] Stage 3c — widen further: `Mod`/`Pow`, `and`/`or` in conditions,
-      forward-referenced mutual recursion (two-pass bytecode function registration),
       then array/loop kernels (the bridge to Track C).
+
+      Two-pass bytecode function registration is **done**: a function body may call a
+      peer defined below it, so mutual recursion, forward references and longer cycles
+      compile and run on all three engines, with mutual TAIL recursion constant-space
+      (verified to 1,000,000 frames). The forward reference is scoped to *bodies* — a
+      top-level call above a definition still raises, and a name shadowing a builtin is
+      not shadowed retroactively, both because the tree-walker binds a top-level `fn`
+      when execution reaches it. These stay on the VM rather than the JIT by design
+      (`eligible_set` excludes recursion cycles; a native frame has no depth guard).
 - [x] **Stage 3d — map-side `arr[i]`.** A `reduce` body could read a captured array;
       a `map` body could not, so ONE missing arm sent the whole map to the per-element
       VM loop. It was the largest measured JIT gap.

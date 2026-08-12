@@ -2839,6 +2839,107 @@ fn fn_name_collision_with_global_matches_walker() {
     }
 }
 
+/// A function body may call a peer defined BELOW it — mutual recursion, forward
+/// references, longer cycles. The bytecode compiler used to resolve names in a
+/// single pass, so `even` calling `odd` lowered to a raise while the tree-walker
+/// (which resolves at call time) ran the same program fine: two engines
+/// disagreeing about whether a program *exists*.
+#[test]
+fn mutual_recursion_and_forward_references_match_walker() {
+    for (src, want, tag) in [
+        (
+            "fn even(n) = if n == 0 then true else odd(n - 1)\n\
+fn odd(n) = if n == 0 then false else even(n - 1)\n\
+print(even(4))\nprint(odd(7))\n",
+            "true\ntrue",
+            "mutual",
+        ),
+        ("fn a(n) = b(n)\nfn b(n) = n + 1\nprint(a(1))\n", "2", "forward"),
+        (
+            "fn f(n) = if n == 0 then 0 else g(n - 1)\n\
+fn g(n) = if n == 0 then 1 else h(n - 1)\n\
+fn h(n) = if n == 0 then 2 else f(n - 1)\nprint(f(7))\n",
+            "1",
+            "three_cycle",
+        ),
+        // A lambda inside a body inherits that body's forward visibility.
+        ("fn a(xs) = xs.map(x => b(x))\nfn b(x) = x * 2\nprint(a([1, 2]))\n", "[2, 4]", "lambda_in_body"),
+    ] {
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (out, err, code) = run_source(src, env, tag);
+            assert_eq!(code, Some(0), "env {env:?} src {tag} stderr: {err}");
+            assert_eq!(out.trim(), want, "env {env:?} src {tag}");
+        }
+    }
+}
+
+/// The forward reference is SCOPED to bodies, which is where the tree-walker's
+/// call-time resolution makes it observable: a top-level `fn` binds when execution
+/// reaches it, so a *top-level* call above the definition still raises, and a name
+/// that shadows a builtin is not shadowed retroactively. Pre-registering either
+/// would answer programs the walker rejects, or answer them differently.
+#[test]
+fn forward_reference_does_not_leak_to_top_level_or_shadow_retroactively() {
+    // Top level, above the definition: unknown on every engine, as before.
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (_, err, code) = run_source("print(f(1))\nfn f(x) = x + 1\n", env, "above");
+        assert_eq!(code, Some(1), "env {env:?} stderr: {err}");
+        assert!(err.contains("`f` is not a known function"), "env {env:?} stderr: {err}");
+    }
+    // A builtin keeps answering until the shadow's definition is reached.
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let src = "print(round(1.4))\nfn round(x) = 99\nprint(round(1.4))\n";
+        let (out, err, code) = run_source(src, env, "shadow");
+        assert_eq!(code, Some(0), "env {env:?} stderr: {err}");
+        assert_eq!(out.lines().collect::<Vec<_>>(), vec!["1", "99"], "env {env:?}");
+    }
+    // A genuinely absent name still reports as absent (not as a reserved slot).
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (_, err, code) = run_source("fn a(n) = nosuch(n)\nprint(a(1))\n", env, "missing");
+        assert_eq!(code, Some(1), "env {env:?} stderr: {err}");
+        assert!(err.contains("`nosuch` is not a known function"), "env {env:?} stderr: {err}");
+    }
+}
+
+/// Mutual tail recursion is constant-space. The peers are static callees now, so the
+/// tail-call peephole applies to them exactly as it does to self-recursion; the old
+/// way to write this (threading the peer as a PARAMETER) is a call through a value,
+/// which is not a static tail call and still caps at the 20,000-frame limit.
+#[test]
+fn mutual_tail_recursion_is_constant_space() {
+    let src = "fn a(n, s) = if n == 0 then s else b(n - 1, s + n)\n\
+fn b(n, s) = if n == 0 then s else a(n - 1, s + n)\n\
+print(a(1000000, 0))\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "mutual_tco");
+        assert_eq!(code, Some(0), "env {env:?} stderr: {err}");
+        assert_eq!(out.trim(), "500000500000", "env {env:?}");
+    }
+    let threaded = "fn t(n, acc, self) = if n == 0 then acc else self(n - 1, acc + n, self)\n\
+print(t(25000, 0, t))\n";
+    let (_, err, code) = run_source(threaded, &[], "threaded");
+    assert_eq!(code, Some(1), "stderr: {err}");
+    assert!(err.contains("maximum recursion depth"), "stderr: {err}");
+}
+
+/// Unbounded mutual recursion raises the depth guard rather than overflowing the
+/// native stack. `jit::eligible_set` excludes every function on a recursion *cycle*
+/// for exactly this reason, and its comment says the exclusion must not depend on
+/// the front-end's define-before-use rule — "a front-end policy that could change".
+/// Two-pass registration changed it, so the property is pinned here instead of
+/// re-argued: a missing base case must stay a catchable Helix error, never a
+/// killed host. Non-tail on purpose — a tail call becomes a loop and never returns.
+#[test]
+fn unbounded_mutual_recursion_raises_instead_of_crashing() {
+    let src = "fn a(n) = 1 + b(n + 1)\nfn b(n) = 1 + a(n + 1)\nprint(a(0))\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (_, err, code) = run_source(src, env, "unbounded_mutual");
+        // Some(1) is a clean Helix error; None would be death by signal.
+        assert_eq!(code, Some(1), "env {env:?} stderr: {err}");
+        assert!(err.contains("maximum recursion depth"), "env {env:?} stderr: {err}");
+    }
+}
+
 /// A deep `x => x => ...` lambda chain must hit the parser depth cap with a
 /// clean error — lambda bodies were the one expr() recursion that skipped the
 /// depth counter, so 2000 nestings overflowed the native stack (SIGABRT).
@@ -3113,7 +3214,7 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // `stack.last()` pattern match immediately above it (same argument as the Ints
         // arm's pop).
         ("src/vm.rs", 57),
-        ("src/bytecode.rs", 2),
+        ("src/bytecode.rs", 1),
         ("src/bytecode/comprehensions.rs", 0),
         ("src/bytecode/ops.rs", 0),
         ("src/lexer.rs", 0),

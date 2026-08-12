@@ -3531,8 +3531,10 @@ fn eligible_set<'a>(funcs: &[FnDef<'a>], kind: NumKind) -> HashSet<&'a str> {
     // native stack and crash the process instead of raising a clean, catchable
     // error. This is a transitive call-graph check, not just a direct self-call
     // test: the JIT's memory safety must NOT silently depend on the front-end's
-    // define-before-use rule (which makes mutual recursion unrepresentable today,
-    // but is a front-end policy that could change — see `recursive_funcs`).
+    // define-before-use rule — a front-end policy that could change (see
+    // `recursive_funcs`). It since DID change: two-pass bytecode registration made
+    // mutual recursion representable, and this check absorbed it with no edit. The
+    // property is pinned by `unbounded_mutual_recursion_raises_instead_of_crashing`.
     // Recursive functions run on the depth-guarded VM (or are memoized) instead —
     // EXCEPT directly tail-self-recursive ones (`tail_loopable_set`), which lower to
     // native LOOPS (parameter rebind + jump, no stack growth), so the native-stack

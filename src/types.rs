@@ -915,8 +915,54 @@ mod signatures;
 use signatures::*;
 
 /// Type-check a whole program. Runs after parse, before interpretation.
+///
+/// TWO PASSES, and the first one is why mutual recursion works. `check_func` already inserts
+/// a provisional signature before checking its own body, so a function can call ITSELF; doing
+/// the same for every top-level function before checking ANY body is the whole generalization,
+/// and it is what turns
+///
+///     fn even(n) = if n == 0 then true else odd(n - 1)
+///     fn odd(n)  = if n == 0 then false else even(n - 1)
+///
+/// from `error: \`odd\` is not a known function` into a program. Before this, the checker
+/// walked statements in order and a name entered `env` only when its own statement was
+/// reached — so a body could never mention a peer defined below it, which rules out
+/// recursive-descent parsers, mutually recursive tree walkers, and state machines whose
+/// states reference each other. That is most of "a library that is not numerics".
+///
+/// The signature registered here is exactly the one `check_func` would register: annotations
+/// where written, `Unknown` where not. `check_func` then overwrites it with the same value
+/// when it reaches the definition, so nothing downstream can tell the difference — this pass
+/// only makes the name VISIBLE earlier.
+///
+/// A later `fn` of the same name still wins, as it did before: the second registration
+/// overwrites the first, in source order, in both passes.
 pub fn check(program: &[Stmt]) -> Result<TypeMap, HelixError> {
     let mut checker = Checker::new();
+    // Declare every top-level `fn` before checking any body, so a body may reference a peer
+    // defined below it (`fn even` calling `fn odd`) without the checker rejecting the file
+    // ahead of the engines. Only the SIGNATURE is declared here; bodies are checked in order
+    // below, so nothing is inferred from a definition that has not been read yet.
+    //
+    // A name that shadows a builtin is skipped, for the same reason the bytecode pre-pass
+    // skips it: the shadow is not retroactive, and declaring it here would type calls ABOVE
+    // the definition against the user's function — a wrong type handed to the JIT, not just a
+    // permissive check.
+    for s in program {
+        if let Stmt::Func { name, params, ret, .. } = s
+            && crate::registry::lookup(name).is_none()
+        {
+            let param_types: Vec<Type> = params
+                .iter()
+                .map(|(_, ann)| ann.as_ref().map(ann_to_type).unwrap_or(Type::Unknown))
+                .collect();
+            let ret_ty = ret.as_ref().map(ann_to_type).unwrap_or(Type::Unknown);
+            checker.env.insert(
+                name.clone(),
+                Type::Function { params: param_types, ret: Box::new(ret_ty) },
+            );
+        }
+    }
     for s in program {
         checker.exec_stmt(s)?;
     }

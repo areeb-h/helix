@@ -162,8 +162,10 @@ claim about a specific, excellent project.)
 
 - **JIT scope:** integer and float numeric recursion only — `+ - * /`, comparisons, `if`,
   `let`, calls, ≤4 params. Arrays, loops, `Mod`, `Pow`, and strings are not yet supported
-  in native code; those run on the VM or tree-walker. Forward-referenced mutual recursion
-  does not compile to bytecode (single-pass) and so cannot yet be JIT-compiled.
+  in native code; those run on the VM or tree-walker. Mutual recursion compiles and runs
+  (two-pass function registration) but is deliberately **not** JIT-compiled: a native frame
+  has no depth guard, so every function on a recursion cycle runs on the VM instead, where
+  a missing base case raises a catchable error rather than killing the process.
 - **VM scope:** arrays, comprehensions, methods, records, tensors, DataFrames, lambdas,
   and interpolation fall back to the tree-walker (correct, but not the fast path).
 - **DataFrames:** no cross-statement caching (a file used twice is re-scanned); print
