@@ -42,6 +42,7 @@ mod serve;
 mod simd;
 mod stats;
 mod strfmt;
+mod suggest;
 mod symbol;
 mod tensor;
 mod token;

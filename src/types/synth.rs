@@ -224,20 +224,19 @@ impl super::Checker {
         if crate::registry::lookup(name).is_some() {
             return builtin_type(name, args, line, col);
         }
-        // unknown — suggest from builtins + user functions
-        let mut cands: Vec<String> = crate::registry::names().map(|s| s.to_string()).collect();
-        cands.extend(
-            self.env
-                .iter()
-                .filter(|(_, t)| matches!(t, Type::Function { .. }))
-                .map(|(k, _)| k.clone()),
-        );
-        let cand_refs: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
-        let mut err = HelixError::new(format!("`{}` is not a known function", name), line, col);
-        if let Some(s) = suggest(name, &cand_refs) {
-            err = err.hint(format!("did you mean `{}`?", s));
-        }
-        Err(err)
+        // Unknown. The builtins are always in the suggester's universe, so only the
+        // user's own functions need collecting here.
+        let cands: Vec<&str> = self
+            .env
+            .iter()
+            .filter(|(_, t)| matches!(t, Type::Function { .. }))
+            .map(|(k, _)| k.as_str())
+            .collect();
+        let err = HelixError::new(format!("`{}` is not a known function", name), line, col);
+        Err(match crate::suggest::hint(name, crate::suggest::Site::Function, &cands) {
+            Some(h) => err.hint(h),
+            None => err,
+        })
     }
 
     pub(super) fn synth_method(
@@ -324,11 +323,20 @@ impl super::Checker {
                 self.synth_simple_args(args)?;
                 record_method_type(name, line, col)
             }
-            other => Err(HelixError::new(
-                format!("type {} has no method `{}`", other, name),
-                line,
-                col,
-            )),
+            // A scalar receiver (Int/Float/Bool/…) — no method table at all. This is
+            // where `(-1).abs()` lands, so cross the namespace and say that `abs` is
+            // a function rather than leaving the user with a bare rejection.
+            other => {
+                let err = HelixError::new(
+                    format!("type {} has no method `{}`", other, name),
+                    line,
+                    col,
+                );
+                Err(match crate::suggest::hint(name, crate::suggest::Site::Method, &[]) {
+                    Some(h) => err.hint(h),
+                    None => err,
+                })
+            }
         }
     }
 

@@ -1,0 +1,9 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `odd` is not a known function
+  --> <src>:1:7
+  |
+1 | print(odd(3))
+  |       ^

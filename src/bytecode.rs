@@ -910,10 +910,15 @@ impl Compiler {
                 // it is unreachable in the normal pipeline; emit a runtime error
                 // (rather than `Unsupported`) so `compile` is total.
                 None => {
+                    // The hint goes through the one suggester, like every other site;
+                    // `assign it first, e.g. `None = ...`` is gone for good. An empty
+                    // hint renders as no `help:` line at all.
+                    let hint = crate::suggest::hint(name, crate::suggest::Site::Value, &[])
+                        .unwrap_or_default();
                     b.emit(
                         Op::raise(
                             std::rc::Rc::new(format!("`{}` is not defined", name)),
-                            std::rc::Rc::new(format!("assign it first, e.g. `{} = ...`.", name)),
+                            std::rc::Rc::new(hint),
                         ),
                         *line,
                         *col,

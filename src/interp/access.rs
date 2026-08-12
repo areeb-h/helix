@@ -291,14 +291,12 @@ pub(crate) fn df_value_method(
         }
         _ => {
             let methods = crate::registry::methods_of(crate::registry::DF_METHODS);
-            let mut err =
+            let err =
                 HelixError::new(format!("a DataFrame has no method `{}`", name), line, col);
-            if let Some(s) = suggest(name, &methods) {
-                err = err.hint(format!("did you mean `{}`?", s));
-            } else {
-                err = err.hint(format!("DataFrame methods: {}", methods.join(", ")));
-            }
-            Err(err)
+            Err(match crate::suggest::hint(name, crate::suggest::Site::Method, &methods) {
+                Some(h) => err.hint(h),
+                None => err.hint(format!("DataFrame methods: {}", methods.join(", "))),
+            })
         }
     }
 }

@@ -241,13 +241,11 @@ fn field_on_non_record(t: &Type, name: &str, line: usize, col: usize) -> HelixEr
 }
 
 fn unknown_method(type_name: &str, name: &str, candidates: &[&str], line: usize, col: usize) -> HelixError {
-    let mut err = HelixError::new(format!("type {} has no method `{}`", type_name, name), line, col);
-    if let Some(s) = suggest(name, candidates) {
-        err = err.hint(format!("did you mean `{}`?", s));
-    } else {
-        err = err.hint(format!("available {} methods: {}", type_name, candidates.join(", ")));
+    let err = HelixError::new(format!("type {} has no method `{}`", type_name, name), line, col);
+    match crate::suggest::hint(name, crate::suggest::Site::Method, candidates) {
+        Some(h) => err.hint(h),
+        None => err.hint(format!("available {} methods: {}", type_name, candidates.join(", "))),
     }
-    err
 }
 
 const MATH_UNARY_FLOAT: &[&str] = &[
@@ -537,14 +535,14 @@ impl Checker {
                 .hint("`it` is the implicit element inside a comprehension body; a `=>` function receives the element as its own parameter — write `.map(x => ...)`.")),
                 None => {
                     let names: Vec<&str> = self.env.keys().map(|s| s.as_str()).collect();
-                    let mut err =
-                        HelixError::new(format!("`{}` is not defined", name), *line, *col);
-                    if let Some(s) = suggest(name, &names) {
-                        err = err.hint(format!("did you mean `{}`?", s));
-                    } else {
-                        err = err.hint(format!("assign it first, e.g. `{} = ...`.", name));
-                    }
-                    Err(err)
+                    let err = HelixError::new(format!("`{}` is not defined", name), *line, *col);
+                    // No fallback: the old one told people to `assign it first, e.g.
+                    // `None = ...``, which is advice to define a variable named `None`
+                    // rather than to write `missing`. Silence beats that.
+                    Err(match crate::suggest::hint(name, crate::suggest::Site::Value, &names) {
+                        Some(h) => err.hint(h),
+                        None => err,
+                    })
                 }
             },
             Expr::Array(items) => {

@@ -1,0 +1,2 @@
+fn velocity(t) = t * 2
+print(velociti(3))

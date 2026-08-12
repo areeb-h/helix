@@ -7,7 +7,7 @@
 use super::*;
 use std::rc::Rc;
 
-use crate::error::{suggest, HelixError};
+use crate::error::HelixError;
 use crate::value::Value;
 
 
@@ -2993,19 +2993,17 @@ fn unknown_method(
     line: usize,
     col: usize,
 ) -> HelixError {
-    let mut err = HelixError::new(
+    let err = HelixError::new(
         format!("a {} has no method `{}`", type_name, name),
         line,
         col,
     );
-    if let Some(s) = suggest(name, candidates) {
-        err = err.hint(format!("did you mean `{}`?", s));
-    } else {
-        err = err.hint(format!(
+    match crate::suggest::hint(name, crate::suggest::Site::Method, candidates) {
+        Some(h) => err.hint(h),
+        None => err.hint(format!(
             "available {} methods: {}",
             type_name,
             candidates.join(", ")
-        ));
+        )),
     }
-    err
 }

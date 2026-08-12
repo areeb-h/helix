@@ -9,7 +9,7 @@ use ndarray::{Array2, ArrayD, Axis, Ix1, Ix2, IxDyn, Zip};
 use faer::linalg::solvers::Solve;
 
 use crate::ast::BinOp;
-use crate::error::{suggest, HelixError};
+use crate::error::HelixError;
 use crate::value::{ArrayData, Value};
 
 pub type Tensor = ArrayD<f64>;
@@ -632,18 +632,16 @@ pub fn method(
             }
         }
         _ => {
-            let mut err = HelixError::new(
+            let err = HelixError::new(
                 format!("a Tensor has no method `{}`", name),
                 line,
                 col,
             );
             let methods = crate::registry::methods_of(crate::registry::TENSOR_METHODS);
-            if let Some(s) = suggest(name, &methods) {
-                err = err.hint(format!("did you mean `{}`?", s));
-            } else {
-                err = err.hint(format!("Tensor methods: {}", methods.join(", ")));
-            }
-            Err(err)
+            Err(match crate::suggest::hint(name, crate::suggest::Site::Method, &methods) {
+                Some(h) => err.hint(h),
+                None => err.hint(format!("Tensor methods: {}", methods.join(", "))),
+            })
         }
     }
 }

@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `True` is not defined
+  --> <src>:1:5
+  |
+1 | x = True
+  |     ^
+help: did you mean `true`?

@@ -42,7 +42,10 @@ impl HelixError {
             out.push_str(&format!("{} | {}^\n", gutter, caret_pad));
         }
 
-        if let Some(h) = &self.hint {
+        // An *empty* hint renders as no `help:` line — the bytecode `Op::Raise` carries
+        // its hint as a plain string, so "no advice" reaches here as "" rather than
+        // `None`, and `help: ` on its own would be worse than silence.
+        if let Some(h) = self.hint.as_deref().filter(|h| !h.is_empty()) {
             out.push_str(&format!("help: {}\n", h));
         }
         out
@@ -112,37 +115,77 @@ macro_rules! reserve_rows {
 }
 pub(crate) use reserve_rows;
 
-/// Levenshtein edit distance — used to suggest "did you mean ...?".
+/// Optimal string alignment distance — Levenshtein, plus **transposing an adjacent
+/// pair counts as one edit**. A swapped pair is the single most common typing error
+/// (`maen` for `mean`), and plain Levenshtein charges it two, which would put it out
+/// of reach of the one-edit rule below.
 pub fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
+    if a.is_empty() {
+        return b.len();
+    }
+    if b.is_empty() {
+        return a.len();
+    }
+    // Three rows: the transposition case reaches back two rows and two columns.
+    let mut prev2 = vec![0usize; b.len() + 1];
     let mut prev: Vec<usize> = (0..=b.len()).collect();
     let mut cur = vec![0usize; b.len() + 1];
     for i in 1..=a.len() {
         cur[0] = i;
         for j in 1..=b.len() {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            let mut d = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d = d.min(prev2[j - 2] + 1);
+            }
+            cur[j] = d;
         }
+        // Rotate: prev2 := prev (row i-1), prev := cur (row i).
+        std::mem::swap(&mut prev2, &mut prev);
         std::mem::swap(&mut prev, &mut cur);
     }
     prev[b.len()]
 }
 
+/// How far `name` is from `cand` **if that gap is small enough to be a typo** —
+/// `None` when the two are simply different words.
+///
+/// The rule, and it is deliberately strict: case is ignored (so `Inf` finds `inf`),
+/// and beyond that **one edit, and only in a name of four characters or more**.
+/// One edit inside a three-letter word rewrites a third of it, which is how `nil`
+/// became `pi`, `NA` became `e`, `sum` became `sin`, `cat` became `cbrt`, `disp`
+/// became `dict` and `odd` became `ord`. A wrong suggestion is worse than silence:
+/// a scientist told that `sum` means `sin` may believe it and ship the number.
+///
+/// Foreign spellings that this rule (correctly) refuses to guess at are answered by
+/// name from the alias table in [`crate::suggest`], not by edit distance.
+pub fn typo_distance(name: &str, cand: &str) -> Option<usize> {
+    let a = name.to_lowercase();
+    let b = cand.to_lowercase();
+    let d = edit_distance(&a, &b);
+    if d == 0 {
+        return Some(0); // differs by case alone
+    }
+    if d > 1 {
+        return None;
+    }
+    let longest = a.chars().count().max(b.chars().count());
+    (longest >= 4).then_some(d)
+}
+
 /// Pick the closest candidate name, if it's close enough to be a plausible typo.
+/// Ties break on the smallest name so the answer never depends on the order the
+/// caller collected its candidates (several arrive from hash maps) — the three
+/// engines must render byte-identical errors.
 pub fn suggest(name: &str, candidates: &[&str]) -> Option<String> {
-    let mut best: Option<&str> = None;
-    let mut best_d = usize::MAX;
+    let mut best: Option<(usize, &str)> = None;
     for c in candidates {
-        let d = edit_distance(name, c);
-        if d < best_d {
-            best_d = d;
-            best = Some(c);
+        let Some(d) = typo_distance(name, c) else { continue };
+        if best.is_none_or(|(bd, bc)| d < bd || (d == bd && *c < bc)) {
+            best = Some((d, c));
         }
     }
-    match best {
-        // Accept if within 2 edits, or within ~1/3 of the word length for longer names.
-        Some(c) if best_d <= 2 || best_d * 3 <= name.len() => Some(c.to_string()),
-        _ => None,
-    }
+    best.map(|(_, c)| c.to_string())
 }

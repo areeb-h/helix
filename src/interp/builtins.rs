@@ -1839,13 +1839,12 @@ impl super::Interp {
                 ])))
             }
             _ => {
-                let mut err =
+                let err =
                     HelixError::new(format!("`{}` is not a known function", name), line, col);
-                let cands: Vec<&str> = crate::registry::names().collect();
-                if let Some(s) = suggest(name, &cands) {
-                    err = err.hint(format!("did you mean `{}`?", s));
-                }
-                Err(err)
+                Err(match crate::suggest::hint(name, crate::suggest::Site::Function, &[]) {
+                    Some(h) => err.hint(h),
+                    None => err,
+                })
             }
         }
     }

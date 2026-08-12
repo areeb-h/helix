@@ -367,17 +367,17 @@ impl Interp {
                         .chain(self.globals.keys())
                         .map(|s| s.as_str())
                         .collect();
-                    let mut err = HelixError::new(
+                    let err = HelixError::new(
                         format!("`{}` is not defined", name),
                         *line,
                         *col,
                     );
-                    if let Some(s) = suggest(name, &names) {
-                        err = err.hint(format!("did you mean `{}`?", s));
-                    } else {
-                        err = err.hint(format!("assign it first, e.g. `{} = ...`.", name));
-                    }
-                    Err(err)
+                    // No fallback (see `types.rs`): `assign it first, e.g. `None = ...``
+                    // is never good advice.
+                    Err(match crate::suggest::hint(name, crate::suggest::Site::Value, &names) {
+                        Some(h) => err.hint(h),
+                        None => err,
+                    })
                 }
             },
             Expr::Array(items) => {
@@ -520,22 +520,21 @@ impl Interp {
                 if crate::registry::lookup(name).is_some() {
                     return self.call_builtin(name, vals, *line, *col);
                 }
-                // Unknown — suggest the closest known function name.
-                let mut cands: Vec<String> = crate::registry::names().map(|s| s.to_string()).collect();
-                cands.extend(
-                    self.env
-                        .iter()
-                        .chain(self.globals.iter())
-                        .filter(|(_, b)| matches!(b.value, Value::Function(_)))
-                        .map(|(k, _)| k.clone()),
-                );
-                let cand_refs: Vec<&str> = cands.iter().map(|s| s.as_str()).collect();
-                let mut err =
+                // Unknown. The builtins are always in the suggester's universe, so
+                // only the user's own functions need collecting here.
+                let cands: Vec<&str> = self
+                    .env
+                    .iter()
+                    .chain(self.globals.iter())
+                    .filter(|(_, b)| matches!(b.value, Value::Function(_)))
+                    .map(|(k, _)| k.as_str())
+                    .collect();
+                let err =
                     HelixError::new(format!("`{}` is not a known function", name), *line, *col);
-                if let Some(s) = suggest(name, &cand_refs) {
-                    err = err.hint(format!("did you mean `{}`?", s));
-                }
-                Err(err)
+                Err(match crate::suggest::hint(name, crate::suggest::Site::Function, &cands) {
+                    Some(h) => err.hint(h),
+                    None => err,
+                })
             }
             Expr::CallValue {
                 callee,
