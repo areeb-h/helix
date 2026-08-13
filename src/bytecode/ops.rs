@@ -159,6 +159,37 @@ pub enum Op {
     /// Finish a `reduce`: pop the iterator (its result, the accumulator, is loaded
     /// separately).
     CompEndDiscard,
+    /// `acc = acc.concat(<popped>)` for a reduce accumulator held in local `slot`, as ONE
+    /// indivisible take-append-store. Emitted only for the body shape `acc.concat(e)` where
+    /// `acc` is the fold's own accumulator binder (see `emit_reduce_body_and_store`).
+    ///
+    /// THE POINT IS THE `Rc`, not the opcode count. `LoadLocal` CLONES, so the ordinary
+    /// lowering (`LoadLocal acc; …; Method concat; StoreLocal acc`) guarantees the
+    /// accumulator is shared at the exact moment it is extended — the slot holds one
+    /// reference and the stack another — so `concat` can only ever copy the whole receiver.
+    /// That is what makes growing an array quadratic: 256k appends took 6.5s, and
+    /// `Dict.insert` is worse. Taking the value OUT of the slot leaves the `Rc` unique, so
+    /// the append can extend in place.
+    ///
+    /// Doing it in one op is what makes it safe. A general last-use analysis has to prove
+    /// no later read observes the moved-out slot, and being wrong there is a silent wrong
+    /// answer — a read seeing a hole. Here the take and the store are the same instruction,
+    /// so the slot is never observably empty and there is nothing to prove. The argument is
+    /// evaluated BEFORE the take (so `acc.concat([acc.count()])` still reads the live
+    /// accumulator), and validated before it, so an error leaves the slot untouched.
+    ///
+    /// Falls back to the ordinary copy whenever the `Rc` is shared or the two element
+    /// representations differ, which keeps the result bit-identical to `concat`'s.
+    ConcatIntoLocal(u32),
+    /// `acc = acc.insert(<key>, <value>)` for a reduce accumulator in local `slot` — the
+    /// `Dict` twin of [`Op::ConcatIntoLocal`], same take-append-store shape and same reason.
+    ///
+    /// `insert` clones the entire `BTreeMap` on every call, so building a dictionary in a
+    /// fold was quadratic and measurably worse than the array case: 8,000 inserts already
+    /// cost 0.25s where 8,000 appends cost 0.013s. ADR 0020 names this fast path as future
+    /// work; this is it, for the one shape that can be recognised without a liveness
+    /// analysis. Stack order is key then value, so the value pops first.
+    InsertIntoLocal(u32),
     /// `any`/`all` per-element test. Pops a boolean: short-circuits to the target
     /// on a determining result (`true` for `any`, `false` for `all`); a `missing`
     /// sets the seen-missing slot; a non-boolean errors. Fields: (is_all, sm_slot,

@@ -3386,6 +3386,158 @@ print(range(6, 16).reduce(0.0, (a, i) => a + f(sqrt(to_float(i) - 5.0))))\n";
     }
 }
 
+/// Growing an array in a fold is LINEAR. `acc.concat([x])` copied the whole accumulator
+/// every iteration, because `LoadLocal` clones and the slot therefore still held a
+/// reference at the moment `concat` ran — so the `Rc` could never be unique. 256k appends
+/// took 6.5s. `Op::ConcatIntoLocal` takes the accumulator out of its slot and puts the
+/// result back as ONE op, so the append can extend in place.
+///
+/// These pin the ANSWERS, on all three engines. The tree-walker has no such op, which makes
+/// it a genuinely independent check rather than a restatement of the same code.
+#[test]
+fn growing_an_array_in_a_fold_matches_the_walker() {
+    for (src, want, tag) in [
+        ("print(range(0, 5).reduce([], (acc, i) => acc.concat([i])))", "[0, 1, 2, 3, 4]", "ints"),
+        (
+            "print(range(0, 4).reduce([], (acc, i) => acc.concat([to_float(i) * 0.5])))",
+            "[0.0, 0.5, 1.0, 1.5]",
+            "floats",
+        ),
+        (
+            "print([\"a\", \"b\"].reduce([], (acc, s) => acc.concat([s, s])))",
+            "[\"a\", \"a\", \"b\", \"b\"]",
+            "strings",
+        ),
+        // Mixed element kinds must NOT take the packed fast path — `array_sniff` would
+        // leave a different representation than extending in place does.
+        (
+            "print(range(0, 3).reduce([], (acc, i) => acc.concat([i, to_float(i)])))",
+            "[0, 0.0, 1, 1.0, 2, 2.0]",
+            "mixed_kinds",
+        ),
+        // The argument is compiled BEFORE the take, so it still sees the live accumulator.
+        (
+            "print(range(0, 4).reduce([], (acc, i) => acc.concat([acc.count()])))",
+            "[0, 1, 2, 3]",
+            "arg_reads_acc",
+        ),
+        // The argument RETAINS the accumulator, so the `Rc` is shared and the in-place path
+        // must decline. Getting this wrong would alias a value into itself.
+        (
+            "print(range(0, 3).reduce([], (acc, i) => acc.concat([acc])))",
+            "[[], [[]], [[], [[]]]]",
+            "arg_nests_acc",
+        ),
+        // Multi-argument `concat` is not the recognised shape and takes the ordinary path.
+        (
+            "print(range(0, 3).reduce([], (acc, i) => acc.concat([i], [i * 10])))",
+            "[0, 0, 1, 10, 2, 20]",
+            "concat_many",
+        ),
+        // A `concat` whose receiver is NOT the accumulator must be left alone.
+        (
+            "xs = [9]\nprint(range(0, 3).reduce([], (acc, i) => xs.concat([i])))",
+            "[9, 2]",
+            "not_the_acc",
+        ),
+        ("print(range(0, 4).reduce([], (acc, i) => acc.concat(acc)))", "[]", "acc_twice"),
+        ("print(range(0, 3).reduce([], (acc, i) => acc.concat([])).count())", "0", "empty_adds"),
+    ] {
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (out, err, code) = run_source(&format!("{src}\n"), env, tag);
+            assert_eq!(code, Some(0), "{tag} env {env:?} stderr: {err}");
+            assert_eq!(out.trim(), want, "{tag} env {env:?}");
+        }
+    }
+    // Both error paths must read the accumulator while it is still in its slot, so the
+    // wording is the walker's and a failed append leaves the frame as it found it.
+    for (src, needle, tag) in [
+        (
+            "print(range(0, 3).reduce([], (acc, i) => acc.concat(i)))",
+            "`concat` expects arrays",
+            "non_array_arg",
+        ),
+        (
+            "print(range(0, 3).reduce(0, (acc, i) => acc.concat([i])))",
+            "has no method `concat`",
+            "non_array_acc",
+        ),
+    ] {
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (_, err, code) = run_source(&format!("{src}\n"), env, tag);
+            assert_eq!(code, Some(1), "{tag} env {env:?} stderr: {err}");
+            assert!(err.contains(needle), "{tag} env {env:?}: {err}");
+        }
+    }
+}
+
+/// Building a dictionary in a fold is linear. `insert` clones the whole `BTreeMap` per
+/// call, which made it the worse of the two: 8,000 inserts cost 0.25s where 8,000 appends
+/// cost 0.013s. ADR 0020 names this fast path as future work.
+#[test]
+fn building_a_dict_in_a_fold_matches_the_walker() {
+    for (src, want, tag) in [
+        (
+            "print(range(0, 4).reduce(dict(), (acc, i) => acc.insert(i, i * 2)))",
+            "{0 => 0, 1 => 2, 2 => 4, 3 => 6}",
+            "int_keys",
+        ),
+        (
+            "print([\"a\", \"b\"].reduce(dict(), (acc, s) => acc.insert(s, s)))",
+            "{\"a\" => \"a\", \"b\" => \"b\"}",
+            "string_keys",
+        ),
+        // A repeated key overwrites, in iteration order.
+        (
+            "print(range(0, 5).reduce(dict(), (acc, i) => acc.insert(i % 2, i)))",
+            "{0 => 4, 1 => 3}",
+            "overwrite",
+        ),
+        // The arguments are compiled before the take, so they see the live accumulator.
+        (
+            "print(range(0, 3).reduce(dict(), (acc, i) => acc.insert(i, acc.count())))",
+            "{0 => 0, 1 => 1, 2 => 2}",
+            "arg_reads_acc",
+        ),
+        // The VALUE retains the accumulator, so the in-place path must decline.
+        (
+            "print(range(0, 2).reduce(dict(), (acc, i) => acc.insert(i, acc)))",
+            "{0 => {}, 1 => {0 => {}}}",
+            "value_nests_acc",
+        ),
+        // An `insert` whose receiver is not the accumulator is left alone.
+        (
+            "d0 = dict()\nprint(range(0, 3).reduce(dict(), (acc, i) => d0.insert(i, i)))",
+            "{2 => 2}",
+            "not_the_acc",
+        ),
+    ] {
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (out, err, code) = run_source(&format!("{src}\n"), env, tag);
+            assert_eq!(code, Some(0), "{tag} env {env:?} stderr: {err}");
+            assert_eq!(out.trim(), want, "{tag} env {env:?}");
+        }
+    }
+    for (src, needle, tag) in [
+        (
+            "print(range(0, 2).reduce(dict(), (acc, i) => acc.insert([i], i)))",
+            "a dict key must be",
+            "bad_key",
+        ),
+        (
+            "print(range(0, 2).reduce(0, (acc, i) => acc.insert(i, i)))",
+            "has no method `insert`",
+            "non_dict_acc",
+        ),
+    ] {
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (_, err, code) = run_source(&format!("{src}\n"), env, tag);
+            assert_eq!(code, Some(1), "{tag} env {env:?} stderr: {err}");
+            assert!(err.contains(needle), "{tag} env {env:?}: {err}");
+        }
+    }
+}
+
 /// A deep `x => x => ...` lambda chain must hit the parser depth cap with a
 /// clean error — lambda bodies were the one expr() recursion that skipped the
 /// depth counter, so 2000 nestings overflowed the native stack (SIGABRT).
@@ -3659,7 +3811,10 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // 56 -> 57: the f64 filter dispatch's `stack.pop().unwrap()`, proven by the
         // `stack.last()` pattern match immediately above it (same argument as the Ints
         // arm's pop).
-        ("src/vm.rs", 57),
+        // 60: the argument pops of `Op::ConcatIntoLocal` (1) and `Op::InsertIntoLocal` (2),
+        // proved at each site — the compiler emits those argument expressions immediately
+        // before the op, the same stack-shape invariant the other 57 rely on.
+        ("src/vm.rs", 60),
         ("src/bytecode.rs", 1),
         ("src/bytecode/comprehensions.rs", 0),
         ("src/bytecode/ops.rs", 0),

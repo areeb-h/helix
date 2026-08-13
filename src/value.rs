@@ -454,6 +454,60 @@ impl Value {
         }
     }
 
+    /// `cur.concat(add)` where `cur` is OWNED — extending it in place when nothing else
+    /// holds a reference. Backs [`crate::bytecode::Op::ConcatIntoLocal`]; see that op for
+    /// why the caller owning `cur` is the whole point.
+    ///
+    /// The fast path is deliberately narrow: same packed representation on both sides, and a
+    /// non-empty result. `array_sniff` REPACKS — a `Values` array whose contents happen to be
+    /// homogeneous comes back as `Ints`, and an empty result comes back as `Values` — so
+    /// extending in place outside those cases would produce a value equal to `concat`'s with
+    /// a DIFFERENT representation. That is not cosmetic: the representation decides which
+    /// packed kernels a later stage can take, so the two spellings would silently diverge in
+    /// performance and, through the packed paths, potentially in more than that. Everything
+    /// else falls through to the identical `to_values` + `array_sniff` `concat` performs.
+    pub fn concat_in_place(cur: Rc<ArrayData>, add: &ArrayData) -> Value {
+        let mut cur = cur;
+        match (Rc::get_mut(&mut cur), add) {
+            (Some(ArrayData::Ints(v)), ArrayData::Ints(w)) if !v.is_empty() || !w.is_empty() => {
+                v.extend_from_slice(w);
+                return Value::Array(cur);
+            }
+            (Some(ArrayData::Floats(v)), ArrayData::Floats(w)) if !v.is_empty() || !w.is_empty() => {
+                v.extend_from_slice(w);
+                return Value::Array(cur);
+            }
+            _ => {}
+        }
+        let mut out = cur.to_values().into_owned();
+        out.extend(add.to_values().iter().cloned());
+        Value::array_sniff(out)
+    }
+
+    /// `cur.insert(k, v)` where `cur` is OWNED — mutating in place when nothing else holds a
+    /// reference. Backs [`crate::bytecode::Op::InsertIntoLocal`]. `insert` otherwise clones
+    /// the whole `BTreeMap` per call, which is what made building a dictionary in a fold
+    /// quadratic. No representation subtlety here (unlike the array case): a `BTreeMap` has
+    /// one form, so the fast and slow paths are the same map either way.
+    pub fn insert_in_place(
+        cur: Rc<std::collections::BTreeMap<DictKey, Value>>,
+        k: DictKey,
+        v: Value,
+    ) -> Value {
+        let mut cur = cur;
+        match Rc::get_mut(&mut cur) {
+            Some(m) => {
+                m.insert(k, v);
+                Value::Dict(cur)
+            }
+            None => {
+                let mut new = (*cur).clone();
+                new.insert(k, v);
+                Value::Dict(Rc::new(new))
+            }
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Int(_) => "Int",

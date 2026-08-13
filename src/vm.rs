@@ -630,6 +630,72 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let base = frames[fi].base;
                 stack.push(locals[base + *slot as usize].clone());
             }
+            Op::ConcatIntoLocal(slot) => {
+                // Cannot panic: `emit_reduce_body_and_store` compiles the argument
+                // expression immediately before emitting this op, so exactly one value is on
+                // the stack for it — the same compiler-maintained stack-shape invariant every
+                // other op in this loop relies on for its own `pop`.
+                let arg = stack.pop().unwrap();
+                let base = frames[fi].base;
+                let at = base + *slot as usize;
+                // VALIDATE BEFORE TAKING. Both error paths must read the accumulator while
+                // it is still in its slot, so a failing `concat` leaves the frame exactly as
+                // the ordinary lowering would have — and word-for-word the same, because a
+                // divergence here would be an error-text divergence, which the oracle counts.
+                let Value::Array(add) = &arg else {
+                    return Err(HelixError::new(
+                        format!(
+                            "`concat` expects arrays, but argument 1 is {}",
+                            crate::value::with_article(arg.type_name())
+                        ),
+                        line,
+                        col,
+                    ));
+                };
+                if !matches!(locals[at], Value::Array(_)) {
+                    return Err(HelixError::new(
+                        format!(
+                            "{} has no method `concat`",
+                            crate::value::with_article(locals[at].type_name())
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+                let add = add.clone();
+                // Now the take: the slot's `Rc` loses its second owner, so an accumulator
+                // nothing else aliases becomes unique and can be extended in place.
+                let Value::Array(cur) = std::mem::replace(&mut locals[at], Value::Unit) else {
+                    unreachable!("accumulator type checked immediately above")
+                };
+                locals[at] = Value::concat_in_place(cur, &add);
+            }
+            Op::InsertIntoLocal(slot) => {
+                // Pushed key-then-value, so the value pops first. Both pops are guaranteed
+                // by the compiler, exactly as in `ConcatIntoLocal`.
+                let v = stack.pop().unwrap();
+                let kv = stack.pop().unwrap();
+                let base = frames[fi].base;
+                let at = base + *slot as usize;
+                // Validated before the take, so a bad key or a non-Dict accumulator leaves
+                // the slot untouched and reports what the ordinary lowering reports.
+                if !matches!(locals[at], Value::Dict(_)) {
+                    return Err(HelixError::new(
+                        format!(
+                            "{} has no method `insert`",
+                            crate::value::with_article(locals[at].type_name())
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+                let k = crate::value::DictKey::from_value(&kv)
+                    .map_err(|m| HelixError::new(m, line, col))?;
+                let Value::Dict(cur) = std::mem::replace(&mut locals[at], Value::Unit) else {
+                    unreachable!("accumulator type checked immediately above")
+                };
+                locals[at] = Value::insert_in_place(cur, k, v);
+            }
             Op::StoreLocal(slot) => {
                 let base = frames[fi].base;
                 locals[base + *slot as usize] = stack.pop().unwrap();

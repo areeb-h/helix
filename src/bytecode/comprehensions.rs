@@ -771,8 +771,7 @@ impl super::Compiler {
 
         let loop_start = b.code.len() as u32;
         let next_at = b.emit(Op::CompNext(x, 0, false), line, col);
-        self.compile_expr(b, body)?;
-        b.emit(Op::StoreLocal(acc), line, col);
+        self.emit_reduce_body_and_store(b, body, pa, acc, line, col)?;
         b.emit(Op::Jump(loop_start), line, col);
 
         let end_at = b.code.len() as u32;
@@ -1065,8 +1064,7 @@ impl super::Compiler {
 
         let loop_start = b.code.len() as u32;
         let next_at = b.emit(Op::CompNext(x, 0, false), line, col);
-        self.compile_expr(b, body)?;
-        b.emit(Op::StoreLocal(acc), line, col);
+        self.emit_reduce_body_and_store(b, body, &pa, acc, line, col)?;
         b.emit(Op::Jump(loop_start), line, col);
 
         let end_at = b.code.len() as u32;
@@ -1346,6 +1344,43 @@ impl super::Compiler {
 
     /// All user-defined function names — so a kernel's inline float builtins
     /// (`sqrt`/`abs`/`min`/`max`) are recognized only when not shadowed by a user fn.
+    /// Emit a reduce body followed by the store back into the accumulator slot — the tail of
+    /// every fold's loop body, shared by the range and array sources so they cannot drift.
+    ///
+    /// Takes the in-place path when the body is exactly `acc.concat(e)` with `acc` the fold's
+    /// own accumulator binder. `e` is compiled FIRST, so it still sees the live accumulator
+    /// (`acc.concat([acc.count()])` is fine, and merely declines the fast path at run time
+    /// because the `Rc` is then shared). Any other body — including one that merely mentions
+    /// `concat` somewhere inside it — takes the ordinary path unchanged.
+    fn emit_reduce_body_and_store(
+        &mut self,
+        b: &mut Builder,
+        body: &Expr,
+        pa: &str,
+        acc: u32,
+        line: usize,
+        col: usize,
+    ) -> R<()> {
+        if let Expr::Method { recv, name, args, named, .. } = body
+            && named.is_empty()
+            && matches!(&**recv, Expr::Ident { name: n, .. } if n == pa)
+            && let Some(op) = match (name.as_str(), args.len()) {
+                ("concat", 1) => Some(Op::ConcatIntoLocal(acc)),
+                ("insert", 2) => Some(Op::InsertIntoLocal(acc)),
+                _ => None,
+            }
+        {
+            for a in args {
+                self.compile_expr(b, a)?;
+            }
+            b.emit(op, line, col);
+            return Ok(());
+        }
+        self.compile_expr(b, body)?;
+        b.emit(Op::StoreLocal(acc), line, col);
+        Ok(())
+    }
+
     fn user_fn_set(&self) -> std::collections::HashSet<&str> {
         self.func_names.iter().map(String::as_str).collect()
     }

@@ -1770,8 +1770,45 @@ motivates this phase.
       an operation widens its distance from the other unless both are done, which is the
       same lesson the sweep above kept teaching from the other direction.
 
-- [ ] **LAST-USE LIVENESS — the prerequisite for `while`/`for` syntax and for an O(1)
-      append.** Today the final read of a binding clones its `Rc`, so an accumulator is
+- [x] **THE APPEND WALL IS DOWN — `reduce` + `concat`/`insert` are LINEAR.** Solved without
+      the general liveness pass below, which remains open for the shapes this does not cover.
+
+      `Op::ConcatIntoLocal` / `Op::InsertIntoLocal` do take-append-store as ONE instruction
+      on the accumulator's slot, emitted only for the body shape `acc.concat(e)` /
+      `acc.insert(k, v)` where `acc` is the fold's own binder. Taking the value out of the
+      slot is what leaves the `Rc` unique; doing it in one op is what makes that safe.
+
+      | n | append before | after | | n | insert before | after |
+      |---|---|---|---|---|---|---|
+      | 32,000 | 0.075 s | 0.004 s | | 8,000 | 0.021 s | 0.013 s |
+      | 128,000 | 1.516 s | 0.012 s | | 32,000 | (quadratic) | 0.012 s |
+      | 256,000 | **6.493 s** | **0.041 s** | | 128,000 | ~64 s (extrapolated) | **0.025 s** |
+      | 4,000,000 | — | **0.249 s** | | | | |
+
+      **158× at 256k, and now linear**: 1.78×, 1.88×, 1.98× for 2× the work at 0.5M/1M/2M/4M.
+      The complexity change is the result; the ratio at any one n understates it.
+
+      WHY THIS AND NOT THE GENERAL ANALYSIS. A last-use pass has to PROVE no later read
+      observes a moved-out slot, and being wrong is a silent wrong answer — a read seeing a
+      hole, in the area the corpus covers least. Here the take and the store are the same
+      instruction, so the slot is never observably empty and there is nothing to prove. The
+      argument expression is compiled BEFORE the take (so `acc.concat([acc.count()])` still
+      reads the live accumulator) and validated before it (so a failed append leaves the
+      frame exactly as the ordinary lowering would).
+
+      The array fast path is deliberately narrow — same packed representation on both sides,
+      non-empty result — because `array_sniff` REPACKS, so extending a `Values` array in
+      place could return a value equal to `concat`'s with a *different representation*, and
+      representation decides which packed kernels a later stage can take. Everything else
+      falls through to the identical `to_values` + `array_sniff`.
+
+      Pinned by 18 cases across three engines, including the two that matter most: an
+      argument that RETAINS the accumulator (`acc.concat([acc])`, `acc.insert(i, acc)`),
+      where the `Rc` is genuinely shared and the in-place path must decline, and both error
+      paths. The tree-walker has no such op, so it is an independent check.
+
+- [ ] **LAST-USE LIVENESS — still open for everything else, and the prerequisite for
+      `while`/`for` syntax.** Today the final read of a binding clones its `Rc`, so an accumulator is
       always shared at the moment it is extended and can never be mutated in place. If the
       compiler knew a read was a binding's LAST, it could MOVE instead — leaving the `Rc`
       unique. That single change makes `acc.concat([x])` O(1) amortized, which is what
