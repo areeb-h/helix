@@ -2873,25 +2873,41 @@ fn h(n) = if n == 0 then 2 else f(n - 1)\nprint(f(7))\n",
     }
 }
 
-/// The forward reference is SCOPED to bodies, which is where the tree-walker's
-/// call-time resolution makes it observable: a top-level `fn` binds when execution
-/// reaches it, so a *top-level* call above the definition still raises, and a name
-/// that shadows a builtin is not shadowed retroactively. Pre-registering either
-/// would answer programs the walker rejects, or answer them differently.
+/// ADR 0027: a top-level `fn` is FILE-SCOPED. It is callable above its own definition, and
+/// a name that shadows a builtin means the user's function everywhere in the file — not the
+/// builtin above the definition and the user's below.
+///
+/// This supersedes `forward_reference_does_not_leak_to_top_level_or_shadow_retroactively`,
+/// which pinned the opposite. That test recorded the tree-walker's resolve-at-call-time
+/// order-sensitivity, which is exactly the silent three-engine divergence the ADR removes:
+/// `fn use(v) = round(v)` called either side of `fn round` answered `1, 1` compiled and
+/// `1, 99` interpreted.
 #[test]
-fn forward_reference_does_not_leak_to_top_level_or_shadow_retroactively() {
-    // Top level, above the definition: unknown on every engine, as before.
-    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
-        let (_, err, code) = run_source("print(f(1))\nfn f(x) = x + 1\n", env, "above");
-        assert_eq!(code, Some(1), "env {env:?} stderr: {err}");
-        assert!(err.contains("`f` is not a known function"), "env {env:?} stderr: {err}");
-    }
-    // A builtin keeps answering until the shadow's definition is reached.
-    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
-        let src = "print(round(1.4))\nfn round(x) = 99\nprint(round(1.4))\n";
-        let (out, err, code) = run_source(src, env, "shadow");
-        assert_eq!(code, Some(0), "env {env:?} stderr: {err}");
-        assert_eq!(out.lines().collect::<Vec<_>>(), vec!["1", "99"], "env {env:?}");
+fn a_top_level_fn_is_file_scoped_on_every_engine() {
+    for (src, want, tag) in [
+        // Callable above its own definition.
+        ("print(f(1))\nfn f(x) = x + 1\n", "2", "call_above"),
+        // A shadow is retroactive: the user's `round`, both times.
+        ("print(round(1.4))\nfn round(x) = 99\nprint(round(1.4))\n", "99\n99", "shadow_above"),
+        // The divergence that motivated the ADR — a body compiled above the shadow.
+        (
+            "fn use(v) = round(v)\nprint(use(1.4))\nfn round(x) = 99\nprint(use(1.4))\n",
+            "99\n99",
+            "body_above_shadow",
+        ),
+        // Mutual recursion between two builtin-shadowing names now resolves to the user's.
+        (
+            "fn round(n) = if n == 0 then 0 else abs(n - 1)\n\
+fn abs(n) = if n == 0 then 1 else round(n - 1)\nprint(round(5))\n",
+            "1",
+            "mutual_builtin_names",
+        ),
+    ] {
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (out, err, code) = run_source(src, env, tag);
+            assert_eq!(code, Some(0), "{tag} env {env:?} stderr: {err}");
+            assert_eq!(out.trim().replace("\r\n", "\n"), want, "{tag} env {env:?}");
+        }
     }
     // A genuinely absent name still reports as absent (not as a reserved slot).
     for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {

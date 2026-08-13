@@ -113,6 +113,43 @@ protect.
 cost of making these names permanently unanalyzable, which is paying forever to avoid
 rewriting one test fixture.
 
+## Implementation note: (a) implies hoisting EVERY top-level `fn`, not just shadowing ones
+
+Found while starting the implementation, and recorded here because it changes the size of
+the change and was not obvious from the decision.
+
+Making the shadow retroactive is not a VM-side edit. The divergence has two halves, and
+fixing one exposes the other:
+
+```helix
+fn use(v) = round(v)
+print(use(1.4))     # walker 1  — `round` is not bound as a global yet
+fn round(x) = 99
+print(use(1.4))     # walker 99 — now it is
+```
+
+Deleting the PASS ONE guard makes the VM bind the user's `round` inside `use`, so the
+SECOND line agrees at 99 — and the FIRST line then diverges the other way, because the
+walker still resolves it to the builtin. So the **tree-walker must pre-register top-level
+`fn`s too**; "retroactive" is a property of the walker, which is the engine that moves.
+
+And once the walker hoists, hoisting only the *builtin-shadowing* names would be its own
+surprise: `fn round` visible above its definition while `fn my_helper` is not. The coherent
+rule is the general one — **a top-level `fn` is file-scoped, full stop** — which is what
+Python, JavaScript, Rust and C# all do with module-level declarations, and what a library
+author will expect.
+
+That has a consequence the two-pass work (`db6941a`) deliberately avoided: a top-level call
+ABOVE a definition starts working, so `body_depth`/`fn_slot_visible` and the test
+`forward_reference_does_not_leak_to_top_level_or_shadow_retroactively` are superseded rather
+than kept. That test was written to pin the *walker's* order-sensitivity, which is exactly
+what this ADR decides to remove.
+
+Collision behaviour must NOT move with it. `fn inf(x)` over the seeded immutable `inf`, and
+`mut f = 5` followed by `fn f(x)`, both keep their definition-point semantics — so the hoist
+must skip any name that a top-level `Assign`/`Destructure` binds or that is already a seeded
+global, both of which are statically known before the program runs.
+
 ## Consequences
 
 - Under (a) or (b), the three guards are deleted in the same change, and

@@ -4840,23 +4840,21 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             "a written `Int` annotation must not be overruled by the Float promotion"
         );
 
-        // AND NEVER A NAME THAT SHADOWS A BUILTIN. This table is derived from the whole AST
-        // and has no notion of definition ORDER, while the VM resolves names in source order.
-        // `tests/corpus/j14_rounders_and_int_mixed.helix` calls the builtin `round` twenty
-        // times and only then writes `fn round(x) = 99`; promoting that definition made the
-        // JIT apply the user's function to the twenty EARLIER call sites — `[99, 99, 99, 99]`
-        // against the VM's `[1, 2, 3, 4]`, a three-engine divergence.
-        //
-        // With no forward references, a call can only precede its definition when the name is
-        // also a builtin, so this restriction is exactly the exposure and not a wider one.
+        // A NAME THAT SHADOWS A BUILTIN IS SPECIALIZED LIKE ANY OTHER, since ADR 0027.
+        // It used to be excluded: this table is derived from the whole AST and has no notion
+        // of definition ORDER, while the engines resolved in source order, so promoting
+        // `fn round(x) = 99` applied the user's function to the call sites ABOVE it —
+        // `[99, 99, 99, 99]` against `[1, 2, 3, 4]`. A top-level `fn` is now file-scoped, so
+        // the order-blind table is CORRECT about these names instead of needing to avoid
+        // them, and excluding them would now be the thing that costs a specialization.
         let shadow = "fn round(x) = 99\nround(1)\n";
         let t3 = crate::jit::mixed_fn_sigs(
             &parser::parse(lexer::lex(shadow).expect("lex")).expect("parse"),
         );
         assert!(
-            !t3.contains_key("round"),
-            "a user function shadowing a builtin must not gain a Float specialization — the \
-             JIT's tables are order-blind and would apply it to earlier call sites"
+            t3.contains_key("round"),
+            "since ADR 0027 a builtin-shadowing name is file-scoped, so it specializes like \
+             any other user function"
         );
     }
 

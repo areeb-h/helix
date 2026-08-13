@@ -390,7 +390,6 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
     for stmt in program {
         if let Stmt::Func { name, params, .. } = stmt
             && !c.func_names.iter().any(|n| n == name)
-            && crate::registry::lookup(name).is_none()
         {
             c.func_names.push(name.clone());
             c.func_arity.push(params.len() as u32);
@@ -679,8 +678,25 @@ impl Compiler {
     ///
     /// The slot a function reserved for ITSELF is unfilled while its own body compiles, and
     /// stays visible by the same rule — which is what has always made self-recursion resolve.
-    fn fn_slot_visible(&self, i: usize) -> bool {
-        self.body_depth > 0 || self.funcs[i].is_some()
+    /// Has this `fn`'s DEFINITION been compiled already — i.e. does it sit above the point
+    /// being compiled? Distinct from [`Self::fn_slot_visible`], and the distinction matters:
+    /// name RESOLUTION is file-scoped (ADR 0027), but assignment LEGALITY is still about
+    /// declaration order. `mut f = 5` above `fn f(x) = …` reassigns the mutable global, so
+    /// the assign/destructure arms must not see the not-yet-compiled reservation and reject
+    /// it. Conflating the two turned that program into "`f` is immutable and cannot be
+    /// reassigned" at line 1.
+    fn fn_slot_defined_above(&self, i: usize) -> bool {
+        self.funcs[i].is_some()
+    }
+
+    fn fn_slot_visible(&self, _i: usize) -> bool {
+        // ADR 0027: a top-level `fn` is FILE-SCOPED, so a reservation is nameable from
+        // anywhere in the file — including a top-level statement above the definition, which
+        // the walker now answers too (`hoist_top_level_fns`). This used to require
+        // `body_depth > 0`, pinning the walker's resolve-at-call-time order-sensitivity;
+        // that is exactly what the ADR decided to remove. Kept as a function rather than
+        // inlined because the three call sites read better naming the rule.
+        true
     }
 
     /// Is `name` bound to a *user* value/function (local, captured upvalue,
@@ -760,7 +776,7 @@ impl Compiler {
                         .func_names
                         .iter()
                         .position(|f| f == name)
-                        .is_some_and(|i| self.fn_slot_visible(i))
+                        .is_some_and(|i| self.fn_slot_defined_above(i))
                     {
                         b.emit(
                             Op::raise(
@@ -842,7 +858,7 @@ impl Compiler {
                             .func_names
                             .iter()
                             .position(|f| f == name)
-                            .is_some_and(|i| self.fn_slot_visible(i))
+                            .is_some_and(|i| self.fn_slot_defined_above(i))
                     {
                         b.emit(
                             Op::raise(

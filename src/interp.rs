@@ -50,6 +50,10 @@ pub struct Interp {
     /// VM binds `CallFn` targets at compile time, so late rebinding could never
     /// be honored there — forbidding it keeps the engines bit-identical.
     fn_decls: std::collections::HashSet<String>,
+    /// Top-level `fn` names bound UP FRONT by [`Interp::hoist_top_level_fns`], so their
+    /// definition statement knows not to bind them a second time (which would look like a
+    /// reassignment of an immutable binding and error). See ADR 0027.
+    hoisted: std::collections::HashSet<String>,
     depth: usize,
 }
 
@@ -151,6 +155,7 @@ impl Interp {
             env: FxHashMap::default(),
             globals,
             fn_decls: std::collections::HashSet::new(),
+            hoisted: std::collections::HashSet::new(),
             depth: 0,
         }
     }
@@ -162,10 +167,51 @@ impl Interp {
     }
 
     pub fn run(&mut self, program: &[Stmt]) -> Result<(), HelixError> {
+        self.hoist_top_level_fns(program);
         for stmt in program {
             self.exec(stmt)?;
         }
         Ok(())
+    }
+
+    /// Bind every top-level `fn` before the first statement runs — ADR 0027's "a top-level
+    /// `fn` is file-scoped". This is the half of that decision the WALKER owns: the compiled
+    /// engines already register functions before running via the bytecode PASS ONE, and it was
+    /// the walker's resolve-at-call-time that made a builtin shadow depend on where you
+    /// stood in the file. `fn use(v) = round(v)` now means the user's `round` on both sides
+    /// of `fn round`'s definition, not the builtin above it and the user's below.
+    ///
+    /// COLLISIONS DO NOT MOVE. A name that a top-level `Assign`/`Destructure` binds, or that
+    /// is already a seeded global, is skipped — so `fn inf(x)` over the immutable `inf`, and
+    /// `mut f = 5` followed by `fn f(x)`, keep their definition-point behaviour exactly.
+    /// Both sets are known statically, before anything runs.
+    fn hoist_top_level_fns(&mut self, program: &[Stmt]) {
+        let assigned: std::collections::HashSet<&str> = program
+            .iter()
+            .flat_map(|s| match s {
+                Stmt::Assign { name, .. } => vec![name.as_str()],
+                Stmt::Destructure { names, .. } => names.iter().map(String::as_str).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        for stmt in program {
+            if let Stmt::Func { name, params, body, .. } = stmt
+                && !assigned.contains(name.as_str())
+                && !self.globals.contains_key(name)
+                && !self.hoisted.contains(name)
+            {
+                let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                let f = Value::Function(Rc::new(crate::value::FuncVal {
+                    params: Rc::new(param_names),
+                    body: Rc::new(body.clone()),
+                    captured: Rc::new(Vec::new()),
+                    decl_name: Some(std::rc::Rc::from(name.as_str())),
+                }));
+                self.globals.insert(name.clone(), Binding { value: f, mutable: false });
+                self.fn_decls.insert(name.clone());
+                self.hoisted.insert(name.clone());
+            }
+        }
     }
 
     pub fn exec(&mut self, stmt: &Stmt) -> Result<StmtOutcome, HelixError> {
@@ -211,6 +257,11 @@ impl Interp {
                 col,
                 ..
             } => {
+                // Already bound by `hoist_top_level_fns`, to exactly this function. Binding
+                // it again would read as reassigning an immutable global and error.
+                if self.hoisted.contains(name) {
+                    return Ok(StmtOutcome { value: Value::Unit, is_expr: false });
+                }
                 // Annotations are checker-only; the interpreter needs just names.
                 let param_names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
                 let f = Value::Function(Rc::new(crate::value::FuncVal {

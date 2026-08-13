@@ -4544,23 +4544,15 @@ fn mixed_fn_sig(
         // annotation is not, and promoting a partly-annotated signature would overrule
         // something the author actually said.
         //
-        // AND NEVER FOR A NAME THAT SHADOWS A BUILTIN. `mixed_fn_sigs` is derived from the
-        // whole AST and has no notion of definition ORDER, while the VM resolves names in
-        // source order — and `tests/corpus/j14_rounders_and_int_mixed.helix` is built on
-        // exactly that difference: it calls the builtin `round` twenty times and only then
-        // writes `fn round(x) = 99`. Promoting that definition made the JIT apply the user's
-        // function to the twenty EARLIER call sites, printing `[99, 99, 99, 99]` where the VM
-        // printed `[1, 2, 3, 4]` — a three-engine divergence, caught by the corpus.
-        //
-        // The restriction is exactly right rather than merely cautious: with no forward
-        // references, a call site can only precede its definition when the name is ALSO a
-        // builtin, so that is the whole of the exposure. (The same order-blindness is
-        // reachable today by an explicitly-annotated shadow — it predates this change and is
-        // not made worse by it.)
-        if f.params.iter().all(|(_, a)| a.is_none())
-            && crate::registry::lookup(f.name).is_none()
-            && !JIT_SCALAR_BUILTINS.iter().any(|(n, _)| *n == f.name)
-        {
+        // A NAME THAT SHADOWS A BUILTIN IS NO LONGER EXCLUDED. It used to be, because
+        // `mixed_fn_sigs` is derived from the whole AST and has no notion of definition
+        // ORDER while the engines resolved in source order — so promoting `fn round(x) = 99`
+        // applied the user's function to the call sites ABOVE it and printed
+        // `[99, 99, 99, 99]` against `[1, 2, 3, 4]`. ADR 0027 removed the premise: a
+        // top-level `fn` is file-scoped, so an order-blind analysis is now simply CORRECT
+        // about these names rather than needing to be kept away from them. This is one of
+        // the three guards that decision was taken to delete.
+        if f.params.iter().all(|(_, a)| a.is_none()) {
             let fkinds = vec![NumKind::Float; f.params.len()];
             let mut fenv: HashMap<&str, NumKind> =
                 f.params.iter().map(|(n, _)| (n.as_str(), NumKind::Float)).collect();
