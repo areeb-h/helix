@@ -1,0 +1,82 @@
+# Ordering — every spelling of "put these in order", and what each does with
+# `missing`, `NaN`, and signed zeros.
+#   helix run examples/language/ordering.helix
+#
+# Every `>>>` below is executed on the tree-walker, the bytecode VM and the JIT every
+# time the gate runs, so this file cannot drift from what the language does.
+
+## One order, one domain. `sort`, `argsort` and `sort_by` are three spellings of the same
+## question, so they answer it the same way — including for DNA, and including when the
+## array has `missing` (ADR 0025).
+##
+##     >>> [3, 1, 2].sort()
+##     [1, 2, 3]
+##
+##     >>> [3, 1, 2].argsort()
+##     [1, 2, 0]
+##
+##     >>> [3, 1, 2].sort_by(it)
+##     [1, 2, 3]
+##
+##     >>> [dna("GG"), dna("AA")].sort()
+##     [AA, GG]
+##
+##     >>> [dna("GG"), dna("AA")].argsort()
+##     [1, 0]
+
+## `missing` has no place in an order, so sorting REFUSES rather than inventing one — and
+## says how to proceed. Dropping is an explicit, visible step (ADR 0001).
+##
+##     >>> [1, missing, 3].sort()
+##     error: cannot sort: the array has missing values
+##
+##     >>> [1, missing, 3].argsort()
+##     error: cannot sort: the array has missing values
+##
+##     >>> [1, missing, 3].drop_missing().sort()
+##     [1, 3]
+
+## `min`/`max` REDUCE, and a reduction over an array containing `missing` is `missing` —
+## the three-valued answer, not an error. This is a different question from sorting, and
+## the two give different answers on purpose.
+##
+##     >>> [3, 1, 2].min()
+##     1
+##
+##     >>> [1, missing, 3].min()
+##     missing
+##
+##     >>> [1, missing, 3].max()
+##     missing
+
+## NaN is placed by SORT (by sign bit, so a negative NaN sorts first) and propagates as
+## `missing` through `min`/`max`.
+##
+##     >>> [1.0, sqrt(0.0 - 1.0), 3.0].sort()
+##     [NaN, 1.0, 3.0]
+##
+##     >>> [1.0, sqrt(0.0 - 1.0), 3.0].min()
+##     missing
+
+## SIGNED ZEROS: `sort` orders them (`-0.0` before `0.0`), while the `_by` family and the
+## `argmin`/`argmax` METHODS mirror the `<` operator, which is IEEE — under IEEE
+## `-0.0 < 0.0` is false, so ties keep their original order and the FIRST one wins.
+## The consequence is real and worth knowing: `xs[xs.argmin()]` and `xs.min()` can be
+## different elements of `xs`. ADR 0025 (d) records this as a documented consequence
+## that resolves when the comparators unify.
+##
+##     >>> [0.0, -0.0].sort()
+##     [-0.0, 0.0]
+##
+##     >>> [0.0, -0.0].argmin()
+##     0
+##
+##     >>> [-0.0, 0.0].argmin()
+##     0
+##
+##     >>> [0.0, -0.0].min()
+##     -0.0
+
+print("sorted:", [3, 1, 2].sort(), " indices:", [3, 1, 2].argsort())
+print("min of a column with a hole:", [1, missing, 3].min())
+print("signed-zero tie, first wins:", [0.0, -0.0].argmin())
