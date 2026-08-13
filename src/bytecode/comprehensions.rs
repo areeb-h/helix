@@ -164,7 +164,7 @@ impl super::Compiler {
         };
         // Computed here, while `user_fns` is still borrowable — the capture-push loop below
         // needs `&mut self`, which would end the borrow.
-        let kernel_raises = crate::jit::map_body_raises(body, &user_fns, &self.mixed_sigs);
+        let kernel_raises = crate::jit::body_raises(body, &user_fns, &self.mixed_sigs);
         let kernel_guard: Option<(usize, u32)> = if let Some((caps, index_bounds, synth_exprs)) =
             captures
         {
@@ -574,6 +574,13 @@ impl super::Compiler {
         // pushed in `captures` order (ArrayI64 only); the VM consumes them in that same order. Each
         // is a bare free variable (recorded only when the index receiver is a free `Ident`), hence
         // idempotent for the fallback's by-name re-read. Then register the inner loop + guard. ---
+        // Before the pushes take `&mut self`. This is the i64 nested-reduce path, whose kernel
+        // has no poison ABI at all — but the flag is still computed honestly rather than
+        // hard-coded, so widening the analysis later cannot leave this site quietly stale.
+        let raises = {
+            let user_fns = self.user_fn_set();
+            crate::jit::body_raises(rbody, &user_fns, &self.mixed_sigs)
+        };
         for c in caps.iter().filter(|c| c.kind == CaptureKind::ArrayI64) {
             let ident = Expr::Ident { name: c.name.clone(), line, col };
             self.compile_expr(b, &ident)?;
@@ -593,6 +600,7 @@ impl super::Compiler {
             captures: caps,
             index_bounds: bnds,
             float: false,
+            raises,
             inner_start_coeff: sc,
             inner_end_coeff: ec,
         });
@@ -710,6 +718,13 @@ impl super::Compiler {
         let x;
         let guard;
         if let Some(bodies) = jit_bodies {
+            // Computed while `self` is only borrowed immutably — the capture pushes below
+            // need `&mut self`, same constraint the map site records. This decides the
+            // kernel's ABI, so it is stored on the loop rather than re-derived in the VM.
+            let raises = {
+                let user_fns = self.user_fn_set();
+                bodies.iter().any(|bd| crate::jit::body_raises(bd, &user_fns, &self.mixed_sigs))
+            };
             self.compile_expr(b, init)?; // stack: [start, end, init]
             acc = b.declare_local(pa);
             x = b.declare_local(pb);
@@ -735,6 +750,7 @@ impl super::Compiler {
                 captures,
                 index_bounds: bounds,
                 float,
+                raises,
                 // Not a nested-reduce call site: this loop's bounds are ordinary stack operands,
                 // never affine in an outer binder. The VM reads these only via `TryJitNestedReduce`.
                 inner_start_coeff: 0,
@@ -895,6 +911,12 @@ impl super::Compiler {
             }
         };
 
+        // Before the pushes below take `&mut self` — see the sibling site in `compile_reduce`.
+        let raises = {
+            let user_fns = self.user_fn_set();
+            bodies.iter().any(|bd| crate::jit::body_raises(bd, &user_fns, &self.mixed_sigs))
+        };
+
         // --- committed: emit [start, end], the acc slot, the captures, then the guard ---
         match start {
             None => {
@@ -928,6 +950,7 @@ impl super::Compiler {
             captures,
             index_bounds: bounds,
             float,
+            raises,
             inner_start_coeff: 0,
             inner_end_coeff: 0,
         });
@@ -1140,6 +1163,13 @@ impl super::Compiler {
                 && bounds.is_empty()
                 && caps.iter().all(|c| c.kind == CaptureKind::Scalar)
             {
+                // Before the pushes take `&mut self`. The i64 scan kernel has no poison ABI
+                // either; recorded rather than hard-coded for the same reason as the nested
+                // site — a later widening must not silently skip a construction site.
+                let raises = {
+                    let user_fns = self.user_fn_set();
+                    crate::jit::body_raises(body, &user_fns, &self.mixed_sigs)
+                };
                 match start {
                     None => {
                         let c0 = b.add_const(Value::Int(0));
@@ -1159,6 +1189,7 @@ impl super::Compiler {
                     bodies: vec![body.clone()],
                     captures: caps,
                     index_bounds: bounds,
+                    raises,
                     float: false,
                     inner_start_coeff: 0,
                     inner_end_coeff: 0,

@@ -434,6 +434,20 @@ pub struct ReduceLoop {
     /// capture-free body whose inferred root type is `Float`. (Tuple/captured float reduces
     /// stay on the VM loop.)
     pub float: bool,
+    /// Whether any body can RAISE where native code would silently produce inf/NaN or a
+    /// wrapped integer — a `/0`, a rounder leaving i64 range, or a call to a mixed
+    /// specialization (whose own ABI can bail for either reason).
+    ///
+    /// This decides the kernel's SIGNATURE: a raising scalar `f64` reduce takes an extra
+    /// `*mut i8` poison out-param, and the VM must call it through the matching wrapper.
+    /// Stored rather than re-derived, which is the whole point — the builder
+    /// (`jit::define_reduce_loop`) and the caller (`vm.rs`) previously each computed
+    /// `reduce_body_divides` and had to arrive at the same answer, and calling a 5-argument
+    /// kernel through a 4-argument signature is undefined behaviour, not a wrong number.
+    /// Following a call into its callee's body is impossible in the VM anyway: it has the
+    /// reduce bodies but not the user functions. Set at compile time by
+    /// [`crate::jit::body_raises`], exactly as [`ArrayKernel::raises`] is.
+    pub raises: bool,
     /// **#31 parallel nested-reduce call site only.** The inner range bounds as AFFINE functions
     /// of the outer binder `i`: `start(i) = inner_start_coeff * i + <the pushed `is` operand>`,
     /// and likewise `end(i)` with `inner_end_coeff` over the pushed `ie`. The pushed operands are
@@ -497,7 +511,7 @@ pub struct ArrayKernel {
     /// `round`/`trunc` on an out-of-i64-range result). Such a kernel takes an extra
     /// poison out-param the codegen sets on any raising condition; the VM discards the
     /// whole output and falls back to the bytecode loop, which re-runs and raises the
-    /// exact interpreter error. Set at compile time by [`crate::jit::map_body_raises`],
+    /// exact interpreter error. Set at compile time by [`crate::jit::body_raises`],
     /// re-derived at build time (drift guard), and read at dispatch to pick the poison
     /// call wrapper. A raising kernel must NEVER take the in-place buffer reuse — a
     /// poison after mutating the source would corrupt the fall-back's input.

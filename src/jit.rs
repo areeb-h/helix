@@ -939,7 +939,7 @@ fn define_array_kernels(
             // analysis's `Scalar`s, while this specialization's are `ScalarValue`; the kinds
             // are a per-specialization loading decision, not an identity.
             !indexed
-                && map_body_raises(&k.body, user_fns, msigs) == k.raises
+                && body_raises(&k.body, user_fns, msigs) == k.raises
                 && mixed_map_value_scalar_eligible(&k.body, &k.binder, eligible, user_fns, msigs).is_some_and(
                     |c| {
                         c.len() == k.captures.len()
@@ -951,7 +951,7 @@ fn define_array_kernels(
             // same drift guard as the capture list: re-derive from the body and require the
             // stored flag to match, or the VM would call a 5-param kernel through a 4-param
             // wrapper.
-            map_body_raises(&k.body, user_fns, msigs) == k.raises
+            body_raises(&k.body, user_fns, msigs) == k.raises
                 && if indexed {
                 // Synthetic `$aff*` naming is a deterministic function of the body (dedup
                 // by printed form), so the re-derived capture list — `$aff` slots included
@@ -974,7 +974,7 @@ fn define_array_kernels(
             // Int-rooted body has shown up in no probe, and its bounds discharge would be
             // unexercised safety code.
             !indexed
-                && map_body_raises(&k.body, user_fns, msigs) == k.raises
+                && body_raises(&k.body, user_fns, msigs) == k.raises
                 && mixed_map_int_root_eligible(&k.body, &k.binder, eligible, user_fns, msigs)
                     .is_some_and(|c| c == k.captures)
                 && map_kernel_captures(&k.body, &k.binder, eligible).is_none()
@@ -1473,26 +1473,11 @@ fn f64_range_body_eligible(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>,
     infer_reduce_f64_kind(body, pa, pb, fns, user_fns) == Some(NumKind::Float)
 }
 
-/// Whether `e` contains a `/` (float division) anywhere — a dividing reduce kernel carries a
-/// poison out-param (see [`reduce_body_divides`] / [`gen_f64_typed`]).
-pub fn expr_has_div(e: &Expr) -> bool {
-    match e {
-        Expr::Binary { op: BinOp::Div, .. } => true,
-        Expr::Binary { left, right, .. } => expr_has_div(left) || expr_has_div(right),
-        Expr::Unary { expr, .. } => expr_has_div(expr),
-        Expr::Index { recv, index, .. } => expr_has_div(recv) || expr_has_div(index),
-        Expr::Call { args, .. } => args.iter().any(expr_has_div),
-        _ => false,
-    }
-}
-
-/// Whether a reduce loop's (single) body contains a float division. A dividing scalar f64 reduce
-/// kernel takes an extra `*mut i8` **poison** out-param that the codegen sets on any zero divisor;
-/// the VM passes a poison cell, and on a set flag falls back to the exact-erroring bytecode loop
-/// (native `fdiv` yields inf/nan where the interpreter raises on `/0`).
-pub fn reduce_body_divides(rl: &crate::bytecode::ReduceLoop) -> bool {
-    rl.bodies.len() == 1 && expr_has_div(&rl.bodies[0])
-}
+// `expr_has_div` / `reduce_body_divides` lived here. Both are gone: the poison decision is now
+// `ReduceLoop::raises`, set once at compile time by `body_raises` (the predicate the map side
+// already used) and READ by both the kernel builder and the VM. `expr_has_div` could not have
+// been widened in place anyway — its `Call` arm recursed into a call's ARGUMENTS but never into
+// the callee's BODY, so `fn f(x) = 1.0 / x` used as `acc + f(i)` reported no division at all.
 
 /// Whether `e` reads the identifier `name` anywhere. Used to prove a multi-accumulator `term` is
 /// FREE of the accumulator. Literals plainly reference nothing; the arithmetic/index/call nodes
@@ -2744,13 +2729,20 @@ pub fn mixed_map_eligible(
 /// analyses do not admit.
 const RAISING_ROUNDERS: &[&str] = &["floor", "ceil", "round", "trunc"];
 
-/// Whether a map body contains a call to a raising rounder — i.e. whether its kernel needs
-/// the poison out-param and its dispatch the poison call wrapper. A user function SHADOWING
-/// one of these names is not the raising builtin (the call dispatches to the user's
-/// function), so it does not count. Over-approximates on an `Int`-typed argument (where the
-/// builtin is the identity and cannot raise): the kernel then carries a poison slot it never
-/// sets, which costs one dead store and nothing else.
-pub fn map_body_raises(e: &Expr, user_fns: &HashSet<&str>, msigs: &MixedSigTable) -> bool {
+/// Whether a kernel body can RAISE where native code would silently produce inf/NaN or a
+/// wrapped integer — i.e. whether its kernel needs the poison out-param and its dispatch the
+/// poison call wrapper. A user function SHADOWING one of these names is not the raising
+/// builtin (the call dispatches to the user's function), so it does not count.
+/// Over-approximates on an `Int`-typed argument (where the builtin is the identity and cannot
+/// raise): the kernel then carries a poison slot it never sets, which costs one dead store
+/// and nothing else.
+///
+/// Shared by MAP and REDUCE bodies — the question and the expression forms are identical, and
+/// one predicate is what keeps the two from drifting apart as either side widens. Its answer
+/// is stored on the kernel ([`crate::bytecode::ArrayKernel::raises`],
+/// [`crate::bytecode::ReduceLoop::raises`]) rather than recomputed by the VM, because the
+/// answer decides an ABI and the VM cannot reach the user functions a call would need.
+pub fn body_raises(e: &Expr, user_fns: &HashSet<&str>, msigs: &MixedSigTable) -> bool {
     match e {
         Expr::Call { name, args, .. } => {
             // A call to a MIXED specialization always counts: its ABI carries a poison
@@ -2763,22 +2755,22 @@ pub fn map_body_raises(e: &Expr, user_fns: &HashSet<&str>, msigs: &MixedSigTable
                 || (RAISING_ROUNDERS.contains(&name.as_str())
                     && args.len() == 1
                     && !user_fns.contains(name.as_str()))
-                || args.iter().any(|a| map_body_raises(a, user_fns, msigs))
+                || args.iter().any(|a| body_raises(a, user_fns, msigs))
         }
         // Any `/`: the interpreter raises on a zero divisor. Over-approximates on a nonzero
         // literal divisor (which cannot raise) — that costs a dead poison slot, nothing else.
         Expr::Binary { op: BinOp::Div, .. } => true,
         Expr::Binary { left, right, .. } => {
-            map_body_raises(left, user_fns, msigs) || map_body_raises(right, user_fns, msigs)
+            body_raises(left, user_fns, msigs) || body_raises(right, user_fns, msigs)
         }
-        Expr::Unary { expr, .. } => map_body_raises(expr, user_fns, msigs),
+        Expr::Unary { expr, .. } => body_raises(expr, user_fns, msigs),
         Expr::Index { recv, index, .. } => {
-            map_body_raises(recv, user_fns, msigs) || map_body_raises(index, user_fns, msigs)
+            body_raises(recv, user_fns, msigs) || body_raises(index, user_fns, msigs)
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
-            map_body_raises(cond, user_fns, msigs)
-                || map_body_raises(then_branch, user_fns, msigs)
-                || map_body_raises(else_branch, user_fns, msigs)
+            body_raises(cond, user_fns, msigs)
+                || body_raises(then_branch, user_fns, msigs)
+                || body_raises(else_branch, user_fns, msigs)
         }
         _ => false,
     }
@@ -2922,7 +2914,7 @@ fn infer_mixed_kind(
                 // The RAISING rounders: `Float` in, `Int` out, and an out-of-i64-range result
                 // raises where the never-raising `to_int` saturates. Admissible only because
                 // the kernel carries a poison out-param (`ArrayKernel::raises`, set by
-                // `map_body_raises` from this same name list): on any raising condition the
+                // `body_raises` from this same name list): on any raising condition the
                 // codegen sets poison, the VM discards the whole output, and the bytecode loop
                 // re-runs to raise the exact interpreter error. An `Int` argument makes the
                 // builtin the identity (`floor(2) == 2`) and is admitted as such. (This plain
@@ -2965,7 +2957,7 @@ fn infer_mixed_kind(
             })
         }
         // `/` is always float division and always yields Float, for ANY eligible divisor —
-        // admissible because `map_body_raises` counts every `/`, so the kernel carries the
+        // admissible because `body_raises` counts every `/`, so the kernel carries the
         // poison accumulator `gen_value_typed`'s Div arm ORs `divisor == 0.0` into (the
         // interpreter raises on `/0` where native `fdiv` yields inf). This is what lets
         // `ceil(to_float(i) / 4.0)` compile instead of forcing the `* 0.25` spelling.
@@ -3311,7 +3303,7 @@ fn infer_mixed_kind_indexed(
         // `10 / 2 == 5.0`), so unlike `+ - *` it is safe for ANY operand mix — including an
         // unpromoted value scalar, which is precisely the promotion the interpreter also
         // performs at this node. Result is a genuine float. A zero divisor poisons
-        // (`map_body_raises` counts every `/`, so a dividing kernel always carries the
+        // (`body_raises` counts every `/`, so a dividing kernel always carries the
         // poison accumulator `gen_value_typed`'s Div arm ORs into).
         Expr::Binary { op: BinOp::Div, left, right, .. } => {
             infer_mixed_kind_indexed(left, binder, out, fns, user_fns, msigs)?;
@@ -4853,10 +4845,16 @@ fn define_reduce_loop(
     // A scalar body may capture loop-invariant outer `i64` values, passed via a 4th
     // pointer param `caps` (the nested-fold case). Tuple/float accumulators don't capture.
     let has_caps = scalar && !rl.captures.is_empty();
-    // A dividing scalar f64 reduce takes an extra `*mut i8` **poison** out-param: the codegen ORs
+    // A RAISING scalar f64 reduce takes an extra `*mut i8` **poison** out-param: the codegen ORs
     // `divisor == 0` into it (a `/0` where the interpreter raises), and the VM falls back if set.
     // Mutually exclusive with `has_caps` — a caps body (the float dot-product) never divides.
-    let needs_poison = float_scalar && !has_caps && reduce_body_divides(rl);
+    //
+    // `rl.raises` is READ, not re-derived. This decides the built SIGNATURE, and the VM must
+    // select its call wrapper by the same answer: a 5-argument kernel invoked through a
+    // 4-argument signature is undefined behaviour, not a wrong number. Both sides now read
+    // one field the compiler set, so they cannot drift — which is what makes it safe to widen
+    // the predicate to cover calls, whose callee bodies the VM cannot even see.
+    let needs_poison = float_scalar && !has_caps && rl.raises;
     ctx.func.signature.call_conv = CallConv::SystemV;
     ctx.func.signature.params.push(AbiParam::new(I64)); // start
     ctx.func.signature.params.push(AbiParam::new(I64)); // end
@@ -6619,7 +6617,7 @@ fn gen_value_typed<'a>(
                     // a MAP body: the loop always terminates, so accumulate-and-store is
                     // sound, unlike the mixed-FUNCTION tail loop whose bail must be
                     // immediate). The VM discards the whole output on poison and the
-                    // bytecode loop re-runs to raise the exact error. `map_body_raises`
+                    // bytecode loop re-runs to raise the exact error. `body_raises`
                     // counts any `/`, so a dividing kernel always has the poison signature.
                     // `rf == 0.0` also catches `-0.0`, matching the interpreter's check.
                     BinOp::Div => {

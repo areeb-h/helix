@@ -1507,9 +1507,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 // the exact-erroring bytecode loop, while an unset flag guarantees
                                 // no `/0` occurred so `r` is bit-exact to the interpreter. A
                                 // non-dividing reduce uses the plain, poison-free kernel.
-                                if crate::jit::reduce_body_divides(
-                                    &program.reduce_loops[*loop_idx as usize],
-                                ) {
+                                // The SAME field `define_reduce_loop` built the signature
+                                // from — not a second derivation that has to agree with it.
+                                if program.reduce_loops[*loop_idx as usize].raises {
                                     let mut poison: i8 = 0;
                                     let r = unsafe {
                                         crate::jit::call_reduce_f64_div(ptr, s, e, init, &mut poison)
