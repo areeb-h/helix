@@ -3554,6 +3554,60 @@ fn building_a_dict_in_a_fold_matches_the_walker() {
     }
 }
 
+/// A library's PRIVATE sibling import cannot be captured by what the consumer installs.
+///
+/// The dependency map is the ROOT project's and is consulted for every file in the graph,
+/// including files inside a dependency, which have no say in it. With dependency keys
+/// winning over local siblings, a consumer adding an unrelated package named `helpers`
+/// silently rewired a correct, self-contained library's internals: `mathlib.go(10)` returned
+/// 20 alone and 1010 in that consumer. Exit 0, `helix check` ok, and all three engines agreed
+/// — because all three were equally wrong, so the differential oracle is blind to it. This
+/// test is the only thing that catches it.
+#[test]
+fn a_consumers_dependency_cannot_capture_a_librarys_private_import() {
+    let dir = std::env::temp_dir().join("helix_import_capture");
+    let _ = std::fs::remove_dir_all(&dir);
+    for p in ["mathlib", "helpers", "appA", "appB"] {
+        std::fs::create_dir_all(dir.join(p)).unwrap();
+    }
+    // A self-contained library with a private sibling it imports by name.
+    std::fs::write(dir.join("mathlib/helix.toml"), "[package]\nname = \"mathlib\"\n").unwrap();
+    std::fs::write(dir.join("mathlib/helpers.helix"), "export fn scale(x) = x * 2\n").unwrap();
+    std::fs::write(
+        dir.join("mathlib/mathlib.helix"),
+        "import helpers\nexport fn go(x) = helpers.scale(x)\n",
+    )
+    .unwrap();
+    // An unrelated package that happens to be named `helpers`.
+    std::fs::write(dir.join("helpers/helix.toml"), "[package]\nname = \"helpers\"\n").unwrap();
+    std::fs::write(dir.join("helpers/helpers.helix"), "export fn scale(x) = x * 100 + 10\n")
+        .unwrap();
+
+    let app = |name: &str, deps: &str| {
+        std::fs::write(
+            dir.join(name).join("helix.toml"),
+            format!("[package]\nname = \"{name}\"\n\n[dependencies]\n{deps}"),
+        )
+        .unwrap();
+        std::fs::write(dir.join(name).join("main.helix"), "import mathlib\nprint(mathlib.go(10))\n")
+            .unwrap();
+        let entry = dir.join(name).join("main.helix");
+        run(&[entry.to_str().unwrap()], &[], "")
+    };
+
+    let (out, err, code) = app("appA", "mathlib = { path = \"../mathlib\" }\n");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "20", "the library alone");
+
+    // The SAME library, in a consumer that also depends on something named `helpers`.
+    let (out, err, code) = app(
+        "appB",
+        "mathlib = { path = \"../mathlib\" }\nhelpers = { path = \"../helpers\" }\n",
+    );
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert_eq!(out.trim(), "20", "a consumer's dependency must not rewire mathlib's internals");
+}
+
 /// A deep `x => x => ...` lambda chain must hit the parser depth cap with a
 /// clean error — lambda bodies were the one expr() recursion that skipped the
 /// depth counter, so 2000 nestings overflowed the native stack (SIGABRT).

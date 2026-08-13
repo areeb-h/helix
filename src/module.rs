@@ -292,8 +292,7 @@ impl Loader {
                 let local = dir.join(&rel);
                 // A package dependency: `import dep.module` resolves within `dep`'s
                 // source directory (the first segment selects the package); plain
-                // `import dep` loads `dep`'s same-named module. Dependencies win over
-                // ambiguous local files, matching the manifest's explicit intent.
+                // `import dep` loads `dep`'s same-named module.
                 let dep_file = self.deps.get(&segments[0]).map(|d| {
                     if segments.len() == 1 {
                         d.join(format!("{}.helix", segments[0]))
@@ -301,10 +300,35 @@ impl Loader {
                         d.join(import_rel_path(&segments[1..]))
                     }
                 });
-                let dep_path = if let Some(p) = dep_file.filter(|p| p.is_file()) {
-                    p
-                } else if local.is_file() {
+                // A FILE'S OWN SIBLING WINS OVER A DEPENDENCY KEY. This used to be the other
+                // way round ("dependencies win over ambiguous local files, matching the
+                // manifest's explicit intent"), and that is a supply-chain hazard rather than
+                // a preference, because `self.deps` is the ROOT project's map and is consulted
+                // for EVERY file in the graph — including files inside a dependency, which
+                // have no say in it and cannot see it:
+                //
+                //     mathlib/helpers.helix    export fn scale(x) = x * 2   <- private sibling
+                //     mathlib/mathlib.helix    import helpers ...
+                //
+                //     app deps {mathlib}             -> mathlib.go(10) == 20
+                //     app deps {mathlib, helpers}    -> mathlib.go(10) == 1010
+                //
+                // A consumer adding an unrelated package named `helpers` silently rewired a
+                // correct, self-contained library's private internals. Exit 0, `helix check`
+                // ok, and all three engines agree — because all three are equally wrong, so
+                // the differential oracle cannot see it. The author cannot defend (they do not
+                // know what else will be installed) and the consumer cannot detect it.
+                //
+                // A file's own directory is the one thing it unambiguously owns, so it wins.
+                // This does NOT fix the whole class: a module that imports a name it has no
+                // sibling for can still bind a consumer's dependency. That library is already
+                // broken standalone, which is far less dangerous, and closing it properly
+                // means resolving each package against ITS OWN manifest — a semantics change
+                // that needs an ADR of its own.
+                let dep_path = if local.is_file() {
                     local
+                } else if let Some(p) = dep_file.filter(|p| p.is_file()) {
+                    p
                 } else if let Some(found) =
                     self.roots.iter().map(|r| r.join(&rel)).find(|p| p.is_file())
                 {
