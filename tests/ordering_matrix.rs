@@ -14,11 +14,17 @@
 //! | domain | spellings | comparator | `missing` | `NaN` | empty |
 //! |---|---|---|---|---|---|
 //! | A. **sort** | `sort` | `numeric_cmp` (`total_cmp`) + Str + Dna | **error** | placed | `[]` |
-//! | B. **argsort** | `argsort`, `sort_by` | `numeric_cmp` + Str, **no Dna** | **`missing`** | placed | `[]` |
+//! | B. **argsort** | `argsort`, `sort_by` | *(same as A since ADR 0025 (a1))* | **error** | placed | `[]` |
 //! | C. **reduction** | `min`, `max`, free `argmin`/`argmax` | `numeric_cmp`, numbers only | `missing` | `missing` | error |
 //! | D. **`<`-reduce** | `min_by`, `max_by`, method `argmin`/`argmax` | `ops::compare` (IEEE, 3-valued, Tuple/Str/Dna) | error | error | error |
 //!
 //! Four domains, four answers to the same question. The table below is the evidence.
+//!
+//! **A and B are now ONE domain** — ADR 0025 question (a), option a1, taken: `argsort`
+//! adopted `sort`'s policy (error on `missing`, accept `Dna`), and `sort_by` followed for
+//! free because `desugar_sort_by` rewrites it through `argsort`. Before that, `xs.sort()`
+//! and `xs.sort_by(it)` did not agree with each other. C and D remain, and are questions
+//! (b) and (c).
 //!
 //! ## Two rules this file follows
 //!
@@ -198,10 +204,10 @@ const CASES: &[(&str, &str, &str)] = &[
     // `map(key).argsort().map(...)` (src/parser.rs, `desugar_sort_by`).
     ("dna/sort", "[dna(\"GG\"), dna(\"AA\")].sort()", "[AA, GG]"),
     // DISAGREE (sort vs argsort): `sort` accepts Dna, `argsort` rejects it.
-    ("dna/argsort", "[dna(\"GG\"), dna(\"AA\")].argsort()", "error: `argsort` needs an array of all numbers or all strings"),
+    ("dna/argsort", "[dna(\"GG\"), dna(\"AA\")].argsort()", "[1, 0]"),
     // DISAGREE (sort vs sort_by): two spellings of one operation, one works. Note the
     // error names `argsort`, a method the user did not write — the desugar leaks.
-    ("dna/sort_by", "[dna(\"GG\"), dna(\"AA\")].sort_by(it)", "error: `argsort` needs an array of all numbers or all strings"),
+    ("dna/sort_by", "[dna(\"GG\"), dna(\"AA\")].sort_by(it)", "[AA, GG]"),
     // DISAGREE (sort vs min): `sort` orders DNA; `min` calls it a non-number.
     ("dna/min", "[dna(\"GG\"), dna(\"AA\")].min()", "error: `min` needs an array of numbers, but element 0 is a Dna"),
     ("dna/max", "[dna(\"GG\"), dna(\"AA\")].max()", "error: `max` needs an array of numbers, but element 0 is a Dna"),
@@ -220,8 +226,8 @@ const CASES: &[(&str, &str, &str)] = &[
     // Every spelling refuses — but with four different sentences, two of which name an
     // operator (`<`, `>`) the user never typed.
     ("bool/sort", "[true, false].sort()", "error: `sort` needs an array of all numbers, all strings, or all DNA"),
-    ("bool/argsort", "[true, false].argsort()", "error: `argsort` needs an array of all numbers or all strings"),
-    ("bool/sort_by", "[true, false].sort_by(it)", "error: `argsort` needs an array of all numbers or all strings"),
+    ("bool/argsort", "[true, false].argsort()", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
+    ("bool/sort_by", "[true, false].sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
     ("bool/min", "[true, false].min()", "error: `min` needs an array of numbers, but element 0 is a Bool"),
     ("bool/max", "[true, false].max()", "error: `max` needs an array of numbers, but element 0 is a Bool"),
     ("bool/min_by", "[true, false].min_by(it)", "error: operator `<` needs numbers, but got a Bool"),
@@ -251,8 +257,8 @@ const CASES: &[(&str, &str, &str)] = &[
     // ============================= Mixed Int/Str — refused ===========================
     // All four domains refuse, with four different sentences.
     ("mixed_int_str/sort", "[1, \"a\"].sort()", "error: `sort` needs an array of all numbers, all strings, or all DNA"),
-    ("mixed_int_str/argsort", "[1, \"a\"].argsort()", "error: `argsort` needs an array of all numbers or all strings"),
-    ("mixed_int_str/sort_by", "[1, \"a\"].sort_by(it)", "error: `argsort` needs an array of all numbers or all strings"),
+    ("mixed_int_str/argsort", "[1, \"a\"].argsort()", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
+    ("mixed_int_str/sort_by", "[1, \"a\"].sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
     ("mixed_int_str/min", "[1, \"a\"].min()", "error: `min` needs an array of numbers, but element 1 is a String"),
     ("mixed_int_str/max", "[1, \"a\"].max()", "error: `max` needs an array of numbers, but element 1 is a String"),
     ("mixed_int_str/min_by", "[1, \"a\"].min_by(it)", "error: cannot order String and Int — `<` compares two numbers, two strings, or two DNA sequences"),
@@ -271,8 +277,8 @@ const CASES: &[(&str, &str, &str)] = &[
     // `min_by`/method-`argmin` RAISE — with an error about an `if` the user never
     // wrote, leaked by `desugar_order_by`'s reduce.
     ("with_missing/sort", "[1, missing, 3].sort()", "error: cannot sort: the array has missing values"),
-    ("with_missing/argsort", "[1, missing, 3].argsort()", "missing"),
-    ("with_missing/sort_by", "[1, missing, 3].sort_by(it)", "missing"),
+    ("with_missing/argsort", "[1, missing, 3].argsort()", "error: cannot sort: the array has missing values"),
+    ("with_missing/sort_by", "[1, missing, 3].sort_by(it)", "error: cannot sort: the array has missing values"),
     ("with_missing/min", "[1, missing, 3].min()", "missing"),
     ("with_missing/max", "[1, missing, 3].max()", "missing"),
     // DISAGREE (min vs min_by): `min` propagates, `min_by(it)` raises.
@@ -331,8 +337,8 @@ const CASES: &[(&str, &str, &str)] = &[
     // `min` and `max` all refuse. Same value, same order relation, five refusals and
     // four answers.
     ("tuple/sort", "[(2, 1), (1, 2)].sort()", "error: `sort` needs an array of all numbers, all strings, or all DNA"),
-    ("tuple/argsort", "[(2, 1), (1, 2)].argsort()", "error: `argsort` needs an array of all numbers or all strings"),
-    ("tuple/sort_by", "[(2, 1), (1, 2)].sort_by(it)", "error: `argsort` needs an array of all numbers or all strings"),
+    ("tuple/argsort", "[(2, 1), (1, 2)].argsort()", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
+    ("tuple/sort_by", "[(2, 1), (1, 2)].sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
     // DISAGREE (`<` vs min): `(1, 2) < (2, 1)` is `true`, yet `min` refuses the array.
     ("tuple/min", "[(2, 1), (1, 2)].min()", "error: `min` needs an array of numbers, but element 0 is a Tuple"),
     ("tuple/max", "[(2, 1), (1, 2)].max()", "error: `max` needs an array of numbers, but element 0 is a Tuple"),
@@ -349,8 +355,8 @@ const CASES: &[(&str, &str, &str)] = &[
     // ==================================== Records ====================================
     // Records have no order in any domain — the one shape all four agree on refusing.
     ("record/sort", "[{a: 2}, {a: 1}].sort()", "error: `sort` needs an array of all numbers, all strings, or all DNA"),
-    ("record/argsort", "[{a: 2}, {a: 1}].argsort()", "error: `argsort` needs an array of all numbers or all strings"),
-    ("record/sort_by", "[{a: 2}, {a: 1}].sort_by(it)", "error: `argsort` needs an array of all numbers or all strings"),
+    ("record/argsort", "[{a: 2}, {a: 1}].argsort()", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
+    ("record/sort_by", "[{a: 2}, {a: 1}].sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
     ("record/min", "[{a: 2}, {a: 1}].min()", "error: `min` needs an array of numbers, but element 0 is a Record"),
     ("record/max", "[{a: 2}, {a: 1}].max()", "error: `max` needs an array of numbers, but element 0 is a Record"),
     ("record/min_by", "[{a: 2}, {a: 1}].min_by(it)", "error: operator `<` needs numbers, but got a Record"),
@@ -367,8 +373,8 @@ const CASES: &[(&str, &str, &str)] = &[
     // the `<`-reduce family is CONSISTENT with `sort` here. It is the Tuple arm of
     // `compare` that creates the tuple asymmetry, not arrays.
     ("nested_array/sort", "[[2], [1]].sort()", "error: `sort` needs an array of all numbers, all strings, or all DNA"),
-    ("nested_array/argsort", "[[2], [1]].argsort()", "error: `argsort` needs an array of all numbers or all strings"),
-    ("nested_array/sort_by", "[[2], [1]].sort_by(it)", "error: `argsort` needs an array of all numbers or all strings"),
+    ("nested_array/argsort", "[[2], [1]].argsort()", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
+    ("nested_array/sort_by", "[[2], [1]].sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
     ("nested_array/min", "[[2], [1]].min()", "error: `min` needs an array of numbers, but element 0 is an Array"),
     ("nested_array/max", "[[2], [1]].max()", "error: `max` needs an array of numbers, but element 0 is an Array"),
     ("nested_array/min_by", "[[2], [1]].min_by(it)", "error: operator `<` needs numbers, but got an Array"),
@@ -401,8 +407,8 @@ const CASES: &[(&str, &str, &str)] = &[
     // the language hands you for "index alongside value" cannot be sorted by `sort`,
     // only by `min_by`/`argmin`.
     ("lazy_enumerate/sort", "[10, 20].enumerate().sort()", "error: `sort` needs an array of all numbers, all strings, or all DNA"),
-    ("lazy_enumerate/argsort", "[10, 20].enumerate().argsort()", "error: `argsort` needs an array of all numbers or all strings"),
-    ("lazy_enumerate/sort_by", "[10, 20].enumerate().sort_by(it)", "error: `argsort` needs an array of all numbers or all strings"),
+    ("lazy_enumerate/argsort", "[10, 20].enumerate().argsort()", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
+    ("lazy_enumerate/sort_by", "[10, 20].enumerate().sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
     ("lazy_enumerate/min", "[10, 20].enumerate().min()", "error: `min` needs an array of numbers, but element 0 is a Tuple"),
     ("lazy_enumerate/max", "[10, 20].enumerate().max()", "error: `max` needs an array of numbers, but element 0 is a Tuple"),
     // DISAGREE (min vs min_by), same as `tuple/`.
@@ -417,8 +423,8 @@ const CASES: &[(&str, &str, &str)] = &[
 
     // =================================== Lazy: zip ===================================
     ("lazy_zip/sort", "[1, 2].zip([3, 4]).sort()", "error: `sort` needs an array of all numbers, all strings, or all DNA"),
-    ("lazy_zip/argsort", "[1, 2].zip([3, 4]).argsort()", "error: `argsort` needs an array of all numbers or all strings"),
-    ("lazy_zip/sort_by", "[1, 2].zip([3, 4]).sort_by(it)", "error: `argsort` needs an array of all numbers or all strings"),
+    ("lazy_zip/argsort", "[1, 2].zip([3, 4]).argsort()", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
+    ("lazy_zip/sort_by", "[1, 2].zip([3, 4]).sort_by(it)", "error: `argsort` needs an array of all numbers, all strings, or all DNA"),
     ("lazy_zip/min", "[1, 2].zip([3, 4]).min()", "error: `min` needs an array of numbers, but element 0 is a Tuple"),
     ("lazy_zip/max", "[1, 2].zip([3, 4]).max()", "error: `max` needs an array of numbers, but element 0 is a Tuple"),
     ("lazy_zip/min_by", "[1, 2].zip([3, 4]).min_by(it)", "(1, 3)"),
@@ -524,24 +530,25 @@ fn equality_is_blind_to_the_signed_zero_disagreement() {
 fn the_four_order_domains_disagree_today() {
     let env: &[(&str, &str)] = &[];
 
-    // (a) `sort` vs `argsort` — missing policy and type domain.
+    // (a) ANSWERED — a1 taken: `argsort` adopted `sort`'s policy, so the two now agree on
+    // both edges. `sort_by` followed for free, because `desugar_sort_by` rewrites it to
+    // `map(key).argsort().map(...)` — which means `xs.sort()` and `xs.sort_by(it)` did not
+    // agree with each other before this, and do now.
     assert_eq!(
         render("[1, missing, 3].sort()", env, "q_a1"),
         "error: cannot sort: the array has missing values"
     );
-    assert_eq!(render("[1, missing, 3].argsort()", env, "q_a2"), "missing");
+    assert_eq!(
+        render("[1, missing, 3].argsort()", env, "q_a2"),
+        "error: cannot sort: the array has missing values"
+    );
     assert_eq!(render("[dna(\"GG\"), dna(\"AA\")].sort()", env, "q_a3"), "[AA, GG]");
+    assert_eq!(render("[dna(\"GG\"), dna(\"AA\")].argsort()", env, "q_a4"), "[1, 0]");
     assert_eq!(
-        render("[dna(\"GG\"), dna(\"AA\")].argsort()", env, "q_a4"),
-        "error: `argsort` needs an array of all numbers or all strings"
+        render("[1, missing, 3].sort_by(it)", env, "q_a5"),
+        "error: cannot sort: the array has missing values"
     );
-    // ...and `sort_by` follows `argsort`, not `sort`, because `desugar_sort_by`
-    // rewrites it to `map(key).argsort().map(...)`.
-    assert_eq!(render("[1, missing, 3].sort_by(it)", env, "q_a5"), "missing");
-    assert_eq!(
-        render("[dna(\"GG\"), dna(\"AA\")].sort_by(it)", env, "q_a6"),
-        "error: `argsort` needs an array of all numbers or all strings"
-    );
+    assert_eq!(render("[dna(\"GG\"), dna(\"AA\")].sort_by(it)", env, "q_a6"), "[AA, GG]");
 
     // (b) `min`/`max` are narrower than `sort` — and narrower than `min_by`.
     assert_eq!(

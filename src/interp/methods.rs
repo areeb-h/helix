@@ -1864,12 +1864,13 @@ fn array_method(
             if !args.is_empty() {
                 return Err(HelixError::new("`argsort` takes no arguments", line, col));
             }
-            if items.iter().any(|v| matches!(v, Value::Missing)) {
-                return Ok(Value::Missing);
-            }
+            // ONE ORDER, ONE DOMAIN (ADR 0025, question (a), option a1). `argsort` used to
+            // have its own policy — propagate `missing`, refuse `Dna` — while `sort` errored
+            // on `missing` and accepted `Dna`. Two spellings of one concept disagreeing about
+            // both edges is the tax a library author pays by being surprised, and `sort_by`
+            // IS `argsort` (see `desugar_sort_by`), so `xs.sort()` and `xs.sort_by(it)` did
+            // not even agree with each other. They do now.
             let mut idx: Vec<i64> = (0..items.len() as i64).collect();
-            // Stable ascending sort of the *indices* by the values they point at -
-            // numeric (exact, like `sort`) or all-string; other element types error.
             if items.iter().all(|v| v.as_f64().is_some()) {
                 idx.sort_by(|&a, &b| numeric_cmp(&items[a as usize], &items[b as usize]));
             } else if items.iter().all(|v| matches!(v, Value::Str(_))) {
@@ -1877,9 +1878,24 @@ fn array_method(
                     (Value::Str(x), Value::Str(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 });
+            } else if items.iter().all(|v| matches!(v, Value::Dna(_))) {
+                // `ops::compare` has always ordered `Dna`; `argsort` refusing it was the
+                // outlier, and DNA ordering is a bio-first flagship's own use case.
+                idx.sort_by(|&a, &b| match (&items[a as usize], &items[b as usize]) {
+                    (Value::Dna(x), Value::Dna(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
+                });
+            } else if items.iter().any(|v| matches!(v, Value::Missing)) {
+                // `sort`'s wording and hint verbatim — one concept, one message.
+                return Err(HelixError::new(
+                    "cannot sort: the array has missing values",
+                    line,
+                    col,
+                )
+                .hint("drop them explicitly first: `xs.drop_missing().sort()`."));
             } else {
                 return Err(HelixError::new(
-                    "`argsort` needs an array of all numbers or all strings",
+                    "`argsort` needs an array of all numbers, all strings, or all DNA",
                     line,
                     col,
                 ));

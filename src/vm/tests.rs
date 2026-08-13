@@ -7000,9 +7000,10 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             ("range(10, 0, -2).argsort()", "[4, 3, 2, 1, 0]"),
             ("(0..0).argsort()", "[]"),
             ("range(10, 0, -2).argsort().sum()", "10"),
-            // deferrals: missing propagates, strings work, mixed numerics exact
-            ("[1, missing, 2].argsort()", "missing"),
+            // strings work, mixed numerics exact. (`missing` now ERRORS — see below.)
             ("[\"b\", \"a\"].argsort()", "[1, 0]"),
+            // DNA orders, since ADR 0025 (a1) unified `argsort` onto `sort`'s domain.
+            ("[dna(\"T\"), dna(\"A\")].argsort()", "[1, 0]"),
             ("[1, 2.5, 0].argsort()", "[2, 0, 1]"),
             ("[].argsort()", "[]"),
             // sort_by rides on argsort: stability with distinguishable elements
@@ -7016,12 +7017,13 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             assert_eq!(tw, vm, "engines disagree on `{src}`");
             assert_eq!(vm, Ok(want.to_string()), "`{src}`");
         }
-        // Errors unchanged: DNA refused (unlike `sort` — pre-existing), non-sortables,
-        // arity.
+        // Errors, now identical to `sort`'s (ADR 0025 (a1)): `missing` is refused with
+        // `sort`'s own wording and hint instead of propagating, DNA is accepted above, and
+        // the type error names the same three domains `sort` names.
         for (src, want) in [
-            ("[dna(\"T\"), dna(\"A\")].argsort()", "all numbers or all strings"),
-            ("[1, \"a\"].argsort()", "all numbers or all strings"),
-            ("[true, false].argsort()", "all numbers or all strings"),
+            ("[1, missing, 2].argsort()", "cannot sort: the array has missing values"),
+            ("[1, \"a\"].argsort()", "all numbers, all strings, or all DNA"),
+            ("[true, false].argsort()", "all numbers, all strings, or all DNA"),
             ("[1, 2].argsort(1)", "`argsort` takes no arguments"),
         ] {
             let (tw, vm) = (run_tw(src), run_vm(src));
