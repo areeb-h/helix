@@ -157,14 +157,30 @@ pub fn ast_to_colexpr(
                 .hint(format!("available columns: {}", columns.join(", "))))
             }
         }
+        // A BINDING IN SCOPE WINS OVER A COLUMN OF THE SAME NAME (ADR 0028). It used to be
+        // the other way round, which made a library's parameter names reserved words in data
+        // it has never seen:
+        //
+        //     fn above(frame, cutoff) = frame.where(@value > cutoff).count()
+        //
+        // returned 2 on columns {value, other} and 3 on {value, cutoff} — `cutoff` bound to
+        // the caller's COLUMN, so the predicate became column-vs-column. Same function, same
+        // argument, different answer, exit 0, and all three engines agree because all three
+        // are equally wrong.
+        //
+        // The hazard does not disappear, it MOVES — and that is the whole argument. A query
+        // author whose local shadows a column can see both names in one scope; a library
+        // author cannot see the caller's schema at all. Trading an invisible, undefendable
+        // capture for a local, visible one is the trade. `@name` still pins the column side
+        // explicitly, which is what an author who writes `@value > cutoff` already means.
         Ast::Ident { name, line, col } => {
-            if columns.iter().any(|c| c == name) {
-                Ok(ColExpr::Col(name.clone()))
-            } else if let Some(v) = resolve_var(name) {
+            if let Some(v) = resolve_var(name) {
                 // A variable used in a query must be a scalar — reject e.g. an
                 // Array up front, with the same message the engine would give.
                 validate_scalar(&v, *line, *col)?;
                 Ok(ColExpr::Lit(v))
+            } else if columns.iter().any(|c| c == name) {
+                Ok(ColExpr::Col(name.clone()))
             } else {
                 Err(HelixError::new(
                     format!("no column or variable named `{}`", name),

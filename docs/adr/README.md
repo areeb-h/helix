@@ -33,7 +33,8 @@ they are made deliberately and in the open.
 | [0024](0024-total-runtime-no-host-panics.md) | Total runtime: user input never aborts the host | Accepted — implemented + regression-tested; CI lint gate pending |
 | [0025](0025-ordering.md) | One order, one domain: `sort` / `argsort` / `min`-`max` / the `_by` family | **Accepted** — all four taken (a1/b1/c1/d1+d2); not yet implemented; pinned by `tests/ordering_matrix.rs` (247 cells × 3 engines) |
 | [0026](0026-library-performance-boundary.md) | Is library code meant to be fast? The indirect-call boundary | **Accepted** — libraries are first-class; monomorphize at the call site; scheduled after the append wall |
-| [0027](0027-builtin-shadowing.md) | When does `fn round(x)` start being `round`? | **Accepted** — a shadow is file-scoped and retroactive; deletes three guards; not yet implemented |
+| [0027](0027-builtin-shadowing.md) | When does `fn round(x)` start being `round`? | **Accepted** — a shadow is file-scoped and retroactive; **implemented** (`4b74056`) |
+| [0028](0028-query-name-resolution.md) | In a DataFrame query, does a bare name mean the column or the binding? | **Accepted** — a binding in scope wins, `@name` still pins the column; **implemented**; breaking, ships in v0.2.0 |
 
 ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
 (23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a

@@ -3608,6 +3608,45 @@ fn a_consumers_dependency_cannot_capture_a_librarys_private_import() {
     assert_eq!(out.trim(), "20", "a consumer's dependency must not rewire mathlib's internals");
 }
 
+/// A DataFrame query's bare name resolves to a BINDING IN SCOPE before a column (ADR 0028),
+/// so a library's parameter names are not reserved words in the caller's data.
+///
+/// This was the last known silent wrong answer: `above(df, 3)` returned 2 on columns
+/// {value, other} and 3 on {value, cutoff} — `cutoff` bound to the caller's column, turning
+/// the predicate into a column-vs-column comparison. Exit 0, `helix check` ok, three engines
+/// agreeing because all three were equally wrong.
+#[test]
+fn a_query_binds_a_name_to_a_local_before_a_column() {
+    let lib = "fn above(frame, cutoff) = frame.where(@value > cutoff).count()\n";
+    // The ONLY difference between these is the second column's NAME.
+    for (cols, tag) in [("other", "no_clash"), ("cutoff", "clashes_with_param")] {
+        let src = format!(
+            "{lib}df = dataframe({{value: [1, 5, 9], {cols}: [0, 0, 0]}})\nprint(above(df, 3))\n"
+        );
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (out, err, code) = run_source(&src, env, tag);
+            assert_eq!(code, Some(0), "{tag} env {env:?} stderr: {err}");
+            assert_eq!(out.trim(), "2", "{tag} env {env:?}: the caller's schema changed the answer");
+        }
+    }
+    // A bare name with NO binding in scope is still a column — the DSL's ergonomics are
+    // untouched for the case they exist to serve.
+    let plain = "df = dataframe({value: [1, 5, 9]})\nprint(df.where(value > 3).count())\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(plain, env, "bare_is_column");
+        assert_eq!(code, Some(0), "env {env:?} stderr: {err}");
+        assert_eq!(out.trim(), "2", "env {env:?}");
+    }
+    // `@name` still pins the column side explicitly, even when a local shadows it.
+    let pinned =
+        "cutoff = 99\ndf = dataframe({cutoff: [1, 5, 9]})\nprint(df.where(@cutoff > 3).count())\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(pinned, env, "sigil_pins_column");
+        assert_eq!(code, Some(0), "env {env:?} stderr: {err}");
+        assert_eq!(out.trim(), "2", "env {env:?}");
+    }
+}
+
 /// A deep `x => x => ...` lambda chain must hit the parser depth cap with a
 /// clean error — lambda bodies were the one expr() recursion that skipped the
 /// depth counter, so 2000 nestings overflowed the native stack (SIGABRT).
