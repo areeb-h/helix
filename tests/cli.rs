@@ -3303,6 +3303,89 @@ fn a_facade_re_export_keeps_defaults_and_named_arguments() {
     assert_eq!(out.trim(), "42");
 }
 
+/// A `reduce` body may call a user function with a MIXED (float-parameter) signature, the
+/// way a `map` body already could. The same integrand was 1.844s as a reduce against 0.031s
+/// as a map — and, tellingly, equal to its own `HELIX_NOJIT` time, because the kernel
+/// declined outright rather than compiling a slow one. Now 0.051s, a 49x JIT gain.
+///
+/// These pin the ANSWERS. Agreement is the property that matters: a kernel that computes
+/// something different from the VM is worse than no kernel.
+#[test]
+fn a_reduce_body_may_call_a_mixed_specialization() {
+    for (src, want, tag) in [
+        // The integrand shape the whole change is for.
+        (
+            "fn f(x) = x * x * 0.5 + x\n\
+print(range(0, 1000).reduce(0.0, (a, i) => a + f(to_float(i))))\n",
+            "166916250.0",
+            "integrand",
+        ),
+        // Two different mixed callees in one body.
+        (
+            "fn f(x) = x * 2.0\nfn g(x) = x * x\n\
+print(range(0, 100).reduce(0.0, (a, i) => a + f(to_float(i)) + g(to_float(i))))\n",
+            "338250.0",
+            "two_callees",
+        ),
+        // A mixed call nested inside another mixed call's argument — the inner one writes
+        // the same poison cell, so it must fold its flag before the outer re-zeroes it.
+        (
+            "fn f(x) = x * 2.0\nfn g(x) = x + 1.0\n\
+print(range(0, 100).reduce(0.0, (a, i) => a + f(g(to_float(i)))))\n",
+            "10100.0",
+            "nested",
+        ),
+        // A mixed callee whose result is Int-rooted (bitcast back as i64, not f64).
+        (
+            "fn f(x) = to_int(x * 2.0)\n\
+print(range(0, 100).reduce(0.0, (a, i) => a + to_float(f(to_float(i)))))\n",
+            "9900.0",
+            "int_result",
+        ),
+    ] {
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (out, err, code) = run_source(src, env, tag);
+            assert_eq!(code, Some(0), "{tag} env {env:?} stderr: {err}");
+            assert_eq!(out.trim(), want, "{tag} env {env:?}");
+        }
+    }
+}
+
+/// A mixed callee that RAISES inside a reduce is not swallowed. This is why the poison
+/// decision had to become a stored fact FIRST: the kernel's signature and the VM's call
+/// wrapper are chosen from the same `ReduceLoop::raises`, so a callee that bails has
+/// somewhere to put its flag and the VM re-runs the bytecode loop for the exact error.
+/// Built poison-free instead, these would print a number and exit 0.
+#[test]
+fn a_raising_mixed_callee_in_a_reduce_is_not_swallowed() {
+    // A NaN reaches an ordering comparison INSIDE the callee.
+    let nan_compare = "fn f(x) = if x < 1.0 then 0.0 else x\n\
+print(range(0, 10).reduce(0.0, (a, i) => a + f(sqrt(to_float(i) - 5.0))))\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (_, err, code) = run_source(nan_compare, env, "reduce_nan");
+        assert_eq!(code, Some(1), "env {env:?} stderr: {err}");
+        assert!(err.contains("cannot compare these values"), "env {env:?}: {err}");
+    }
+    // A rounder leaves i64 range INSIDE the callee.
+    let rounder = "fn f(x) = to_float(floor(x))\n\
+print(range(0, 4).reduce(0.0, (a, i) => a + f(to_float(i) * 1.0e300)))\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (_, err, code) = run_source(rounder, env, "reduce_rounder");
+        assert_eq!(code, Some(1), "env {env:?} stderr: {err}");
+        assert!(err.contains("cannot produce an integer"), "env {env:?}: {err}");
+    }
+    // The same callee never fed a raising value still computes — the bail is not a blanket
+    // decline, and a kernel that always poisoned would pass the two checks above while
+    // quietly giving up every speedup this change exists for.
+    let clean = "fn f(x) = if x < 1.0 then 0.0 else x\n\
+print(range(6, 16).reduce(0.0, (a, i) => a + f(sqrt(to_float(i) - 5.0))))\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(clean, env, "reduce_clean");
+        assert_eq!(code, Some(0), "env {env:?} stderr: {err}");
+        assert_eq!(out.trim(), "22.4682781862041", "env {env:?}");
+    }
+}
+
 /// A deep `x => x => ...` lambda chain must hit the parser depth cap with a
 /// clean error — lambda bodies were the one expr() recursion that skipped the
 /// depth counter, so 2000 nestings overflowed the native stack (SIGABRT).

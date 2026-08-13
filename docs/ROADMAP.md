@@ -874,6 +874,39 @@ path for scalar and control-flow code (single-threaded, AST re-traversal,
       not shadowed retroactively, both because the tree-walker binds a top-level `fn`
       when execution reaches it. These stay on the VM rather than the JIT by design
       (`eligible_set` excludes recursion cycles; a native frame has no depth guard).
+
+- [x] **The reduce family — mixed-call codegen.** A `reduce` body may now call a user
+      function with a MIXED (float-parameter) signature, which a `map` body already could.
+      The same integrand, `fn f(x) = x * x * 0.5 + x` over n=20M (`target/gate`, load 0.71,
+      min of 3, every run's output asserted):
+
+      | shape | before | after | JIT gain after |
+      |---|---|---|---|
+      | `map(i => f(…)).sum()` | 0.031 s | 0.032 s | 83.6x |
+      | `reduce(0.0, (a,i) => a + f(…))` | **1.844 s** | **0.051 s** | 1.36x → **49.0x** |
+      | same reduce, callee INLINED | 0.022 s | 0.017 s | 172.3x |
+
+      36x. The old JIT gain of 1.36x is the tell: the kernel was not slow, it DECLINED —
+      the capture-free scalar f64 analysis had no arm for a mixed callee, so the whole
+      reduce ran on the VM. reduce-vs-map went from 59.2x to 1.6x, and against the inlined
+      control from 84.1x to 2.9x.
+
+      Landed in two commits, in that order, because the second is only safe after the
+      first. A scalar f64 reduce kernel has two ABIs — with and without a `*mut i8` poison
+      out-param — and the builder and the VM each chose independently by recomputing
+      `reduce_body_divides`. That predicate could not have been widened in place: its
+      `Call` arm recursed into a call's ARGUMENTS but never into the callee's BODY, so
+      `fn f(x) = 1.0 / x` used as `acc + f(i)` reported no division at all. And the VM
+      cannot follow a call into a callee even in principle — it holds the reduce bodies,
+      not the user functions. So the decision became `ReduceLoop::raises`, set once at
+      compile time by the shared `body_raises` and READ by both, exactly as
+      `ArrayKernel::raises` already worked. Mismatching those two is not a wrong number:
+      it is a 5-argument kernel called through a 4-argument signature.
+
+      Both raising paths are pinned: a NaN reaching an ordering comparison inside the
+      callee, and a rounder leaving i64 range inside the callee, each still raise the exact
+      interpreter error on all three engines — and a clean call still computes, so the bail
+      is not a blanket decline.
 - [x] **Stage 3d — map-side `arr[i]`.** A `reduce` body could read a captured array;
       a `map` body could not, so ONE missing arm sent the whole map to the per-element
       VM loop. It was the largest measured JIT gap.
