@@ -694,7 +694,7 @@ impl super::Compiler {
                             synth_exprs = c.synth;
                             (Some(vec![c.body]), c.caps, c.bounds, true)
                         }
-                        None => match crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &fns, &user_fns) {
+                        None => match crate::jit::reduce_jit_f64_range_body(init, body, pa, pb, &fns, &user_fns, &self.mixed_sigs) {
                             Some(b) => (Some(vec![b]), Vec::new(), Vec::new(), true),
                             None => (None, Vec::new(), Vec::new(), false),
                         },
@@ -888,7 +888,7 @@ impl super::Compiler {
         let (bodies, captures, bounds, synth, float) = if matches!(init, Expr::Float(_)) {
             match crate::jit::reduce_jit_f64_range_captures(init, &new_body, pa, MR_COUNTER, &fns, &user_fns) {
                 Some(c) => (vec![c.body], c.caps, c.bounds, c.synth, true),
-                None => match crate::jit::reduce_jit_f64_range_body(init, &new_body, pa, MR_COUNTER, &fns, &user_fns) {
+                None => match crate::jit::reduce_jit_f64_range_body(init, &new_body, pa, MR_COUNTER, &fns, &user_fns, &self.mixed_sigs) {
                     Some(bd) => (vec![bd], Vec::new(), Vec::new(), Vec::new(), true),
                     None => return Ok(false),
                 },
