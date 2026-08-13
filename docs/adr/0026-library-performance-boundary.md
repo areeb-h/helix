@@ -1,7 +1,8 @@
 # ADR 0026 — Is library code meant to be fast? The indirect-call boundary
 
-- **Status:** **Proposed — one question for the owner.** Nothing here changes behaviour;
-  the measurements are reproducible with `target/release` and the programs quoted below.
+- **Status:** **Accepted 2026-08-13 — Helix libraries are first-class; option (b),
+  monomorphize at the call site.** Scheduled, not implemented. The measurements are
+  reproducible with `target/release` and the programs quoted below.
 - **Date:** 2026-08-13
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0007 — Tensor backend](0007-tensor-backend.md) and
@@ -88,12 +89,38 @@ that the value is the specialization the kernel was compiled against. Most gener
 expensive, and it needs a uniform ABI across every specialization — the mixed ABI's
 trailing poison pointer already shows how fiddly that surface is.
 
-**Recommendation: (b), if the answer to the question is "first-class".** Helix's JIT is
-already a monomorphizing compiler — `mixed_fn_sigs`, `int_eligible_fns` and the map/reduce
-kernels all specialize by kind — so this is an extension of the existing design rather than
-a new mechanism, and its failure mode (fall back to the VM) is the one the codebase already
-handles everywhere. **(c) should not be attempted first**: it is the general answer to a
-question that (b) answers for the call sites that actually occur.
+## Decision: libraries are first-class. Option (b), monomorphize at the call site
+
+Accepted 2026-08-13, against the stated goal of *a language people build packages and
+libraries on*. The goal answers the question directly: **you cannot ask people to build
+libraries on a language where the standard way to factor a numerical routine is a 72×
+trap.** "Serious types are Rust, Helix is the layer above" is a coherent architecture for a
+*scripting* language over Polars and faer — but it is not one anybody writes a package
+ecosystem for, because every performance-critical library would have to be written in Rust,
+and then Helix is a configuration language for other people's crates.
+
+So (a) is rejected, and rejected explicitly rather than by default — which matters, because
+(a) is what the project has been doing implicitly by never deciding.
+
+**(b) over (c).** Helix's JIT is already a monomorphizing compiler — `mixed_fn_sigs`,
+`int_eligible_fns` and the map/reduce kernels all specialize by kind — so call-site
+specialization extends the existing design instead of introducing a second one, and its
+failure mode is the VM fallback the codebase already handles everywhere. (c), a guarded
+indirect call, is the general answer to a question (b) answers for the call sites that
+actually occur; the mixed ABI's trailing poison pointer is a fair warning about how fiddly
+a uniform cross-specialization ABI gets. (c) stays on the table only if a real program is
+found whose callee is genuinely dynamic *and* hot.
+
+**This does not jump the queue.** It is scheduled AFTER last-use liveness (the append
+wall), which blocks a strictly larger class of library: a callback-shaped API is slow,
+whereas a library that grows a collection — tokenizer, parser, index builder, symbol table
+— is not writable at all. Fixing "slow" before "impossible" would be the wrong order.
+
+**Until it lands, the boundary is a documented diagnostic, not silence.** The current state
+— where the only way to discover which of your APIs is 72× slower is to measure it — is the
+part that is indefensible regardless of which option was chosen, so it is fixed first and
+independently: calling a function that arrived through a parameter, from inside a
+comprehension, should say so the way the JIT already explains its other declines.
 
 ## What is NOT being asked
 

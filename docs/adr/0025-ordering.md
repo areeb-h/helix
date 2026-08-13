@@ -1,6 +1,6 @@
 # ADR 0025 — One order, one domain: unifying `sort`, `argsort`, `min`/`max` and the `_by` family
 
-- **Status:** **Proposed — four open questions for the owner.** Nothing is implemented.
+- **Status:** **Accepted 2026-08-13 — all four taken (a1, b1, c1, d1+d2); not yet implemented.**
   The evidence artifact exists and is green: `tests/ordering_matrix.rs` pins 247 cells
   (19 shapes × 13 spellings) on all three engines and passes against `e267a25`. It is a
   regression net for whichever direction is chosen, not an endorsement of today.
@@ -436,7 +436,31 @@ they drifted in the first place.
 
 ## Decision
 
-**Deferred to the owner.** The recommendations, restated for a yes/no:
+**ACCEPTED 2026-08-13 — all four recommendations taken (a1, b1, c1, d1 + d2).**
+
+Decided against a stated goal: *a language people will use and build packages and
+libraries on*. That criterion settles all four the same way, and it is worth writing down
+why, because the four questions look independent and are not.
+
+A library author does not experience `sort`, `argsort`, `min_by` and `argmax` as four
+features. They experience them as **one concept with four spellings**, and today those four
+spellings disagree about `missing`, about which types they order, and about ties. Every
+such disagreement is something the author must learn by being surprised, then encode as a
+workaround, then carry forever — and then every *consumer* of their library inherits it.
+That is precisely the tax that stops an ecosystem forming. Four spellings of one idea must
+have one policy, and if that costs a v0.2.0 breaking change, the cheapest moment to spend
+it is now, at 0.1.1, with one published release and a 247-cell matrix to prove what moved.
+
+The counts below are kept exactly as written, including the note that they are the weakest
+argument here — (b) changes zero tests and is the riskiest of the four. That remains true
+and is the reason (b) ships as a named v0.2.0 CHANGELOG entry rather than quietly.
+
+**Implementation order** is the one the recommendations already imply: (a) and (d1) first
+(no behaviour change, or documentation only), then (c) in its own commit, then (b) as the
+release-noted widening. `tests/ordering_matrix.rs` is the specification of each step — its
+diff is the review.
+
+The original recommendations, restated for the record:
 
 | # | Question | Recommendation | Assertions changed | Goldens |
 |---|---|---|---|---|

@@ -31,9 +31,9 @@ they are made deliberately and in the open.
 | [0022](0022-http-version-roadmap.md) | HTTP version roadmap (keep-alive now, HTTP/2 & HTTP/3 via established stacks) | Accepted — Stage 1 (keep-alive) implemented; HTTP/2 & HTTP/3 proposed |
 | [0023](0023-hbc-emitter-artifact-format.md) | `.hbc` emitter & portable core-bytecode artifact format (`helix emit-hbc`) | Accepted — implemented; runs in ctype ring 0, cross-producer verified |
 | [0024](0024-total-runtime-no-host-panics.md) | Total runtime: user input never aborts the host | Accepted — implemented + regression-tested; CI lint gate pending |
-| [0025](0025-ordering.md) | One order, one domain: `sort` / `argsort` / `min`-`max` / the `_by` family | Proposed — four open questions; evidence pinned by `tests/ordering_matrix.rs` (247 cells × 3 engines) |
-| [0026](0026-library-performance-boundary.md) | Is library code meant to be fast? The indirect-call boundary | Proposed — one question; measured 2026-08-13 (naming a callee costs 2×, passing it as a value costs 72×) |
-| [0027](0027-builtin-shadowing.md) | When does `fn round(x)` start being `round`? | Proposed — one question; a live three-engine divergence, proved pre-existing at `c16a9e7` |
+| [0025](0025-ordering.md) | One order, one domain: `sort` / `argsort` / `min`-`max` / the `_by` family | **Accepted** — all four taken (a1/b1/c1/d1+d2); not yet implemented; pinned by `tests/ordering_matrix.rs` (247 cells × 3 engines) |
+| [0026](0026-library-performance-boundary.md) | Is library code meant to be fast? The indirect-call boundary | **Accepted** — libraries are first-class; monomorphize at the call site; scheduled after the append wall |
+| [0027](0027-builtin-shadowing.md) | When does `fn round(x)` start being `round`? | **Accepted** — a shadow is file-scoped and retroactive; deletes three guards; not yet implemented |
 
 ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
 (23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a

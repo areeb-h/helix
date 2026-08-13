@@ -1,7 +1,7 @@
 # ADR 0027 — When does `fn round(x)` start being `round`?
 
-- **Status:** **Proposed — one question for the owner.** A live three-engine divergence,
-  reproduced and pinned below. Nothing here changes behaviour yet.
+- **Status:** **Accepted 2026-08-13 — option (a): a shadow is file-scoped and retroactive.**
+  Not yet implemented. A live three-engine divergence, reproduced and pinned below.
 - **Date:** 2026-08-13
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0017 — Methods and functions](0017-methods-and-functions.md) (why the
@@ -86,15 +86,32 @@ for a shadowed name: check whether the global is bound yet, call the builtin if 
 current program keeps working. Costs a check per call to a shadowed builtin, keeps all three
 guards, and keeps the order-blind analyses permanently unable to reason about these names.
 
-**Recommendation: (a).** It is the only option that converts the JIT's whole-AST analyses
-from "guarded" to "correct", which is worth more than the one corpus program it breaks — and
-that program is a *test fixture* written to pin this exact behaviour, not a user program. It
-also matches what a reader expects: `j14` is surprising precisely because a name means two
-different things in one file.
+## Decision: (a) — a shadow is file-scoped and retroactive
 
-**(b) is the better answer if the owner's view is that shadowing a builtin was never
-intended to be supported.** That is a legitimate reading of ADR-0017's flat namespace, and
-it should be said out loud rather than left to whichever analysis touches it next.
+Accepted 2026-08-13, against the stated goal of *a language people build packages and
+libraries on*. Two reasons, and the second is the one that decides it.
+
+**It is the only option that makes the compiler correct rather than guarded.** Every
+whole-AST, order-blind analysis in the JIT currently has to carve out shadowing names, and
+each carve-out both narrows an optimization and leaves somewhere a future change can
+forget. Under (a) all three guards are deleted, not added to. The one program that breaks,
+`tests/corpus/j14_rounders_and_int_mixed.helix`, is a fixture written to pin this exact
+behaviour — not a user program.
+
+**(b) — rejecting the shadow outright — is disqualified by the ecosystem goal, and this
+argument is new.** Under (b), every builtin name becomes reserved. Helix's builtin
+namespace is flat (ADR-0017) and still growing, so *adding a builtin in a future release
+would break any published library that happens to use that name as a function*. That turns
+each new builtin into an ecosystem-wide breaking change and gives library authors a hazard
+they cannot defend against — they would have to avoid names Helix has not chosen yet. Under
+(a) the opposite holds: a user's `fn foo` keeps winning inside its own file no matter what
+Helix adds later. **(a) is the option that lets the standard library grow without breaking
+the ecosystem**, which is not a consideration that existed while Helix had no ecosystem to
+protect.
+
+(c) is rejected for the reason it was listed: it preserves every current program at the
+cost of making these names permanently unanalyzable, which is paying forever to avoid
+rewriting one test fixture.
 
 ## Consequences
 
