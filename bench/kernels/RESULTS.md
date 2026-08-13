@@ -1,19 +1,16 @@
-# Kernel benchmark results — 2026-08-04 (HEAD `736fe10`)
+# Kernel benchmark results — 2026-08-13 (HEAD `3f91177`)
 
 Regenerate with `./run.sh` from this directory. Every number below was produced
-by that script on a quiet machine, after the anchor gate confirmed that all
+by that script on a quiet machine (load < 0.7), after the anchor gate confirmed that all
 languages of a kernel print byte-identical output.
 
-> **Re-measured 2026-08-04 against a freshly built `target/release`; the 2026-08-03 run
-> below is what first exposed the problem.**
-> The previous table was taken on 2026-07-18 against a `target/release` binary
-> that then went four days stale while a dozen JIT stages landed. **k7 in
-> particular was published at 7.0× slower than C and losing to CPython; it is
-> 3.0× slower than C and beats CPython by 2.4×** — most of that from the native
-> `scan` kernel (Stage 3t), which k7 uses and which postdated the old number. A
-> published ratio measured against a binary you have since improved is not a
-> conservative estimate, it is a wrong one. **Rebuild `target/release` before
-> quoting this file.**
+> **Re-measured 2026-08-13 against a `target/release` rebuilt immediately before the run**
+> (8m27s, fat LTO), because the standing rule in this file has bitten this project once
+> already: the 2026-07-18 table was taken against a binary that then went four days stale
+> while a dozen JIT stages landed, and published **k7 at 7.0× slower than C and losing to
+> CPython** when it was 3.0× slower and beat CPython by 2.4×. A published ratio measured
+> against a binary you have since improved is not a conservative estimate, it is a wrong
+> one. **Rebuild `target/release` before quoting this file.**
 
 **Machine**: AMD Ryzen 7 7700X (6 cores visible to WSL2), Ubuntu 24.04 on WSL2.
 **Toolchains**: gcc 13.3.0 (`-O3 -march=native`, plus `-ffp-contract=off` /
@@ -31,47 +28,92 @@ never do — a wall-clock win bought with 2.8× the cores is not a codegen win.
 
 | # | Kernel | Helix | C | Rust | Go | CPython | NumPy | Helix vs C |
 |---|--------|-------|---|------|-----|---------|-------|------------|
-| k1 | dot 50M i64 | **0.08s** (379%) | 0.11s | 0.13s | 0.48s | 9.70s | 0.29s | **1.4x faster on wall clock, for 2.8x the CPU** (0.30 vs 0.11 core-s) — see k1 note |
-| k2 | mandelbrot 1200² | 0.08s (97%) | 0.08s | **0.07s** | **0.07s** | 6.50s | — | **tie with C**, single-threaded (was 5.3x slower at 0.42s) |
-| k3 | basel 1e8 | 0.09s (96%) | **0.06s** | 0.08s | 0.09s | 9.37s | 0.46s | **1.5x slower** (ties Go) |
-| k4 | allpairs 15k | 0.01s (322%) | **0.00s** | 0.00s | 0.05s | 4.56s | 0.12s | **at timer grain** — not a measurement; ~7x per the audit |
-| k5 | montecarlo 1e8 | 0.68s (99%) | 0.28s | **0.24s** | 0.29s | 48.56s | — | **2.4x slower** |
-| k6 | sieve π(10⁷) | 0.02s (89%) | **0.01s** | 0.01s | 0.02s | 0.65s | 0.07s | ~tie (**delegation** — beats NumPy 3.5x) |
-| k7 | wordcount 5M | 0.68s (99%) | **0.23s** | 0.28s | 0.24s | 1.60s | 1.95s | **3.0x slower** — but **2.4x faster than CPython**, 2.9x than NumPy |
-| k8 | matmul 1024³ (build + GEMM) | **0.05s** (155%) | — | — | — | — | 0.08s (457%) | **1.6x FASTER than NumPy**, on a third of the cores |
-| k9 | matmul 512³ (naive) | 0.54s (98%) | 0.36s | 0.34s | **0.25s**† | 17.91s | — | **1.5x slower** |
-| k9m | matmul 512³ (map-temp) | 0.52s (99%) | 0.36s | 0.34s | **0.25s**† | 17.91s | — | **1.4x slower** (was **27.12s / 75x** — see below) |
+| k1 | dot 50M i64 | **0.25s** (417%) | 0.30s | 0.34s | 0.44s | 8.77s | 0.54s | **1.2x faster on wall clock, for 4x the CPU** (1.04 vs 0.32 core-s) — see the k1 note, and the bandwidth caveat below |
+| k2 | mandelbrot 1200² | 0.08s (101%) | 0.08s | **0.07s** | **0.07s** | 7.57s | — | **tie with C**, single-threaded |
+| k3 | basel 1e8 | 0.09s (105%) | **0.05s** | 0.08s | 0.09s | 9.20s | 0.69s | **1.8x slower** (ties Go) |
+| k4 | allpairs 15k | 0.01s (305%) | **0.00s** | 0.00s | 0.05s | 4.20s | 0.11s | **at timer grain** — not a measurement |
+| k5 | montecarlo 1e8 | 0.63s (105%) | 0.26s | **0.22s** | 0.27s | 40.81s | — | **2.4x slower** |
+| k6 | sieve π(10⁷) | 0.02s (100%) | **0.01s** | 0.01s | 0.02s | 0.61s | 0.06s | ~tie (**delegation** — beats NumPy 3x) |
+| k7 | wordcount 5M | 0.67s (105%) | **0.20s** | 0.25s | 0.22s | 1.43s | 1.84s | **3.4x slower** — but **2.1x faster than CPython**, 2.7x than NumPy |
+| k8 | matmul 1024³ (build + GEMM) | **0.03s** (177%) | — | — | — | — | 0.07s (477%) | **2.3x FASTER than NumPy**, on a third of the cores |
+| k9 | matmul 512³ (naive) | 0.49s (105%) | 0.33s | 0.32s | **0.30s** | 16.53s | — | **1.5x slower** |
+| k9m | matmul 512³ (map-temp) | 0.51s (105%) | 0.33s | 0.32s | **0.30s** | 16.53s | — | **1.5x slower** (was **27.12s / 75x** — see below) |
 
-† Go's k9 came in at **140% CPU**, so that column is not the single-threaded reference the
-others are — the Go runtime found parallelism the C and Rust versions do not use. Its 0.25s
-is not comparable to their 0.34–0.36s, and Helix-vs-C is the honest comparison in that row.
+Go's k9 read **105% CPU** this run, so its 0.30s is a genuine single-threaded reference and
+comparable to C's and Rust's. (The 2026-08-04 table footnoted Go's k9 at 140% CPU — the Go
+runtime finding parallelism the C and Rust versions do not use. That did not reproduce, which
+is itself worth recording: it was a property of that run, not of the Go program.)
+
+**k1's ABSOLUTE numbers are not comparable to the 2026-08-04 table, and the reason is not
+Helix.** k1 went 0.08s → 0.25s — but so did every other bandwidth-bound language in that
+row: C 0.11 → 0.30, Rust 0.13 → 0.34, NumPy 0.29 → 0.54, while Go (0.48 → 0.44) and CPython
+(9.70 → 8.77), which are compute-bound at this size, got slightly *faster*. A second k1-only
+run reproduced it (Helix 0.23s, C 0.40s), and C's own two readings differed by 33%. k1
+streams 800 MB through a dot product; on a WSL2 guest that is a memory-bandwidth measurement
+of the host as much as of the code. The **ratios** held; the absolutes moved together. Nothing
+in this arc touched the i64 dot-product path.
 
 **Read differences under ~20% as noise.** These are best-of-3 wall clock, and this
 machine swings ~15% run to run: two honest wall-clock runs of the *same* binary on
 k7 once disagreed by **1.7×**. Everything moves a little between runs, references
-included: across the July, 3 August and 4 August runs C's k9 read 0.39s, 0.33s and
-0.36s with no code change, and Go's k9 read 0.32s, 0.34s and 0.25s. Only gaps of 2× and up are safe to reason about, which is why the
-paragraphs below quote child CPU time and interleaved runs when the effect is small.
+included: across the July, 3 August, 4 August and 13 August runs C's k9 read 0.39s, 0.33s,
+0.36s and 0.33s with no code change, and Go's k9 read 0.32s, 0.34s, 0.25s and 0.30s. Only
+gaps of 2× and up are safe to reason about, which is why the paragraphs below quote child
+CPU time and interleaved runs when the effect is small. This run added a fifth reading of
+the same lesson from the other side: k1's absolutes moved ~3× for four languages at once.
 
-**Helix loses to C on seven of nine comparable kernels**, ties on k2, and leads k1
-only by spending 2.8× the CPU. k9 is within 1.5× of C and k3 within 1.5×, tying Go. The one
-place it stands out is k6, where it wins by *not doing the work* — calling a native
-`primes()` builtin, the same way NumPy wins by calling BLAS. The honest counterpart
-is `k6_sieve_trial.helix` (pure-Helix trial division): **88.46s**, i.e. ~4400×
-slower than the builtin and ~8000× slower than C's sieve. That gap is the kernel's
+**Helix loses to C on five of nine comparable kernels** (k3, k5, k7, k9, k9m), ties on k2
+and k6, and leads k1 only by spending 4× the CPU. k9 is within 1.5× of C and k3 within
+1.8×, tying Go. The one place it stands out is k6, where it wins by *not doing the work* —
+calling a native `primes()` builtin, the same way NumPy wins by calling BLAS. The honest
+counterpart is `k6_sieve_trial.helix` (pure-Helix trial division): **87.39s**, i.e. ~4400×
+slower than the builtin and ~8700× slower than C's sieve. That gap is the kernel's
 whole point.
 
 **Against NumPy the picture is different, and k8 has now flipped.** k8 is
-0.05s vs 0.08s (**1.6× faster**), k6 wins 3.5×, and k7 — the kernel Helix is worst
-at against C — still beats NumPy by 2.9× and CPython by 2.4×. Those are the three
+0.03s vs 0.07s (**2.3× faster**), k6 wins 3×, and k7 — the kernel Helix is worst
+at against C — still beats NumPy by 2.7× and CPython by 2.1×. Those are the three
 kernels with a NumPy reference where Helix leads. Each deserves the same caveat as
 NumPy's own: k6 delegates to a builtin, and k8's win is a *whole-program* one —
 Helix beats NumPy on build + convert + GEMM together while still losing the
 isolated GEMM to OpenBLAS (~1.8×). It is a real end-to-end result, not a claim
 that faer beats OpenBLAS.
 
-**What changed since 2026-07-17, and what did not.** One number in this table
-moved materially: **k9 map-temp, 27.12s → 0.50s (54×)**, which also erases the
+## What changed since 2026-08-04: nothing in this table, and that is the finding
+
+Three fixes landed between the two runs, worth 43×, 10× and 36× on the shapes they target.
+**Not one of them moved a kernel here**, and every row above sits on its 2026-08-04 value
+within this machine's noise (k1 excepted, for the bandwidth reason given above). The suite
+has now failed to cover a capability arc twice running, so the reason is recorded rather
+than the coincidence:
+
+| fix | the shape it needs | is it in this suite? |
+|---|---|---|
+| unannotated parameter kinds (43×) | a user fn with **unannotated** params, called from a kernel body with `Float` arguments | no — k5's `mc` annotates its params, and no other kernel calls a user fn from a kernel body |
+| `purge_decommits = 0` (10×) | a workload that **frees and reuses** buffers over 512 KiB | no — no kernel here appends or grows a collection |
+| reduce mixed-call codegen (36×) | a **`reduce` body calling a user function** | no — k3's reduce inlines its term; k5 is tail recursion, not a reduce |
+
+Measured off-suite on this same release binary, n=20M, min of 4, every run's output
+asserted. **Helix-vs-Helix**: with no C/Rust/Go reference these say nothing about how Helix
+compares to anything, only that a shape improved — the same convention (and the same
+exclusion from the scorecard) as the k10/SAXPY numbers below.
+
+| shape | JIT | `HELIX_NOJIT=1` | gain |
+|---|---|---|---|
+| `reduce(0.0, (a,i) => a + f(to_float(i)))` | **0.049s** | 2.355s | **48.0x** |
+| the same integrand as a `map` | 0.028s | 2.699s | 95.3x |
+| `map(i => sq(to_float(i)))`, `fn sq(x) = x * x` | **0.027s** | 2.081s | 77.5x |
+| the same with `fn sq(x: Float) -> Float` | 0.025s | 2.111s | 84.5x |
+
+The last pair is the point of the 43× fix: an **unannotated** parameter is now within 8% of
+the annotated spelling, where before it did not compile at all (0.967s against 0.019s). The
+first pair is the 36× one — and the number to read is the *gain*, not the time: it was
+**1.36×** before, i.e. the reduce kernel was not slow, it was ABSENT. Separately,
+`reduce([], (acc,i) => acc.concat([i]))` at 80k appends is **0.454s**, from 4.710s before
+`purge_decommits = 0`.
+
+**What changed in the 2026-07-17 → 2026-08-04 arc, and what did not.** One number in that
+table moved materially: **k9 map-temp, 27.12s → 0.50s (54×)**, which also erases the
 75× penalty for writing the natural `map().reduce()` spelling instead of the
 hand-transcribed one. Everything else is within run-to-run noise of the previous
 table. That is the honest shape of the result: the arc that produced it (map-side
@@ -363,6 +405,12 @@ workload-dependent in a way no single default can serve:
 |---|---|---|---|---|
 | k4 all-pairs (compute-bound) | 0.59s @ 99% | 0.11s @ 550% | **5.4×** | 0.58 → 0.61 core-s (**+4%**) |
 | k1 dot (allocation-bound) | 0.14s @ 96% | 0.08s @ 300% | 1.75× | 0.13 → 0.24 core-s (**+79%**) |
+
+(Those k1 absolutes are from the 2026-08-04 machine state. The 2026-08-13 run found k1's
+wall time ~3× higher for Helix, C, Rust and NumPy alike — see the bandwidth note under the
+scorecard — so re-measure this table before quoting its k1 row. The *conclusion*, that k1's
+extra cores buy little because the kernel is bound by faulting in 800 MB, is if anything
+reinforced by a run where bandwidth got scarcer.)
 
 On compute-bound work the cores are nearly free. On k1 they are not: much of that kernel is the
 OS faulting in and zeroing 800 MB of fresh pages, so parallel efficiency falls to ~45% and the
