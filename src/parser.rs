@@ -394,11 +394,63 @@ fn desugar_order_by(
         };
         let inner = if name == "min_by" { "argmin" } else { "argmax" };
         let idx_expr = desugar_order_by(keys, inner, Vec::new(), line, col)?;
+        // ADR 0025 (c1): the REDUCTION policy, spelled in ordinary AST. The receiver's own
+        // guards carry THIS spelling's name (an empty `min_by` must not say "argmin"), and
+        // the missing/NaN policy rides on the inner argmin, whose `missing` answer is
+        // caught here — `$obe[missing]` would raise "`index` expected an integer", which is
+        // exactly the leaked-internals shape c1 removes. `is_missing`/`count` are O(1), so
+        // the composed fast path (`a5737ce`) is undisturbed.
+        let method0 = |recv: Expr, m: &str| Expr::Method {
+            recv: Box::new(recv),
+            name: m.to_string(),
+            args: vec![],
+            named: vec![],
+            line,
+            col,
+        };
+        let indexed = Expr::Let {
+            bindings: vec![("$obi".to_string(), idx_expr)],
+            body: Box::new(Expr::If {
+                cond: Box::new(method0(ident("$obi"), "is_missing")),
+                then_branch: Box::new(Expr::Missing),
+                else_branch: Box::new(Expr::Index {
+                    recv: Box::new(ident("$obe")),
+                    index: Box::new(ident("$obi")),
+                    line,
+                    col,
+                }),
+                line,
+                col,
+            }),
+        };
         return Ok(Expr::Let {
             bindings: vec![("$obe".to_string(), recv)],
-            body: Box::new(Expr::Index {
-                recv: Box::new(ident("$obe")),
-                index: Box::new(idx_expr),
+            body: Box::new(Expr::If {
+                cond: Box::new(method0(ident("$obe"), "is_missing")),
+                then_branch: Box::new(Expr::Missing),
+                else_branch: Box::new(Expr::If {
+                    cond: Box::new(Expr::Binary {
+                        op: BinOp::Eq,
+                        left: Box::new(method0(ident("$obe"), "count")),
+                        right: Box::new(Expr::Int(0)),
+                        line,
+                        col,
+                    }),
+                    // `raise` is the ordinary builtin (task #8); a user `fn raise` would
+                    // capture it under ADR 0027's file scoping, the same way any desugar
+                    // that names a builtin can be re-pointed. Accepted: the capture is the
+                    // user's own file-scoped choice, and the alternative is a private AST
+                    // node for one message.
+                    then_branch: Box::new(Expr::Call {
+                        name: "raise".to_string(),
+                        args: vec![Expr::Str(format!("`{name}` of an empty collection"))],
+                        line,
+                        col,
+                    }),
+                    else_branch: Box::new(indexed),
+                    line,
+                    col,
+                }),
                 line,
                 col,
             }),
@@ -465,11 +517,14 @@ fn desugar_order_by(
     // "index 0 is out of bounds for length 0"; both are the reduce seed talking, and only
     // the real reduce says them with the right column.
     //
-    // `missing` is safe as the decline sentinel for a precise reason: the METHOD spelling of
-    // argmin/argmax returns an Int or raises — never `missing` (verified across the whole
-    // 63-shape matrix on all three engines). A future change that makes it propagate
-    // `missing` (the free-function `argmax(xs)` already does, which is its own open
-    // divergence) must confront this collision first.
+    // `missing` is safe as the decline sentinel for a precise reason: the KERNEL never
+    // produces `missing` as an ANSWER — a packed array cannot contain `missing`, and the
+    // kernel declines on NaN. The method as a whole DOES answer `missing` now (ADR 0025
+    // (c1): missing/NaN propagate), but every such answer is produced by the policy guards
+    // on the RIGHT of the `??` — the slow path, where it is final and nothing downstream
+    // needs to tell it from a decline. That guard placement is what resolved the collision
+    // this comment used to warn about, without a second channel; keep the guards there,
+    // or the warning becomes live again.
     //
     // `min_by`/`max_by` inherit the fast path for free: they compose through the recursive
     // `desugar_order_by(keys, inner, …)` call above, and the key `map` produces a packed
@@ -477,6 +532,101 @@ fn desugar_order_by(
     let slow = Expr::Let {
         bindings: vec![("$ob".to_string(), src)],
         body: Box::new(index(reduced, ret_idx)),
+    };
+    // ADR 0025 (c1): the method adopts the REDUCTION policy — `missing`/NaN propagate as
+    // `missing`, the empty array gets the free function's own named error — spelled as
+    // ordinary AST guards ON THE SLOW PATH ONLY. Placement is both the soundness and the
+    // performance argument:
+    //
+    //   * SOUND without a new decline channel: `$arg_extreme` still answers `missing` to
+    //     mean "declined", and nothing downstream has to distinguish that from a real
+    //     `missing` answer — the kernel only ever answers an Int (a packed array cannot
+    //     contain `missing`, and it declines on NaN), so a real `missing` is only ever
+    //     produced HERE, on the right of the `??`, where it is final. The collision the
+    //     comment above warns about never materializes.
+    //   * FAST: packed Ints/Floats/Range never reach the guards, so the kernel path is
+    //     byte-for-byte what it was. The guards' extra scans run only on shapes that were
+    //     already walking the interpreted tuple-reduce.
+    //
+    // Guard order is load-bearing: `is_missing` first (`missing.count()` would propagate
+    // and make the `if` condition `missing` — the exact leak this removes), then empty,
+    // then missing-elements, then NaN. The missing check is `count() !=
+    // drop_missing().count()`, NOT `any(it.is_missing())` — `any` propagates a missing
+    // ELEMENT before the predicate runs, so that spelling answers `missing` for the wrong
+    // reason on some shapes and was measured doing so. The NaN check is `any(it != it)`,
+    // total once missing elements are excluded (IEEE: only NaN is unequal to itself).
+    let method0 = |recv: Expr, m: &str| Expr::Method {
+        recv: Box::new(recv),
+        name: m.to_string(),
+        args: vec![],
+        named: vec![],
+        line,
+        col,
+    };
+    let count_of = |e: Expr| -> Expr {
+        Expr::Method {
+            recv: Box::new(e),
+            name: "count".to_string(),
+            args: vec![],
+            named: vec![],
+            line,
+            col,
+        }
+    };
+    let guarded_slow = Expr::If {
+        cond: Box::new(method0(ident("$oba"), "is_missing")),
+        then_branch: Box::new(Expr::Missing),
+        else_branch: Box::new(Expr::If {
+            cond: Box::new(Expr::Binary {
+                op: BinOp::Eq,
+                left: Box::new(count_of(ident("$oba"))),
+                right: Box::new(Expr::Int(0)),
+                line,
+                col,
+            }),
+            then_branch: Box::new(Expr::Call {
+                name: "raise".to_string(),
+                args: vec![Expr::Str(format!("`{name}` of an empty collection"))],
+                line,
+                col,
+            }),
+            else_branch: Box::new(Expr::If {
+                cond: Box::new(Expr::Binary {
+                    op: BinOp::Ne,
+                    left: Box::new(count_of(ident("$oba"))),
+                    right: Box::new(count_of(method0(ident("$oba"), "drop_missing"))),
+                    line,
+                    col,
+                }),
+                then_branch: Box::new(Expr::Missing),
+                else_branch: Box::new(Expr::If {
+                    cond: Box::new(Expr::Method {
+                        recv: Box::new(ident("$oba")),
+                        name: "any".to_string(),
+                        args: vec![Expr::Binary {
+                            op: BinOp::Ne,
+                            left: Box::new(ident("it")),
+                            right: Box::new(ident("it")),
+                            line,
+                            col,
+                        }],
+                        named: vec![],
+                        line,
+                        col,
+                    }),
+                    then_branch: Box::new(Expr::Missing),
+                    else_branch: Box::new(slow),
+                    line,
+                    col,
+                }),
+                line,
+                col,
+            }),
+            line,
+            col,
+        }),
+        line,
+        col,
     };
     Ok(Expr::Let {
         bindings: vec![("$oba".to_string(), recv)],
@@ -490,7 +640,7 @@ fn desugar_order_by(
                 line,
                 col,
             }),
-            right: Box::new(slow),
+            right: Box::new(guarded_slow),
             line,
             col,
         }),

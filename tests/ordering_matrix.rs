@@ -16,15 +16,24 @@
 //! | A. **sort** | `sort` | `numeric_cmp` (`total_cmp`) + Str + Dna | **error** | placed | `[]` |
 //! | B. **argsort** | `argsort`, `sort_by` | *(same as A since ADR 0025 (a1))* | **error** | placed | `[]` |
 //! | C. **reduction** | `min`, `max`, free `argmin`/`argmax` | `numeric_cmp` + Str + Dna since ADR 0025 (b1) (free `argmin`/`argmax` numbers only) | `missing` | `missing` | error |
-//! | D. **`<`-reduce** | `min_by`, `max_by`, method `argmin`/`argmax` | `ops::compare` (IEEE, 3-valued, Tuple/Str/Dna) | error | error | error |
+//! | D. **`<`-reduce** | `min_by`, `max_by`, method `argmin`/`argmax` | `ops::compare` (IEEE, 3-valued, Tuple/Str/Dna) | `missing` since (c1) | `missing` since (c1) | error since (c1) |
 //!
-//! Four domains, four answers to the same question. The table below is the evidence.
+//! Four domains, four answers to the same question — WAS. All four ADR 0025 questions are
+//! now taken:
 //!
-//! **A and B are now ONE domain** — ADR 0025 question (a), option a1, taken: `argsort`
-//! adopted `sort`'s policy (error on `missing`, accept `Dna`), and `sort_by` followed for
-//! free because `desugar_sort_by` rewrites it through `argsort`. Before that, `xs.sort()`
-//! and `xs.sort_by(it)` did not agree with each other. C and D remain, and are questions
-//! (b) and (c).
+//! * **(a1)** merged A and B: `argsort` adopted `sort`'s policy (error on `missing`,
+//!   accept `Dna`), and `sort_by` followed for free because `desugar_sort_by` rewrites it
+//!   through `argsort` — before that, `xs.sort()` and `xs.sort_by(it)` did not agree with
+//!   each other.
+//! * **(b1)** widened `min`/`max` to `sort`'s type domain (numbers, strings, DNA).
+//! * **(c1)** moved D onto C's POLICY: `missing`/NaN propagate, empty is the named domain
+//!   error, and the method/free split on `argmin`/`argmax` is closed. The leaked internals
+//!   (`if` condition is `missing`, `index 0 is out of bounds`, "cannot be indexed") are
+//!   gone.
+//! * **(d1)** documented IEEE first-wins on signed-zero ties
+//!   (`examples/language/ordering.helix`). The COMPARATORS remain two (`total_cmp` for
+//!   sorting and C, IEEE `<` for D's selection), which is why the signed-zero cells below
+//!   still disagree — that residue is d2, and it needs comparator unification, not policy.
 //!
 //! ## Two rules this file follows
 //!
@@ -108,9 +117,9 @@ const CASES: &[(&str, &str, &str)] = &[
     ("float/fn_max", "max([3.0, 1.0, 2.0])", "error: `max` takes 2 arguments, got 1"),
 
     // ================================ Float with NaN =================================
-    // THREE answers to one question. `sort`/`argsort`/`sort_by` PLACE the NaN;
-    // `min`/`max` and the FREE `argmin`/`argmax` propagate `missing`; the METHOD
-    // `argmin`/`argmax` and `min_by`/`max_by` RAISE.
+    // TWO answers to one question since ADR 0025 (c1), down from three: the sorting
+    // spellings PLACE the NaN; every reduction spelling — `min`/`max`, `min_by`/`max_by`,
+    // method AND free `argmin`/`argmax` — propagates `missing`.
     //
     // Note where the NaN lands: FIRST, not last. `sqrt(-1.0)` produces a NaN with its
     // sign bit SET, and `total_cmp` orders by the sign bit — so ADR 0024's prose
@@ -121,13 +130,10 @@ const CASES: &[(&str, &str, &str)] = &[
     ("float_nan/sort_by", "[1.0, sqrt(0.0 - 1.0), 3.0].sort_by(it)", "[NaN, 1.0, 3.0]"),
     ("float_nan/min", "[1.0, sqrt(0.0 - 1.0), 3.0].min()", "missing"),
     ("float_nan/max", "[1.0, sqrt(0.0 - 1.0), 3.0].max()", "missing"),
-    // DISAGREE (min vs min_by): `min` answers `missing`, `min_by(it)` raises.
-    ("float_nan/min_by", "[1.0, sqrt(0.0 - 1.0), 3.0].min_by(it)", "error: cannot compare these values (NaN?)"),
-    ("float_nan/max_by", "[1.0, sqrt(0.0 - 1.0), 3.0].max_by(it)", "error: cannot compare these values (NaN?)"),
-    // DISAGREE (method argmin vs free argmin): the method raises, the function
-    // answers `missing`. Same name, same argument, two outcomes.
-    ("float_nan/argmin", "[1.0, sqrt(0.0 - 1.0), 3.0].argmin()", "error: cannot compare these values (NaN?)"),
-    ("float_nan/argmax", "[1.0, sqrt(0.0 - 1.0), 3.0].argmax()", "error: cannot compare these values (NaN?)"),
+    ("float_nan/min_by", "[1.0, sqrt(0.0 - 1.0), 3.0].min_by(it)", "missing"),
+    ("float_nan/max_by", "[1.0, sqrt(0.0 - 1.0), 3.0].max_by(it)", "missing"),
+    ("float_nan/argmin", "[1.0, sqrt(0.0 - 1.0), 3.0].argmin()", "missing"),
+    ("float_nan/argmax", "[1.0, sqrt(0.0 - 1.0), 3.0].argmax()", "missing"),
     ("float_nan/fn_argmin", "argmin([1.0, sqrt(0.0 - 1.0), 3.0])", "missing"),
     ("float_nan/fn_argmax", "argmax([1.0, sqrt(0.0 - 1.0), 3.0])", "missing"),
     ("float_nan/fn_min", "min([1.0, sqrt(0.0 - 1.0), 3.0])", "error: `min` takes 2 arguments, got 1"),
@@ -183,8 +189,7 @@ const CASES: &[(&str, &str, &str)] = &[
     ("str/sort", "[\"b\", \"a\"].sort()", "[\"a\", \"b\"]"),
     ("str/argsort", "[\"b\", \"a\"].argsort()", "[1, 0]"),
     ("str/sort_by", "[\"b\", \"a\"].sort_by(it)", "[\"a\", \"b\"]"),
-    // DISAGREE (sort vs min): `sort` orders these; `min` says they are not numbers.
-    // DISAGREE (min vs min_by): `min()` errors, `min_by(it)` returns "a".
+    // AGREE since ADR 0025 (b1): `min`/`max` order strings exactly as `sort` does.
     ("str/min", "[\"b\", \"a\"].min()", "a"),
     ("str/max", "[\"b\", \"a\"].max()", "b"),
     ("str/min_by", "[\"b\", \"a\"].min_by(it)", "a"),
@@ -282,11 +287,11 @@ const CASES: &[(&str, &str, &str)] = &[
     ("with_missing/min", "[1, missing, 3].min()", "missing"),
     ("with_missing/max", "[1, missing, 3].max()", "missing"),
     // DISAGREE (min vs min_by): `min` propagates, `min_by(it)` raises.
-    ("with_missing/min_by", "[1, missing, 3].min_by(it)", "error: `if` condition is `missing` — cannot choose a branch"),
-    ("with_missing/max_by", "[1, missing, 3].max_by(it)", "error: `if` condition is `missing` — cannot choose a branch"),
+    ("with_missing/min_by", "[1, missing, 3].min_by(it)", "missing"),
+    ("with_missing/max_by", "[1, missing, 3].max_by(it)", "missing"),
     // DISAGREE (method argmin vs free argmin): raise vs propagate.
-    ("with_missing/argmin", "[1, missing, 3].argmin()", "error: `if` condition is `missing` — cannot choose a branch"),
-    ("with_missing/argmax", "[1, missing, 3].argmax()", "error: `if` condition is `missing` — cannot choose a branch"),
+    ("with_missing/argmin", "[1, missing, 3].argmin()", "missing"),
+    ("with_missing/argmax", "[1, missing, 3].argmax()", "missing"),
     ("with_missing/fn_argmin", "argmin([1, missing, 3])", "missing"),
     ("with_missing/fn_argmax", "argmax([1, missing, 3])", "missing"),
     ("with_missing/fn_min", "min([1, missing, 3])", "error: `min` takes 2 arguments, got 1"),
@@ -302,10 +307,10 @@ const CASES: &[(&str, &str, &str)] = &[
     ("empty/min", "[].min()", "error: cannot compute `min` of an empty array"),
     ("empty/max", "[].max()", "error: cannot compute `max` of an empty array"),
     // DISAGREE (min vs min_by): a domain error vs a leaked index error.
-    ("empty/min_by", "[].min_by(it)", "error: index 0 is out of bounds for length 0"),
-    ("empty/max_by", "[].max_by(it)", "error: index 0 is out of bounds for length 0"),
-    ("empty/argmin", "[].argmin()", "error: index 0 is out of bounds for length 0"),
-    ("empty/argmax", "[].argmax()", "error: index 0 is out of bounds for length 0"),
+    ("empty/min_by", "[].min_by(it)", "error: `min_by` of an empty collection"),
+    ("empty/max_by", "[].max_by(it)", "error: `max_by` of an empty collection"),
+    ("empty/argmin", "[].argmin()", "error: `argmin` of an empty collection"),
+    ("empty/argmax", "[].argmax()", "error: `argmax` of an empty collection"),
     // DISAGREE (method argmin vs free argmin): three empty-array messages for one
     // concept, across `min`, `argmin()` and `argmin(xs)`.
     ("empty/fn_argmin", "argmin([])", "error: `argmin` of an empty collection"),
@@ -322,10 +327,10 @@ const CASES: &[(&str, &str, &str)] = &[
     ("missing_receiver/min", "missing.min()", "missing"),
     ("missing_receiver/max", "missing.max()", "missing"),
     // DISAGREE (min vs min_by): propagate vs raise, on the receiver itself.
-    ("missing_receiver/min_by", "missing.min_by(it)", "error: a value of type Missing cannot be indexed"),
-    ("missing_receiver/max_by", "missing.max_by(it)", "error: a value of type Missing cannot be indexed"),
-    ("missing_receiver/argmin", "missing.argmin()", "error: a value of type Missing cannot be indexed"),
-    ("missing_receiver/argmax", "missing.argmax()", "error: a value of type Missing cannot be indexed"),
+    ("missing_receiver/min_by", "missing.min_by(it)", "missing"),
+    ("missing_receiver/max_by", "missing.max_by(it)", "missing"),
+    ("missing_receiver/argmin", "missing.argmin()", "missing"),
+    ("missing_receiver/argmax", "missing.argmax()", "missing"),
     ("missing_receiver/fn_argmin", "argmin(missing)", "error: `argmin` expected an array or tensor of numbers, found a value of type Missing"),
     ("missing_receiver/fn_argmax", "argmax(missing)", "error: `argmax` expected an array or tensor of numbers, found a value of type Missing"),
     ("missing_receiver/fn_min", "min(missing)", "error: `min` takes 2 arguments, got 1"),
@@ -568,22 +573,16 @@ fn the_four_order_domains_disagree_today() {
     );
     assert_eq!(render("[(2, 1), (1, 2)].min_by(it)", env, "q_b7"), "(1, 2)");
 
-    // (c) `min_by`/`argmin` raise where `min` propagates — including the METHOD vs
-    //     FREE-FUNCTION split on the same name.
+    // (c) ANSWERED — c1 taken: the `_by` family and the method `argmin`/`argmax` adopted
+    // the reduction policy. `missing`/NaN propagate, the empty array gets the free
+    // function's own named error, and the METHOD vs FREE-FUNCTION split on the same name is
+    // closed: `xs.argmin()` and `argmin(xs)` finally give one answer to one question.
+    // The leaked internals (`if` condition, `index 0`, "cannot be indexed") are gone.
     assert_eq!(render("[1, missing, 3].min()", env, "q_c1"), "missing");
-    assert_eq!(
-        render("[1, missing, 3].min_by(it)", env, "q_c2"),
-        "error: `if` condition is `missing` — cannot choose a branch"
-    );
-    assert_eq!(
-        render("[1, missing, 3].argmin()", env, "q_c3"),
-        "error: `if` condition is `missing` — cannot choose a branch"
-    );
+    assert_eq!(render("[1, missing, 3].min_by(it)", env, "q_c2"), "missing");
+    assert_eq!(render("[1, missing, 3].argmin()", env, "q_c3"), "missing");
     assert_eq!(render("argmin([1, missing, 3])", env, "q_c4"), "missing");
-    assert_eq!(
-        render("[].argmin()", env, "q_c5"),
-        "error: index 0 is out of bounds for length 0"
-    );
+    assert_eq!(render("[].argmin()", env, "q_c5"), "error: `argmin` of an empty collection");
     assert_eq!(render("argmin([])", env, "q_c6"), "error: `argmin` of an empty collection");
     assert_eq!(render("[].min()", env, "q_c7"), "error: cannot compute `min` of an empty array");
 

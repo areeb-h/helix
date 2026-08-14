@@ -6941,13 +6941,23 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             assert_eq!(tw, vm, "engines disagree on `{src}`");
             assert_eq!(vm, Ok(want.to_string()), "`{src}`");
         }
-        // The load-bearing error shapes, one per family (the full matrix was verified
-        // against the previous binary; these pin the text going forward).
+        // ADR 0025 (c1): the `_by` family follows the REDUCTION policy — `missing`/NaN
+        // propagate as `missing` rather than leaking the desugar's internals (`if`
+        // condition, `index 0`, "cannot be indexed"), which no user wrote.
         for (src, want) in [
-            ("[].min_by(it)", "index 0 is out of bounds"),
-            ("missing.min_by((a, b) => a)", "cannot be indexed"),
-            ("[1, missing, 3].min_by(it)", "condition is `missing`"),
-            ("[1.0, inf - inf].min_by(it)", "cannot compare these values"),
+            ("missing.min_by((a, b) => a)", "missing"),
+            ("[1, missing, 3].min_by(it)", "missing"),
+            ("[1.0, inf - inf].min_by(it)", "missing"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+        // The error shapes that REMAIN errors: empty gets its own named message (the free
+        // function's wording, not a leaked reduce seed), and the key-shape diagnostics are
+        // untouched — the guards run before the reduce, not instead of its lambda checks.
+        for (src, want) in [
+            ("[].min_by(it)", "`min_by` of an empty collection"),
             ("[5, 3].min_by((a, b) => a)", "cannot destructure a value of type Int"),
             ("[[1],[0]].min_by((a, b) => a)", "lambda expects 2 values"),
             ("[2, 1].min_by()", "takes exactly one key function"),
