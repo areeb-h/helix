@@ -336,9 +336,22 @@ impl DataHandle for PolarsFrame {
         Ok(self.derive(self.lf.clone().with_columns(exprs)))
     }
 
+    /// Sort by one or more columns — a **stable** sort.
+    ///
+    /// `SortMultipleOptions::default()` is `maintain_order: false`, i.e. an unstable
+    /// parallel sort: rows that tie on the key come out in a run-varying order. That
+    /// is not merely untidy, it silently tears rows apart, because every `.column()`
+    /// re-executes the lazy plan: reading two columns out of one sorted frame runs the
+    /// sort twice, and the two runs can disagree about which tied row went where, so
+    /// `d.column("h")` and `d.column("v")` return values from DIFFERENT orderings.
+    /// Ties are the common case, not the exotic one — any sort on a category, a
+    /// chromosome, a group key.
     fn sort(&self, names: &[String], _line: usize, _col: usize) -> Result<Df, HelixError> {
         let exprs: Vec<Expr> = names.iter().map(|n| pcol(n.as_str())).collect();
-        Ok(self.derive(self.lf.clone().sort_by_exprs(exprs, SortMultipleOptions::default())))
+        Ok(self.derive(self.lf.clone().sort_by_exprs(
+            exprs,
+            SortMultipleOptions::default().with_maintain_order(true),
+        )))
     }
 
     /// Join on one or more shared key columns (`a.join(b, id)`). `how` is `inner`
@@ -462,12 +475,36 @@ impl DataHandle for PolarsFrame {
         let key_exprs: Vec<Expr> = keys.iter().map(|k| pcol(k.as_str())).collect();
         let c = pcol(value_col);
         let agg_expr = match agg {
-            "mean" => c.mean(),
-            "sum" => c.sum(),
-            "min" => c.min(),
-            "max" => c.max(),
-            "count" => c.count(),
-            "std" => c.std(1),
+            // `count` counts ROWS, `missing` included — matching `[1.0, 3.0, missing].count()`
+            // and `df.column("v").count()`, which both answer 3. Polars' `count()` excludes
+            // nulls, which is what made an all-`missing` group report 0; `len()` is the
+            // row count and is the one that matches Helix.
+            "count" => c.len(),
+            // Every other grouped aggregation PROPAGATES `missing`, matching the array
+            // and whole-column paths (`[1.0, 3.0, missing].sum()` is `missing`). Polars
+            // skips nulls, which silently turned an unknown into a number — and made an
+            // all-`missing` group indistinguishable from one that really sums to zero.
+            //
+            // The `when(...).then(NULL).otherwise(agg)` shape is also what makes the
+            // float reductions DETERMINISTIC, and that is not a coincidence to be
+            // rediscovered later: Polars only runs its partitioned (non-deterministic
+            // merge order) group-by when every aggregation passes `can_pre_agg`, whose
+            // `Ternary` arm rejects any branch that itself contains an aggregation.
+            // So this expression cannot take the partitioned path. See ADR-notes in
+            // `docs/v0.2.1-fix-plan.md`; the regression test asserts the determinism
+            // directly rather than trusting that rule to survive a Polars bump.
+            "mean" | "sum" | "min" | "max" | "std" => {
+                let inner = match agg {
+                    "mean" => c.clone().mean(),
+                    "sum" => c.clone().sum(),
+                    "min" => c.clone().min(),
+                    "max" => c.clone().max(),
+                    _ => c.clone().std(1),
+                };
+                when(c.null_count().gt(lit(0u32)))
+                    .then(lit(NULL))
+                    .otherwise(inner)
+            }
             _ => {
                 return Err(
                     HelixError::new(format!("`{}` is not a grouped aggregation", agg), line, col)
@@ -480,7 +517,12 @@ impl DataHandle for PolarsFrame {
         // groups in a hash-dependent order that varies run-to-run — a reproducibility
         // hazard for a scientific language, and the sole cause of the VM/tree-walker
         // parity flakiness on the grouped examples.
-        Ok(self.derive(self.lf.clone().group_by_stable(key_exprs).agg([agg_expr])))
+        Ok(self.derive(
+            self.lf
+                .clone()
+                .group_by_stable(key_exprs)
+                .agg([agg_expr.alias(value_col)]),
+        ))
     }
 
     /// Row count via a `len()` pushdown — no column is materialized.

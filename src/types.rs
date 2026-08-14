@@ -201,6 +201,39 @@ fn type_err(who: &str, want: &str, got: &Type, line: usize, col: usize) -> Helix
     )
 }
 
+/// `try EXPR` binds tighter than any binary operator, so `try 1 + 1` parses as
+/// `(try 1) + 1` — the `try` yields its `{ok, value, error}` record and `+ 1` then
+/// fails on a Record. The resulting error is *true* and useless: it names a Record
+/// in an expression that contains no visible record.
+///
+/// When an operand is literally a `try` expression, say so and name the fix. The
+/// test is on the **AST node**, not on the record's shape, so a user's own
+/// `{ok: …, value: …, error: …}` record never triggers this hint.
+///
+/// Whether `try` *should* bind looser is a separate, breaking parser question; this
+/// only makes the existing behaviour explicable.
+fn try_binds_tighter_hint(e: HelixError, op: &BinOp, left: &Expr, right: &Expr) -> HelixError {
+    if e.hint.is_some() {
+        return e; // never displace a more specific hint
+    }
+    let side = if matches!(left, Expr::Try { .. }) {
+        Some("left")
+    } else if matches!(right, Expr::Try { .. }) {
+        Some("right")
+    } else {
+        None
+    };
+    match side {
+        Some(_) => e.hint(format!(
+            "`try` binds tighter than `{0}`, so this is `(try …) {0} …` and the `try` \
+             produced a `{{ok, value, error}}` record — parenthesize the whole \
+             expression: `try (a {0} b)`.",
+            op.symbol()
+        )),
+        None => e,
+    }
+}
+
 fn arity_err(name: &str, want: usize, got: usize, line: usize, col: usize) -> HelixError {
     HelixError::new(
         format!(
@@ -644,6 +677,7 @@ impl Checker {
                 let lt = self.synth(left)?;
                 let rt = self.synth(right)?;
                 self.synth_binary(op, &lt, &rt, *line, *col)
+                    .map_err(|e| try_binds_tighter_hint(e, op, left, right))
             }
             Expr::Call {
                 name,

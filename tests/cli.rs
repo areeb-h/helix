@@ -4357,3 +4357,206 @@ fn check_type_checks_without_running_anything() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// v0.2.1 regression tests. Each of these was written against the BROKEN binary
+// first and confirmed to FAIL there — a test that passes either way pins nothing.
+// ---------------------------------------------------------------------------
+
+/// The three engines, as `run_source` env blocks. Every fix below must hold on all
+/// three: they are a differential oracle only while they agree.
+const ENGINES: [(&str, &[(&str, &str)]); 3] = [
+    ("jit", &[]),
+    ("vm", &[("HELIX_NOJIT", "1")]),
+    ("walker", &[("HELIX_NOVM", "1")]),
+];
+
+/// B1. A grouped `f64` aggregation must give the same answer every time.
+///
+/// The repetition is the whole test, and it must happen INSIDE ONE PROCESS. Polars
+/// ran a partitioned group-by whose merge order varied per execution, so a single
+/// evaluation cannot see the bug — a one-shot assertion passes against the broken
+/// binary and pins nothing. Measured before the fix: `drift: 30` out of 30, five
+/// runs out of five. After: `drift: 0`.
+#[test]
+fn grouped_float_aggregation_is_deterministic_within_one_process() {
+    let src = r#"
+n = 20000
+g = range(0, n).map(i => i % 2)
+v = range(0, n).map(i => 1.0 + (i % 97) * 0.01)
+df = dataframe({g: g, v: v})
+first = df.group(@g).sum(@v).sort(@g).column("v")
+drift = range(0, 30).filter(i => df.group(@g).sum(@v).sort(@g).column("v") != first).count()
+print("drift:", drift)
+"#;
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("b1_determinism_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out.trim(), "drift: 0", "{name}: grouped sum drifted across evaluations");
+    }
+}
+
+/// B2. Grouped aggregations propagate `missing`, like every other reduction (ADR 0001).
+///
+/// Before: `mean` answered `2.0` for a group containing an unknown, and an all-`missing`
+/// group reported `sum` `0.0` — indistinguishable from a group that really sums to zero.
+/// `count` is the deliberate exception: it counts ROWS, matching `[1.0, 3.0, missing].count()`
+/// and `df.column("v").count()`, which both answer 3.
+#[test]
+fn grouped_aggregations_propagate_missing() {
+    let src = r#"
+d = dataframe({g: ["a", "a", "a"], v: [1.0, 3.0, missing]})
+print("mean:", d.group(@g).mean(@v).column("v"))
+gv = dataframe({g: ["a", "a", "b"], v: [1.0, 2.0, missing]})
+print("sum:", gv.group(@g).sum(@v).sort(@g).column("v"))
+print("count:", gv.group(@g).count(@v).sort(@g).column("v"))
+print("array:", [1.0, 3.0, missing].count())
+"#;
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("b2_missing_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(
+            out,
+            "mean: [missing]\nsum: [3.0, missing]\ncount: [2, 1]\narray: 3\n",
+            "{name}: grouped aggregation disagreed with the whole-column path on `missing`"
+        );
+    }
+}
+
+/// C2. `.sum()` of an infinity is an infinity, not `NaN`.
+///
+/// Neumaier compensation went non-finite once the running sum did, turning a CORRECT
+/// `inf` into `NaN` — disagreeing with IEEE-754, python3, NumPy, and with Helix's own
+/// `+` and `reduce`. `inf + -inf` is still `NaN`, which is correct and must stay.
+/// The cancellation case guards the other direction: the compensation that makes
+/// Neumaier worth having must survive the guard.
+#[test]
+fn sum_of_non_finite_values_matches_ieee() {
+    let src = r#"
+INF = exp(800.0)
+print([INF].sum() == INF)
+print([0.0 - INF].sum() == 0.0 - INF)
+print([INF, 0.0 - INF].sum())
+print([INF, 1.0].mean() == INF)
+print([1.0e16, 1.0, 0.0 - 1.0e16].sum())
+"#;
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("c2_inf_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        // The last line is the cancellation case: naive summation answers 0.0 here,
+        // Neumaier answers the true 1.0. If that regresses, the guard ate the compensation.
+        assert_eq!(out, "true\ntrue\nNaN\ntrue\n1.0\n", "{name}");
+    }
+}
+
+/// C3. `erf` is computed to double precision, like every other math builtin.
+///
+/// It was the Abramowitz & Stegun 7.1.26 rational approximation (~1.5e-7 absolute),
+/// which left a fixed pedestal near zero — so its RELATIVE error was unbounded there,
+/// and the `x == 0.0` special case it needed made `erf` discontinuous at the origin.
+/// The self-oracle needs no external table: `erf(x)/x` as x approaches 0 is `2/sqrt(pi)`,
+/// a value Helix can compute itself. Every literal below is python3's `math.erf`.
+#[test]
+fn erf_is_computed_to_double_precision() {
+    let src = r#"
+print(erf(1.0e-12) / 1.0e-12 == 2.0 / sqrt(3.141592653589793))
+print(erf(0.5))
+print(erf(1.0))
+print(erf(0.0), erf(0.0 - 1.0))
+"#;
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("c3_erf_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(
+            out,
+            "true\n0.5204998778130465\n0.8427007929497149\n0.0 -0.8427007929497149\n",
+            "{name}: erf drifted from python3's math.erf"
+        );
+    }
+}
+
+/// D1. `try` binds tighter than binary operators, and the error now says so.
+///
+/// `try 1 + 1` parses as `(try 1) + 1`, so the operand really is a record — the old
+/// message was true and useless, naming a Record in an expression containing none.
+/// The hint keys on the AST node, not the record's shape, so a user's own
+/// `{ok, value, error}` record never triggers it; the second half of this test is
+/// what pins that, and it is the half that would catch an over-eager rewrite.
+#[test]
+fn try_binding_tighter_than_operators_is_explained() {
+    for (name, env) in ENGINES {
+        let (_, err, code) = run_source("r = try 1 + 1\nprint(r)\n", env, &format!("d1_try_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(
+            err.contains("`try` binds tighter than `+`") && err.contains("try (a + b)"),
+            "{name}: no hint naming `try`:\n{err}"
+        );
+
+        // An ORDINARY record operand must still get the ordinary message.
+        let (_, plain, code) =
+            run_source("r = {a: 1} + 1\nprint(r)\n", env, &format!("d1_plain_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(
+            !plain.contains("binds tighter"),
+            "{name}: ordinary record wrongly blamed on `try`:\n{plain}"
+        );
+    }
+}
+
+/// B3. An oversized materialization is a catchable Helix error, never a dead process.
+///
+/// ADR 0024: the runtime is total — a limit is reported, never signalled by killing the
+/// host. Before this fix `range(0, 100000000).filter(...).map(i => [i]).count()` aborted
+/// with SIGABRT (exit 134, core dumped) on all three engines, `try` could not catch it,
+/// and nothing after it ran.
+///
+/// The address-space cap is what makes this cheap and deterministic to test: without it
+/// the same program succeeds on a large machine after several minutes. Run through `sh`
+/// so `ulimit` applies to the child, and only where that means something.
+#[test]
+#[cfg(unix)]
+fn oversized_materialization_is_an_error_not_an_abort() {
+    let src = "r = try (range(0, 100000000).filter(i => true).map(i => [i]).count())\n\
+               print(\"ok:\", r.ok)\nprint(\"alive\")\n";
+    let path = std::env::temp_dir().join("helix_it_b3_abort.helix");
+    std::fs::write(&path, src).unwrap();
+
+    for (name, extra) in [
+        ("jit", ""),
+        ("vm", "export HELIX_NOJIT=1; "),
+        ("walker", "export HELIX_NOVM=1; "),
+    ] {
+        // The engine switch is EXPORTED before the `exec`: `exec VAR=1 cmd` is not an
+        // assignment in sh, it looks for a command literally named `VAR=1`.
+        let script = format!(
+            "ulimit -v 3670016; {}exec {} {} < /dev/null",
+            extra,
+            env!("CARGO_BIN_EXE_helix"),
+            path.display()
+        );
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("failed to spawn sh");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        // The process must survive: SIGABRT shows up as a None exit code (signalled).
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{name}: process died instead of reporting a limit\n{stderr}"
+        );
+        assert!(
+            stdout.contains("ok: false") && stdout.contains("alive"),
+            "{name}: `try` did not catch the limit, or execution stopped:\n{stdout}\n{stderr}"
+        );
+        assert!(
+            !stderr.contains("memory allocation of"),
+            "{name}: raw allocator abort leaked to the user:\n{stderr}"
+        );
+    }
+    let _ = std::fs::remove_file(&path);
+}

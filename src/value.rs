@@ -304,7 +304,7 @@ impl ArrayData {
 /// comprehension result (`xs.map(...)`) never materializes the intermediate boxed
 /// `Value`s, halving the transient memory of building a numeric column.
 #[derive(Default)]
-pub enum ColumnBuilder {
+pub enum ColumnKind {
     #[default]
     Empty,
     Ints(Vec<i64>),
@@ -312,44 +312,159 @@ pub enum ColumnBuilder {
     Values(Vec<Value>),
 }
 
+/// The budget, in bytes of *estimated element heap*, for one materialized collection
+/// of heap-valued elements. See [`ColumnBuilder::over_budget`].
+///
+/// This is a POLICY NUMBER, not a law of nature. 1 GiB is the line the project already
+/// draws for a single oversized value (`repeat`'s scalar-string cap), so collection
+/// materialization uses the same one rather than inventing a second.
+pub const MATERIALIZE_BUDGET: usize = 1 << 30;
+
+/// A conservative O(1) estimate of the heap a single element owns.
+///
+/// **Shallow on purpose.** A nested array counts its own buffer but not its children's,
+/// because a deep walk would be O(n) per push and turn materialization quadratic. It is
+/// therefore an UNDER-estimate for deeply nested elements — see the residual risk note
+/// in `docs/v0.2.1-fix-plan.md` (B3).
+fn element_heap_estimate(v: &Value) -> usize {
+    // Every heap-valued element costs at least its `Value` slot plus an allocation
+    // header; `[i]` measured ~64 B in practice, so the floor is deliberately not 0.
+    const SLOT: usize = std::mem::size_of::<Value>() + 32;
+    SLOT + match v {
+        Value::Str(s) => s.len(),
+        Value::Array(a) => a.len() * std::mem::size_of::<Value>(),
+        Value::Record(fields) => fields.len() * (std::mem::size_of::<Value>() + 8),
+        _ => 0,
+    }
+}
+
+/// Why a materialization was refused. Both arms are ordinary Helix errors — ADR 0024:
+/// a limit is reported, never signalled by killing the process.
+pub enum MaterializeLimit {
+    /// The *estimated* element heap passed [`MATERIALIZE_BUDGET`]. This is the guard for
+    /// many small heap-valued elements — 100M one-element arrays are only 2.4 GB of
+    /// `Vec<Value>` slots, so no single allocation is outrageous and the allocator would
+    /// happily grant them one at a time until the machine died.
+    Budget(usize),
+    /// The allocator refused to grow the buffer: this one allocation was too big for the
+    /// machine (or for a `ulimit`). Caught with `try_reserve`, which is exactly the case
+    /// a byte budget CANNOT model, because the limit is the environment's, not ours.
+    Alloc(usize),
+}
+
+/// Reserve room for one more element, doubling as `Vec` would, but *fallibly*.
+///
+/// `Vec::push` grows by reallocating to twice the capacity, and during the move both
+/// buffers are live — so the transient peak is ~3x the current buffer. That overshoot is
+/// what actually aborted: a 100M-element `i64` column is a legitimate 800 MB, but growing
+/// it reallocates to 1 GiB, and `handle_alloc_error` aborts the process rather than
+/// returning. `try_reserve` turns exactly that failure into a value we can report.
+fn reserve_one<T>(v: &mut Vec<T>) -> Result<(), MaterializeLimit> {
+    if v.len() == v.capacity() {
+        let more = v.capacity().max(1);
+        v.try_reserve(more).map_err(|_| {
+            MaterializeLimit::Alloc((v.capacity() + more) * std::mem::size_of::<T>())
+        })?;
+    }
+    Ok(())
+}
+
+/// Promote a packed buffer to boxed `Value`s, reserving fallibly up front.
+fn promote<T: Copy>(
+    src: Vec<T>,
+    wrap: fn(T) -> Value,
+    extra: Value,
+) -> Result<Vec<Value>, MaterializeLimit> {
+    let mut vals: Vec<Value> = Vec::new();
+    vals.try_reserve(src.len() + 1).map_err(|_| {
+        MaterializeLimit::Alloc((src.len() + 1) * std::mem::size_of::<Value>())
+    })?;
+    vals.extend(src.into_iter().map(wrap));
+    vals.push(extra);
+    Ok(vals)
+}
+
+#[derive(Default)]
+pub struct ColumnBuilder {
+    kind: ColumnKind,
+    /// Running estimate of heap owned by `Values` elements. Stays 0 for the packed
+    /// `Ints`/`Floats` arms, whose cost is 8 bytes/element in one contiguous buffer and
+    /// so is caught by [`reserve_one`]'s fallible growth instead — which is why the
+    /// numeric hot path (`xs.map(i => i * 2)`) pays NOTHING for the estimate and keeps
+    /// its packed representation.
+    heap_bytes: usize,
+}
+
 impl ColumnBuilder {
-    pub fn push(&mut self, v: Value) {
-        match (std::mem::take(self), v) {
-            (ColumnBuilder::Empty, Value::Int(i)) => *self = ColumnBuilder::Ints(vec![i]),
-            (ColumnBuilder::Empty, Value::Float(f)) => *self = ColumnBuilder::Floats(vec![f]),
-            (ColumnBuilder::Empty, other) => *self = ColumnBuilder::Values(vec![other]),
-            (ColumnBuilder::Ints(mut v), Value::Int(i)) => {
+    /// Append one element, refusing rather than aborting when it will not fit.
+    ///
+    /// On `Err` the partially built buffer has already been dropped, which frees the
+    /// memory before the caller renders the error — deliberate, since we are by
+    /// definition under memory pressure at that moment.
+    pub fn push(&mut self, v: Value) -> Result<(), MaterializeLimit> {
+        match (std::mem::take(&mut self.kind), v) {
+            (ColumnKind::Empty, Value::Int(i)) => self.kind = ColumnKind::Ints(vec![i]),
+            (ColumnKind::Empty, Value::Float(f)) => self.kind = ColumnKind::Floats(vec![f]),
+            (ColumnKind::Empty, other) => {
+                self.heap_bytes += element_heap_estimate(&other);
+                self.kind = ColumnKind::Values(vec![other]);
+            }
+            (ColumnKind::Ints(mut v), Value::Int(i)) => {
+                reserve_one(&mut v)?;
                 v.push(i);
-                *self = ColumnBuilder::Ints(v);
+                self.kind = ColumnKind::Ints(v);
             }
-            (ColumnBuilder::Floats(mut v), Value::Float(f)) => {
+            (ColumnKind::Floats(mut v), Value::Float(f)) => {
+                reserve_one(&mut v)?;
                 v.push(f);
-                *self = ColumnBuilder::Floats(v);
+                self.kind = ColumnKind::Floats(v);
             }
-            (ColumnBuilder::Values(mut v), other) => {
+            (ColumnKind::Values(mut v), other) => {
+                reserve_one(&mut v)?;
+                self.heap_bytes += element_heap_estimate(&other);
                 v.push(other);
-                *self = ColumnBuilder::Values(v);
+                self.kind = ColumnKind::Values(v);
             }
             // Homogeneity broken: promote the packed buffer to boxed `Value`s.
-            (ColumnBuilder::Ints(v), other) => {
-                let mut vals: Vec<Value> = v.into_iter().map(Value::Int).collect();
-                vals.push(other);
-                *self = ColumnBuilder::Values(vals);
+            (ColumnKind::Ints(v), other) => {
+                let n = v.len();
+                let add = element_heap_estimate(&other);
+                let vals = promote(v, Value::Int, other)?;
+                self.heap_bytes = n * std::mem::size_of::<Value>() + add;
+                self.kind = ColumnKind::Values(vals);
             }
-            (ColumnBuilder::Floats(v), other) => {
-                let mut vals: Vec<Value> = v.into_iter().map(Value::Float).collect();
-                vals.push(other);
-                *self = ColumnBuilder::Values(vals);
+            (ColumnKind::Floats(v), other) => {
+                let n = v.len();
+                let add = element_heap_estimate(&other);
+                let vals = promote(v, Value::Float, other)?;
+                self.heap_bytes = n * std::mem::size_of::<Value>() + add;
+                self.kind = ColumnKind::Values(vals);
             }
+        }
+        match self.over_budget() {
+            Some(bytes) => Err(MaterializeLimit::Budget(bytes)),
+            None => Ok(()),
         }
     }
 
+    /// `Some(bytes)` once the estimated element heap exceeds [`MATERIALIZE_BUDGET`].
+    ///
+    /// The caller turns this into a clean `HelixError` at its own source position.
+    /// It has to be a PRE-EMPTIVE budget rather than a fallible allocation: by the
+    /// time the process actually runs out, the allocation that fails is a *tiny* one
+    /// (48 bytes, deep inside an unrelated `Rc`), and Rust's `handle_alloc_error`
+    /// aborts the process — `try_reserve` on the result vector cannot see it coming.
+    #[inline]
+    pub fn over_budget(&self) -> Option<usize> {
+        (self.heap_bytes > MATERIALIZE_BUDGET).then_some(self.heap_bytes)
+    }
+
     pub fn finish(self) -> Value {
-        match self {
-            ColumnBuilder::Empty => Value::array(Vec::new()),
-            ColumnBuilder::Ints(v) => Value::int_array(v),
-            ColumnBuilder::Floats(v) => Value::float_array(v),
-            ColumnBuilder::Values(v) => Value::array(v),
+        match self.kind {
+            ColumnKind::Empty => Value::array(Vec::new()),
+            ColumnKind::Ints(v) => Value::int_array(v),
+            ColumnKind::Floats(v) => Value::float_array(v),
+            ColumnKind::Values(v) => Value::array(v),
         }
     }
 }

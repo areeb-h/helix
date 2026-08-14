@@ -68,6 +68,11 @@ noodles-bam = "0.90"
 # without scanning the whole file (the local-first capability). Pinned to the copy
 # already in the tree. The .tbi index reader lives in noodles-vcf.
 noodles-core = "0.20"
+# musl's libm, ported to Rust — used ONLY for `erf`/`erfc` (src/stats.rs): the two
+# functions Rust's std does not provide, and which a rational approximation cannot
+# compute to double precision. Already compiled into this binary via
+# cranelift-codegen and faer, so this adds a dependency EDGE, not a new crate.
+libm = "0.2"
 # Latest Polars — Arrow-columnar, lazy, multi-threaded execution engine.
 polars = { version = "0.54", features = [
     "lazy",

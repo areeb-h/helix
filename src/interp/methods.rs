@@ -2269,7 +2269,19 @@ fn neumaier_seq(xs: &[f64]) -> f64 {
         }
         sum = t;
     }
-    sum + c
+    // The compensation is only meaningful while the running sum is finite. Once `sum`
+    // is ±inf, the very next `(sum - t)` is `inf - inf` = NaN, so `c` goes NaN and the
+    // final `sum + c` turns a CORRECT ±inf into NaN — which is how `[1e308 * 10].sum()`
+    // answered NaN where IEEE-754, python3, NumPy and Helix's own `+` all answer inf.
+    // A non-finite running sum is already final (it can never return to finite), so
+    // return it and drop the compensator. Neumaier is kept everywhere else: it is
+    // genuinely more accurate on finite data, and this guard costs one predictable
+    // branch at the very end of the loop, not inside it.
+    if sum.is_finite() {
+        sum + c
+    } else {
+        sum
+    }
 }
 
 fn population_std(xs: &[f64]) -> f64 {

@@ -108,31 +108,44 @@ pub fn variance_ddof(xs: &[f64], ddof: usize) -> f64 {
 }
 
 // ---- Special functions -----------------------------------------------------
-// Standard numerical algorithms (Abramowitz & Stegun, Numerical Recipes) for the
-// error function, log-gamma, and the regularized incomplete beta — the machinery the
-// normal and Student's-t distribution functions need. Accurate to better than 1e-7,
-// which is ample for reported p-values.
+// Standard numerical algorithms (Numerical Recipes) for log-gamma and the regularized
+// incomplete beta, plus `libm`'s error function — the machinery the normal and
+// Student's-t distribution functions need.
 
-/// The error function, via the Abramowitz & Stegun 7.1.26 rational approximation
-/// (maximum absolute error ~1.5e-7).
+/// The error function, to full double precision.
+///
+/// This was the Abramowitz & Stegun 7.1.26 rational approximation, whose stated
+/// maximum absolute error is ~1.5e-7 — the only math builtin in Helix not computed
+/// to double precision, while `exp`/`ln`/`sqrt`/`sin`/… are all 0 ULP against glibc.
+/// Near zero A&S 7.1.26 leaves a fixed ~1e-9 pedestal, so its *relative* error is
+/// unbounded (89% at x = 1e-9) and the `x == 0.0` special case it needed made `erf`
+/// discontinuous at the origin.
+///
+/// `libm` is the Rust port of musl's libm (the Sun/FreeBSD `s_erf.c` lineage),
+/// accurate to <1 ULP. It is **already compiled into this binary** — cranelift and
+/// faer both depend on it — so this is a new edge to an existing crate, not new
+/// supply-chain surface.
 pub fn erf(x: f64) -> f64 {
-    if x == 0.0 {
-        return 0.0; // exact; the approximation below leaves ~1e-9 here otherwise
-    }
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.327_591_1 * x);
-    let y = 1.0
-        - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
-            + 0.254_829_592)
-            * t
-            * (-x * x).exp();
-    sign * y
+    libm::erf(x)
+}
+
+/// The complementary error function, `1 - erf(x)`, computed without cancellation.
+///
+/// Internal (not a Helix builtin): it exists so [`normal_cdf`] has a numerically
+/// stable left tail. Computing `1 - erf(x)` directly would defeat the purpose.
+pub fn erfc(x: f64) -> f64 {
+    libm::erfc(x)
 }
 
 /// Standard normal cumulative distribution function, `P(Z <= x)`.
+///
+/// Routed through `erfc`, **not** `0.5 * (1 + erf(x / √2))`. That formula is
+/// catastrophically cancelling in the left tail no matter how accurate `erf` is:
+/// with a *perfect* `erf` it still gives a relative error of 2.3e-06 at x = -7 and
+/// returns exactly `0.0` for x <= -9, where the true value is 1.1e-19. The left
+/// tail IS the p-value use case, so fixing `erf` alone would not have fixed it.
 pub fn normal_cdf(x: f64) -> f64 {
-    0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))
+    0.5 * erfc(-x / std::f64::consts::SQRT_2)
 }
 
 /// Standard normal probability density at `x`.

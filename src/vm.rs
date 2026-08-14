@@ -122,6 +122,47 @@ enum MemoKey {
     An(usize, Vec<MemoArg>),
 }
 
+/// The clean, catchable error for a collection that will not fit (ADR 0024: a limit is
+/// an error, never a signal — never a dead process).
+///
+/// Shared by the VM's `map`/`filter` push sites and the tree-walker's, so all three
+/// engines refuse the same program with the same words.
+pub(crate) fn materialize_refused(
+    lim: crate::value::MaterializeLimit,
+    line: usize,
+    col: usize,
+) -> HelixError {
+    use crate::value::MaterializeLimit;
+    const LAZY: &str = "or stay lazy — a `map`/`filter` that feeds straight into \
+                        `count`/`sum`/`first` does not materialize at all.";
+    match lim {
+        MaterializeLimit::Budget(bytes) => HelixError::new(
+            format!(
+                "this collection would hold more than {} MB of elements, which is too large",
+                crate::value::MATERIALIZE_BUDGET / (1 << 20)
+            ),
+            line,
+            col,
+        )
+        .hint(format!(
+            "it had already reached ~{} MB. Keep the result under the limit, {}",
+            bytes / (1 << 20),
+            LAZY
+        )),
+        MaterializeLimit::Alloc(bytes) => HelixError::new(
+            "there is not enough memory to hold this collection".to_string(),
+            line,
+            col,
+        )
+        .hint(format!(
+            "it asked for {} MB in one block and the system refused. Build it in smaller \
+             pieces, {}",
+            bytes / (1 << 20),
+            LAZY
+        )),
+    }
+}
+
 /// Project a (gated-scalar) argument value into a hashable memo argument.
 fn memo_arg(v: &Value) -> MemoArg {
     match v {
@@ -2499,7 +2540,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             }
             Op::CompMapPush => {
                 let v = stack.pop().unwrap();
-                iters.last_mut().unwrap().builder.push(v);
+                if let Err(lim) = iters.last_mut().unwrap().builder.push(v) {
+                    return Err(materialize_refused(lim, line, col));
+                }
             }
             Op::CompFilterPush(kind) => {
                 let keep = stack.pop().unwrap();
@@ -2509,7 +2552,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         // `cur_val` is dead after this (the next `CompNext` overwrites it),
                         // so move it out — no refcount bump — leaving the `Unit` placeholder.
                         let el = std::mem::replace(&mut it.cur_val, Value::Unit);
-                        it.builder.push(el);
+                        if let Err(lim) = it.builder.push(el) {
+                            return Err(materialize_refused(lim, line, col));
+                        }
                     }
                     Value::Bool(false) => {}
                     other => {

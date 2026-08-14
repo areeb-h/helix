@@ -141,12 +141,18 @@ impl super::Interp {
                 }
                 let (params, body) = comprehension_params(&args[0]);
                 comp_needs_binder(&params, name, "e.g. `xs.map(it * 2)` or `xs.map((a, b) => ...)`.", line, col)?;
-                let mut out = Vec::with_capacity(items.len());
+                // `ColumnBuilder`, not a bare `Vec<Value>`, for the same reason the VM uses
+                // one: it packs `Int`/`Float` results into 8 bytes each instead of 24-byte
+                // boxed slots, and it is the single place the materialization limit is
+                // enforced — so all three engines refuse the same program with the same
+                // words (ADR 0024), rather than the walker alone aborting the process.
+                let mut out = crate::value::ColumnBuilder::default();
                 self.eval_pattern_loop(&params, &items, body, line, col, |_el, v| {
-                    out.push(v);
+                    out.push(v)
+                        .map_err(|lim| crate::vm::materialize_refused(lim, line, col))?;
                     Ok(None)
                 })?;
-                Ok(Value::array_sniff(out))
+                Ok(out.finish())
             }
             "filter" | "where" => {
                 if args.len() != 1 {
@@ -154,10 +160,11 @@ impl super::Interp {
                 }
                 let (params, body) = comprehension_params(&args[0]);
                 comp_needs_binder(&params, name, "e.g. `xs.map(it * 2)` or `xs.map((a, b) => ...)`.", line, col)?;
-                let mut out = Vec::new();
+                let mut out = crate::value::ColumnBuilder::default();
                 self.eval_pattern_loop(&params, &items, body, line, col, |el, keep| match keep {
                     Value::Bool(true) => {
-                        out.push(el.clone());
+                        out.push(el.clone())
+                            .map_err(|lim| crate::vm::materialize_refused(lim, line, col))?;
                         Ok(None)
                     }
                     Value::Bool(false) => Ok(None),
@@ -172,7 +179,7 @@ impl super::Interp {
                     )
                     .hint("write a comparison, e.g. `xs.filter(it > 50)`.")),
                 })?;
-                Ok(Value::array_sniff(out))
+                Ok(out.finish())
             }
             // First index whose predicate result is EXACTLY `Bool(want)` (`want` is
             // `true` from source; `false` only from the `take_while`/`drop_while`
@@ -378,14 +385,21 @@ impl super::Interp {
                 .insert(n.to_string(), Binding { value: Value::Unit, mutable: false });
         }
         let mut outcome: Result<Option<Value>, HelixError> = Ok(None);
-        for el in items.to_values().iter() {
+        // `iter_values()`, NOT `to_values()`. On a packed array the latter expands every
+        // element into a boxed `Value` up front purely to iterate it: for a 100M-element
+        // `Int` array that is a 1.6 GB `Vec` allocated before the first element is even
+        // examined, and `handle_alloc_error` ABORTS the process when it cannot be had —
+        // the tree-walker's half of the ADR 0024 violation, and the reason a guard on the
+        // comprehension's *output* could never fix the walker. Iterating boxes one element
+        // at a time and allocates nothing.
+        for el in items.iter_values() {
             // Rewrite the binder value(s) for this element: a single binder takes it
             // directly; several destructure it (identical to the old per-element path).
             let bind_err = if names.len() == 1 {
                 self.env.get_mut(&names[0]).unwrap().value = el.clone();
                 None
             } else {
-                match pattern_parts(el, names.len(), line, col) {
+                match pattern_parts(&el, names.len(), line, col) {
                     Ok(parts) => {
                         for (n, v) in names.iter().zip(parts) {
                             self.env.get_mut(n).unwrap().value = v;
@@ -400,7 +414,7 @@ impl super::Interp {
                 break;
             }
             match self.eval(body) {
-                Ok(v) => match visit(el, v) {
+                Ok(v) => match visit(&el, v) {
                     Ok(None) => {}
                     other => {
                         outcome = other;
