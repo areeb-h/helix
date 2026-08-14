@@ -1343,25 +1343,66 @@ fn array_method(
             if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
-            // `numeric_vec` validates (all-numeric) and powers `empty_guard`, but the
-            // selection compares the original `Value`s EXACTLY via `numeric_cmp` — not
-            // their f64 widening, which would collapse two i64 above 2^53 to the same
-            // value and pick the wrong element (and disagree with the packed Int path).
-            let xs = numeric_vec(items, name, line, col)?;
-            empty_guard(&xs, name, line, col)?;
-            let mut best_idx = 0;
-            for i in 1..items.len() {
-                let ord = numeric_cmp(&items[i], &items[best_idx]);
-                let better = if name == "min" {
-                    ord == std::cmp::Ordering::Less
-                } else {
-                    ord == std::cmp::Ordering::Greater
-                };
-                if better {
-                    best_idx = i;
+            // WIDENED TO `sort`'s DOMAIN — ADR 0025 (b), option b1: all numbers, all
+            // strings, or all DNA, each ordered by the comparator `sort` uses for that
+            // type. `min`/`max` were the one ordering spelling still numbers-only, so
+            // `["b","a"].min()` errored while `["b","a"].min_by(it)` answered "a" and
+            // `["b","a"].sort()` answered ["a","b"] — three spellings, two domains.
+            //
+            // The REDUCTION policy is unchanged and is the part that stays different from
+            // `sort` on purpose: an array containing `missing` (or NaN) reduces to
+            // `missing` (checked above, now covering the widened types too), where sorting
+            // REFUSES — reducing and ordering-in-place are different questions (ADR 0001).
+            // The empty array still errors, via `empty_guard` on the numeric branch —
+            // `.all()` is vacuously true on empty, so empty arrays take that branch, as
+            // before.
+            //
+            // The selector below is `sort().first()`/`sort().last()` in one pass:
+            // first-wins on ties, which for numerics under `total_cmp` cannot differ from
+            // `sort`'s stable order, and for Str/Dna ties means equal `Rc` contents.
+            let pick = |cmp: &dyn Fn(&Value, &Value) -> std::cmp::Ordering| {
+                let mut best_idx = 0;
+                for i in 1..items.len() {
+                    let ord = cmp(&items[i], &items[best_idx]);
+                    let better = if name == "min" {
+                        ord == std::cmp::Ordering::Less
+                    } else {
+                        ord == std::cmp::Ordering::Greater
+                    };
+                    if better {
+                        best_idx = i;
+                    }
                 }
+                items[best_idx].clone()
+            };
+            if items.iter().all(|v| v.as_f64().is_some()) {
+                // Numeric (or empty). `numeric_cmp` compares the original `Value`s EXACTLY
+                // — not their f64 widening, which would collapse two i64 above 2^53 to the
+                // same value and pick the wrong element (and disagree with the packed Int
+                // path). `numeric_vec` cannot fail here; it powers `empty_guard`.
+                let xs = numeric_vec(items, name, line, col)?;
+                empty_guard(&xs, name, line, col)?;
+                Ok(pick(&|a, b| numeric_cmp(a, b)))
+            } else if items.iter().all(|v| matches!(v, Value::Str(_))) {
+                Ok(pick(&|a, b| match (a, b) {
+                    (Value::Str(x), Value::Str(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
+                }))
+            } else if items.iter().all(|v| matches!(v, Value::Dna(_))) {
+                Ok(pick(&|a, b| match (a, b) {
+                    (Value::Dna(x), Value::Dna(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
+                }))
+            } else {
+                // `sort`'s domain wording, with this method's name — one concept, one
+                // message (the old text named numbers only and pointed at the first
+                // offending element, which is now often a legal type in the wrong mix).
+                Err(HelixError::new(
+                    format!("`{name}` needs an array of all numbers, all strings, or all DNA"),
+                    line,
+                    col,
+                ))
             }
-            Ok(items[best_idx].clone())
         }
         "normalize" => {
             no_args(name)?;
