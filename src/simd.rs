@@ -20,8 +20,20 @@ pub fn base_counts(bytes: &[u8]) -> (i64, i64, i64, i64) {
     base_counts_scalar(bytes)
 }
 
-/// Count GC bases (`G` or `C`) and `N` bases in `bytes` → `(gc, n)`. The caller's GC
-/// fraction is `gc / (len - n)` (N excluded from the denominator).
+/// Count GC-definite and GC-classifiable bases in `bytes` → `(gc, classified)`.
+///
+/// The policy (stated in the bio docs and pinned by `dna_iupac_arithmetic_is_correct`):
+/// a base counts toward the GC fraction iff its identity *with respect to GC-ness* is
+/// certain. `S` is BY DEFINITION "G or C" — GC either way — so it belongs in the
+/// numerator; `W` ("A or T") is definitely not GC, so it belongs in the denominator
+/// only. Every code that could be either (`N`, and the partial codes
+/// `R Y K M B D H V`) is excluded from BOTH — the same rule `N` always had, extended
+/// to the codes it was arbitrarily not applied to. Counting `S` as non-GC while
+/// leaving it in the denominator — the old behaviour — was arithmetically identical
+/// to declaring it an A or a T.
+///
+/// The caller's GC fraction is `gc / classified`, and a sequence with `classified == 0`
+/// has an UNKNOWN fraction — `missing`, per ADR 0001, not `0.0`.
 pub fn gc_counts(bytes: &[u8]) -> (i64, i64) {
     #[cfg(target_arch = "x86_64")]
     {
@@ -46,12 +58,13 @@ fn base_counts_scalar(bytes: &[u8]) -> (i64, i64, i64, i64) {
 }
 
 fn gc_counts_scalar(bytes: &[u8]) -> (i64, i64) {
-    let (mut gc, mut n) = (0i64, 0i64);
+    let (mut gc, mut classified) = (0i64, 0i64);
     for &b in bytes {
-        gc += (b == b'G' || b == b'C') as i64;
-        n += (b == b'N') as i64;
+        gc += (b == b'G' || b == b'C' || b == b'S') as i64;
+        classified +=
+            (b == b'A' || b == b'C' || b == b'G' || b == b'T' || b == b'S' || b == b'W') as i64;
     }
-    (gc, n)
+    (gc, classified)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -105,35 +118,54 @@ unsafe fn base_counts_avx2(bytes: &[u8]) -> (i64, i64, i64, i64) {
 unsafe fn gc_counts_avx2(bytes: &[u8]) -> (i64, i64) {
     use std::arch::x86_64::*;
     unsafe {
-        let (vg, vc, vn) =
-            (_mm256_set1_epi8(b'G' as i8), _mm256_set1_epi8(b'C' as i8), _mm256_set1_epi8(b'N' as i8));
-        let (mut tgc, mut tn) = (0i64, 0i64);
+        let (va, vc, vg, vt, vs, vw) = (
+            _mm256_set1_epi8(b'A' as i8),
+            _mm256_set1_epi8(b'C' as i8),
+            _mm256_set1_epi8(b'G' as i8),
+            _mm256_set1_epi8(b'T' as i8),
+            _mm256_set1_epi8(b'S' as i8),
+            _mm256_set1_epi8(b'W' as i8),
+        );
+        let (mut tgc, mut tcl) = (0i64, 0i64);
         let n = bytes.len();
         let mut i = 0usize;
         while i + 32 <= n {
-            let (mut cgc, mut cn) = (_mm256_setzero_si256(), _mm256_setzero_si256());
+            let (mut cgc, mut ccl) = (_mm256_setzero_si256(), _mm256_setzero_si256());
             let mut blk = 0;
             while blk < 255 && i + 32 <= n {
                 let chunk = _mm256_loadu_si256(bytes.as_ptr().add(i) as *const __m256i);
+                // GC-definite: G, C, or S ("G or C" — GC either way).
                 let is_gc = _mm256_or_si256(
-                    _mm256_cmpeq_epi8(chunk, vg),
-                    _mm256_cmpeq_epi8(chunk, vc),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi8(chunk, vg),
+                        _mm256_cmpeq_epi8(chunk, vc),
+                    ),
+                    _mm256_cmpeq_epi8(chunk, vs),
+                );
+                // Classifiable: the GC-definite set plus A, T, and W ("A or T").
+                let is_at = _mm256_or_si256(
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi8(chunk, va),
+                        _mm256_cmpeq_epi8(chunk, vt),
+                    ),
+                    _mm256_cmpeq_epi8(chunk, vw),
                 );
                 cgc = _mm256_sub_epi8(cgc, is_gc);
-                cn = _mm256_sub_epi8(cn, _mm256_cmpeq_epi8(chunk, vn));
+                ccl = _mm256_sub_epi8(ccl, _mm256_or_si256(is_gc, is_at));
                 i += 32;
                 blk += 1;
             }
             tgc += hsum_epu8(cgc);
-            tn += hsum_epu8(cn);
+            tcl += hsum_epu8(ccl);
         }
         while i < n {
             let b = bytes[i];
-            tgc += (b == b'G' || b == b'C') as i64;
-            tn += (b == b'N') as i64;
+            tgc += (b == b'G' || b == b'C' || b == b'S') as i64;
+            tcl +=
+                (b == b'A' || b == b'C' || b == b'G' || b == b'T' || b == b'S' || b == b'W') as i64;
             i += 1;
         }
-        (tgc, tn)
+        (tgc, tcl)
     }
 }
 

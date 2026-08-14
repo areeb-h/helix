@@ -336,16 +336,19 @@ impl DataHandle for PolarsFrame {
         Ok(self.derive(self.lf.clone().with_columns(exprs)))
     }
 
-    /// Sort by one or more columns — a **stable** sort.
+    /// Sort by one or more columns — a **stable** sort, by contract.
     ///
-    /// `SortMultipleOptions::default()` is `maintain_order: false`, i.e. an unstable
-    /// parallel sort: rows that tie on the key come out in a run-varying order. That
-    /// is not merely untidy, it silently tears rows apart, because every `.column()`
-    /// re-executes the lazy plan: reading two columns out of one sorted frame runs the
-    /// sort twice, and the two runs can disagree about which tied row went where, so
-    /// `d.column("h")` and `d.column("v")` return values from DIFFERENT orderings.
-    /// Ties are the common case, not the exotic one — any sort on a category, a
-    /// chromosome, a group key.
+    /// `SortMultipleOptions::default()` is `maintain_order: false`: an unstable sort,
+    /// meaning tie order is *unspecified*. Attempts to catch it actually varying
+    /// (300k rows, int and string keys, two reads of one frame in-process and across
+    /// 12 runs) found it stable in practice on the pinned Polars — so this is NOT a
+    /// measured bug fix, and no failing repro exists; see docs/v0.2.1-fix-plan.md.
+    /// It is pinned anyway because the exposure is structural: every `.column()`
+    /// re-executes the lazy plan, so if an unspecified tie order ever *did* vary
+    /// (a Polars bump, a different machine), reading two columns out of one sorted
+    /// frame would pair values from two different orderings — and ties are the common
+    /// case (categories, chromosomes, group keys). `maintain_order: true` makes the
+    /// stability ADR 0020 assumes a guarantee instead of an accident.
     fn sort(&self, names: &[String], _line: usize, _col: usize) -> Result<Df, HelixError> {
         let exprs: Vec<Expr> = names.iter().map(|n| pcol(n.as_str())).collect();
         Ok(self.derive(self.lf.clone().sort_by_exprs(

@@ -9,6 +9,13 @@ print("Total bases: {genome.map(it.length).sum()}")
 print("IDs:         {genome.map(it.id)}")
 
 # Per-sequence GC content (a Dna method, mapped over the records).
+#
+# The IUPAC policy: a base counts toward the GC fraction iff its GC-ness is certain.
+# S ("G or C") counts as GC and W ("A or T") as non-GC, while N and the partial codes
+# (R Y K M B D H V) are excluded from numerator and denominator alike — so
+# dna("GCS") reads 1.0, dna("GCN") reads 1.0, and an all-ambiguous sequence like
+# dna("NNN") has an UNKNOWN fraction: `missing`, never a fabricated 0.0. `missing`
+# then propagates through mean_gc like any other mean.
 print("GC content:  {genome.map(it.seq.gc_content())}")
 
 # Work with a single sequence — field access then sequence methods.

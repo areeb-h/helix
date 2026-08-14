@@ -11,9 +11,14 @@ use crate::error::HelixError;
 use crate::value::Value;
 
 
-/// GC fraction of a DNA string (`N` excluded from the denominator), erroring on an
-/// empty sequence — shared by the `at_content` and `mean_gc` methods.
-fn dna_gc(s: &str, who: &str, line: usize, col: usize) -> Result<f64, HelixError> {
+/// GC fraction of a DNA string, shared by `gc_content`, `at_content`, and `mean_gc` so
+/// the three cannot drift. The IUPAC policy lives on `simd::gc_counts`: `S` counts as
+/// GC, `W` as non-GC, and the codes ambiguous about GC-ness (`N`, `R Y K M B D H V`)
+/// are excluded from numerator and denominator alike. `Ok(None)` means the sequence
+/// has no classifiable base — the fraction is unknown, and the caller renders it as
+/// `missing` (ADR 0001) rather than a fabricated `0.0`. Errors only on an empty
+/// sequence, which is a mistake in the program rather than a condition in the data.
+fn dna_gc(s: &str, who: &str, line: usize, col: usize) -> Result<Option<f64>, HelixError> {
     if s.is_empty() {
         return Err(HelixError::new(
             format!("cannot compute `{who}` of an empty sequence"),
@@ -21,9 +26,10 @@ fn dna_gc(s: &str, who: &str, line: usize, col: usize) -> Result<f64, HelixError
             col,
         ));
     }
-    let gc = s.chars().filter(|c| *c == 'G' || *c == 'C').count();
-    let called = s.chars().filter(|c| *c != 'N').count();
-    Ok(if called == 0 { 0.0 } else { gc as f64 / called as f64 })
+    // `Dna` is ASCII (validated + upper-cased at construction), so count raw bytes —
+    // AVX2 when available, else the auto-vectorized scalar path.
+    let (gc, classified) = crate::simd::gc_counts(s.as_bytes());
+    Ok((classified > 0).then(|| gc as f64 / classified as f64))
 }
 
 /// Prepend the receiver and call the matching chart/writer/export free function.
@@ -1785,8 +1791,16 @@ fn array_method(
                 if seqs.is_empty() {
                     return Err(HelixError::new("cannot compute `mean_gc` of no sequences", line, col));
                 }
-                let total: f64 =
-                    seqs.iter().map(|s| dna_gc(s, name, line, col)).sum::<Result<f64, _>>()?;
+                // A sequence with no classifiable base has an unknown GC fraction, and an
+                // unknown term makes the mean unknown — the same propagation the arm's
+                // first line already applies to a `missing` element (ADR 0001).
+                let mut total = 0.0;
+                for s in &seqs {
+                    match dna_gc(s, name, line, col)? {
+                        Some(gc) => total += gc,
+                        None => return Ok(Value::Missing),
+                    }
+                }
                 Ok(Value::Float(total / seqs.len() as f64))
             }
         }
@@ -2551,14 +2565,17 @@ fn dna_method(
                     col,
                 ));
             }
-            // GC fraction over *called* bases: `N` (unknown) is excluded from the
-            // denominator, so `gc_content("GCN") == 1.0`, not 2/3. `Dna` is ASCII, so count
-            // raw bytes (AVX2 when available, else auto-vectorized scalar) — `called =
-            // len - Ns`.
-            let bytes = s.as_bytes();
-            let (gc, ns) = crate::simd::gc_counts(bytes);
-            let called = bytes.len() as i64 - ns;
-            Ok(Value::Float(if called == 0 { 0.0 } else { gc as f64 / called as f64 }))
+            // GC fraction over *classifiable* bases — see `simd::gc_counts` for the
+            // policy: `S` ("G or C") is GC, `W` ("A or T") is not, and every code that
+            // could be either (`N`, `R Y K M B D H V`) is excluded from numerator AND
+            // denominator, so `gc_content("GCN") == 1.0`, not 2/3, and `"GCS"` reads
+            // 1.0 rather than LOWER than the same sequence without the S. A sequence
+            // with no classifiable base has an unknown fraction: `missing` (ADR 0001),
+            // because 0.0 here is indistinguishable from a genuinely AT-only answer.
+            match dna_gc(s, "gc_content", line, col)? {
+                Some(gc) => Ok(Value::Float(gc)),
+                None => Ok(Value::Missing),
+            }
         }
         "complement" => {
             if !args.is_empty() {
@@ -2855,8 +2872,14 @@ fn dna_method(
             if !args.is_empty() {
                 return Err(HelixError::new("`at_content` takes no arguments", line, col));
             }
-            // AT fraction = 1 − GC fraction (over called bases; `N` excluded).
-            Ok(Value::Float(1.0 - dna_gc(s, "at_content", line, col)?))
+            // AT fraction = 1 − GC fraction, over the same classifiable-base policy —
+            // which is what makes `dna("S").at_content()` answer 0.0 (S is never A or
+            // T) instead of the old 1.0, and keeps `gc_content + at_content == 1.0`
+            // whenever either is a number at all.
+            match dna_gc(s, "at_content", line, col)? {
+                Some(gc) => Ok(Value::Float(1.0 - gc)),
+                None => Ok(Value::Missing),
+            }
         }
         // Per-base tally in ONE pass over the sequence (no per-base string allocation):
         // `{A, C, G, T, N}` where `N` collects every non-ACGT base. Access via `.A` etc.

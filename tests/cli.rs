@@ -4560,3 +4560,38 @@ fn oversized_materialization_is_an_error_not_an_abort() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+/// C1. IUPAC ambiguity codes participate in `gc_content`/`at_content` by what they
+/// actually assert, not by accident of spelling.
+///
+/// Before: `S` ("G or C" — GC by definition) was counted as non-GC while staying in
+/// the denominator, arithmetically identical to declaring it an A or a T, so
+/// `dna("GCS")` read LOWER than the same sequence without the S and `dna("S")` read
+/// 0.0 where 1.0 is provable. The policy pinned here: S is GC, W is not, and the codes
+/// genuinely ambiguous about GC-ness (N, R Y K M B D H V) are excluded from numerator
+/// and denominator alike — extending the rule N always had. A sequence with NO
+/// classifiable base has an unknown fraction: `missing` (ADR 0001), because 0.0 there
+/// is indistinguishable from a genuinely AT-only answer — and `missing` then
+/// propagates through `mean_gc`, which used to average an all-N sequence in as 0.0.
+#[test]
+fn dna_iupac_arithmetic_is_correct() {
+    let src = r#"
+print(dna("S").gc_content(), dna("S").at_content())
+print(dna("GCS").gc_content())
+print(dna("GCR").gc_content())
+print(dna("GCN").gc_content())
+print(dna("NNN").gc_content())
+print(dna("RRRR").at_content())
+print(dna("ATGCGC").gc_content())
+print([dna("GC"), dna("NN")].mean_gc())
+"#;
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("c1_iupac_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(
+            out,
+            "1.0 0.0\n1.0\n1.0\n1.0\nmissing\nmissing\n0.6666666666666666\nmissing\n",
+            "{name}: IUPAC GC arithmetic drifted from the documented policy"
+        );
+    }
+}
