@@ -1,5 +1,81 @@
 # Changelog
 
+## v0.2.0 — 2026-08-13
+
+**The consistency release.** Every breaking change this project has decided is in this one
+version, so upgrading is one deliberate step instead of a drip. Each break below names the
+ADR that argued it; each was landed with its blast radius measured first, and the ordering
+changes are specified cell-by-cell by `tests/ordering_matrix.rs` (247 pinned
+expression/answer pairs, identical on all three engines).
+
+The theme is one sentence: **a library author must be able to write correct code without
+knowing anything about the caller** — not their schema, not their manifest, not which
+builtins a future Helix adds.
+
+### Breaking
+
+- **One order, one domain** ([ADR 0025](docs/adr/0025-ordering.md), all four questions).
+  `sort`, `argsort`, `sort_by`, `min`/`max`, `min_by`/`max_by` and `argmin`/`argmax` now
+  agree about what can be ordered and what `missing` means:
+  - `argsort` (and therefore `sort_by`) adopts `sort`'s policy: an array with `missing`
+    **errors** with the same message and hint, and DNA orders. Before, `xs.sort()` and
+    `xs.sort_by(it)` disagreed with each other.
+  - `min`/`max` widen to `sort`'s type domain: strings and DNA now reduce
+    (`["b","a"].min()` is `"a"`), so `min() == sort().first()` holds everywhere. The
+    reduction policy is unchanged: `missing`/NaN still propagate as `missing`.
+  - `min_by`/`max_by` and the **method** `argmin`/`argmax` adopt the reduction policy:
+    `missing`/NaN propagate instead of raising leaked internals (`` `if` condition is
+    `missing` ``, `index 0 is out of bounds`), and the empty array gets a named error.
+    `xs.argmax()` and `argmax(xs)` now give the same answer to the same question.
+  - Signed-zero ties on `argmin`/`argmax`/`min_by` remain IEEE first-wins, now documented
+    with runnable examples in `examples/language/ordering.helix` (the gate executes them
+    on all three engines, so the documentation cannot drift).
+- **In a DataFrame query, a bare name means the binding, not the caller's column**
+  ([ADR 0028](docs/adr/0028-query-name-resolution.md)). `fn above(frame, cutoff) =
+  frame.where(@value > cutoff)` no longer changes meaning when the caller's data happens
+  to have a `cutoff` column. `@name` still pins the column side; a bare name with no
+  binding in scope is still a column. This was the last known silent wrong answer.
+- **A top-level `fn` is file-scoped** ([ADR 0027](docs/adr/0027-builtin-shadowing.md)).
+  It is callable above its own definition, and shadowing a builtin is retroactive for the
+  whole file — a name means one thing per file. This removed a silent three-engine
+  divergence, and it is what lets future Helix releases add builtins without breaking
+  published libraries that already use those names.
+
+### Fixed
+
+- **A consumer's dependency can no longer capture a library's private import.** A file's
+  own sibling now wins over a dependency key, so installing a package named `helpers`
+  cannot rewire another library's `import helpers`. The failure was silent (exit 0,
+  `check` ok, all three engines agreeing) and is now pinned by the one test able to see it.
+- **Growing an array or dict in a fold is linear.** 256k `acc.concat([x])` appends went
+  6.49s → 0.04s (158×) and 4M run in 0.25s; `Dict.insert` follows. The accumulator is
+  taken, extended and stored as one VM instruction, so nothing observes it mid-move.
+- **A `reduce` body can call a user function with a float signature** — 1.84s → 0.05s at
+  n=20M (the kernel used to decline outright). A `/0` or NaN comparison inside the callee
+  still raises the exact interpreter error.
+- Mutual recursion and forward references compile and run on all three engines, with
+  mutual tail calls constant-space to 1M frames.
+
+### Added
+
+- `raise(message[, help])` — a library can reject an argument in its own words, with a
+  `help:` line, instead of `assertion failed: …`. Caught by `try` like any error.
+- `source_path(rel)` — resolves against the directory of the file the call is written in,
+  so a package can ship and read its own data regardless of the process working directory.
+- `chars()` — a string as an array of characters (Unicode scalars). The previous
+  spelling, `replace("", "\t").split("\t")`, was both undiscoverable and wrong.
+- `helix test` runs your `## >>>` doc examples on all three engines and fails a test file
+  that asserts nothing. A facade re-export (`export f = lib.f`) keeps defaults and named
+  arguments. `helix verify` hashes a dependency's data files, not just its source.
+
+### Upgrading
+
+If your code never shadows a builtin, never names a `min_by` parameter after a DataFrame
+column, and never sorts arrays containing `missing`, v0.1.1 programs run unchanged. The
+repository's own corpus, examples and benchmarks needed **zero** edits beyond the ordering
+test matrix itself; the one fixture that deliberately pinned the old shadowing behaviour
+was regenerated.
+
 ## v0.1.1 — 2026-08-11
 
 **The first installable release.** `v0.1.0` is published but nobody can install from it, and
