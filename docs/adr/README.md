@@ -31,7 +31,7 @@ they are made deliberately and in the open.
 | [0022](0022-http-version-roadmap.md) | HTTP version roadmap (keep-alive now, HTTP/2 & HTTP/3 via established stacks) | Accepted — Stage 1 (keep-alive) implemented; HTTP/2 & HTTP/3 proposed |
 | [0023](0023-hbc-emitter-artifact-format.md) | `.hbc` emitter & portable core-bytecode artifact format (`helix emit-hbc`) | Accepted — implemented; runs in ctype ring 0, cross-producer verified |
 | [0024](0024-total-runtime-no-host-panics.md) | Total runtime: user input never aborts the host | Accepted — implemented + regression-tested; CI lint gate pending |
-| [0025](0025-ordering.md) | One order, one domain: `sort` / `argsort` / `min`-`max` / the `_by` family | **Accepted** — all four taken (a1/b1/c1/d1+d2); not yet implemented; pinned by `tests/ordering_matrix.rs` (247 cells × 3 engines) |
+| [0025](0025-ordering.md) | One order, one domain: `sort` / `argsort` / `min`-`max` / the `_by` family | **Accepted + implemented** — all four (a1/b1/c1/d1); 34 matrix cells moved across three commits, each diff the review; ships in v0.2.0 |
 | [0026](0026-library-performance-boundary.md) | Is library code meant to be fast? The indirect-call boundary | **Accepted** — libraries are first-class; monomorphize at the call site; scheduled after the append wall |
 | [0027](0027-builtin-shadowing.md) | When does `fn round(x)` start being `round`? | **Accepted** — a shadow is file-scoped and retroactive; **implemented** (`4b74056`) |
 | [0028](0028-query-name-resolution.md) | In a DataFrame query, does a bare name mean the column or the binding? | **Accepted** — a binding in scope wins, `@name` still pins the column; **implemented**; breaking, ships in v0.2.0 |

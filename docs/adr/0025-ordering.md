@@ -1,6 +1,8 @@
 # ADR 0025 — One order, one domain: unifying `sort`, `argsort`, `min`/`max` and the `_by` family
 
-- **Status:** **Accepted 2026-08-13 — all four taken (a1, b1, c1, d1+d2); not yet implemented.**
+- **Status:** **Accepted and IMPLEMENTED 2026-08-13** — a1 (`8d51f6c`), d1 (`9262684`),
+  b1 (`4b0475d`), c1 (`e073d23`). The signed-zero residue (d2) awaits comparator
+  unification and is documented in `examples/language/ordering.helix`. Ships in v0.2.0.
   The evidence artifact exists and is green: `tests/ordering_matrix.rs` pins 247 cells
   (19 shapes × 13 spellings) on all three engines and passes against `e267a25`. It is a
   regression net for whichever direction is chosen, not an endorsement of today.
