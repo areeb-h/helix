@@ -69,6 +69,11 @@ pub enum ColExpr {
     Lit(Value),
     Unary(UnOp, Box<ColExpr>),
     Binary(BinOp, Box<ColExpr>, Box<ColExpr>),
+    /// `expr.is_missing()` — the EXPLICIT null test, and the only sanctioned way to
+    /// select missing rows. `@v == missing` is not it and never will be: under ADR 0001
+    /// `missing == missing` is `missing`, so that predicate selects nothing — on arrays
+    /// and in queries alike, deliberately kept in agreement.
+    IsMissing(Box<ColExpr>),
 }
 
 /// The engine-facing DataFrame interface. One `impl` per backend; all engine
@@ -190,6 +195,16 @@ pub fn ast_to_colexpr(
                 .hint(format!("available columns: {}", columns.join(", "))))
             }
         }
+        // `expr.is_missing()` — the universal method, admitted inside queries so intent
+        // about missing data is EXPRESSIBLE without bending `==`: `where(@v == missing)`
+        // silently selects nothing (correctly — `missing == missing` is `missing`, and
+        // queries agree with arrays on that), which left no honest spelling at all. Now
+        // `where(@v.is_missing())` and `where(not @v.is_missing())` are the spellings,
+        // matching what `[..].map(it.is_missing())` already means on arrays.
+        Ast::Method { recv, name, args, .. } if name == "is_missing" && args.is_empty() => {
+            let inner = ast_to_colexpr(recv, columns, resolve_var)?;
+            Ok(ColExpr::IsMissing(Box::new(inner)))
+        }
         Ast::Unary { op, expr, .. } => {
             let inner = ast_to_colexpr(expr, columns, resolve_var)?;
             Ok(ColExpr::Unary(op.clone(), Box::new(inner)))
@@ -305,6 +320,8 @@ pub fn validate_predicate(pred: &ColExpr, line: usize, col: usize) -> Result<(),
             // `not` preserves its operand's verdict: `not 1` is as wrong as `1`.
             ColExpr::Unary(UnOp::Not, inner) => shape(inner),
             ColExpr::Unary(..) => Some(false),
+            // A null test is a condition whatever its operand holds.
+            ColExpr::IsMissing(_) => Some(true),
         }
     }
     if shape(pred) != Some(false) {
@@ -323,6 +340,7 @@ pub fn validate_predicate(pred: &ColExpr, line: usize, col: usize) -> Result<(),
         }
         ColExpr::Binary(..) => "an arithmetic expression".to_string(),
         ColExpr::Col(_) => unreachable!("a bare column is never provably non-boolean"),
+        ColExpr::IsMissing(_) => unreachable!("a null test is always a condition"),
     };
     Err(
         HelixError::new(format!("a filter predicate must be a condition, but this is {what}"), line, col)

@@ -4916,3 +4916,29 @@ fn describe_reports_signatures_from_the_checker() {
         );
     }
 }
+
+/// The missing-data escape hatch in queries (dx-plan do-later, landed; the last open
+/// edge of the v0.2.1 B2 blocker). `where(@v == missing)` selects nothing and always
+/// will — `missing == missing` is `missing` under ADR 0001, and queries deliberately
+/// agree with arrays — so intent needs its own spellings: `@col.is_missing()` inside
+/// a predicate (lowered to the Arrow validity bitmap, which IS Helix's `missing`),
+/// its `not` negation, and frame-level `drop_missing()`, which keeps rows where EVERY
+/// column is non-missing and desugars to the same validated filter `where` runs.
+#[test]
+fn queries_can_name_missingness_explicitly() {
+    let src = r#"
+df = dataframe({g: ["a", "b", "c", "d"], v: [1.0, missing, 3.0, missing], w: [10, 20, missing, 40]})
+print(df.where(@v.is_missing()).column("g"))
+print(df.where(not @v.is_missing()).count())
+print(df.drop_missing().column("g"))
+print(df.where(@v == missing).count())
+r = try df.drop_missing(@v)
+print(r.ok)
+"#;
+    let want = "[\"b\", \"d\"]\n2\n[\"a\"]\n0\nfalse\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("missing_query_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: missingness spellings drifted");
+    }
+}

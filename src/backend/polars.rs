@@ -191,6 +191,8 @@ fn lower(e: &ColExpr) -> Result<Expr, HelixError> {
                 UnOp::Not => i.not(),
             }
         }
+        // Arrow's validity bitmap IS Helix's `missing`, so the null test lowers exactly.
+        ColExpr::IsMissing(inner) => lower(inner)?.is_null(),
         ColExpr::Binary(op, l, r) => {
             let l = lower(l)?;
             let r = lower(r)?;
