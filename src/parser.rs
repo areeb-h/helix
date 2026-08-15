@@ -55,9 +55,30 @@ fn is_const_default(e: &Expr) -> bool {
 /// Returns the hole's expression plus any `do {}` binding names it contained, so the
 /// enclosing parser can fold them into its own list — otherwise an interpolated
 /// `"{do { n = 1 … }}"` would be the one place the mut-global shadow check does not reach.
-fn parse_expression(src: &str, depth: usize, sigs: &HashMap<String, FnSig>) -> Result<(Expr, Vec<DoBinding>), HelixError> {
+///
+/// `imports` rides along for the same reason `sigs` does: an interpolation hole is a
+/// fresh Parser, and every piece of enclosing-parser state it does NOT inherit is a
+/// place where a rule holds outside a string but not inside one. That is not
+/// hypothetical — the module-namespace guard on the comprehension desugars shipped in
+/// v0.2.2 covering `print(mod.position(…))` but not `emit("{mod.position(…)}")`,
+/// because this constructor filled `imports` with an empty set. The field report that
+/// caught it noted the interpolated form is the idiomatic one, so the fix had missed
+/// exactly where users hit it first.
+fn parse_expression(
+    src: &str,
+    depth: usize,
+    sigs: &HashMap<String, FnSig>,
+    imports: &std::collections::HashSet<String>,
+) -> Result<(Expr, Vec<DoBinding>), HelixError> {
     let tokens = crate::lexer::lex(src)?;
-    let mut p = Parser { toks: tokens, pos: 0, depth, fn_sigs: (*sigs).clone(), do_bindings: Vec::new(), imports: std::collections::HashSet::new() };
+    let mut p = Parser {
+        toks: tokens,
+        pos: 0,
+        depth,
+        fn_sigs: (*sigs).clone(),
+        do_bindings: Vec::new(),
+        imports: imports.clone(),
+    };
     p.skip_newlines();
     let e = p.expr()?;
     p.skip_newlines();
@@ -2370,7 +2391,7 @@ impl Parser {
                             // Relocate it to the interpolated string's real position so
                             // the caret points at the user's actual source, not line 1.
                             let (mut e, hole_do_bindings) =
-                                parse_expression(&src, self.depth, &self.fn_sigs)
+                                parse_expression(&src, self.depth, &self.fn_sigs, &self.imports)
                                     .map_err(|err| HelixError { line: l, col: c, ..err })?;
                             // Fold the hole's `do {}` bindings into this parser's list, at
                             // the string's real position for the same reason the error and

@@ -5110,3 +5110,38 @@ print([[5], [6]].reduce([], (acc, x) => acc.concat(x)))
         assert_eq!(out, want, "{name}: duplicate-binder fold diverged");
     }
 }
+
+/// The module-namespace guard reaches interpolation holes (physics field report,
+/// v0.2.2). The v0.2.2 fix covered `print(mod.position(…))` but not
+/// `emit("{mod.position(…)}")` — an interpolation hole is parsed by a FRESH Parser,
+/// and its empty `imports` set meant the comprehension desugars fired again exactly
+/// where users print things. `imports` now rides into `parse_expression` the same way
+/// `fn_sigs` already did. Array sugar inside holes is pinned unchanged.
+#[test]
+fn qualified_module_calls_work_inside_interpolation() {
+    let dir = std::env::temp_dir().join("helix_it_interpmod");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("modx.helix"),
+        "export fn position(a, b, c, d) = a + b + c + d\nexport fn zipmap(x) = x + 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.helix"),
+        "import modx\n\
+         print(\"{modx.position(1.0, 2.0, 3.0, 4.0)}\")\n\
+         print(\"val: {modx.zipmap(41)}\")\n\
+         print(\"{[5, 6, 7].position(it == 6)}\")\n",
+    )
+    .unwrap();
+    let want = "10.0\nval: 42\n1\n";
+    for (name, env) in ENGINES {
+        let mut envv: Vec<(&str, &str)> = env.to_vec();
+        envv.push(("HELIX_PATH", dir.to_str().unwrap()));
+        let (out, err, code) = run(&["run", dir.join("main.helix").to_str().unwrap()], &envv, "");
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: interpolation-hole module call drifted");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

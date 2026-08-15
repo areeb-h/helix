@@ -166,6 +166,19 @@ pub fn format_source(src: &str) -> Result<String, HelixError> {
         out.push_str(&render_line(src, line));
         out.push('\n');
 
+        // A step whose bracket this line's TRAILING closers ended is dead: a step's
+        // bracket closes when depth falls back to its opening level (`low <= at`), but
+        // only LEADING closers participate in the indent unwind above — so a body that
+        // ends with its closers at the END of the line
+        // (`…reduce(0.0, (acc, j) => acc + 1.0))`) left its step queued, and the NEXT
+        // flush-left line popped it and inherited its indent. That is how a column-0
+        // comment after a wrapped nested lambda came out at column 2, more indented
+        // than the `export fn` it documented. Dead steps are discarded silently — they
+        // must not influence anyone's indent; this line's own indent was already
+        // decided above.
+        while steps.last().is_some_and(|&(at, _)| at >= low) {
+            steps.pop();
+        }
         // If the line leaves something open, it is the opener of one step — one, however
         // many brackets it actually left open.
         let opened = end_depth > low;
@@ -502,6 +515,16 @@ mod tests {
         assert_eq!(f("x = 1#note"), "x = 1 #note\n");
         // A whole-line comment takes its statement's indent and is otherwise untouched.
         assert_eq!(f("f(\n# why\n1\n)"), "f(\n  # why\n  1\n)\n");
+        // A body whose closers sit at the END of a wrapped line (a nested lambda wrapped
+        // across lines) ends its indent step THERE: the following column-0 comment and
+        // `fn` stay at column 0. The dead step used to survive — only leading closers
+        // unwound — and the next flush-left line popped it and inherited its indent, so
+        // the comment came out MORE indented than the function it documented (physics
+        // field report, v0.2.2).
+        assert_eq!(
+            f("fn a(xs) =\n  xs.map(i =>\n    i + 1)\n\n# note\nfn b(x) = x\n"),
+            "fn a(xs) =\n  xs.map(i =>\n    i + 1)\n\n# note\nfn b(x) = x\n"
+        );
     }
 
     /// A file that does not PARSE still formats — the moment a formatter is most wanted.
