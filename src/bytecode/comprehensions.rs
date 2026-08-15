@@ -1420,6 +1420,40 @@ impl super::Compiler {
             b.emit(op, line, col);
             return Ok(());
         }
+        // The STRING fold (ADR 0029, plan #2): the body is exactly `"{acc}…tail…"` —
+        // parts[0] the bare accumulator hole with NO format spec (a spec re-pads the
+        // WHOLE accumulator each iteration; append would be wrong), and no later hole
+        // mentioning the accumulator (that pushes an `Rc` clone, so the take would
+        // always find it shared — correct but silently quadratic; declining at compile
+        // time keeps the fast path honestly fast, the deliberately-narrow house
+        // precedent). The tail's holes compile left-to-right exactly as `Expr::Interp`'s
+        // ordinary lowering would, skipping only the accumulator's own `LoadLocal`,
+        // which is side-effect-free. `expr_uses_ident` is conservative — an unknown
+        // node shape reports "uses", so it can only ever decline a safe shape.
+        if pa != pb
+            && let Expr::Interp(parts) = body
+            && matches!(
+                parts.first(),
+                Some(crate::ast::InterpPart::Expr(e, None))
+                    if matches!(&**e, Expr::Ident { name: n, .. } if n == pa)
+            )
+            && !parts[1..].iter().any(|p| match p {
+                crate::ast::InterpPart::Expr(e, _) => crate::jit::expr_uses_ident(e, pa),
+                crate::ast::InterpPart::Lit(_) => false,
+            })
+        {
+            for p in &parts[1..] {
+                if let crate::ast::InterpPart::Expr(e, _) = p {
+                    self.compile_expr(b, e)?;
+                }
+            }
+            b.emit(
+                Op::AppendStrIntoLocal(acc, std::rc::Rc::new(parts.clone())),
+                line,
+                col,
+            );
+            return Ok(());
+        }
         self.compile_expr(b, body)?;
         b.emit(Op::StoreLocal(acc), line, col);
         Ok(())

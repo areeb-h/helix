@@ -163,6 +163,17 @@ pub(crate) fn materialize_refused(
     }
 }
 
+/// The interpolation cap error, word-for-word `Op::Interp`'s (and the walker's at
+/// `interp.rs`) — shared so `Op::AppendStrIntoLocal` cannot drift from it.
+fn interp_too_long(line: usize, col: usize) -> HelixError {
+    HelixError::new(
+        format!("interpolated string exceeds {} bytes", crate::interp::MAX_STRING_LEN),
+        line,
+        col,
+    )
+    .hint("build large text incrementally or write it to a file instead.")
+}
+
 /// Project a (gated-scalar) argument value into a hashable memo argument.
 fn memo_arg(v: &Value) -> MemoArg {
     match v {
@@ -736,6 +747,96 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     unreachable!("accumulator type checked immediately above")
                 };
                 locals[at] = Value::insert_in_place(cur, k, v);
+            }
+            Op::AppendStrIntoLocal(slot, parts) => {
+                // Only the TAIL's holes (parts[1..]) were compiled, so only those are
+                // on the stack; parts[0] is the accumulator hole by construction.
+                let mut holes = 0usize;
+                let mut cap = 0usize;
+                for p in parts.iter().skip(1) {
+                    match p {
+                        crate::ast::InterpPart::Lit(t) => cap += t.len(),
+                        crate::ast::InterpPart::Expr(..) => holes += 1,
+                    }
+                }
+                let base = stack.len() - holes;
+                // 1. ALL fallible rendering first, into a scratch tail, per-hole errors
+                //    at each hole's own position exactly as `Op::Interp` reports them —
+                //    so any failure leaves the slot untouched for the catch continuation.
+                let mut tail = String::with_capacity(cap + holes * 4);
+                let mut vi = base;
+                for part in parts.iter().skip(1) {
+                    match part {
+                        crate::ast::InterpPart::Lit(t) => tail.push_str(t),
+                        crate::ast::InterpPart::Expr(e, spec) => {
+                            let (el, ec) = e.position();
+                            match spec {
+                                Some(fs) => tail.push_str(
+                                    &fs.apply(&stack[vi]).map_err(|m| HelixError::new(m, el, ec))?,
+                                ),
+                                None => crate::value::write_value(&mut tail, &stack[vi], el, ec)?,
+                            }
+                            vi += 1;
+                        }
+                    }
+                }
+                let at = frames[fi].base + *slot as usize;
+                if let Value::Str(peek) = &locals[at] {
+                    // 2. The cap, BEFORE the take — `push_str` only grows, so checking
+                    //    the crossing once is monotone-equivalent to `Op::Interp`'s
+                    //    per-part check, with the byte-identical wording.
+                    if peek.len() + tail.len() > crate::interp::MAX_STRING_LEN {
+                        return Err(interp_too_long(line, col));
+                    }
+                    // 3. The take. A unique `Rc` extends in place with FALLIBLE growth
+                    //    — a refused reservation restores the slot and reports (ADR
+                    //    0024), never aborts. A shared one (a kept init, a captured
+                    //    accumulator) pays one content copy, bit-identical to the
+                    //    ordinary lowering.
+                    let Value::Str(cur) = std::mem::replace(&mut locals[at], Value::Unit)
+                    else {
+                        unreachable!("accumulator type checked immediately above")
+                    };
+                    let new = match std::rc::Rc::try_unwrap(cur) {
+                        Ok(mut s) => {
+                            if s.try_reserve(tail.len()).is_err() {
+                                let bytes = s.len() + tail.len();
+                                locals[at] = Value::Str(std::rc::Rc::new(s));
+                                return Err(materialize_refused(
+                                    crate::value::MaterializeLimit::Alloc(bytes),
+                                    line,
+                                    col,
+                                ));
+                            }
+                            s.push_str(&tail);
+                            s
+                        }
+                        Err(shared) => {
+                            let mut s = String::with_capacity(shared.len() + tail.len());
+                            s.push_str(&shared);
+                            s.push_str(&tail);
+                            s
+                        }
+                    };
+                    stack.truncate(base);
+                    locals[at] = Value::Str(std::rc::Rc::new(new));
+                } else {
+                    // 2b. A non-`Str` accumulator (a `0` init on iteration one): the
+                    //     general path FORMATS it — build fresh, never error. The next
+                    //     iteration's accumulator is a `Str` and the fast path engages.
+                    let mut s = String::with_capacity(tail.len() + 16);
+                    let (el, ec) = match parts.first() {
+                        Some(crate::ast::InterpPart::Expr(e, _)) => e.position(),
+                        _ => (line, col),
+                    };
+                    crate::value::write_value(&mut s, &locals[at], el, ec)?;
+                    s.push_str(&tail);
+                    if s.len() > crate::interp::MAX_STRING_LEN {
+                        return Err(interp_too_long(line, col));
+                    }
+                    stack.truncate(base);
+                    locals[at] = Value::Str(std::rc::Rc::new(s));
+                }
             }
             Op::StoreLocal(slot) => {
                 let base = frames[fi].base;

@@ -330,14 +330,39 @@ impl super::Interp {
                 // inits, captured accumulators and self-referencing arguments all fall
                 // to the copy path with identical answers (ADR 0029: correct at the
                 // old cost, never wrong at any cost).
-                let fold_step: Option<(bool, &[Expr])> = if want_scan || pa == pb {
+                enum FoldFast<'a> {
+                    Concat(&'a [Expr]),
+                    Insert(&'a [Expr]),
+                    /// The string fold `"{acc}…tail…"` — same admission as the
+                    /// compiler's `AppendStrIntoLocal` arm: parts[0] the bare
+                    /// accumulator hole with no format spec, and no later hole
+                    /// mentioning the accumulator.
+                    AppendStr(&'a [crate::ast::InterpPart]),
+                }
+                let fold_step: Option<FoldFast> = if want_scan || pa == pb {
                     None
                 } else if let Expr::Method { recv, name: vn, args: va, named, .. } = body
                     && named.is_empty()
                     && matches!(&**recv, Expr::Ident { name: n, .. } if n == pa)
                     && matches!((vn.as_str(), va.len()), ("concat", 1) | ("insert", 2))
                 {
-                    Some((vn == "concat", va.as_slice()))
+                    Some(if vn == "concat" {
+                        FoldFast::Concat(va.as_slice())
+                    } else {
+                        FoldFast::Insert(va.as_slice())
+                    })
+                } else if let Expr::Interp(parts) = body
+                    && matches!(
+                        parts.first(),
+                        Some(crate::ast::InterpPart::Expr(e, None))
+                            if matches!(&**e, Expr::Ident { name: n, .. } if n == pa)
+                    )
+                    && !parts[1..].iter().any(|p| match p {
+                        crate::ast::InterpPart::Expr(e, _) => crate::jit::expr_uses_ident(e, pa),
+                        crate::ast::InterpPart::Lit(_) => false,
+                    })
+                {
+                    Some(FoldFast::AppendStr(parts.as_slice()))
                 } else {
                     None
                 };
@@ -348,8 +373,15 @@ impl super::Interp {
                 for el in items.iter_values() {
                     self.env.get_mut(pa).unwrap().value = acc;
                     self.env.get_mut(pb).unwrap().value = el;
-                    if let Some((is_concat, va)) = fold_step {
-                        match self.fold_take_append(is_concat, va, pa, line, col) {
+                    if let Some(step) = &fold_step {
+                        let r = match step {
+                            FoldFast::Concat(va) => self.fold_take_append(true, va, pa, line, col),
+                            FoldFast::Insert(va) => self.fold_take_append(false, va, pa, line, col),
+                            FoldFast::AppendStr(parts) => {
+                                self.fold_append_str(parts, pa, line, col)
+                            }
+                        };
+                        match r {
                             Ok(v) => acc = v,
                             Err(e) => {
                                 acc = Value::Unit;
@@ -468,6 +500,90 @@ impl super::Interp {
                 unreachable!("accumulator type checked immediately above")
             };
             Ok(Value::insert_in_place(cur, k, v))
+        }
+    }
+
+    /// One element of the STRING fold fast path — the walker twin of
+    /// `Op::AppendStrIntoLocal`, same order of operations: render the tail first (all
+    /// fallible work with the binding untouched), the cap crossing with the
+    /// interpolation's exact wording, the non-`Str` fresh-build fallback (the general
+    /// path FORMATS a `0` init, it does not error), and only then the take — a unique
+    /// `Rc` extends in place with fallible growth, a shared one pays one content copy.
+    fn fold_append_str(
+        &mut self,
+        parts: &[crate::ast::InterpPart],
+        pa: &str,
+        line: usize,
+        col: usize,
+    ) -> Result<Value, HelixError> {
+        use crate::ast::InterpPart;
+        let mut tail = String::new();
+        for part in &parts[1..] {
+            match part {
+                InterpPart::Lit(t) => tail.push_str(t),
+                InterpPart::Expr(e, spec) => {
+                    let v = self.eval(e)?;
+                    let (el, ec) = e.position();
+                    match spec {
+                        Some(fs) => tail.push_str(
+                            &fs.apply(&v).map_err(|m| HelixError::new(m, el, ec))?,
+                        ),
+                        None => crate::value::write_value(&mut tail, &v, el, ec)?,
+                    }
+                }
+            }
+        }
+        let too_long = || {
+            HelixError::new(
+                format!("interpolated string exceeds {} bytes", crate::interp::MAX_STRING_LEN),
+                line,
+                col,
+            )
+            .hint("build large text incrementally or write it to a file instead.")
+        };
+        let slot = &mut self.env.get_mut(pa).unwrap().value;
+        if matches!(&*slot, Value::Str(_)) {
+            let Value::Str(cur) = &*slot else { unreachable!() };
+            if cur.len() + tail.len() > crate::interp::MAX_STRING_LEN {
+                return Err(too_long());
+            }
+            let Value::Str(cur) = std::mem::replace(slot, Value::Unit) else {
+                unreachable!("accumulator type checked immediately above")
+            };
+            let new = match std::rc::Rc::try_unwrap(cur) {
+                Ok(mut s) => {
+                    if s.try_reserve(tail.len()).is_err() {
+                        let bytes = s.len() + tail.len();
+                        *slot = Value::Str(std::rc::Rc::new(s));
+                        return Err(crate::vm::materialize_refused(
+                            crate::value::MaterializeLimit::Alloc(bytes),
+                            line,
+                            col,
+                        ));
+                    }
+                    s.push_str(&tail);
+                    s
+                }
+                Err(shared) => {
+                    let mut s = String::with_capacity(shared.len() + tail.len());
+                    s.push_str(&shared);
+                    s.push_str(&tail);
+                    s
+                }
+            };
+            Ok(Value::Str(std::rc::Rc::new(new)))
+        } else {
+            let mut s = String::with_capacity(tail.len() + 16);
+            let (el, ec) = match parts.first() {
+                Some(InterpPart::Expr(e, _)) => e.position(),
+                _ => (line, col),
+            };
+            crate::value::write_value(&mut s, slot, el, ec)?;
+            s.push_str(&tail);
+            if s.len() > crate::interp::MAX_STRING_LEN {
+                return Err(too_long());
+            }
+            Ok(Value::Str(std::rc::Rc::new(s)))
         }
     }
 

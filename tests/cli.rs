@@ -3911,11 +3911,12 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         ("src/interp/ops.rs", 3),
         ("src/interp/access.rs", 1),
         ("src/interp/builtins.rs", 8),
-        // 6: the two additions are `fold_take_append`'s `env.get_mut(pa).unwrap()`s —
-        // the reduce arm inserts both binders unconditionally before the loop and
-        // nothing removes them until the restore after it, the same invariant the
-        // loop's own pre-existing `get_mut(pa)/get_mut(pb)` unwraps rely on.
-        ("src/interp/comprehensions.rs", 6),
+        // 7: `fold_take_append`'s two `env.get_mut(pa).unwrap()`s plus
+        // `fold_append_str`'s one — the reduce arm inserts both binders
+        // unconditionally before the loop and nothing removes them until the restore
+        // after it, the same invariant the loop's own pre-existing
+        // `get_mut(pa)/get_mut(pb)` unwraps rely on.
+        ("src/interp/comprehensions.rs", 7),
         ("src/interp/dataframe_ops.rs", 0),
         // +3 (52 → 55): `TryJitScan`'s three operand pops. Emitted at exactly one compiler
         // site, which pushes `[start, end, init]` immediately before the op — proven at the
@@ -5212,5 +5213,64 @@ print(w.ok, acc)
         let (out, err, code) = run_source(src, env, &format!("wfold_sem_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
         assert_eq!(out, want, "{name}: fold fast-path semantics drifted");
+    }
+}
+
+/// The string-interpolation fold is amortized-linear on every engine (ADR 0029, plan
+/// #2): `Op::AppendStrIntoLocal` on the VM (which also serves JIT mode — a Str-init
+/// fold never takes a kernel), and the walker's `fold_append_str` twin. Before, every
+/// element copied the whole accumulator into a fresh `String` (13.6–14.6× per 4× n on
+/// all three engines); after, 4× n costs ~1.8×. Same class pin as the walker fold:
+/// ratio, not wall-clock, threshold 8× against quadratic's ~14×.
+#[test]
+fn interpolation_fold_is_linear_on_all_engines() {
+    for (name, env) in ENGINES {
+        let time_of = |n: usize| {
+            let src = format!(
+                "print(range(0, {n}).reduce(\"\", (acc, x) => \"{{acc}}x\").length())\n"
+            );
+            let start = std::time::Instant::now();
+            let (out, err, code) = run_source(&src, env, &format!("strfold_{name}_{n}"));
+            assert_eq!(code, Some(0), "{name}: {err}");
+            assert_eq!(out.trim(), n.to_string(), "{name}");
+            start.elapsed().as_secs_f64()
+        };
+        let t1 = time_of(65_536);
+        let t4 = time_of(262_144);
+        let ratio = t4 / t1.max(1e-9);
+        assert!(
+            ratio < 8.0,
+            "{name}: interp fold went quadratic again: 4x n cost {ratio:.1}x \
+             (t1={t1:.3}s t4={t4:.3}s)"
+        );
+    }
+}
+
+/// The string fold fast path's semantics, pinned on all three engines against the
+/// general path's behavior: a non-`Str` init FORMATS (never errors) and re-engages the
+/// fast path next iteration; a format spec on the accumulator hole DECLINES (it
+/// re-pads the whole accumulator — append would be wrong); a shared init survives
+/// untouched; specs on element holes work inside the fast path; scan keeps snapshot
+/// history; a mid-fold error is caught. Every line byte-identical to the pre-change
+/// released binary at landing.
+#[test]
+fn string_fold_fast_path_semantics_are_pinned() {
+    let src = r#"
+print(range(0, 3).reduce("", (acc, x) => "{acc}{x}"))
+print(range(0, 3).reduce(0, (acc, x) => "{acc}{x}"))
+print(range(0, 3).reduce("", (acc, x) => "{acc:>4}{x}"))
+s0 = "seed"
+print(range(0, 3).reduce(s0, (acc, x) => "{acc}{x}"), s0)
+print(range(0, 3).reduce("", (acc, x) => "{acc}{x}!{x * 2}"))
+print(range(0, 4).scan("", (acc, x) => "{acc}{x}"))
+print(range(0, 3).reduce("", (a, x) => "{a}{x:03d}"))
+r = try range(0, 3).reduce("", (acc, x) => "{acc}{1 // 0}")
+print(r.ok)
+"#;
+    let want = "012\n0012\n    012\nseed012 seed\n0!01!22!4\n[\"0\", \"01\", \"012\", \"0123\"]\n000001002\nfalse\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("strfold_sem_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: string-fold fast path drifted");
     }
 }

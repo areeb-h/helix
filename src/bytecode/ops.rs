@@ -190,6 +190,30 @@ pub enum Op {
     /// work; this is it, for the one shape that can be recognised without a liveness
     /// analysis. Stack order is key then value, so the value pops first.
     InsertIntoLocal(u32),
+    /// `acc = "{acc}…tail…"` for a reduce accumulator in local `slot` — the STRING twin
+    /// of [`Op::ConcatIntoLocal`] (ADR 0029, plan #2), same take-append-store shape and
+    /// the same `Rc` reason: `Op::Interp` copies the WHOLE accumulator into a fresh
+    /// `String` every element, so the interpolation fold was quadratic on every engine
+    /// (13.6–14.6× per 4× n).
+    ///
+    /// Carries the interpolation's own parts vector; `parts[0]` is BY CONSTRUCTION the
+    /// bare accumulator hole with no format spec (the emitter declines a spec — it
+    /// re-pads the whole accumulator each iteration, so append would be semantically
+    /// wrong — and declines any later hole that mentions the accumulator, which would
+    /// pin the `Rc` shared and make the fast path silently slow). Only the holes in
+    /// `parts[1..]` are compiled, so only those are on the stack.
+    ///
+    /// Order of operations is the safety argument: the TAIL is rendered first into a
+    /// scratch string — every fallible step (hole formatting, the `MAX_STRING_LEN` cap
+    /// with the interpolation's exact wording) happens with the slot untouched, so an
+    /// error mid-fold leaves the frame exactly as the ordinary lowering would. A
+    /// non-`Str` accumulator (a `0` init on iteration one) falls back to the ordinary
+    /// fresh build — the general path FORMATS it, it does not error — and the next
+    /// iteration re-engages the fast path. Only then the take: a unique `Rc` extends in
+    /// place with FALLIBLE growth (a refused reservation restores the slot and reports,
+    /// never aborts — ADR 0024); a shared one pays one content copy, which keeps every
+    /// aliased case bit-identical to the ordinary lowering.
+    AppendStrIntoLocal(u32, std::rc::Rc<Vec<crate::ast::InterpPart>>),
     /// `any`/`all` per-element test. Pops a boolean: short-circuits to the target
     /// on a determining result (`true` for `any`, `false` for `all`); a `missing`
     /// sets the seen-missing slot; a non-boolean errors. Fields: (is_all, sm_slot,

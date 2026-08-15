@@ -1585,7 +1585,7 @@ fn f64_range_body_eligible(
 /// (`_ => true`). Under-approximating here (returning `false` for a node that DOES use the
 /// accumulator, as a bare `_ => false` did for `let … in acc`) would wrongly enable multi-acc and
 /// then panic in codegen (the accumulator is intentionally absent from the partials' `vars`).
-fn expr_uses_ident(e: &Expr, name: &str) -> bool {
+pub(crate) fn expr_uses_ident(e: &Expr, name: &str) -> bool {
     match e {
         Expr::Ident { name: n, .. } => n == name,
         Expr::Int(_) | Expr::Float(_) => false,
