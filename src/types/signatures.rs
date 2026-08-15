@@ -958,7 +958,7 @@ pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Typ
     })
 }
 
-/// Type of a record **dynamic-access** method (`get`/`has`/`keys`/`values`/`items`, see
+/// Type of a record **dynamic-access** method (`get`/`expect`/`has`/`keys`/`values`/`items`, see
 /// `record_method`). `get` is permissive (Unknown — the field value's type isn't statically
 /// known); `has` is Bool; the enumerators are arrays. Static `rec.field` access is typed the
 /// normal way (this is the escape hatch for runtime-unknown shapes).
@@ -970,6 +970,9 @@ pub(super) fn record_method_type(
 ) -> Result<Type, HelixError> {
     Ok(match name {
         "get" => Type::Unknown,
+        // The raising lookup: the value on a hit, an error on a miss — so the value's
+        // type is as unknown as get's.
+        "expect" => Type::Unknown,
         "has" => Type::Bool,
         "keys" => Type::Array(Box::new(Type::String)),
         "values" => Type::Array(Box::new(Type::Unknown)),
@@ -1004,7 +1007,7 @@ pub(super) fn record_method_type(
                     col,
                 )
                 .hint(
-                    "records have dynamic access `get`/`has`/`keys`/`values`/`items` — or use \
+                    "records have dynamic access `get`/`expect`/`has`/`keys`/`values`/`items` — or use \
                      `rec.field` directly for a known field.",
                 )),
             };

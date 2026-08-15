@@ -295,12 +295,57 @@ fn cli_doc(args: &[String]) -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 None => {
+                    // REVERSE LOOKUP: not a type — is it a METHOD or a BUILTIN? This is
+                    // the question a user actually arrives with ("is there a scan, and
+                    // how do I call it?"), and the project's own history shows the cost
+                    // of not answering it: months spent designing around a "missing"
+                    // `scan` that was one `helix doc Array` away. Owners are reported
+                    // exhaustively (`mean` lives on Array, Tensor AND GroupBy; `max` is
+                    // also a free function) — no metadata is invented: name, owners,
+                    // effect and an example receiver all exist in the registry today,
+                    // while signatures do not (see docs/dx-plan.md, do-later).
+                    let mut found = false;
+                    for (ty, methods) in tables {
+                        if methods.contains(&query) {
+                            let eff = capability::method_effect_of(query).label();
+                            let recv = suggest::receiver_for(ty);
+                            println!(
+                                "`{query}` is a method on {ty} (effect: {eff}) — e.g. \
+                                 `{recv}.{query}(...)`; full list: `helix doc {ty}`"
+                            );
+                            found = true;
+                        }
+                    }
+                    if registry::UNIVERSAL_METHODS.contains(&query) {
+                        println!(
+                            "`{query}` is a universal method (any value) — e.g. `x.{query}()`"
+                        );
+                        found = true;
+                    }
+                    if let Some(b) = registry::lookup(query) {
+                        let eff = capability::effect_of(b.path).label();
+                        println!(
+                            "`{query}` is a free function (effect: {eff}, category: {}) — \
+                             see `helix doc builtins`",
+                            registry::category_of(b.path)
+                        );
+                        found = true;
+                    }
+                    if found {
+                        return ExitCode::SUCCESS;
+                    }
+                    // Unknown everywhere: the same suggester every "is not defined"
+                    // error routes through (foreign aliases first, then one-edit typos),
+                    // then the original unknown-type wording.
                     let known: Vec<&str> = tables.iter().map(|(t, _)| *t).collect();
                     eprintln!(
                         "error: unknown type `{}`. Try one of: {} (or `builtins`).",
                         query,
                         known.join(", ")
                     );
+                    if let Some(h) = suggest::hint(query, suggest::Site::Function, &[]) {
+                        eprintln!("help: {h}");
+                    }
                     ExitCode::FAILURE
                 }
             }
@@ -1005,7 +1050,25 @@ fn cli_test(args: &[String]) -> ExitCode {
         }
         let mut files = Vec::new();
         if root.is_file() {
-            files.push(root.clone());
+            // Naming a file must mean what naming its directory means. A definitions-only
+            // module carrying `## >>>` examples is a DOC MODULE: the directory run tests
+            // it through its examples and never demands assertions, so the file run must
+            // not either — before this, the same command that PASSED a module's two
+            // examples also FAILed it for asserting nothing, in one output, and an agent
+            // narrowing from directory to file to iterate faster was punished for it.
+            // A `*_test.helix` named directly keeps the assert-or-fail contract, exactly
+            // as the directory run applies it to collected test files.
+            let is_test_file = root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("_test.helix"));
+            let doc_module = !is_test_file
+                && std::fs::read_to_string(&root).is_ok_and(|src| {
+                    !doctest::doc_examples_in(&src).is_empty() && is_definitions_only(&src)
+                });
+            if !doc_module {
+                files.push(root.clone());
+            }
         } else {
             collect_test_files(&root, &mut files);
         }
@@ -1366,8 +1429,17 @@ fn render_err(mut e: HelixError, spans: &[module::Span], multi: bool) -> String 
 }
 
 fn repl() -> ExitCode {
+    // The banner carries the map. Bare `helix` is where a new user (or agent) lands
+    // first, and the project's own history proves the cost of not pointing from here:
+    // its heaviest user spent months believing `scan` didn't exist while
+    // `helix doc Array` would have printed it. Line 1 stays exactly as it was
+    // (external scrapers key on it); the three pointer lines are copied verbatim
+    // from `print_help()` so the two surfaces cannot drift.
     println!(
-        "Helix {} — interactive session. Type an expression and press Enter; Ctrl-D to exit.",
+        "Helix {} — interactive session. Type an expression and press Enter; Ctrl-D to exit.\n    \
+         helix help               commands and usage\n    \
+         helix doc [Type]         list a type's methods (Array/String/Dna/…) or `builtins`\n    \
+         helix describe           the whole API as JSON (for LLMs/agents/tools)",
         env!("CARGO_PKG_VERSION")
     );
     let mut interp = Interp::new();

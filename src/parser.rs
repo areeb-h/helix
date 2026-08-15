@@ -2118,6 +2118,21 @@ impl Parser {
                 let (ml, mc) = self.pos();
                 return Err(mut_inside_a_body(ml, mc));
             }
+            // `fn` is item-level only. Without this arm the catch-all says "expected a
+            // value here" — true and useless, because the author's mistake is a RULE
+            // they cannot see, not a typo. Name the rule and show the local form.
+            if matches!(self.peek(), Tok::Fn) {
+                let (fl, fc) = self.pos();
+                return Err(HelixError::new(
+                    "`fn` cannot be defined inside a `do` block",
+                    fl,
+                    fc,
+                )
+                .hint(
+                    "`fn` is item-level — define it at the top of the file. For a local \
+                     function, bind a lambda instead: `f = (x) => x * 2`.",
+                ));
+            }
             // A binding is `IDENT = expr` — a single `=`, never `==`. Anything else
             // is the block's final result expression.
             let binding_name = match self.peek().clone() {

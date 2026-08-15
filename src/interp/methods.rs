@@ -548,6 +548,53 @@ fn dict_method(
             arity(1)?;
             Ok(map.get(&key_of(&args[0])?).cloned().unwrap_or(Value::Missing))
         }
+        // `expect(k)` → the value, RAISING on absence — the loud companion to `get`.
+        // ADR 0001 keeps `get`/`d[k]` answering `missing` (an absent value is a condition
+        // in the data); `expect` is for when absence would be a mistake in the PROGRAM,
+        // and it raises at the lookup — before a `missing` is minted and laundered
+        // through arithmetic into a number-shaped hole nothing downstream can trace.
+        "expect" => {
+            arity(1)?;
+            let k = key_of(&args[0])?;
+            match map.get(&k) {
+                Some(v) => Ok(v.clone()),
+                None => {
+                    let e = HelixError::new(
+                        format!(
+                            "key `{}` not found in this dict ({} key{})",
+                            args[0],
+                            map.len(),
+                            if map.len() == 1 { "" } else { "s" }
+                        ),
+                        line,
+                        col,
+                    );
+                    // One-edit did-you-mean over the dict's OWN string keys — the house
+                    // policy (a wrong suggestion is worse than silence). Non-string keys
+                    // can't typo by spelling, so they never suggest.
+                    let near = match &args[0] {
+                        Value::Str(want) => map
+                            .keys()
+                            .filter_map(|c| match c.to_value() {
+                                Value::Str(s) => crate::error::typo_distance(want, &s)
+                                    .map(|d| (d, (*s).clone())),
+                                _ => None,
+                            })
+                            .min_by_key(|(d, _)| *d)
+                            .map(|(_, s)| s),
+                        _ => None,
+                    };
+                    Err(match near {
+                        Some(s) => e.hint(format!("did you mean `{s}`?")),
+                        None => e.hint(
+                            "`.has(k)` checks presence; `.get(k)` answers `missing` \
+                             instead of raising, so `.get(k) ?? default` supplies a \
+                             fallback.",
+                        ),
+                    })
+                }
+            }
+        }
         // `has` is the alias that matches a record's `has` — the same key-presence question,
         // one name across both keyed types.
         "contains" | "has" => {
@@ -642,6 +689,44 @@ fn record_method(
             let k = key(&args[0])?;
             let found = fields.iter().find(|(s, _)| s.as_str() == k).map(|(_, v)| v.clone());
             Ok(found.unwrap_or_else(|| args.get(1).cloned().unwrap_or(Value::Missing)))
+        }
+        // `expect(k)` → the field's value, RAISING on absence — the record twin of the
+        // dict arm above: the loud lookup for when a missing field means the PROGRAM is
+        // wrong, raising before a `missing` is minted (ADR 0001's propagating default
+        // stays on `get` and static access).
+        "expect" => {
+            arity(1)?;
+            let k = key(&args[0])?;
+            match fields.iter().find(|(s, _)| s.as_str() == k) {
+                Some((_, v)) => Ok(v.clone()),
+                None => {
+                    let e = HelixError::new(
+                        format!(
+                            "field `{k}` not found in this record ({} field{})",
+                            fields.len(),
+                            if fields.len() == 1 { "" } else { "s" }
+                        ),
+                        line,
+                        col,
+                    );
+                    let near = fields
+                        .iter()
+                        .filter_map(|(s, _)| {
+                            crate::error::typo_distance(&k, s.as_str())
+                                .map(|d| (d, s.as_str().to_string()))
+                        })
+                        .min_by_key(|(d, _)| *d)
+                        .map(|(_, s)| s);
+                    Err(match near {
+                        Some(s) => e.hint(format!("did you mean `{s}`?")),
+                        None => e.hint(
+                            "`.has(k)` checks presence; `.get(k)` answers `missing` \
+                             instead of raising, so `.get(k, default)` supplies a \
+                             fallback.",
+                        ),
+                    })
+                }
+            }
         }
         "has" => {
             arity(1)?;
@@ -3222,10 +3307,11 @@ fn unknown_method(
     );
     match crate::suggest::hint(name, crate::suggest::Site::Method, candidates) {
         Some(h) => err.hint(h),
+        // No near-miss: point at the doc command instead of dumping 79 names — a dump
+        // is a haystack, `helix doc Array` is an answer. Byte-identical to the checker
+        // twin in `types.rs` so the engines cannot drift.
         None => err.hint(format!(
-            "available {} methods: {}",
-            type_name,
-            candidates.join(", ")
+            "no similar method — `helix doc {type_name}` lists all {type_name} methods."
         )),
     }
 }

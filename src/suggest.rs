@@ -112,6 +112,12 @@ const ALIASES: &[(&str, Target)] = &[
     ("numel", Target::Method("length")),
     ("size", Target::Method("length")),
     ("count", Target::Method("count")),
+    ("prefix_sum", Target::Text(
+        "a prefix sum is `xs.cumsum()`; the general running reduction is `xs.scan(init, f)`.",
+    )),
+    ("cumulative_sum", Target::Text(
+        "a prefix sum is `xs.cumsum()`; the general running reduction is `xs.scan(init, f)`.",
+    )),
     ("seq", Target::Text(
         "a sequence is `range(start, stop)` or the literal `(0..n)`; step with `range(a, b, step)`.",
     )),
@@ -147,7 +153,7 @@ const ALIASES: &[(&str, Target)] = &[
 
 /// A natural receiver name per type, so a cross-namespace hint reads like code a
 /// user would write (`xs.sum()`, `s.upper()`, `df.select(...)`).
-fn receiver_for(type_name: &str) -> &'static str {
+pub(crate) fn receiver_for(type_name: &str) -> &'static str {
     match type_name {
         "Array" => "xs",
         "String" => "s",

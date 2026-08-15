@@ -277,8 +277,31 @@ fn unknown_method(type_name: &str, name: &str, candidates: &[&str], line: usize,
     let err = HelixError::new(format!("type {} has no method `{}`", type_name, name), line, col);
     match crate::suggest::hint(name, crate::suggest::Site::Method, candidates) {
         Some(h) => err.hint(h),
-        None => err.hint(format!("available {} methods: {}", type_name, candidates.join(", "))),
+        // No near-miss: point at the doc command instead of dumping 79 names — a dump
+        // is a haystack, `helix doc Array` is an answer. Byte-identical to the runtime
+        // twin in `interp/methods.rs` so the engines cannot drift.
+        None => err.hint(format!(
+            "no similar method — `helix doc {type_name}` lists all {type_name} methods."
+        )),
     }
+}
+
+/// `"{feat}"` with `feat` undefined produces the ordinary is-not-defined error — true,
+/// and blind to WHERE the name sits: inside a string, where the braces themselves may be
+/// the surprise. Fires only for a bare-`Ident` hole (a compound expression's error stands
+/// on its own) and never displaces an existing hint.
+fn interp_hole_hint(e: HelixError, hole: &crate::ast::Expr) -> HelixError {
+    if e.hint.is_some() {
+        return e;
+    }
+    let crate::ast::Expr::Ident { name, .. } = hole else {
+        return e;
+    };
+    e.hint(format!(
+        "`{{ }}` inside a string is interpolation — define `{name}` (or fix its \
+         spelling), or escape the braces for literal text: `{{{{{name}}}}}` prints \
+         `{{{name}}}`."
+    ))
 }
 
 const MATH_UNARY_FLOAT: &[&str] = &[
@@ -522,10 +545,15 @@ impl Checker {
             .hint("use `@column` inside a verb like `df.where(...)`, `df.select(...)`, or `df.group(...)`.")),
             Expr::Interp(parts) => {
                 // Type-check every embedded expression (so `"{undefined}"` errors),
-                // then the whole thing is a String.
+                // then the whole thing is a String. An undefined BARE NAME in a hole
+                // gets the extra half of the story: the braces themselves may be the
+                // surprise (the author may have wanted literal text), so the hint
+                // teaches both the rule and the `{{ }}` escape — same house pattern as
+                // `try_binds_tighter_hint`, and like it, it never displaces a more
+                // specific hint and keys on the AST node, not the message text.
                 for part in parts {
                     if let crate::ast::InterpPart::Expr(e, _) = part {
-                        self.synth(e)?;
+                        self.synth(e).map_err(|err| interp_hole_hint(err, e))?;
                     }
                 }
                 Ok(Type::String)

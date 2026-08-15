@@ -573,14 +573,17 @@ impl Value {
     /// holds a reference. Backs [`crate::bytecode::Op::ConcatIntoLocal`]; see that op for
     /// why the caller owning `cur` is the whole point.
     ///
-    /// The fast path is deliberately narrow: same packed representation on both sides, and a
-    /// non-empty result. `array_sniff` REPACKS — a `Values` array whose contents happen to be
-    /// homogeneous comes back as `Ints`, and an empty result comes back as `Values` — so
-    /// extending in place outside those cases would produce a value equal to `concat`'s with
-    /// a DIFFERENT representation. That is not cosmetic: the representation decides which
-    /// packed kernels a later stage can take, so the two spellings would silently diverge in
-    /// performance and, through the packed paths, potentially in more than that. Everything
-    /// else falls through to the identical `to_values` + `array_sniff` `concat` performs.
+    /// The fast paths are deliberately narrow, and each carries a REPRESENTATION proof.
+    /// `array_sniff` REPACKS — a `Values` array whose contents happen to be homogeneous
+    /// comes back as `Ints`, and an empty result comes back as `Values` — so extending in
+    /// place is legal only where the sniffed result is provably the same representation:
+    /// same packed form on both sides with a non-empty result (the two packed arms), or a
+    /// `Values` accumulator gaining a NON-NUMERIC element, which makes repacking
+    /// impossible by construction (the `Values` arm). That is not cosmetic: the
+    /// representation decides which packed kernels a later stage can take, so the two
+    /// spellings would silently diverge in performance and, through the packed paths,
+    /// potentially in more than that. Everything else falls through to the identical
+    /// `to_values` + `array_sniff` `concat` performs.
     pub fn concat_in_place(cur: Rc<ArrayData>, add: &ArrayData) -> Value {
         let mut cur = cur;
         match (Rc::get_mut(&mut cur), add) {
@@ -590,6 +593,26 @@ impl Value {
             }
             (Some(ArrayData::Floats(v)), ArrayData::Floats(w)) if !v.is_empty() || !w.is_empty() => {
                 v.extend_from_slice(w);
+                return Value::Array(cur);
+            }
+            // A `Values` accumulator whose argument carries a NON-NUMERIC witness. The
+            // representation argument that keeps this fast path honest: `array_sniff`
+            // returns `Values` unless ALL elements are Int (or all Float), and the
+            // witness makes that impossible for the combined result — so extending in
+            // place is representation-identical to the `to_values` + `array_sniff` path
+            // below, provably, not incidentally. A numeric-only `add` still falls
+            // through: an all-int result must sniff back to packed `Ints`. The guard is
+            // O(|add|) — the payload's own cost. This is what makes the fold spelling
+            // `lines.reduce([], (acc, s) => acc.concat([s]))` linear for strings and
+            // records (measured 218.5s -> sub-second at 256k pieces): without it every
+            // step re-boxed the whole accumulator just to append one element.
+            (Some(ArrayData::Values(v)), add)
+                if add
+                    .to_values()
+                    .iter()
+                    .any(|x| !matches!(x, Value::Int(_) | Value::Float(_))) =>
+            {
+                v.extend(add.to_values().iter().cloned());
                 return Value::Array(cur);
             }
             _ => {}

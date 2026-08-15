@@ -62,6 +62,17 @@ Source: seven audits of an external DX review, each verified against the **insta
 
 ## DO NOW (ordered by leverage / risk)
 
+> **STATUS 2026-08-15: all seven landed in one change**, each pinned by a test in
+> `tests/cli.rs` (`repl_banner_points_at_help_doc_and_describe`,
+> `helix_test_on_a_doc_module_file_matches_the_directory_run`,
+> `expect_is_the_raising_lookup_on_dict_and_record`,
+> `helix_doc_reverse_looks_up_methods_and_builtins`, `parse_help_gaps_are_closed`,
+> `string_fold_matches_plain_concat_in_value_and_representation`). Item 7 measured
+> 235.8 s → 61 ms at 256k pieces on the default engine. Two sites the plan missed,
+> found while landing: the checker's own record-method arm (`types/signatures.rs`,
+> `record_method_type`) needed `expect` too, and its unknown-method hint text now
+> names it.
+
 ### 1. REPL banner mentions help/doc/describe (entry-points 1.1)
 **Verified state:** bare `helix` prints exactly one banner line + prompt; never mentions `help`, `doc`, or `describe`. Banner at `src/main.rs:1368-1372` in `fn repl()`; the text to echo lives in `print_help()` at `main.rs:866-891` (doc/describe lines at :883-884).
 **Change (drafted, complete):**

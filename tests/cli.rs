@@ -4693,3 +4693,181 @@ print(range(0, 5).map(i => b[i - 5]).sum())
         assert_eq!(out, want, "{name}: affine-indexed map drifted");
     }
 }
+
+// ---------------------------------------------------------------------------
+// DX hardening (docs/dx-plan.md do-now items). Each behavioral test was run
+// against the v0.2.1 binary first and confirmed to fail there.
+// ---------------------------------------------------------------------------
+
+/// The REPL banner carries the map (dx-plan 1). Bare `helix` is where a new user or
+/// agent lands first; the project's own history prices the missing pointer at months
+/// of designing around a "missing" `scan` that `helix doc Array` printed all along.
+#[test]
+fn repl_banner_points_at_help_doc_and_describe() {
+    let (out, _, code) = run(&[], &[], "");
+    assert_eq!(code, Some(0));
+    for needle in ["helix help", "helix doc [Type]", "helix describe"] {
+        assert!(out.contains(needle), "banner lost `{needle}`:\n{out}");
+    }
+}
+
+/// `helix test <file>` on a doc module answers what `helix test <dir>` answers
+/// (dx-plan 3). Before: the same command that PASSED a module's examples also FAILed
+/// the file for asserting nothing, in one output — an agent narrowing from directory
+/// to file to iterate faster was punished for it. A `*_test.helix` named directly
+/// keeps the assert-or-fail contract.
+#[test]
+fn helix_test_on_a_doc_module_file_matches_the_directory_run() {
+    let dir = std::env::temp_dir().join("helix_it_docmod");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let module = dir.join("mylib.helix");
+    std::fs::write(
+        &module,
+        "## Doubles a number.\n##\n##     >>> double(21)\n##     42\nexport fn double(x) = x * 2\n",
+    )
+    .unwrap();
+
+    let (dir_out, _, dir_code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    let (file_out, _, file_code) = run(&["test", module.to_str().unwrap()], &[], "");
+    assert_eq!(dir_code, Some(0), "dir run failed:\n{dir_out}");
+    assert_eq!(file_code, Some(0), "file run must pass like the dir run:\n{file_out}");
+    assert!(
+        !file_out.contains("without asserting anything"),
+        "file run still demands assertions from a doc module:\n{file_out}"
+    );
+    assert!(file_out.contains("1 passed"), "examples did not run:\n{file_out}");
+
+    // The pathological case keeps its contract: an assertion-free *_test.helix
+    // named directly still fails, exactly as the directory run would fail it.
+    let tfile = dir.join("empty_test.helix");
+    std::fs::write(&tfile, "x = 1\n").unwrap();
+    let (t_out, _, t_code) = run(&["test", tfile.to_str().unwrap()], &[], "");
+    assert_eq!(t_code, Some(1), "assertion-free test file must still FAIL:\n{t_out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `expect(k)` — the loud lookup (dx-plan 4). `get`/`d[k]` keep ADR 0001's propagating
+/// `missing`; `expect` raises at the miss, BEFORE a `missing` is minted and laundered
+/// through arithmetic into a number-shaped hole. Pins: hit, miss with a one-edit
+/// did-you-mean, miss with the fallback hint, and all three engines byte-identical.
+#[test]
+fn expect_is_the_raising_lookup_on_dict_and_record() {
+    let src = r#"
+d = [("alpha", 1), ("beta", 2)].to_dict()
+print(d.expect("alpha"))
+r = try d.expect("alpah")
+print(r.ok, "|", r.error)
+rec = {name: "x", size: 3}
+print(rec.expect("size"))
+q = try rec.expect("nmae")
+print(q.ok, "|", q.error)
+"#;
+    let want = "1\nfalse | key `alpah` not found in this dict (2 keys)\n3\nfalse | field `nmae` not found in this record (2 fields)\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("expect_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+    // The rendered hints: a one-edit typo suggests the real key; a far miss teaches
+    // the quiet alternatives instead of guessing.
+    let (_, err, code) = run_source(
+        "d = [(\"alpha\", 1)].to_dict()\nprint(d.expect(\"alpah\"))\n",
+        &[],
+        "expect_hint_near",
+    );
+    assert_eq!(code, Some(1));
+    assert!(err.contains("did you mean `alpha`?"), "{err}");
+    let (_, err, code) =
+        run_source("rec = {name: 1}\nprint(rec.expect(\"zz\"))\n", &[], "expect_hint_far");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("`.has(k)` checks presence"), "{err}");
+}
+
+/// `helix doc <name>` answers the question users actually arrive with (dx-plan 5):
+/// "is there a scan, and how do I call it?" — owners, effect, an example receiver.
+/// Multi-owner names report every owner; unknown names keep the unknown-type error.
+#[test]
+fn helix_doc_reverse_looks_up_methods_and_builtins() {
+    let (out, _, code) = run(&["doc", "scan"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("`scan` is a method on Array") && out.contains("helix doc Array"), "{out}");
+
+    let (out, _, code) = run(&["doc", "sqrt"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("`sqrt` is a free function"), "{out}");
+
+    let (out, _, code) = run(&["doc", "max"], &[], "");
+    assert_eq!(code, Some(0));
+    for ty in ["Array", "Tensor", "GroupBy"] {
+        assert!(out.contains(&format!("is a method on {ty}")), "missing owner {ty}:\n{out}");
+    }
+
+    let (_, err, code) = run(&["doc", "zzz"], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("unknown type `zzz`"), "{err}");
+}
+
+/// Three parse-help gaps (dx-plan 6). (a) a foreign-idiom running sum steers to
+/// `cumsum`/`scan` instead of dumping 79 names, and the no-near-miss fallback points at
+/// `helix doc <Type>`; (b) an undefined bare name inside a string hole teaches that
+/// braces are interpolation and shows the `{{ }}` escape; (f) `fn` inside `do { }`
+/// names the item-level rule and the lambda form. (a)'s runtime twin must be
+/// byte-identical on all three engines.
+#[test]
+fn parse_help_gaps_are_closed() {
+    for (name, env) in ENGINES {
+        let (_, err, code) =
+            run_source("print([1, 2].prefix_sum())\n", env, &format!("prefix_sum_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains("a prefix sum is `xs.cumsum()`"), "{name}: {err}");
+
+        let (_, err, code) =
+            run_source("print([1, 2].zzyzx())\n", env, &format!("nomethod_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(
+            err.contains("no similar method — `helix doc Array` lists all Array methods."),
+            "{name}: {err}"
+        );
+    }
+    let (_, err, code) = run_source("print(\"value: {feat}\")\n", &[], "interp_hole");
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("inside a string is interpolation") && err.contains("{{feat}}"),
+        "{err}"
+    );
+    let (_, err, code) = run_source("y = do { fn f(x) = x\n  1 }\nprint(y)\n", &[], "fn_in_do");
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("`fn` cannot be defined inside a `do` block")
+            && err.contains("f = (x) => x * 2"),
+        "{err}"
+    );
+}
+
+/// The string/record fold is linear (dx-plan 7): `concat_in_place` gained a `Values`
+/// arm guarded by a non-numeric witness, which makes repacking impossible by
+/// construction — so what is pinned is VALUE and REPRESENTATION equality between the
+/// fold spelling and plain `concat`, on all three engines. (Timing is not asserted:
+/// wall clock here is ±15%; the measured change was 235.8s -> 61ms at 256k pieces.)
+#[test]
+fn string_fold_matches_plain_concat_in_value_and_representation() {
+    let src = r#"
+parts = range(0, 2000).map(i => "line{i}")
+a = parts.reduce([], (acc, s) => acc.concat([s]))
+b = [].concat(parts)
+print(a == b, a.count(), a[0], a[1999])
+mixed = range(0, 100).map(i => i).concat(["x"])
+c = mixed.reduce([], (acc, v) => acc.concat([v]))
+d = [].concat(mixed)
+print(c == d, c.count(), c[100])
+nums = range(0, 50).reduce([], (acc, i) => acc.concat([i]))
+print(nums == range(0, 50).map(i => i), nums.sum())
+"#;
+    let want = "true 2000 line0 line1999\ntrue 101 x\ntrue 1225\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("strfold_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: fold diverged from plain concat");
+    }
+}
