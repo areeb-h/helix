@@ -1,5 +1,71 @@
 # Changelog
 
+## v0.2.2 — 2026-08-15
+
+**The discoverability release** — plus the two deepest performance fixes since the
+append wall, and four wrong answers removed. Everything below was driven by field
+reports from the language's heaviest users (the #19 review and the physics-library
+build); every fix is pinned by a test confirmed to fail on v0.2.1 first.
+
+### Fixed
+
+- **`helix test a.helix b.helix` ran only the first file, silently** ("running 1 test
+  file") while `helix check` accepted many — anyone verifying two modules in one command
+  believed both passed. Every path argument is now a root; files and directories mix.
+- **Duplicate fold binders `(a, a)` diverged across engines**: the accumulator fast path
+  matched by binder name, so `[[1],[2]].reduce([], (a, a) => a.concat([9]))` answered
+  `[9, 9]` on the VM/JIT and `[2, 9]` on the walker — silent, exit 0. All engines now
+  agree on the correct last-write-wins answer.
+- **Qualified module calls beat comprehension sugar**: seven receiver-blind parse-time
+  desugars (`position`, `sort_by`, `take_while`, `drop_while`, `min_by`, `max_by`,
+  `zipmap`) intercepted `mymod.position(a, b, c, d)` and rejected a module's own 4-arg
+  export. The parser now knows import namespaces; methods on them resolve to the module.
+- **`unique()` on a large packed array could abort the process** — the general method
+  dispatch boxed the whole buffer first (80M ints → 1.9 GB before one comparison). Now a
+  packed fast path with fallible growth: refuses cleanly where memory genuinely runs out,
+  and is 15–25% faster where it doesn't.
+- **`helix test <file>` on a documented module** now answers what the directory run
+  answers, instead of passing its examples and failing the file for asserting nothing in
+  one output.
+
+### Performance
+
+- **The i64 map kernel admits affine indices**: `a[2*i]` 486 → 27 ms at 10M (16×), the
+  3-point stencil `a[i] + a[i+1] + a[i+2]` 1871 → 31 ms at 20M (**50×**), measured
+  against the v0.2.1 release binary. Values bit-identical on all three engines,
+  including out-of-bounds and negative-index behaviour.
+- **Array-of-strings accumulation is linear**: the fold spelling
+  `lines.reduce([], (acc, s) => acc.concat([s]))` went **235.8 s → 61 ms** at 256k
+  pieces (a `Values` arm in `concat_in_place`, guarded by a non-numeric witness that
+  makes representation change impossible by construction).
+
+### Added
+
+- **`helix.toml` is a real manifest**: `description`, `authors`, `license`,
+  `repository`, `keywords` — and `helix = ">=X.Y.Z"`, an **enforced toolchain floor**:
+  an older binary opening the project reports *"this project requires Helix >= X, and
+  this binary is Y"* once, instead of failing sixty confusing ways on unknown syntax.
+  `version` must be comparable MAJOR.MINOR.PATCH. `helix new` writes the full template.
+- **`helix describe` carries signatures** derived by probing the checker's own tables —
+  accepted arities and per-arity return types (`round`: 1 arg → `Int`, 2 → `Float`),
+  `null` where the checker genuinely does not constrain them, never fabricated.
+- **`helix doc <name>` reverse lookup**: a method or builtin by name answers with every
+  owner type, its effect, and an example receiver — the question users actually arrive
+  with, previously answered by "error: unknown type".
+- **`expect(k)` on Dict and Record** — the loud lookup: raises at the miss (with a
+  one-edit did-you-mean over the collection's own keys) where `get`/`d[k]` keep
+  ADR 0001's propagating `missing`.
+- **Queries can name missingness**: `where(@v.is_missing())`, its `not` negation, and
+  `drop_missing()` on DataFrames. `where(@v == missing)` still selects nothing — that is
+  ADR 0001 semantics, and now there is an honest spelling for the real question.
+- **The map at the door**: bare `helix` points at `helix help` / `helix doc` /
+  `helix describe`; `AGENTS.md` at the repo root carries the commands, the three-engine
+  correctness model, and the wrong-answer footguns.
+- **Errors teach**: `prefix_sum` steers to `cumsum`/`scan`; an undefined name in a
+  string hole explains interpolation and the `{{ }}` escape; `fn` inside `do {}` names
+  the rule; unknown methods point at `helix doc <Type>` instead of dumping 79 names;
+  reassigning `e`/`pi`/`inf` says what the constant is instead of suggesting a shadow.
+
 ## v0.2.1 — 2026-08-15
 
 **The trust release.** No new features and no breaking API: seven wrong answers removed,
