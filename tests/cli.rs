@@ -5084,3 +5084,29 @@ fn qualified_module_calls_win_over_comprehension_sugar() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Duplicate fold binders `(a, a)` never take the accumulator fast path (ADR 0029
+/// plan, fix #0). They are legal, last-write-wins — `a` in the body is the ELEMENT —
+/// but `emit_reduce_body_and_store` matched the fast path's receiver by NAME against
+/// the accumulator binder, so the VM and JIT emitted `ConcatIntoLocal` folding into
+/// the ACCUMULATOR: `[9, 9]` where the walker answered `[2, 9]`, silent, exit 0 — a
+/// live three-engine divergence on released v0.2.1, found by the ADR 0029 design
+/// recon. The guard declines the sugar for `pa == pb`; the scalar fold and the
+/// ordinary distinct-binder fold are pinned unchanged.
+#[test]
+fn duplicate_fold_binders_agree_on_all_engines() {
+    let src = r#"
+print([[1], [2]].reduce([], (a, a) => a.concat([9])))
+d1 = [("k", 7)].to_dict()
+d2 = [("j", 1)].to_dict()
+print([d1, d2].reduce(dict(), (a, a) => a.insert("n", a.count())))
+print(range(0, 3).reduce(0, (a, a) => a + a))
+print([[5], [6]].reduce([], (acc, x) => acc.concat(x)))
+"#;
+    let want = "[2, 9]\n{\"j\" => 1, \"n\" => 1}\n4\n[5, 6]\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("dup_binders_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: duplicate-binder fold diverged");
+    }
+}

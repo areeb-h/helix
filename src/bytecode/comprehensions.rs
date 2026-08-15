@@ -796,7 +796,7 @@ impl super::Compiler {
 
         let loop_start = b.code.len() as u32;
         let next_at = b.emit(Op::CompNext(x, 0, false), line, col);
-        self.emit_reduce_body_and_store(b, body, pa, acc, line, col)?;
+        self.emit_reduce_body_and_store(b, body, pa, pb, acc, line, col)?;
         b.emit(Op::Jump(loop_start), line, col);
 
         let end_at = b.code.len() as u32;
@@ -1097,7 +1097,7 @@ impl super::Compiler {
 
         let loop_start = b.code.len() as u32;
         let next_at = b.emit(Op::CompNext(x, 0, false), line, col);
-        self.emit_reduce_body_and_store(b, body, &pa, acc, line, col)?;
+        self.emit_reduce_body_and_store(b, body, &pa, &pb, acc, line, col)?;
         b.emit(Op::Jump(loop_start), line, col);
 
         let end_at = b.code.len() as u32;
@@ -1385,16 +1385,27 @@ impl super::Compiler {
     /// (`acc.concat([acc.count()])` is fine, and merely declines the fast path at run time
     /// because the `Rc` is then shared). Any other body — including one that merely mentions
     /// `concat` somewhere inside it — takes the ordinary path unchanged.
+    #[allow(clippy::too_many_arguments)] // as its neighbours: the fold's parts are all distinct
     fn emit_reduce_body_and_store(
         &mut self,
         b: &mut Builder,
         body: &Expr,
         pa: &str,
+        pb: &str,
         acc: u32,
         line: usize,
         col: usize,
     ) -> R<()> {
-        if let Expr::Method { recv, name, args, named, .. } = body
+        // `pa != pb` is a SOUNDNESS guard, not tidiness (ADR 0029 plan, fix #0).
+        // Duplicate binders `(a, a)` are legal, last-write-wins — the walker writes `pa`
+        // then `pb`, and `resolve_local` is last-declared-wins, so `a` in the body is
+        // the ELEMENT. Matching the receiver by NAME against `pa` alone emitted
+        // `ConcatIntoLocal(acc)` folding into the ACCUMULATOR: `[[1], [2]].reduce([],
+        // (a, a) => a.concat([9]))` answered `[9, 9]` on VM/JIT while the walker
+        // answered `[2, 9]` — a silent three-engine divergence, exit 0. Declining
+        // costs nothing: the general path below is then identical on every engine.
+        if pa != pb
+            && let Expr::Method { recv, name, args, named, .. } = body
             && named.is_empty()
             && matches!(&**recv, Expr::Ident { name: n, .. } if n == pa)
             && let Some(op) = match (name.as_str(), args.len()) {
