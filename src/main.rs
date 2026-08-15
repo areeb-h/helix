@@ -1108,21 +1108,59 @@ fn check_file_capture(path: &std::path::Path) -> Result<(), String> {
 /// to install, no config — name a file `*_test.helix` and it runs.
 fn cli_test(args: &[String]) -> ExitCode {
     use std::path::PathBuf;
-    // Whether the root was named explicitly on the command line (vs. defaulting to
-    // the current directory) — an explicit path that doesn't exist is a user error.
-    let explicit = args.get(2).cloned();
-    let root = explicit
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // EVERY path argument is a root — `helix test a.helix b.helix` runs both, exactly
+    // as `helix check a b` checks both. It used to take args.get(2) alone and silently
+    // drop the rest while printing "running 1 test file": anyone verifying two modules
+    // in one command believed both passed when only the first ran — the worst shape a
+    // test runner can have, found in the field by the physics-library build.
+    let explicit: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
+    let roots: Vec<PathBuf> = if explicit.is_empty() {
+        vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))]
+    } else {
+        explicit.clone()
+    };
+    let named_explicitly = !explicit.is_empty();
     run_on_big_stack(move || {
         // A path the user named explicitly but which doesn't exist is an error, not
         // an empty (successful) run — otherwise a typo'd path silently "passes".
-        if explicit.is_some() && !root.exists() {
-            eprintln!("error: no such file or directory: {}", root.display());
+        if named_explicitly
+            && let Some(missing) = roots.iter().find(|r| !r.exists())
+        {
+            eprintln!("error: no such file or directory: {}", missing.display());
             return ExitCode::FAILURE;
         }
         let mut files = Vec::new();
+        for root in &roots {
+            collect_root(root, &mut files);
+        }
+        files.dedup();
+        // Display paths relative to the search root when there is ONE root (its parent
+        // when that root is a single file, so the file's own name still shows); with
+        // several roots, paths display as given — the empty-prefix strip below is a
+        // deliberate no-op then.
+        let base: PathBuf = if let [only] = roots.as_slice() {
+            if only.is_file() {
+                only.parent().unwrap_or(only).to_path_buf()
+            } else {
+                only.clone()
+            }
+        } else {
+            PathBuf::new()
+        };
+        let root_shown = roots
+            .iter()
+            .map(|r| r.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        run_test_roots(roots, files, base, root_shown)
+    })
+}
+
+/// Collect the test files one root contributes: a directory's `*_test.helix` set, or
+/// the named file itself — except a documented, definitions-only module, which tests
+/// through its doc examples exactly as its directory run would.
+fn collect_root(root: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+    {
         if root.is_file() {
             // Naming a file must mean what naming its directory means. A definitions-only
             // module carrying `## >>>` examples is a DOC MODULE: the directory run tests
@@ -1137,27 +1175,35 @@ fn cli_test(args: &[String]) -> ExitCode {
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.ends_with("_test.helix"));
             let doc_module = !is_test_file
-                && std::fs::read_to_string(&root).is_ok_and(|src| {
+                && std::fs::read_to_string(root).is_ok_and(|src| {
                     !doctest::doc_examples_in(&src).is_empty() && is_definitions_only(&src)
                 });
             if !doc_module {
-                files.push(root.clone());
+                files.push(root.to_path_buf());
             }
         } else {
-            collect_test_files(&root, &mut files);
+            collect_test_files(root, files);
         }
         files.sort();
-        // Display paths relative to the search root (its parent when the root is a single
-        // file, so the file's own name still shows).
-        let base = if root.is_file() { root.parent().unwrap_or(&root) } else { root.as_path() };
+    }
+}
+
+/// The run half of `cli_test`, over an already-collected file set and its roots.
+fn run_test_roots(
+    roots: Vec<std::path::PathBuf>,
+    files: Vec<std::path::PathBuf>,
+    base: std::path::PathBuf,
+    root_shown: String,
+) -> ExitCode {
+    {
+        let base = base.as_path();
         // Doc examples count as tests, so "nothing to run" must account for them — a
         // library of documented modules with no `*_test.helix` beside them is a real
         // project shape, and reporting "no tests found" over a dozen live examples would
         // be the same lie this pass is removing everywhere else.
-        if files.is_empty() && !any_doc_examples(&root) {
+        if files.is_empty() && !roots.iter().any(|r| any_doc_examples(r)) {
             println!(
-                "no tests found (looked for `*_test.helix`, and for `>>>` doc examples, under {})",
-                root.display()
+                "no tests found (looked for `*_test.helix`, and for `>>>` doc examples, under {root_shown})"
             );
             return ExitCode::SUCCESS;
         }
@@ -1212,7 +1258,13 @@ fn cli_test(args: &[String]) -> ExitCode {
         // documented example is executed and must still say what it says — a promise that
         // until now held only for Helix's OWN source, checked by a `cargo test` a user of
         // the language cannot run. For a library author it was decoration.
-        let (doc_ok, doc_failed, skipped) = run_doc_examples(&root, base);
+        let (mut doc_ok, mut doc_failed, mut skipped) = (0usize, 0usize, 0usize);
+        for root in &roots {
+            let (a, b, c) = run_doc_examples(root, base);
+            doc_ok += a;
+            doc_failed += b;
+            skipped += c;
+        }
         // A doc example is a test: it counts in the same totals, so the summary never
         // reads `0 passed` over a screen of green.
         let passed = (files.len() - failed) + doc_ok;
@@ -1234,7 +1286,7 @@ fn cli_test(args: &[String]) -> ExitCode {
             println!("{passed} passed, {failed} failed");
             ExitCode::FAILURE
         }
-    })
+    }
 }
 
 fn plural(n: usize) -> &'static str {

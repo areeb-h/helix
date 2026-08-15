@@ -57,7 +57,7 @@ fn is_const_default(e: &Expr) -> bool {
 /// `"{do { n = 1 … }}"` would be the one place the mut-global shadow check does not reach.
 fn parse_expression(src: &str, depth: usize, sigs: &HashMap<String, FnSig>) -> Result<(Expr, Vec<DoBinding>), HelixError> {
     let tokens = crate::lexer::lex(src)?;
-    let mut p = Parser { toks: tokens, pos: 0, depth, fn_sigs: (*sigs).clone(), do_bindings: Vec::new() };
+    let mut p = Parser { toks: tokens, pos: 0, depth, fn_sigs: (*sigs).clone(), do_bindings: Vec::new(), imports: std::collections::HashSet::new() };
     p.skip_newlines();
     let e = p.expr()?;
     p.skip_newlines();
@@ -675,6 +675,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
         depth: 0,
         fn_sigs: HashMap::new(),
         do_bindings: Vec::new(),
+        imports: std::collections::HashSet::new(),
     };
     let program = p.program()?;
     reject_do_binding_over_mut_global(&program, &p.do_bindings)?;
@@ -752,6 +753,10 @@ struct Parser {
     /// [`reject_do_binding_over_mut_global`]. Generated `$do<N>` bindings are not
     /// recorded: they are throwaway names the user never wrote.
     do_bindings: Vec<DoBinding>,
+    /// Namespaces bound by `import` so far — an alias, or the path's last segment.
+    /// The comprehension-sugar desugars consult this: a method on an imported
+    /// namespace is a QUALIFIED MODULE CALL, never array sugar, however it is named.
+    imports: std::collections::HashSet<String>,
 }
 
 impl Parser {
@@ -887,6 +892,12 @@ impl Parser {
                 // Default the namespace to the last path segment.
                 segments.last().unwrap().clone()
             };
+            // Record the bound namespace so the comprehension-sugar desugars know a
+            // method on it is a qualified module call. Selective imports bind function
+            // names directly and create no namespace, so they are not recorded.
+            if selected.is_none() {
+                self.imports.insert(alias.clone());
+            }
             return Ok(Stmt::Import { segments, alias, selected, line: l, col: c });
         }
         // Optional leading `export` (ADR 0019) — contextual: it's a keyword only
@@ -1653,6 +1664,27 @@ impl Parser {
                                 name: name.clone(),
                                 args,
                                 named,
+                                line: l,
+                                col: c,
+                            };
+                            continue;
+                        }
+                        // A method on an IMPORTED NAMESPACE is a qualified module call,
+                        // never array sugar — left as a plain Method node for the module
+                        // loader to resolve. The desugars below match by NAME with no
+                        // idea what the receiver is, which intercepted
+                        // `mechanics.position(x0, v, a, t)` at parse time and rejected a
+                        // 4-arg module export with "takes one predicate function" — a
+                        // false rejection (an arity-MATCHING call slipped past the check
+                        // and resolved correctly, which is how the physics library found
+                        // the seam). Seven names were affected: position, sort_by,
+                        // take_while, drop_while, min_by, max_by, zipmap.
+                        if matches!(&e, Expr::Ident { name: n, .. } if self.imports.contains(n)) {
+                            e = Expr::Method {
+                                recv: Box::new(e),
+                                name: name.clone(),
+                                args,
+                                named: vec![],
                                 line: l,
                                 col: c,
                             };

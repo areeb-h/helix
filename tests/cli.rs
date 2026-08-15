@@ -5024,3 +5024,63 @@ fn seeded_constants_explain_themselves_on_reassignment() {
         );
     }
 }
+
+/// `helix test a.helix b.helix` runs EVERY named file (physics-library field report).
+/// It used to take the first path and silently drop the rest while printing "running
+/// 1 test file" — anyone verifying two modules in one command believed both passed
+/// when only the first ran. The second file here asserts 4 == 5: if it doesn't run,
+/// this test's rc assertion is the alarm.
+#[test]
+fn helix_test_runs_every_named_file() {
+    let dir = std::env::temp_dir().join("helix_it_multitest");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = dir.join("a_test.helix");
+    let b = dir.join("b_test.helix");
+    std::fs::write(&a, "assert_eq(1 + 1, 2)\n").unwrap();
+    std::fs::write(&b, "assert_eq(2 + 2, 5)\n").unwrap();
+    let (out, _, code) = run(&["test", a.to_str().unwrap(), b.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "the failing second file must be RUN:\n{out}");
+    assert!(out.contains("running 2 test files"), "{out}");
+    assert!(out.contains("1 passed, 1 failed"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A method on an imported namespace is a qualified module call, never comprehension
+/// sugar (physics-library field report). Seven receiver-blind parse-time desugars —
+/// position, sort_by, take_while, drop_while, min_by, max_by, zipmap — intercepted
+/// `mechanics.position(x0, v, a, t)` and rejected the module's own 4-arg export with
+/// "takes one predicate function". The parser now tracks import namespaces and leaves
+/// their method calls alone. Array sugar on real arrays is pinned unchanged.
+#[test]
+fn qualified_module_calls_win_over_comprehension_sugar() {
+    let dir = std::env::temp_dir().join("helix_it_modsugar");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("mechanics.helix"),
+        "export fn position(x0, v, a, t) = x0 + v * t + 0.5 * a * t * t\n\
+         export fn take_while(a, b) = a * 10 + b\n\
+         export fn zipmap(x) = x + 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.helix"),
+        "import mechanics\n\
+         print(mechanics.position(0.0, 10.0, 0.0, 2.0))\n\
+         print(mechanics.take_while(3, 4))\n\
+         print(mechanics.zipmap(41))\n\
+         print([5, 6, 7].position(it == 6))\n\
+         print([1, 2, 3, 0].take_while(it > 0))\n",
+    )
+    .unwrap();
+    let want = "20.0\n34\n42\n1\n[1, 2, 3]\n";
+    for (name, env) in ENGINES {
+        let mut envv: Vec<(&str, &str)> = env.to_vec();
+        envv.push(("HELIX_PATH", dir.to_str().unwrap()));
+        let (out, err, code) = run(&["run", dir.join("main.helix").to_str().unwrap()], &envv, "");
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: qualified call or array sugar drifted");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
