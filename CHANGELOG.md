@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.2.1 — 2026-08-15
+
+**The trust release.** No new features and no breaking API: seven wrong answers removed,
+every one pinned by a regression test that was first confirmed to fail against the v0.2.0
+binary, on all three engines. Three were release blockers found by a ~4,000-program stress
+fleet within a day of v0.2.0 shipping; the deepest were on the DataFrame/Polars seam, not
+in the language core.
+
+### Fixed
+
+- **Grouped `f64` `sum`/`mean` was nondeterministic** — the same pure expression could give
+  a different answer across runs (and even twice within one program), because Polars'
+  partitioned group-by merges intra-group values in a scheduling-dependent order. Grouped
+  aggregations are now built so they structurally cannot take that path; the regression
+  test evaluates the same query 30× in one process. This restores ADR 0020 reproducibility
+  and un-blinds the three-engine differential oracle.
+- **Grouped aggregations skipped `missing`** (ADR 0001 inverted): a group containing an
+  unknown reported a number, and an all-`missing` group reported `sum` `0.0` —
+  indistinguishable from a genuine zero. They now propagate `missing` per group, matching
+  the array and whole-column paths. `count` is the deliberate exception: it counts rows,
+  as `[1.0, missing].count()` always has.
+- **Oversized collection materialization could abort the host** (SIGABRT, exit 134, not
+  catchable) — the one ADR 0024 violation found. Three causes, all fixed: the tree-walker
+  materialized packed arrays up front just to iterate them; the packed builder arms could
+  overshoot their budget on `Vec` doubling; and the byte budget was checked only after the
+  push. All three engines now refuse with the same catchable error, in the same words.
+- **`.sum()`/`.mean()` returned `NaN` where IEEE-754 returns `±inf`** — Neumaier
+  compensation went non-finite with the running sum. The compensation (and its accuracy on
+  finite data) is kept; the non-finite case now answers what python3 and NumPy answer.
+- **`erf` was the only math builtin not computed to double precision** (~1.4e-7 absolute
+  error, discontinuous at 0, unbounded relative error near 0). It now matches python3's
+  `math.erf` bit-for-bit across the tested grid, and `normal_cdf` routes through `erfc`,
+  fixing the left tail — the p-value case — which no `erf` accuracy alone could fix.
+- **DNA IUPAC arithmetic**: `gc_content` counted `S` ("G or C" — GC by definition) as
+  non-GC, so `dna("S")` read 0.0 and `dna("GCS")` read *lower* than `dna("GC")`. The
+  policy, now uniform and documented: a base participates iff its GC-ness is certain
+  (`S` is GC, `W` is not; `N R Y K M B D H V` are excluded from numerator and denominator
+  alike — the rule `N` always had). A sequence with no classifiable base answers `missing`,
+  never a fabricated `0.0`, and that propagates through `mean_gc`, which had been averaging
+  all-`N` sequences in as `0.0`.
+- **`try 1 + 1` produced a true but useless error** ("got a Record", with no record in
+  sight — it parses as `(try 1) + 1`). The error now explains that `try` binds tighter
+  than the operator and shows the parenthesized fix. Ordinary record operands keep the
+  ordinary message.
+
+### Hardened
+
+- **`sort` tie order is now a contract, not an accident**: DataFrame `sort` pins
+  `maintain_order`. No misbehaviour was ever reproduced (300k rows, int and string keys),
+  but unstable tie order is unspecified and every `.column()` re-executes the lazy plan,
+  so the pin makes the stability ADR 0020 assumes survive any Polars upgrade.
+
 ## v0.2.0 — 2026-08-13
 
 **The consistency release.** Every breaking change this project has decided is in this one
