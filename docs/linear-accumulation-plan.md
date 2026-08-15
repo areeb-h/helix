@@ -1,5 +1,13 @@
 # Linear accumulation — the implementation plan
 
+> **STATUS 2026-08-16: all three landed.** #0 in v0.2.2 (`d693a4b`), #1 at `22368d5`
+> (walker 262k appends 6,768 → 23 ms, dict 64k 17,689 → 16 ms), #2 at `438adfd`
+> (interp fold ~1.8× per 4×n on all engines). One deviation from the spec as written:
+> #2's runtime restores the slot and reports on a refused reservation rather than
+> erroring after the take — strictly stronger than the drafted behavior. The
+> AGENTS.md footgun list and `docs/dx-plan.md`'s string items can now drop their
+> quadratic-fold warnings.
+
 Implements [ADR 0029](adr/0029-linear-accumulation.md). Every anchor below was verified
 against the live tree at `b23c314` by a three-agent recon (2026-08-15); every measurement
 is from the released v0.2.1 PGO binary at load < 0.25, min-of-3, with the complexity

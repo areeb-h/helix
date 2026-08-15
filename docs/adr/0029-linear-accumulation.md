@@ -1,10 +1,13 @@
 # ADR 0029 — Amortized-linear accumulation is a language guarantee
 
-- **Status:** **Accepted 2026-08-15 — the fold spellings are linear on every engine, by
-  the Rc-uniqueness discipline, or they decline to the copy path and stay correct.**
-  Not yet implemented; the implementation plan with verified anchors is
-  [docs/linear-accumulation-plan.md](../linear-accumulation-plan.md). A live
-  three-engine divergence found during this design (§ Context) is fix #0 of that plan.
+- **Status:** **Accepted 2026-08-15; IMPLEMENTED 2026-08-16** — #0 the `(a, a)` guard
+  shipped in v0.2.2; #1 the walker's fold (`22368d5`: 262k appends 6,768 → 23 ms, 64k
+  dict inserts 17,689 → 16 ms); #2 `Op::AppendStrIntoLocal` + the walker twin
+  (`438adfd`: the interpolation fold 4×n → ~1.8× on all three engines, from
+  13.6–14.6×). Each landed with its class pin (n-vs-4n ratio, threshold 8×) and its
+  semantics table pinned byte-identical across engines and against the pre-change
+  released binary. The plan with the verified anchors remains
+  [docs/linear-accumulation-plan.md](../linear-accumulation-plan.md).
 - **Date:** 2026-08-15
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0024 — Total runtime](0024-total-runtime-no-host-panics.md) (the
