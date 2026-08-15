@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.2.3 — 2026-08-15
+
+Two fixes, both found by re-verifying v0.2.2's claims against the installed release —
+the survivors of that audit.
+
+### Fixed
+
+- **The module-namespace guard now reaches string interpolation.** v0.2.2 fixed
+  `print(mod.position(…))` but `emit("{mod.position(…)}")` still failed for all seven
+  comprehension-lowered names — and the interpolated form is the idiomatic print, so the
+  fix had missed exactly where users hit the bug first. An interpolation hole is parsed
+  by a fresh parser; the import-namespace set now rides into it the same way function
+  signatures always did.
+- **`helix fmt` no longer indents a column-0 comment into the previous function's
+  body.** Trigger: a nested lambda wrapped across lines — its closing brackets sit at
+  line *end*, and the indent tracker only unwound *leading* closers, leaving a dead
+  step for the next flush-left line to inherit. Dead steps are now discarded per line;
+  all 54 example files still reformat to byte-identity.
+
 ## v0.2.2 — 2026-08-15
 
 **The discoverability release** — plus the two deepest performance fixes since the
