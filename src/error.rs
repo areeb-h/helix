@@ -189,3 +189,35 @@ pub fn suggest(name: &str, candidates: &[&str]) -> Option<String> {
     }
     best.map(|(_, c)| c.to_string())
 }
+
+/// The message + hint for reassigning an immutable binding, shared by the walker's env
+/// check and the compiler's raise ops so all three engines stay byte-identical.
+///
+/// The seeded math constants get their own wording because the generic hint was
+/// actively harmful there: "declare it as mutable up front" WORKS for them — it
+/// silently shadows Euler's number (or pi, or inf) for the whole file, which is the
+/// trap, not the fix. An agent-written physics library hit exactly this: the natural
+/// variable name for elementary charge is `e`.
+pub fn immutable_reassign(name: &str) -> (String, String) {
+    let known = match name {
+        "e" => Some("Euler's number, 2.71828..."),
+        "pi" => Some("3.14159..."),
+        "inf" => Some("positive infinity"),
+        _ => None,
+    };
+    match known {
+        Some(what) => (
+            format!("`{name}` is a built-in constant ({what}) and cannot be reassigned"),
+            format!(
+                "pick another name (`{name}_`, `E_CHARGE`, ...) — `mut {name} = ...` \
+                 would shadow the constant for the whole file."
+            ),
+        ),
+        None => (
+            format!("`{name}` is immutable and cannot be reassigned"),
+            format!(
+                "declare it as mutable up front with `mut {name} = ...` if it needs to change."
+            ),
+        ),
+    }
+}

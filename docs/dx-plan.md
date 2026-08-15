@@ -157,6 +157,19 @@ The doc/describe lines are copied **verbatim** from `print_help()` (same `\\n   
 
 ## DO LATER (real features — design/ADR first)
 
+- **`let` in a float reduce body falls off the JIT kernel** (from the physics-library
+  field report: ~23× claimed, mechanism CONFIRMED 2026-08-15, magnitude not yet measured
+  at honest load). The i64 eligibility paths admit `Expr::Let` (`value_eligible_cap_indexed`
+  jit.rs:1318 with the rebind/shadow guards; `gen_value` compiles it), but the mixed/f64
+  indexed inference (`infer_f64_indexed`, ~jit.rs:1600-1700) has NO Let arm — `let d =
+  x[j] - y[j] in a + d*d` declines to the VM loop while the write-it-twice spelling is
+  native. Fix = mirror the i64 Let discipline: an arm in `infer_f64_indexed` typing the
+  let-local by its init's `MixT` kind (reject rebinding `pa`/`pb`/an index scalar — the
+  same guards as jit.rs:1318), plus the `gen_f64_typed` Let arm binding a typed local.
+  Measure the claimed 23× on an idle box FIRST (fail-first), then land with an n-vs-4n
+  pin. Until then it stays a documented footgun (AGENTS.md #5's class: silent perf,
+  never wrong answers).
+
 - **`helix describe` signature enrichment** (describe-sigs — claim fully current, v0.2.1 output has zero signature keys, verified by walking all JSON keys): probe `builtin_type` (types/signatures.rs:36-817) with `vec![Type::Unknown; k]`, k=0..=5 — sound because `compatible(Unknown,_)=true` (types.rs:100) and every non-arity guard admits Unknown (verified arm-by-arm) — Ok-set = arity; refine returns per-k via palette probes ([Float;k],[String;k],[Array(Float);k],[Unknown;k]). Additive JSON: `params` (new hand-authored data in `BuiltinDef`, 131 entries), `arity` (`null` for the 15 unguarded builtins at signatures.rs:780-795 — never fabricate), `returns` (per-arity; structured record/tuple rendering; `null` for comprehension verbs typed in synth.rs:353-414 / parser desugars, and for all Dict/Net methods — no checker tables). Needs: pub wrapper seam at types.rs:948-949; drift-pin test (every builtin probes to nonempty arity or is arity-null — converts a future Unknown-rejecting guard into a gate failure); decision on `universal_methods` strings→objects (cli.rs:2428-2462 only checks `.as_array()`, but external tooling may index strings — or add a parallel key).
 - **string FIX 2 — `Op::AppendStrIntoLocal`**: linearize `\"{acc}{x}\"` folds on VM/JIT (currently ×13–21 per ×4 n, but only 3.4s at 2MB — real, not urgent). New opcode beside ConcatIntoLocal (ops.rs:183), hbc.rs name row (~:582), every exhaustive Op match, byte-for-byte MAX_STRING_LEN error parity (vm.rs:1275-1332, interp.rs:33 = 1 GiB), decline on format-spec holes, write_value fallback for a non-Str first iteration, scan-shares-emit-path test. **Coordinate with the uncommitted comprehensions.rs/jit.rs work.**
 - **string FIX 3 — walker append wall**: the walker never got the v0.2.0 fix (256k int appends 6.33s — numerically the pre-fix 6.493s). `concat_in_place`/`insert_in_place` are vm.rs-only callers; the walker's reduce (interp/comprehensions.rs:258, rebinding at :317-333) keeps the Rc shared. Touches the binder save/restore choreography — decline for same-name binders `(a,a)`; own design pass.

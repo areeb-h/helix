@@ -57,10 +57,49 @@ pub struct Package {
     pub name: String,
     #[serde(default = "default_version")]
     pub version: String,
+    /// One sentence saying what the package is — for humans and for tooling
+    /// (`helix describe --project` and registries to come). Optional everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authors: Option<Vec<String>>,
+    /// An SPDX identifier (`MIT`, `Apache-2.0`, …). Not validated against the SPDX
+    /// list — it is metadata, not a gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keywords: Option<Vec<String>>,
+    /// The MINIMUM Helix toolchain this package needs, e.g. `">=0.2.1"` (a bare
+    /// `"0.2.1"` means the same). **Enforced at manifest load** — an older binary
+    /// refuses with one clear error naming both versions, instead of the sixty
+    /// confusing parse errors a new-syntax file would otherwise produce. This is
+    /// the #19 review's incident verbatim: three binaries on one machine, and
+    /// `error: unexpected character` sent the user hunting for a typo in their own
+    /// source when the true cause was "your binary is too old".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helix: Option<String>,
 }
 
 fn default_version() -> String {
     "0.1.0".to_string()
+}
+
+/// Parse `MAJOR.MINOR.PATCH` into a comparable triple. Deliberately strict — no
+/// pre-release tags, no build metadata, no partial versions. A package version is an
+/// ordering claim, and claims that cannot be compared are not versions.
+fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
+    let mut it = s.split('.');
+    let (a, b, c) = (it.next()?, it.next()?, it.next()?);
+    if it.next().is_some() {
+        return None;
+    }
+    let num = |p: &str| -> Option<u64> {
+        (!p.is_empty() && p.len() <= 10 && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse().ok())?
+    };
+    Some((num(a)?, num(b)?, num(c)?))
 }
 
 /// A declared dependency's source: either a local `path`, or a remote `url` tarball
@@ -108,9 +147,50 @@ impl Manifest {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(err(format!("could not read `{}`: {e}", path.display()))),
         };
-        toml::from_str(&text)
-            .map(Some)
-            .map_err(|e| err(format!("invalid `helix.toml`: {e}")))
+        let m: Manifest = toml::from_str(&text)
+            .map_err(|e| err(format!("invalid `helix.toml`: {e}")))?;
+        m.validate(&path)?;
+        Ok(Some(m))
+    }
+
+    /// The checks a parse cannot express: the version must be a comparable
+    /// MAJOR.MINOR.PATCH, and a declared `helix` toolchain floor is ENFORCED here —
+    /// at the one seam every consumer (`run`, `test`, `sync`, and every dependency's
+    /// own manifest) already goes through.
+    fn validate(&self, path: &Path) -> Result<(), HelixError> {
+        if parse_semver(&self.package.version).is_none() {
+            return Err(err(format!(
+                "`version` in `{}` must be MAJOR.MINOR.PATCH (e.g. \"0.1.0\"), got \"{}\"",
+                path.display(),
+                self.package.version
+            )));
+        }
+        if let Some(req) = &self.package.helix {
+            let want = req.strip_prefix(">=").unwrap_or(req).trim();
+            let Some(min) = parse_semver(want) else {
+                return Err(err(format!(
+                    "`helix` in `{}` must be a minimum version, `\">=X.Y.Z\"` or \
+                     `\"X.Y.Z\"`, got \"{req}\"",
+                    path.display()
+                )));
+            };
+            let cur_str = env!("CARGO_PKG_VERSION");
+            let cur = parse_semver(cur_str)
+                .expect("CARGO_PKG_VERSION is MAJOR.MINOR.PATCH by construction");
+            if cur < min {
+                return Err(err(format!(
+                    "this project requires Helix >= {want}, and this binary is {cur_str} \
+                     (declared in `{}`)",
+                    path.display()
+                ))
+                .hint(
+                    "upgrade from https://github.com/areeb-h/helix/releases — one clear \
+                     error here replaces the sixty confusing parse errors an old binary \
+                     would produce on new syntax.",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -576,12 +656,27 @@ pub fn cli_new(name: &str) -> Result<(), HelixError> {
     if path.exists() {
         return Err(err("`helix.toml` already exists in this directory".to_string()));
     }
+    // The template declares the toolchain floor from birth: this binary's own version.
+    // That is the whole point of the field — a project created on 0.3 opened by an 0.2
+    // binary should say "your binary is too old" once, not fail sixty ways.
     let body = format!(
-        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n# Add dependencies with \
-         `helix add <name> --path ../lib` or `--url <tarball>`.\n[dependencies]\n"
+        "[package]\n\
+         name = \"{name}\"\n\
+         version = \"0.1.0\"\n\
+         description = \"\"\n\
+         # authors = [\"Your Name <you@example.com>\"]\n\
+         # license = \"MIT\"\n\
+         # repository = \"https://github.com/you/{name}\"\n\
+         # keywords = [\"…\"]\n\
+         # The minimum Helix this package needs — enforced with one clear error.\n\
+         helix = \">={cur}\"\n\
+         \n\
+         # Add dependencies with `helix add <name> --path ../lib` or `--url <tarball>`.\n\
+         [dependencies]\n",
+        cur = env!("CARGO_PKG_VERSION"),
     );
     std::fs::write(&path, body).map_err(|e| err(format!("could not write helix.toml: {e}")))?;
-    println!("Created helix.toml for package `{name}`.");
+    println!("Created helix.toml for package `{name}` (helix >= {}).", env!("CARGO_PKG_VERSION"));
     Ok(())
 }
 

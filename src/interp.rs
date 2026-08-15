@@ -311,15 +311,8 @@ impl Interp {
         col: usize,
     ) -> Result<(), HelixError> {
         let immutable_err = || {
-            Err(HelixError::new(
-                format!("`{}` is immutable and cannot be reassigned", name),
-                line,
-                col,
-            )
-            .hint(format!(
-                "declare it as mutable up front with `mut {} = ...` if it needs to change.",
-                name
-            )))
+            let (msg, hint) = crate::error::immutable_reassign(name);
+            Err(HelixError::new(msg, line, col).hint(hint))
         };
         // Statements only execute at the top level, so `bind` writes globals.
         match self.globals.get(name) {

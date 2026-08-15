@@ -471,13 +471,9 @@ fn as_range_call(e: &Expr) -> Option<(Option<&Expr>, &Expr)> {
 /// error rather than a wrong answer or a panic in the compiler.
 fn rejected_fn_chunk(name: &str, arity: u32) -> Chunk {
     let mut b = Builder::new();
+    let (msg, hint) = crate::error::immutable_reassign(name);
     b.emit(
-        Op::raise(
-            std::rc::Rc::new(format!("`{name}` is immutable and cannot be reassigned")),
-            std::rc::Rc::new(format!(
-                "declare it as mutable up front with `mut {name} = ...` if it needs to change."
-            )),
-        ),
+        Op::raise(std::rc::Rc::new(msg), std::rc::Rc::new(hint)),
         0,
         0,
     );
@@ -744,17 +740,9 @@ impl Compiler {
                     } else if self.global_mut[i] {
                         b.emit(Op::StoreGlobal(i as u32), *line, *col);
                     } else {
+                        let (msg, hint) = crate::error::immutable_reassign(name);
                         b.emit(
-                            Op::raise(
-                                std::rc::Rc::new(format!(
-                                    "`{}` is immutable and cannot be reassigned",
-                                    name
-                                )),
-                                std::rc::Rc::new(format!(
-                                    "declare it as mutable up front with `mut {} = ...` if it needs to change.",
-                                    name
-                                )),
-                            ),
+                            Op::raise(std::rc::Rc::new(msg), std::rc::Rc::new(hint)),
                             *line,
                             *col,
                         );
@@ -778,17 +766,9 @@ impl Compiler {
                         .position(|f| f == name)
                         .is_some_and(|i| self.fn_slot_defined_above(i))
                     {
+                        let (msg, hint) = crate::error::immutable_reassign(name);
                         b.emit(
-                            Op::raise(
-                                std::rc::Rc::new(format!(
-                                    "`{}` is immutable and cannot be reassigned",
-                                    name
-                                )),
-                                std::rc::Rc::new(format!(
-                                    "declare it as mutable up front with `mut {} = ...` if it needs to change.",
-                                    name
-                                )),
-                            ),
+                            Op::raise(std::rc::Rc::new(msg), std::rc::Rc::new(hint)),
                             *line,
                             *col,
                         );
@@ -816,17 +796,9 @@ impl Compiler {
                 // errored (immutable) or called the fn (mutable).
                 if let Some(i) = self.globals.iter().position(|g| g == name) {
                     if !self.global_mut[i] {
+                        let (msg, hint) = crate::error::immutable_reassign(name);
                         b.emit(
-                            Op::raise(
-                                std::rc::Rc::new(format!(
-                                    "`{}` is immutable and cannot be reassigned",
-                                    name
-                                )),
-                                std::rc::Rc::new(format!(
-                                    "declare it as mutable up front with `mut {} = ...` if it needs to change.",
-                                    name
-                                )),
-                            ),
+                            Op::raise(std::rc::Rc::new(msg), std::rc::Rc::new(hint)),
                             *line,
                             *col,
                         );
@@ -860,17 +832,9 @@ impl Compiler {
                             .position(|f| f == name)
                             .is_some_and(|i| self.fn_slot_defined_above(i))
                     {
+                        let (msg, hint) = crate::error::immutable_reassign(name);
                         b.emit(
-                            Op::raise(
-                                std::rc::Rc::new(format!(
-                                    "`{}` is immutable and cannot be reassigned",
-                                    name
-                                )),
-                                std::rc::Rc::new(format!(
-                                    "declare it as mutable up front with `mut {} = ...` if it needs to change.",
-                                    name
-                                )),
-                            ),
+                            Op::raise(std::rc::Rc::new(msg), std::rc::Rc::new(hint)),
                             *line,
                             *col,
                         );
@@ -886,17 +850,9 @@ impl Compiler {
                     for name in names {
                         if let Some(i) = self.globals.iter().position(|g| g == name)
                             && !self.global_mut[i] {
+                                let (msg, hint) = crate::error::immutable_reassign(name);
                                 b.emit(
-                                    Op::raise(
-                                        std::rc::Rc::new(format!(
-                                            "`{}` is immutable and cannot be reassigned",
-                                            name
-                                        )),
-                                        std::rc::Rc::new(format!(
-                                            "declare it as mutable up front with `mut {} = ...` if it needs to change.",
-                                            name
-                                        )),
-                                    ),
+                                    Op::raise(std::rc::Rc::new(msg), std::rc::Rc::new(hint)),
                                     *line,
                                     *col,
                                 );

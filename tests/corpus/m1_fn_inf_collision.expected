@@ -2,9 +2,9 @@ exit: 1
 --- stdout ---
 
 --- stderr ---
-error: `inf` is immutable and cannot be reassigned
+error: `inf` is a built-in constant (positive infinity) and cannot be reassigned
   --> <src>:1:1
   |
 1 | fn inf(x) = x + 1
   | ^
-help: declare it as mutable up front with `mut inf = ...` if it needs to change.
+help: pick another name (`inf_`, `E_CHARGE`, ...) — `mut inf = ...` would shadow the constant for the whole file.

@@ -2824,8 +2824,10 @@ fn fn_name_collision_with_global_matches_walker() {
         for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
             let (_, err, code) = run_source(src, env, tag);
             assert_eq!(code, Some(1), "env {env:?} src {tag}");
+            // `fn inf` gets the seeded-constant wording, `fn x` the generic one; the
+            // shared clause is what this test pins (exact texts live in the corpus).
             assert!(
-                err.contains("is immutable and cannot be reassigned"),
+                err.contains("cannot be reassigned"),
                 "env {env:?} stderr: {err}"
             );
         }
@@ -4940,5 +4942,85 @@ print(r.ok)
         let (out, err, code) = run_source(src, env, &format!("missing_query_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
         assert_eq!(out, want, "{name}: missingness spellings drifted");
+    }
+}
+
+/// `helix.toml` is a real manifest: description/authors/license/repository/keywords are
+/// accepted, `version` must be comparable MAJOR.MINOR.PATCH, and a declared `helix`
+/// toolchain floor is ENFORCED at manifest load — the #19 review's incident verbatim:
+/// an old binary on new syntax must say "your binary is too old" once, not fail with
+/// sixty confusing parse errors. Enforcement lives in `Manifest::load`, the one seam
+/// `run`/`test`/`sync` and every dependency manifest already go through.
+#[test]
+fn helix_toml_carries_metadata_and_enforces_the_toolchain_floor() {
+    let dir = std::env::temp_dir().join("helix_it_manifest");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let toml = dir.join("helix.toml");
+    let prog = dir.join("m.helix");
+    std::fs::write(&prog, "print(1 + 1)\n").unwrap();
+    let run = |manifest: &str| {
+        std::fs::write(&toml, manifest).unwrap();
+        run(&[prog.to_str().unwrap()], &[], "")
+    };
+
+    // The full metadata surface parses, and a satisfied floor runs.
+    let (out, err, code) = run(
+        "[package]\nname = \"physics\"\nversion = \"0.1.0\"\n\
+         description = \"Orbital mechanics\"\nauthors = [\"A <a@b.c>\"]\n\
+         license = \"MIT\"\nkeywords = [\"physics\"]\nhelix = \">=0.1.0\"\n[dependencies]\n",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "2\n");
+
+    // An unsatisfiable floor is ONE clear error naming both versions.
+    let (_, err, code) = run(
+        "[package]\nname = \"physics\"\nhelix = \">=9.0.0\"\n[dependencies]\n",
+    );
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("requires Helix >= 9.0.0") && err.contains("this binary is"),
+        "{err}"
+    );
+
+    // A version that cannot be compared is not a version.
+    let (_, err, code) =
+        run("[package]\nname = \"physics\"\nversion = \"1.0\"\n[dependencies]\n");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("must be MAJOR.MINOR.PATCH"), "{err}");
+
+    // A malformed floor names the accepted forms.
+    let (_, err, code) =
+        run("[package]\nname = \"physics\"\nhelix = \"banana\"\n[dependencies]\n");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("must be a minimum version"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Reassigning a seeded math constant names the constant and warns about shadowing —
+/// the generic hint was actively harmful there: "declare it as mutable up front" WORKS
+/// for `e`, silently shadowing Euler's number for the whole file (the natural variable
+/// name for elementary charge, which is how a physics library found this). An ordinary
+/// immutable binding keeps the generic wording. Byte-identical on all three engines:
+/// the message pair is built by one shared helper.
+#[test]
+fn seeded_constants_explain_themselves_on_reassignment() {
+    for (name, env) in ENGINES {
+        let (_, err, code) = run_source("e = 3\nprint(e)\n", env, &format!("econst_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(
+            err.contains("`e` is a built-in constant (Euler's number, 2.71828...)")
+                && err.contains("would shadow the constant"),
+            "{name}: {err}"
+        );
+
+        let (_, err, code) =
+            run_source("x = 1\nx = 2\nprint(x)\n", env, &format!("ximm_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(
+            err.contains("`x` is immutable and cannot be reassigned")
+                && err.contains("mut x = ..."),
+            "{name}: ordinary binding lost the generic wording: {err}"
+        );
     }
 }

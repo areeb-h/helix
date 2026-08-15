@@ -58,6 +58,26 @@ cmp a.out b.out && cmp a.out c.out
 A lookup miss is *distinguishable* on request: `d.expect(k)` raises where `d.get(k)`
 and `d[k]` return `missing` (ADR 0001 keeps the propagating default).
 
+## Packaging
+
+`helix.toml` is a full manifest — `helix new <name>` writes the template:
+
+```toml
+[package]
+name = "physics"
+version = "0.1.0"            # must be MAJOR.MINOR.PATCH — it is an ordering claim
+description = "Orbital mechanics and physical constants"
+authors = ["You <you@example.com>"]
+license = "MIT"
+helix = ">=0.2.1"            # toolchain floor — ENFORCED with one clear error
+[dependencies]
+```
+
+The `helix` floor is the field to always set: an older binary opening the project says
+*"this project requires Helix >= X, and this binary is Y"* once, instead of failing
+sixty confusing ways on syntax it doesn't know. Dependencies are hash-pinned in
+`helix.lock` (`helix sync` / `helix verify`).
+
 ## For contributors
 
 - Gate before any commit: `bash scripts/gate.sh < /dev/null` (the stdin redirect is
