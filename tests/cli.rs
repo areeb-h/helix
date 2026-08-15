@@ -4656,3 +4656,40 @@ print(range(0, 5).unique())
         assert_eq!(out, "4\n[0, 1, 2]\n[0, 1, 2, 3, 4]\n", "{name}: unique classes drifted");
     }
 }
+
+/// The i64 map kernel admits AFFINE indices (`a[2*i]`, `a[i+1]`, `a[i*k+3]`) — previously
+/// only the bare counter (`a[i]`) and a free scalar (`a[k]`) were eligible, so an affine
+/// body fell to the per-element bytecode loop: measured 486 -> 27 ms at 10M elements, and
+/// the 3-point stencil `a[i] + a[i+1] + a[i+2]` 1871 -> 31 ms at 20M, against the PGO
+/// release binary. (The reduce path deliberately still declines affine bounds: admitting
+/// them there changed which compiled form the body got without the dispatch taking a
+/// kernel — see the site comment in `bytecode/comprehensions.rs`.)
+///
+/// What this pins is CORRECTNESS, not speed: the kernel does unchecked native loads, so
+/// the values — and the out-of-bounds/negative-index behaviour, which must decline to the
+/// exact interpreter semantics (Python-wrap for negatives, the precise OOB error text) —
+/// must be bit-identical on all three engines. The `let` shadowing case guards the
+/// soundness rule that a rebound base/coef name refuses the kernel rather than running a
+/// stale bounds proof.
+#[test]
+fn affine_indexed_map_is_correct_on_all_engines() {
+    let src = r#"
+n = 1000
+a = range(0, n).map(i => i * 3 + 7)
+print(range(0, 500).map(i => a[2 * i]).sum())
+print(range(0, 999).map(i => a[i + 1]).sum())
+print(range(0, 500).map(i => a[2 * i + 1] - a[2 * i]).sum())
+k = 5
+print(range(0, 100).map(i => a[i * k + 3]).sum())
+b = range(0, 10).map(i => i * 10)
+r = try (range(0, 7).map(i => b[2 * i]).sum())
+print(r.ok, r.error)
+print(range(0, 5).map(i => b[i - 5]).sum())
+"#;
+    let want = "752000\n1505493\n1500\n75850\nfalse index 10 is out of bounds for length 10\n350\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("affine_map_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: affine-indexed map drifted");
+    }
+}

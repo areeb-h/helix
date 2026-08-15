@@ -116,10 +116,9 @@ impl super::Compiler {
                 // A body reading a captured array (`a[it]`). Tried AFTER the scalar analyses so
                 // an unindexed body keeps its existing (bound-free) kernel unchanged — this arm
                 // only ever admits shapes that used to fall to the per-element bytecode loop.
-                .or_else(|| {
-                    crate::jit::map_kernel_captures_indexed(body, &params[0], &fns)
-                        .map(|(c, bnd)| (c, bnd, Vec::new()))
-                })
+                // Its affine indices (`a[2*i]`) mint synthetic `$aff` base/coef terms,
+                // which the push loop below evaluates — same contract as the mixed twin.
+                .or_else(|| crate::jit::map_kernel_captures_indexed(body, &params[0], &fns))
                 // The FLOAT-rooted indexed body (`a[i] + b[i]` over f64 arrays, `a[i*n + k]`)
                 // the i64 analysis rejects. Same capture/bounds vocabulary — the JIT builds
                 // the mixed (i64 range → f64 out) specialization from it, and a body BOTH
@@ -550,9 +549,18 @@ impl super::Compiler {
         // parallelized yet — its non-associative fold needs the serial captured-reduce path — so
         // it declines here (falls to the ordinary serial map-of-reduce).
         let fns = self.jit_fn_set();
+        // Synth (`$aff`) terms are declined here: this site pushes every capture as a BARE
+        // IDENT (see the push loop below), so a synthetic slot's name would not resolve.
         let (caps, bnds) = match crate::jit::reduce_loop_captures(rbody, pa, pb, &fns) {
-            Some(cb) => cb,
-            None => return Ok(None),
+            Some((caps, bnds, synth))
+                if synth.is_empty()
+                    && bnds
+                        .iter()
+                        .all(|b| !matches!(b, crate::bytecode::IndexBound::Affine { .. })) =>
+            {
+                (caps, bnds)
+            }
+            _ => return Ok(None),
         };
         let one_scalar = caps.iter().filter(|c| c.kind == CaptureKind::Scalar).count() == 1;
         let shape_ok = one_scalar
@@ -709,7 +717,24 @@ impl super::Compiler {
                 match crate::jit::reduce_jit_bodies(init, body, pa, pb, &fns) {
                     Some(bodies) => (Some(bodies), Vec::new(), Vec::new(), false),
                     None => match crate::jit::reduce_loop_captures(body, pa, pb, &fns) {
-                        Some((caps, bnds)) if !caps.is_empty() => (Some(vec![body.clone()]), caps, bnds, false),
+                        // AFFINE bounds are DECLINED on the reduce path, deliberately. The
+                        // i64 affine admission exists for the standalone MAP kernel, where
+                        // it measures 16-50x (`a[2*i]`, the 3-point stencil); admitting it
+                        // here made the same body 1.9x SLOWER (416 -> 792 ms at 10M),
+                        // because emitting the guard changes which compiled form the body
+                        // gets while this path's dispatch never takes the kernel. Keeping
+                        // the reduce at Counter/Scalar keeps it byte-identical to what it
+                        // was. Lifting this needs the reduce dispatch to actually run the
+                        // affine kernel, measured — see docs/v0.2.1-fix-plan.md.
+                        Some((caps, bnds, syn))
+                            if !caps.is_empty()
+                                && syn.is_empty()
+                                && bnds.iter().all(|b| {
+                                    !matches!(b, crate::bytecode::IndexBound::Affine { .. })
+                                }) =>
+                        {
+                            (Some(vec![body.clone()]), caps, bnds, false)
+                        }
                         _ => (None, Vec::new(), Vec::new(), false),
                     },
                 }
@@ -899,11 +924,19 @@ impl super::Compiler {
             // MUST BE NON-EMPTY: a capture-free i64 chain belongs to `FusedKernel`, and if it was
             // declined for some other reason it should stay on the path it had, not gain a second
             // one here — this arm only admits shapes that previously had no fused form at all.
-            // (`reduce_loop_captures` emits no synthetic `$aff` terms — the i64 collector only
-            // admits `arr[counter]`/`arr[scalar]` indices — so `synth` is empty and every capture
-            // pushes as a bare ident, exactly as `compile_reduce_range`'s captured arm does.)
+            // (An affine index's synthetic `$aff` terms are DECLINED here — this site pushes
+            // every capture as a bare ident, exactly as `compile_reduce_range`'s captured arm
+            // does, so a synthetic slot's name would not resolve. The parallel nested path
+            // declines `Affine` bounds at dispatch anyway; keeping the shape off this arm
+            // keeps it on the path it had.)
             match crate::jit::reduce_loop_captures(&new_body, pa, MR_COUNTER, &fns) {
-                Some((caps, bnds)) if !caps.is_empty() => {
+                Some((caps, bnds, syn))
+                    if !caps.is_empty()
+                        && syn.is_empty()
+                        && bnds.iter().all(|b| {
+                            !matches!(b, crate::bytecode::IndexBound::Affine { .. })
+                        }) =>
+                {
                     (vec![new_body.clone()], caps, bnds, Vec::new(), false)
                 }
                 _ => return Ok(false),
@@ -1157,7 +1190,7 @@ impl super::Compiler {
             && is_idempotent(end)
         {
             let fns = self.jit_fn_set();
-            if let Some((caps, bounds)) = crate::jit::reduce_loop_captures(body, &pa, &pb, &fns)
+            if let Some((caps, bounds, _)) = crate::jit::reduce_loop_captures(body, &pa, &pb, &fns)
                 && bounds.is_empty()
                 && caps.iter().all(|c| c.kind == CaptureKind::Scalar)
             {

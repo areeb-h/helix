@@ -707,7 +707,7 @@ pub fn build(
                 && rl.index_bounds.is_empty()
                 && rl.captures.iter().all(|c| c.kind == CaptureKind::Scalar)
                 && reduce_loop_captures(&rl.bodies[0], &rl.pa, &rl.pb, &int_eligible)
-                    .is_some_and(|(caps, bnds)| caps == rl.captures && bnds.is_empty());
+                    .is_some_and(|(caps, bnds, _)| caps == rl.captures && bnds.is_empty());
             if !ok {
                 scan_ids.push(None);
                 continue;
@@ -985,7 +985,7 @@ fn define_array_kernels(
             // Re-derive from the body and require the SAME capture list the compiler stored,
             // so codegen's `caps[j]` and the VM's load order cannot drift apart.
             map_kernel_captures_indexed(&k.body, &k.binder, eligible)
-                .is_some_and(|(c, bnd)| c == k.captures && bnd == k.index_bounds)
+                .is_some_and(|(c, bnd, _)| c == k.captures && bnd == k.index_bounds)
         } else {
             map_kernel_captures(&k.body, &k.binder, eligible).is_some()
         };
@@ -1085,19 +1085,32 @@ pub fn reduce_loop_eligible(body: &Expr, pa: &str, pb: &str, fns: &HashSet<&str>
 /// [`CaptureKind::ArrayI64`]). Returns the ordered captures (possibly empty), or `None` if
 /// the body is ineligible, captures more than [`MAX_CAPTURES`], or uses a name both bare
 /// and indexed (a contradictory kind). Same i64-closed rules as `value_eligible(Int)`.
+/// What an indexed collector returns: the ordered captures, the bounds obligations the VM
+/// must discharge, and any synthetic `$aff` base/coef terms (expressions the compile site
+/// evaluates once in the enclosing scope — a site that pushes bare idents only must
+/// decline when this is non-empty).
+pub type IndexedCaptures = (Vec<Capture>, Vec<IndexBound>, Vec<(String, Expr)>);
+
 pub fn reduce_loop_captures(
     body: &Expr,
     pa: &str,
     pb: &str,
     fns: &HashSet<&str>,
-) -> Option<(Vec<Capture>, Vec<IndexBound>)> {
+) -> Option<IndexedCaptures> {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(pa);
     locals.insert(pb);
     let mut caps: Vec<Capture> = Vec::new();
     let mut bounds: Vec<IndexBound> = Vec::new();
-    if value_eligible_cap_indexed(body, fns, &locals, pb, &mut caps, &mut bounds) && caps.len() <= MAX_CAPTURES {
-        Some((caps, bounds))
+    // Synthetic `$aff` base/coef terms from affine indices (`a[2*i]`) — expressions the
+    // compile site evaluates once in the enclosing scope. A site whose capture-push loop
+    // cannot evaluate an expression (it pushes bare idents only) must DECLINE when this
+    // is non-empty rather than push an unresolvable name.
+    let mut synth: Vec<(String, Expr)> = Vec::new();
+    if value_eligible_cap_indexed(body, fns, &locals, pb, &mut caps, &mut bounds, &mut synth)
+        && caps.len() <= MAX_CAPTURES
+    {
+        Some((caps, bounds, synth))
     } else {
         None
     }
@@ -1185,6 +1198,7 @@ fn value_eligible_cap_indexed(
     pb: &str,
     caps: &mut Vec<Capture>,
     bounds: &mut Vec<IndexBound>,
+    synth: &mut Vec<(String, Expr)>,
 ) -> bool {
     match e {
         Expr::Int(_) => true,
@@ -1230,6 +1244,50 @@ fn value_eligible_cap_indexed(
                 push_bound(bounds, IndexBound::Scalar { array: ap as u32, scalar: sp as u32 });
                 true
             }
+            // `arr[AFFINE(pb)]`: any other index affine in the counter — `a[2*i]`,
+            // `a[i + 1]`, `a[i*n + k]`. The same admission, by the same helpers, as the
+            // mixed map's arm (see `infer_f64_indexed`): validate the WHOLE index first
+            // as a pure `i64` expression over the counter, free scalars and `Int`
+            // literals (codegen lowers exactly that expression from `vars`, so it must
+            // be checked verbatim; every leaf effect-free and non-trapping, which is
+            // what licenses `affine_split`'s algebraic folding), then split it into
+            // counter-free `base`/`coef` terms that land as Scalar cap slots — bare
+            // idents reuse the body's own caps, compound terms get a synthetic `$aff`
+            // slot the compile site evaluates once. The VM discharges the bound from
+            // the two ENDPOINT indices in i128 — over the range endpoints for a reduce
+            // (whose `pb` IS the counter), and composed with the lazy range's
+            // `start/step` for a map (`map_index_caps`), which declines any other
+            // source. There is no `pa` here — the empty string, never a legal ident,
+            // fills `index_scalars_eligible`'s reject slot; the REAL accumulator (and
+            // every other local) is refused by the `locals` scan below, because a
+            // loop-varying name in the index would make the once-evaluated base/coef
+            // caps stale, and a `let`-local does not even exist in the enclosing scope
+            // the compile site evaluates them in.
+            (Expr::Ident { name: arr, .. }, idx) if !locals.contains(arr.as_str()) => {
+                if locals.iter().any(|l| *l != pb && expr_uses_ident(idx, l)) {
+                    return false;
+                }
+                let Some(ap) = record_cap_pos(caps, arr, CaptureKind::ArrayI64) else {
+                    return false;
+                };
+                if index_scalars_eligible(idx, "", pb, caps).is_none() {
+                    return false;
+                }
+                let Some((base, coef)) = affine_split(idx, pb) else {
+                    return false;
+                };
+                let (Some(bp), Some(cp)) = (
+                    record_index_term(caps, synth, base),
+                    record_index_term(caps, synth, coef),
+                ) else {
+                    return false;
+                };
+                push_bound(
+                    bounds,
+                    IndexBound::Affine { array: ap as u32, base: bp as u32, coef: cp as u32 },
+                );
+                true
+            }
             _ => false,
         },
         Expr::Binary { op, left, right, .. } => {
@@ -1242,18 +1300,20 @@ fn value_eligible_cap_indexed(
                 _ => false,
             };
             op_ok
-                && value_eligible_cap_indexed(left, eligible, locals, pb, caps, bounds)
-                && value_eligible_cap_indexed(right, eligible, locals, pb, caps, bounds)
+                && value_eligible_cap_indexed(left, eligible, locals, pb, caps, bounds, synth)
+                && value_eligible_cap_indexed(right, eligible, locals, pb, caps, bounds, synth)
         }
         Expr::Call { name, args, .. } => {
             eligible.contains(name.as_str())
                 && jit_builtin_arity_ok(name, args.len())
-                && args.iter().all(|a| value_eligible_cap_indexed(a, eligible, locals, pb, caps, bounds))
+                && args
+                    .iter()
+                    .all(|a| value_eligible_cap_indexed(a, eligible, locals, pb, caps, bounds, synth))
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
-            cond_eligible_cap_indexed(cond, eligible, locals, pb, caps, bounds)
-                && value_eligible_cap_indexed(then_branch, eligible, locals, pb, caps, bounds)
-                && value_eligible_cap_indexed(else_branch, eligible, locals, pb, caps, bounds)
+            cond_eligible_cap_indexed(cond, eligible, locals, pb, caps, bounds, synth)
+                && value_eligible_cap_indexed(then_branch, eligible, locals, pb, caps, bounds, synth)
+                && value_eligible_cap_indexed(else_branch, eligible, locals, pb, caps, bounds, synth)
         }
         Expr::Let { bindings, body } => {
             let mut locals2 = locals.clone();
@@ -1262,23 +1322,34 @@ fn value_eligible_cap_indexed(
                 // arm relies on: `arr[pb]` no longer means `arr[counter]` — codegen would emit
                 // an UNCHECKED load at the let-bound index, past what the VM's counter-range
                 // pre-check validated → an out-of-bounds native read. It also can't shadow a
-                // captured scalar index without changing what a `Scalar` bound refers to.
-                // Refuse to JIT any `let` that rebinds `pb` OR a name already used as a scalar
-                // index; the VM/tree-walker evaluate such a body correctly.
+                // captured scalar index without changing what a `Scalar` bound refers to —
+                // nor a name an `Affine` bound's `base`/`coef` slot refers to, for the same
+                // reason: the bound was proved against the ENCLOSING-scope value, and codegen
+                // would recompute the index from the let-bound one. (`$aff` slots cannot
+                // collide — `$` is not a legal identifier character.) Refuse to JIT any such
+                // `let`; the VM/tree-walker evaluate such a body correctly.
                 if n.as_str() == pb
                     || bounds.iter().any(|b| {
-                        matches!(b, IndexBound::Scalar { scalar, .. }
-                            if caps.get(*scalar as usize).is_some_and(|c| c.name == *n))
+                        let names_cap = |pos: u32| {
+                            caps.get(pos as usize).is_some_and(|c| c.name == *n)
+                        };
+                        match b {
+                            IndexBound::Scalar { scalar, .. } => names_cap(*scalar),
+                            IndexBound::Affine { base, coef, .. } => {
+                                names_cap(*base) || names_cap(*coef)
+                            }
+                            IndexBound::Counter { .. } => false,
+                        }
                     })
                 {
                     return false;
                 }
-                if !value_eligible_cap_indexed(v, eligible, &locals2, pb, caps, bounds) {
+                if !value_eligible_cap_indexed(v, eligible, &locals2, pb, caps, bounds, synth) {
                     return false;
                 }
                 locals2.insert(n.as_str());
             }
-            value_eligible_cap_indexed(body, eligible, &locals2, pb, caps, bounds)
+            value_eligible_cap_indexed(body, eligible, &locals2, pb, caps, bounds, synth)
         }
         _ => false,
     }
@@ -1293,16 +1364,17 @@ fn cond_eligible_cap_indexed(
     pb: &str,
     caps: &mut Vec<Capture>,
     bounds: &mut Vec<IndexBound>,
+    synth: &mut Vec<(String, Expr)>,
 ) -> bool {
     match e {
         Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
-            cond_eligible_cap_indexed(left, eligible, locals, pb, caps, bounds)
-                && cond_eligible_cap_indexed(right, eligible, locals, pb, caps, bounds)
+            cond_eligible_cap_indexed(left, eligible, locals, pb, caps, bounds, synth)
+                && cond_eligible_cap_indexed(right, eligible, locals, pb, caps, bounds, synth)
         }
         Expr::Binary { op, left, right, .. } => {
             matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne)
-                && value_eligible_cap_indexed(left, eligible, locals, pb, caps, bounds)
-                && value_eligible_cap_indexed(right, eligible, locals, pb, caps, bounds)
+                && value_eligible_cap_indexed(left, eligible, locals, pb, caps, bounds, synth)
+                && value_eligible_cap_indexed(right, eligible, locals, pb, caps, bounds, synth)
         }
         _ => false,
     }
@@ -2578,8 +2650,19 @@ fn reduce_bodies_eligible(
         locals.insert(rl.pb.as_str());
         let mut caps: Vec<Capture> = Vec::new();
         let mut bounds: Vec<IndexBound> = Vec::new();
-        let ok =
-            value_eligible_cap_indexed(&rl.bodies[0], fns, &locals, rl.pb.as_str(), &mut caps, &mut bounds);
+        // `$aff` naming is a deterministic function of the body, so the re-derived caps
+        // (which include any synthetic slots) match the stored list iff nothing drifted —
+        // the synth expressions themselves were consumed at the compile site's push loop.
+        let mut synth: Vec<(String, Expr)> = Vec::new();
+        let ok = value_eligible_cap_indexed(
+            &rl.bodies[0],
+            fns,
+            &locals,
+            rl.pb.as_str(),
+            &mut caps,
+            &mut bounds,
+            &mut synth,
+        );
         // The build gate must reproduce BOTH the capture set and the bounds obligations the VM
         // will check — a drift in either would run the kernel with a pre-check that doesn't match
         // its actual `arr[…]` accesses (an out-of-bounds hazard), so require an exact match.
@@ -2635,22 +2718,23 @@ pub fn map_kernel_captures_indexed(
     body: &Expr,
     binder: &str,
     fns: &HashSet<&str>,
-) -> Option<(Vec<Capture>, Vec<IndexBound>)> {
+) -> Option<IndexedCaptures> {
     let mut locals: HashSet<&str> = HashSet::new();
     locals.insert(binder);
     let mut caps: Vec<Capture> = Vec::new();
     let mut bounds: Vec<IndexBound> = Vec::new();
-    if value_eligible_cap_indexed(body, fns, &locals, binder, &mut caps, &mut bounds)
+    let mut synth: Vec<(String, Expr)> = Vec::new();
+    if value_eligible_cap_indexed(body, fns, &locals, binder, &mut caps, &mut bounds, &mut synth)
         && caps.len() <= MAX_CAPTURES
     {
         // Relabel purely-value scalars to `ScalarValue` — same as the mixed twin, so the two
         // derivations of one body produce identical lists (the i64 kernel loads a `ScalarValue`
         // as `i64` exactly as it did a `Scalar`, so its behavior is unchanged; the relabel only
         // lets the mixed kernel recognize the same cap as `f64`). The reduce path does NOT
-        // relabel, so its captures are untouched. `value_eligible_cap_indexed` emits no affine
-        // synthetic terms (the i64 map has no affine arm), so an empty `synth` here.
-        relabel_value_scalars(&mut caps, &bounds, &[]);
-        Some((caps, bounds))
+        // relabel, so its captures are untouched. `synth` carries any affine `$aff` terms —
+        // the map compile site's push loop evaluates them, exactly as it does the mixed twin's.
+        relabel_value_scalars(&mut caps, &bounds, &synth);
+        Some((caps, bounds, synth))
     } else {
         None
     }
