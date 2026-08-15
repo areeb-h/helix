@@ -3911,7 +3911,11 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         ("src/interp/ops.rs", 3),
         ("src/interp/access.rs", 1),
         ("src/interp/builtins.rs", 8),
-        ("src/interp/comprehensions.rs", 4),
+        // 6: the two additions are `fold_take_append`'s `env.get_mut(pa).unwrap()`s —
+        // the reduce arm inserts both binders unconditionally before the loop and
+        // nothing removes them until the restore after it, the same invariant the
+        // loop's own pre-existing `get_mut(pa)/get_mut(pb)` unwraps rely on.
+        ("src/interp/comprehensions.rs", 6),
         ("src/interp/dataframe_ops.rs", 0),
         // +3 (52 → 55): `TryJitScan`'s three operand pops. Emitted at exactly one compiler
         // site, which pushes `[start, end, init]` immediately before the op — proven at the
@@ -5144,4 +5148,69 @@ fn qualified_module_calls_work_inside_interpolation() {
         assert_eq!(out, want, "{name}: interpolation-hole module call drifted");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The walker's fold is amortized-linear (ADR 0029, plan #1) — the last engine where
+/// an accumulator rebuild was quadratic. The VM's take-append-store discipline is
+/// transplanted: the exact `acc.concat(e)` / `acc.insert(k, v)` shapes take the
+/// binding's value out before appending, so an unaliased accumulator extends in place;
+/// everything else — and every aliased case — keeps the copy path with identical
+/// answers. Measured at landing: 262k appends 6,768 → 23 ms; 64k dict inserts
+/// 17,689 → 16 ms.
+///
+/// The pin is the COMPLEXITY CLASS, not wall-clock (wall clock here is ±15%): time
+/// n and 4n in one process pair and assert the ratio stays far below quadratic's
+/// ~16×. Threshold 8× leaves headroom for startup constants and load while a
+/// quadratic regression (28.8× measured before the fix) still fails loudly.
+#[test]
+fn walker_fold_append_is_linear() {
+    let time_of = |n: usize| {
+        let src = format!(
+            "print(range(0, {n}).reduce([], (acc, i) => acc.concat([i])).count())\n"
+        );
+        let start = std::time::Instant::now();
+        let (out, err, code) =
+            run_source(&src, &[("HELIX_NOVM", "1")], &format!("wfold_lin_{n}"));
+        assert_eq!(code, Some(0), "{err}");
+        assert_eq!(out.trim(), n.to_string());
+        start.elapsed().as_secs_f64()
+    };
+    let t1 = time_of(65_536);
+    let t4 = time_of(262_144);
+    let ratio = t4 / t1.max(1e-9);
+    assert!(
+        ratio < 8.0,
+        "walker fold went quadratic again: 4x n cost {ratio:.1}x (t1={t1:.3}s t4={t4:.3}s)"
+    );
+}
+
+/// The fold fast path's semantics, pinned on all three engines: a self-referencing
+/// argument sees the live accumulator (and declines in-place via the Rc), a shared
+/// init survives the fold untouched, both runtime error texts match the general
+/// path's words, scan keeps snapshot history, and a mid-fold error restores the
+/// shadowed outer binding (the p4/p5 contract, previously pinned nowhere).
+#[test]
+fn walker_fold_fast_path_semantics_are_pinned() {
+    let src = r#"
+print(range(0, 5).reduce([], (acc, i) => acc.concat([acc.count()])))
+pre = [1, 2]
+print([3, 4].reduce(pre, (acc, x) => acc.concat([x])))
+print(pre)
+z = [[9], 0]
+r = try [1, 2].reduce(z[1], (acc, x) => acc.concat([x]))
+print(r.ok, "|", r.error)
+q = try [[1]].reduce([], (acc, x) => acc.concat(x[0]))
+print(q.ok, "|", q.error)
+s = [1, 2, 3].scan([], (acc, x) => acc.concat([x]))
+print(s.count(), s[2])
+acc = 99
+w = try range(0, 6).reduce([], (acc, i) => if i == 3 then acc.concat([1 // 0]) else acc.concat([i]))
+print(w.ok, acc)
+"#;
+    let want = "[0, 1, 2, 3, 4]\n[1, 2, 3, 4]\n[1, 2]\nfalse | an Int has no method `concat`\nfalse | `concat` expects arrays, but argument 1 is an Int\n3 [1, 2, 3]\nfalse 99\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("wfold_sem_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: fold fast-path semantics drifted");
+    }
 }

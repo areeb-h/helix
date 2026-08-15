@@ -313,10 +313,52 @@ impl super::Interp {
                 } else {
                     Vec::new()
                 };
+                // THE TAKE-APPEND-STORE FAST PATH (ADR 0029, plan #1) — the VM's
+                // discipline transplanted, not a parallel invention. Recognized ONCE:
+                // the body is EXACTLY `acc.concat(e)` / `acc.insert(k, v)` on the
+                // fold's own accumulator binder — the compiler's guarded
+                // `emit_reduce_body_and_store` predicate, including `pa != pb` (with
+                // duplicate binders the name means the ELEMENT) and never for `scan`
+                // (each snapshot in `out` co-owns the accumulator, so in-place
+                // extension would corrupt history; the Rc check would decline anyway —
+                // excluding it here keeps that structural rather than incidental).
+                // Everything hard is inherited: arguments evaluate FIRST with the
+                // binding intact (`acc.concat([acc.count()])` sees the live value and
+                // merely keeps the Rc shared), validation precedes the take with the
+                // VM op's exact error texts, and the `Rc::get_mut` inside
+                // `concat_in_place`/`insert_in_place` is the aliasing oracle — shared
+                // inits, captured accumulators and self-referencing arguments all fall
+                // to the copy path with identical answers (ADR 0029: correct at the
+                // old cost, never wrong at any cost).
+                let fold_step: Option<(bool, &[Expr])> = if want_scan || pa == pb {
+                    None
+                } else if let Expr::Method { recv, name: vn, args: va, named, .. } = body
+                    && named.is_empty()
+                    && matches!(&**recv, Expr::Ident { name: n, .. } if n == pa)
+                    && matches!((vn.as_str(), va.len()), ("concat", 1) | ("insert", 2))
+                {
+                    Some((vn == "concat", va.as_slice()))
+                } else {
+                    None
+                };
                 let mut err: Option<HelixError> = None;
-                for el in items.to_values().iter() {
+                // `iter_values()`, not `to_values()`: the latter boxes a packed
+                // receiver into a `Vec<Value>` up front purely to iterate it — the
+                // same ADR-0024 hazard `eval_pattern_loop` already fixed.
+                for el in items.iter_values() {
                     self.env.get_mut(pa).unwrap().value = acc;
-                    self.env.get_mut(pb).unwrap().value = el.clone();
+                    self.env.get_mut(pb).unwrap().value = el;
+                    if let Some((is_concat, va)) = fold_step {
+                        match self.fold_take_append(is_concat, va, pa, line, col) {
+                            Ok(v) => acc = v,
+                            Err(e) => {
+                                acc = Value::Unit;
+                                err = Some(e);
+                                break;
+                            }
+                        }
+                        continue;
+                    }
                     match self.eval(body) {
                         Ok(v) => {
                             acc = v;
@@ -367,6 +409,68 @@ impl super::Interp {
     /// whole loop with `v` (for `any`/`all`) or `Ok(None)` to continue. The shadowed
     /// binding(s) are restored on **every** exit — normal end, short-circuit, or error —
     /// so nested comprehensions and the surrounding scope behave exactly as before.
+    /// One element of the fold fast path: evaluate the argument(s) with the accumulator
+    /// binding INTACT, validate everything fallible with the VM op's exact error texts
+    /// (the oracle counts words), and only then take the binding's value —
+    /// `mem::replace` drops the env's ownership, so an accumulator nothing else aliases
+    /// becomes unique and `concat_in_place`/`insert_in_place` extend it in place.
+    /// Mirrors `Op::ConcatIntoLocal`/`Op::InsertIntoLocal` (vm.rs) arm for arm,
+    /// including the validation ORDER — a failing step leaves the binding exactly as
+    /// the general path would have, which is what the error-mid-fold restore contract
+    /// (init variable intact, shadowed outer binding restored) depends on.
+    fn fold_take_append(
+        &mut self,
+        is_concat: bool,
+        va: &[Expr],
+        pa: &str,
+        line: usize,
+        col: usize,
+    ) -> Result<Value, HelixError> {
+        use crate::value::with_article;
+        if is_concat {
+            let arg = self.eval(&va[0])?;
+            let Value::Array(add) = arg else {
+                return Err(HelixError::new(
+                    format!(
+                        "`concat` expects arrays, but argument 1 is {}",
+                        with_article(arg.type_name())
+                    ),
+                    line,
+                    col,
+                ));
+            };
+            let slot = &mut self.env.get_mut(pa).unwrap().value;
+            if !matches!(slot, Value::Array(_)) {
+                return Err(HelixError::new(
+                    format!("{} has no method `concat`", with_article(slot.type_name())),
+                    line,
+                    col,
+                ));
+            }
+            let Value::Array(cur) = std::mem::replace(slot, Value::Unit) else {
+                unreachable!("accumulator type checked immediately above")
+            };
+            Ok(Value::concat_in_place(cur, &add))
+        } else {
+            let kv = self.eval(&va[0])?;
+            let v = self.eval(&va[1])?;
+            let slot = &mut self.env.get_mut(pa).unwrap().value;
+            if !matches!(slot, Value::Dict(_)) {
+                return Err(HelixError::new(
+                    format!("{} has no method `insert`", with_article(slot.type_name())),
+                    line,
+                    col,
+                ));
+            }
+            let k = crate::value::DictKey::from_value(&kv)
+                .map_err(|m| HelixError::new(m, line, col))?;
+            let Value::Dict(cur) = std::mem::replace(slot, Value::Unit) else {
+                unreachable!("accumulator type checked immediately above")
+            };
+            Ok(Value::insert_in_place(cur, k, v))
+        }
+    }
+
     fn eval_pattern_loop<F>(
         &mut self,
         names: &[String],
