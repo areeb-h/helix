@@ -241,3 +241,30 @@
             );
         }
     }
+
+/// Every builtin answers the signature probe (docs/dx-plan.md, describe enrichment).
+///
+/// `helix describe` derives each builtin's arity by probing [`super::probe_builtin`]
+/// with `Unknown` argument vectors: the accepted lengths are the signature, and a
+/// builtin whose checker arm never looks at `args.len()` accepts every probe and is
+/// reported `signatures: null` — honest, not fabricated. What must never happen is the
+/// THIRD state: a builtin rejecting every probe, which would mean its checker arm
+/// rejects `Unknown` arguments — and since `compatible(Unknown, _)` is the permissive
+/// checker's foundation, that is a checker bug before it is a catalog bug. This pin
+/// turns a future Unknown-rejecting guard into a gate failure instead of a silently
+/// signature-less catalog entry.
+#[test]
+fn every_builtin_answers_the_signature_probe() {
+    for b in crate::registry::BUILTINS {
+        let accepted: Vec<usize> = (0..=8)
+            .filter(|&k| super::probe_builtin(b.path, &vec![super::Type::Unknown; k]).is_some())
+            .collect();
+        assert!(
+            !accepted.is_empty(),
+            "`{}` rejected every arity probe 0..=8 — its checker arm rejects Unknown \
+             arguments (a permissive-checker violation), or its arity exceeds the probe \
+             range",
+            b.path
+        );
+    }
+}

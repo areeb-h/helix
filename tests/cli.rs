@@ -4871,3 +4871,48 @@ print(nums == range(0, 50).map(i => i), nums.sum())
         assert_eq!(out, want, "{name}: fold diverged from plain concat");
     }
 }
+
+/// `helix describe` carries signatures derived from the checker's own tables (dx-plan
+/// do-later, landed): accepted arities plus per-arity return types, `null` where the
+/// checker genuinely does not constrain or determine them — never fabricated. `round`
+/// is the shape that forces per-arity returns (1 → Int, 2 → Float); `random` is the
+/// honest-null shape (unguarded arity, arity-independent `Array<Float>` return).
+#[test]
+fn describe_reports_signatures_from_the_checker() {
+    let (out, _, code) = run(&["describe"], &[], "");
+    assert_eq!(code, Some(0));
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("describe is JSON");
+    let builtins = doc["builtins"].as_array().unwrap();
+    let by_name = |n: &str| {
+        builtins
+            .iter()
+            .find(|b| b["name"] == n)
+            .unwrap_or_else(|| panic!("`{n}` missing from describe"))
+    };
+
+    let sqrt = by_name("sqrt");
+    assert_eq!(sqrt["signatures"], serde_json::json!([{"args": 1, "returns": "Float"}]));
+
+    let round = by_name("round");
+    assert_eq!(
+        round["signatures"],
+        serde_json::json!([
+            {"args": 1, "returns": "Int"},
+            {"args": 2, "returns": "Float"}
+        ])
+    );
+
+    let random = by_name("random");
+    assert!(random["signatures"].is_null(), "unguarded arity must be null, not invented");
+    assert_eq!(random["returns"], "Array<Float>");
+
+    // Every entry is one of the two honest states: a nonempty signature list, or null.
+    for b in builtins {
+        let sigs = &b["signatures"];
+        assert!(
+            sigs.is_null() || sigs.as_array().is_some_and(|a| !a.is_empty()),
+            "`{}` has an empty signature list — the probe found no accepted arity",
+            b["name"]
+        );
+    }
+}

@@ -359,17 +359,91 @@ fn cli_doc(args: &[String]) -> ExitCode {
 /// (real names, which methods live on which receiver, what is capability-gated) instead of
 /// hallucinating. Sourced from the registry — the same single source of truth the checker,
 /// runtime, and `did you mean?` hints use, so it can never drift from the language.
+/// Render a checker [`types::Type`] for the catalog — recursive where `Display` is flat,
+/// because "Array<Float>" vs "Array<Record{…}>" is exactly the information a caller
+/// chaining methods needs. `Num` renders as the honest "Int|Float".
+fn render_type(t: &types::Type) -> String {
+    use types::Type;
+    match t {
+        Type::Array(el) => format!("Array<{}>", render_type(el)),
+        Type::Tuple(ts) => {
+            let inner: Vec<String> = ts.iter().map(render_type).collect();
+            format!("Tuple<{}>", inner.join(", "))
+        }
+        Type::Record(fields) => {
+            let inner: Vec<String> =
+                fields.iter().map(|(n, ft)| format!("{n}: {}", render_type(ft))).collect();
+            format!("Record{{{}}}", inner.join(", "))
+        }
+        Type::Num => "Int|Float".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// The return type of `name` at arity `k`, from the checker's own tables, or `None`
+/// when it genuinely depends on the inputs. The `Unknown`-vector probe answers the
+/// input-independent case; otherwise concrete palettes are tried, and only UNANIMITY
+/// across the palettes the checker accepts is reported — a guess is worse than a null.
+fn probe_returns(name: &str, k: usize) -> Option<String> {
+    use types::Type;
+    if let Some(t) = types::probe_builtin(name, &vec![Type::Unknown; k])
+        && !matches!(t, Type::Unknown)
+    {
+        return Some(render_type(&t));
+    }
+    let palettes =
+        [Type::Float, Type::Int, Type::String, Type::Array(Box::new(Type::Float))];
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for p in palettes {
+        if let Some(t) = types::probe_builtin(name, &vec![p; k])
+            && !matches!(t, Type::Unknown)
+        {
+            seen.insert(render_type(&t));
+        }
+    }
+    (seen.len() == 1).then(|| seen.into_iter().next().unwrap())
+}
+
 fn cli_describe() -> ExitCode {
     use crate::{capability, registry};
     let builtins: Vec<serde_json::Value> = registry::BUILTINS
         .iter()
         .map(|b| {
-            serde_json::json!({
+            // Arity by probing the checker with `Unknown` argument vectors: the accepted
+            // lengths ARE the signature the checker enforces. A builtin whose arm never
+            // checks `args.len()` accepts every probe — reported as `signatures: null`
+            // (the checker does not constrain it; fabricating "0..=8" would be a lie),
+            // with the return type still reported when it is arity-independent.
+            let accepted: Vec<usize> = (0..=8)
+                .filter(|&k| {
+                    types::probe_builtin(b.path, &vec![types::Type::Unknown; k]).is_some()
+                })
+                .collect();
+            let (signatures, loose_returns) = if accepted.len() == 9 {
+                (serde_json::Value::Null, probe_returns(b.path, 1))
+            } else {
+                let sigs: Vec<serde_json::Value> = accepted
+                    .iter()
+                    .map(|&k| {
+                        serde_json::json!({
+                            "args": k,
+                            "returns": probe_returns(b.path, k),
+                        })
+                    })
+                    .collect();
+                (serde_json::Value::Array(sigs), None)
+            };
+            let mut entry = serde_json::json!({
                 "name": b.path,
                 "pure": b.pure,
                 "effect": capability::effect_of(b.path).label(),
                 "category": registry::category_of(b.path),
-            })
+                "signatures": signatures,
+            });
+            if let Some(r) = loose_returns {
+                entry["returns"] = serde_json::Value::String(r);
+            }
+            entry
         })
         .collect();
     let mut methods = serde_json::Map::new();

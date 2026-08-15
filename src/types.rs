@@ -70,6 +70,17 @@ impl fmt::Display for Type {
     }
 }
 
+/// Probe the checker's own `builtin_type` table with synthetic argument types — the seam
+/// `helix describe` derives arity and return types through. One source of truth: the same
+/// match arms that type-check real programs answer the catalog, so the catalog cannot
+/// drift from the language (the argument `describe` already makes for names, extended to
+/// signatures). Sound because `compatible(Unknown, _)` is true and the non-arity guards
+/// admit `Unknown`, so an `Err` here is an ARITY rejection, not a type one. Line/col are
+/// zeroed: the probe never renders an error.
+pub(crate) fn probe_builtin(name: &str, args: &[Type]) -> Option<Type> {
+    signatures::builtin_type(name, args, 0, 0).ok()
+}
+
 fn is_numeric(t: &Type) -> bool {
     matches!(t, Type::Int | Type::Float | Type::Num)
 }
