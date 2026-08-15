@@ -4595,3 +4595,64 @@ print([dna("GC"), dna("NN")].mean_gc())
         );
     }
 }
+
+/// `unique` on a packed array must not box the whole buffer just to probe a set.
+///
+/// The general method dispatch expands a packed array via `to_values()` before the
+/// method runs; for `unique` that meant 80M packed ints became ~1.9 GB of boxed
+/// `Value`s — and an allocator ABORT under a memory cap — before a single comparison.
+/// (`zip`/`enumerate` were hoisted above that expansion long ago for the same reason;
+/// `unique` never got the treatment.) The packed fast path probes raw scalars, so the
+/// same program now finishes in a 1000-entry set on the JIT and refuses cleanly (ADR
+/// 0024) where memory genuinely does not suffice. Semantics are pinned unchanged by
+/// the second program: NaN survives (it belongs to no equivalence class), ±0.0
+/// collapse to first-seen, first-seen order throughout.
+#[test]
+#[cfg(unix)]
+fn unique_on_a_packed_array_does_not_abort() {
+    let src = "print(\"n:\", try (range(0, 80000000).map(i => i % 1000).unique().count()))\n\
+               print(\"alive\")\n";
+    let path = std::env::temp_dir().join("helix_it_unique_abort.helix");
+    std::fs::write(&path, src).unwrap();
+    for (name, extra) in [
+        ("jit", ""),
+        ("vm", "export HELIX_NOJIT=1; "),
+        ("walker", "export HELIX_NOVM=1; "),
+    ] {
+        let script = format!(
+            "ulimit -v 3670016; {}exec {} {} < /dev/null",
+            extra,
+            env!("CARGO_BIN_EXE_helix"),
+            path.display()
+        );
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("failed to spawn sh");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{name}: process died\n{stderr}");
+        assert!(stdout.contains("alive"), "{name}: execution stopped\n{stdout}\n{stderr}");
+        assert!(
+            !stderr.contains("memory allocation of"),
+            "{name}: raw allocator abort leaked\n{stderr}"
+        );
+    }
+    let _ = std::fs::remove_file(&path);
+
+    // The packed fast path must reproduce the general path's classes exactly.
+    let sem = r#"
+INF = exp(800.0)
+nan = INF - INF
+print([1.0, nan, nan, 1.0, 0.0 - 0.0, 0.0].unique().count())
+print(range(0, 10).map(i => i % 3).unique())
+print(range(0, 5).unique())
+"#;
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(sem, env, &format!("unique_sem_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "4\n[0, 1, 2]\n[0, 1, 2, 3, 4]\n", "{name}: unique classes drifted");
+    }
+}

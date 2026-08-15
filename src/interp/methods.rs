@@ -400,6 +400,95 @@ pub(crate) fn call_method(
                     }
                 }
             }
+            // `unique` on a PACKED array must not round-trip through `to_values()`: the
+            // general dispatch below boxes every element first, so 80M packed ints became
+            // 1.9 GB of `Value`s — and an allocator ABORT under a memory cap — before
+            // `unique` ran a single comparison. The zip/enumerate lesson, one method over.
+            //
+            // On the packed buffer the key IS the scalar: an `Ints`/`Floats` buffer can
+            // hold no `missing` and no second type, so a plain `HashSet` reproduces
+            // `values_equal`'s classes exactly — with `FloatKey`'s two wrinkles kept:
+            // ±0.0 hash together (first seen stays the representative) and NaN belongs
+            // to no class at all, so every NaN survives. A `Range` is distinct by
+            // construction: its `unique` is itself, same `Rc`, no work. Growth is
+            // FALLIBLE throughout (ADR 0024): 90M distinct ints are a legitimate ask on
+            // a big machine and a clean error on a small one, never a dead process.
+            // Only the bare call takes the fast path — `unique(x)` falls through so the
+            // general arm's arity error is preserved word for word.
+            if name == "unique" && args.is_empty() {
+                use crate::value::{ArrayData, MaterializeLimit};
+                fn grow<T>(v: &mut Vec<T>, line: usize, col: usize) -> Result<(), HelixError> {
+                    if v.len() == v.capacity() {
+                        let more = v.capacity().max(16);
+                        v.try_reserve(more).map_err(|_| {
+                            crate::vm::materialize_refused(
+                                MaterializeLimit::Alloc(
+                                    (v.capacity() + more) * std::mem::size_of::<T>(),
+                                ),
+                                line,
+                                col,
+                            )
+                        })?;
+                    }
+                    Ok(())
+                }
+                fn grow_set<T: std::hash::Hash + Eq>(
+                    s: &mut std::collections::HashSet<T>,
+                    line: usize,
+                    col: usize,
+                ) -> Result<(), HelixError> {
+                    if s.len() == s.capacity() {
+                        let more = s.len().max(16);
+                        s.try_reserve(more).map_err(|_| {
+                            crate::vm::materialize_refused(
+                                MaterializeLimit::Alloc(
+                                    (s.len() + more) * std::mem::size_of::<T>() * 2,
+                                ),
+                                line,
+                                col,
+                            )
+                        })?;
+                    }
+                    Ok(())
+                }
+                match items.as_ref() {
+                    ArrayData::Range { .. } => return Ok(Value::Array(items.clone())),
+                    ArrayData::Ints(xs) => {
+                        let mut seen: std::collections::HashSet<i64> =
+                            std::collections::HashSet::new();
+                        let mut out: Vec<i64> = Vec::new();
+                        for &x in xs {
+                            grow_set(&mut seen, line, col)?;
+                            if seen.insert(x) {
+                                grow(&mut out, line, col)?;
+                                out.push(x);
+                            }
+                        }
+                        return Ok(Value::Array(std::rc::Rc::new(ArrayData::Ints(out))));
+                    }
+                    ArrayData::Floats(xs) => {
+                        let mut seen: std::collections::HashSet<u64> =
+                            std::collections::HashSet::new();
+                        let mut out: Vec<f64> = Vec::new();
+                        for &x in xs {
+                            if x.is_nan() {
+                                grow(&mut out, line, col)?;
+                                out.push(x);
+                                continue;
+                            }
+                            let bits = if x == 0.0 { 0.0f64 } else { x }.to_bits();
+                            grow_set(&mut seen, line, col)?;
+                            if seen.insert(bits) {
+                                grow(&mut out, line, col)?;
+                                out.push(x);
+                            }
+                        }
+                        return Ok(Value::Array(std::rc::Rc::new(ArrayData::Floats(out))));
+                    }
+                    // `Values` (and the lazy tuple views) keep the general path below.
+                    _ => {}
+                }
+            }
             match array_numeric_fast(items, name, &args, line, col)? {
                 // A typed array's numeric reduction reads the packed buffer directly.
                 Some(v) => Ok(v),
