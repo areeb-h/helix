@@ -5274,3 +5274,36 @@ print(r.ok)
         assert_eq!(out, want, "{name}: string-fold fast path drifted");
     }
 }
+
+/// The autodiff surface gaps the nn field report mapped (docs/dx-plan.md): `sin`/`cos`/
+/// `abs` now have derivative arms on the tape (abs takes the same subgradient
+/// convention at its kink that relu already uses), `.sum()` on an array of tracked
+/// values folds on the tape — before, the two spellings of one sum silently FORKED BY
+/// CAPABILITY (the reduce fold differentiated while `.sum()` errored, ADR 0003's
+/// wound) — and `to_array` crosses the tensor/tape wall natively: it was Python-gated,
+/// stranding the BLAS path's results on a stock binary. Values pinned against the
+/// analytic derivatives, on all three engines.
+#[test]
+fn autodiff_surface_covers_the_nn_report_gaps() {
+    let src = r#"
+x = variable(1.5)
+print(gradient(sin(x), x) == cos(1.5))
+y = variable(1.5)
+print(gradient(cos(y), y) == 0.0 - sin(1.5))
+z = variable(0.0 - 2.0)
+print(gradient(abs(z), z))
+a = variable(2.0)
+b = variable(5.0)
+s = [a * a, b, a].sum()
+print(value_of(s), gradient(s, a), gradient(s, b))
+t = tensor([[1.0, 2.0], [3.0, 4.0]])
+print(to_array(t), to_array(t).sum())
+print(to_array(t.matmul(t)))
+"#;
+    let want = "true\ntrue\n-1.0\n11.0 5.0 1.0\n[1.0, 2.0, 3.0, 4.0] 10.0\n[7.0, 10.0, 15.0, 22.0]\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("nn_gaps_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: autodiff/tensor surface drifted");
+    }
+}

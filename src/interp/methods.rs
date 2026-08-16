@@ -1490,6 +1490,20 @@ fn array_method(
         }
         "sum" => {
             no_args(name)?;
+            // TRACKED elements fold on the tape — left-to-right adds, exactly what the
+            // reduce spelling produces — so `.sum()` and the fold carry gradients
+            // alike. Before this, the two spellings of one concept silently forked by
+            // CAPABILITY (ADR 0003's wound, found by the nn field report): the fold
+            // differentiated while `.sum()` errored, forcing every dot product and
+            // loss into hand-written folds.
+            if items.iter().any(|v| matches!(v, Value::Node(_))) {
+                let mut it = items.iter();
+                let mut acc = it.next().cloned().unwrap_or(Value::Int(0));
+                for v in it {
+                    acc = crate::autodiff::binary(&crate::ast::BinOp::Add, &acc, v, line, col)?;
+                }
+                return Ok(acc);
+            }
             if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }

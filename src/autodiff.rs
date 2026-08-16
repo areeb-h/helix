@@ -340,7 +340,7 @@ pub fn binary(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Resu
                 line,
                 col,
             )
-            .hint("use + - * / ** , matmul, or an activation (relu/sigmoid/tanh/exp/ln)."))
+            .hint("use + - * / ** , matmul, or an activation (relu/sigmoid/tanh/exp/ln/sin/cos/abs)."))
         }
     };
     Ok(Value::Node(out))
@@ -362,6 +362,25 @@ pub fn unary_builtin(name: &str, v: &Value, line: usize, col: usize) -> Result<V
         "exp" => unary(&a, |x| x.exp(), |x| x.exp()),
         "ln" => unary(&a, |x| x.ln(), |x| 1.0 / x),
         "sqrt" => unary(&a, |x| x.sqrt(), |x| 0.5 / x.sqrt()),
+        "sin" => unary(&a, |x| x.sin(), |x| x.cos()),
+        "cos" => unary(&a, |x| x.cos(), |x| -x.sin()),
+        // The subgradient convention: 0 at the kink, ±1 elsewhere — the same choice
+        // `relu` above already makes at its own kink, so the two stay consistent.
+        // (The nn field report was rebuilding `abs` as `sqrt(x² + ε)` to get a
+        // gradient at all, and the ε choice was its own trap.)
+        "abs" => unary(
+            &a,
+            |x| x.abs(),
+            |x| {
+                if x > 0.0 {
+                    1.0
+                } else if x < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                }
+            },
+        ),
         _ => {
             return Err(HelixError::new(
                 format!("`{name}` is not differentiable on a tracked value"),
@@ -399,7 +418,7 @@ pub fn method(n: &Rc<Node>, name: &str, args: &[Value], line: usize, col: usize)
             let out = make(value, vec![n.clone()], Box::new(|g| vec![g.t().to_owned()]));
             Ok(Value::Node(out))
         }
-        "relu" | "sigmoid" | "tanh" | "exp" | "ln" | "sqrt" => {
+        "relu" | "sigmoid" | "tanh" | "exp" | "ln" | "sqrt" | "sin" | "cos" | "abs" => {
             no_method_args(name, args, line, col)?;
             unary_builtin(name, &Value::Node(n.clone()), line, col)
         }
@@ -408,7 +427,10 @@ pub fn method(n: &Rc<Node>, name: &str, args: &[Value], line: usize, col: usize)
             line,
             col,
         )
-        .hint("methods: matmul/dot, sum, mean, t/transpose, relu, sigmoid, tanh, exp, ln, sqrt.")),
+        .hint(
+            "methods: matmul/dot, sum, mean, t/transpose, relu, sigmoid, tanh, exp, ln, \
+             sqrt, sin, cos, abs.",
+        )),
     }
 }
 

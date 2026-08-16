@@ -274,9 +274,26 @@ impl super::Interp {
             }
             "to_array" => {
                 arity(name, &args, 1, line, col)?;
-                // Explicit, on-demand materialization of a Python iterable into a
-                // native Helix Array (the visible escape hatch from opaque-by-default).
-                crate::python::to_array(args.into_iter().next().unwrap(), line, col)
+                match args.into_iter().next().unwrap() {
+                    // A Tensor flattens NATIVELY (row-major) — this was Python-gated,
+                    // which put a feature wall exactly between the two halves of a
+                    // network: the BLAS tensor path computes at ~177 GFLOPS and the
+                    // autodiff tape consumes `[Float]`, and on a stock binary nothing
+                    // could cross (the nn field report's top finding). A tracked
+                    // tensor's payload crosses the same way, via its VALUE — the tape
+                    // is not extended, exactly like `value_of`.
+                    Value::Tensor(t) => Ok(Value::float_array(t.iter().copied().collect())),
+                    Value::Node(n) => match crate::autodiff::node_value(&n) {
+                        Value::Tensor(t) => {
+                            Ok(Value::float_array(t.iter().copied().collect()))
+                        }
+                        other => Ok(Value::array(vec![other])),
+                    },
+                    // Explicit, on-demand materialization of a Python iterable into a
+                    // native Helix Array (the visible escape hatch from
+                    // opaque-by-default).
+                    other => crate::python::to_array(other, line, col),
+                }
             }
             "to_dataframe" => {
                 arity(name, &args, 1, line, col)?;
@@ -1083,6 +1100,12 @@ impl super::Interp {
             }
             "abs" => {
                 arity(name, &args, 1, line, col)?;
+                // A tracked (autodiff) argument builds a graph node — same routing as
+                // the unary-float family above; `abs` lives in its own arm only because
+                // it also handles Ints.
+                if matches!(&args[0], Value::Node(_)) {
+                    return crate::autodiff::unary_builtin(name, &args[0], line, col);
+                }
                 // `wrapping_abs` matches the wrapping-on-overflow convention used by the
                 // arithmetic ops; a packed array maps over its buffer (no per-element box).
                 super::apply_abs(args.into_iter().next().unwrap(), line, col)
