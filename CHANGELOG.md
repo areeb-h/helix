@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.2.5 — 2026-08-16
+
+Two field reports from the llm/nn library builds, answered.
+
+### Performance
+
+- **A reduce's initial value may be any expression** — the last silent JIT cliff. A
+  non-literal init (`reduce(a0, …)`, the natural ODE-integrator spelling) never
+  compiled: identical body, identical answer, 21–53× slower. Four compile-time gates
+  required a `Float` *literal* as a stand-in for a check the dispatch already makes on
+  the runtime value — so a non-literal init now enters the float kernel family and the
+  runtime decides. Parameter init at 100M iterations: **3,117 → 64 ms**. An init that
+  turns out to be an `Int` falls back to the bytecode loop with a bit-identical answer.
+
+### Added
+
+- **The autodiff surface the nn library needed**: `sin`, `cos`, and `abs` gain
+  derivative arms on the tape (`abs` uses the same subgradient convention at its kink
+  that `relu` always has); `.sum()` on an array of tracked values folds on the tape, so
+  the two spellings of a sum carry gradients alike instead of silently forking by
+  capability; and `to_array(tensor)` flattens **natively** (row-major) — it was
+  Python-gated, which put a feature wall exactly between the BLAS tensor path and the
+  autodiff tape on a stock binary.
+
 ## v0.2.4 — 2026-08-16
 
 **The linear-accumulation release** — [ADR 0029](docs/adr/0029-linear-accumulation.md)
