@@ -822,7 +822,7 @@ fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &HashSet<&str>, user_f
         // `bodies_eligible`. Scalar (1 body) over `{pa, pb}`; tuple (N>1) over the f64 slots
         // `{$acc0…, pb}` (the array element `pb` is `f64`).
         FusionSink::Reduce { pa, pb, bodies, float: true } if bodies.len() == 1 => {
-            float_reduce_body_eligible(&bodies[0], pa, pb, user_fns)
+            float_reduce_body_eligible(&bodies[0], pa, pb, &HashSet::new(), user_fns)
         }
         FusionSink::Reduce { pb, bodies, float: true, .. } => {
             let n = bodies.len();
@@ -1386,19 +1386,47 @@ fn cond_eligible_cap_indexed(
 /// free (captured) variable is (a capture's runtime type is unknown, so it can't be folded
 /// as `f64`). `.reduce` is naive left-to-right, so the kernel's `fadd`/`fmul` in this order
 /// is bit-exact to the interpreter (the property `differential_float_reduce_oracle` locks).
-fn float_reduce_body_eligible(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>) -> bool {
+fn float_reduce_body_eligible<'e>(
+    e: &'e Expr,
+    pa: &str,
+    pb: &str,
+    locals: &HashSet<&'e str>,
+    user_fns: &HashSet<&str>,
+) -> bool {
     match e {
         Expr::Int(_) | Expr::Float(_) => true,
-        Expr::Ident { name, .. } => name == pa || name == pb,
+        Expr::Ident { name, .. } => {
+            name == pa || name == pb || locals.contains(name.as_str())
+        }
         Expr::Binary { op, left, right, .. } => {
             matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
-                && float_reduce_body_eligible(left, pa, pb, user_fns)
-                && float_reduce_body_eligible(right, pa, pb, user_fns)
+                && float_reduce_body_eligible(left, pa, pb, locals, user_fns)
+                && float_reduce_body_eligible(right, pa, pb, locals, user_fns)
         }
         Expr::Call { name, args, .. } => {
             jit_float_builtin_arity(name) == Some(args.len())
                 && !user_fns.contains(name.as_str())
-                && args.iter().all(|a| float_reduce_body_eligible(a, pa, pb, user_fns))
+                && args.iter().all(|a| float_reduce_body_eligible(a, pa, pb, locals, user_fns))
+        }
+        // A `let` binds one more local per binding — scoped exactly as the walker
+        // scopes it, and as `gen_f64_typed`'s `Let` arm scopes the Cranelift variable.
+        // Rebinding the accumulator or the counter declines: those names are the
+        // kernel's wiring, and a decline costs only the fast path (ADR 0029: slow-but-
+        // correct is acceptable, wrong is not). This closes the field's ~19-23× trap:
+        // `let d = xs[j] - t[j] in acc + d*d` fell to the interpreter while the
+        // written-twice spelling compiled.
+        Expr::Let { bindings, body } => {
+            let mut inner = locals.clone();
+            for (n, v) in bindings {
+                if n == pa || n == pb {
+                    return false;
+                }
+                if !float_reduce_body_eligible(v, pa, pb, &inner, user_fns) {
+                    return false;
+                }
+                inner.insert(n.as_str());
+            }
+            float_reduce_body_eligible(body, pa, pb, &inner, user_fns)
         }
         _ => false,
     }
@@ -1409,7 +1437,9 @@ fn float_reduce_body_eligible(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&
 /// Returns the body, or `None`. (The source must be a `Float` array; the VM checks that at
 /// dispatch and falls back otherwise.)
 pub fn reduce_jit_f64_body(init: &Expr, body: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>) -> Option<Expr> {
-    if init_admits_scalar_f64(init) && float_reduce_body_eligible(body, pa, pb, user_fns) {
+    if init_admits_scalar_f64(init)
+        && float_reduce_body_eligible(body, pa, pb, &HashSet::new(), user_fns)
+    {
         Some(body.clone())
     } else {
         None
@@ -1422,10 +1452,11 @@ pub fn reduce_jit_f64_body(init: &Expr, body: &Expr, pa: &str, pb: &str, user_fn
 /// `+ - *` (Int OP Int stays `i64`/wrapping, mixed → `f64`), `sqrt`→Float, `abs` preserves
 /// kind, `min`/`max` require both args the SAME kind (a mixed `min(float,int)` returns
 /// whichever original operand wins → runtime-dependent type → rejected). No captures.
-fn infer_reduce_f64_kind(
-    e: &Expr,
+fn infer_reduce_f64_kind<'e>(
+    e: &'e Expr,
     pa: &str,
     pb: &str,
+    locals: &HashMap<&'e str, NumKind>,
     fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
     msigs: &MixedSigTable,
@@ -1455,7 +1486,7 @@ fn infer_reduce_f64_kind(
             // Typed exactly once, into a `Vec`, before anything is decided.
             let mut kinds = Vec::with_capacity(args.len());
             for a in args {
-                kinds.push(infer_reduce_f64_kind(a, pa, pb, fns, user_fns, msigs)?);
+                kinds.push(infer_reduce_f64_kind(a, pa, pb, locals, fns, user_fns, msigs)?);
             }
             if kinds.iter().all(|k| *k == NumKind::Int) && fns.contains(name.as_str()) {
                 if !jit_builtin_arity_ok(name, args.len()) {
@@ -1476,12 +1507,14 @@ fn infer_reduce_f64_kind(
             } else if name == pb {
                 Some(NumKind::Int) // the i64 range counter
             } else {
-                None // captures excluded — a free var's runtime type is unknown
+                // A `let` local answers the kind its init inferred; otherwise None —
+                // captures are excluded, a free var's runtime type is unknown.
+                locals.get(name.as_str()).copied()
             }
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_reduce_f64_kind(left, pa, pb, fns, user_fns, msigs)?;
-            let rk = infer_reduce_f64_kind(right, pa, pb, fns, user_fns, msigs)?;
+            let lk = infer_reduce_f64_kind(left, pa, pb, locals, fns, user_fns, msigs)?;
+            let rk = infer_reduce_f64_kind(right, pa, pb, locals, fns, user_fns, msigs)?;
             Some(if lk == NumKind::Float || rk == NumKind::Float {
                 NumKind::Float
             } else {
@@ -1494,24 +1527,24 @@ fn infer_reduce_f64_kind(
         // `min`/`max` exclusion (see `f64_range_body_eligible`) + the VM's `is_finite` guard, which
         // together make a division-by-zero fall back to the exact-erroring bytecode loop.
         Expr::Binary { op: BinOp::Div, left, right, .. } => {
-            infer_reduce_f64_kind(left, pa, pb, fns, user_fns, msigs)?;
-            infer_reduce_f64_kind(right, pa, pb, fns, user_fns, msigs)?;
+            infer_reduce_f64_kind(left, pa, pb, locals, fns, user_fns, msigs)?;
+            infer_reduce_f64_kind(right, pa, pb, locals, fns, user_fns, msigs)?;
             Some(NumKind::Float)
         }
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
-                    infer_reduce_f64_kind(&args[0], pa, pb, fns, user_fns, msigs)?;
+                    infer_reduce_f64_kind(&args[0], pa, pb, locals, fns, user_fns, msigs)?;
                     Some(NumKind::Float)
                 }
                 // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
                 // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
                 // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
                 ("to_float", 1) => {
-                    infer_reduce_f64_kind(&args[0], pa, pb, fns, user_fns, msigs)?;
+                    infer_reduce_f64_kind(&args[0], pa, pb, locals, fns, user_fns, msigs)?;
                     Some(NumKind::Float)
                 }
-                ("abs", 1) => infer_reduce_f64_kind(&args[0], pa, pb, fns, user_fns, msigs),
+                ("abs", 1) => infer_reduce_f64_kind(&args[0], pa, pb, locals, fns, user_fns, msigs),
                 // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
                 // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
                 // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
@@ -1519,16 +1552,29 @@ fn infer_reduce_f64_kind(
                 // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
                 // RAISE when the result leaves i64 range and therefore still need a poison path.
                 ("to_int" | "sign", 1) => {
-                    infer_reduce_f64_kind(&args[0], pa, pb, fns, user_fns, msigs)?;
+                    infer_reduce_f64_kind(&args[0], pa, pb, locals, fns, user_fns, msigs)?;
                     Some(NumKind::Int)
                 }
                 ("min" | "max", 2) => {
-                    let ka = infer_reduce_f64_kind(&args[0], pa, pb, fns, user_fns, msigs)?;
-                    let kb = infer_reduce_f64_kind(&args[1], pa, pb, fns, user_fns, msigs)?;
+                    let ka = infer_reduce_f64_kind(&args[0], pa, pb, locals, fns, user_fns, msigs)?;
+                    let kb = infer_reduce_f64_kind(&args[1], pa, pb, locals, fns, user_fns, msigs)?;
                     if ka == kb { Some(ka) } else { None }
                 }
                 _ => None,
             }
+        }
+        // A `let` scope — sequential bindings, each typed by its init and visible to
+        // the ones after it (the walker's semantics); rebinding `pa`/`pb` declines.
+        Expr::Let { bindings, body } => {
+            let mut inner = locals.clone();
+            for (n, v) in bindings {
+                if n == pa || n == pb {
+                    return None;
+                }
+                let k = infer_reduce_f64_kind(v, pa, pb, &inner, fns, user_fns, msigs)?;
+                inner.insert(n.as_str(), k);
+            }
+            infer_reduce_f64_kind(body, pa, pb, &inner, fns, user_fns, msigs)
         }
         _ => None,
     }
@@ -1569,7 +1615,8 @@ fn f64_range_body_eligible(
     user_fns: &HashSet<&str>,
     msigs: &MixedSigTable,
 ) -> bool {
-    infer_reduce_f64_kind(body, pa, pb, fns, user_fns, msigs) == Some(NumKind::Float)
+    infer_reduce_f64_kind(body, pa, pb, &HashMap::new(), fns, user_fns, msigs)
+        == Some(NumKind::Float)
 }
 
 // `expr_has_div` / `reduce_body_divides` lived here. Both are gone: the poison decision is now
@@ -1648,10 +1695,11 @@ struct IndexedOut {
     bounds: Vec<IndexBound>,
 }
 
-fn infer_f64_indexed(
-    e: &Expr,
+fn infer_f64_indexed<'e>(
+    e: &'e Expr,
     pa: &str,
     pb: &str,
+    locals: &HashMap<&'e str, MixT>,
     out: &mut IndexedOut,
     fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
@@ -1672,7 +1720,7 @@ fn infer_f64_indexed(
                 return None;
             }
             for a in args {
-                if infer_f64_indexed(a, pa, pb, out, fns, user_fns)? != MixT::Int {
+                if infer_f64_indexed(a, pa, pb, locals, out, fns, user_fns)? != MixT::Int {
                     return None;
                 }
             }
@@ -1684,6 +1732,8 @@ fn infer_f64_indexed(
                 Some(MixT::GFloat) // the f64 accumulator register — a genuine float
             } else if name == pb {
                 Some(MixT::Int)
+            } else if let Some(k) = locals.get(name.as_str()) {
+                Some(*k) // a `let` local: the MixT its init inferred
             } else {
                 // A free VALUE scalar, loaded `f64` by the kernel. Recorded `Scalar` here and
                 // relabeled to `ScalarValue` by the caller once the bounds show it is not an
@@ -1695,6 +1745,17 @@ fn infer_f64_indexed(
         // `arr[pb]` (v1b) keeps its cheap `Counter` bound; any other affine index
         // (`a[i*n+k]`, `b[k*n+j]`, `a[k+1]`) records an `Affine` bound instead.
         Expr::Index { recv, index, .. } => {
+            // Inside a `let` scope, an index that mentions ANY local declines: the
+            // bounds machinery pre-evaluates base/coef caps in the ENCLOSING scope,
+            // where no local exists — the same argument as the i64 path's guard.
+            // (`expr_uses_ident` is conservative: unknown shapes report "uses".)
+            if !locals.is_empty()
+                && locals
+                    .keys()
+                    .any(|l| expr_uses_ident(recv, l) || expr_uses_ident(index, l))
+            {
+                return None;
+            }
             let arr = match &**recv {
                 Expr::Ident { name, .. } if name != pa && name != pb => name,
                 _ => return None,
@@ -1724,22 +1785,22 @@ fn infer_f64_indexed(
             Some(MixT::GFloat) // an f64 array load is a genuine float
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_f64_indexed(left, pa, pb, out, fns, user_fns)?;
-            let rk = infer_f64_indexed(right, pa, pb, out, fns, user_fns)?;
+            let lk = infer_f64_indexed(left, pa, pb, locals, out, fns, user_fns)?;
+            let rk = infer_f64_indexed(right, pa, pb, locals, out, fns, user_fns)?;
             mix_combine(lk, rk)
         }
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 // `sqrt` promotes its argument in BOTH engines → an `SFloat` arg is safe.
                 ("sqrt", 1) => {
-                    infer_f64_indexed(&args[0], pa, pb, out, fns, user_fns)?;
+                    infer_f64_indexed(&args[0], pa, pb, locals, out, fns, user_fns)?;
                     Some(MixT::GFloat)
                 }
                 // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
                 // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
                 // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
                 ("to_float", 1) => {
-                    infer_f64_indexed(&args[0], pa, pb, out, fns, user_fns)?;
+                    infer_f64_indexed(&args[0], pa, pb, locals, out, fns, user_fns)?;
                     Some(MixT::GFloat)
                 }
                 // `abs`/`min`/`max` do NOT promote (interp `abs(Int)` is `iabs`), so an `SFloat`
@@ -1752,21 +1813,36 @@ fn infer_f64_indexed(
                 // RAISE when the result leaves i64 range and therefore still need a poison path.
                 // An unpromoted value scalar is refused for the same reason `abs` refuses one:
                 // its runtime type is not yet pinned, and `to_int`/`sign` read it directly.
-                ("to_int" | "sign", 1) => match infer_f64_indexed(&args[0], pa, pb, out, fns, user_fns)? {
+                ("to_int" | "sign", 1) => match infer_f64_indexed(&args[0], pa, pb, locals, out, fns, user_fns)? {
                     MixT::SFloat => None,
                     _ => Some(MixT::Int),
                 },
-("abs", 1) => match infer_f64_indexed(&args[0], pa, pb, out, fns, user_fns)? {
+("abs", 1) => match infer_f64_indexed(&args[0], pa, pb, locals, out, fns, user_fns)? {
                     MixT::SFloat => None,
                     k => Some(k),
                 },
                 ("min" | "max", 2) => {
-                    let ka = infer_f64_indexed(&args[0], pa, pb, out, fns, user_fns)?;
-                    let kb = infer_f64_indexed(&args[1], pa, pb, out, fns, user_fns)?;
+                    let ka = infer_f64_indexed(&args[0], pa, pb, locals, out, fns, user_fns)?;
+                    let kb = infer_f64_indexed(&args[1], pa, pb, locals, out, fns, user_fns)?;
                     if ka == kb && ka != MixT::SFloat { Some(ka) } else { None }
                 }
                 _ => None,
             }
+        }
+        // A `let` scope — sequential bindings, each carrying its init's MixT (an
+        // SFloat-typed local keeps SFloat's refusal rules at its uses); rebinding
+        // `pa`/`pb` declines. Locals never record captures: the `Ident` arm checks
+        // them first, and the `Index` arm refuses any index that mentions one.
+        Expr::Let { bindings, body } => {
+            let mut inner = locals.clone();
+            for (n, v) in bindings {
+                if n == pa || n == pb {
+                    return None;
+                }
+                let k = infer_f64_indexed(v, pa, pb, &inner, out, fns, user_fns)?;
+                inner.insert(n.as_str(), k);
+            }
+            infer_f64_indexed(body, pa, pb, &inner, out, fns, user_fns)
         }
         _ => None,
     }
@@ -1940,7 +2016,8 @@ pub fn reduce_jit_f64_range_captures(
         return None;
     }
     let mut out = IndexedOut::default();
-    if infer_f64_indexed(body, pa, pb, &mut out, fns, user_fns) == Some(MixT::GFloat)
+    if infer_f64_indexed(body, pa, pb, &HashMap::new(), &mut out, fns, user_fns)
+        == Some(MixT::GFloat)
         // Non-empty, NOT "contains an array". Requiring an array capture kept this path from
         // competing with the capture-free `reduce_jit_f64_range_body` — but it also meant a body
         // whose only capture is a SCALAR matched neither: `s + to_float(i) * c` fell to the
@@ -2026,27 +2103,60 @@ fn infer_f64_typed(e: &Expr, binders: &HashMap<&str, NumKind>, user_fns: &HashSe
 /// Everything [`gen_f64_typed`] threads through its recursion unchanged. Bundled for the
 /// same reason [`TypedCtx`] is: the walker calls itself thirteen times, and repeating six
 /// identical arguments at each one buries the single argument that actually differs.
-struct F64Ctx<'c> {
-    /// The kernel's binders — the accumulator, the i64 counter, and any scalar captures.
-    binders: &'c HashMap<&'c str, (Variable, NumKind)>,
+struct F64Ctx<'a, 'c> {
+    /// The kernel's binders — the accumulator, the i64 counter, any scalar captures,
+    /// and (scoped, via the `Let` arm's save/restore) any `let` locals. `&mut` and
+    /// two-lifetimed exactly like [`TypedCtx`]'s `vars`, for the same reason: a `let`
+    /// local's name is borrowed from the BODY being lowered, not from the kernel's
+    /// capture tables.
+    binders: &'c mut HashMap<&'a str, (Variable, NumKind)>,
     /// `ArrayF64` capture bases, for `arr[counter]` in the dot-product kernel.
-    arrays: &'c HashMap<&'c str, Variable>,
+    arrays: &'c HashMap<&'a str, Variable>,
     /// The kernel's `i8` poison accumulator, when it carries one.
     poison: Option<Variable>,
     /// Monomorphized `i64` user functions this kernel may call directly.
-    fn_ids: &'c HashMap<&'c str, FuncId>,
+    fn_ids: &'c HashMap<&'a str, FuncId>,
     module: &'c mut JITModule,
     /// Present only when the kernel carries poison — see the call arm.
     mixed: Option<&'c MixedCallCtx<'c>>,
 }
 
-fn gen_f64_typed(
+fn gen_f64_typed<'a>(
     b: &mut FunctionBuilder,
-    e: &Expr,
-    cx: &mut F64Ctx,
+    e: &'a Expr,
+    cx: &mut F64Ctx<'a, '_>,
 ) -> (ClValue, NumKind) {
     match e {
         Expr::Int(i) => (b.ins().iconst(I64, *i), NumKind::Int),
+        // A `let` scope: inits evaluate left-to-right (each seeing the bindings before
+        // it — the walker's sequential semantics), each binds a fresh Cranelift
+        // variable of its inferred kind, and the body lowers against the extended
+        // binder map. Save/restore makes the extension a true SCOPE: shadowing an
+        // outer binder or capture restores it when the scope closes — the same
+        // choreography the walker's env uses. The analyses guarantee `pa`/`pb` are
+        // never rebound here.
+        Expr::Let { bindings, body } => {
+            let mut saved: Vec<(&'a str, Option<(Variable, NumKind)>)> =
+                Vec::with_capacity(bindings.len());
+            for (n, vexpr) in bindings {
+                let (val, kind) = gen_f64_typed(b, vexpr, cx);
+                let var = b.declare_var(kind.cl_type());
+                b.def_var(var, val);
+                saved.push((n.as_str(), cx.binders.insert(n.as_str(), (var, kind))));
+            }
+            let out = gen_f64_typed(b, body, cx);
+            for (n, old) in saved.into_iter().rev() {
+                match old {
+                    Some(prev) => {
+                        cx.binders.insert(n, prev);
+                    }
+                    None => {
+                        cx.binders.remove(n);
+                    }
+                }
+            }
+            out
+        }
         // A USER function call — ONE arm for both specializations, the twin of
         // `gen_value_typed`'s. Merged rather than split for the reason recorded there: `fns`
         // means "i64-closed BODY", not "Int parameters", so a callee can be in both tables and
@@ -2612,7 +2722,15 @@ fn reduce_bodies_eligible(
                 return false;
             }
             let mut out = IndexedOut::default();
-            let root = infer_f64_indexed(&rl.bodies[0], &rl.pa, &rl.pb, &mut out, fns, user_fns);
+            let root = infer_f64_indexed(
+                &rl.bodies[0],
+                &rl.pa,
+                &rl.pb,
+                &HashMap::new(),
+                &mut out,
+                fns,
+                user_fns,
+            );
             // Mirror the compile gate exactly, INCLUDING the value-scalar relabel — otherwise the
             // re-derived list differs from the stored one by kind alone and every such kernel
             // silently declines.
@@ -5345,7 +5463,7 @@ fn define_reduce_loop(
             }
         }
         let mut cx = F64Ctx {
-            binders: &binders,
+            binders: &mut binders,
             arrays: &arrays,
             poison: poison_var,
             fn_ids,
@@ -5831,7 +5949,7 @@ fn define_fused_kernel<'a>(
                 // No poison and no mixed table: this shape admits no user call at all (its
                 // analysis `infer_f64_typed` guards its call arm on `!user_fns.contains`).
                 let mut cx = F64Ctx {
-                    binders: &binders,
+                    binders: &mut binders,
                     arrays: &no_arrays,
                     poison: None,
                     fn_ids,

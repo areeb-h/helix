@@ -5361,3 +5361,68 @@ print(dot(xs, ys, 0.0), dot(xs, ys, 100.0) - dot(xs, ys, 0.0))
         assert_eq!(out, want, "{name}: parameter-init fold semantics drifted");
     }
 }
+
+/// `let` inside a float reduce body takes the JIT kernel (the field's ~19-23× trap,
+/// the last member of the reduce-eligibility family). The three f64 analyses carry a
+/// scoped `locals` map — a binding is typed by its init and visible to the bindings
+/// after it, rebinding the accumulator or counter declines, and an index mentioning a
+/// local declines (bounds pre-evaluate in the enclosing scope) — and `gen_f64_typed`
+/// gained a save/restore `Let` arm over a now-mutable binder map, the walker's own
+/// scope choreography. The class pin follows the field's hard-won methodology: a
+/// NOJIT control column, because their first probe used `%` which blocked BOTH arms
+/// and read as a 1.0× false "fixed". Pre-fix the JIT/NOJIT ratio on this shape was
+/// ~1.0 (never compiled); with the kernel engaged it is >30×; threshold 4× fails
+/// loudly either way without flaking.
+#[test]
+fn let_in_float_reduce_body_takes_the_kernel() {
+    let src = "n = 50000\n\
+               xs = range(0, n).map(i => (i % 97) * 0.25)\n\
+               t = range(0, 64).map(i => i * 0.5)\n\
+               print(range(0, n - 64).reduce(0.0, (m, s) =>\n\
+                 m + range(0, 64).reduce(0.0, (acc, j) => let d = xs[s + j] - t[j] in acc + d * d)))\n";
+    let time_with = |env: &[(&str, &str)], tag: &str| {
+        let start = std::time::Instant::now();
+        let (out, err, code) = run_source(src, env, tag);
+        assert_eq!(code, Some(0), "{err}");
+        (start.elapsed().as_secs_f64(), out)
+    };
+    let (jit, out_j) = time_with(&[], "let_kernel_jit");
+    let (nojit, out_n) = time_with(&[("HELIX_NOJIT", "1")], "let_kernel_nojit");
+    assert_eq!(out_j, out_n, "engines disagree on the let-body fold");
+    let ratio = nojit / jit.max(1e-9);
+    assert!(
+        ratio > 4.0,
+        "the let-in-reduce kernel is not engaging: NOJIT/JIT = {ratio:.1}x \
+         (jit={jit:.3}s nojit={nojit:.3}s) — ~1.0x means the guard rejects again"
+    );
+}
+
+/// The `let`-body fold's semantics, pinned on all three engines: sequential bindings
+/// (later sees earlier), an Int-typed local promoting at the interpreter's exact
+/// point, NESTED shadowing restoring on scope exit, a local shadowing an outer
+/// global (outer intact after), a local coefficient in the captured-array kernel, a
+/// let-local in an INDEX (declines to the general path, answers identically), and an
+/// accumulator-reading local (likewise). Byte-identical against the pre-change
+/// released binary at landing.
+#[test]
+fn let_in_reduce_semantics_are_pinned() {
+    let src = r#"
+print(range(0, 5).reduce(0.0, (a, i) => let d = i * 1.0 in a + d * d))
+print(range(0, 5).reduce(0.0, (a, i) => let x = i * 1.0, y = x + 1.0 in a + x * y))
+print(range(0, 4).reduce(0.0, (a, i) => let k = 2 in a + (i * k) * 1.0))
+print(range(0, 4).reduce(0.0, (a, i) => let u = 1.0 in a + (let u = 2.0 in u) + u))
+c = 10.0
+print(range(0, 4).reduce(0.0, (a, i) => let c = 1.0 in a + c), c)
+xs = [1.0, 2.0, 3.0, 4.0]
+print(range(0, 4).reduce(0.0, (a, j) => let w = 2.0 in a + xs[j] * w))
+print(range(0, 4).reduce(0.0, (a, j) => let k = 1 in a + xs[j * k]))
+r = try range(0, 3).reduce(0.0, (a, i) => let d = a in d + 1.0)
+print(r.ok)
+"#;
+    let want = "30.0\n40.0\n12.0\n12.0\n4.0 10.0\n20.0\n10.0\ntrue\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("let_sem_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: let-in-reduce semantics drifted");
+    }
+}
