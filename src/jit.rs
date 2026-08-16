@@ -1409,7 +1409,7 @@ fn float_reduce_body_eligible(e: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&
 /// Returns the body, or `None`. (The source must be a `Float` array; the VM checks that at
 /// dispatch and falls back otherwise.)
 pub fn reduce_jit_f64_body(init: &Expr, body: &Expr, pa: &str, pb: &str, user_fns: &HashSet<&str>) -> Option<Expr> {
-    if matches!(init, Expr::Float(_)) && float_reduce_body_eligible(body, pa, pb, user_fns) {
+    if init_admits_scalar_f64(init) && float_reduce_body_eligible(body, pa, pb, user_fns) {
         Some(body.clone())
     } else {
         None
@@ -1548,7 +1548,7 @@ pub fn reduce_jit_f64_range_body(
     user_fns: &HashSet<&str>,
     msigs: &MixedSigTable,
 ) -> Option<Expr> {
-    if matches!(init, Expr::Float(_)) && f64_range_body_eligible(body, pa, pb, fns, user_fns, msigs) {
+    if init_admits_scalar_f64(init) && f64_range_body_eligible(body, pa, pb, fns, user_fns, msigs) {
         Some(body.clone())
     } else {
         None
@@ -1936,7 +1936,7 @@ pub fn reduce_jit_f64_range_captures(
     fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
 ) -> Option<F64RangeCaptures> {
-    if !matches!(init, Expr::Float(_)) {
+    if !init_admits_scalar_f64(init) {
         return None;
     }
     let mut out = IndexedOut::default();
@@ -2283,8 +2283,30 @@ pub fn is_float_acc_init(init: &Expr) -> bool {
         Expr::Record(fields) if fields.len() >= 2 => {
             fields.iter().all(|(_, e)| matches!(e, Expr::Float(_)))
         }
-        _ => false,
+        // A NON-LITERAL init routes to the float family too — see
+        // [`init_admits_scalar_f64`]. If the body then fails the f64 analyses, no
+        // kernel is stored, exactly as before; if it passes but the runtime init is
+        // not a `Float`, the dispatch falls back — so an unknown init can only ever
+        // GAIN a kernel, never lose one (it had none: every gate required a literal).
+        other => init_admits_scalar_f64(other),
     }
+}
+
+/// Whether a reduce INIT may inhabit the scalar `f64` accumulator ABI. A `Float`
+/// literal proves it; a NON-LITERAL init — a parameter, a call, an ident, i.e. the
+/// natural ODE-integrator spelling `reduce(a0, …)` — is admitted too, because the kind
+/// check lives where it belongs: the DISPATCH reads the runtime init value and takes
+/// the f64 kernel only for a `Value::Float`, falling back to the bytecode loop
+/// otherwise (vm.rs, "a `Float` init confirms the f64 ABI"). The old literal-match was
+/// a static type oracle standing in for that existing runtime check, and it silently
+/// cost 21–53× on the natural spelling (the llm field report's finding: identical
+/// body, identical answer, 59 ms vs 3,117 ms at 100M). Literals of another kind and
+/// composite literals stay excluded so the int and tuple families keep their paths.
+pub fn init_admits_scalar_f64(init: &Expr) -> bool {
+    !matches!(
+        init,
+        Expr::Int(_) | Expr::Bool(_) | Expr::Str(_) | Expr::Tuple(_) | Expr::Record(_)
+    )
 }
 
 /// A tuple accumulator may have at most this many `i64` slots; a wider one runs on the

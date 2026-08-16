@@ -696,7 +696,11 @@ impl super::Compiler {
                 // v1b) — try that first, then the capture-free scalar/tuple forms. (The f64 VM
                 // path range-checks its array caps inline, so it carries no `IndexBound`s.)
                 let user_fns = self.user_fn_set();
-                if matches!(init, Expr::Float(_)) {
+                // Scalar sub-branch: a `Float` literal OR a non-literal init (the
+                // `reduce(a0, …)` spelling — the dispatch confirms the f64 ABI from the
+                // runtime value and falls back otherwise). Composite literals keep the
+                // tuple sub-branch below.
+                if crate::jit::init_admits_scalar_f64(init) {
                     match crate::jit::reduce_jit_f64_range_captures(init, body, pa, pb, &fns, &user_fns) {
                         Some(c) => {
                             synth_exprs = c.synth;

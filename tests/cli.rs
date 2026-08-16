@@ -5307,3 +5307,57 @@ print(to_array(t.matmul(t)))
         assert_eq!(out, want, "{name}: autodiff/tensor surface drifted");
     }
 }
+
+/// A reduce's init no longer needs to be a literal to take the f64 kernel (the llm
+/// field report's 21–53× cliff: identical body, identical answer, `reduce(1.0, …)`
+/// 59 ms vs `reduce(a0, …)` 3,117 ms at 100M — the natural ODE-integrator spelling).
+/// The literal-match in four gates was a static type oracle standing in for a runtime
+/// check the dispatch ALREADY makes (`Value::Float` confirms the f64 ABI, anything
+/// else falls back) — so a non-literal init now enters the float family and the
+/// runtime decides. The class pin runs the same fold with a literal and a parameter
+/// init in one process and bounds their ratio: pre-fix it was >20×, kernel-vs-kernel
+/// it is ~1×; 8× leaves noise headroom while the cliff still fails loudly.
+#[test]
+fn reduce_init_may_be_a_parameter_and_still_jit() {
+    let time_of = |src: &str, tag: &str| {
+        let start = std::time::Instant::now();
+        let (out, err, code) = run_source(src, &[], tag);
+        assert_eq!(code, Some(0), "{err}");
+        assert_eq!(out.trim(), "1.0100501679192893");
+        start.elapsed().as_secs_f64()
+    };
+    let lit = time_of(
+        "fn go() = range(0, 100000000).reduce(1.0, (a, i) => a * 1.0000000001)\nprint(go())\n",
+        "init_lit",
+    );
+    let par = time_of(
+        "fn go(a0) = range(0, 100000000).reduce(a0, (a, i) => a * 1.0000000001)\nprint(go(1.0))\n",
+        "init_par",
+    );
+    let ratio = par / lit.max(1e-9);
+    assert!(
+        ratio < 8.0,
+        "the reduce-init cliff is back: parameter init cost {ratio:.1}x the literal \
+         (lit={lit:.3}s par={par:.3}s)"
+    );
+
+    // Semantics across the family, all three engines: a parameter init, an
+    // Int-at-runtime init (dispatch declines the f64 kernel, the bytecode loop
+    // answers identically), a captured dot-product with a parameter init, and a
+    // mut-global init.
+    let sem = r#"
+fn scale(a0) = range(0, 1000).reduce(a0, (a, i) => a * 1.001)
+print(scale(2.0) == 2.0 * scale(1.0))
+print(scale(3))
+fn dot(x, y, s0) = range(0, x.count()).reduce(s0, (a, j) => a + x[j] * y[j])
+xs = range(0, 1000).map(i => i + 0.5)
+ys = range(0, 1000).map(i => 2.0)
+print(dot(xs, ys, 0.0), dot(xs, ys, 100.0) - dot(xs, ys, 0.0))
+"#;
+    let want = "true\n8.150771796706774\n1000000.0 100.0\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(sem, env, &format!("init_sem_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: parameter-init fold semantics drifted");
+    }
+}
