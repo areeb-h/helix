@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.2.4 — 2026-08-16
+
+**The linear-accumulation release** — [ADR 0029](docs/adr/0029-linear-accumulation.md)
+implemented in full: building a collection one element at a time in a fold is
+amortized-linear **on every engine, for every spelling** — arrays, dicts, and strings —
+or it declines to the copy path and stays correct. The v0.2.3 field report measured the
+released walker at the O(n²) signature (×2.1 → ×2.8 → ×5.2 ratios); this release is the
+answer.
+
+### Performance
+
+- **The tree-walker's fold is linear** — the last engine with the append wall. The VM's
+  take-append-store discipline transplanted: 262k array appends **6,768 → 23 ms**
+  (294×), 64k dict inserts **17,689 → 16 ms** (1,100×). The walker's reduce also stops
+  boxing packed receivers up front just to iterate them.
+- **The string-interpolation fold is linear on all three engines** — previously
+  quadratic everywhere (`13.6–14.6×` per 4×n; no engine had a fast path). The new
+  `AppendStrIntoLocal` op and its walker twin render the tail first, so every fallible
+  step happens with the accumulator untouched; a non-string init still formats exactly
+  as before; a format spec on the accumulator hole still takes the general path (it
+  re-pads, so append would be wrong); growth is fallible (a refused reservation reports
+  instead of aborting). After: 4×n costs ~1.8×.
+- **Duplicate fold binders `(a, a)` never take the fast paths** (shipped as a
+  correctness guard in v0.2.2; the fast paths added here inherit it).
+
+Every fix is pinned two ways: a complexity-class test (n vs 4n in one process — a
+quadratic regression fails the gate rather than waiting for a field report) and a
+semantics table byte-identical across all three engines *and* against the previous
+release — self-referencing arguments, shared inits, scan's snapshot history, mid-fold
+error restore, and the string fold's format-spec and non-string-init edges.
+
 ## v0.2.3 — 2026-08-15
 
 Two fixes, both found by re-verifying v0.2.2's claims against the installed release —
