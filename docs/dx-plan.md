@@ -157,6 +157,18 @@ The doc/describe lines are copied **verbatim** from `print_help()` (same `\\n   
 
 ## DO LATER (real features — design/ADR first)
 
+- **A reduce's INIT must be a literal or the kernel silently never compiles (~21-53×)** —
+  the llm-library field report's finding, VERIFIED on HEAD 2026-08-16: identical body,
+  identical answer, `reduce(1.0, …)` 59 ms vs `reduce(a0, …)` (a0 a parameter) 3,117 ms
+  at 100M. Mechanism: FIVE guards key on `matches!(init, Expr::Float(_))` (jit.rs:1412,
+  :1551, :1939; bytecode/comprehensions.rs:699, :883 — the last admits `Int(_)` too).
+  The literal-match is a cheap static TYPE oracle, not a value requirement — the compile
+  site already `compile_expr`s the init and passes its VALUE on the stack, so the kernel
+  is init-value-agnostic. Fix design: dispatch on the RUNTIME init kind at the guard
+  (the VM pops init anyway: `Value::Float` → f64 kernel, `Value::Int` → i64, else fall
+  back) — the same runtime-representation dispatch the map kernels already use. This
+  hits the natural ODE-integrator spelling `reduce(a0, …)`; the field workaround (fold a
+  dimensionless factor from a literal, scale after) should not need to exist.
 - **`let` in a float reduce body falls off the JIT kernel** (from the physics-library
   field report: ~23× claimed, mechanism CONFIRMED 2026-08-15, magnitude not yet measured
   at honest load). The i64 eligibility paths admit `Expr::Let` (`value_eligible_cap_indexed`
@@ -178,6 +190,17 @@ The doc/describe lines are copied **verbatim** from `print_help()` (same `\\n   
 - **`Dict.get(k, default)`** — Record.get already takes a default (methods.rs:634-645), Dict's is strictly 1-arg: an undocumented asymmetry; decide inside the ADR 0004 errors-as-values work.
 - **D2 `--explain-jit`** — already deferred to v0.2.2 with a sketch (fix-plan STATUS 5). AGENTS.md documents the cliff meanwhile.
 - **AGENTS.md rot pin** — a test that executes its command examples, since footguns 1 and 5 have scheduled fixes and nothing fails today if the file rots.
+
+- **Autodiff surface gaps** (from the ml-engine field report, 2026-08-16, mapped not
+  guessed): the native reverse-mode tape (`variable`/`gradient`) differentiates
+  `+ - * / **`, `relu`/`sigmoid`/`tanh`, `exp`/`ln`/`sqrt`, and `reduce` folds — but
+  NOT `sin`/`cos`/`log10`/`abs`, and NOT `array.sum()` (while `reduce` sums
+  differentiate, so the two spellings of one concept diverge — an ADR-0003
+  one-verb-per-concept wound). Candidates in value order: (1) route `.sum()`'s tracked
+  path through the same tape rule as the reduce fold; (2) derivative arms for
+  `sin`/`cos` (the errors are already excellent — "`sin` is not differentiable on a
+  tracked value" — so this is adding arms, not designing surface); (3) `abs` via the
+  subgradient convention. Needs the tape's op-table location scouted first.
 
 ## SKIP (declined, with why)
 
