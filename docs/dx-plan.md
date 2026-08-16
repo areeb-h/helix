@@ -169,6 +169,18 @@ The doc/describe lines are copied **verbatim** from `print_help()` (same `\\n   
   back) — the same runtime-representation dispatch the map kernels already use. This
   hits the natural ODE-integrator spelling `reduce(a0, …)`; the field workaround (fold a
   dimensionless factor from a literal, scale after) should not need to exist.
+- **[SCOPED 2026-08-16, the LAST live reduce trap]** the init-cliff half of this family
+  landed (`18517d2`); what remains is `let`-in-body, and it is NOT eligibility-only:
+  `gen_f64_typed`'s `F64Ctx.binders` is an IMMUTABLE borrow (`&HashMap<&str, (Variable,
+  NumKind)>`, jit.rs:2031), so the codegen needs scoped binder extension (save/restore
+  or a per-Let overlay) before the three analyses (`float_reduce_body_eligible`:1389,
+  `f64_range_body_eligible`:1564, `infer_f64_indexed`:1651) can gain Let arms typing the
+  local by its init's kind — with the i64 path's rebind guards (no shadowing `pa`/`pb`/
+  an index scalar, jit.rs:1318's rules) mirrored. The field's `%`-in-float-body
+  corollary belongs to the same widening (the float op set is `+ - *`; the i64 set
+  already admits guarded `%`). Field-measured 19-23×; a NOJIT control column is
+  mandatory (their `xs[i % 1000]` probe once produced a 1.0× false negative because the
+  modulo blocked BOTH arms).
 - **`let` in a float reduce body falls off the JIT kernel** (from the physics-library
   field report: ~23× claimed, mechanism CONFIRMED 2026-08-15, magnitude not yet measured
   at honest load). The i64 eligibility paths admit `Expr::Let` (`value_eligible_cap_indexed`
