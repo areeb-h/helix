@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.2.6 — 2026-08-16
+
+The reduce-eligibility family completed, and the autodiff aggregates closed.
+
+### Performance
+
+- **`let` in a float reduce body takes the JIT kernel** — the last live reduce trap
+  (~19–23× in the field, measured 33× kernel engagement here: 51 ms vs 1,706 ms
+  interpreted on the 200k×64-tap correlation shape). The old guidance — "write the
+  subexpression twice; the native loop with a redundant op beats the interpreted one
+  with CSE" — is dead: bindings are scoped in the analyses and the codegen exactly as
+  the walker scopes them, sequential visibility included, with nested shadowing
+  restoring on scope exit. Rebinding the accumulator or counter, and indices that
+  mention a local, decline to the general path and stay bit-identical.
+
+### Added
+
+- **`.mean()` and `.product()` carry gradients** on arrays of tracked values, joining
+  v0.2.5's `.sum()` — `mean` differentiates as fold-add over a divide (gradient exactly
+  1/n), `product` accumulates repeated-element gradients (`[a, b, a]` gives d/da = 2ab).
+  `.max()`/`.min()` remain unsupported on tracked arrays deliberately: a tie's
+  subgradient needs a design decision, not a guess.
+- **Pinned: `variable(tensor(…))` differentiates through `matmul`** — tensor-aware
+  autodiff has existed in the tape and is now under test on all three engines
+  (`gradient(w.matmul(w).sum(), w)` returns the analytic gradient exactly). A trainable
+  layer's forward pass can be a real BLAS `matmul` when its parameters are created as a
+  tensor variable. The scalars→tensor bridge (`tensor([w, …])` from tracked scalars)
+  remains open.
+
 ## v0.2.5 — 2026-08-16
 
 Two field reports from the llm/nn library builds, answered.
