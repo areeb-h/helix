@@ -5426,3 +5426,36 @@ print(r.ok)
         assert_eq!(out, want, "{name}: let-in-reduce semantics drifted");
     }
 }
+
+/// `.mean()` and `.product()` on tracked arrays fold on the tape (the v0.2.5 field
+/// re-verification's finding: `.sum()` was closed while these still forked by
+/// capability). `mean` is fold-add then a differentiable divide by the count —
+/// gradient 1/n exactly; `product`'s fold accumulates repeated-element gradients
+/// (`[a, b, a]` gives d/da = 2ab). `.max()`/`.min()` stay open by design until the
+/// tie-subgradient decision (docs/dx-plan.md). The same program pins the finding the
+/// probe surfaced: `variable(tensor)` ALREADY differentiates through `matmul` — the
+/// gradient below is the hand-derived row-sums + col-sums — so tensor-aware autodiff
+/// exists and must not regress while it is still undocumented in the field.
+#[test]
+fn tracked_aggregates_and_tensor_variables_carry_gradients() {
+    let src = r#"
+a = variable(2.0)
+b = variable(6.0)
+m = [a, b].mean()
+print(value_of(m), gradient(m, a), gradient(m, b))
+a2 = variable(2.0)
+b2 = variable(5.0)
+p = [a2, b2, a2].product()
+print(value_of(p), gradient(p, a2), gradient(p, b2))
+print([1.0, 2.0, 3.0].mean(), [2, 3, 4].product())
+w = variable(tensor([[1.0, 2.0], [3.0, 4.0]]))
+g = gradient(w.matmul(w).sum(), w)
+print(g)
+"#;
+    let want = "4.0 0.5 0.5\n20.0 20.0 4.0\n2.0 24\n[[7, 11],\n [9, 13]]\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("agg_tape_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: tracked aggregates or tensor tape drifted");
+    }
+}

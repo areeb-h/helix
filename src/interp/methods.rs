@@ -1389,6 +1389,25 @@ fn array_method(
         }
         "mean" => {
             no_args(name)?;
+            // TRACKED elements: fold-add on the tape, divide by the count — division
+            // is differentiable, so `.mean()` carries gradients exactly as its
+            // reduce-then-divide spelling does. Same ADR-0003 rule as `.sum()`: the
+            // spellings of one concept must not fork by capability (the v0.2.5 field
+            // re-verification found `.sum()` closed and this one still open).
+            if items.iter().any(|v| matches!(v, Value::Node(_))) {
+                let mut it = items.iter();
+                let mut acc = it.next().cloned().unwrap_or(Value::Int(0));
+                for v in it {
+                    acc = crate::autodiff::binary(&crate::ast::BinOp::Add, &acc, v, line, col)?;
+                }
+                return crate::autodiff::binary(
+                    &crate::ast::BinOp::Div,
+                    &acc,
+                    &Value::Float(items.len() as f64),
+                    line,
+                    col,
+                );
+            }
             if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
@@ -2088,6 +2107,17 @@ fn array_method(
         "product" => {
             if !args.is_empty() {
                 return Err(HelixError::new("`product` takes no arguments", line, col));
+            }
+            // TRACKED elements: fold-mul on the tape — same rule as `.sum()`/`.mean()`.
+            // (`.max()`/`.min()` stay open: their gradient at a tie needs a subgradient
+            // decision the tape has no primitive for yet — see docs/dx-plan.md.)
+            if items.iter().any(|v| matches!(v, Value::Node(_))) {
+                let mut it = items.iter();
+                let mut acc = it.next().cloned().unwrap_or(Value::Int(1));
+                for v in it {
+                    acc = crate::autodiff::binary(&crate::ast::BinOp::Mul, &acc, v, line, col)?;
+                }
+                return Ok(acc);
             }
             if items.iter().any(|v| matches!(v, Value::Missing)) {
                 return Ok(Value::Missing);
