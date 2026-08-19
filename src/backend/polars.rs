@@ -398,18 +398,22 @@ impl DataHandle for PolarsFrame {
         let on: Vec<Expr> = keys.iter().map(|k| pcol(k.as_str())).collect();
         // CSV-sourced on either side ⇒ CSV-sourced: the joined plan still reads that
         // file through the parser, so its count must still be the parser's count.
-        let joined = self.lf.clone().join(
-            rf.lf.clone(),
-            on.clone(),
-            on,
-            // Coalesce the key columns for *every* join type. Without this, a `full`
-            // (outer) join leaves both `key` and `key_right` with nulls split across
-            // them — a different, surprising shape from inner/left/right. Coalescing
-            // gives one key column uniformly (standard SQL FULL-OUTER semantics).
-            JoinArgs::new(join_type)
-                .with_suffix(Some("_right".into()))
-                .with_coalesce(JoinCoalesce::CoalesceColumns),
-        );
+        // Coalesce the key columns for *every* join type. Without this, a `full`
+        // (outer) join leaves both `key` and `key_right` with nulls split across
+        // them — a different, surprising shape from inner/left/right. Coalescing
+        // gives one key column uniformly (standard SQL FULL-OUTER semantics).
+        let mut jargs = JoinArgs::new(join_type)
+            .with_suffix(Some("_right".into()))
+            .with_coalesce(JoinCoalesce::CoalesceColumns);
+        // The default (`MaintainOrderJoin::None`) makes join output order a per-
+        // EXECUTION coin flip — and because `.column()` re-executes the lazy plan,
+        // two column reads of one joined-then-grouped frame could pair keys from one
+        // ordering with values from another (the sort-tearing class, realized: ~490
+        // of 500 rows silently mispaired in the stabilization sweep's repro).
+        // `LeftRight` pins reading order for every join type; the same ADR 0020
+        // doctrine as `sort`'s maintain_order above.
+        jargs.maintain_order = MaintainOrderJoin::LeftRight;
+        let joined = self.lf.clone().join(rf.lf.clone(), on.clone(), on, jargs);
         Ok(wrap_with(joined, self.csv_source || rf.csv_source))
     }
 

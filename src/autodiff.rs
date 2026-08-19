@@ -14,7 +14,7 @@
 //! `call_builtin`, so both engines behave identically), and asks for
 //! `gradient(loss, x)`. Reductions to a scalar loss are required before `backward`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 
@@ -37,11 +37,23 @@ pub struct Node {
     grad: RefCell<Arr>,
     parents: Vec<Rc<Node>>,
     backward: Backprop,
+    /// The backward pass that last touched this node (see `EPOCH`). `grad` is only
+    /// meaningful for readers from that same pass; a leaf that did not feed the most
+    /// recent loss keeps a stale accumulation here, and `grad_of` must answer 0 for
+    /// it, not replay whatever an earlier tape left behind.
+    epoch: Cell<u64>,
+}
+
+thread_local! {
+    /// Monotonic id of the most recent `run_backward`. 0 means "no pass yet", which
+    /// no node ever carries after a pass — so a fresh leaf (epoch 0) always reads as
+    /// off-tape until a backward pass actually visits it.
+    static EPOCH: Cell<u64> = const { Cell::new(0) };
 }
 
 fn make(value: Arr, parents: Vec<Rc<Node>>, backward: Backprop) -> Rc<Node> {
     let grad = RefCell::new(ArrayD::zeros(value.raw_dim()));
-    Rc::new(Node { value, grad, parents, backward })
+    Rc::new(Node { value, grad, parents, backward, epoch: Cell::new(0) })
 }
 
 /// A graph leaf (an input / parameter): no parents, no incoming gradient rule.
@@ -51,8 +63,10 @@ pub fn leaf(value: Arr) -> Rc<Node> {
 
 // ---------- broadcasting helpers ----------
 
-/// Elementwise binary op with NumPy broadcasting; infallible (forward already
-/// proved the shapes broadcast). Falls back to `a` clone on an impossible shape.
+/// Elementwise binary op with NumPy broadcasting; infallible because `binary()`
+/// refuses non-broadcastable shapes before any node is built (backward-pass calls
+/// only combine shapes the forward already proved). The clone fallback is defensive
+/// depth only — it must never be the path that answers for a user's shape mistake.
 fn ew(a: &Arr, b: &Arr, f: impl Fn(f64, f64) -> f64) -> Arr {
     match broadcast_shape(a.shape(), b.shape()) {
         Some(shape) => {
@@ -132,8 +146,9 @@ fn pow_scalar(a: &Rc<Node>, n: f64) -> Rc<Node> {
     let value = a.value.mapv(|x| x.powf(n));
     let av = a.value.clone();
     make(value, vec![a.clone()], Box::new(move |g| {
-        // d/dx x^n = n*x^(n-1)
-        let local = av.mapv(|x| n * x.powf(n - 1.0));
+        // d/dx x^n = n*x^(n-1); x^0 is the constant 1, so its derivative is 0
+        // everywhere — without the guard, n=0 at x=0 computes 0 * inf = NaN.
+        let local = av.mapv(|x| if n == 0.0 { 0.0 } else { n * x.powf(n - 1.0) });
         vec![ew(g, &local, |x, y| x * y)]
     }))
 }
@@ -248,8 +263,13 @@ fn run_backward(root: &Rc<Node>) {
             topo.push(node);
         }
     }
+    let epoch = EPOCH.with(|e| {
+        e.set(e.get() + 1);
+        e.get()
+    });
     for n in &topo {
         *n.grad.borrow_mut() = ArrayD::zeros(n.value.raw_dim());
+        n.epoch.set(epoch);
     }
     *root.grad.borrow_mut() = ArrayD::ones(root.value.raw_dim());
     for n in topo.iter().rev() {
@@ -314,6 +334,25 @@ pub fn binary(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Resu
     };
     let a = to_node(l).ok_or_else(|| bad(l))?;
     let b = to_node(r).ok_or_else(|| bad(r))?;
+    // The tracked path must refuse exactly where the plain path refuses. Without
+    // this guard `ew`'s defensive fallback fabricates a forward value (the LHS,
+    // unchanged) and the backward accumulation panics on the shape mismatch — the
+    // stabilization sweep's silent-wrong-value + uncatchable-abort pair. Scoped to
+    // the elementwise ops so a non-differentiable op still reports THAT first.
+    if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div)
+        && broadcast_shape(a.value.shape(), b.value.shape()).is_none()
+    {
+        return Err(HelixError::new(
+            format!(
+                "cannot broadcast tensors of shape {:?} and {:?}",
+                a.value.shape(),
+                b.value.shape()
+            ),
+            line,
+            col,
+        )
+        .hint("shapes must match, or a dimension of 1 stretches to fit (NumPy rules)."));
+    }
     use BinOp::*;
     let out = match op {
         Add => add(&a, &b),
@@ -321,10 +360,14 @@ pub fn binary(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Resu
         Mul => mul(&a, &b),
         Div => div(&a, &b),
         Pow => {
-            // Only a constant scalar exponent is differentiable here.
+            // Only a CONSTANT scalar exponent is differentiable here. A tracked
+            // exponent must refuse, not freeze at its current value: reading
+            // `b.value` drops b from the graph, and `gradient(2.0 ** x, x)`
+            // silently answers 0.0 where the truth is 2^x·ln 2 (the sweep's
+            // repro). d/db needs a full pow node — a feature, not this arm.
             let n = b.value.first().copied();
-            match (b.value.ndim() == 0, n) {
-                (true, Some(n)) => pow_scalar(&a, n),
+            match (matches!(r, Value::Node(_)), b.value.ndim() == 0, n) {
+                (false, true, Some(n)) => pow_scalar(&a, n),
                 _ => {
                     return Err(HelixError::new(
                         "a tracked value can only be raised to a constant scalar power",
@@ -489,8 +532,18 @@ pub fn gradient(loss: &Value, x: &Value, line: usize, col: usize) -> Result<Valu
 }
 
 /// Read the (already-computed) gradient out of a leaf node or an array of leaves.
+///
+/// A leaf the most recent backward pass never reached has gradient ZERO with respect
+/// to that loss — its `grad` cell may still hold an accumulation from an earlier
+/// tape (`run_backward` zeroes only nodes reachable from the root), and answering
+/// with it is the training-loop footgun the stabilization sweep pinned:
+/// `gradient(x*x, y)` reporting y's gradient from a previous loss.
 fn grad_of(x: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    let current = EPOCH.with(|e| e.get());
     match x {
+        Value::Node(n) if n.epoch.get() != current => {
+            Ok(arr_to_value(ArrayD::zeros(n.value.raw_dim())))
+        }
         Value::Node(n) => Ok(arr_to_value(n.grad.borrow().clone())),
         Value::Array(items) => {
             let out: Result<Vec<Value>, HelixError> =

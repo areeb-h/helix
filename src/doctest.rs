@@ -88,7 +88,7 @@ pub fn example_program(file_src: &str, ex: &DocExample) -> String {
     prog.push_str(file_src);
     prog.push('\n');
     for (i, line) in ex.code.iter().enumerate() {
-        if i + 1 == ex.code.len() && !ex.expect.is_empty() {
+        if i + 1 == ex.code.len() && !ex.expect.is_empty() && !is_bare_print(line) {
             prog.push_str(&format!("print({line})\n"));
         } else {
             prog.push_str(line);
@@ -96,4 +96,43 @@ pub fn example_program(file_src: &str, ex: &DocExample) -> String {
         }
     }
     prog
+}
+
+/// Is this code line already a single bare `print(...)` call? Wrapping one in
+/// another `print` emits the value and then `()` (print's Unit return), so
+/// `## >>> print(1 + 2)` expecting `3` could never pass — and the diagnostic showed
+/// `expected: 3` / `got: 3`, the real difference being an invisible trailing `()`.
+///
+/// Std-only by the module-header rule, so no parser: a string-literal-aware bracket
+/// scan. The line qualifies iff it starts with `print(` and the close that returns
+/// the depth to zero is a `)` sitting at the very end — nothing before the call,
+/// nothing after it, so the whole line IS the call.
+fn is_bare_print(line: &str) -> bool {
+    let Some(rest) = line.trim().strip_prefix("print(") else {
+        return false;
+    };
+    let (mut depth, mut in_str, mut escaped) = (1i32, false, false);
+    for (i, c) in rest.char_indices() {
+        if in_str {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return c == ')' && i + c.len_utf8() == rest.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }

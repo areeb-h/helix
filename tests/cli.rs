@@ -5502,3 +5502,137 @@ print(r.ok)
         assert_eq!(out, "false\nfalse\n", "{name}");
     }
 }
+
+/// A tracked elementwise op refuses exactly where the plain path refuses. `ew`'s
+/// defensive fallback used to answer for a user's shape mistake instead: the forward
+/// silently returned the LHS unchanged (where the plain twin raises the broadcast
+/// error), and the backward pass then panicked on the mismatched accumulation —
+/// SIGABRT rc 134, uncatchable, on every engine. Same guard, both symptoms.
+#[test]
+fn tracked_shape_mismatch_raises_like_the_plain_path() {
+    let fwd = "v = variable(tensor([1.0, 2.0]))\n\
+               print(value_of(v + tensor([10.0, 20.0, 30.0])))\n";
+    let bwd = "v = variable(tensor([1.0, 2.0]))\n\
+               print(gradient((v + tensor([1.0, 2.0, 3.0])).sum(), v))\n";
+    for (name, env) in ENGINES {
+        for (tag, src) in [("fwd", fwd), ("bwd", bwd)] {
+            let (out, err, code) = run_source(src, env, &format!("adshape_{tag}_{name}"));
+            assert_eq!(code, Some(1), "{name}/{tag}: must raise, not fabricate: {out}");
+            assert!(
+                err.contains("cannot broadcast tensors of shape [2] and [3]"),
+                "{name}/{tag}: {err}"
+            );
+        }
+    }
+    // Legitimate broadcasting still differentiates: the bias-add shape.
+    let ok = "w = variable(tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+              b = variable(tensor([5.0, 6.0]))\n\
+              print(gradient((w + b).sum(), b))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(ok, env, &format!("adshape_ok_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "[2, 2]\n", "{name}");
+    }
+}
+
+/// Three silent-wrong-gradient shapes from the stabilization sweep, one test.
+/// (1) A tracked EXPONENT refuses rather than freezing at its value — reading it as
+/// a constant dropped it from the graph, so `gradient(2.0 ** x, x)` answered 0.0
+/// where the truth is 2^x·ln 2. (2) A leaf that does not feed the loss answers 0,
+/// not whatever an earlier backward pass left in its grad cell — the training-loop
+/// footgun. (3) d/dx x^0 is 0 everywhere, including x = 0 (was 0·inf = NaN).
+#[test]
+fn tracked_gradients_answer_for_the_current_tape_only() {
+    let pow = "x = variable(3.0)\n\
+               print(gradient(x ** 2.0, x))\n\
+               y = variable(1.0)\n\
+               print(gradient(2.0 ** y, y))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(pow, env, &format!("adpow_{name}"));
+        assert_eq!(code, Some(1), "{name}: tracked exponent must refuse: {out}");
+        assert_eq!(out, "6.0\n", "{name}: constant exponent must still work");
+        assert!(err.contains("constant scalar power"), "{name}: {err}");
+    }
+    let stale = "x = variable(2.0)\n\
+                 y = variable(3.0)\n\
+                 print(gradient(x * x * y, x))\n\
+                 print(gradient(x * x, y))\n\
+                 print(gradient(x * x, [x, y]))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(stale, env, &format!("adstale_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "12.0\n0.0\n[4.0, 0.0]\n", "{name}");
+    }
+    let pow0 = "x = variable(0.0)\nprint(gradient(x ** 0, x))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(pow0, env, &format!("adpow0_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "0.0\n", "{name}");
+    }
+}
+
+/// Join output order is pinned (`MaintainOrderJoin::LeftRight`), because `.column()`
+/// re-executes the lazy plan: with the backend's per-execution ordering, two column
+/// reads of ONE grouped-after-join frame paired keys from one run with values from
+/// another — silently, at exit 0, in most multi-group runs. The sort-tearing class
+/// ADR 0020 exists to forbid, realized through the join path. Repeated runs must be
+/// byte-stable AND correctly paired (true sums: a = 1+3 = 4, b = 2).
+#[test]
+fn grouped_aggregation_after_join_is_deterministic() {
+    let src = "left = dataframe({id: [\"a\", \"b\", \"a\"], v: [1.0, 2.0, 3.0]})\n\
+               right = dataframe({id: [\"a\", \"b\"], w: [10.0, 20.0]})\n\
+               g = left.join(right, @id).group(@id).sum(@v)\n\
+               print(g.column(\"id\"))\n\
+               print(g.column(\"v\"))\n";
+    let want = "[\"a\", \"b\"]\n[4.0, 2.0]\n";
+    for i in 0..12 {
+        let (out, err, code) = run_source(src, &[], &format!("jointear_{i}"));
+        assert_eq!(code, Some(0), "run {i}: {err}");
+        assert_eq!(out, want, "run {i}: torn or reordered");
+    }
+    for (name, env) in ENGINES {
+        let (out, _, code) = run_source(src, env, &format!("jointear_eng_{name}"));
+        assert_eq!(code, Some(0), "{name}");
+        assert_eq!(out, want, "{name}");
+    }
+}
+
+/// The `helix test` walk is safe on an ordinary filesystem: a symlinked directory
+/// cycle terminates (one self-loop used to count the same test 41 times at rc 0, two
+/// loops hung forever), overlapping roots count each test and doc example once (the
+/// doc side had no cross-root dedup, so `helix test dir dir/file.helix` inflated the
+/// pass total), and a doc example whose last line is already `print(...)` passes
+/// (the harness double-wrapped it, emitting the value plus print's Unit return).
+#[test]
+fn helix_test_walk_handles_cycles_overlaps_and_bare_prints() {
+    let dir = std::env::temp_dir().join("helix_walk_pins");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("z_test.helix"), "assert_eq(2 + 2, 4)\n").unwrap();
+    std::fs::write(
+        dir.join("mod_doc.helix"),
+        "## Doubles.\n## >>> 2 + 2\n## 4\nfn a(x) = x\n\n\
+         ## Already printing.\n## >>> print(1 + 2)\n## 3\nfn b(x) = x\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(".", dir.join("loop_a")).unwrap();
+        std::os::unix::fs::symlink(".", dir.join("loop_b")).unwrap();
+    }
+    let root = dir.to_str().unwrap();
+    let (out, err, code) = run(&["test", root], &[], "");
+    assert_eq!(code, Some(0), "stderr: {err}\nout: {out}");
+    assert!(out.contains("running 1 test file"), "out:\n{out}");
+    assert!(out.contains("3 passed"), "out:\n{out}");
+
+    // Overlapping spellings of the same tree all count each test exactly once.
+    let file = dir.join("mod_doc.helix");
+    for roots in [vec![root, root], vec![root, file.to_str().unwrap()]] {
+        let mut args = vec!["test"];
+        args.extend(roots.iter().copied());
+        let (out, err, code) = run(&args, &[], "");
+        assert_eq!(code, Some(0), "{roots:?}: stderr: {err}\nout: {out}");
+        assert!(out.contains("3 passed"), "{roots:?}: out:\n{out}");
+    }
+}

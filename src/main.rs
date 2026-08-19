@@ -1133,7 +1133,7 @@ fn cli_test(args: &[String]) -> ExitCode {
         for root in &roots {
             collect_root(root, &mut files);
         }
-        files.dedup();
+        dedup_by_canonical(&mut files);
         // Display paths relative to the search root when there is ONE root (its parent
         // when that root is a single file, so the file's own name still shows); with
         // several roots, paths display as given — the empty-prefix strip below is a
@@ -1258,13 +1258,19 @@ fn run_test_roots(
         // documented example is executed and must still say what it says — a promise that
         // until now held only for Helix's OWN source, checked by a `cargo test` a user of
         // the language cannot run. For a library author it was decoration.
-        let (mut doc_ok, mut doc_failed, mut skipped) = (0usize, 0usize, 0usize);
+        // Collect ACROSS roots then dedup, so overlapping roots (a directory plus a
+        // file inside it, the same directory twice) count each example once — the
+        // per-root loop this replaces re-ran them, and only the file list deduped.
+        let mut doc_sources = Vec::new();
         for root in &roots {
-            let (a, b, c) = run_doc_examples(root, base);
-            doc_ok += a;
-            doc_failed += b;
-            skipped += c;
+            if root.is_file() {
+                doc_sources.push(root.clone());
+            } else {
+                collect_helix_files(root, &mut doc_sources);
+            }
         }
+        dedup_by_canonical(&mut doc_sources);
+        let (doc_ok, doc_failed, skipped) = run_doc_examples(doc_sources, base);
         // A doc example is a test: it counts in the same totals, so the summary never
         // reads `0 passed` over a screen of green.
         let passed = (files.len() - failed) + doc_ok;
@@ -1323,13 +1329,10 @@ fn any_doc_examples(root: &std::path::Path) -> bool {
 /// relative imports resolve exactly as they normally would, and is removed immediately
 /// after. The three engines must agree before the value is compared at all — an example
 /// that diverges is a defect in the language, not in the documentation.
-fn run_doc_examples(root: &std::path::Path, base: &std::path::Path) -> (usize, usize, usize) {
-    let mut sources = Vec::new();
-    if root.is_file() {
-        sources.push(root.to_path_buf());
-    } else {
-        collect_helix_files(root, &mut sources);
-    }
+fn run_doc_examples(
+    mut sources: Vec<std::path::PathBuf>,
+    base: &std::path::Path,
+) -> (usize, usize, usize) {
     sources.sort();
 
     let (mut ok, mut failed, mut skipped) = (0usize, 0usize, 0usize);
@@ -1425,29 +1428,33 @@ fn is_definitions_only(src: &str) -> bool {
 
 /// Recursively collect every `.helix` file under `dir`, skipping hidden directories.
 fn collect_helix_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with('.') {
-            continue;
-        }
-        let path = entry.path();
-        if path.is_dir() {
-            collect_helix_files(&path, out);
-        } else if name.ends_with(".helix") {
-            out.push(path);
-        }
-    }
+    collect_by_suffix(dir, ".helix", &mut std::collections::HashSet::new(), out);
 }
 
 /// Recursively collect `*_test.helix` files under `dir`, skipping hidden directories
 /// (`.git`, etc.). Unreadable directories are silently skipped.
 fn collect_test_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
+    collect_by_suffix(dir, "_test.helix", &mut std::collections::HashSet::new(), out);
+}
+
+/// The shared walker behind the two collectors above. `seen` holds the canonical
+/// path of every directory already entered, so a symlinked directory cycle
+/// terminates: without it, one self-loop made `helix test` count the same test once
+/// per traversal depth (41 times, bounded only by the OS path limit) and two loops
+/// recursed forever — a test runner that lies about its count or never returns, from
+/// an ordinary filesystem accident. A directory that cannot be canonicalized (racing
+/// deletion, dangling symlink) is skipped like an unreadable one.
+fn collect_by_suffix(
+    dir: &std::path::Path,
+    suffix: &str,
+    seen: &mut std::collections::HashSet<std::path::PathBuf>,
+    out: &mut Vec<std::path::PathBuf>,
+) {
+    let Ok(canon) = std::fs::canonicalize(dir) else { return };
+    if !seen.insert(canon) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -1456,11 +1463,21 @@ fn collect_test_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) 
         }
         let path = entry.path();
         if path.is_dir() {
-            collect_test_files(&path, out);
-        } else if name.ends_with("_test.helix") {
+            collect_by_suffix(&path, suffix, seen, out);
+        } else if name.ends_with(suffix) {
             out.push(path);
         }
     }
+}
+
+/// Drop later duplicates of the same on-disk file, keyed by canonical path, keeping
+/// first-seen order. Adjacent-only `dedup()` missed interleaved walks (`helix test
+/// t1 t1` with two test files collects a,b,a,b) and spelling variants (`./t1` vs
+/// `t1`); doc examples had no cross-root dedup at all, so a directory root plus a
+/// file inside it re-ran and re-counted the same examples, inflating the pass total.
+fn dedup_by_canonical(files: &mut Vec<std::path::PathBuf>) {
+    let mut seen = std::collections::HashSet::new();
+    files.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
 }
 
 /// Strip internal module prefixes (`m<N>$`) from a rendered error so users never
