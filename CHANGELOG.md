@@ -1,5 +1,90 @@
 # Changelog
 
+## v0.2.7 — 2026-08-19
+
+**The stabilization release.** Before opening the next feature tier, everything the
+last six releases added was put under an adversarial sweep: six agents, ~450 probe
+programs, each run on all three engines and against the released v0.2.6 binary. This
+release is what the sweep found — two criticals in v0.2.6's own `let` widening, three
+silent-wrong-gradient shapes in the autodiff tape, a nondeterministic join, and three
+ways `helix test` could misreport what it ran. No new features; every fix is pinned.
+
+### Fixed — the JIT
+
+- **A `let` in a float reduce body no longer aborts the process or silently prints
+  `inf`.** v0.2.6 admitted `let` into the kernel's eligibility analyses and its codegen
+  but not into the predicate that decides whether a kernel is built with its *poison
+  cell* — the mechanism that carries a raised error out of a compiled loop. So `let`
+  bodies were built without one. A user function called in a binding's initializer
+  (`let d = sq(i * 1.0) in a + d`) then reached codegen that cannot represent it and
+  aborted: exit 134, uncatchable by `try`, where both interpreters print `14.0`. A
+  division by zero under a `let` was worse — the JIT printed `inf` and exited 0 where
+  both interpreters raise `division by zero` and exit 1: a wrong answer *and* a wrong
+  exit code from the flagship engine. Both were the same missing case, which now
+  recurses into every binding initializer and the body. The kernel still engages
+  (~30× on the 200k×64 correlation shape); the poison cell costs nothing measurable.
+
+### Fixed — autodiff
+
+- **A tracked value refuses mismatched shapes exactly where a plain one does.**
+  `variable(tensor([1.0, 2.0])) + tensor([1.0, 2.0, 3.0])` silently returned the left
+  operand unchanged — no addition performed, no error raised — and asking for a
+  gradient through it aborted the process (exit 134, uncatchable) inside the backward
+  pass. Both symptoms were one defensive fallback answering for a user's shape mistake;
+  the tape now raises the same `cannot broadcast tensors of shape [2] and [3]` the
+  plain expression raises. Legitimate broadcasting (the bias-add shape) is unaffected.
+- **A tracked exponent is refused rather than silently frozen.** `gradient(2.0 ** x, x)`
+  returned `0.0` — the exponent was read as a constant and dropped from the graph —
+  where the true derivative is `2^x · ln 2`. It now reports "a tracked value can only be
+  raised to a constant scalar power", the error already documented for tensor
+  exponents. A constant exponent (`x ** 2.0`) is unaffected; a differentiable `a ** b`
+  is a feature, not a silent zero.
+- **A variable that does not feed the loss has gradient zero.** The backward pass zeroes
+  only the nodes the loss reaches, so a variable left over from an earlier `gradient(…)`
+  call reported *that* call's accumulation instead: in a training loop, one parameter's
+  gradient could be another loss's. Nodes now carry the identity of the pass that
+  touched them, and a variable from any other pass reads zero.
+- **`gradient(x ** 0, x)` is `0.0` at `x = 0`** (was `NaN`).
+
+### Fixed — DataFrames
+
+- **Grouped aggregation after a join is deterministic.** Join output order was decided
+  per plan execution, and `.column()` re-executes the plan — so two column reads of one
+  grouped-after-join frame could pair keys from one ordering with values from another,
+  at exit 0, with no warning. In the sweep's 500-group probe roughly 490 of 500 rows
+  silently mispaired; even a two-group frame tore in 16 of 40 runs. Joins now pin
+  reading order, the same guarantee `.sort()` already makes. The `.sort(key)` and
+  `.cache()` workarounds are no longer needed.
+
+### Fixed — `helix test`
+
+- **The file walk terminates on symlinked directories.** A directory symlink pointing
+  into its own tree made the runner count one test file 41 times and report success;
+  two such links made it recurse until killed. Both collectors now share one walker
+  that remembers where it has been.
+- **Overlapping roots count each test once.** `helix test dir dir/module.helix` re-ran
+  and re-counted that module's doc examples, reporting more passing tests than exist.
+  Doc sources are now gathered across all roots and deduplicated by canonical path, as
+  the test-file list already was — that list's adjacent-only deduplication had missed
+  interleaved walks and differently-spelled paths too.
+- **A doc example whose last line is `print(…)` can pass.** The harness wraps an
+  example's final line in `print(…)` when the example documents output, so one that
+  already printed emitted its value and then `()`. The failure report showed
+  `expected: 3` against `got: 3` — identical to the eye, the real difference invisible.
+
+### Notes
+
+- Every fix above is pinned by tests that run on all three engines. The sweep's
+  remaining findings are recorded in [`docs/dx-plan.md`](docs/dx-plan.md) with their
+  mechanisms rather than fixed in haste: a grouped `i64` sum that wraps where the array
+  path promotes, the frame/array disagreement on sorting `missing`, backend error text
+  that names no Helix concept, and two name-resolution gaps around imported module
+  names.
+- The sweep's four other agents found no cross-engine divergence at all across 126
+  fold fast-path programs, 87 CLI-surface programs, and the aggregate/eligibility
+  families — the three-engine oracle held everywhere it was not explicitly broken by
+  the two defects above.
+
 ## v0.2.6 — 2026-08-16
 
 The reduce-eligibility family completed, and the autodiff aggregates closed.
