@@ -44,6 +44,22 @@ pub struct Node {
     epoch: Cell<u64>,
 }
 
+impl Node {
+    /// Length of the forward value's leading axis — 0 for a tracked scalar, which
+    /// has no axis to index. A slicing caller needs it to resolve bounds exactly as
+    /// it does for a plain tensor, without reaching into the tape.
+    pub fn axis0_len(&self) -> usize {
+        self.value.shape().first().copied().unwrap_or(0)
+    }
+}
+
+/// Rank of a tracked value's forward payload — 0 for a scalar. Lets an error
+/// constructor outside this module say `Tensor` for a tracked tensor without
+/// reaching into the node.
+pub fn rank_of(n: &Rc<Node>) -> usize {
+    n.value.ndim()
+}
+
 thread_local! {
     /// Monotonic id of the most recent `run_backward`. 0 means "no pass yet", which
     /// no node ever carries after a pass — so a fresh leaf (epoch 0) always reads as
@@ -243,6 +259,200 @@ fn matmul(a: &Rc<Node>, b: &Rc<Node>, line: usize, col: usize) -> Result<Rc<Node
         }
         _ => Err(mis()),
     }
+}
+
+// ---------- the scalar ↔ tensor bridge ----------
+//
+// Two adjoint primitives, and everything at the boundary is built from them:
+// `stack` joins N nodes of one shape into a node with a new leading axis, and
+// `select` pulls one slice back out. Stacking's adjoint is slicing (parent `k`
+// receives the k-th slice of the incoming gradient) and slicing's adjoint is
+// scattering (the gradient lands in a zero block at slice `k`) — so a value can
+// be assembled out of tracked scalars, computed on with BLAS, and taken apart
+// again without ever leaving the tape.
+
+/// Stack `parents` — all of identical shape `S` — into one node of shape `[N, …S]`.
+///
+/// The caller guarantees a non-empty list of equal shapes; `tensor_node` below is
+/// the only caller and checks both, reporting the same ragged error the plain
+/// build reports. Equal shapes are what make the backward total: contribution `k`
+/// is exactly `parents[k]`'s shape, and gradient accumulation adds same-shape
+/// arrays only (a mismatch there is the abort ADR 0024 forbids).
+fn stack(parents: Vec<Rc<Node>>) -> Rc<Node> {
+    debug_assert!(!parents.is_empty(), "stack: `build` only reaches here with elements");
+    let mut shape = vec![parents.len()];
+    shape.extend_from_slice(parents[0].value.shape());
+    let mut value = ArrayD::zeros(IxDyn(&shape));
+    for (k, p) in parents.iter().enumerate() {
+        value.index_axis_mut(Axis(0), k).assign(&p.value);
+    }
+    let n = parents.len();
+    make(
+        value,
+        parents,
+        Box::new(move |g| (0..n).map(|k| g.index_axis(Axis(0), k).to_owned()).collect()),
+    )
+}
+
+/// One slice off the leading axis (`t[k]`), as a node. `k` is already in bounds.
+///
+/// A 1-D receiver yields a 0-D node — which reads back as a `Float`, exactly what
+/// `tensor::index_first` hands back for the same index on a plain tensor.
+fn select(n: &Rc<Node>, k: usize) -> Rc<Node> {
+    let value = n.value.index_axis(Axis(0), k).to_owned();
+    let full = n.value.raw_dim();
+    make(
+        value,
+        vec![n.clone()],
+        Box::new(move |g| {
+            let mut out = ArrayD::zeros(full.clone());
+            out.index_axis_mut(Axis(0), k).assign(g);
+            vec![out]
+        }),
+    )
+}
+
+/// Does this value carry a tracked node anywhere inside it?
+///
+/// The gate on the whole bridge: when this is false — the overwhelmingly common
+/// case — tensor construction takes the plain path unchanged, which is a shape
+/// walk and a memcpy. Nothing here costs a program that is not differentiating.
+pub fn contains_tracked(v: &Value) -> bool {
+    use crate::value::ArrayData;
+    match v {
+        Value::Node(_) => true,
+        Value::Array(items) => match &**items {
+            // Only a boxed element list can hold one.
+            ArrayData::Values(vs) => vs.iter().any(contains_tracked),
+            // `Ints`/`Floats`/`Range` are numbers by construction. `Enumerate` and
+            // `Zip` are NOT — they can wrap a boxed buffer — but every element they
+            // yield is a TUPLE, which no tensor build accepts, tracked or plain. So
+            // they answer `false` here and are refused by the build either way,
+            // with the plain build's wording. Walking their inners would change no
+            // outcome; saying they are "packed" would be wrong.
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Build a tracked tensor out of a value containing tracked scalars — the bridge
+/// `tensor([w1, w2])` crosses. Mixed plain and tracked elements are fine: a plain
+/// number becomes a constant leaf, so gradient flows to the tracked ones only.
+///
+/// This accepts EXACTLY what the plain build accepts — numbers and nested arrays of
+/// numbers — with one addition: a tracked scalar counts as a number. That one
+/// sentence is the whole rule, and keeping it that short is deliberate. The plain
+/// build refuses a tensor as an element (`tensor([tensor(…), …])`, hint: "nested
+/// arrays of numbers"), so this refuses a tracked tensor as an element too; letting
+/// one through would mean the legality of an expression depended on whether a
+/// variable happened to be inside it. Stacking whole tensors as rows is a real
+/// widening for a later release, and it belongs to both builds or neither.
+///
+/// Every refusal is the plain build's refusal in its words (`tensor::*_err`), so the
+/// same mistake reads the same whether or not a variable is in the array.
+pub fn tensor_node(v: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    Ok(Value::Node(build(v, line, col)?))
+}
+
+fn build(v: &Value, line: usize, col: usize) -> Result<Rc<Node>, HelixError> {
+    // A wholly plain subtree is ONE constant block, not one leaf per number: it
+    // contributes no gradient, so its internal structure is never needed again, and
+    // the plain build already turns it into a dense buffer in a single pass (a
+    // packed row memcpies). This is what keeps `tensor([[w, …], [1.0, 2.0, …]])`
+    // from boxing a thousand-element row into a thousand nodes, and it hands the
+    // plain build's own errors back for anything inside it that is not a number.
+    if !contains_tracked(v) {
+        return Ok(leaf(crate::tensor::from_value(v, line, col)?));
+    }
+    // Past here the value holds a tracked one, so it is a node or an array with a
+    // node somewhere inside — every plain shape, `missing` and the empty array
+    // included, was answered above by the plain build and its wording.
+    match v {
+        // A tracked SCALAR is a number and passes straight through. A tracked
+        // TENSOR is not an element, exactly as a plain tensor is not, and
+        // `not_tensor_value_err` gives both the one sentence.
+        Value::Node(n) if n.value.ndim() == 0 => Ok(n.clone()),
+        Value::Array(items) => {
+            // Shapes are compared AS the elements are built, never afterwards: the
+            // plain shape walk interleaves the two and stops at the first offending
+            // element, so `tensor([[1.0], [2.0, 3.0], "x"])` reports the ragged row
+            // rather than the string. Building every element first and comparing at
+            // the end would let a bad type anywhere outrank a ragged row anywhere,
+            // and the same program would change its error the moment a variable
+            // appeared in it. A tracked array is never empty — an empty one holds
+            // no node — so the first element always exists to set the shape.
+            let mut parts: Vec<Rc<Node>> = Vec::with_capacity(items.len());
+            let mut head: Option<Vec<usize>> = None;
+            for it in items.to_values().iter() {
+                let part = build(it, line, col)?;
+                match &head {
+                    None => head = Some(part.value.shape().to_vec()),
+                    Some(h) if part.value.shape() != h.as_slice() => {
+                        return Err(crate::tensor::ragged_err(line, col))
+                    }
+                    Some(_) => {}
+                }
+                parts.push(part);
+            }
+            Ok(stack(parts))
+        }
+        // `contains_tracked` admits nothing else. Answering with the plain build's
+        // refusal rather than an `unreachable!` keeps the function total — the rule
+        // ADR 0024 states, and the one the v0.2.6 poison-cell abort broke.
+        other => Err(crate::tensor::not_tensor_value_err(other, line, col)),
+    }
+}
+
+/// `t[i]` on a tracked tensor — differentiable element access, the bridge's other
+/// direction. Bounds and wording follow `tensor::index_first` exactly, because to a
+/// reader this IS that operation; the only difference is that the result stays on
+/// the tape.
+pub fn index(n: &Rc<Node>, i: i64, line: usize, col: usize) -> Result<Value, HelixError> {
+    if n.value.ndim() == 0 {
+        return Err(crate::tensor::index_scalar_err(line, col));
+    }
+    let len = n.value.shape()[0] as i64;
+    let real = if i < 0 { len + i } else { i };
+    if real < 0 || real >= len {
+        return Err(crate::tensor::index_bounds_err(i, len, line, col));
+    }
+    Ok(Value::Node(select(n, real as usize)))
+}
+
+/// `t[a:b:step]` on a tracked tensor — the slice twin of `index`, over already
+/// resolved indices (the caller resolves them exactly as it does for a plain
+/// tensor, so the two agree on every edge including a reversing step).
+///
+/// Gathering rows is a sum over the rows it names, so its adjoint SCATTERS and
+/// ACCUMULATES: a row named twice by a slice must receive both contributions.
+pub fn slice(n: &Rc<Node>, idxs: &[usize], line: usize, col: usize) -> Result<Value, HelixError> {
+    if n.value.ndim() == 0 {
+        return Err(HelixError::new("cannot slice a 0-D (scalar) tensor", line, col));
+    }
+    let picks: Vec<usize> = idxs.to_vec();
+    let mut shape = vec![picks.len()];
+    shape.extend_from_slice(&n.value.shape()[1..]);
+    let mut value = ArrayD::zeros(IxDyn(&shape));
+    for (k, &src) in picks.iter().enumerate() {
+        value
+            .index_axis_mut(Axis(0), k)
+            .assign(&n.value.index_axis(Axis(0), src));
+    }
+    let full = n.value.raw_dim();
+    let out = make(
+        value,
+        vec![n.clone()],
+        Box::new(move |g| {
+            let mut back = ArrayD::zeros(full.clone());
+            for (k, &src) in picks.iter().enumerate() {
+                let mut row = back.index_axis_mut(Axis(0), src);
+                row += &g.index_axis(Axis(0), k);
+            }
+            vec![back]
+        }),
+    );
+    Ok(Value::Node(out))
 }
 
 // ---------- backward pass ----------
@@ -465,6 +675,25 @@ pub fn method(n: &Rc<Node>, name: &str, args: &[Value], line: usize, col: usize)
             no_method_args(name, args, line, col)?;
             unary_builtin(name, &Value::Node(n.clone()), line, col)
         }
+        // Metadata, not mathematics: how big a value is does not depend on the
+        // tape, and answering "no differentiable method `shape`" would mean
+        // `tensor([w1, w2]).shape()` failed where `tensor([1.0, 2.0]).shape()`
+        // works — the same expression made illegal by a variable being inside it.
+        // These read straight off the forward value, exactly as the plain twins do.
+        "shape" => {
+            no_method_args(name, args, line, col)?;
+            Ok(Value::array(
+                n.value.shape().iter().map(|&d| Value::Int(d as i64)).collect(),
+            ))
+        }
+        "count" => {
+            no_method_args(name, args, line, col)?;
+            Ok(Value::Int(n.value.len() as i64))
+        }
+        "ndim" => {
+            no_method_args(name, args, line, col)?;
+            Ok(Value::Int(n.value.ndim() as i64))
+        }
         _ => Err(HelixError::new(
             format!("a tracked value has no differentiable method `{name}`"),
             line,
@@ -472,7 +701,7 @@ pub fn method(n: &Rc<Node>, name: &str, args: &[Value], line: usize, col: usize)
         )
         .hint(
             "methods: matmul/dot, sum, mean, t/transpose, relu, sigmoid, tanh, exp, ln, \
-             sqrt, sin, cos, abs.",
+             sqrt, sin, cos, abs; shape/count/ndim read the value.",
         )),
     }
 }

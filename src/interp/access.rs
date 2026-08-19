@@ -97,6 +97,18 @@ pub(crate) fn eval_slice(
             let idxs = slice_indices(t.shape()[0] as i64, start, stop, step);
             Ok(tensor::slice_first(t, &idxs))
         }
+        // A tracked tensor slices like a plain one — resolved by the SAME
+        // `slice_indices`, so every edge (negative bounds, a reversing step, an
+        // empty range) lands identically — and the rows stay on the tape.
+        // Unguarded, so a tracked SCALAR reaches `autodiff::slice` and is refused
+        // in the plain path's words ("cannot slice a 0-D (scalar) tensor") rather
+        // than falling through to the generic arm and leaking the name `Node`.
+        // `axis0_len` is 0 there and the resolved index list is empty, which the
+        // rank check rejects before it is ever read.
+        Value::Node(n) => {
+            let idxs = slice_indices(n.axis0_len() as i64, start, stop, step);
+            crate::autodiff::slice(n, &idxs, line, col)
+        }
         // A Python handle slices via its own `__getitem__` (numpy/list semantics).
         Value::PyObject(h) => crate::python::slice(h, start, stop, step, line, col),
         Value::Missing => Ok(Value::Missing),
@@ -427,6 +439,10 @@ pub(crate) fn eval_index(recv: &Value, idx: &Value, line: usize, col: usize) -> 
             Ok(Value::Str(Rc::new(ch.to_string())))
         }
         Value::Tensor(t) => tensor::index_first(t, i, line, col),
+        // A tracked tensor indexes exactly as a plain one does — same bounds, same
+        // wording — except the element stays on the tape, so `W[0][1]` is a
+        // differentiable read of one weight rather than a dead end.
+        Value::Node(n) => crate::autodiff::index(n, i, line, col),
         other => {
             let err = HelixError::new(
                 format!("a value of type {} cannot be indexed", other.type_name()),

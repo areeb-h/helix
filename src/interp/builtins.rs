@@ -889,6 +889,16 @@ impl super::Interp {
             // ---- tensor constructors ----
             "tensor" => {
                 arity(name, &args, 1, line, col)?;
+                // The scalar→tensor bridge: an argument carrying a tracked value
+                // builds a tracked tensor, so a trainable layer's weights can be
+                // ordinary variables and its forward pass an ordinary `matmul`.
+                // Everything else takes the plain build unchanged — the predicate
+                // is the array's own walk, and a packed buffer answers `false`
+                // without one, so a program that is not differentiating pays
+                // nothing for this.
+                if crate::autodiff::contains_tracked(&args[0]) {
+                    return crate::autodiff::tensor_node(&args[0], line, col);
+                }
                 Ok(Value::Tensor(Rc::new(tensor::from_value(&args[0], line, col)?)))
             }
             "dataframe" => {

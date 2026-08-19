@@ -37,3 +37,23 @@ print("loss after 200 steps:", mse(w1))
 trained = range(0, 800).reduce(w1, (w, i) => step(w))
 print("loss after 1000 steps:", mse(trained))
 print("learned weights (≈ [2, 1]):", trained)
+
+# --- the scalars→tensor bridge: individual parameters, one BLAS matmul ---
+# Above, the whole weight vector is one `variable`. When parameters are named
+# separately — the shape a layer usually has — `tensor(…)` assembles them into a
+# real tensor that is still on the tape, so the forward pass is a `matmul` and the
+# gradient still finds each scalar. A plain element is simply a constant.
+w11 = variable(0.5)
+w12 = variable(-0.5)
+w21 = variable(0.25)
+w22 = variable(0.75)
+W = tensor([[w11, w12], [w21, w22]])                         # tracked 2×2
+out = W.matmul(tensor([1.0, 2.0])).sum()
+print("\nlayer out:", value_of(out))                         # 1.25
+print("d out/d each weight:", gradient(out, [w11, w12, w21, w22]))  # [1, 2, 1, 2]
+
+# Reading a tracked tensor apart keeps the pieces tracked: an element scatters its
+# gradient back where it came from, and a slice gathers rows the same way.
+print("W[0][1] =", value_of(W[0][1]), "→ d/dw12 =", gradient(W[0][1], w12))
+print("first row sum grad wrt w11:", gradient(W[0:1].sum(), w11))
+print("shape:", W.shape(), "count:", W.count())              # metadata, not calculus

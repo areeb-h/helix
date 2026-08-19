@@ -25,8 +25,8 @@ print("native sum:", to_array(nums).sum())
 np = python.import("numpy")
 a = np.arange(6)
 print("indexing  a[2]:", a[2])              # __getitem__  -> 2
-print("slicing   a[1:4]:", a[1: 4])          # __getitem__(slice)  ->  [1 2 3]
-print("reverse   a[::-1]:", a[:: -1])        # numpy slice semantics ->  [5 4 3 2 1 0]
+print("slicing   a[1:4]:", a[1:4])          # __getitem__(slice)  ->  [1 2 3]
+print("reverse   a[::-1]:", a[::-1])        # numpy slice semantics ->  [5 4 3 2 1 0]
 print("operators a * 10:", a * 10)          # __mul__  ->  [ 0 10 20 30 40 50]
 print("a printed as its value:", np.array([1.5, 2.5]))   # str(obj), not <python ...>
 

@@ -301,6 +301,20 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             if is_numeric(a)
                 || matches!(a, Type::Array(_) | Type::Unknown | Type::Missing)
             {
+                // `Tensor` UNCONDITIONALLY, including when the argument may hold a
+                // tracked value (the scalars->tensor bridge makes the result a graph
+                // node then). Widening to `Unknown` in that case was tried and
+                // REVERTED: `Array(Unknown)` is the type of every empty literal,
+                // every mixed literal, and every unannotated parameter, so the
+                // widening silently switched off static checking for programs with
+                // nothing tracked in them at all -- `tensor([]).no_such_method()`
+                // and `fn f(xs) = tensor(xs) + "oops"` both started passing `check`.
+                // That is worse than the gap it closed, and it broke the rule this
+                // change is built on: a program without variables behaves exactly as
+                // it did. A tracked tensor answers the Tensor methods that carry the
+                // use case (matmul, sum, mean, t, shape, count, ndim); where the two
+                // surfaces still differ is a spelling question recorded in
+                // docs/dx-plan.md, not something to pay for with real checking.
                 Ok(Type::Tensor)
             } else {
                 Err(type_err("tensor", "a number or array", a, line, col))
@@ -1080,3 +1094,4 @@ pub(super) fn groupby_method_type(name: &str, line: usize, col: usize) -> Result
         }
     })
 }
+

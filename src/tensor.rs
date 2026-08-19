@@ -16,6 +16,53 @@ pub type Tensor = ArrayD<f64>;
 
 // ---------- construction ----------
 
+// The refusals below are constructors rather than inline `HelixError::new` calls
+// because there are now TWO builds behind `tensor(…)`: this one, and the tracked
+// build in `autodiff` that the scalar→tensor bridge takes when an element is a
+// variable. The same mistake must read the same either way, so neither build gets
+// to phrase these itself.
+
+/// A value that cannot be part of a tensor at all.
+pub(crate) fn not_tensor_value_err(v: &Value, line: usize, col: usize) -> HelixError {
+    // A TRACKED tensor is reported as the `Tensor` it is to everyone who can see it:
+    // it prints as one, carries one, and is refused here for exactly the reason a
+    // plain one is. Naming its internal type would both leak `Node` and make one
+    // mistake read two ways depending on which side of the comma it sat on —
+    // `tensor([tracked, plain])` and `tensor([plain, tracked])` are the same error.
+    let name = match v {
+        Value::Node(n) if crate::autodiff::rank_of(n) > 0 => "Tensor",
+        other => other.type_name(),
+    };
+    HelixError::new(format!("cannot build a tensor from a value of type {}", name), line, col)
+        .hint("tensors are built from numbers and (nested) arrays of numbers.")
+}
+
+/// Rows of unequal shape — a nested array that is not rectangular.
+pub(crate) fn ragged_err(line: usize, col: usize) -> HelixError {
+    HelixError::new("tensor rows must all have the same shape (ragged array)", line, col)
+        .hint("every nested array at a given depth must have the same length.")
+}
+
+/// `missing` has no place in a dense numeric buffer.
+pub(crate) fn missing_element_err(line: usize, col: usize) -> HelixError {
+    HelixError::new("tensors cannot contain `missing`", line, col)
+        .hint("drop or impute missing values before building a tensor.")
+}
+
+/// Indexing a 0-D tensor — there is no axis to index.
+pub(crate) fn index_scalar_err(line: usize, col: usize) -> HelixError {
+    HelixError::new("cannot index a 0-D (scalar) tensor", line, col)
+}
+
+/// An index past the end of the leading axis.
+pub(crate) fn index_bounds_err(i: i64, len: i64, line: usize, col: usize) -> HelixError {
+    HelixError::new(
+        format!("index {} is out of bounds for a tensor axis of length {}", i, len),
+        line,
+        col,
+    )
+}
+
 /// Infer the (rectangular) shape of a nested Helix value.
 fn shape_of(v: &Value, line: usize, col: usize) -> Result<Vec<usize>, HelixError> {
     match v {
@@ -40,24 +87,14 @@ fn shape_of(v: &Value, line: usize, col: usize) -> Result<Vec<usize>, HelixError
             let sub = shape_of(&items.get(0), line, col)?;
             for it in items.to_values().iter() {
                 if shape_of(it, line, col)? != sub {
-                    return Err(HelixError::new(
-                        "tensor rows must all have the same shape (ragged array)",
-                        line,
-                        col,
-                    )
-                    .hint("every nested array at a given depth must have the same length."));
+                    return Err(ragged_err(line, col));
                 }
             }
             let mut shape = vec![items.len()];
             shape.extend(sub);
             Ok(shape)
         }
-        other => Err(HelixError::new(
-            format!("cannot build a tensor from a value of type {}", other.type_name()),
-            line,
-            col,
-        )
-        .hint("tensors are built from numbers and (nested) arrays of numbers.")),
+        other => Err(not_tensor_value_err(other, line, col)),
     }
 }
 
@@ -83,10 +120,7 @@ fn flatten_into(v: &Value, out: &mut Vec<f64>, line: usize, col: usize) -> Resul
                 }
             }
         },
-        Value::Missing => {
-            return Err(HelixError::new("tensors cannot contain `missing`", line, col)
-                .hint("drop or impute missing values before building a tensor."))
-        }
+        Value::Missing => return Err(missing_element_err(line, col)),
         other => {
             return Err(HelixError::new(
                 format!("a tensor element must be a number, not {}", crate::value::with_article(other.type_name())),
@@ -115,20 +149,12 @@ pub fn from_value(v: &Value, line: usize, col: usize) -> Result<Tensor, HelixErr
 /// indices count from the end.
 pub fn index_first(t: &Tensor, i: i64, line: usize, col: usize) -> Result<Value, HelixError> {
     if t.ndim() == 0 {
-        return Err(HelixError::new(
-            "cannot index a 0-D (scalar) tensor",
-            line,
-            col,
-        ));
+        return Err(index_scalar_err(line, col));
     }
     let n = t.shape()[0] as i64;
     let real = if i < 0 { n + i } else { i };
     if real < 0 || real >= n {
-        return Err(HelixError::new(
-            format!("index {} is out of bounds for a tensor axis of length {}", i, n),
-            line,
-            col,
-        ));
+        return Err(index_bounds_err(i, n, line, col));
     }
     let sub = t.clone().index_axis_move(Axis(0), real as usize);
     if sub.ndim() == 0 {

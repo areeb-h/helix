@@ -203,15 +203,57 @@ with mechanisms so nothing has to be rediscovered:
 - **Autodiff DX family** (engine-identical, non-blocking): tracked error paths drop
   the help hints their plain twins carry (misaligned tracked matmul loses the
   "vector-vector, matrix-matrix..." help); unary minus on a Node errors where
-  `0.0 - x` works; tracked tensors gain `.exp()` that plain tensors lack (inverse of
-  the ADR 0003 spelling rule); no differentiable indexing (`v[0]` on a tracked
-  tensor errors). Also: a tracked element in an array `.sum()` switches the fold
+  `0.0 - x` works. Also: a tracked element in an array `.sum()` switches the fold
   from compensated to naive left-to-right, observably changing the sum of the same
-  data (~1e-12 at n=1000) — docs note or a compensated tape fold.
-- **`tensor([w, ...])` from tracked scalars still refuses** — the scalars→tensor
-  bridge, already first in the feature queue (the nn field's trainable-BLAS-layer
-  blocker). The real `d/db a**b` pow node belongs to the same tape-surface batch
-  (the sweep made a tracked exponent refuse instead of silently freezing).
+  data (~1e-12 at n=1000) — docs note or a compensated tape fold. *(Differentiable
+  indexing landed with the bridge; the `.exp()` asymmetry is now its own entry
+  below, because the bridge made it reachable by an ordinary spelling.)*
+
+### Recorded by the scalars→tensor bridge survey (2026-08-20)
+
+The bridge itself landed. These are the boundary decisions it surfaced and did not
+make, each verified across all three engines; the first is the one that most wants
+an owner's ruling.
+
+- **DECIDE: which spelling of an activation survives.** `tensor([w1, w2]).exp()`
+  works (the tape's method table) while `tensor([1.0, 2.0]).exp()` does not (plain
+  tensors have no such method) — nine names: relu, sigmoid, tanh, exp, ln, sqrt,
+  sin, cos, abs. The FUNCTION form (`exp(t)`) works on both, so it is already the
+  universal spelling and ADR 0003's "one verb per concept" points at dropping the
+  nine methods from `autodiff::method`. That is a breaking change for anyone who
+  wrote `x.sigmoid()` on a tracked value, so it is a release decision, not a
+  drive-by. The alternative — adding all nine to `tensor::method` + `TENSOR_METHODS`
+  — widens the surface instead of narrowing it. The asymmetry predates the bridge;
+  what the bridge changed is that `tensor([w, …])` is now the natural way to build a
+  tracked tensor, so an ordinary program reaches it.
+- **`to_array` stays the tape EXIT, deliberately** (it already carried a code comment
+  saying so). Making it return tracked scalars was probed and rejected on evidence:
+  on the resulting array `contains` flips true→false, `index_of` returns `missing`,
+  `unique` stops deduplicating, and `max`/`min`/`std`/`median`/`cumsum` break
+  outright — all silently, all at exit 0. It would also change `.sum()`'s ANSWER
+  (packed Neumaier 100.0 vs naive tape fold 99.9999999999986 over 1000×0.1), and a
+  2-D tracked tensor has no good shape convention (`to_array` flattens row-major).
+  The differentiable capability already exists as `range(0, n).map(i => t[i])`, now
+  that indexing is on the tape. If a differentiable extraction verb is ever wanted
+  it needs its own name and its own ADR.
+- **Stacking whole tensors as rows** — `tensor([row1, row2])` where the rows are
+  tensors — is refused by BOTH builds today (the plain one says "cannot build a
+  tensor from a value of type Tensor"; the tracked one names the tracked case). The
+  stack primitive the bridge added would support it directly; widening is a real
+  feature and must land in both builds at once, or the legality of an expression
+  starts depending on whether a variable is inside it.
+- **The receiver-lift at `interp/methods.rs:265` is name-blind**: a plain tensor
+  receiver is pulled onto the tape by ANY tracked argument, so
+  `tensor(…).solve(variable(…))` reports "a tracked value has no differentiable
+  method `solve`" instead of `solve`'s own error. Gate the lift on the tracked
+  method table rather than on the presence of a Node argument. Low severity now; it
+  grows with every method added to either side.
+- **`Node` still leaks as a type name** in a few error paths (`value.rs:669`).
+  Display is clean — a tracked value prints as its value everywhere, including in
+  interpolation — so a user who meets the word has no way to connect it to anything
+  they wrote. Route user-facing mentions through "a tracked value".
+- **The real `d/db a**b` pow node** belongs to the same tape-surface batch (v0.2.7
+  made a tracked exponent refuse rather than silently answer 0.0).
 
 - **A reduce's INIT must be a literal or the kernel silently never compiles (~21-53×)** —
   the llm-library field report's finding, VERIFIED on HEAD 2026-08-16: identical body,

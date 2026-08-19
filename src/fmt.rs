@@ -262,6 +262,14 @@ fn needs_space(prev: &Tok, next: &Tok, line: &[&Token], i: usize) -> bool {
     if matches!(prev, LParen | LBracket) || matches!(next, RParen | RBracket | Comma | Colon) {
         return false;
     }
+    // A SLICE colon hugs both sides — `xs[0:2]`, `xs[::-1]` — while a record colon
+    // takes its space (`{a: 1}`). They are the same token, so only the bracket still
+    // open tells them apart. Every slice in the repository lives inside a string
+    // interpolation, which this formatter does not descend into, so the record rule
+    // had never met a bare one and quietly rendered it `xs[0: 2]`.
+    if matches!(prev, Colon) && inside_index(line, i - 1) {
+        return false;
+    }
     // `{` and `}` are records here, and read as units: `{a: 1}`, not `{ a: 1 }`.
     if matches!(prev, LBrace) || matches!(next, RBrace) {
         return false;
@@ -318,6 +326,28 @@ fn needs_space(prev: &Tok, next: &Tok, line: &[&Token], i: usize) -> bool {
         return false;
     }
     true
+}
+
+/// Is the token at `at` sitting directly inside `[…]` rather than `(…)` or `{…}`?
+///
+/// Scans back over balanced pairs to the innermost opener still unclosed. Only a
+/// slice colon can appear directly inside brackets — an array literal has no colons
+/// of its own — so an open `[` at depth zero identifies one. A record's colon sits
+/// inside `{`, a call's inside `(`, and a colon whose opener is on an earlier line
+/// falls through to `false` and keeps the spaced form.
+fn inside_index(line: &[&Token], at: usize) -> bool {
+    use Tok::*;
+    let mut depth = 0i32;
+    for t in line[..at].iter().rev() {
+        match &t.tok {
+            RParen | RBracket | RBrace => depth += 1,
+            LBracket if depth == 0 => return true,
+            LParen | LBrace if depth == 0 => return false,
+            LParen | LBracket | LBrace => depth -= 1,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Is the `Minus` at `at` a unary sign rather than a subtraction? It is unary when the
@@ -453,6 +483,40 @@ mod tests {
                     "{path}: token changed"
                 );
             }
+        }
+    }
+
+    /// A slice colon hugs both sides; a record colon does not. They are the same
+    /// token, so the formatter had been applying the record rule to every colon and
+    /// rendering `xs[0:2]` as `xs[0: 2]` — which no author writes and which the
+    /// repository's own examples had already been degraded into (`v[1: 3]` sitting
+    /// under a comment that says `v[1:3]`). It went unseen because every slice in
+    /// the tree lived inside a string interpolation, which the formatter does not
+    /// descend into; the scalars→tensor bridge made bare slices ordinary.
+    #[test]
+    fn slice_colons_hug_and_record_colons_do_not() {
+        let cases = [
+            ("xs[0:2]", "xs[0:2]"),
+            ("xs[0: 2]", "xs[0:2]"),
+            ("xs[1:]", "xs[1:]"),
+            ("xs[:2]", "xs[:2]"),
+            ("xs[::-1]", "xs[::-1]"),
+            ("xs[:: -1]", "xs[::-1]"),
+            ("xs[0:3:2]", "xs[0:3:2]"),
+            ("xs[a:b]", "xs[a:b]"),
+            // The record/dict form keeps its space, including nested inside an index.
+            ("{a: 1, b: 2}", "{a: 1, b: 2}"),
+            ("{a:1}", "{a: 1}"),
+            ("f({k: 1})", "f({k: 1})"),
+            ("[{k: 1}]", "[{k: 1}]"),
+            ("xs[{k: 1}.k:2]", "xs[{k: 1}.k:2]"),
+        ];
+        for (input, want) in cases {
+            let got = format_source(&format!("{input}\n")).expect("lexes");
+            assert_eq!(got.trim_end(), want, "formatting `{input}`");
+            // Idempotence, per case rather than only over the tracked corpus.
+            let again = format_source(&got).expect("lexes");
+            assert_eq!(again, got, "`{input}` is not idempotent");
         }
     }
 

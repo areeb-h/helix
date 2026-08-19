@@ -5636,3 +5636,332 @@ fn helix_test_walk_handles_cycles_overlaps_and_bare_prints() {
         assert!(out.contains("3 passed"), "{roots:?}: out:\n{out}");
     }
 }
+
+/// The scalars→tensor bridge: `tensor(…)` over tracked scalars builds a TRACKED
+/// tensor, so a trainable layer's weights can be ordinary variables and its forward
+/// pass an ordinary BLAS `matmul`. Before this, the nn field build had to choose
+/// between a differentiable network and a fast one.
+///
+/// The gradients here are hand-derived, not recorded: for `W·x` summed, ∂/∂wᵢⱼ = xⱼ,
+/// so `W = [[w11, w12], [w21, w22]]` against `x = [1, 2]` gives `[1, 2, 1, 2]`.
+#[test]
+fn tensor_builds_from_tracked_scalars() {
+    let layer = "w11 = variable(0.5)\n\
+                 w12 = variable(-0.5)\n\
+                 w21 = variable(0.25)\n\
+                 w22 = variable(0.75)\n\
+                 W = tensor([[w11, w12], [w21, w22]])\n\
+                 x = tensor([1.0, 2.0])\n\
+                 loss = W.matmul(x).sum()\n\
+                 print(value_of(loss))\n\
+                 print(gradient(loss, [w11, w12, w21, w22]))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(layer, env, &format!("bridge_layer_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "1.25\n[1.0, 2.0, 1.0, 2.0]\n", "{name}");
+    }
+
+    // One variable used TWICE in the same build: both slices of the incoming
+    // gradient must reach it. `t = [w, w]`, loss = sum(t·t) = 2w², d/dw = 4w = 12.
+    let repeated = "w = variable(3.0)\n\
+                    t = tensor([w, w])\n\
+                    print(value_of((t * t).sum()))\n\
+                    print(gradient((t * t).sum(), w))\n";
+    // Plain elements become constants, so gradient reaches only the tracked ones.
+    let mixed = "w = variable(5.0)\n\
+                 t = tensor([w, 2.0])\n\
+                 print(value_of(t.sum()))\n\
+                 print(gradient(t.sum(), w))\n";
+    // Ints convert exactly as the plain build converts them; a bare tracked scalar
+    // passes straight through; nesting goes as deep as it likes.
+    let edges = "w = variable(1.5)\n\
+                 print(value_of(tensor([w, 2]).sum()))\n\
+                 print(value_of(tensor(w)))\n\
+                 t3 = tensor([[[w, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+                 print(gradient(t3.sum(), w))\n";
+    for (name, env) in ENGINES {
+        for (tag, src, want) in [
+            ("repeated", repeated, "18.0\n12.0\n"),
+            ("mixed", mixed, "7.0\n1.0\n"),
+            ("edges", edges, "3.5\n1.5\n1.0\n"),
+        ] {
+            let (out, err, code) = run_source(src, env, &format!("bridge_{tag}_{name}"));
+            assert_eq!(code, Some(0), "{name}/{tag}: {err}");
+            assert_eq!(out, want, "{name}/{tag}");
+        }
+    }
+
+    // The honest oracle: analytic gradient against a central difference computed by
+    // the program itself, through a build whose variables repeat across positions.
+    let cd = "fn f(a, b) = ((tensor([[a, b], [b, a]])).matmul(tensor([1.0, 2.0]))).sum()\n\
+              w1 = variable(1.5)\n\
+              w2 = variable(-0.5)\n\
+              L = ((tensor([[w1, w2], [w2, w1]])).matmul(tensor([1.0, 2.0]))).sum()\n\
+              h = 0.000001\n\
+              print(gradient(L, w1))\n\
+              print(round((f(1.5 + h, -0.5) - f(1.5 - h, -0.5)) / (2.0 * h), 4))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(cd, env, &format!("bridge_cd_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "3.0\n3.0\n", "{name}");
+    }
+}
+
+/// The bridge's other direction: reading a tracked tensor apart keeps the pieces on
+/// the tape. `t[i]` scatters its gradient back into the element it came from, and a
+/// slice gathers rows whose adjoint accumulates — so a weight can be built from
+/// scalars, multiplied as a matrix, and inspected element-wise without the tape
+/// silently ending. Metadata (`shape`/`count`/`ndim`) reads the value, because how
+/// big something is was never a question about derivatives.
+#[test]
+fn tracked_tensors_index_slice_and_measure() {
+    let idx = "v = variable(tensor([1.0, 2.0, 3.0]))\n\
+               print(value_of(v[0]))\n\
+               print(value_of(v[-1]))\n\
+               print(gradient(v[1], v))\n";
+    let two_d = "W = variable(tensor([[1.0, 2.0], [3.0, 4.0]]))\n\
+                 print(value_of(W[1]))\n\
+                 print(value_of(W[0][1]))\n\
+                 print(gradient(W[0][1], W))\n";
+    let slice = "v = variable(tensor([1.0, 2.0, 3.0]))\n\
+                 print(value_of(v[0:2]))\n\
+                 print(gradient(v[0:2].sum(), v))\n\
+                 print(value_of(v[::-1]))\n\
+                 print(value_of(v[2:2]))\n";
+    // Round trip: build from scalars, then read one element back out.
+    let round = "a = variable(2.0)\n\
+                 b = variable(3.0)\n\
+                 t = tensor([a, b])\n\
+                 print(gradient(t[0] * t[1], a))\n\
+                 print(gradient(t[1:2].sum(), b))\n\
+                 print(gradient(t[1:2].sum(), a))\n";
+    let meta = "w = variable(1.0)\n\
+                t = tensor([[w, 2.0], [3.0, 4.0]])\n\
+                print(t.shape())\n\
+                print(t.count())\n\
+                print(t.ndim())\n\
+                print(w.shape())\n";
+    for (name, env) in ENGINES {
+        for (tag, src, want) in [
+            ("idx", idx, "1.0\n3.0\n[0, 1, 0]\n"),
+            ("two_d", two_d, "[3, 4]\n2.0\n[[0, 1],\n [0, 0]]\n"),
+            ("slice", slice, "[1, 2]\n[1, 1, 0]\n[3, 2, 1]\n[]\n"),
+            ("round", round, "3.0\n1.0\n0.0\n"),
+            ("meta", meta, "[2, 2]\n4\n2\n[]\n"),
+        ] {
+            let (out, err, code) = run_source(src, env, &format!("bridge_read_{tag}_{name}"));
+            assert_eq!(code, Some(0), "{name}/{tag}: {err}");
+            assert_eq!(out, want, "{name}/{tag}");
+        }
+    }
+}
+
+/// A mistake reads the same whether or not a variable happens to be in the array.
+/// The tracked build refuses exactly what the plain build refuses, in the plain
+/// build's words — the programs below compare the two error texts in-language, so a
+/// future edit to either wording fails here rather than in a field report. The one
+/// refusal with its own text is a tracked TENSOR as an element, where naming the
+/// internal type would be worse than useless.
+#[test]
+fn tracked_tensor_build_refuses_exactly_what_the_plain_build_refuses() {
+    let same = |bad_tracked: &str, bad_plain: &str| {
+        format!(
+            "w = variable(1.0)\n\
+             r = try {bad_tracked}\n\
+             p = try {bad_plain}\n\
+             print(r.ok)\n\
+             print(p.ok)\n\
+             print(r.error == p.error)\n\
+             print(r.error)\n"
+        )
+    };
+    let cases = [
+        ("string", same("tensor([w, \"a\"])", "tensor([1.0, \"a\"])"),
+         "cannot build a tensor from a value of type String"),
+        ("bool", same("tensor([w, true])", "tensor([1.0, true])"),
+         "cannot build a tensor from a value of type Bool"),
+        ("tuple", same("tensor([w, (1, 2)])", "tensor([1.0, (1, 2)])"),
+         "cannot build a tensor from a value of type Tuple"),
+        ("record", same("tensor([w, {a: 1}])", "tensor([1.0, {a: 1}])"),
+         "cannot build a tensor from a value of type Record"),
+        ("missing", same("tensor([w, missing])", "tensor([1.0, missing])"),
+         "cannot build a tensor from a value of type Missing"),
+        ("ragged", same("tensor([[w], [w, w]])", "tensor([[1.0], [2.0, 3.0]])"),
+         "tensor rows must all have the same shape (ragged array)"),
+        // The three shapes of "these rows do not agree" — an EMPTY sibling, a
+        // scalar beside an array, and an array beside a scalar — all report as the
+        // one ragged error, tracked or plain.
+        ("empty_sibling", same("tensor([[w], []])", "tensor([[1.0], []])"),
+         "tensor rows must all have the same shape (ragged array)"),
+        ("scalar_sibling", same("tensor([w, [2.0]])", "tensor([1.0, [2.0]])"),
+         "tensor rows must all have the same shape (ragged array)"),
+        ("array_sibling", same("tensor([[w], 2.0])", "tensor([[1.0], 2.0])"),
+         "tensor rows must all have the same shape (ragged array)"),
+        ("deep_ragged", same("tensor([[[w]], [[1.0, 2.0]]])", "tensor([[[3.0]], [[1.0, 2.0]]])"),
+         "tensor rows must all have the same shape (ragged array)"),
+        ("bounds", same("variable(tensor([1.0, 2.0]))[9]", "tensor([1.0, 2.0])[9]"),
+         "index 9 is out of bounds for a tensor axis of length 2"),
+        ("index0d", same("variable(1.0)[0]", "tensor(1.0)[0]"),
+         "cannot index a 0-D (scalar) tensor"),
+        ("slice0d", same("variable(1.0)[0:1]", "tensor(1.0)[0:1]"),
+         "cannot slice a 0-D (scalar) tensor"),
+    ];
+    for (name, env) in ENGINES {
+        for (tag, src, text) in &cases {
+            let (out, err, code) = run_source(src, env, &format!("bridge_refuse_{tag}_{name}"));
+            assert_eq!(code, Some(0), "{name}/{tag}: {err}");
+            assert_eq!(out, format!("false\nfalse\ntrue\n{text}\n"), "{name}/{tag}");
+        }
+    }
+
+    // A tensor is not a tensor ELEMENT — the rule the plain build already applies —
+    // and a tracked tensor is reported as the `Tensor` it is to anyone who can see
+    // it. One sentence whichever side of the comma it sits on: reporting the
+    // tracked one differently made the same mistake read two ways depending on
+    // literal order, and leaked the internal name `Node` while doing it.
+    let orders = [
+        ("tracked_first", "tensor([r1, tensor([3.0, 4.0])])"),
+        ("plain_first", "tensor([tensor([3.0, 4.0]), r1])"),
+        ("both_plain", "tensor([tensor([1.0, 2.0]), tensor([3.0, 4.0])])"),
+    ];
+    for (name, env) in ENGINES {
+        for (tag, expr) in orders {
+            let block = format!(
+                "r1 = variable(tensor([1.0, 2.0]))\n\
+                 r = try {expr}\n\
+                 print(r.ok)\n\
+                 print(r.error)\n\
+                 print(r.error.contains(\"Node\"))\n"
+            );
+            let (out, err, code) =
+                run_source(&block, env, &format!("bridge_block_{tag}_{name}"));
+            assert_eq!(code, Some(0), "{name}/{tag}: {err}");
+            assert_eq!(
+                out,
+                "false\ncannot build a tensor from a value of type Tensor\nfalse\n",
+                "{name}/{tag}"
+            );
+        }
+    }
+}
+
+/// A ragged row outranks a bad element type — in BOTH builds. The plain shape walk
+/// interleaves the two checks and stops at the first offending element; the tracked
+/// build must do the same, or wrapping one element in `variable(` would change which
+/// of two mistakes a program reports.
+#[test]
+fn the_first_mistake_wins_in_both_tensor_builds() {
+    for (name, env) in ENGINES {
+        for (tag, bad) in [("string", "\"x\""), ("missing", "missing")] {
+            let src = format!(
+                "w = variable(1.0)\n\
+                 t = try tensor([[w], [2.0, 3.0], {bad}])\n\
+                 p = try tensor([[1.0], [2.0, 3.0], {bad}])\n\
+                 print(t.error == p.error)\n\
+                 print(p.error)\n"
+            );
+            let (out, err, code) =
+                run_source(&src, env, &format!("bridge_order_{tag}_{name}"));
+            assert_eq!(code, Some(0), "{name}/{tag}: {err}");
+            assert_eq!(
+                out,
+                "true\ntensor rows must all have the same shape (ragged array)\n",
+                "{name}/{tag}"
+            );
+        }
+    }
+}
+
+/// Nothing a program without variables does may change. The plain build is a shape
+/// walk and a memcpy, and the bridge is gated behind a predicate that a packed
+/// buffer answers without one — so these must read exactly as they did before.
+#[test]
+fn plain_tensor_construction_and_reads_are_unchanged() {
+    let src = "print(tensor([1.0, 2.0]))\n\
+               print(tensor([[1, 2], [3, 4]]))\n\
+               print(tensor(3.5))\n\
+               print(tensor([]))\n\
+               print(tensor([1.0, 2.0]).shape())\n\
+               print(to_array(tensor([[1.0, 2.0], [3.0, 4.0]])))\n\
+               print(tensor([[1.0, 2.0], [3.0, 4.0]])[0])\n\
+               print(tensor([1.0, 2.0, 3.0])[-1])\n\
+               print(tensor([1.0, 2.0, 3.0])[0:2])\n\
+               print(tensor([1.0, 2.0, 3.0])[::-1])\n";
+    let want = "[1, 2]\n\
+                [[1, 2],\n [3, 4]]\n\
+                3.5\n\
+                []\n\
+                [2]\n\
+                [1.0, 2.0, 3.0, 4.0]\n\
+                [1, 2]\n\
+                3.0\n\
+                [1, 2]\n\
+                [3, 2, 1]\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("plain_tensor_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+}
+
+/// Metadata answers the same on tracked and plain data — `count` is TOTAL elements
+/// on a tensor (not the leading axis), and a tracked tensor must not quietly pick
+/// the other meaning. Also pins the one place the two paths legitimately differ:
+/// indexing a 1-D PLAIN tensor yields a `Float`, whose own indexing error names
+/// `Float`, while the tracked twin yields a 0-D node and says so. Both are true of
+/// the value in hand; neither says `Node`.
+#[test]
+fn tracked_metadata_matches_plain_and_the_one_honest_difference_is_pinned() {
+    let parity = "w = variable(1.0)\n\
+                  t2 = tensor([[w, 2.0], [3.0, 4.0]])\n\
+                  p2 = tensor([[1.0, 2.0], [3.0, 4.0]])\n\
+                  t3 = tensor([[[w, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+                  p3 = tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])\n\
+                  print(t2.count() == p2.count())\n\
+                  print(t2.shape() == p2.shape())\n\
+                  print(t2.ndim() == p2.ndim())\n\
+                  print(t3.count() == p3.count())\n\
+                  print(t3.shape() == p3.shape())\n\
+                  print(\"{t2.count()} {t3.count()}\")\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(parity, env, &format!("bridge_meta_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "true\ntrue\ntrue\ntrue\ntrue\n4 8\n", "{name}");
+    }
+    let chained = "w = variable(1.0)\n\
+                   r = try tensor([w, 2.0])[0][1]\n\
+                   p = try tensor([1.0, 2.0])[0][1]\n\
+                   print(r.error)\n\
+                   print(p.error)\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(chained, env, &format!("bridge_chain_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(
+            out,
+            "cannot index a 0-D (scalar) tensor\na value of type Float cannot be indexed\n",
+            "{name}"
+        );
+    }
+}
+
+/// A wholly plain subtree inside a tracked build is ONE constant block, not one node
+/// per number. Without that, `tensor([big_plain_row, [w, …]])` would box a whole row
+/// into leaves — the allocation pathology `tests/corpus/j8_tensor_construction.helix`
+/// exists to document as fixed, reintroduced through the tracked door.
+#[test]
+fn a_plain_row_inside_a_tracked_build_stays_one_block() {
+    let src = "w = variable(1.0)\n\
+               n = 100000\n\
+               a = range(0, n).map(i => i * 1.0)\n\
+               b = range(0, n).map(i => i * 2.0)\n\
+               M = tensor([a, b])\n\
+               print(M.shape())\n\
+               tracked = tensor([w, 2.0])\n\
+               print(value_of(tracked.sum()))\n\
+               print(gradient(tracked.sum(), w))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("bridge_block_perf_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "[2, 100000]\n3.0\n1.0\n", "{name}");
+    }
+}
