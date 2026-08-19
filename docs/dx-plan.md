@@ -157,6 +157,62 @@ The doc/describe lines are copied **verbatim** from `print_help()` (same `\\n   
 
 ## DO LATER (real features — design/ADR first)
 
+### Recorded by the 2026-08-19 stabilization sweep (lower tier — engine-identical, no oracle divergence)
+
+The sweep's top tier (poison-cell Let arm, autodiff broadcast/exponent/stale-grad,
+join order, test-walk cycles) landed in `79f4f40` + `62716f1`. What remains, recorded
+with mechanisms so nothing has to be rediscovered:
+
+- **Grouped i64 sum silently WRAPS at the Polars seam** while the column/array path
+  promotes to float on overflow: `df.group(@g).sum(@v)` on two `4611686018427387904`
+  rows answers `-9223372036854775808` where `df.column("v").sum()` and `[big, big]
+  .sum()` answer `9.22e18`. Same word "sum", answers differ in sign; oracle-blind
+  (engine-identical). Needs a seam policy decision — Polars has no checked sum, and
+  pre-casting to f64 changes small-int dtypes. Candidate: dual-agg detector (i64 +
+  f64 sums, promote when they disagree materially) — decide deliberately, not inline.
+- **Missing-ordering seam contradiction**: frame `.sort(@k)` accepts `missing` and
+  sorts it FIRST; array `.sort()` refuses ("the array has missing values"). ADR
+  0025's array-side refusal has no frame-side counterpart. Policy decision.
+- **Zero-row / all-missing columns infer dtype `str`**, so grouped numeric verbs
+  error on empty CSVs with leaked Polars wording ("sum` operation not supported for
+  dtype `str", unbalanced backticks) — while a frame emptied by `where()` keeps
+  dtypes and aggregates cleanly. Also the duplicate-output-name path leaks Polars'
+  "duplicate: column with name ..." with no Helix concept named. One family: seam
+  errors need a translation layer at the schema-read boundary (src/backend/polars.rs).
+- **`where(@v == missing)` / `!= missing` still silently return 0 rows** (v0.2.1
+  finding, unchanged in v0.2.6). `drop_missing()` is the sanctioned spelling; the
+  equality spellings should ERROR with a hint, not silently match nothing.
+- **`strip_mangling` corrupts user strings shaped like `m<digits>$`** in multi-file
+  error renders (src/main.rs:1554→1468): a dict key `m5$gone` in an `expect()` error
+  is reported as `gone` — but only when an import exists. Real fix is demangling
+  identifiers where they are INSERTED into messages, not post-hoc over the whole
+  render; touches every error-construction site that embeds a fn/var name. Corner
+  case (user data containing the mangle shape), but the did-you-mean surface can
+  name a key the user never typed.
+- **Parse-time import-name check ignores scope** (`self.imports.contains(n)`,
+  src/parser.rs:1703): rebinding a module name to a value leaves sugar-named method
+  calls resolving to the MODULE (wrong answer, rc 0: `mymod.sort_by(9, 4)` → `5`
+  after `mymod = [3,1,2]`), and a lambda/fn parameter named like an import suppresses
+  array sugar with a self-contradicting "did you mean `sort_by`?" error. Needs
+  binding-aware resolution (parser scope tracking or a resolver pass) — same family
+  as ADR 0026's name-resolution work.
+- **reduce/scan both-bad error-wording asymmetry** (fold fast path validates the
+  argument before taking the accumulator; the general path reports the receiver
+  first). Byte-identical on every engine — a wording-choice gap in ADR 0029's
+  error-text pin only. Extend the pin's wording note if the fast-path set grows.
+- **Autodiff DX family** (engine-identical, non-blocking): tracked error paths drop
+  the help hints their plain twins carry (misaligned tracked matmul loses the
+  "vector-vector, matrix-matrix..." help); unary minus on a Node errors where
+  `0.0 - x` works; tracked tensors gain `.exp()` that plain tensors lack (inverse of
+  the ADR 0003 spelling rule); no differentiable indexing (`v[0]` on a tracked
+  tensor errors). Also: a tracked element in an array `.sum()` switches the fold
+  from compensated to naive left-to-right, observably changing the sum of the same
+  data (~1e-12 at n=1000) — docs note or a compensated tape fold.
+- **`tensor([w, ...])` from tracked scalars still refuses** — the scalars→tensor
+  bridge, already first in the feature queue (the nn field's trainable-BLAS-layer
+  blocker). The real `d/db a**b` pow node belongs to the same tape-surface batch
+  (the sweep made a tracked exponent refuse instead of silently freezing).
+
 - **A reduce's INIT must be a literal or the kernel silently never compiles (~21-53×)** —
   the llm-library field report's finding, VERIFIED on HEAD 2026-08-16: identical body,
   identical answer, `reduce(1.0, …)` 59 ms vs `reduce(a0, …)` (a0 a parameter) 3,117 ms
