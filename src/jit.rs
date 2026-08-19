@@ -3109,6 +3109,18 @@ pub fn body_raises(e: &Expr, user_fns: &HashSet<&str>, msigs: &MixedSigTable) ->
                 || body_raises(then_branch, user_fns, msigs)
                 || body_raises(else_branch, user_fns, msigs)
         }
+        // EVERY shape an eligibility analysis admits MUST have an arm here. This
+        // predicate decides whether the kernel is built WITH its poison cell, and a
+        // missing arm under-reports: the v0.2.6 `let` widening admitted `Let` bodies
+        // into the f64 analyses and codegen but left this fn's `_ => false` to answer
+        // for them — so `let d = sq(i * 1.0) in a + d` built a poison-free kernel and
+        // hit the mixed-call codegen's unreachable! (SIGABRT, rc 134, uncatchable),
+        // and `let inv = 1.0 / e in a + inv` silently printed `inf` at rc 0 where both
+        // interpreters raise. Found by the v0.2.6 stabilization sweep (p51/p08).
+        Expr::Let { bindings, body } => {
+            bindings.iter().any(|(_, v)| body_raises(v, user_fns, msigs))
+                || body_raises(body, user_fns, msigs)
+        }
         _ => false,
     }
 }

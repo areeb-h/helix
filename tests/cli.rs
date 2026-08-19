@@ -5459,3 +5459,46 @@ print(g)
         assert_eq!(out, want, "{name}: tracked aggregates or tensor tape drifted");
     }
 }
+
+/// `body_raises` covers `Let` (the v0.2.6 stabilization sweep's two criticals, one
+/// root cause). The predicate decides whether a kernel is built WITH its poison cell;
+/// the `let` widening admitted `Let` bodies into the f64 analyses and codegen but this
+/// fn's `_ => false` answered for them, so the kernel was built poison-free — a user-fn
+/// call in a `let` init then hit the mixed-call codegen's unreachable! (SIGABRT, rc
+/// 134, uncatchable — the ADR 0024 violation class), and a division by zero under a
+/// `let` silently printed `inf` at rc 0 where both interpreters raise (the
+/// silent-wrong-answer class, WORSE). Both shapes pinned on all three engines, plus
+/// the raising-rounder family and the captured-array control that already worked.
+#[test]
+fn let_bodies_carry_their_poison_cell() {
+    // The SIGABRT shape: value identical everywhere, process alive.
+    let src = "fn sq(v) = v * v\n\
+               print(range(0, 4).reduce(0.0, (a, i) => let d = sq(i * 1.0) in a + d))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("poison_call_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "14.0\n", "{name}");
+    }
+
+    // The silent-inf shape: the division must RAISE, identically.
+    let div = "print(range(0, 100).reduce(0.0, (a, i) => \
+               let inv = 1.0 / ((i - 50) * 1.0) in a + inv))\n";
+    for (name, env) in ENGINES {
+        let (_, err, code) = run_source(div, env, &format!("poison_div_{name}"));
+        assert_eq!(code, Some(1), "{name}: div-by-zero must raise, not print inf");
+        assert!(err.contains("division by zero"), "{name}: {err}");
+    }
+
+    // Try-visibility and the rounder family, value-pinned across engines.
+    let sem = r#"
+q = try range(0, 100).reduce(0.0, (a, i) => let d = 1.0 / (i * 1.0) in a + d)
+print(q.ok)
+r = try range(0, 4).reduce(0.0, (a, i) => let d = floor(exp(700.0 + i * 100.0)) in a + d)
+print(r.ok)
+"#;
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(sem, env, &format!("poison_sem_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "false\nfalse\n", "{name}");
+    }
+}
