@@ -916,7 +916,8 @@ fn build_response(value: &Value, line: usize, col: usize) -> Result<Response, He
             // Merge any program-supplied response headers (record or dict of name→value).
             let mut payload = payload;
             if let Some(h) = get("headers") {
-                merge_headers(&mut payload.0, h);
+                merge_headers(&mut payload.0, h)
+                    .map_err(|m| HelixError::new(m, line, col))?;
             }
             (status, payload)
         }
@@ -930,12 +931,23 @@ fn build_response(value: &Value, line: usize, col: usize) -> Result<Response, He
 /// `{ "Set-Cookie" => "…" }` for names that aren't identifiers) into the response
 /// header list. A custom `Content-Type` replaces the auto one; `Content-Length` and
 /// `Connection` are reserved (the server computes them) and silently ignored.
-fn merge_headers(out: &mut Vec<(String, String)>, headers: &Value) {
+fn merge_headers(out: &mut Vec<(String, String)>, headers: &Value) -> Result<(), String> {
     let text = |v: &Value| match v {
         Value::Str(s) => (**s).clone(),
         other => other.to_string(),
     };
+    let mut err: Option<String> = None;
     let mut add = |name: String, val: String| {
+        // A response header carrying a newline injects into the message just as a
+        // request header does — a server that echoes a query parameter is the classic
+        // case. Recorded rather than returned because this closure is a `FnMut` used
+        // by the walks below; the first failure is reported after them.
+        if let Err(m) = crate::value::validate_header(&name, &val) {
+            if err.is_none() {
+                err = Some(m);
+            }
+            return;
+        }
         let lname = name.to_ascii_lowercase();
         if lname == "content-length" || lname == "connection" {
             return; // server-controlled — never overridden
@@ -962,6 +974,12 @@ fn merge_headers(out: &mut Vec<(String, String)>, headers: &Value) {
             }
         }
         _ => {} // a non-record/dict `headers` field is ignored
+    }
+    // `add` borrows `err` mutably; its last use is the match above, so the borrow
+    // ends there and the recorded failure can be read.
+    match err {
+        Some(m) => Err(m),
+        None => Ok(()),
     }
 }
 

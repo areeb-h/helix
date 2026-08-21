@@ -2444,6 +2444,10 @@ fn http_request_fields(req: &Value, line: usize, col: usize) -> Result<HttpReqPa
         }
         _ => {}
     }
+    // Every request header, whatever shape it arrived in, before it can reach the wire.
+    for (k, val) in &hdrs {
+        crate::value::validate_header(k, val).map_err(|m| HelixError::new(m, line, col))?;
+    }
     Ok((method, url, body, hdrs))
 }
 

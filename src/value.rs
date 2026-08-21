@@ -1001,3 +1001,53 @@ pub fn dict_as_record_fields(
     }
     Ok(out)
 }
+
+/// Is this a well-formed HTTP header field, safe to put on the wire?
+///
+/// `Err(message)` names what is wrong. Two separate rules, for two separate reasons:
+///
+/// * A NAME must be an RFC 9110 `token` — letters, digits, and ``!#$%&'*+-.^_`|~``.
+///   A name with a space or a colon in it is not a header name, and a message built
+///   from one is malformed in a way different intermediaries resolve differently,
+///   which is the ground request smuggling grows in.
+/// * A VALUE must not contain CR, LF, or NUL. This is HEADER INJECTION: the bytes
+///   after a newline are read as another header, or as the start of a body, so a
+///   caller-supplied string reaching a header without this check hands that caller
+///   the rest of the message. Tab is allowed (it is legal whitespace in a value);
+///   every other C0 control and DEL is not.
+///
+/// Shared by the client (`http_request`) and the server (`respond`) so neither can be
+/// hardened while the other is not — a program is usually both.
+pub fn validate_header(name: &str, value: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("a header name cannot be empty".to_string());
+    }
+    // RFC 9110 §5.6.2 tchar.
+    if let Some(bad) = name.chars().find(|c| {
+        !(c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(*c))
+    }) {
+        let what = if bad == '\r' || bad == '\n' {
+            format!("a newline in the header name `{}`", name.escape_debug())
+        } else {
+            format!("the character `{}` in the header name `{}`", bad.escape_debug(), name.escape_debug())
+        };
+        return Err(format!(
+            "{what} — a header name may only contain letters, digits and !#$%&'*+-.^_`|~"
+        ));
+    }
+    if let Some(bad) = value.chars().find(|c| {
+        *c == '\r' || *c == '\n' || *c == '\0' || (c.is_control() && *c != '\t')
+    }) {
+        let what = match bad {
+            '\r' | '\n' => "a newline",
+            '\0' => "a NUL",
+            _ => "a control character",
+        };
+        return Err(format!(
+            "{what} in the value of header `{}` — this would inject additional headers \
+             into the message. Strip or percent-encode the value before setting it.",
+            name.escape_debug()
+        ));
+    }
+    Ok(())
+}

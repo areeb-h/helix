@@ -6704,3 +6704,110 @@ fn cookies_parse_in_both_directions() {
         assert!(out.contains("needs a `name=value` pair"), "{name}: {out}");
     }
 }
+
+/// ADR 0031 step 1a — a newline in a header is HEADER INJECTION, and it is refused
+/// before it can reach the wire.
+///
+/// The bytes after a newline in a header value are read as another header, or as the
+/// start of a body, so a program that puts a caller-supplied string into a header — a
+/// user id, a filename, a redirect target — otherwise hands that caller the rest of the
+/// message. Names get the stricter RFC 9110 `token` rule as well: a name with a space or
+/// a colon is not a header name, and a message built from one is malformed in a way
+/// different intermediaries resolve differently, which is where request smuggling lives.
+///
+/// The client half is here; the SERVER half is the test below it, because a program is
+/// usually both and hardening one while leaving the other is no defence at all.
+#[test]
+fn header_injection_is_refused_on_both_sides() {
+    // The URL is a closed port: these must fail at VALIDATION, before any connection is
+    // attempted, so a refusal proves the guard fired rather than the network.
+    let attempt = |hdr: &str| {
+        format!(
+            "r = try (http_request({{method: \"GET\", url: \"http://127.0.0.1:1/x\", \
+             headers: {hdr}}}))\nprint(r.error)\n"
+        )
+    };
+    let cases = [
+        ("crlf_value", r#"{"X-Id": "a
+X-Admin: true"}"#, "would inject additional headers"),
+        ("lf_value", r#"{"X-Id": "a
+Evil: 1"}"#, "a newline in the value of header `X-Id`"),
+        ("newline_name", r#"{"X
+Y": "1"}"#, "a newline in the header name"),
+        ("space_name", r#"{"X Id": "1"}"#, "the character ` ` in the header name"),
+        ("colon_name", r#"{"X:Y": "1"}"#, "the character `:` in the header name"),
+        ("empty_name", r#"{"": "1"}"#, "a header name cannot be empty"),
+    ];
+    for (name, env) in ENGINES {
+        for (tag, hdr, needle) in &cases {
+            let (out, err, code) =
+                run_source(&attempt(hdr), env, &format!("hdrinj_{tag}_{name}"));
+            assert_eq!(code, Some(0), "{name}/{tag}: {err}");
+            assert!(out.contains(needle), "{name}/{tag}: got {out}");
+            // Never reached the network: a connection error would mean it passed.
+            assert!(!out.contains("Connection"), "{name}/{tag}: validated too late: {out}");
+        }
+
+        // Legitimate headers pass validation and go on to fail at the CLOSED PORT,
+        // which is how we know the guard let them through rather than rejecting them.
+        let ok = attempt(
+            r#"{"Content-Type": "application/json", "X-Odd_Name.v1": "a b; q=0.5, c", "X-Tab": "a	b"}"#,
+        );
+        let (out, err, code) = run_source(&ok, env, &format!("hdrinj_ok_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert!(out.contains("Connection"), "{name}: a valid header was refused: {out}");
+    }
+}
+
+/// The server half of ADR 0031 step 1a. A handler that decodes a caller-supplied value
+/// and puts it in a response header is the classic reflected-injection shape; `respond`
+/// refuses it, the failure is catchable, and the handler can still send a safe reply —
+/// so the guard costs a connection nothing.
+#[test]
+fn a_server_refuses_to_inject_a_header() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_hdr_inject.helix");
+    std::fs::write(
+        &src,
+        "conn = listen(18240).accept()
+         raw = conn.request().query ?? \"\"
+         r = try (conn.respond({ status: 200, text: \"ok\", headers: {\"X-Echo\": url_decode(raw)} }))
+         conn.respond({ status: 500, text: if r.ok then \"injected\" else \"refused\" })
+",
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the server");
+
+    let mut stream = None;
+    for _ in 0..50 {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:18240") {
+            stream = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut stream = stream.expect("server never started listening on 18240");
+    // `%0d%0a` decodes to CRLF — the injection the handler would otherwise emit.
+    stream
+        .write_all(b"GET /x?a%0d%0aX-Admin:%20true HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut resp = String::new();
+    let _ = stream.read_to_string(&mut resp);
+    let _ = child.wait();
+
+    // The handler saw the refusal and said so...
+    assert!(resp.contains("refused"), "response:\n{resp}");
+    // ...and the header the attacker was trying to add is nowhere in the message.
+    assert!(!resp.contains("X-Admin"), "an injected header reached the wire:\n{resp}");
+}
