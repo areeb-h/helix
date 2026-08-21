@@ -298,7 +298,7 @@ impl super::Checker {
         if name == "$arg_extreme" {
             return Ok(Type::Int);
         }
-        match &rt {
+        let result = match &rt {
             // Permissive: any method on Unknown/Missing receiver is Unknown.
             Type::Unknown | Type::Missing => Ok(Type::Unknown),
             // DataFrame / GroupBy: args are the runtime schema boundary — UNCHECKED.
@@ -338,6 +338,43 @@ impl super::Checker {
                     None => err,
                 })
             }
+        };
+        // UFCS, half two, mirrored so the checker cannot reject what the engines now
+        // run: a builtin-named method that no table claims types as the builtin with
+        // the receiver prepended. Only on the ERROR path — a method that owns its
+        // name keeps its type — and never for the permissive receivers (Unknown /
+        // Missing / DataFrame / GroupBy), matching `ufcs_fallback_applies` at run
+        // time: Unknown covers PyObject and Node, which are opaque to the checker.
+        if result.is_err()
+            && crate::registry::is_builtin_name(name)
+            && !matches!(rt, Type::Unknown | Type::Missing | Type::DataFrame | Type::GroupBy)
+            && !crate::registry::type_owns_method(&Self::receiver_table_name(&rt), name)
+        {
+            let mut bts = Vec::with_capacity(args.len() + 1);
+            bts.push(rt.clone());
+            for a in args {
+                bts.push(self.synth(a)?);
+            }
+            // The builtin's own answer — including its own ERROR, which names the
+            // real mismatch ("`sqrt` needs a number…") where the method error could
+            // only say "no method".
+            return builtin_type(name, &bts, line, col);
+        }
+        result
+    }
+
+    /// The registry-table name for a checker type, for `type_owns_method`. Types the
+    /// registry does not table (scalars, tuples) return a name it maps to nothing, so
+    /// the ownership test answers `false` and the fallback proceeds — which is right:
+    /// a scalar has no methods a table could claim.
+    fn receiver_table_name(rt: &Type) -> String {
+        match rt {
+            Type::Array(_) => "Array".to_string(),
+            Type::String => "String".to_string(),
+            Type::Dna => "Dna".to_string(),
+            Type::Tensor => "Tensor".to_string(),
+            Type::Record(_) => "Record".to_string(),
+            other => other.to_string(),
         }
     }
 

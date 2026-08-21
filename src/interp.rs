@@ -664,6 +664,26 @@ impl Interp {
                 for a in args {
                     vals.push(self.eval(a)?);
                 }
+                // UFCS, half two: a builtin-NAMED method that fails dispatch retries
+                // as `name(recv, args…)`. `is_builtin_name` is one O(1) lookup and
+                // no hot method name is a builtin, so the hot path never takes this
+                // branch; the clone that keeps the args alive for the retry happens
+                // only for calls that are errors today. See `ufcs_fallback_applies`
+                // for who never falls back, and why the decision lives at run time.
+                if crate::registry::is_builtin_name(name)
+                    && ufcs_fallback_applies(&recv_v, name)
+                {
+                    let saved = vals.clone();
+                    return match call_method(&recv_v, name, vals, *line, *col) {
+                        Ok(v) => Ok(v),
+                        Err(_) => {
+                            let mut bargs = Vec::with_capacity(saved.len() + 1);
+                            bargs.push(recv_v);
+                            bargs.extend(saved);
+                            self.call_builtin(name, bargs, *line, *col)
+                        }
+                    };
+                }
                 call_method(&recv_v, name, vals, *line, *col)
             }
             Expr::Index {

@@ -3445,6 +3445,34 @@ fn complement(s: &str) -> String {
     }
 }
 
+
+/// May a FAILED method call `recv.name(args…)` retry as the builtin `name(recv, args…)`?
+///
+/// The other half of UFCS, decided where the v0.3.0 parser rewrite could not decide it:
+/// on the receiver, at run time. Four receiver kinds never fall back —
+///
+/// * `PyObject` — its attributes are resolved by Python at run time; no static table
+///   sees them, and capturing one silently rewrote `np.round(1.5)` into
+///   `round(np, 1.5)`, which type-checks. The bug this predicate exists to prevent.
+/// * `Node` — the tape's method set (`autodiff::method`) is likewise not in the
+///   registry tables, and its errors teach the differentiable surface.
+/// * `DataFrame` / `GroupBy` — both engines dispatch these BEFORE the shared
+///   `call_method`, so a fallback here would fire on one engine and not the other.
+///
+/// Everything else falls back only when its own table does not claim the name — a
+/// method that owns its name always wins — and the caller must only consult this
+/// AFTER dispatch has failed, which is what makes the whole scheme additive: it
+/// substitutes an answer where an error stood.
+pub(crate) fn ufcs_fallback_applies(recv: &Value, name: &str) -> bool {
+    match recv {
+        Value::PyObject(_)
+        | Value::Node(_)
+        | Value::DataFrame(_)
+        | Value::GroupBy(_) => false,
+        other => !crate::registry::type_owns_method(other.type_name(), name),
+    }
+}
+
 fn unknown_method(
     type_name: &str,
     name: &str,

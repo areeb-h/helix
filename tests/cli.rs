@@ -6352,16 +6352,19 @@ fn recursion_depth_error_names_tail_position() {
     }
 }
 
-/// `x.f(a)` means `f(x, a)` when `f` is a USER-DEFINED function that is no type's
-/// method — giving your own functions the chaining that only built-in types had:
-/// `layer.forward(x)` on a plain record, with no second way to define behaviour and no
-/// mutable object identity.
+/// `x.f(a)` means `f(x, a)` when `f` is not a method the receiver answers — in two
+/// halves, each decided where its information lives.
 ///
-/// Deliberately NOT builtins. A builtin's name is exactly what collides with a Python
-/// attribute, and a PyObject resolves its attributes at run time where no static table
-/// can see them — see `ufcs_never_captures_a_python_attribute_call` below, which is the
-/// bug this restriction exists for. So `tensor(t).to_array()` and `(0 - 1).abs()` stay
-/// function calls, as they were before v0.3.0.
+/// USER-DEFINED functions rewrite in the parser (they need the interpreter's function
+/// environment, which runtime method dispatch does not have): `layer.forward(x)` on a
+/// plain record, chaining like a built-in type, with no new kind of entity.
+///
+/// BUILTINS fall back at RUNTIME, on the receiver, only after method dispatch has
+/// failed — so `tensor(t).to_array()` and `(0 - 1).abs()` chain, while a PyObject's
+/// `np.round(1.5)` reaches Python untouched, because the fallback can see what no
+/// static table could: the receiver. The v0.3.0 parser rewrite for builtins decided
+/// this statically, captured Python attribute calls, and was withdrawn; see
+/// `ufcs_never_captures_a_python_attribute_call` for the bug that forced the split.
 #[test]
 fn a_function_can_be_called_in_method_position() {
     let src = "fn area(r) = r.w * r.h\n\
@@ -6371,10 +6374,14 @@ fn a_function_can_be_called_in_method_position() {
                print({w: 3, h: 4}.area())\n\
                print({w: 2, h: 3}.scaled(2).area())\n\
                print(5.double().inc().double())\n\
+               print(tensor([1.0, 2.0]).to_array())\n\
+               print((0 - 1).abs())\n\
+               print(16.0.sqrt().sqrt())\n\
+               print(tensor([0.0, 1.0]).exp())\n\
                r = {w: 3, h: 4}\n\
                print(\"area is {r.area()}\")\n\
                print([1, 2, 3].map(x => x.double()))\n";
-    let want = "12\n24\n22\narea is 12\n[2, 4, 6]\n";
+    let want = "12\n24\n22\n[1.0, 2.0]\n1\n2.0\n[1, 2.718281828459045]\narea is 12\n[2, 4, 6]\n";
     for (name, env) in ENGINES {
         let (out, err, code) = run_source(src, env, &format!("ufcs_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
@@ -6388,6 +6395,41 @@ fn a_function_can_be_called_in_method_position() {
         let (out, err, code) = run_source(below, env, &format!("ufcs_below_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
         assert_eq!(out, "10\n", "{name}");
+    }
+}
+
+/// The runtime fallback's boundary, pinned case by case. A method that owns its name
+/// always wins (`[1,2,3].sum()` is the array's sum even though a `sum` builtin could
+/// exist); a Node keeps the tape's errors and the tape's methods (`w.shape()` is the
+/// bridge's metadata read, `w.nosuch()` lists the differentiable surface); `missing`
+/// propagates through a fallback exactly as it propagates through the builtin called
+/// directly, because that IS the builtin called directly; and a failed fallback reports
+/// the BUILTIN's error, which names the real mismatch where a method error could only
+/// say "no method".
+#[test]
+fn the_builtin_fallback_defers_to_owners_and_reports_honestly() {
+    let src = "print([1, 2, 3].sum())\n\
+               print({\"a\": 1}.get(\"a\"))\n\
+               w = variable(tensor([1.0, 2.0]))\n\
+               print(w.shape())\n\
+               n = variable(1.0)\n\
+               print((try (n.nosuch())).error)\n\
+               print(missing.sqrt())\n";
+    let want = "6\n1\n[2]\na tracked value has no differentiable method `nosuch`\nmissing\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("ufcs_bound_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+
+    // A PROVABLE mismatch is the checker's, and it reports the BUILTIN's error — the
+    // one naming the real problem — before any engine runs. `try` never gets the
+    // chance, the same split `sqrt("abc")` in function position has always had.
+    for (name, env) in ENGINES {
+        let (_, err, code) =
+            run_source("print(\"abc\".sqrt())\n", env, &format!("ufcs_bound_chk_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains("expected a number"), "{name}: {err}");
     }
 }
 

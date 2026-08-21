@@ -324,6 +324,12 @@ pub struct DfColumnVerbData {
 pub struct MethodData {
     pub name: std::rc::Rc<String>,
     pub nargs: u32,
+    /// Is `name` also a free builtin? Decides whether a FAILED dispatch may retry as
+    /// `name(recv, …)` (UFCS). Cached here because the answer is a property of the
+    /// call site, not the iteration: computed once on first execution, a plain load
+    /// afterwards — the hash lookup it replaces measured +4–8% on hot method loops.
+    /// Runtime-only (starts unset after deserialisation, fills on first run).
+    pub ufcs_name: std::cell::OnceCell<bool>,
 }
 
 /// Payload of [`Op::CallValue`] — a function-value call's argument count and the

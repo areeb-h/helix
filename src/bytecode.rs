@@ -570,6 +570,7 @@ impl Compiler {
             Op::Method(std::rc::Rc::new(MethodData {
                 name: std::rc::Rc::new("is_missing".to_string()),
                 nargs: 0,
+                ufcs_name: std::cell::OnceCell::new(),
             })),
             line,
             col,
@@ -1522,6 +1523,7 @@ impl Compiler {
                     Op::Method(std::rc::Rc::new(MethodData {
                         name: std::rc::Rc::new(name.clone()),
                         nargs: args.len() as u32,
+                        ufcs_name: std::cell::OnceCell::new(),
                     })),
                     *line,
                     *col,

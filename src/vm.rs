@@ -1535,6 +1535,24 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                             col,
                         )
                         .hint("aggregate with a column, e.g. `g.mean(col)`.")),
+                        // UFCS, half two — the tree-walker's fallback, verbatim:
+                        // a builtin-named method that fails dispatch retries as
+                        // `name(recv, args…)`. Same predicate, same builtin host, so
+                        // the engines cannot disagree about what a fallback produced.
+                        _ if *d.ufcs_name.get_or_init(|| crate::registry::is_builtin_name(name))
+                            && crate::interp::ufcs_fallback_applies(&recv, name) =>
+                        {
+                            let saved = args.clone();
+                            match crate::interp::call_method(&recv, name, args, line, col) {
+                                Ok(v) => Ok(v),
+                                Err(_) => {
+                                    let mut bargs = Vec::with_capacity(saved.len() + 1);
+                                    bargs.push(recv.clone());
+                                    bargs.extend(saved);
+                                    host.call_builtin(name, bargs, line, col)
+                                }
+                            }
+                        }
                         _ => crate::interp::call_method(&recv, name, args, line, col),
                     }
                 }?;

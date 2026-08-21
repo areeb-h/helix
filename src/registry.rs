@@ -375,6 +375,35 @@ pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 9] {
     ]
 }
 
+/// Is this name a free builtin? O(1) — the set is built once, because this is asked on
+/// EVERY method call: it is the gate on the UFCS builtin fallback, and a linear scan of
+/// 135 defs per call would tax exactly the hot loops the fallback must not touch. None
+/// of the hot method names (`get`, `sum`, `map`, `count`, …) are builtins, so for them
+/// this single lookup is the entire cost of the feature.
+pub fn is_builtin_name(name: &str) -> bool {
+    use std::sync::OnceLock;
+    static SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| BUILTINS.iter().map(|b| b.path).collect()).contains(name)
+}
+
+/// Does this receiver TYPE claim this method in its static table? O(1), same reasoning
+/// as [`is_builtin_name`] — consulted only for builtin-named methods, where it decides
+/// whether the method owns the name (and the fallback must stay out) or does not (and a
+/// failed dispatch may retry as `name(recv, …)`).
+pub fn type_owns_method(type_name: &str, method: &str) -> bool {
+    use std::sync::OnceLock;
+    type Table = std::collections::HashMap<&'static str, std::collections::HashSet<&'static str>>;
+    static MAP: OnceLock<Table> = OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        type_method_tables()
+            .iter()
+            .map(|(t, methods)| (*t, methods.iter().copied().collect()))
+            .collect()
+    });
+    UNIVERSAL_METHODS.contains(&method)
+        || map.get(type_name).is_some_and(|m| m.contains(method))
+}
+
 /// Is this name a method on ANY receiver type (including the universal ones)?
 ///
 /// The gate on the UFCS fallback in the parser: a name that some type answers must keep
