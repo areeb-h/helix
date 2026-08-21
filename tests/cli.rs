@@ -7168,3 +7168,58 @@ fn redirects_enforce_the_boundary_rules() {
     assert!(l[4].starts_with("false"), "a redirect loop ran uncapped: {out}");
     assert!(l[4].contains("more than 10 redirects"), "{out}");
 }
+
+/// The event-loop server (`accept_poll`/`poll_request`) and the blocking server share
+/// one contract, and they had drifted: the concurrent parser still built a case-
+/// SENSITIVE Dict for request headers, so `req.headers.get("Content-Type")` missed on
+/// the path people reach for throughput — the exact trap step 1b removed from the
+/// blocking path. This pins the two parsers to the same `Headers` value.
+#[test]
+fn the_event_loop_server_returns_case_insensitive_headers() {
+    use std::time::Duration;
+
+    let dir = std::env::temp_dir();
+    let ready = dir.join("helix_evloop_hdr.ready");
+    let _ = std::fs::remove_file(&ready);
+    let src_f = dir.join("helix_evloop_hdr.helix");
+    // A one-request event-loop server that reads a header by a DIFFERENT case than it was
+    // sent, and echoes what it found.
+    std::fs::write(
+        &src_f,
+        String::from(
+            "l = listen(18330)\n@Q@up@Q@.write_to(@Q@@READY@@Q@)\nfn serve(l, conns) = do {\n  ready = l.wait(conns, 50)\n  fresh = l.accept_poll()\n  live = if fresh.is_missing() then conns else conns.concat([fresh])\n  active = live.filter(c => do {\n    req = c.poll_request()\n    if req.is_missing() then c.is_open()\n      else do {\n        ct = req.headers.get(@Q@CONTENT-TYPE@Q@) ?? @Q@MISS@Q@\n        c.respond({ status: 200, text: @Q@ct={ct}@Q@ })\n        c.is_open()\n      }\n  })\n  serve(l, active)\n}\nserve(l, [])\n",
+        )
+        .replace("@READY@", &ready.display().to_string())
+        .replace("@Q@", "\""),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src_f)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the event-loop server");
+    let mut up = false;
+    for _ in 0..100 {
+        if ready.exists() {
+            up = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(up, "server never became ready");
+
+    let client = String::from(
+        "r = http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18330/x@Q@, headers: {@Q@Content-Type@Q@: @Q@application/json@Q@}})\nprint(r.body)\n",
+    )
+    .replace("@Q@", "\"");
+    let (out, err, code) = run_source(&client, &[], "evloop_hdr");
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(code, Some(0), "stderr: {err}");
+    assert!(
+        out.contains("ct=application/json"),
+        "the event-loop parser lost the case-insensitive header lookup: {out}"
+    );
+}

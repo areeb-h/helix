@@ -472,6 +472,23 @@ pub fn request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value,
     }
 }
 
+/// The five request-record keys, interned ONCE. A `Symbol` is a `u32`, so this is
+/// `Copy`; interning per request was a locked hashmap lookup times five times every
+/// request (25 at 55k req/s). Both engines already read these keys by their `Symbol`.
+fn request_keys() -> (Symbol, Symbol, Symbol, Symbol, Symbol) {
+    use std::sync::OnceLock;
+    static KEYS: OnceLock<(Symbol, Symbol, Symbol, Symbol, Symbol)> = OnceLock::new();
+    *KEYS.get_or_init(|| {
+        (
+            Symbol::intern("method"),
+            Symbol::intern("path"),
+            Symbol::intern("query"),
+            Symbol::intern("headers"),
+            Symbol::intern("body"),
+        )
+    })
+}
+
 /// Parse one HTTP/1.1 request into a record `{method, path, query, headers, body}`.
 /// Headers are a `Dict` keyed by lowercased name (HTTP names are case-insensitive).
 fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, HelixError> {
@@ -542,12 +559,13 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
     }
     let body = String::from_utf8_lossy(&body).into_owned();
 
+    let k = request_keys();
     let record = vec![
-        (Symbol::intern("method"), Value::Str(Rc::new(method))),
-        (Symbol::intern("path"), Value::Str(Rc::new(path))),
-        (Symbol::intern("query"), Value::Str(Rc::new(query))),
-        (Symbol::intern("headers"), Value::Headers(Rc::new(headers))),
-        (Symbol::intern("body"), Value::Str(Rc::new(body))),
+        (k.0, Value::Str(Rc::new(method))),
+        (k.1, Value::Str(Rc::new(path))),
+        (k.2, Value::Str(Rc::new(query))),
+        (k.3, Value::Headers(Rc::new(headers))),
+        (k.4, Value::Str(Rc::new(body))),
     ];
     Ok(Value::Record(Rc::new(record)))
 }
@@ -671,7 +689,10 @@ fn parse_request_buf(buf: &[u8]) -> BufParse {
         Some((p, q)) => (p.to_string(), q.to_string()),
         None => (target, String::new()),
     };
-    let mut headers = std::collections::BTreeMap::new();
+    // Ordered pairs, the wire's own casing — a `Headers` value, matching the blocking
+    // parser. `content-length` is matched case-insensitively (it can arrive any way) but
+    // the stored name is left as sent, because that is what `Headers` promises.
+    let mut headers: Vec<(String, String)> = Vec::new();
     let mut content_length = 0usize;
     let mut count = 0usize;
     for line in lines {
@@ -683,12 +704,12 @@ fn parse_request_buf(buf: &[u8]) -> BufParse {
             return BufParse::Malformed;
         }
         if let Some((k, v)) = line.split_once(':') {
-            let key = k.trim().to_ascii_lowercase();
-            let val = v.trim().to_string();
-            if key == "content-length" {
+            let key = k.trim();
+            let val = v.trim();
+            if key.eq_ignore_ascii_case("content-length") {
                 content_length = val.parse().unwrap_or(0);
             }
-            headers.insert(DictKey::Str(Rc::new(key)), Value::Str(Rc::new(val)));
+            headers.push((key.to_string(), val.to_string()));
         }
     }
     let content_length = content_length.min(MAX_BODY);
@@ -697,12 +718,13 @@ fn parse_request_buf(buf: &[u8]) -> BufParse {
         return BufParse::Incomplete; // waiting for the body
     }
     let body = String::from_utf8_lossy(&buf[head_end + 4..total]).into_owned();
+    let k = request_keys();
     let record = vec![
-        (Symbol::intern("method"), Value::Str(Rc::new(method))),
-        (Symbol::intern("path"), Value::Str(Rc::new(path))),
-        (Symbol::intern("query"), Value::Str(Rc::new(query))),
-        (Symbol::intern("headers"), Value::Dict(Rc::new(headers))),
-        (Symbol::intern("body"), Value::Str(Rc::new(body))),
+        (k.0, Value::Str(Rc::new(method))),
+        (k.1, Value::Str(Rc::new(path))),
+        (k.2, Value::Str(Rc::new(query))),
+        (k.3, Value::Headers(Rc::new(headers))),
+        (k.4, Value::Str(Rc::new(body))),
     ];
     BufParse::Complete(Box::new(Value::Record(Rc::new(record))), total)
 }
