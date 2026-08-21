@@ -69,6 +69,7 @@ fn parse_expression(
     depth: usize,
     sigs: &HashMap<String, FnSig>,
     imports: &std::collections::HashSet<String>,
+    fn_names: &std::collections::HashSet<String>,
 ) -> Result<(Expr, Vec<DoBinding>), HelixError> {
     let tokens = crate::lexer::lex(src)?;
     let mut p = Parser {
@@ -78,6 +79,10 @@ fn parse_expression(
         fn_sigs: (*sigs).clone(),
         do_bindings: Vec::new(),
         imports: imports.clone(),
+        // Threaded for the same reason `imports` is, and recorded above: a hole's
+        // parser that does not inherit an enclosing rule makes that rule hold outside
+        // strings and not inside them, which is where people meet it first.
+        fn_names: fn_names.clone(),
     };
     p.skip_newlines();
     let e = p.expr()?;
@@ -690,6 +695,16 @@ fn mut_inside_a_body(line: usize, col: usize) -> HelixError {
 }
 
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
+    // Every `fn NAME` in the file, before a line of it is parsed. A function may be
+    // called above its definition, so the UFCS fallback cannot wait for the definition
+    // to be reached; the scan is lexical and needs no structure.
+    let fn_names: std::collections::HashSet<String> = tokens
+        .windows(2)
+        .filter_map(|w| match (&w[0].tok, &w[1].tok) {
+            (Tok::Fn, Tok::Ident(n)) => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
     let mut p = Parser {
         toks: tokens,
         pos: 0,
@@ -697,6 +712,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
         fn_sigs: HashMap::new(),
         do_bindings: Vec::new(),
         imports: std::collections::HashSet::new(),
+        fn_names,
     };
     let program = p.program()?;
     reject_do_binding_over_mut_global(&program, &p.do_bindings)?;
@@ -778,6 +794,17 @@ struct Parser {
     /// The comprehension-sugar desugars consult this: a method on an imported
     /// namespace is a QUALIFIED MODULE CALL, never array sugar, however it is named.
     imports: std::collections::HashSet<String>,
+    /// Every name introduced by a `fn` anywhere in this file, pre-scanned from the
+    /// token stream before parsing begins.
+    ///
+    /// A function may be called above its definition, so the UFCS fallback below
+    /// cannot wait until the definition is parsed to know the name exists. The scan is
+    /// purely lexical — `fn` followed by an identifier — and deliberately
+    /// over-approximates by including nested functions: the cost of doing so is that
+    /// `x.f()` for an out-of-scope `f` reports "`f` is not defined" instead of "no
+    /// method `f`", and the cost of under-approximating would be a call that works in
+    /// one file and not in another.
+    fn_names: std::collections::HashSet<String>,
 }
 
 impl Parser {
@@ -1714,6 +1741,43 @@ impl Parser {
                         // `min_by`/`max_by`/`argmin`/`argmax` are sugar — desugared here
                         // into `map`/`enumerate` + `reduce` + index, so both engines get
                         // them for free (no new ops, parity by construction).
+                        // UFCS: a name that is NO type's method, but IS a function,
+                        // is a function called in method position — `x.f(a)` means
+                        // `f(x, a)`. This is what lets a user's own function chain
+                        // (`layer.forward(x)` on a record) without the language
+                        // growing a second way to define behaviour, and it removes
+                        // the method-vs-function split rather than documenting it.
+                        //
+                        // Strictly additive: gated on the name belonging to no type,
+                        // so every call that resolves today still means what it meant,
+                        // and a misspelled method (`xs.lenght()`) still gets the
+                        // method error with its did-you-mean rather than being turned
+                        // into an undefined-function one. Named arguments decline —
+                        // a free call resolves those against the callee's signature,
+                        // which is not this rewrite's business.
+                        // A REMOVED NAMESPACE (`stats`, `json`, …) is never a UFCS
+                        // receiver: `stats.t_test(xs, ys)` must keep reporting that
+                        // the namespace is gone and naming the function that replaced
+                        // it, not become `t_test(stats, …)` and report that `stats` is
+                        // undefined. The migration hint is the whole point of the
+                        // error, and it is the reader's only pointer to the new
+                        // spelling.
+                        let ns_recv = matches!(
+                            &e,
+                            Expr::Ident { name: r, .. } if crate::namespace::is_namespace(r)
+                        );
+                        if !ns_recv
+                            && !crate::registry::is_any_method(&name)
+                            && named.is_empty()
+                            && (self.fn_names.contains(&name)
+                                || crate::registry::lookup(&name).is_some())
+                        {
+                            let mut call_args = Vec::with_capacity(args.len() + 1);
+                            call_args.push(e);
+                            call_args.extend(args);
+                            e = Expr::Call { name, args: call_args, line: l, col: c };
+                            continue;
+                        }
                         e = match name.as_str() {
                             "min_by" | "max_by" | "argmin" | "argmax" => {
                                 desugar_order_by(e, &name, args, l, c)?
@@ -2459,7 +2523,7 @@ impl Parser {
                             // Relocate it to the interpolated string's real position so
                             // the caret points at the user's actual source, not line 1.
                             let (mut e, hole_do_bindings) =
-                                parse_expression(&src, self.depth, &self.fn_sigs, &self.imports)
+                                parse_expression(&src, self.depth, &self.fn_sigs, &self.imports, &self.fn_names)
                                     .map_err(|err| HelixError { line: l, col: c, ..err })?;
                             // Fold the hole's `do {}` bindings into this parser's list, at
                             // the string's real position for the same reason the error and

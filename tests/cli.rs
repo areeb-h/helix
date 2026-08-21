@@ -6351,3 +6351,85 @@ fn recursion_depth_error_names_tail_position() {
         assert_eq!(out, "1000000\ntrue\n50000\n", "{name}");
     }
 }
+
+/// `x.f(a)` means `f(x, a)` when `f` is no type's method. The review's item 2.4 was
+/// that the method-vs-function split has no discoverable rule — `to_array(t)` is a
+/// function, `a.matmul(b)` is a method, and you learn which one error at a time. This
+/// removes the split rather than documenting it, and in doing so gives a user's own
+/// functions the chaining that only built-in types had: `layer.forward(x)` on a plain
+/// record, with no second way to define behaviour and no mutable object identity.
+#[test]
+fn a_function_can_be_called_in_method_position() {
+    let src = "fn area(r) = r.w * r.h\n\
+               fn scaled(r, k) = {w: r.w * k, h: r.h * k}\n\
+               fn double(x) = x * 2\n\
+               fn inc(x) = x + 1\n\
+               print({w: 3, h: 4}.area())\n\
+               print({w: 2, h: 3}.scaled(2).area())\n\
+               print(5.double().inc().double())\n\
+               print(tensor([1.0, 2.0]).to_array())\n\
+               print((0 - 1).abs())\n\
+               r = {w: 3, h: 4}\n\
+               print(\"area is {r.area()}\")\n\
+               print([1, 2, 3].map(x => x.double()))\n";
+    let want = "12\n24\n22\n[1.0, 2.0]\n1\narea is 12\n[2, 4, 6]\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("ufcs_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+
+    // A function may be called above its definition, and the fallback must know that —
+    // the parser pre-scans `fn` names from the token stream for exactly this.
+    let below = "print({w: 2, h: 5}.area())\nfn area(r) = r.w * r.h\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(below, env, &format!("ufcs_below_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "10\n", "{name}");
+    }
+}
+
+/// UFCS is STRICTLY ADDITIVE: it fires only for a name that is no type's method, so
+/// nothing that resolves today can change meaning. The cases below are the ones that
+/// would notice if that gate ever slipped — a real method must still win over a
+/// same-named user function, a misspelled method must still get the method error and
+/// its did-you-mean rather than becoming an undefined-function one, and a removed
+/// NAMESPACE must keep the migration hint that is a reader's only pointer to the new
+/// spelling (the gate caught that one: `stats.t_test(…)` had become `t_test(stats, …)`).
+#[test]
+fn ufcs_never_changes_a_call_that_already_resolved() {
+    // A user function named like an Array method does NOT capture the method call.
+    let shadow = "fn count(xs) = 999\n\
+                  print([1, 2, 3].count())\n\
+                  print(count([1, 2, 3]))\n\
+                  print(\"hello\".upper())\n\
+                  print([3, 1, 2].sort())\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(shadow, env, &format!("ufcs_shadow_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "3\n999\nHELLO\n[1, 2, 3]\n", "{name}");
+    }
+
+    let keeps = [
+        ("typo", "print([1, 2].lenght())\n", "type Array has no method `lenght`"),
+        ("wrong_recv", "print(\"abc\".windows(2))\n", "type String has no method `windows`"),
+        ("unknown", "print([1, 2].nosuchthing())\n", "type Array has no method `nosuchthing`"),
+        ("no_fn", "print({a: 1}.nope())\n", "type Record has no method `nope`"),
+        ("namespace", "print(stats.t_test([1.0], [2.0]))\n", "no longer available"),
+    ];
+    for (name, env) in ENGINES {
+        for (tag, src, msg) in &keeps {
+            let (_, err, code) = run_source(src, env, &format!("ufcs_keeps_{tag}_{name}"));
+            assert_eq!(code, Some(1), "{name}/{tag}: must still error");
+            assert!(err.contains(msg), "{name}/{tag}: {err}");
+        }
+    }
+
+    // Arity is the callee's business, and its own error says so.
+    let arity = "fn area(r) = r.w * r.h\nprint({w: 1, h: 2}.area(9))\n";
+    for (name, env) in ENGINES {
+        let (_, err, code) = run_source(arity, env, &format!("ufcs_arity_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains("`area` expects 1 argument, got 2"), "{name}: {err}");
+    }
+}

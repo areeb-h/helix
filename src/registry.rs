@@ -367,6 +367,17 @@ pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 9] {
     ]
 }
 
+/// Is this name a method on ANY receiver type (including the universal ones)?
+///
+/// The gate on the UFCS fallback in the parser: a name that some type answers must keep
+/// meaning "method call", so a misspelled or wrong-receiver method still produces the
+/// method error and its did-you-mean, and no call that resolves today changes meaning.
+/// Only a name no type claims can be a free function called in method position.
+pub fn is_any_method(name: &str) -> bool {
+    UNIVERSAL_METHODS.contains(&name)
+        || type_method_tables().iter().any(|(_, t)| t.contains(&name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
