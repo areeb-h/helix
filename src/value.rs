@@ -34,6 +34,14 @@ pub enum Value {
     Array(Rc<ArrayData>),
     /// A fixed-size, heterogeneous tuple: `(1, "a", true)`.
     Tuple(Rc<Vec<Value>>),
+    /// HTTP headers — ordered `(name, value)` pairs whose LOOKUP is case-insensitive
+    /// (RFC 9110 §5.1: field names are case-insensitive, and HTTP/2 lowercases them
+    /// on the wire, so one program sees both spellings from different servers).
+    /// Pairs rather than a map: insertion order is wire order, and a repeated name —
+    /// `Set-Cookie` legitimately repeats — survives where a Dict collapsed it.
+    /// Runtime-only (built by `http_request` responses and `conn.request()`); the
+    /// checker sees `Unknown`, the opaque-type pattern shared with Dict and Net.
+    Headers(Rc<Vec<(String, String)>>),
     /// An ordered record with identifier keys: `{name: "Ada", age: 41}`. Keys are
     /// interned [`Symbol`]s, so field lookup and dispatch compare a single `u32`
     /// (not a heap string), the names cost no per-record allocation, and equal
@@ -667,6 +675,7 @@ impl Value {
             Value::Unit => "Unit",
             Value::PyObject(_) => "PyObject",
             Value::Node(_) => "Node",
+            Value::Headers(_) => "Headers",
             Value::Dict(_) => "Dict",
             Value::Net(_) => "Net",
         }
@@ -805,6 +814,19 @@ impl fmt::Display for Value {
                         write!(f, ", ")?;
                     }
                     write!(f, "{} => {}", q(&k.to_value()), q(v))?;
+                }
+                write!(f, "}}")
+            }
+            // Headers print in WIRE ORDER with names as they arrived — the same
+            // arrow notation as a Dict, so the two read alike, but unsorted,
+            // because the order and the casing are information here.
+            Value::Headers(pairs) => {
+                write!(f, "{{")?;
+                for (i, (k, val)) in pairs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "\"{}\" => \"{}\"", k, val)?;
                 }
                 write!(f, "}}")
             }

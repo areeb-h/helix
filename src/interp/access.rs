@@ -372,6 +372,15 @@ pub(crate) fn eval_index(recv: &Value, idx: &Value, line: usize, col: usize) -> 
     }
     // `d[key]` — dict lookup (ADR 0020); an absent key yields `missing`, the same safe
     // accessor as `.get(key)`, so `d[k] ?? default` works.
+    // Headers index like a dict — string key, missing on absence — with the lookup
+    // case-insensitive, because that is the type's contract (RFC 9110 field names).
+    if let (Value::Headers(pairs), Value::Str(key)) = (recv, idx) {
+        return Ok(pairs
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(key))
+            .map(|(_, v)| Value::Str(std::rc::Rc::new(v.clone())))
+            .unwrap_or(Value::Missing));
+    }
     if let Value::Dict(map) = recv {
         let key = crate::value::DictKey::from_value(idx).map_err(|m| HelixError::new(m, line, col))?;
         return Ok(map.get(&key).cloned().unwrap_or(Value::Missing));

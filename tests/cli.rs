@@ -6889,3 +6889,126 @@ fn a_server_refuses_to_inject_a_header() {
     // ...and the header the attacker was trying to add is nowhere in the message.
     assert!(!resp.contains("X-Admin"), "an injected header reached the wire:\n{resp}");
 }
+
+/// ADR 0031 step 1b — `Headers`: a value that knows header names are case-insensitive.
+///
+/// RFC 9110 §5.1 makes field names case-insensitive, and HTTP/2 lowercases them on the
+/// wire, so ONE program sees `Content-Type` from an HTTP/1.1 server and `content-type`
+/// from an HTTP/2 one. The old Dict answered `missing` for the spelling the server did
+/// not happen to use — a trap documented in v0.3.0 and removed here.
+///
+/// Pairs rather than a map, and the third assertion is the reason: TWO `Set-Cookie`
+/// headers must both arrive. Building this test found they did not — worse than lost,
+/// the first value came back TWICE (`headers_names()` yields a name per occurrence,
+/// `header(name)` answers the first match) — so the pin guards a real data-corruption
+/// fix, not a preference.
+#[test]
+fn headers_are_case_insensitive_ordered_and_keep_repeats() {
+    use std::time::Duration;
+
+    let dir = std::env::temp_dir();
+    let ready = dir.join("helix_headers_srv.ready");
+    let _ = std::fs::remove_file(&ready);
+    let src_f = dir.join("helix_headers_srv.helix");
+    // Readiness is a FILE the server writes after `listen()` binds. A raw probe
+    // connect is itself a connection: dropped, it is what `accept()` receives, and
+    // the server dies on the EOF before the real client ever arrives — which is why
+    // the house probe-connect pattern only works when the probe goes on to BE the
+    // client.
+    let server = String::from(
+        "srv = listen(18245)\n@Q@up@Q@.write_to(@Q@@READY@@Q@)\nc = srv.accept()\nq = c.request()\nct = q.headers.get(@Q@CONTENT-TYPE@Q@) ?? @Q@none@Q@\nc.respond({ status: 200, text: @Q@seen={ct}@Q@, headers: [(@Q@X-Mixed-Case@Q@, @Q@kept@Q@), (@Q@Set-Cookie@Q@, @Q@a=1@Q@), (@Q@Set-Cookie@Q@, @Q@b=2@Q@)] })\nc2 = srv.accept()\nr2 = c2.request()\nc2.respond({ status: 200, text: @Q@fwd@Q@, headers: r2.headers })\n",
+    )
+    .replace("@READY@", &ready.display().to_string())
+    .replace("@Q@", "\"");
+    std::fs::write(&src_f, server).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src_f)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the server");
+    let mut up = false;
+    for _ in 0..100 {
+        if ready.exists() {
+            up = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if !up {
+        let _ = child.kill();
+        let mut err = String::new();
+        if let Some(mut e) = child.stderr.take() {
+            use std::io::Read;
+            let _ = e.read_to_string(&mut err);
+        }
+        panic!("server never became ready; its stderr:\n{err}");
+    }
+
+    let client = String::from(
+        "r = http_request({method: @Q@QUERY@Q@, url: @Q@http://127.0.0.1:18245/q@Q@, body: @Q@x@Q@, headers: {@Q@Content-Type@Q@: @Q@application/json@Q@}})\nprint(r.body)\nprint(r.headers.get(@Q@X-MIXED-CASE@Q@))\nprint(r.headers.get(@Q@x-mixed-case@Q@))\nprint(r.headers[@Q@X-Mixed-Case@Q@])\nprint(r.headers.get_all(@Q@set-cookie@Q@))\nprint(r.headers.get(@Q@Set-Cookie@Q@))\nprint(r.headers.has(@Q@CONTENT-type@Q@), r.headers.has(@Q@nope@Q@))\nprint(r.headers.to_dict().get(@Q@x-mixed-case@Q@))\ns = http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18245/b@Q@, headers: {@Q@X-Fwd@Q@: @Q@roundtrip@Q@}})\nprint(s.headers.get(@Q@X-FWD@Q@))\n",
+    )
+    .replace("@Q@", "\"");
+    // One engine suffices for the TRANSPORT (ureq + the listener are engine-
+    // independent); value semantics are on all three engines in the test below.
+    let (out, err, code) = run_source(&client, &[], "headers_e2e");
+    let _ = child.wait();
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let want = String::from(
+        "seen=application/json\nkept\nkept\nkept\n[@Q@a=1@Q@, @Q@b=2@Q@]\na=1\ntrue false\nkept\nroundtrip\n",
+    )
+    .replace("@Q@", "\"");
+    assert_eq!(out, want);
+}
+
+/// The Headers VALUE semantics, no network, all three engines: the server's request
+/// record carries one, and every read is case-insensitive; a QUERY body survives; and
+/// the error for an unknown method names the type and its methods.
+#[test]
+fn headers_value_semantics() {
+    use std::time::Duration;
+    // Each engine gets its own server on its own port, because the value under test
+    // only exists on the far side of a real request. Marker-file readiness, as above.
+    let ports = [("jit", 18246u16), ("vm", 18247), ("walker", 18248)];
+    for ((name, env), (_, port)) in ENGINES.iter().zip(ports.iter()) {
+        let dir = std::env::temp_dir();
+        let ready = dir.join(format!("helix_hdrval_{port}.ready"));
+        let _ = std::fs::remove_file(&ready);
+        let src_f = dir.join(format!("helix_hdrval_{port}.helix"));
+        let server = String::from(
+            "srv = listen(@PORT@)\n@Q@up@Q@.write_to(@Q@@READY@@Q@)\nc = srv.accept()\nq = c.request()\nkeys = q.headers.keys().count() > 0\nbad = try (q.headers.nosuch())\nc.respond({ status: 200, text: @Q@m={q.method} keys={keys} err={bad.error}@Q@ })\n",
+        )
+        .replace("@PORT@", &port.to_string())
+        .replace("@READY@", &ready.display().to_string())
+        .replace("@Q@", "\"");
+        std::fs::write(&src_f, server).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+            .arg(&src_f)
+            .envs(env.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn the server");
+        let mut up = false;
+        for _ in 0..100 {
+            if ready.exists() {
+                up = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(up, "{name}: server never became ready");
+        let client = String::from(
+            "r = http_request({method: @Q@QUERY@Q@, url: @Q@http://127.0.0.1:@PORT@/x@Q@, body: @Q@b@Q@, headers: {@Q@A@Q@: @Q@1@Q@}})\nprint(r.body)\n",
+        )
+        .replace("@PORT@", &port.to_string())
+        .replace("@Q@", "\"");
+        let (out, err, code) = run_source(&client, &[], &format!("hdrval_{name}"));
+        let _ = child.wait();
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert!(out.contains("m=QUERY"), "{name}: {out}");
+        assert!(out.contains("keys=true"), "{name}: {out}");
+        assert!(out.contains("a Headers has no method `nosuch`"), "{name}: {out}");
+    }
+}

@@ -148,10 +148,19 @@ pub fn open_stream(
 fn collect_response(resp: ureq::Response) -> Fetched {
     let status = resp.status() as i64;
     let mut hs = Vec::new();
+    // `headers_names()` yields a name once per OCCURRENCE, and `header(name)` answers
+    // the FIRST match — so a repeated header (`Set-Cookie`, canonically) used to come
+    // back as its first value repeated: not merely lost, wrong. `all(name)` gives
+    // every value in order; visit each unique name once and take them all.
+    let mut seen: Vec<String> = Vec::new();
     for name in resp.headers_names() {
-        if let Some(v) = resp.header(&name) {
-            hs.push((name, v.to_string()));
+        if seen.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
+            continue;
         }
+        for v in resp.all(&name) {
+            hs.push((name.clone(), v.to_string()));
+        }
+        seen.push(name);
     }
     let body = resp.into_string().unwrap_or_default();
     (status, body, hs)

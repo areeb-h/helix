@@ -497,7 +497,7 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
     // read through `take(MAX_HEADER_LINE)` (bounds one giant header) and the count is
     // capped (bounds header-bombing) — the body already has MAX_BODY, so the head needs
     // its own limits to be DoS-safe.
-    let mut headers = std::collections::BTreeMap::new();
+    let mut headers: Vec<(String, String)> = Vec::new();
     let mut content_length = 0usize;
     let mut header_count = 0usize;
     loop {
@@ -530,7 +530,7 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
             if key == "content-length" {
                 content_length = val.parse().unwrap_or(0);
             }
-            headers.insert(DictKey::Str(Rc::new(key)), Value::Str(Rc::new(val)));
+            headers.push((key, val));
         }
     }
 
@@ -546,7 +546,7 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
         (Symbol::intern("method"), Value::Str(Rc::new(method))),
         (Symbol::intern("path"), Value::Str(Rc::new(path))),
         (Symbol::intern("query"), Value::Str(Rc::new(query))),
-        (Symbol::intern("headers"), Value::Dict(Rc::new(headers))),
+        (Symbol::intern("headers"), Value::Headers(Rc::new(headers))),
         (Symbol::intern("body"), Value::Str(Rc::new(body))),
     ];
     Ok(Value::Record(Rc::new(record)))
@@ -970,6 +970,30 @@ fn merge_headers(out: &mut Vec<(String, String)>, headers: &Value) -> Result<(),
             for (k, v) in map.iter() {
                 if let DictKey::Str(s) = k {
                     add((**s).clone(), text(v));
+                }
+            }
+        }
+        // Round-tripping: a Headers value (a forwarded request's, or a previous
+        // response's) is already pairs in order.
+        Value::Headers(pairs) => {
+            for (k, v) in pairs.iter() {
+                add(k.clone(), v.clone());
+            }
+        }
+        // An array of `(name, value)` pairs — the one shape that can say a REPEATED
+        // header, which a record (one field per name) and a dict (one key per name)
+        // cannot. Two `Set-Cookie`s in one response is the canonical need. Accepts a
+        // tuple or a 2-element array per pair, the same spellings the client's
+        // request `headers` field takes, so the two directions agree.
+        Value::Array(items) => {
+            for it in items.to_values().iter() {
+                let two: Vec<Value> = match it {
+                    Value::Array(a) => a.to_values().to_vec(),
+                    Value::Tuple(t) => t.iter().cloned().collect(),
+                    _ => continue,
+                };
+                if let [Value::Str(k), v] = two.as_slice() {
+                    add((**k).clone(), text(v));
                 }
             }
         }

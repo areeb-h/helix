@@ -381,14 +381,15 @@ impl super::Interp {
                 {
                     let (status, rbody, rhdrs) = crate::http::request(&method, &url, &body, &hdrs)
                         .map_err(|e| HelixError::new(e, line, col))?;
-                    let mut hmap = std::collections::BTreeMap::new();
-                    for (k, v) in rhdrs {
-                        hmap.insert(crate::value::DictKey::Str(Rc::new(k)), Value::Str(Rc::new(v)));
-                    }
+                    // A Headers value, not a Dict: lookup is case-insensitive (one
+                    // program sees `Content-Type` from HTTP/1.1 and `content-type`
+                    // from HTTP/2), wire order is kept, and a repeated name —
+                    // `Set-Cookie` legitimately repeats — survives where a map
+                    // collapsed it silently.
                     Ok(Value::Record(Rc::new(vec![
                         (Symbol::intern("status"), Value::Int(status)),
                         (Symbol::intern("body"), Value::Str(Rc::new(rbody))),
-                        (Symbol::intern("headers"), Value::Dict(Rc::new(hmap))),
+                        (Symbol::intern("headers"), Value::Headers(Rc::new(rhdrs))),
                     ])))
                 }
                 #[cfg(not(feature = "http"))]
@@ -2428,6 +2429,13 @@ fn http_request_fields(req: &Value, line: usize, col: usize) -> Result<HttpReqPa
                 if let crate::value::DictKey::Str(s) = k {
                     hdrs.push(((**s).clone(), hval(v)));
                 }
+            }
+        }
+        // A Headers value round-trips: forwarding a response's headers into the
+        // next request is the proxy shape, and it should not need a conversion.
+        Some(Value::Headers(pairs)) => {
+            for (k, v) in pairs.iter() {
+                hdrs.push((k.clone(), v.clone()));
             }
         }
         Some(Value::Array(items)) => {

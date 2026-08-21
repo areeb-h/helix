@@ -292,6 +292,12 @@ pub static STRING_METHODS: &[&str] = &[
     "concat",
 ];
 
+/// HTTP-header methods (the `Headers` value): case-insensitive reads, wire order.
+pub static HEADERS_METHODS: &[&str] = &[
+    "get", "get_all", "has", "contains", "keys", "values", "items", "count", "length",
+    "to_dict",
+];
+
 /// DNA-sequence methods.
 pub static DNA_METHODS: &[&str] = &[
     "gc_content", "reverse_complement", "complement", "kmers", "windows", "codons", "kmer_counts",
@@ -361,7 +367,7 @@ pub fn methods_of(table: &[&'static str]) -> Vec<&'static str> {
 
 /// The method tables by receiver type — the single source for `helix doc <Type>`
 /// introspection and the method-uniqueness test.
-pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 9] {
+pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 10] {
     [
         ("Array", ARRAY_METHODS),
         ("String", STRING_METHODS),
@@ -372,6 +378,11 @@ pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 9] {
         ("Dict", DICT_METHODS),
         ("Net", NET_METHODS),
         ("Record", RECORD_METHODS),
+        // LAST deliberately: Headers shares names (count, get, keys, items) with the
+        // common types, and whichever table lists a name first becomes its owner for
+        // did-you-mean examples — "xs.count()" must not become "x.count()" because a
+        // header map also counts.
+        ("Headers", HEADERS_METHODS),
     ]
 }
 
