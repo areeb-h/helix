@@ -5965,3 +5965,106 @@ fn a_plain_row_inside_a_tracked_build_stays_one_block() {
         assert_eq!(out, "[2, 100000]\n3.0\n1.0\n", "{name}");
     }
 }
+
+/// `try` takes an expression and evaluates it; every other language's equivalent
+/// takes a callback, so `try(() => f())` is what a newcomer writes — and it used to
+/// report SUCCESS, because building a closure cannot fail. The record came back
+/// `{ok: true, value: <function/0>}`, so error handling written that way never fired.
+/// A 13-library review hit it and first read it as a bug in `try` itself.
+#[test]
+fn try_refuses_a_function_literal() {
+    for (name, env) in ENGINES {
+        for (tag, src) in [
+            ("bare", "print(try(() => raise(\"x\")))\n"),
+            ("call", "fn f() = 1\nprint(try(() => f()))\n"),
+        ] {
+            let (_, err, code) = run_source(src, env, &format!("try_lambda_{tag}_{name}"));
+            assert_eq!(code, Some(1), "{name}/{tag}: must refuse");
+            assert!(
+                err.contains("`try` takes an expression to evaluate, not a function"),
+                "{name}/{tag}: {err}"
+            );
+        }
+        // Everything `try` is FOR still works, including expressions that contain
+        // lambdas of their own — the guard is about `try`'s own operand, nothing else.
+        let ok = "r = try (1 / 0)\n\
+                  print(r.ok)\n\
+                  print(r.error)\n\
+                  m = try [1, 2].map(x => x * 2)\n\
+                  print(m.value)\n\
+                  d = try [1, 2].reduce(0, (a, x) => a + x)\n\
+                  print(d.value)\n\
+                  f = (x) => x + 1\n\
+                  print(f(1))\n";
+        let (out, err, code) = run_source(ok, env, &format!("try_ok_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "false\ndivision by zero\n[2, 4]\n3\n2\n", "{name}");
+    }
+}
+
+/// A body that is exactly a call to itself with its parameters unchanged can never
+/// return, whatever it is called with. The shape turns up when a name shadows a
+/// builtin — `fn relu(x) = relu(x)`, written to wrap the builtin — where the call
+/// resolves to the definition being written; the review nearly shipped that one.
+/// Real recursion, including recursion under a shadowed builtin name, is untouched.
+#[test]
+fn a_function_whose_body_is_its_own_call_is_refused() {
+    let bad = [
+        ("builtin", "fn relu(x) = relu(x)\n", "not the built-in of the same name"),
+        ("plain", "fn myf(x) = myf(x)\n", "needs a base case"),
+        ("two_params", "fn g(a, b) = g(a, b)\n", "needs a base case"),
+    ];
+    for (name, env) in ENGINES {
+        for (tag, src, hint) in &bad {
+            let (_, err, code) = run_source(src, env, &format!("selfcall_{tag}_{name}"));
+            assert_eq!(code, Some(1), "{name}/{tag}: must refuse");
+            assert!(err.contains("calls itself with the same arguments"), "{name}/{tag}: {err}");
+            assert!(err.contains(hint), "{name}/{tag}: {err}");
+        }
+        // Recursion that makes progress, a shadowed builtin that recurses properly,
+        // a shadowed builtin that does not recurse, mutual tail recursion, and a
+        // self-call with the arguments SWAPPED — none of these are the refused shape.
+        let good = "fn fact(n) = if n <= 1 then 1 else n * fact(n - 1)\n\
+                    fn abs(x) = if x < 0.0 then abs(0.0 - x) else x\n\
+                    fn relu(x) = if x > 0.0 then x else 0.0\n\
+                    fn ev(n) = if n == 0 then true else od(n - 1)\n\
+                    fn od(n) = if n == 0 then false else ev(n - 1)\n\
+                    fn swap(a, b) = if a <= 0 then b else swap(b - 1, a - 1)\n\
+                    print(fact(5))\n\
+                    print(abs(0.0 - 3.0))\n\
+                    print(relu(0.0 - 2.0))\n\
+                    print(ev(10))\n\
+                    print(swap(2, 3))\n";
+        let (out, err, code) = run_source(good, env, &format!("selfcall_ok_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "120\n3.0\n0.0\ntrue\n1\n", "{name}");
+    }
+}
+
+/// A `fn` may be called above its definition; a top-level value may not be used above
+/// its binding. Nothing said so, so a module with its constant table at the bottom
+/// failed at every function above it — one root cause wearing a "not defined" face at
+/// each use. The name is bound further down, and the message now says exactly that,
+/// while a name that is nowhere in the file still reads as plainly undefined.
+#[test]
+fn a_binding_used_before_its_definition_says_so() {
+    for (name, env) in ENGINES {
+        let (_, err, code) = run_source("print(K)\nK = 5\n", env, &format!("later_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains("`K` is not defined yet"), "{name}: {err}");
+        assert!(err.contains("bound further down this file"), "{name}: {err}");
+        assert!(err.contains("move the binding up"), "{name}: {err}");
+
+        let (_, err, code) = run_source("print(NOPE)\n", env, &format!("never_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains("`NOPE` is not defined"), "{name}: {err}");
+        assert!(!err.contains("not defined yet"), "{name}: {err}");
+
+        // A `fn` used above its definition is still fine — the asymmetry the message
+        // describes is real, and this is the half that works.
+        let (out, err, code) =
+            run_source("print(f(2))\nfn f(x) = x * 2\n", env, &format!("fnfirst_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "4\n", "{name}");
+    }
+}

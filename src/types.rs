@@ -345,6 +345,23 @@ pub struct Checker {
     /// compile `d.where(…)` as a DataFrame verb after `d` was rebound to an
     /// array, diverging from the walker's runtime dispatch).
     mut_globals: FxHashSet<String>,
+    /// Every name bound by a top-level value statement anywhere in the file, for
+    /// DIAGNOSIS only: it lets an unbound name be reported as "not defined yet"
+    /// when the file does bind it further down.
+    ///
+    /// A `fn` is usable above its definition (`check` pre-declares every signature)
+    /// and a value is not, and nothing used to say so — a module with its constant
+    /// table at the bottom failed at every function above it with a bare "not
+    /// defined" at each use, one root cause wearing many faces.
+    ///
+    /// Granting `fn` bodies the same forward reference was tried and withdrawn. The
+    /// tree-walker resolves a global at call time and would run it; the bytecode
+    /// compiler binds global SLOTS at compile time and `LoadGlobal` has no
+    /// initialised check, so the VM would read `Unit` where the walker raises. That
+    /// is an engine divergence, and closing it means an uninitialised sentinel and a
+    /// checked load on the interpreter's hottest opcode — its own change, with its
+    /// own measurement, not a side effect of improving a message.
+    deferred_globals: FxHashSet<String>,
 }
 
 impl Default for Checker {
@@ -363,7 +380,12 @@ impl Checker {
         // and any method/attribute chain off a Python value never errors (Python
         // values ride the same permissive boundary as DataFrame columns).
         env.insert("python".to_string(), Type::Unknown);
-        Checker { env, types: FxHashMap::default(), mut_globals: FxHashSet::default() }
+        Checker {
+            env,
+            types: FxHashMap::default(),
+            mut_globals: FxHashSet::default(),
+            deferred_globals: FxHashSet::default(),
+        }
     }
 
     pub fn exec_stmt(&mut self, s: &Stmt) -> Result<(), HelixError> {
@@ -460,6 +482,39 @@ impl Checker {
         line: usize,
         col: usize,
     ) -> Result<(), HelixError> {
+        // A body that is EXACTLY a call to this function with its own parameters
+        // unchanged recurses forever, whatever it is called with. The shape shows up
+        // when a name shadows a builtin -- `fn relu(x) = relu(x)`, written to wrap the
+        // builtin -- where the call resolves to the definition being written, not to
+        // the builtin, and nothing said so until it hung at run time.
+        if let Expr::Call { name: callee, args, line: cl, col: cc } = body
+            && callee == name
+            && args.len() == params.len()
+            && args.iter().zip(params).all(|(a, (p, _))| {
+                matches!(a, Expr::Ident { name: an, .. } if an == p)
+            })
+        {
+            let err = HelixError::new(
+                format!(
+                    "`{name}` calls itself with the same arguments and nothing else, so it can never return"
+                ),
+                *cl,
+                *cc,
+            );
+            return Err(if crate::registry::lookup(name).is_some() {
+                err.hint(format!(
+                    "`{name}` here is this definition, not the built-in of the same name \
+                     — inside the body the name already refers to the function being \
+                     defined. To wrap the builtin, give this one a different name."
+                ))
+            } else {
+                err.hint(
+                    "a recursive function needs a base case, and needs to make progress \
+                     towards it — recurse on a smaller argument.",
+                )
+            });
+        }
+
         let param_types: Vec<Type> = params
             .iter()
             .map(|(_, ann)| ann.as_ref().map(ann_to_type).unwrap_or(Type::Unknown))
@@ -605,6 +660,19 @@ impl Checker {
                     *col,
                 )
                 .hint("`it` is the implicit element inside a comprehension body; a `=>` function receives the element as its own parameter — write `.map(x => ...)`.")),
+                // Bound at the top level, but BELOW this use. A `fn` may be used
+                // above its definition and a value may not, and nothing said so --
+                // the message named the use and left the reader to find the cause.
+                None if self.deferred_globals.contains(name) => Err(HelixError::new(
+                    format!("`{name}` is not defined yet"),
+                    *line,
+                    *col,
+                )
+                .hint(format!(
+                    "`{name}` is bound further down this file. Unlike a `fn`, which may \
+                     be called above its definition, a top-level value binding has to \
+                     appear before the code that uses it — move the binding up."
+                ))),
                 None => {
                     let names: Vec<&str> = self.env.keys().map(|s| s.as_str()).collect();
                     let err = HelixError::new(format!("`{}` is not defined", name), *line, *col);
@@ -937,7 +1005,26 @@ impl Checker {
             // type error inside EXPR is still reported (try catches runtime errors,
             // not compile-time ones). On the error path `value` is `missing`, which is
             // compatible with the success type, so field access stays sound.
-            Expr::Try { expr, .. } => {
+            Expr::Try { expr, line, col } => {
+                // `try` takes an EXPRESSION and evaluates it; every other language's
+                // equivalent takes a callback, so `try(() => f())` is what a newcomer
+                // writes -- and it quietly succeeded, because building a closure cannot
+                // fail. The record came back `{ok: true, value: <function/0>}` and the
+                // error handling never fired. There is no reading under which wrapping
+                // a function literal in `try` is useful, so refuse it and say what to
+                // write instead.
+                if matches!(&**expr, Expr::Lambda { .. }) {
+                    return Err(HelixError::new(
+                        "`try` takes an expression to evaluate, not a function",
+                        *line,
+                        *col,
+                    )
+                    .hint(
+                        "building a function never fails, so this would always report \
+                         success. Call it inside the `try` instead: `try f()`, or \
+                         `try (f(x))`.",
+                    ));
+                }
                 let vt = self.synth(expr)?;
                 Ok(Type::Record(vec![
                     ("ok".to_string(), Type::Bool),
@@ -1034,6 +1121,16 @@ pub fn check(program: &[Stmt]) -> Result<TypeMap, HelixError> {
                 name.clone(),
                 Type::Function { params: param_types, ret: Box::new(ret_ty) },
             );
+        }
+    }
+    // The same courtesy for top-level VALUE bindings, and for the same reason: a
+    // deferred body runs after the whole file has executed, so a constant table at
+    // the bottom is in scope for every function above it. Recorded as names only --
+    // `check_func` hoists them into the body's environment as `Unknown` and takes
+    // them out again, so top-level flow keeps rejecting a genuine use-before-binding.
+    for s in program {
+        if let Stmt::Assign { name, .. } = s {
+            checker.deferred_globals.insert(name.clone());
         }
     }
     for s in program {
