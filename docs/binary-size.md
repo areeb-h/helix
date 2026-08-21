@@ -70,5 +70,19 @@ Investigated and ruled out:
   the cost of Polars's optimized lazy scan/pushdown. A major architectural decision,
   warranted only if binary size becomes a real adoption blocker.
 
-Until then the trade-off is accepted deliberately: a large but genuinely self-contained,
-fast-starting binary, in exchange for the maturity and speed of the Polars engine.
+- **Feature-gate Polars out entirely** (the option this document predates): ADR 0012's
+  seam is now finished and audited airtight — no `polars::` type escapes
+  `src/backend/polars.rs`, `Value::DataFrame` is a trait object, and only 7 reference
+  sites exist outside the backend file. A `dataframes` cargo feature (default-ON; the
+  small build is opt-in) sheds the 27 polars crates AND the object_store/tokio tail
+  for ~Small surgery. Scoped in [ADR 0032](adr/0032-appliance-profile.md), Proposed.
+
+Note on `dtype-full` (asked and settled 2026-08-22): trimming it is a REGRESSION, not
+a size win — the bridge's total string-fallback becomes a polars schema-layer panic
+(-> abort, an ADR 0024 violation) on Decimal/Categorical/Struct parquet columns, the
+fixture suite would not catch it (every parquet in the tree is Helix-written), and the
+tail enters via `polars-error` regardless of dtype features. It stays.
+
+Until a decision on ADR 0032, the trade-off is accepted deliberately: a large but
+genuinely self-contained, fast-starting binary, in exchange for the maturity and
+speed of the Polars engine.
