@@ -91,6 +91,48 @@ fn net_method(
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
+    // The cookie-jar handle answers a small set of its own methods; everything else is
+    // a server/stream method below.
+    if let crate::serve::NetHandle::CookieJar(jar) = &**h {
+        let now = crate::cookiejar::now_unix();
+        return match name {
+            "cookies" => {
+                if !args.is_empty() {
+                    return Err(HelixError::new("`cookies` takes no arguments", line, col));
+                }
+                // Each cookie as a record `{name, value, domain, path}`, in jar order.
+                let rows = jar.snapshot(now).into_iter().map(|(n, v, d, p)| {
+                    Value::Record(Rc::new(vec![
+                        (crate::symbol::Symbol::intern("name"), Value::Str(Rc::new(n))),
+                        (crate::symbol::Symbol::intern("value"), Value::Str(Rc::new(v))),
+                        (crate::symbol::Symbol::intern("domain"), Value::Str(Rc::new(d))),
+                        (crate::symbol::Symbol::intern("path"), Value::Str(Rc::new(p))),
+                    ]))
+                });
+                Ok(Value::array(rows.collect()))
+            }
+            "count" | "length" => {
+                if !args.is_empty() {
+                    return Err(HelixError::new(format!("`{name}` takes no arguments"), line, col));
+                }
+                Ok(Value::Int(jar.snapshot(now).len() as i64))
+            }
+            "clear" => {
+                if !args.is_empty() {
+                    return Err(HelixError::new("`clear` takes no arguments", line, col));
+                }
+                jar.clear();
+                Ok(Value::Unit)
+            }
+            other => Err(HelixError::new(
+                format!("a cookie jar has no method `{other}`"),
+                line,
+                col,
+            )
+            .hint("jar methods: cookies, count, clear.")),
+        };
+    }
+
     // Capability gate (ADR 0021): the socket-touching verbs (accept/poll/respond/sse/send)
     // are `Net` authority — defense-in-depth behind `listen` (itself gated). `request` reads
     // the already-parsed request record (no socket I/O) and is ungated (`Pure`).

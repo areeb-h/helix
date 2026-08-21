@@ -380,8 +380,16 @@ impl super::Interp {
                 #[cfg(feature = "http")]
                 {
                     let limits = http_limits(&args[0], line, col)?;
+                    // An optional `jar:` field carries a cookie jar (from `cookie_jar()`);
+                    // the request sends its matching cookies and stores what the response
+                    // sets. The jar mutates through its RefCell — the program holds it.
+                    let jar_handle = http_jar(&args[0]);
+                    let jar_ref = jar_handle.as_deref().and_then(|h| match h {
+                        crate::serve::NetHandle::CookieJar(j) => Some(j),
+                        _ => None,
+                    });
                     let (status, rbody, rhdrs, redirects) =
-                        crate::http::request(&method, &url, &body, &hdrs, &limits)
+                        crate::http::request(&method, &url, &body, &hdrs, &limits, jar_ref)
                             .map_err(|e| HelixError::new(e, line, col))?;
                     // A Headers value, not a Dict: lookup is case-insensitive (one
                     // program sees `Content-Type` from HTTP/1.1 and `content-type`
@@ -560,6 +568,14 @@ impl super::Interp {
                 let hex: String = tag.iter().map(|b| format!("{:02x}", b)).collect();
                 Ok(Value::Str(Rc::new(hex)))
             }
+            // A fresh, empty cookie jar (ADR 0031). Explicit state the program holds
+            // and threads into `http_request({… , jar: jar})`.
+            "cookie_jar" => {
+                arity(name, &args, 0, line, col)?;
+                Ok(Value::Net(Rc::new(crate::serve::NetHandle::CookieJar(
+                    crate::cookiejar::CookieJar::new(),
+                ))))
+            }
             // A `Cookie:` request header — `name=value; name2=value2` — as a Dict.
             // Pairs are separated by `;` (never `,`), a value may be quoted, and
             // surrounding spaces are not part of either half.
@@ -607,53 +623,41 @@ impl super::Interp {
                 match &args[0] {
                     Value::Missing => Ok(Value::Missing),
                     Value::Str(s) => {
-                        let mut parts = s.split(';');
-                        let first = parts.next().unwrap_or("").trim();
-                        let (cname, cvalue) = match first.split_once('=') {
-                            Some((k, v)) => (k.trim().to_string(), v.trim().trim_matches('"').to_string()),
-                            None => {
-                                return Err(HelixError::new(
-                                    "`parse_set_cookie` needs a `name=value` pair before the first `;`",
-                                    line,
-                                    col,
-                                )
-                                .hint("e.g. `parse_set_cookie(\"id=abc; Path=/; Secure\")`."))
-                            }
+                        // ONE parser, shared with the cookie jar (`store_from_header`),
+                        // so the record a program reads and the cookie the jar stores can
+                        // never disagree about a header.
+                        let Some(c) = crate::cookiejar::parse_set_cookie(s) else {
+                            return Err(HelixError::new(
+                                "`parse_set_cookie` needs a `name=value` pair before the first `;`",
+                                line,
+                                col,
+                            )
+                            .hint("e.g. `parse_set_cookie(\"id=abc; Path=/; Secure\")`."));
                         };
                         let mut fields: Vec<(Symbol, Value)> = vec![
-                            (Symbol::intern("name"), Value::Str(Rc::new(cname))),
-                            (Symbol::intern("value"), Value::Str(Rc::new(cvalue))),
+                            (Symbol::intern("name"), Value::Str(Rc::new(c.name))),
+                            (Symbol::intern("value"), Value::Str(Rc::new(c.value))),
                         ];
-                        let mut secure = false;
-                        let mut http_only = false;
-                        for attr in parts {
-                            let attr = attr.trim();
-                            if attr.is_empty() {
-                                continue;
-                            }
-                            let (k, v) = match attr.split_once('=') {
-                                Some((k, v)) => (k.trim().to_ascii_lowercase(), v.trim().to_string()),
-                                None => (attr.to_ascii_lowercase(), String::new()),
-                            };
-                            match k.as_str() {
-                                "secure" => secure = true,
-                                "httponly" => http_only = true,
-                                "path" => fields.push((Symbol::intern("path"), Value::Str(Rc::new(v)))),
-                                "domain" => fields.push((Symbol::intern("domain"), Value::Str(Rc::new(v)))),
-                                // Kept verbatim: an HTTP-date contains a comma, which is
-                                // why `Set-Cookie` is not a comma-combinable field, and
-                                // parsing it is a separate question from reading a cookie.
-                                "expires" => fields.push((Symbol::intern("expires"), Value::Str(Rc::new(v)))),
-                                "samesite" => fields.push((Symbol::intern("same_site"), Value::Str(Rc::new(v)))),
-                                "max-age" => {
-                                    let secs: i64 = v.trim().parse().unwrap_or(0);
-                                    fields.push((Symbol::intern("max_age"), Value::Int(secs)));
-                                }
-                                _ => {}
-                            }
+                        if let Some(p) = c.path {
+                            fields.push((Symbol::intern("path"), Value::Str(Rc::new(p))));
                         }
-                        fields.push((Symbol::intern("secure"), Value::Bool(secure)));
-                        fields.push((Symbol::intern("http_only"), Value::Bool(http_only)));
+                        if let Some(d) = c.domain {
+                            fields.push((Symbol::intern("domain"), Value::Str(Rc::new(d))));
+                        }
+                        // Expires kept verbatim — an HTTP-date carries a comma, which is
+                        // why `Set-Cookie` is not comma-combinable; the jar parses it, a
+                        // reader usually just forwards it.
+                        if let Some(e) = c.expires {
+                            fields.push((Symbol::intern("expires"), Value::Str(Rc::new(e))));
+                        }
+                        if let Some(ss) = c.same_site {
+                            fields.push((Symbol::intern("same_site"), Value::Str(Rc::new(ss))));
+                        }
+                        if let Some(ma) = c.max_age {
+                            fields.push((Symbol::intern("max_age"), Value::Int(ma)));
+                        }
+                        fields.push((Symbol::intern("secure"), Value::Bool(c.secure)));
+                        fields.push((Symbol::intern("http_only"), Value::Bool(c.http_only)));
                         Ok(Value::Record(Rc::new(fields)))
                     }
                     other => Err(type_err("parse_set_cookie", "a string", other, line, col)),
@@ -2476,6 +2480,20 @@ fn http_request_fields(req: &Value, line: usize, col: usize) -> Result<HttpReqPa
 /// Absent fields keep the defaults the client has always used; a present field with a
 /// non-positive or non-integer value is a clean error naming the field, not a
 /// silently-ignored one.
+/// The optional `jar:` field of a request record — a `cookie_jar()` handle, or `None`.
+/// A `jar` that is not a cookie jar is ignored rather than erroring: the field is
+/// optional, and a wrong value there is the caller's to notice, not a request-breaker.
+#[cfg(feature = "http")]
+fn http_jar(req: &Value) -> Option<Rc<crate::serve::NetHandle>> {
+    let Value::Record(fields) = req else { return None };
+    match fields.iter().find(|(s, _)| s.as_str() == "jar").map(|(_, v)| v) {
+        Some(Value::Net(h)) if matches!(&**h, crate::serve::NetHandle::CookieJar(_)) => {
+            Some(h.clone())
+        }
+        _ => None,
+    }
+}
+
 #[cfg(feature = "http")]
 fn http_limits(req: &Value, line: usize, col: usize) -> Result<crate::http::Limits, HelixError> {
     let Value::Record(fields) = req else { return Ok(Default::default()) };

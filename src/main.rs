@@ -22,6 +22,7 @@ mod error;
 mod fmt;
 mod gff;
 mod hbc;
+mod cookiejar;
 mod http;
 mod interp;
 mod jit;

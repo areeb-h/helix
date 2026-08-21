@@ -253,6 +253,9 @@ mod tests {
             "aes_keygen", "aes_encrypt", "ed25519_keygen", "assert", "assert_eq", "assert_close",
             // Raising an error is a control-flow effect, not an fs/net authority.
             "raise",
+            // A fresh cookie jar is an empty in-memory value; it touches no network or
+            // filesystem until it is threaded into a request, which IS gated (`Net`).
+            "cookie_jar",
         ];
         for b in crate::registry::BUILTINS {
             if b.pure || effect_of(b.path).gated() {

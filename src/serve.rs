@@ -62,6 +62,11 @@ pub enum NetHandle {
         status: i64,
         reader: RefCell<Option<std::io::BufReader<Box<dyn std::io::Read>>>>,
     },
+    /// A cookie jar (ADR 0031 §4): explicit, program-held state that a request threads
+    /// through to store what a response sets and send what a later request should carry.
+    /// Behind the `Net` value so it reuses that dispatch; interior-mutable because a
+    /// request mutates it while the program holds it by shared reference.
+    CookieJar(crate::cookiejar::CookieJar),
 }
 
 impl Drop for NetHandle {

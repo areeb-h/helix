@@ -51,6 +51,10 @@ num-traits = "0.2"
 # ureq transitive dep; made direct because credential-stripping correctness must not
 # rest on a hand-rolled scheme/host/port parser — that is exactly where these bugs live.
 url = "2"
+# The Public Suffix List (Mozilla), embedded as a generated match tree — the supercookie
+# defence for the ADR 0031 cookie jar. "embed a snapshot" per the ADR; the crate carries
+# the list revision, so its staleness is visible rather than silent.
+psl = "2"
 num-bigint = "0.4"
 needletail = "0.7.3"
 # Spec-compliant genomics parsers (the bio flagship stands on the Rust bio

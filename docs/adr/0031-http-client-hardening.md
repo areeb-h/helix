@@ -1,7 +1,8 @@
 # ADR 0031 — What does an HTTP client owe a program that trusts it?
 
-- **Status:** **Proposed 2026-08-20** — recommendation argued below; awaiting owner
-  acceptance. Nothing implemented.
+- **Status:** **Accepted & Implemented 2026-08-22** — all four steps landed: header
+  injection guard, per-request timeouts/limits, redirect boundary rules, and the cookie
+  jar with the Public Suffix List.
 - **Date:** 2026-08-20
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0021 — Capabilities](0021-capabilities.md) (`Net` is a declared

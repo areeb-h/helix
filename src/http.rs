@@ -112,7 +112,7 @@ fn agent() -> ureq::Agent {
 
 #[cfg(feature = "http")]
 pub fn get(url: &str) -> Result<(i64, String), String> {
-    let ((status, body, _), _) = follow("GET", url, "", &[], &Limits::default())?;
+    let ((status, body, _), _) = follow("GET", url, "", &[], &Limits::default(), None)?;
     Ok((status, body))
 }
 
@@ -123,7 +123,7 @@ pub fn get(url: &str) -> Result<(i64, String), String> {
 #[cfg(feature = "http")]
 pub fn post(url: &str, body: &str, content_type: &str) -> Result<(i64, String), String> {
     let headers = [("Content-Type".to_string(), content_type.to_string())];
-    let ((status, rbody, _), _) = follow("POST", url, body, &headers, &Limits::default())?;
+    let ((status, rbody, _), _) = follow("POST", url, body, &headers, &Limits::default(), None)?;
     Ok((status, rbody))
 }
 
@@ -181,6 +181,7 @@ fn follow(
     body: &str,
     headers: &[(String, String)],
     limits: &Limits,
+    jar: Option<&crate::cookiejar::CookieJar>,
 ) -> Result<(Fetched, Vec<String>), String> {
     let mut cur_url: url::Url = url_str
         .parse()
@@ -199,6 +200,15 @@ fn follow(
         }
         for (k, v) in &cur_headers {
             req = req.set(k, v);
+        }
+        // The jar's cookies for THIS hop's URL — recomputed per hop, so a redirect to a
+        // new host sends that host's cookies, not the previous one's (the cross-origin
+        // header strip above removed the old Cookie header; this adds the right one).
+        let now = crate::cookiejar::now_unix();
+        if let Some(j) = jar
+            && let Some(cookie) = j.cookie_header(&cur_url, now)
+        {
+            req = req.set("Cookie", &cookie);
         }
         let send = if cur_body.is_empty() { req.call() } else { req.send_string(&cur_body) };
 
@@ -256,6 +266,18 @@ fn follow(
                             && !k.eq_ignore_ascii_case("proxy-authorization")
                     });
                 }
+                // A redirect can set cookies too — a login 302 sets the session
+                // cookie — so store from this response before following.
+                if let Some(j) = jar {
+                    let host = cur_url.host_str().unwrap_or("");
+                    for name in resp.headers_names() {
+                        if name.eq_ignore_ascii_case("set-cookie") {
+                            for v in resp.all(&name) {
+                                j.store_from_header(host, v, now);
+                            }
+                        }
+                    }
+                }
                 let (m, keep_body) = redirect_method(code, &cur_method);
                 cur_method = m.to_string();
                 if !keep_body {
@@ -269,6 +291,16 @@ fn follow(
         }
         let fetched = collect_response(resp, limits.max_body.unwrap_or(DEFAULT_MAX_BODY))
             .map_err(|e| format!("HTTP {cur_method} to {cur_url}: {e}"))?;
+        // Store what this response set. `fetched.2` is the response headers in order, so
+        // repeated `Set-Cookie`s are all seen.
+        if let Some(j) = jar {
+            let host = cur_url.host_str().unwrap_or("");
+            for (k, v) in &fetched.2 {
+                if k.eq_ignore_ascii_case("set-cookie") {
+                    j.store_from_header(host, v, now);
+                }
+            }
+        }
         return Ok((fetched, chain));
     }
 }
@@ -284,8 +316,9 @@ pub fn request(
     body: &str,
     headers: &[(String, String)],
     limits: &Limits,
+    jar: Option<&crate::cookiejar::CookieJar>,
 ) -> Result<FetchedWithChain, String> {
-    let ((status, body, hs), chain) = follow(method, url, body, headers, limits)?;
+    let ((status, body, hs), chain) = follow(method, url, body, headers, limits, jar)?;
     Ok((status, body, hs, chain))
 }
 

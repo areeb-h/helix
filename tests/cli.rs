@@ -7223,3 +7223,67 @@ fn the_event_loop_server_returns_case_insensitive_headers() {
         "the event-loop parser lost the case-insensitive header lookup: {out}"
     );
 }
+
+/// ADR 0031 step 4 — the cookie jar, explicit state a program threads through requests.
+///
+/// A server sets a session cookie AND attempts a supercookie (`Domain=.co.uk`); the jar
+/// stores the first and refuses the second to host-only; a later request through the jar
+/// carries the cookie back; a request WITHOUT the jar carries nothing (the isolation the
+/// explicit-state design buys); and `clear` empties it. The supercookie rule at its sharp
+/// point — a Domain that is a valid suffix of the host but IS a public suffix — is proven
+/// in the module's own unit tests, since 127.0.0.1 cannot exercise a real suffix.
+#[test]
+fn the_cookie_jar_stores_sends_and_isolates() {
+    use std::time::Duration;
+
+    let dir = std::env::temp_dir();
+    let ready = dir.join("helix_jar_srv.ready");
+    let _ = std::fs::remove_file(&ready);
+    let src_f = dir.join("helix_jar_srv.helix");
+    std::fs::write(
+        &src_f,
+        String::from(
+            "srv = listen(18345)\n@Q@up@Q@.write_to(@Q@@READY@@Q@)\nrange(0, 20).reduce(true, (acc, i) => do {\n  c = srv.accept()\n  q = c.request()\n  p = q.path\n  resp = if p == @Q@/login@Q@ then { status: 200, text: @Q@ok@Q@, headers: [(@Q@Set-Cookie@Q@, @Q@sid=abc; Path=/; HttpOnly@Q@), (@Q@Set-Cookie@Q@, @Q@evil=1; Domain=.co.uk@Q@)] }\n    else { status: 200, text: @Q@cookie={q.headers.get(@BQ@cookie@BQ@) ?? @BQ@NONE@BQ@}@Q@ }\n  c.respond(resp)\n  acc\n})\n",
+        )
+        .replace("@READY@", &ready.display().to_string())
+        .replace("@BQ@", "\\\"")
+        .replace("@Q@", "\""),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src_f)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the jar server");
+    let mut up = false;
+    for _ in 0..100 {
+        if ready.exists() {
+            up = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(up, "jar server never became ready");
+
+    let client = String::from(
+        "jar = cookie_jar()\nprint(jar.count())\nr1 = http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18345/login@Q@, jar: jar})\nprint(jar.count())\nprint(jar.cookies().map(c => @Q@{c.name}@{c.domain}@Q@))\nr2 = http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18345/check@Q@, jar: jar})\nprint(r2.body)\nr3 = http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18345/check@Q@})\nprint(r3.body)\njar.clear()\nprint(jar.count())\n",
+    )
+    .replace("@Q@", "\"");
+    let (out, err, code) = run_source(&client, &[], "jar_e2e");
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let l: Vec<&str> = out.lines().collect();
+    assert_eq!(l[0], "0", "a fresh jar is empty: {out}");
+    assert_eq!(l[1], "2", "login should have set two cookies: {out}");
+    // The supercookie fell back to the host, not `.co.uk`.
+    assert!(l[2].contains("sid@127.0.0.1"), "{out}");
+    assert!(l[2].contains("evil@127.0.0.1"), "the supercookie kept its .co.uk scope: {out}");
+    // The jar sent both cookies back.
+    assert!(l[3].contains("sid=abc") && l[3].contains("evil=1"), "the jar did not send its cookies: {out}");
+    // A request without the jar carried nothing — the isolation the design is for.
+    assert_eq!(l[4], "cookie=NONE", "a jar-less request leaked cookies: {out}");
+    assert_eq!(l[5], "0", "clear did not empty the jar: {out}");
+}

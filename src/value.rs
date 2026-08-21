@@ -753,6 +753,7 @@ impl fmt::Display for Value {
                 crate::serve::NetHandle::Listener(_) => write!(f, "<listener>"),
                 crate::serve::NetHandle::Conn { .. } => write!(f, "<connection>"),
                 crate::serve::NetHandle::HttpStream { .. } => write!(f, "<http-stream>"),
+                crate::serve::NetHandle::CookieJar(j) => write!(f, "<cookie-jar: {} cookies>", j.len()),
             },
             Value::PyObject(h) => write!(f, "{}", h.repr()),
             // A tracked value prints as its forward value (the graph stays hidden).

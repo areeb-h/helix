@@ -61,7 +61,7 @@ pub fn category_of(name: &str) -> &'static str {
         // Encoding.
         "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" | "url_encode"
         | "url_decode" => "encoding",
-        "parse_cookies" | "parse_set_cookie" => "http",
+        "parse_cookies" | "parse_set_cookie" | "cookie_jar" => "http",
         // Reproducible random.
         "random" | "randn" | "random_int" => "random",
         // Statistics, ML metrics, regression.
@@ -208,6 +208,9 @@ pub static BUILTINS: &[BuiltinDef] = &[
     // Cookies, both directions — pure parsing of a header value.
     BuiltinDef { path: "parse_cookies", pure: true },
     BuiltinDef { path: "parse_set_cookie", pure: true },
+    // A fresh cookie jar. NOT pure: two calls yield two distinct, independently
+    // mutable jars, so it must not be memoized.
+    BuiltinDef { path: "cookie_jar", pure: false },
     // AES-256-GCM. keygen/encrypt draw fresh randomness (NOT memoizable); decrypt is pure.
     BuiltinDef { path: "aes_keygen", pure: false },
     BuiltinDef { path: "aes_encrypt", pure: false },
@@ -339,6 +342,8 @@ pub static NET_METHODS: &[&str] = &[
     "accept", "poll", "request", "respond", "sse", "send", "next", "status", "close",
     // Cooperative event-loop server (keep-alive, one thread serves many connections):
     "accept_poll", "poll_request", "is_open", "wait",
+    // Cookie jar (the `Net` value also carries a jar): inspect and clear.
+    "cookies", "clear",
 ];
 
 /// Look up a builtin by its dotted path.
