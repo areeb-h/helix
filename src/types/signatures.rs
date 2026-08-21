@@ -489,6 +489,27 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::String)
         }
+        // A Dict of name -> value; `Unknown` because a Dict is opaque to the checker.
+        "parse_cookies" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            if !matches!(args[0], Type::String | Type::Unknown | Type::Missing) {
+                return Err(type_err(name, "a string", &args[0], line, col));
+            }
+            Ok(Type::Unknown)
+        }
+        // The record shape is fixed except for the optional attributes, so it stays
+        // `Unknown` rather than claiming fields a given header may not carry.
+        "parse_set_cookie" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            if !matches!(args[0], Type::String | Type::Unknown | Type::Missing) {
+                return Err(type_err(name, "a string", &args[0], line, col));
+            }
+            Ok(Type::Unknown)
+        }
         "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" | "url_encode"
         | "url_decode" => {
             if args.len() != 1 {

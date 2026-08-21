@@ -2787,6 +2787,75 @@ impl Parser {
                     return Ok(Expr::RecordUpdate { base: Box::new(base), fields, line: l, col: c });
                 }
                 let mut fields: Vec<(String, Expr)> = Vec::new();
+                // A QUOTED key makes this a DICT literal rather than a record: a record
+                // field is a name, and the maps people actually write — HTTP headers,
+                // JSON objects, lookup tables transcribed from a document — have keys
+                // that are not names. `{"Content-Type": "text/html"}` had no spelling
+                // at all before this; it was `[("Content-Type", "text/html")].to_dict()`,
+                // a constructor shaped like a fold.
+                //
+                // Desugars to that same `.to_dict()` call, so the engines and the
+                // checker need to know nothing about it.
+                if matches!(self.peek(), Tok::Str(_)) {
+                    let mut entries: Vec<Expr> = Vec::new();
+                    let mut seen: Vec<String> = Vec::new();
+                    loop {
+                        let (kl, kc) = self.pos();
+                        let key = match self.peek().clone() {
+                            Tok::Str(k) => {
+                                self.advance();
+                                k
+                            }
+                            other => {
+                                return Err(HelixError::new(
+                                    format!(
+                                        "expected a quoted key in this dict, found {}",
+                                        other.describe()
+                                    ),
+                                    kl,
+                                    kc,
+                                )
+                                .hint(
+                                    "a brace with quoted keys is a dict — every key must be \
+                                     quoted. For a record, use bare names: `{name: \"Ada\"}`.",
+                                ))
+                            }
+                        };
+                        // A duplicate is a typo you can see, so it is refused here rather
+                        // than silently resolved last-wins as `to_dict` would.
+                        if seen.contains(&key) {
+                            return Err(HelixError::new(
+                                format!("duplicate key `{}` in dict literal", key),
+                                kl,
+                                kc,
+                            )
+                            .hint("each key may appear once; add or replace one with `d.insert(k, v)`."));
+                        }
+                        seen.push(key.clone());
+                        self.eat(&Tok::Colon, &format!("after key `{}`", key)).map_err(|e| {
+                            e.hint("dicts look like `{\"a\": 1, \"b\": 2}`.")
+                        })?;
+                        let value = self.expr()?;
+                        entries.push(Expr::Tuple(vec![Expr::Str(key), value]));
+                        if matches!(self.peek(), Tok::Comma) {
+                            self.advance();
+                            if matches!(self.peek(), Tok::RBrace) {
+                                break; // trailing comma
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    self.eat(&Tok::RBrace, "to close the dict")?;
+                    return Ok(Expr::Method {
+                        recv: Box::new(Expr::Array(entries)),
+                        name: "to_dict".to_string(),
+                        args: vec![],
+                        named: vec![],
+                        line: l,
+                        col: c,
+                    });
+                }
                 if !matches!(self.peek(), Tok::RBrace) {
                     loop {
                         // A spread is only valid as the FIRST element (there is one base).
@@ -2802,6 +2871,22 @@ impl Parser {
                         // Field names may be keywords (`match`, `in`, `if`, …) — they
                         // are contextual here, never ambiguous before a `:`.
                         let (kl, kc) = self.pos();
+                        // A quoted key here means the two brace forms got mixed: the
+                        // first key was a bare name, so this is a record, and a record
+                        // field is a name. Say what the two forms are — the reader is
+                        // one keystroke from either.
+                        if matches!(self.peek(), Tok::Str(_)) {
+                            return Err(HelixError::new(
+                                "this brace began as a record, so its keys must be bare names",
+                                kl,
+                                kc,
+                            )
+                            .hint(
+                                "a brace is one of two things: a RECORD with bare-name fields \
+                                 (`{name: \"Ada\"}`), or a DICT with quoted keys \
+                                 (`{\"Content-Type\": \"text/html\"}`). Quote every key, or none.",
+                            ));
+                        }
                         let key = self.member_name("as a record field name")?;
                         // A duplicate field would break `==`'s substitutability
                         // (order-independent equality assumes one entry per key:

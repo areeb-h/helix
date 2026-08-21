@@ -61,6 +61,7 @@ pub fn category_of(name: &str) -> &'static str {
         // Encoding.
         "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" | "url_encode"
         | "url_decode" => "encoding",
+        "parse_cookies" | "parse_set_cookie" => "http",
         // Reproducible random.
         "random" | "randn" | "random_int" => "random",
         // Statistics, ML metrics, regression.
@@ -204,6 +205,9 @@ pub static BUILTINS: &[BuiltinDef] = &[
     // Percent-encoding (RFC 3986) — pure, and the pair a URL cannot be built without.
     BuiltinDef { path: "url_encode", pure: true },
     BuiltinDef { path: "url_decode", pure: true },
+    // Cookies, both directions — pure parsing of a header value.
+    BuiltinDef { path: "parse_cookies", pure: true },
+    BuiltinDef { path: "parse_set_cookie", pure: true },
     // AES-256-GCM. keygen/encrypt draw fresh randomness (NOT memoizable); decrypt is pure.
     BuiltinDef { path: "aes_keygen", pure: false },
     BuiltinDef { path: "aes_encrypt", pure: false },

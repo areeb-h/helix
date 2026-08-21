@@ -551,6 +551,105 @@ impl super::Interp {
                 let hex: String = tag.iter().map(|b| format!("{:02x}", b)).collect();
                 Ok(Value::Str(Rc::new(hex)))
             }
+            // A `Cookie:` request header — `name=value; name2=value2` — as a Dict.
+            // Pairs are separated by `;` (never `,`), a value may be quoted, and
+            // surrounding spaces are not part of either half.
+            "parse_cookies" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Missing => Ok(Value::Missing),
+                    Value::Str(s) => {
+                        let mut map = std::collections::BTreeMap::new();
+                        for part in s.split(';') {
+                            let part = part.trim();
+                            if part.is_empty() {
+                                continue;
+                            }
+                            // A cookie with no `=` is not a pair; skip it rather than
+                            // invent a name for it.
+                            if let Some((k, v)) = part.split_once('=') {
+                                let k = k.trim();
+                                if k.is_empty() {
+                                    continue;
+                                }
+                                let v = v.trim().trim_matches('"');
+                                map.insert(
+                                    crate::value::DictKey::Str(Rc::new(k.to_string())),
+                                    Value::Str(Rc::new(v.to_string())),
+                                );
+                            }
+                        }
+                        Ok(Value::Dict(Rc::new(map)))
+                    }
+                    other => Err(type_err("parse_cookies", "a string", other, line, col)),
+                }
+            }
+            // One `Set-Cookie:` response header as a record: the pair, plus the
+            // attributes that decide whether it is stored and sent back.
+            //
+            // Attribute names are matched case-insensitively (RFC 6265 says they are),
+            // `Secure` and `HttpOnly` are flags with no value, and everything not
+            // recognised is ignored rather than guessed at. `max_age` is an Int because
+            // it is a number of seconds; `expires` stays the raw string, since parsing
+            // an HTTP-date is a bigger question than this and the raw value is what a
+            // caller forwards anyway.
+            "parse_set_cookie" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Missing => Ok(Value::Missing),
+                    Value::Str(s) => {
+                        let mut parts = s.split(';');
+                        let first = parts.next().unwrap_or("").trim();
+                        let (cname, cvalue) = match first.split_once('=') {
+                            Some((k, v)) => (k.trim().to_string(), v.trim().trim_matches('"').to_string()),
+                            None => {
+                                return Err(HelixError::new(
+                                    "`parse_set_cookie` needs a `name=value` pair before the first `;`",
+                                    line,
+                                    col,
+                                )
+                                .hint("e.g. `parse_set_cookie(\"id=abc; Path=/; Secure\")`."))
+                            }
+                        };
+                        let mut fields: Vec<(Symbol, Value)> = vec![
+                            (Symbol::intern("name"), Value::Str(Rc::new(cname))),
+                            (Symbol::intern("value"), Value::Str(Rc::new(cvalue))),
+                        ];
+                        let mut secure = false;
+                        let mut http_only = false;
+                        for attr in parts {
+                            let attr = attr.trim();
+                            if attr.is_empty() {
+                                continue;
+                            }
+                            let (k, v) = match attr.split_once('=') {
+                                Some((k, v)) => (k.trim().to_ascii_lowercase(), v.trim().to_string()),
+                                None => (attr.to_ascii_lowercase(), String::new()),
+                            };
+                            match k.as_str() {
+                                "secure" => secure = true,
+                                "httponly" => http_only = true,
+                                "path" => fields.push((Symbol::intern("path"), Value::Str(Rc::new(v)))),
+                                "domain" => fields.push((Symbol::intern("domain"), Value::Str(Rc::new(v)))),
+                                // Kept verbatim: an HTTP-date contains a comma, which is
+                                // why `Set-Cookie` is not a comma-combinable field, and
+                                // parsing it is a separate question from reading a cookie.
+                                "expires" => fields.push((Symbol::intern("expires"), Value::Str(Rc::new(v)))),
+                                "samesite" => fields.push((Symbol::intern("same_site"), Value::Str(Rc::new(v)))),
+                                "max-age" => {
+                                    let secs: i64 = v.trim().parse().unwrap_or(0);
+                                    fields.push((Symbol::intern("max_age"), Value::Int(secs)));
+                                }
+                                _ => {}
+                            }
+                        }
+                        fields.push((Symbol::intern("secure"), Value::Bool(secure)));
+                        fields.push((Symbol::intern("http_only"), Value::Bool(http_only)));
+                        Ok(Value::Record(Rc::new(fields)))
+                    }
+                    other => Err(type_err("parse_set_cookie", "a string", other, line, col)),
+                }
+            }
             // Percent-encoding, RFC 3986. Encodes BYTES, not characters: `é` is two
             // UTF-8 bytes and becomes `%C3%A9`, which a per-character mapping cannot
             // express. Only the unreserved set survives; uppercase hex, as the RFC

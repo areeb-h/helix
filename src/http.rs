@@ -10,15 +10,36 @@
 #[cfg(feature = "http")]
 pub type Fetched = (i64, String, Vec<(String, String)>);
 
+/// The process-wide client, built once.
+///
+/// A `ureq::Agent` IS the connection pool: it holds the keep-alive connections and the
+/// TLS sessions. Building one per call — which every function here used to do — opens a
+/// fresh TCP connection and redoes the TLS handshake for every request, then discards
+/// it. For the shape this client is actually used in (a loop against one API host) that
+/// handshake dominates the request, so the pool is the difference between talking to a
+/// server and re-introducing yourself to it every time.
+///
+/// Cloning an `Agent` is cheap and shares the same pool, which is how ureq intends it to
+/// be used across threads.
+#[cfg(feature = "http")]
+fn agent() -> ureq::Agent {
+    use std::sync::OnceLock;
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT
+        .get_or_init(|| {
+            // Connect/read timeouts so a hung or slow-loris server cannot stall the
+            // program indefinitely. (`into_string` already caps a body at ureq's 10 MiB.)
+            ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(30))
+                .timeout_read(std::time::Duration::from_secs(120))
+                .build()
+        })
+        .clone()
+}
+
 #[cfg(feature = "http")]
 pub fn get(url: &str) -> Result<(i64, String), String> {
-    // Connect/read timeouts so a hung or slow-loris server can't stall the program
-    // indefinitely. (`into_string` already caps the body at ureq's 10 MiB limit.)
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(30))
-        .timeout_read(std::time::Duration::from_secs(120))
-        .build();
-    match agent.get(url).call() {
+    match agent().get(url).call() {
         Ok(resp) => {
             let status = resp.status() as i64;
             let body = resp
@@ -42,11 +63,7 @@ pub fn get(url: &str) -> Result<(i64, String), String> {
 /// caller builds it (typically `record.to_json()` for a JSON API, the default content type).
 #[cfg(feature = "http")]
 pub fn post(url: &str, body: &str, content_type: &str) -> Result<(i64, String), String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(30))
-        .timeout_read(std::time::Duration::from_secs(120))
-        .build();
-    match agent.post(url).set("Content-Type", content_type).send_string(body) {
+    match agent().post(url).set("Content-Type", content_type).send_string(body) {
         Ok(resp) => {
             let status = resp.status() as i64;
             let rbody = resp
@@ -73,11 +90,7 @@ pub fn request(
     body: &str,
     headers: &[(String, String)],
 ) -> Result<Fetched, String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(30))
-        .timeout_read(std::time::Duration::from_secs(120))
-        .build();
-    let mut req = agent.request(method, url);
+    let mut req = agent().request(method, url);
     for (k, v) in headers {
         req = req.set(k, v);
     }

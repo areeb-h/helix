@@ -6598,3 +6598,109 @@ fn a_dict_spreads_into_a_record() {
         assert!(err.contains("must be a record or a dict"), "{name}: {err}");
     }
 }
+
+/// `{"Content-Type": "application/json"}` — a QUOTED key makes a brace a Dict; a bare
+/// name still makes it a Record. Two complaints turn out to be one: a record field is a
+/// NAME, every HTTP header name has a hyphen, so a header map could only be written
+/// `[("Content-Type", "application/json")].to_dict()` — a constructor shaped like a
+/// fold, which is the same thing the review counted 17 times for lookup tables.
+///
+/// Strictly additive: `{"a": 1}` was an ERROR before this ("expected a name as a record
+/// field name, found a string"), so nothing that ran can change meaning. It desugars to
+/// that same `.to_dict()`, so the engines and the checker learn nothing new.
+#[test]
+fn a_quoted_key_makes_a_brace_a_dict() {
+    let src = "print({\"Content-Type\": \"application/json\", \"X-Req-Id\": \"7\"})\n\
+               print({name: \"Ada\", age: 41})\n\
+               print({})\n\
+               print({\"a\": {\"b\": 1}})\n\
+               x = 2\n\
+               print({\"a\": x * 3, \"b\": [1, 2]})\n\
+               print({\"a\": 1,})\n\
+               h = {\"Content-Type\": \"text/html\"}\n\
+               print(h.get(\"Content-Type\"))\n\
+               print({\"model\": \"x\", \"n\": 2}.to_json())\n\
+               print({...h, extra: 1})\n";
+    let want = "{\"Content-Type\" => \"application/json\", \"X-Req-Id\" => \"7\"}\n\
+                {name: \"Ada\", age: 41}\n\
+                {}\n\
+                {\"a\" => {\"b\" => 1}}\n\
+                {\"a\" => 6, \"b\" => [1, 2]}\n\
+                {\"a\" => 1}\n\
+                text/html\n\
+                {\"model\":\"x\",\"n\":2}\n\
+                {Content-Type: \"text/html\", extra: 1}\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("dictlit_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+
+    // A duplicate key is a typo you can see, so it is refused rather than resolved
+    // last-wins; and mixing the two brace forms names both of them.
+    for (name, env) in ENGINES {
+        let (_, err, code) =
+            run_source("print({\"a\": 1, \"a\": 2})\n", env, &format!("dictlit_dup_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains("duplicate key `a` in dict literal"), "{name}: {err}");
+
+        let (_, err, code) =
+            run_source("print({name: 1, \"b\": 2})\n", env, &format!("dictlit_mixed_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains("began as a record"), "{name}: {err}");
+        assert!(err.contains("Quote every key, or none"), "{name}: {err}");
+    }
+}
+
+/// Cookies, both directions. These are builtins rather than a Helix-side helper because
+/// the naive version is WRONG in a way that looks right: an `Expires` attribute contains
+/// a COMMA (`Expires=Wed, 09 Jun 2027 10:18:14 GMT`), so splitting a `Set-Cookie` on `,`
+/// — the instinct, since most header fields are comma-lists — tears the date in half.
+/// That case is the third assertion here, and it is why this is not string code.
+#[test]
+fn cookies_parse_in_both_directions() {
+    let src = "print(parse_cookies(\"sid=abc; theme=dark; empty=\"))\n\
+               print(parse_cookies(\"a=\\\"q v\\\"; b=2\"))\n\
+               c = parse_set_cookie(\"sid=abc123; Path=/; Domain=example.com; Secure; HttpOnly; SameSite=Lax; Max-Age=3600\")\n\
+               print(c.name, c.value)\n\
+               print(c.path, c.domain, c.same_site, c.max_age)\n\
+               print(c.secure, c.http_only)\n\
+               exp = parse_set_cookie(\"id=1; Expires=Wed, 09 Jun 2027 10:18:14 GMT; Path=/\")\n\
+               print(exp.expires)\n\
+               print(exp.path)\n\
+               m = parse_set_cookie(\"a=b\")\n\
+               print(m.name, m.value, m.secure, m.http_only)\n\
+               i = parse_set_cookie(\"a=b; secure; HTTPONLY; path=/x\")\n\
+               print(i.secure, i.http_only, i.path)\n\
+               print(parse_cookies(\"a=1; b=2\").items().map((k, v) => \"{k}={v}\").join(\"; \"))\n\
+               print(parse_cookies(missing))\n\
+               print(parse_set_cookie(missing))\n";
+    let want = "{\"empty\" => \"\", \"sid\" => \"abc\", \"theme\" => \"dark\"}\n\
+                {\"a\" => \"q v\", \"b\" => \"2\"}\n\
+                sid abc123\n\
+                / example.com Lax 3600\n\
+                true true\n\
+                Wed, 09 Jun 2027 10:18:14 GMT\n\
+                /\n\
+                a b false false\n\
+                true true /x\n\
+                a=1; b=2\n\
+                missing\n\
+                missing\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("cookies_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+
+    // A Set-Cookie with no `name=value` before the first `;` is not a cookie.
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(
+            "r = try (parse_set_cookie(\"justflag\"))\nprint(r.error)\n",
+            env,
+            &format!("cookies_bad_{name}"),
+        );
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert!(out.contains("needs a `name=value` pair"), "{name}: {out}");
+    }
+}
