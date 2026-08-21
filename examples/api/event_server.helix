@@ -2,11 +2,13 @@
 # interleaved, so no client can pin the server (unlike a blocking accept→respond loop).
 #   helix run examples/api/event_server.helix   # then: curl http://127.0.0.1:8080/
 #
-# Measured ~83k req/s on one core (~1.7x the blocking conn-per-request server), zero
-# starvation, and ~0.3% CPU when idle — because `wait` blocks in poll(2) until a
-# connection is ready rather than busy-spinning. The loop is tail-recursive, so it runs
-# in constant space (TCO). For the simple case, the blocking accept/respond loop is fine;
-# reach for this when you need concurrent keep-alive throughput.
+# Measured ~72k req/s on one core at full clock (~41k when the host power-manages an
+# idle package down), zero starvation, and ~0.3% CPU when idle — because `wait` blocks
+# in poll(2) until a connection is ready rather than busy-spinning. The loop is
+# tail-recursive, so it runs in constant space (TCO). And it shards: `listen(8080, 3)`
+# runs three share-nothing copies of this same loop (SO_REUSEPORT) — measured 317–336k
+# req/s on this 6-core box, ~2x a node 24 cluster at equal workers. For the simple case,
+# the blocking accept/respond loop is fine; reach for this when you need throughput.
 #
 # The primitives:
 #   l.accept_poll()          non-blocking accept -> a persistent keep-alive connection (or missing)

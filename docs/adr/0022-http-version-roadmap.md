@@ -95,11 +95,29 @@ idle** (a busy-spin without a readiness primitive pinned 100%; any coarse `sleep
 crashed throughput to ~20k — `poll(2)` is what makes it both fast and idle-cheap). Memory is
 flat (16 MB) via TCO.
 
-Known ceiling: `poll(2)` is O(N) in the connection set, so this won't scale linearly across
-shards the way `epoll`/an async reactor would (sharded topped ~90k here) — that final step is
-the Stage 2/3 async stack. But as an in-model, no-new-deps Stage 1, the cooperative event loop
-is a real, shipped win: the blocking `serve_loop` (conn-per-request) stays the simple default,
-and `serve_events` (the cooperative loop) is the high-throughput option.
+**Correction (2026-08-22): the event loop DOES scale near-linearly across shards.** The
+earlier "sharded topped ~90k" was a measurement artifact, not a ceiling: this box's host
+power management under-clocks a mostly-idle package, so a single busy server thread runs
+at ~60% of achievable clocks and reads ~40% low (41k alone -> 71k with four busy-loop
+companions, same server, same second). Multi-shard runs self-boost — every added shard
+both adds a core and raises the clock. Re-measured on the gate binary (localhost, oha,
+100% success, body verified, listeners asserted per run):
+
+| event loop x shards | req/s | p50 / p99 |
+|---|---|---|
+| 1 shard (idle package) | 41–50k | 1.0 ms / — |
+| 1 shard (package busy) | ~72k | — |
+| 2 shards | ~191–200k | — |
+| **3 shards** | **317–336k** (3 runs) | **0.29 ms / 0.62 ms** |
+| 4+ shards | ~334k (plateau: 6 cores shared with the load generator) | — |
+| 3 shards, conc=300 | 318k, 0 failures | — |
+
+Node 24 on the same box, same harness: 39k single, 167k with 3 cluster workers — the
+sharded event loop is ~2x node at equal worker count. `poll(2)`'s O(N) cost is real but
+irrelevant at these connection counts; the per-shard cost is the interpreted tick
+(~10 µs/request at full clock). The async stack remains the road to HTTP/2/3, but
+HTTP/1.1 multi-core scaling is already here, in-model, no new deps: `listen(port, shards)`
+composed with the cooperative loop.
 
 ### Stage 2 — HTTP/2, and Stage 3 — HTTP/3, via an async stack
 
@@ -140,9 +158,10 @@ the parts that are the product, borrow the parts that are a decade of hardening.
   `is_open`/`wait`) is the high-throughput option — **83k on one core, zero starvation,
   ~0.3% idle CPU**, in-model, no new deps. Naive blocking keep-alive (which regressed) was
   reverted along the way.
-- **Ceiling:** `poll(2)` is O(N) in the connection set, so the cooperative loop doesn't scale
-  linearly across shards (topped ~90k here). Linear multi-core scaling + HTTP/2/3 is the async
-  stack below.
+- **Ceiling, corrected 2026-08-22:** the cooperative loop scales near-linearly across
+  shards after all — 3 shards measured 317–336k req/s (~2x node's cluster at equal
+  workers); the earlier ~90k reading was a host power-management artifact (see the
+  correction above). HTTP/2/3 still needs the async stack; raw HTTP/1.1 throughput does not.
 - **Later, as a major version:** Stages 2–3 behind a feature flag, on Tokio + hyper +
   Quinn, TLS via rustls, sandbox-preserving. Never a hand-rolled QUIC/TLS/H2 core. The
   async stack gets HTTP/1.1 keep-alive, HTTP/2, and HTTP/3 all at once.
