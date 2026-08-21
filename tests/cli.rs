@@ -7012,3 +7012,78 @@ fn headers_value_semantics() {
         assert!(out.contains("a Headers has no method `nosuch`"), "{name}: {out}");
     }
 }
+
+/// ADR 0031 step 2 — per-request limits, each an ERROR that names itself.
+///
+/// `total_ms` is the limit that bounds a hostile server: a slow-loris keeps every
+/// individual read inside the read timeout, and only an overall deadline ends it.
+/// `max_body` caps the response, and hitting it must be an error naming the cap —
+/// never a truncated body under a 200. Building this found the quieter version of
+/// exactly that: `collect_response` used `into_string().unwrap_or_default()`, so a
+/// body-read failure (too big, invalid UTF-8, a mid-body disconnect) became an EMPTY
+/// body under an intact status — complete-looking, and wrong.
+///
+/// The server stalls 3 s before answering its first request and sends 50 KB on its
+/// second, so both limits genuinely fire; the third request runs with no limits and
+/// must be untouched by any of it.
+#[test]
+fn request_limits_error_by_name() {
+    use std::time::Duration;
+
+    let dir = std::env::temp_dir();
+    let ready = dir.join("helix_limits_srv.ready");
+    let _ = std::fs::remove_file(&ready);
+    let src_f = dir.join("helix_limits_srv.helix");
+    let server = String::from(
+        "srv = listen(18261)\n@Q@up@Q@.write_to(@Q@@READY@@Q@)\nc = srv.accept()\nq = c.request()\nsleep(3000)\nc.respond({ status: 200, text: @Q@slow@Q@ })\nc2 = srv.accept()\nr2 = c2.request()\nc2.respond({ status: 200, text: @Q@x@Q@.repeat(50000) })\nc3 = srv.accept()\nr3 = c3.request()\nc3.respond({ status: 200, text: @Q@quick@Q@ })\n",
+    )
+    .replace("@READY@", &ready.display().to_string())
+    .replace("@Q@", "\"");
+    std::fs::write(&src_f, server).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src_f)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the server");
+    let mut up = false;
+    for _ in 0..100 {
+        if ready.exists() {
+            up = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(up, "server never became ready");
+
+    let client = String::from(
+        "t0 = try (http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18261/slow@Q@, total_ms: 400}))\nprint(t0.ok)\nprint(t0.error)\nt1 = try (http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18261/big@Q@, max_body: 1000}))\nprint(t1.ok)\nprint(t1.error)\nt2 = http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18261/fine@Q@})\nprint(t2.status, t2.body)\n",
+    )
+    .replace("@Q@", "\"");
+    // Transport is engine-independent (per the Headers pins); one engine suffices.
+    let (out, err, code) = run_source(&client, &[], "limits_e2e");
+    let _ = child.wait();
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "false", "the stall must trip total_ms: {out}");
+    assert!(lines[1].contains("exceeded total_ms (400 ms)"), "{out}");
+    assert_eq!(lines[2], "false", "the big body must trip max_body: {out}");
+    assert!(lines[3].contains("exceeds max_body (1000 bytes)"), "{out}");
+    assert!(lines[3].contains("http_stream"), "the error should name the way out: {out}");
+    assert_eq!(lines[4], "200 quick", "a request with no limits must be untouched: {out}");
+
+    // A limit field with a non-positive or non-integer value is a clean error naming
+    // the FIELD — validated before any connection is attempted (the host is fake).
+    let bad = String::from(
+        "r = try (http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:1/x@Q@, total_ms: 0}))\nprint(r.error)\nq = try (http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:1/x@Q@, max_body: @Q@big@Q@}))\nprint(q.error)\n",
+    )
+    .replace("@Q@", "\"");
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(&bad, env, &format!("limits_bad_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert!(out.contains("`total_ms` must be a positive integer"), "{name}: {out}");
+        assert!(out.contains("`max_body` must be a positive integer"), "{name}: {out}");
+        assert!(!out.contains("Connection"), "{name}: validated too late: {out}");
+    }
+}

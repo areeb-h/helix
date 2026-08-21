@@ -379,8 +379,10 @@ impl super::Interp {
                 let (method, url, body, hdrs) = http_request_fields(&args[0], line, col)?;
                 #[cfg(feature = "http")]
                 {
-                    let (status, rbody, rhdrs) = crate::http::request(&method, &url, &body, &hdrs)
-                        .map_err(|e| HelixError::new(e, line, col))?;
+                    let limits = http_limits(&args[0], line, col)?;
+                    let (status, rbody, rhdrs) =
+                        crate::http::request(&method, &url, &body, &hdrs, &limits)
+                            .map_err(|e| HelixError::new(e, line, col))?;
                     // A Headers value, not a Dict: lookup is case-insensitive (one
                     // program sees `Content-Type` from HTTP/1.1 and `content-type`
                     // from HTTP/2), wire order is kept, and a repeated name —
@@ -2463,6 +2465,34 @@ fn http_request_fields(req: &Value, line: usize, col: usize) -> Result<HttpReqPa
 /// integer per-chunk read deadline in milliseconds. Absent → `None` (no read timeout). A
 /// non-integer or non-positive value is a clean error rather than a silently-ignored field.
 #[cfg_attr(not(feature = "http"), allow(dead_code))]
+/// The optional limit fields of an `http_request` record (ADR 0031 §3): `total_ms`,
+/// `connect_ms`, `read_ms` (positive milliseconds) and `max_body` (positive bytes).
+/// Absent fields keep the defaults the client has always used; a present field with a
+/// non-positive or non-integer value is a clean error naming the field, not a
+/// silently-ignored one.
+#[cfg(feature = "http")]
+fn http_limits(req: &Value, line: usize, col: usize) -> Result<crate::http::Limits, HelixError> {
+    let Value::Record(fields) = req else { return Ok(Default::default()) };
+    let pos = |name: &str| -> Result<Option<u64>, HelixError> {
+        match fields.iter().find(|(s, _)| s.as_str() == name).map(|(_, v)| v) {
+            None | Some(Value::Missing) => Ok(None),
+            Some(Value::Int(n)) if *n > 0 => Ok(Some(*n as u64)),
+            Some(_) => Err(HelixError::new(
+                format!("`{name}` must be a positive integer"),
+                line,
+                col,
+            )
+            .hint("timeouts are milliseconds, `max_body` is bytes — e.g. `total_ms: 5000`.")),
+        }
+    };
+    Ok(crate::http::Limits {
+        total_ms: pos("total_ms")?,
+        connect_ms: pos("connect_ms")?,
+        read_ms: pos("read_ms")?,
+        max_body: pos("max_body")?.map(|n| n as usize),
+    })
+}
+
 fn http_timeout_ms(req: &Value, line: usize, col: usize) -> Result<Option<u64>, HelixError> {
     let Value::Record(fields) = req else { return Ok(None) };
     match fields.iter().find(|(s, _)| s.as_str() == "timeout_ms").map(|(_, v)| v) {
