@@ -6433,3 +6433,48 @@ fn ufcs_never_changes_a_call_that_already_resolved() {
         assert!(err.contains("`area` expects 1 argument, got 2"), "{name}: {err}");
     }
 }
+
+/// `#[ … ]#` — a comment that spans lines and NESTS, so a region that already contains
+/// one can be commented out whole. Every module header in the reviewed corpus was a
+/// 20-line run of `#`, across 117 modules.
+///
+/// The interesting pin is `statements_survive`: `lex` drops comments, and newlines are
+/// significant here, so a block that crossed lines had to leave its break behind or it
+/// would have joined the statements either side of it — a comment changing what a
+/// program means, which is the one thing a comment may never do.
+#[test]
+fn block_comments_span_lines_and_nest() {
+    let cases = [
+        ("header", "#[\n  A module header.\n  Several lines.\n]#\nprint(1)\n", "1\n"),
+        ("statements_survive", "a = 1\n#[\n  spanning\n  lines\n]#\nb = 2\nprint(a + b)\n", "3\n"),
+        ("inline", "print(1) #[ trailing ]#\nprint(2)\n", "1\n2\n"),
+        ("mid_expression", "print(1 + #[ why ]# 2)\n", "3\n"),
+        ("nesting", "#[ outer #[ inner ]# still outer ]#\nprint(7)\n", "7\n"),
+        ("commenting_out", "#[\nprint(\"never\")\n#[ nested ]#\n]#\nprint(\"only this\")\n", "only this\n"),
+        ("empty", "#[]#\nprint(3)\n", "3\n"),
+        // Untouched neighbours: a line comment whose text merely starts with `[`, a doc
+        // comment (the char after `#` is another `#`), and the sequence inside a string.
+        ("line_comment_with_bracket", "# see #[1] in the paper\nprint(9)\n", "9\n"),
+        ("in_a_string", "print(\"#[ not a comment ]#\")\n", "#[ not a comment ]#\n"),
+    ];
+    for (name, env) in ENGINES {
+        for (tag, src, want) in &cases {
+            let (out, err, code) = run_source(src, env, &format!("block_{tag}_{name}"));
+            assert_eq!(code, Some(0), "{name}/{tag}: {err}");
+            assert_eq!(out, *want, "{name}/{tag}");
+        }
+        // Unterminated is a clean error at the line the block OPENED on — `line` has
+        // walked to the end of the file by then, and pointing there would be useless.
+        let (_, err, code) =
+            run_source("x = 1\n#[ never closed\nprint(1)\n", env, &format!("block_unterm_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains("unterminated block comment"), "{name}: {err}");
+        assert!(err.contains(":2:1"), "{name}: should point at the opener: {err}");
+
+        // Positions after a multi-line block are still right.
+        let (_, err, code) =
+            run_source("#[\n\n\n]#\nprint(nope)\n", env, &format!("block_lines_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains(":5:7"), "{name}: line count drifted: {err}");
+    }
+}

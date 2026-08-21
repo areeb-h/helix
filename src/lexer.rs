@@ -22,7 +22,18 @@ use crate::token::{StrSeg, Tok, Token};
 pub fn lex(src: &str) -> Result<Vec<Token>, HelixError> {
     let raw = lex_trivia(src)?;
     Ok(cook_newlines(
-        raw.into_iter().filter(|t| !matches!(t.tok, Tok::Comment(_))).collect(),
+        raw.into_iter()
+            .filter_map(|t| match &t.tok {
+                // A BLOCK comment that crossed lines leaves its break behind. Newlines
+                // are significant here, so dropping the token whole would join the
+                // statements either side of it — the one way a comment could change
+                // what a program means. `lex_trivia` keeps the comment intact and adds
+                // nothing, because that view is `helix fmt`'s and must be the file.
+                Tok::Comment(c) if c.contains('\n') => Some(Token { tok: Tok::Newline, ..t }),
+                Tok::Comment(_) => None,
+                _ => Some(t),
+            })
+            .collect(),
     ))
 }
 
@@ -110,6 +121,51 @@ pub fn lex_trivia(src: &str) -> Result<Vec<Token>, HelixError> {
                 i += 1;
                 line += 1;
                 col = 1;
+            }
+            // `#[ … ]#` — a comment that spans lines, and NESTS, so a region that
+            // already contains one can be commented out whole. Checked before the
+            // line-comment arm; `##[` is still a doc comment, because the character
+            // after `#` is another `#`.
+            '#' if i + 1 < n && chars[i + 1] == '[' => {
+                let from = i;
+                let (open_line, open_col) = (line, start_col);
+                let mut depth = 0usize;
+                loop {
+                    if i >= n {
+                        return Err(HelixError::new(
+                            "unterminated block comment",
+                            open_line,
+                            open_col,
+                        )
+                        .hint("a `#[` block comment is closed by `]#`; they nest, so every `#[` needs one."));
+                    }
+                    if chars[i] == '#' && i + 1 < n && chars[i + 1] == '[' {
+                        depth += 1;
+                        i += 2;
+                        col += 2;
+                    } else if chars[i] == ']' && i + 1 < n && chars[i + 1] == '#' {
+                        depth -= 1;
+                        i += 2;
+                        col += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else if chars[i] == '\n' {
+                        line += 1;
+                        col = 1;
+                        i += 1;
+                    } else {
+                        i += 1;
+                        col += 1;
+                    }
+                }
+                // Report the comment at the line it OPENED on: `line` has walked to the
+                // close by now, and a diagnostic pointing at a block's last line would
+                // be pointing at the wrong place.
+                let closed_at = line;
+                line = open_line;
+                push!(Tok::Comment(chars[from..i].iter().collect()), open_col);
+                line = closed_at;
             }
             '#' => {
                 // comment to end of line — kept as a token here, dropped by `lex`

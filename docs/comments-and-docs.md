@@ -1,15 +1,48 @@
 # Comments and documentation
 
-Helix has two comment forms and one rule that makes them worth distinguishing:
+Helix has three comment forms and one rule that makes two of them worth distinguishing:
 
 | form | meaning | verified? |
 | --- | --- | --- |
 | `#` | an ordinary comment — a note to whoever reads the line | no |
 | `##` | a **doc comment** — describes the definition that follows | yes, if it contains examples |
+| `#[ … ]#` | a block comment — spans lines, and nests | no |
 
-Both are lexically identical (everything after `#` to end of line is skipped), so `##` costs
-nothing and breaks nothing. The distinction is a convention the *tooling* enforces, not a
-new syntax.
+`#` and `##` are lexically identical (everything after `#` to end of line is skipped), so
+`##` costs nothing and breaks nothing. The distinction is a convention the *tooling*
+enforces, not a new syntax.
+
+`#[ … ]#` is the one that is genuinely different: it runs until its matching `]#`, across
+as many lines as you like, and it **nests** — so a region that already contains a block
+comment can be commented out whole, which is the case the non-nesting version of this
+syntax gets wrong in most languages that have it.
+
+```
+#[
+  A module header, without a `#` on every line.
+  Several paragraphs, if it needs them.
+]#
+
+print(1 + #[ inline, too ]# 2)
+
+#[
+  Commenting out a region that already has comments:
+  #[ this inner one does not end the outer block ]#
+  print("not run")
+]#
+```
+
+Two details, both consequences of newlines meaning something in Helix:
+
+* A block comment that crossed lines **leaves its line break behind**. `a = 1` and `b = 2`
+  separated only by a multi-line comment stay two statements — a comment can never change
+  what a program means.
+* `helix fmt` reproduces a block comment byte for byte, including its indentation, and does
+  not add or remove a line around it. The author owns the vertical; fmt owns the horizontal.
+
+A doc comment is still `##` per line: `#[ ]#` blocks are not scanned for `>>>` examples,
+because a doc comment is attached to the definition it precedes and is read line by line by
+the extractor.
 
 ## The rule that makes this different from Python
 

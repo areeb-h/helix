@@ -520,6 +520,28 @@ mod tests {
         }
     }
 
+    /// A BLOCK comment is one token carrying its own newlines, so formatting must
+    /// reproduce it byte for byte AND must not gain a line. The second half is the
+    /// one that broke first: `lex` has to leave a newline behind when it drops a
+    /// multi-line comment (or the statements either side would join), and putting
+    /// that newline in `lex_trivia` — the view fmt reads — gave fmt two breaks where
+    /// the author wrote one, so it inserted a blank line after every block comment.
+    /// fmt owns the horizontal; this is the vertical.
+    #[test]
+    fn a_block_comment_survives_formatting_exactly() {
+        let src = "#[\n   indented   inside\n     deeper\n]#\nx=1\nprint(x)\n";
+        let out = format_source(src).expect("lexes");
+        assert!(out.starts_with("#[\n   indented   inside\n     deeper\n]#\n"), "{out}");
+        // The code after it is formatted, and no line was added.
+        assert_eq!(out, "#[\n   indented   inside\n     deeper\n]#\nx = 1\nprint(x)\n");
+        assert_eq!(format_source(&out).expect("lexes"), out, "not idempotent");
+        // Inline and nested forms keep their bytes too.
+        for s in ["print(1) #[ trailing ]#\n", "#[ outer #[ inner ]# out ]#\nprint(1)\n"] {
+            let o = format_source(s).expect("lexes");
+            assert_eq!(o, s, "block comment changed: {s}");
+        }
+    }
+
     /// Not one byte inside a comment may change, and not one comment may be lost. The token
     /// identity above is completely blind to this — `lex` drops comments — so without this
     /// assertion the formatter could quietly eat documentation and every other gate would
