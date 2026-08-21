@@ -209,6 +209,73 @@ with mechanisms so nothing has to be rediscovered:
   indexing landed with the bridge; the `.exp()` asymmetry is now its own entry
   below, because the bridge made it reachable by an ordinary spelling.)*
 
+### The syntax review (2026-08-20) — what remains, and what was declined
+
+From 13 libraries / 117 modules / 15,260 lines, every claim probed against the released
+binary. Tier 1 landed in `2d6788f`; the verbs it kept hand-rolling in `64bba1c`; range
+patterns in `a0bd498`. What follows is the rest, each with a decision rather than a
+wish, because an undecided list is what a later reader has to re-litigate.
+
+**Worth doing, in this order.**
+
+- **Block comments.** Only `#` line comments exist, so every one of 117 module headers
+  is a 20-line run of `#`. A lexer change (`lex_trivia` already carries comments as
+  trivia) plus `fmt` awareness — `fmt` re-emits comment bytes verbatim and never
+  reflows, so a block form is preserved by construction, but its indentation rule needs
+  stating. The largest purely cosmetic cost in the corpus.
+- **`group_by(key)` on arrays.** A DataFrame has `group`; an array has `frequencies`
+  (counts only) and nothing that groups elements by a computed key, so the corpus folds
+  a dict by hand. Distinct from `chunks`/`windows`, which group by POSITION. Returns
+  pairs, so it composes with the newly-widened `to_dict`.
+- **Dict spread into a record** — `{...d, k: v}` where `d` is a Dict is refused
+  ("`...` record update needs a record, got a Dict"), which forced branch-per-field code
+  in `llm/request.helix`. A record has fixed known fields and a dict has dynamic keys,
+  so this is a real question (what is the field set?), not an oversight — but the
+  one-way direction (dict → record, keys must be strings) is answerable.
+- **Destructuring in `let` and `fn` parameters.** `a, b = expr` works as a STATEMENT
+  and lambda parameters destructure tuples, so the gap is narrower than it looks:
+  `let [a, b] = …` and `fn f([a, b])`. Medium cost, and the statement form covers most
+  of what the corpus wanted.
+
+**Needs a decision before it can be built.**
+
+- **Record dot vs `.get` vs Dict dot.** `r.zz` raises, `r.get("zz")` yields `missing`,
+  and `d.a` on a Dict raises "has no field". Three behaviours to hold in mind whenever a
+  value might be either. Any change here is a semantics decision (is absence an error or
+  a `missing`?), and ADR 0020 already answered it for Dict INDEXING — `d[k]` yields
+  `missing`. Aligning dot with that is defensible; making it silent is also how a typo
+  stops being caught. Owner's call.
+- **Selective import** (`from status import reason`). `import status as st` works. This
+  is module-system surface and interacts with the parse-time import-name resolution
+  already recorded above as scope-blind.
+
+**Declined, with the reason, so it is not re-proposed.**
+
+- **`elif`** — `else if` already spells it. A second spelling for one concept is what
+  ADR 0003 exists to prevent, and the 162 ladder arms wanted the TABLE (now available as
+  range patterns), not a shorter ladder.
+- **`fold` as an alias for `reduce`**, **`each`** alongside `map` — same rule. One verb
+  per concept; an alias is a second way to say the identical thing.
+- **`flat_map`** — `map(…).flatten()` composes and is one obvious way. If it is ever
+  worth adding, the reason will be that the intermediate array is a measured cost, and
+  then the right fix is fusing the pair, not a third verb.
+- **String `+`** — interpolation is the everyday spelling and `concat` now exists for
+  the sequence-joining sense. Overloading `+` across numbers and text is the ambiguity
+  the current error message already explains well.
+- **Ternary `a ? b : c`, pipeline `x |> f`, comparison chaining `1 < 2 < 3`, `xor`** —
+  `if/then/else` is an expression, method chaining IS the pipeline, and chained
+  comparison already has a good error explaining itself. Each would be a second spelling.
+- **Early `return`** — the review did not ask for it and said so; totality is the point
+  of `if` requiring `else`, and a `return` reintroduces the statement/expression split
+  the language does not have.
+
+**Confirmed non-problems** (the review corrected its own notes; recorded so they are not
+re-reported): `{{` and `\{` both escape a brace in interpolation; `//` is integer
+division and `/` is float division, deliberately; unary minus works everywhere (the
+corpus's 176 `0 - x` were habit); tail calls are optimised and the 20,000 cap only binds
+NON-tail recursion — though that error should say "this call is not in tail position",
+which is a message worth improving.
+
 ### Recorded by the scalars→tensor bridge survey (2026-08-20)
 
 The bridge itself landed. These are the boundary decisions it surfaced and did not
