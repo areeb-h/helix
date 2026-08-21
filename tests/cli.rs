@@ -6352,12 +6352,16 @@ fn recursion_depth_error_names_tail_position() {
     }
 }
 
-/// `x.f(a)` means `f(x, a)` when `f` is no type's method. The review's item 2.4 was
-/// that the method-vs-function split has no discoverable rule — `to_array(t)` is a
-/// function, `a.matmul(b)` is a method, and you learn which one error at a time. This
-/// removes the split rather than documenting it, and in doing so gives a user's own
-/// functions the chaining that only built-in types had: `layer.forward(x)` on a plain
-/// record, with no second way to define behaviour and no mutable object identity.
+/// `x.f(a)` means `f(x, a)` when `f` is a USER-DEFINED function that is no type's
+/// method — giving your own functions the chaining that only built-in types had:
+/// `layer.forward(x)` on a plain record, with no second way to define behaviour and no
+/// mutable object identity.
+///
+/// Deliberately NOT builtins. A builtin's name is exactly what collides with a Python
+/// attribute, and a PyObject resolves its attributes at run time where no static table
+/// can see them — see `ufcs_never_captures_a_python_attribute_call` below, which is the
+/// bug this restriction exists for. So `tensor(t).to_array()` and `(0 - 1).abs()` stay
+/// function calls, as they were before v0.3.0.
 #[test]
 fn a_function_can_be_called_in_method_position() {
     let src = "fn area(r) = r.w * r.h\n\
@@ -6367,12 +6371,10 @@ fn a_function_can_be_called_in_method_position() {
                print({w: 3, h: 4}.area())\n\
                print({w: 2, h: 3}.scaled(2).area())\n\
                print(5.double().inc().double())\n\
-               print(tensor([1.0, 2.0]).to_array())\n\
-               print((0 - 1).abs())\n\
                r = {w: 3, h: 4}\n\
                print(\"area is {r.area()}\")\n\
                print([1, 2, 3].map(x => x.double()))\n";
-    let want = "12\n24\n22\n[1.0, 2.0]\n1\narea is 12\n[2, 4, 6]\n";
+    let want = "12\n24\n22\narea is 12\n[2, 4, 6]\n";
     for (name, env) in ENGINES {
         let (out, err, code) = run_source(src, env, &format!("ufcs_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
@@ -6386,6 +6388,40 @@ fn a_function_can_be_called_in_method_position() {
         let (out, err, code) = run_source(below, env, &format!("ufcs_below_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
         assert_eq!(out, "10\n", "{name}");
+    }
+}
+
+/// The bug that narrowed UFCS, kept as a test so it cannot come back.
+///
+/// UFCS was gated on `registry::is_any_method`, which reads a table of NINE types. A
+/// PyObject is not one of them: Python resolves its attributes at run time, so the gate
+/// was blind to every one of them. `m = python.import("math")` then `m.sqrt(16.0)` was
+/// therefore rewritten to `sqrt(m, 16.0)` — with no shadowing of any kind, because
+/// `sqrt` is a Helix builtin — and `np.round(1.5)` became `round(np, 1.5)`, which
+/// type-checks CLEAN because `round(x, digits)` is a real two-argument builtin.
+///
+/// A Python attribute call must reach Python. This build has no Python support, and
+/// that is exactly what makes the assertion sharp: the error naming the missing feature
+/// proves the call was dispatched as a PYTHON call, where a rewrite would instead have
+/// produced an arity or type error from the Helix builtin.
+#[test]
+fn ufcs_never_captures_a_python_attribute_call() {
+    let cases = [
+        ("sqrt", "m = python.import(\"math\")\nprint(m.sqrt(16.0))\n"),
+        ("range", "b = python.import(\"builtins\")\nprint(b.range(0, 5))\n"),
+        ("round", "np = python.import(\"numpy\")\nprint(np.round(1.5))\n"),
+        // Even when the program defines a same-named function of its own.
+        ("shadowed", "fn sqrt(x) = 1\nm = python.import(\"math\")\nprint(m.sqrt(16.0))\n"),
+    ];
+    for (name, env) in ENGINES {
+        for (tag, src) in &cases {
+            let (_, err, code) = run_source(src, env, &format!("pyufcs_{tag}_{name}"));
+            assert_eq!(code, Some(1), "{name}/{tag}");
+            assert!(
+                err.contains("without Python support"),
+                "{name}/{tag}: the call was captured by UFCS instead of reaching Python: {err}"
+            );
+        }
     }
 }
 

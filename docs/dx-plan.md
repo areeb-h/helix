@@ -209,6 +209,58 @@ with mechanisms so nothing has to be rediscovered:
   indexing landed with the bridge; the `.exp()` asymmetry is now its own entry
   below, because the bridge made it reachable by an ordinary spelling.)*
 
+### UFCS after the PyObject narrowing (2026-08-20)
+
+v0.3.0 shipped UFCS gated on `registry::is_any_method`, and called it strictly additive.
+It was not. That table covers the NINE types with static method tables; a **PyObject**
+resolves its attributes at run time and appears in none of them, so
+`m = python.import("math")` then `m.sqrt(16.0)` was rewritten to `sqrt(m, 16.0)`, with no
+shadowing at all, because `sqrt` is a builtin. `np.round(1.5)` became `round(np, 1.5)`,
+which type-checks clean because `round(x, digits)` is a real two-argument builtin — the
+silent-wrong-answer class, shipped by the change whose own commit message claimed it
+could not happen. Found because a field build insisted on verifying the claim instead of
+trusting it, which is the lesson worth keeping.
+
+UFCS is now restricted to **user-defined functions**. What that leaves:
+
+- **THE PROPER FIX, not yet built.** Decide on the RECEIVER at run time: a PyObject
+  always takes the method path, everything else falls back to the function. The
+  tree-walker can do this today at `interp.rs`'s `Expr::Method` arm. The VM cannot,
+  because it has no way to invoke a function from inside `Op::CallMethod` — it needs the
+  compiler to emit a branch, which needs a peek-the-receiver test opcode, which touches
+  the bytecode format (`ops.rs`, `hbc.rs` sizing and serialisation, `vm.rs`, and the
+  emitter). That is a real change and it should be made deliberately, not smuggled in
+  behind a bug fix. With it, builtins could chain again — `tensor(t).to_array()`,
+  `(0 - 1).abs()` — which is what the narrowing costs today.
+- **The residue.** A user's own `fn` can still collide with a Python attribute they also
+  call (`fn helper` plus `np.helper(...)`). It is a name they chose and can see, and it
+  was an error before UFCS existed, so nothing that worked changes — but it is not
+  nothing, and the run-time fix closes it too.
+- **The half-resolution.** The field build's reading is correct: item 2.4 is now half
+  answered. Functions can be called in method position; methods still cannot be called
+  as free functions (`matmul(a, b)` fails). The reverse direction is a separate decision
+  — it would make the two spellings genuinely interchangeable, which is a simpler rule
+  than the one we have — and it should be argued on its own, not assumed because the
+  forward direction shipped.
+
+### Two questions the field build raised, answered (2026-08-20)
+
+- **`http/` duplicating three native builtins** (`url_encode`/`url_decode`,
+  `parse_cookies`, `parse_set_cookie`). The library versions keep their place: they do
+  things the builtins deliberately do not — ordered pairs, a multi-map for repeated
+  header names, `__Host-` prefix validation. The builtins exist because the naive
+  version of each is wrong in a way that looks right (percent-encoding is over BYTES,
+  and a `Set-Cookie` `Expires` contains a comma). **Recommendation:** the library keeps
+  its own names and documents the relationship at the top of each module — "the builtin
+  does X; this adds Y" — rather than either side being removed. A wrapper that only
+  forwards would be the second spelling ADR 0003 forbids; a wrapper that adds structure
+  is a different verb doing a different job.
+- **`http/status.helix::class_name` as a range-pattern table.** Worth doing, and worth
+  doing as the field build proposed it — offered rather than applied, because it raises
+  that module's floor to v0.3.0. That is a real cost for a library that may want to
+  support the previous release, and the decision belongs to whoever maintains its
+  compatibility promise, not to whoever wrote the feature.
+
 ### The syntax review (2026-08-20) — what remains, and what was declined
 
 From 13 libraries / 117 modules / 15,260 lines, every claim probed against the released

@@ -1766,11 +1766,29 @@ impl Parser {
                             &e,
                             Expr::Ident { name: r, .. } if crate::namespace::is_namespace(r)
                         );
+                        // USER-DEFINED functions only — deliberately NOT builtins.
+                        //
+                        // `is_any_method` knows the nine types that have static method
+                        // tables. A PyObject has none: its attributes are resolved by
+                        // Python at run time, so the gate cannot see them. A builtin's
+                        // name is precisely what collides with them (`sqrt`, `range`,
+                        // `round`, `sum`, `exp`, `sort` are all both), and
+                        // `m = python.import("math")` then `m.sqrt(16.0)` was being
+                        // rewritten to `sqrt(m, 16.0)` with no shadowing at all —
+                        // `np.round(1.5)` even type-checked clean, because
+                        // `round(x, digits)` is a real two-argument builtin.
+                        //
+                        // A user's own function can only collide with a Python attribute
+                        // they also call, which is a name they chose and can see. That is
+                        // the narrow residue; the complete answer is to decide on the
+                        // RECEIVER at run time so a PyObject always takes the method
+                        // path, and it is recorded in docs/dx-plan.md rather than
+                        // approximated here.
                         if !ns_recv
                             && !crate::registry::is_any_method(&name)
                             && named.is_empty()
-                            && (self.fn_names.contains(&name)
-                                || crate::registry::lookup(&name).is_some())
+                            && self.fn_names.contains(&name)
+                            && crate::registry::lookup(&name).is_none()
                         {
                             let mut call_args = Vec::with_capacity(args.len() + 1);
                             call_args.push(e);
