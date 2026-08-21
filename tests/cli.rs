@@ -7087,3 +7087,84 @@ fn request_limits_error_by_name() {
         assert!(!out.contains("Connection"), "{name}: validated too late: {out}");
     }
 }
+
+/// ADR 0031 step 3 — redirect policy. Each rule below is a documented HTTP-client CVE
+/// class when it is missing, so each is proven to FIRE against a real server, not
+/// asserted from the code.
+///
+/// The server routes by request PATH — one server is every hop of every scenario, which
+/// is what a redirecting server actually is — and echoes the Authorization header it
+/// received, so credential stripping is observable rather than inferred. A SECOND server
+/// on a different port is the cross-origin target.
+#[test]
+fn redirects_enforce_the_boundary_rules() {
+    use std::time::Duration;
+
+    let dir = std::env::temp_dir();
+    let ready_a = dir.join("helix_redir_a.ready");
+    let ready_b = dir.join("helix_redir_b.ready");
+    let _ = std::fs::remove_file(&ready_a);
+    let _ = std::fs::remove_file(&ready_b);
+
+    let srv_a = dir.join("helix_redir_a.helix");
+    std::fs::write(
+        &srv_a,
+        String::from(
+            "srv = listen(18282)\n@Q@up@Q@.write_to(@Q@@RA@@Q@)\nrange(0, 40).reduce(true, (acc, i) => do {\n  c = srv.accept()\n  q = c.request()\n  p = q.path\n  auth = q.headers.get(@Q@authorization@Q@) ?? @Q@none@Q@\n  resp = if p == @Q@/same@Q@ then {status: 302, text: @Q@@Q@, headers: [(@Q@Location@Q@, @Q@http://127.0.0.1:18282/landed@Q@)]}\n    else if p == @Q@/landed@Q@ then {status: 200, text: @Q@landed auth={auth}@Q@}\n    else if p == @Q@/cross@Q@ then {status: 302, text: @Q@@Q@, headers: [(@Q@Location@Q@, @Q@http://127.0.0.1:18283/echo@Q@)]}\n    else if p == @Q@/scheme@Q@ then {status: 302, text: @Q@@Q@, headers: [(@Q@Location@Q@, @Q@file:///etc/passwd@Q@)]}\n    else if p == @Q@/loop@Q@ then {status: 302, text: @Q@@Q@, headers: [(@Q@Location@Q@, @Q@http://127.0.0.1:18282/loop@Q@)]}\n    else {status: 200, text: @Q@root@Q@}\n  c.respond(resp)\n  acc\n})\n",
+        )
+        .replace("@RA@", &ready_a.display().to_string())
+        .replace("@Q@", "\""),
+    )
+    .unwrap();
+
+    let srv_b = dir.join("helix_redir_b.helix");
+    std::fs::write(
+        &srv_b,
+        String::from(
+            "srv = listen(18283)\n@Q@up@Q@.write_to(@Q@@RB@@Q@)\nc = srv.accept()\nq = c.request()\nc.respond({ status: 200, text: @Q@B-echo auth={q.headers.get(@BQ@authorization@BQ@) ?? @BQ@none@BQ@}@Q@ })\n",
+        )
+        .replace("@RB@", &ready_b.display().to_string())
+        .replace("@BQ@", "\\\"")
+        .replace("@Q@", "\""),
+    )
+    .unwrap();
+
+    let mut ca = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&srv_a).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut cb = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&srv_b).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut up = false;
+    for _ in 0..120 {
+        if ready_a.exists() && ready_b.exists() {
+            up = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(up, "one of the redirect servers never became ready");
+
+    let client = String::from(
+        "r1 = http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18282/same@Q@, headers: {@Q@Authorization@Q@: @Q@Bearer secret@Q@}})\nprint(r1.body)\nprint(r1.redirects.count())\nr2 = http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18282/cross@Q@, headers: {@Q@Authorization@Q@: @Q@Bearer secret@Q@}})\nprint(r2.body)\nr3 = try (http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18282/scheme@Q@}))\nprint(r3.ok, r3.error)\nr4 = try (http_request({method: @Q@GET@Q@, url: @Q@http://127.0.0.1:18282/loop@Q@}))\nprint(r4.ok, r4.error)\n",
+    )
+    .replace("@Q@", "\"");
+    let (out, err, code) = run_source(&client, &[], "redir_e2e");
+    // Kill (the loop server outlives the client's connections) then wait, so neither
+    // becomes a zombie.
+    let _ = ca.kill();
+    let _ = ca.wait();
+    let _ = cb.kill();
+    let _ = cb.wait();
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let l: Vec<&str> = out.lines().collect();
+    // 1. same origin: the credential is KEPT, and the chain records the hop.
+    assert_eq!(l[0], "landed auth=Bearer secret", "same-origin auth was dropped: {out}");
+    assert_eq!(l[1], "1", "the redirect chain should have one entry: {out}");
+    // 2. cross origin: the credential is STRIPPED — the CVE-class defence.
+    assert_eq!(l[2], "B-echo auth=none", "a credential crossed an origin boundary: {out}");
+    // 3. a non-http(s) scheme is refused, naming the scheme.
+    assert!(l[3].starts_with("false"), "a file: redirect was followed: {out}");
+    assert!(l[3].contains("`file:` URL"), "{out}");
+    // 4. a loop is capped, naming the cause.
+    assert!(l[4].starts_with("false"), "a redirect loop ran uncapped: {out}");
+    assert!(l[4].contains("more than 10 redirects"), "{out}");
+}

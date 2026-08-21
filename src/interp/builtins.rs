@@ -380,7 +380,7 @@ impl super::Interp {
                 #[cfg(feature = "http")]
                 {
                     let limits = http_limits(&args[0], line, col)?;
-                    let (status, rbody, rhdrs) =
+                    let (status, rbody, rhdrs, redirects) =
                         crate::http::request(&method, &url, &body, &hdrs, &limits)
                             .map_err(|e| HelixError::new(e, line, col))?;
                     // A Headers value, not a Dict: lookup is case-insensitive (one
@@ -392,6 +392,12 @@ impl super::Interp {
                         (Symbol::intern("status"), Value::Int(status)),
                         (Symbol::intern("body"), Value::Str(Rc::new(rbody))),
                         (Symbol::intern("headers"), Value::Headers(Rc::new(rhdrs))),
+                        // The chain of URLs redirected through — empty when direct.
+                        // Data, not a silent follow (ADR 0031).
+                        (
+                            Symbol::intern("redirects"),
+                            Value::array(redirects.into_iter().map(|u| Value::Str(Rc::new(u))).collect()),
+                        ),
                     ])))
                 }
                 #[cfg(not(feature = "http"))]

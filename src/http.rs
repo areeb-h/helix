@@ -10,6 +10,12 @@
 #[cfg(feature = "http")]
 pub type Fetched = (i64, String, Vec<(String, String)>);
 
+/// A `request` result: the response plus the chain of URLs redirected THROUGH (empty
+/// when there were none). Returned as data because a chain followed silently is a
+/// chain nobody audited (ADR 0031).
+#[cfg(feature = "http")]
+pub type FetchedWithChain = (i64, String, Vec<(String, String)>, Vec<String>);
+
 /// The process-wide client, built once.
 ///
 /// A `ureq::Agent` IS the connection pool: it holds the keep-alive connections and the
@@ -60,6 +66,7 @@ fn agent_for(limits: &Limits) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_millis(limits.connect_ms.unwrap_or(30_000)))
         .timeout_read(std::time::Duration::from_millis(limits.read_ms.unwrap_or(120_000)))
+        .redirects(0)
         .build()
 }
 
@@ -94,6 +101,10 @@ fn agent() -> ureq::Agent {
             ureq::AgentBuilder::new()
                 .timeout_connect(std::time::Duration::from_secs(30))
                 .timeout_read(std::time::Duration::from_secs(120))
+                // We follow redirects ourselves (see `follow`), applying the boundary
+                // rules ureq cannot express. ureq must never follow one we have not
+                // vetted, so it returns every 3xx to us.
+                .redirects(0)
                 .build()
         })
         .clone()
@@ -101,20 +112,8 @@ fn agent() -> ureq::Agent {
 
 #[cfg(feature = "http")]
 pub fn get(url: &str) -> Result<(i64, String), String> {
-    match agent().get(url).call() {
-        Ok(resp) => {
-            let status = resp.status() as i64;
-            let body = read_body(resp, DEFAULT_MAX_BODY)?;
-            Ok((status, body))
-        }
-        // A non-2xx status isn't an error here — return the code + body so callers
-        // can branch on it (e.g. handle 404 themselves).
-        Err(ureq::Error::Status(code, resp)) => {
-            let body = read_body(resp, DEFAULT_MAX_BODY)?;
-            Ok((code as i64, body))
-        }
-        Err(e) => Err(format!("HTTP request to {url} failed: {e}")),
-    }
+    let ((status, body, _), _) = follow("GET", url, "", &[], &Limits::default())?;
+    Ok((status, body))
 }
 
 /// `http_post(url, body)` — send `body` with the given `content_type` and return
@@ -123,17 +122,154 @@ pub fn get(url: &str) -> Result<(i64, String), String> {
 /// caller builds it (typically `record.to_json()` for a JSON API, the default content type).
 #[cfg(feature = "http")]
 pub fn post(url: &str, body: &str, content_type: &str) -> Result<(i64, String), String> {
-    match agent().post(url).set("Content-Type", content_type).send_string(body) {
-        Ok(resp) => {
-            let status = resp.status() as i64;
-            let rbody = read_body(resp, DEFAULT_MAX_BODY)?;
-            Ok((status, rbody))
+    let headers = [("Content-Type".to_string(), content_type.to_string())];
+    let ((status, rbody, _), _) = follow("POST", url, body, &headers, &Limits::default())?;
+    Ok((status, rbody))
+}
+
+/// The redirect chain cap (ADR 0031). A loop, or a server pointing a client in a
+/// circle, must end rather than run forever (ADR 0024).
+#[cfg(feature = "http")]
+const MAX_REDIRECTS: usize = 10;
+
+/// Did the origin change between two URLs — scheme, host, or port? The test that
+/// decides whether credentials may cross. Parsed by the `url` crate, not by hand,
+/// because a wrong answer here leaks a bearer token to another host.
+#[cfg(feature = "http")]
+fn origin_changed(from: &url::Url, to: &url::Url) -> bool {
+    from.scheme() != to.scheme()
+        || from.host_str() != to.host_str()
+        || from.port_or_known_default() != to.port_or_known_default()
+}
+
+/// The method and body a redirect continues with (RFC 9110 §15.4, RFC 10008 §3).
+///
+/// Returns `(new_method, keep_body)`. 303 means "retrieve the result with GET", so it
+/// becomes GET and drops the body for every method but HEAD. 301/302 keep the method,
+/// EXCEPT the historical POST -> GET — which RFC 10008 excludes QUERY from, so a QUERY
+/// stays a QUERY with its body. 307/308 preserve method and body for everything.
+#[cfg(feature = "http")]
+fn redirect_method(status: i64, method: &str) -> (&str, bool) {
+    match status {
+        303 => {
+            if method.eq_ignore_ascii_case("HEAD") {
+                ("HEAD", false)
+            } else {
+                ("GET", false)
+            }
         }
-        Err(ureq::Error::Status(code, resp)) => {
-            let rbody = read_body(resp, DEFAULT_MAX_BODY)?;
-            Ok((code as i64, rbody))
+        301 | 302 => {
+            if method.eq_ignore_ascii_case("POST") {
+                ("GET", false)
+            } else {
+                // GET/HEAD keep themselves; QUERY keeps itself AND its body (RFC 10008).
+                (method, !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD"))
+            }
         }
-        Err(e) => Err(format!("HTTP POST to {url} failed: {e}")),
+        // 307 / 308: preserve everything.
+        _ => (method, true),
+    }
+}
+
+/// Send one request and follow redirects under the ADR 0031 boundary rules, returning
+/// the final response and the chain of URLs that led to it. `get`/`post`/`request` all
+/// route through here, so the safe policy is uniform and the pool is shared.
+#[cfg(feature = "http")]
+fn follow(
+    method: &str,
+    url_str: &str,
+    body: &str,
+    headers: &[(String, String)],
+    limits: &Limits,
+) -> Result<(Fetched, Vec<String>), String> {
+    let mut cur_url: url::Url = url_str
+        .parse()
+        .map_err(|e| format!("`{url_str}` is not a valid URL: {e}"))?;
+    let mut cur_method = method.to_string();
+    let mut cur_body = body.to_string();
+    // The headers carried forward. Cloned once; a cross-origin hop drops the
+    // credential-bearing ones from THIS copy, never the caller's record.
+    let mut cur_headers: Vec<(String, String)> = headers.to_vec();
+    let mut chain: Vec<String> = Vec::new();
+
+    loop {
+        let mut req = agent_for(limits).request(cur_method.as_str(), cur_url.as_str());
+        if let Some(ms) = limits.total_ms {
+            req = req.timeout(std::time::Duration::from_millis(ms));
+        }
+        for (k, v) in &cur_headers {
+            req = req.set(k, v);
+        }
+        let send = if cur_body.is_empty() { req.call() } else { req.send_string(&cur_body) };
+
+        // ureq returns a 3xx as `Ok` (only 4xx/5xx are `Err::Status`), so the response
+        // comes out here whether or not it redirects; a genuine transport failure is
+        // the only `Err`.
+        let resp = match send {
+            Ok(resp) => resp,
+            Err(ureq::Error::Status(_, resp)) => resp,
+            Err(e) => {
+                if limits.total_ms.is_some() && format!("{e}").contains("timed out") {
+                    return Err(format!(
+                        "HTTP {cur_method} to {cur_url} exceeded total_ms ({} ms): {e}",
+                        limits.total_ms.unwrap_or(0)
+                    ));
+                }
+                return Err(format!("HTTP {cur_method} to {cur_url} failed: {e}"));
+            }
+        };
+        let code = resp.status() as i64;
+        // A 3xx with a `Location` is a redirect to vet and follow; anything else is the
+        // final response, returned as data.
+        if (300..400).contains(&code)
+            && let Some(location) = resp.header("location").map(str::to_string)
+        {
+                if chain.len() >= MAX_REDIRECTS {
+                    return Err(format!(
+                        "more than {MAX_REDIRECTS} redirects starting from {url_str} — a redirect loop, or a server pointing in a circle"
+                    ));
+                }
+                let next: url::Url = cur_url.join(&location).map_err(|e| {
+                    format!("redirect target `{location}` from {cur_url} is not a valid URL: {e}")
+                })?;
+                // Scheme gate: only http/https, and never a downgrade.
+                match next.scheme() {
+                    "https" => {}
+                    "http" => {
+                        if cur_url.scheme() == "https" {
+                            return Err(format!(
+                                "refused an https -> http downgrade redirect from {cur_url} to {next}"
+                            ));
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "refused a redirect to a `{other}:` URL ({next}) — only http and https are followed"
+                        ))
+                    }
+                }
+                // Credential headers do not cross an origin boundary.
+                if origin_changed(&cur_url, &next) {
+                    cur_headers.retain(|(k, _)| {
+                        !k.eq_ignore_ascii_case("authorization")
+                            && !k.eq_ignore_ascii_case("cookie")
+                            && !k.eq_ignore_ascii_case("proxy-authorization")
+                    });
+                }
+                let (m, keep_body) = redirect_method(code, &cur_method);
+                cur_method = m.to_string();
+                if !keep_body {
+                    cur_body.clear();
+                }
+                chain.push(cur_url.to_string());
+                cur_url = next;
+                continue;
+            // A 3xx with no `Location` is not a redirect we can follow — it falls
+            // through and is returned as the data it is.
+        }
+        let fetched = collect_response(resp, limits.max_body.unwrap_or(DEFAULT_MAX_BODY))
+            .map_err(|e| format!("HTTP {cur_method} to {cur_url}: {e}"))?;
+        return Ok((fetched, chain));
     }
 }
 
@@ -148,36 +284,9 @@ pub fn request(
     body: &str,
     headers: &[(String, String)],
     limits: &Limits,
-) -> Result<Fetched, String> {
-    let mut req = agent_for(limits).request(method, url);
-    if let Some(ms) = limits.total_ms {
-        // ureq's per-request timeout is the OVERALL deadline — connect, write, read,
-        // everything — which is exactly what `total_ms` promises.
-        req = req.timeout(std::time::Duration::from_millis(ms));
-    }
-    for (k, v) in headers {
-        req = req.set(k, v);
-    }
-    // An empty body → `call()` (no request body); otherwise send it as-is.
-    let result = if body.is_empty() { req.call() } else { req.send_string(body) };
-    let resp = match result {
-        Ok(resp) => resp,
-        // A non-2xx status still carries a full response — return it as data, not an error.
-        Err(ureq::Error::Status(_, resp)) => resp,
-        Err(e) => {
-            // A deadline that fired names the field that set it, so the caller reads
-            // the fix in the error rather than a bare transport failure.
-            if limits.total_ms.is_some() && format!("{e}").contains("timed out") {
-                return Err(format!(
-                    "HTTP {method} to {url} exceeded total_ms ({} ms): {e}",
-                    limits.total_ms.unwrap_or(0)
-                ));
-            }
-            return Err(format!("HTTP {method} to {url} failed: {e}"));
-        }
-    };
-    collect_response(resp, limits.max_body.unwrap_or(DEFAULT_MAX_BODY))
-        .map_err(|e| format!("HTTP {method} to {url}: {e}"))
+) -> Result<FetchedWithChain, String> {
+    let ((status, body, hs), chain) = follow(method, url, body, headers, limits)?;
+    Ok((status, body, hs, chain))
 }
 
 /// Open a request for **streaming**: return `(status, body_reader)` without reading the body
