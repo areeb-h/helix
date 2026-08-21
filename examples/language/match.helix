@@ -36,6 +36,22 @@ fn describe(x) = match x {
 print(describe(missing))
 print(describe(42))
 
+# A range pattern classifies by magnitude: `lo..hi` matches lo up to but NOT
+# including hi — the same half-open convention as `range(lo, hi)` and `xs[lo:hi]`, so
+# adjacent bands tile exactly and nothing lands in two of them. This is the shape that
+# would otherwise be a ladder of `else if`.
+fn class_name(code) = match code {
+  100..200 => "informational",
+  200..300 => "success",
+  300..400 => "redirect",
+  400..500 => "client error",
+  500..600 => "server error",
+  _ => "unknown",
+}
+print(class_name(204))
+print(class_name(404))
+print(class_name(700))
+
 # Tuple and record patterns destructure nested data...
 print(match (1, (2, 3)) {(a, (b, c)) => a + b + c, _ => 0})
 

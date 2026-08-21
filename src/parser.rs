@@ -2030,6 +2030,74 @@ impl Parser {
         Ok(crate::ast::Pattern::Or(alts))
     }
 
+    /// A numeric literal pattern that may continue into a RANGE (`200..300`). The
+    /// literal has already been consumed; `plain` is the pattern to return when no
+    /// `..` follows, and `lo` is that literal's value.
+    ///
+    /// The bounds are checked here rather than at match time because both are known
+    /// now and a bad one can never match anything: an empty or reversed interval is a
+    /// typo, not a pattern that happens never to fire, and saying so at the point it
+    /// was written costs nothing.
+    fn maybe_range_pattern(
+        &mut self,
+        plain: crate::ast::Pattern,
+        lo: f64,
+        l: usize,
+        c: usize,
+    ) -> Result<crate::ast::Pattern, HelixError> {
+        if !matches!(self.peek(), Tok::DotDot) {
+            return Ok(plain);
+        }
+        self.advance();
+        let hi = self.parse_range_bound(l, c)?;
+        exact_bound(lo, l, c)?;
+        exact_bound(hi, l, c)?;
+        // NaN is already excluded by `exact_bound` above, so the direct comparison
+        // says what it means: an interval that cannot contain anything.
+        if lo >= hi {
+            return Err(HelixError::new(
+                format!("a range pattern needs a low bound below its high bound, got `{lo}..{hi}`"),
+                l,
+                c,
+            )
+            .hint(
+                "`lo..hi` matches lo up to but NOT including hi, so an empty or \
+                 reversed range can never match — did you mean the bounds the other \
+                 way round?",
+            ));
+        }
+        Ok(crate::ast::Pattern::Range { lo, hi })
+    }
+
+    /// The upper bound of a range pattern: a number, optionally negative.
+    fn parse_range_bound(&mut self, l: usize, c: usize) -> Result<f64, HelixError> {
+        let neg = if matches!(self.peek(), Tok::Minus) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        let v = match self.peek().clone() {
+            Tok::Int(v) => {
+                self.advance();
+                v as f64
+            }
+            Tok::Float(v) | Tok::BigInt(v, _) => {
+                self.advance();
+                v
+            }
+            other => {
+                return Err(HelixError::new(
+                    format!("expected a number after `..` in a range pattern, found {}", other.describe()),
+                    l,
+                    c,
+                )
+                .hint("a range pattern spans two numbers, e.g. `200..300 => \"success\"`."))
+            }
+        };
+        Ok(if neg { -v } else { v })
+    }
+
     /// Parse one pattern alternative: a literal, `_`, a name to bind, a tuple, or a
     /// record. Tuple elements and record field values recurse through `parse_pattern`,
     /// so `|` nests inside them.
@@ -2043,11 +2111,11 @@ impl Parser {
             }
             Tok::Int(v) => {
                 self.advance();
-                Ok(Pattern::Int(v))
+                self.maybe_range_pattern(Pattern::Int(v), v as f64, l, c)
             }
             Tok::Float(v) | Tok::BigInt(v, _) => {
                 self.advance();
-                Ok(Pattern::Float(v))
+                self.maybe_range_pattern(Pattern::Float(v), v, l, c)
             }
             Tok::Str(s) => {
                 self.advance();
@@ -2070,15 +2138,15 @@ impl Parser {
                 match self.peek().clone() {
                     Tok::Int(v) => {
                         self.advance();
-                        Ok(Pattern::Int(-v))
+                        self.maybe_range_pattern(Pattern::Int(-v), -v as f64, l, c)
                     }
                     Tok::BigInt(_, true) => {
                         self.advance();
-                        Ok(Pattern::Int(i64::MIN))
+                        self.maybe_range_pattern(Pattern::Int(i64::MIN), i64::MIN as f64, l, c)
                     }
                     Tok::Float(v) | Tok::BigInt(v, _) => {
                         self.advance();
-                        Ok(Pattern::Float(-v))
+                        self.maybe_range_pattern(Pattern::Float(-v), -v, l, c)
                     }
                     other => Err(HelixError::new(
                         format!("expected a number after `-` in a pattern, found {}", other.describe()),
@@ -2710,4 +2778,20 @@ impl Parser {
             .hint("expected a value here — a number, string, name, or `[...]` array.")),
         }
     }
+}
+
+/// A range bound must be a number `f64` holds exactly. Beyond 2^53 consecutive
+/// integers stop being representable, so a bound written there would silently match a
+/// different interval than the one on the page — rare, and a wrong answer if reached.
+fn exact_bound(v: f64, l: usize, c: usize) -> Result<(), HelixError> {
+    const EXACT: f64 = 9_007_199_254_740_992.0; // 2^53
+    if v.is_nan() || v.abs() > EXACT {
+        return Err(HelixError::new(
+            format!("`{v}` is too large to be an exact range bound"),
+            l,
+            c,
+        )
+        .hint("range-pattern bounds are held as f64; use a guard (`n if n > …`) for magnitudes beyond 2^53."));
+    }
+    Ok(())
 }

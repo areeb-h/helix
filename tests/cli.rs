@@ -6229,3 +6229,87 @@ fn concat_joins_strings_as_well_as_arrays() {
         assert_eq!(out, "ab\n[1, 2, 3]\nABC\ntrue\n", "{name}");
     }
 }
+
+/// `match c { 200..300 => "success", … }` — the numeric ladder as the table it always
+/// was. A 15,260-line review counted 162 `else if` arms, the deepest of them exactly
+/// this shape, and ranked range patterns above `elif` because `elif` flattens a
+/// ladder while a range removes it.
+///
+/// Half-open, `lo <= x < hi`, the convention `range(lo, hi)` and `xs[lo:hi]` already
+/// use — so adjacent bands TILE: nothing lands in two of them and nothing falls
+/// between. The boundary walk below is the whole argument, and the last case checks
+/// 400 values against the `if` ladder it replaces.
+#[test]
+fn match_range_patterns_tile_half_open() {
+    let classes = "fn class_name(c) = match c {\n\
+                     100..200 => \"informational\",\n\
+                     200..300 => \"success\",\n\
+                     300..400 => \"redirect\",\n\
+                     400..500 => \"client error\",\n\
+                     500..600 => \"server error\",\n\
+                     _ => \"unknown\"\n\
+                   }\n\
+                   print(class_name(204))\n\
+                   print(class_name(404))\n\
+                   print(class_name(500))\n\
+                   print(class_name(700))\n";
+    let edges = "fn f(x) = match x { 0..10 => \"a\", 10..20 => \"b\", _ => \"c\" }\n\
+                 print(f(0))\n\
+                 print(f(9))\n\
+                 print(f(10))\n\
+                 print(f(19))\n\
+                 print(f(20))\n";
+    // A range asks about MAGNITUDE, so it takes a number however written; a literal
+    // pattern still tests identity within one representation, and `1` is not `1.0`.
+    let kinds = "print(match 2.5 { 0..5 => \"in\", _ => \"out\" })\n\
+                 print(match 2 { 0.0..5.0 => \"in\", _ => \"out\" })\n\
+                 print(match 1.0 { 1 => \"int-lit\", _ => \"no\" })\n\
+                 print(match \"x\" { 0..5 => \"in\", _ => \"out\" })\n\
+                 print(match missing { 0..5 => \"in\", _ => \"out\" })\n";
+    let rest = "print(match 0 - 3 { -5..0 => \"neg\", 0..5 => \"pos\", _ => \"far\" })\n\
+                print(match 0 - 7 { -10..-5 => \"band\", _ => \"no\" })\n\
+                print(match 7 { n if n > 100 => \"big\", 0..10 => \"small\", _ => \"mid\" })\n\
+                print(match 3 { 1 | 2 | 3 => \"low\", _ => \"high\" })\n\
+                print(match 42 { 0..10 => \"low\", n => \"got {n}\" })\n";
+    // The ladder and the table must agree on every value in range.
+    let same = "fn old(c) = if c < 200 then \"i\" else if c < 300 then \"s\" \
+                            else if c < 400 then \"r\" else \"o\"\n\
+                fn new(c) = match c { 0..200 => \"i\", 200..300 => \"s\", 300..400 => \"r\", _ => \"o\" }\n\
+                print(range(100, 500).all(c => old(c) == new(c)))\n";
+    for (name, env) in ENGINES {
+        for (tag, src, want) in [
+            ("classes", classes, "success\nclient error\nserver error\nunknown\n"),
+            ("edges", edges, "a\na\nb\nb\nc\n"),
+            ("kinds", kinds, "in\nin\nno\nout\nout\n"),
+            ("rest", rest, "neg\nband\nsmall\nlow\ngot 42\n"),
+            ("same", same, "true\n"),
+        ] {
+            let (out, err, code) = run_source(src, env, &format!("range_pat_{tag}_{name}"));
+            assert_eq!(code, Some(0), "{name}/{tag}: {err}");
+            assert_eq!(out, want, "{name}/{tag}");
+        }
+    }
+}
+
+/// A range that can never match is a typo, not a pattern that happens never to fire,
+/// and both bounds are known where it is written — so it is refused there.
+#[test]
+fn an_impossible_range_pattern_is_refused_where_it_is_written() {
+    let cases = [
+        ("reversed", "print(match 1 { 5..0 => \"x\", _ => \"y\" })\n", "low bound below its high bound"),
+        ("empty", "print(match 1 { 3..3 => \"x\", _ => \"y\" })\n", "low bound below its high bound"),
+        ("no_upper", "print(match 1 { 3.. => \"x\", _ => \"y\" })\n", "expected a number after `..`"),
+        (
+            "inexact",
+            "print(match 1 { 0..99999999999999999999.0 => \"x\", _ => \"y\" })\n",
+            "too large to be an exact range bound",
+        ),
+    ];
+    for (name, env) in ENGINES {
+        for (tag, src, msg) in &cases {
+            let (_, err, code) = run_source(src, env, &format!("range_bad_{tag}_{name}"));
+            assert_eq!(code, Some(1), "{name}/{tag}: must refuse");
+            assert!(err.contains(msg), "{name}/{tag}: {err}");
+        }
+    }
+}

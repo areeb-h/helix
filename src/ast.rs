@@ -118,6 +118,15 @@ pub enum Pattern {
     /// `a | b | c` — matches if any alternative matches. Alternatives must not bind
     /// variables (v1), so the arm's bindings are unambiguous.
     Or(Vec<Pattern>),
+    /// `lo..hi` — matches a NUMBER in the half-open interval `[lo, hi)`: the same
+    /// convention `range(lo, hi)` and `xs[lo:hi]` use, so adjacent bands tile exactly
+    /// (`200..300` then `300..400` leaves no value in both and none in neither).
+    ///
+    /// Unlike the literal patterns, which test identity within one representation
+    /// (`Pattern::Int` does not match a `Float`), this asks about MAGNITUDE and so
+    /// matches any number in the interval however it is written. Bounds are held as
+    /// `f64`; the parser refuses an integer bound too large to be exact.
+    Range { lo: f64, hi: f64 },
 }
 
 /// One arm of a `match`: a pattern, an optional `if` guard (evaluated with the

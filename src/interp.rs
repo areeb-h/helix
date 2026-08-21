@@ -1251,6 +1251,18 @@ pub(crate) fn pattern_match(pat: &crate::ast::Pattern, v: &Value) -> Option<Vec<
         Pattern::Str(s) => lit(matches!(v, Value::Str(x) if x.as_str() == s.as_str())),
         Pattern::Bool(b) => lit(matches!(v, Value::Bool(x) if x == b)),
         Pattern::Missing => lit(matches!(v, Value::Missing)),
+        // A range asks about MAGNITUDE, so it matches any number in `[lo, hi)`
+        // however that number is written — unlike the literal patterns above, which
+        // test identity within one representation. Non-numbers simply do not match:
+        // there is no ordering to ask the question with.
+        Pattern::Range { lo, hi } => lit(match v {
+            Value::Int(x) => {
+                let x = *x as f64;
+                x >= *lo && x < *hi
+            }
+            Value::Float(x) => x >= lo && x < hi,
+            _ => false,
+        }),
         Pattern::Tuple(pats) => {
             let items = match v {
                 Value::Tuple(items) => items,
