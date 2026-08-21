@@ -6313,3 +6313,41 @@ fn an_impossible_range_pattern_is_refused_where_it_is_written() {
         }
     }
 }
+
+/// The recursion cap only ever binds a NON-tail shape — Helix reuses the frame of a
+/// tail call, so a tail-recursive function, including a mutually tail-recursive pair,
+/// runs to millions of levels. The message never said so, and read as a flat limit on
+/// recursion: a reader went looking for a loop the language does not have, instead of
+/// at the one rewrite that removes the limit. A 15,260-line review measured the
+/// optimisation, called it good design, and observed it was invisible.
+///
+/// The interesting half of this test is not the wording — it is that every claim the
+/// wording makes is checked here: tail recursion to a million on all three engines,
+/// mutual tail recursion likewise, and the exact rewrite the hint suggests turning the
+/// failing depth into a working one. A hint that teaches something must be true.
+#[test]
+fn recursion_depth_error_names_tail_position() {
+    let deep = "fn deep(n) = if n == 0 then 0 else 1 + deep(n - 1)\n\
+                print(deep(50000))\n";
+    for (name, env) in ENGINES {
+        let (_, err, code) = run_source(deep, env, &format!("depth_{name}"));
+        assert_eq!(code, Some(1), "{name}: 50k non-tail frames must hit the cap");
+        assert!(err.contains("maximum recursion depth"), "{name}: {err}");
+        assert!(err.contains("not in TAIL position"), "{name}: {err}");
+        assert!(err.contains("reuses its frame"), "{name}: {err}");
+    }
+
+    // Everything the hint asserts, verified rather than asserted.
+    let claims = "fn count_to(n, acc) = if n == 0 then acc else count_to(n - 1, acc + 1)\n\
+                  fn ev(n) = if n == 0 then true else od(n - 1)\n\
+                  fn od(n) = if n == 0 then false else ev(n - 1)\n\
+                  fn deep_tail(n, acc) = if n == 0 then acc else deep_tail(n - 1, acc + 1)\n\
+                  print(count_to(1000000, 0))\n\
+                  print(ev(1000000))\n\
+                  print(deep_tail(50000, 0))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(claims, env, &format!("depth_claims_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "1000000\ntrue\n50000\n", "{name}");
+    }
+}

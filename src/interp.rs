@@ -858,12 +858,7 @@ impl Interp {
         self.depth += 1;
         if self.depth > MAX_CALL_DEPTH {
             self.depth -= 1;
-            return Err(HelixError::new(
-                format!("maximum recursion depth ({}) exceeded", MAX_CALL_DEPTH),
-                line,
-                col,
-            )
-            .hint("is the recursion missing a base case, or should this be a loop/comprehension?"));
+            return Err(crate::error::recursion_depth_err(MAX_CALL_DEPTH, line, col));
         }
         // THE FRAME BOUNDARY: swap the caller's locals out wholesale, so the
         // callee resolves names against ITS OWN params/captured, then globals —

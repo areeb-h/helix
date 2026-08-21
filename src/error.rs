@@ -221,3 +221,23 @@ pub fn immutable_reassign(name: &str) -> (String, String) {
         ),
     }
 }
+
+/// The recursion cap, worded so it teaches the rule it is reporting the edge of.
+///
+/// Helix optimises TAIL calls — when the recursive call is the whole result, with
+/// nothing left to do after it, the frame is reused and a mutually tail-recursive pair
+/// runs to millions of levels. So reaching this cap means the call is not in tail
+/// position, and that is the single most useful thing to say: a reader told only
+/// "maximum recursion depth exceeded" goes looking for a loop the language does not
+/// have, when rewriting the call into tail position would remove the limit entirely.
+///
+/// One constructor for all four sites (the tree-walker's, and the VM's three) so the
+/// engines cannot word the same condition differently.
+pub fn recursion_depth_err(max: usize, line: usize, col: usize) -> HelixError {
+    HelixError::new(format!("maximum recursion depth ({max}) exceeded"), line, col).hint(
+        "this call is not in TAIL position, so every level keeps a frame. A tail call \
+         — where the recursive call is the whole result, with nothing left to do after \
+         it — reuses its frame and runs to millions of levels. Otherwise: is a base \
+         case missing, or would a comprehension (`map`/`filter`/`reduce`) fit better?",
+    )
+}

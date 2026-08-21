@@ -1007,12 +1007,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         ));
                     }
                     if frames.len() > VM_MAX_DEPTH {
-                        return Err(HelixError::new(
-                            format!("maximum recursion depth ({}) exceeded", VM_MAX_DEPTH),
-                            line,
-                            col,
-                        )
-                        .hint("is the recursion missing a base case, or should this be a loop/comprehension?"));
+                        return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
                     }
                     let base = locals.len();
                     locals.extend(stack.drain(start..));
@@ -1150,12 +1145,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     ));
                 }
                 if frames.len() > VM_MAX_DEPTH {
-                    return Err(HelixError::new(
-                        format!("maximum recursion depth ({}) exceeded", VM_MAX_DEPTH),
-                        line,
-                        col,
-                    )
-                    .hint("is the recursion missing a base case, or should this be a loop/comprehension?"));
+                    return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
                 }
                 let base = locals.len();
                 // `drain` moves the args straight into the callee's locals with
@@ -1333,12 +1323,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     ));
                 }
                 if frames.len() > VM_MAX_DEPTH {
-                    return Err(HelixError::new(
-                        format!("maximum recursion depth ({}) exceeded", VM_MAX_DEPTH),
-                        line,
-                        col,
-                    )
-                    .hint("is the recursion missing a base case, or should this be a loop/comprehension?"));
+                    return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
                 }
                 let base = locals.len();
                 locals.extend(stack.drain(start..)); // args → callee locals
