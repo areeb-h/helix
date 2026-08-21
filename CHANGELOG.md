@@ -1,5 +1,92 @@
 # Changelog
 
+## v0.3.0 — 2026-08-20
+
+**The language-surface release.** A 13-library / 117-module / 15,260-line review of
+v0.2.7 arrived with its claims already probed against the released binary, and this is
+the answer to it — plus the tensor bridge the nn build was blocked on, and the pieces a
+web library could not be written without. The minor version moves because programs can
+now say things they could not say before, not because anything they said has changed.
+
+### Added — the language
+
+- **A function can be called in method position.** `x.f(a)` means `f(x, a)` when `f` is
+  no type's method, so your own functions chain like built-in ones:
+  `{w: 2, h: 3}.scaled(2).area()`. This removes the method-vs-function split rather than
+  documenting it — the review's complaint was that `to_array(t)` is a function,
+  `a.matmul(b)` is a method, and you learn which one error at a time. It is also what
+  people usually want from classes: methods on your own types, with no new kind of
+  entity, no inheritance, and no mutable object identity. Strictly additive by
+  construction: the rewrite is gated on the name belonging to no type, so no call that
+  resolved before can change meaning, and a misspelled method still gets the method
+  error with its did-you-mean.
+- **Range patterns in `match`** — `200..300 => "success"`. Half-open, `lo <= x < hi`,
+  the convention `range(lo, hi)` and `xs[lo:hi]` already use, so adjacent bands tile
+  exactly: nothing lands in two of them and nothing falls between. A range asks about
+  magnitude, so `2.5` matches `0..5`; literal patterns keep their existing strictness.
+  An impossible range (`5..0`, `3..3`) is refused where it is written.
+- **Dict literals** — `{"Content-Type": "application/json"}`. A quoted key makes a brace
+  a Dict; a bare name still makes it a Record. A record field is a NAME, so a map whose
+  keys are not names — every HTTP header, every JSON object, every table transcribed
+  from a document — could previously only be written
+  `[("Content-Type", "…")].to_dict()`, a constructor shaped like a fold.
+- **Block comments** — `#[ … ]#`, spanning lines, and **nesting**, so a region that
+  already contains one can be commented out whole.
+- **The scalars→tensor bridge.** `tensor([[w11, w12], [w21, w22]])` over tracked
+  scalars builds a tracked tensor, so a trainable layer's weights can be ordinary
+  variables and its forward pass an ordinary BLAS `matmul`. `t[i]` and `t[a:b]` on a
+  tracked tensor stay on the tape, and `shape`/`count`/`ndim` read the value.
+
+### Added — the library
+
+- `s.split_once(sep)` → `(before, after)` or `missing`. Splitting at the FIRST separator
+  is the commonest parsing step there is and had no direct spelling; the idiom it
+  replaces recovered the tail by arithmetic on the first part's length.
+- `s.index_of(needle)` → the first match's **character** index, the unit every other
+  String method counts in, so it feeds straight back into `drop`/`take`/`s[a:b]`.
+- `xs.windows(n)` and `xs.chunks(n)` — `Dna` had `windows`; an array had to hand-roll it.
+- `s.concat(t)` — the sibling of `Array.concat`.
+- `url_encode` / `url_decode` (RFC 3986). Without them a query string cannot be built
+  correctly, and the hand-rolled version cannot be right: percent-encoding is defined
+  over UTF-8 **bytes**, so `café` must become `caf%C3%A9`.
+- `parse_cookies` and `parse_set_cookie`. Builtins rather than string code because the
+  naive version is wrong in a way that looks right — an `Expires` attribute contains a
+  comma, so splitting `Set-Cookie` on `,` tears the date in half.
+- `to_dict` now takes a pair **however it is written**: `(k, v)` or a two-element array.
+  That is why the review found seventeen `reduce(dict(), …)` folds — tables transcribed
+  as arrays of arrays could not use the verb that exists.
+- `{...dict, k: v}` — a Dict spreads into a record, the request-builder shape.
+
+### Fixed
+
+- **Three shapes that could produce a silently wrong program**, all now refused at check
+  time: `try(() => f())` reported SUCCESS (building a closure cannot fail, so error
+  handling written that way never fired); `fn relu(x) = relu(x)` defined infinite
+  recursion under a shadowed builtin; and a top-level value used above its binding said
+  only "not defined", with no hint that a `fn` may be used above its definition and a
+  value may not.
+- **HTTP connections are reused.** `get`/`post`/`request` each built a fresh agent, and
+  the agent IS the connection pool — every call opened a new TCP connection and redid
+  the TLS handshake. For a loop against one API host that handshake dominated the
+  request.
+- **The recursion-depth error names the cause**: the cap only ever binds a NON-tail
+  shape, since tail and mutual-tail recursion run to millions of levels, and the message
+  never said so.
+- **`helix fmt`** was rendering `xs[0:2]` as `xs[0: 2]`, `match x { … }` as
+  `match x {…}`, and `try (a / b)` as `try(a / b)` — three cases of a rule written for
+  one construct meeting a token it also owns elsewhere. The last is the spelling the
+  language's own precedence error recommends.
+
+### Notes
+
+- Everything here is pinned on all three engines. The release was preceded by a
+  cross-feature sweep — dict literals inside match arms, UFCS inside interpolation,
+  block comments between match arms, ranges beside guards — with zero divergences.
+- The HTTP client's remaining gaps are known and specified rather than half-built: a
+  cookie jar, method-preserving redirects (which RFC 10008 requires for QUERY),
+  per-request timeouts, and case-insensitive header lookup. The QUERY method itself
+  already works through `http_request`, verified end to end.
+
 ## v0.2.7 — 2026-08-19
 
 **The stabilization release.** Before opening the next feature tier, everything the
