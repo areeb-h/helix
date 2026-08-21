@@ -270,15 +270,35 @@ fn needs_space(prev: &Tok, next: &Tok, line: &[&Token], i: usize) -> bool {
     if matches!(prev, Colon) && inside_index(line, i - 1) {
         return false;
     }
-    // `{` and `}` are records here, and read as units: `{a: 1}`, not `{ a: 1 }`.
-    if matches!(prev, LBrace) || matches!(next, RBrace) {
-        return false;
+    // `{` and `}` are records here, and read as units: `{a: 1}`, not `{ a: 1 }` —
+    // EXCEPT a match body, which is a block of arms and reads as one: `match x { 1 =>
+    // "a", _ => "b" }`. The record rule had been applied to both because they are the
+    // same token, and produced `match x {1 => "a", _ => "b"}`, which nobody writes.
+    // (It only ever showed on a single-line body; a multi-line one has its braces at
+    // the ends of lines, where no spacing rule applies.)
+    //
+    // These two DECIDE rather than decline: an opening brace is often followed by `(`
+    // (a tuple pattern: `match x {(a, b) => …}`), and the call rule below would
+    // otherwise close the gap this one just opened — giving a body its space at one
+    // end and not the other.
+    if matches!(prev, LBrace) {
+        return opens_match_body(line, i - 1);
+    }
+    if matches!(next, RBrace) {
+        return closes_match_body(line, i);
     }
     // A call or an index binds tight to what it applies to: `f(x)`, `xs[0]`, `"s".len()`.
     // Stated as "what needs a space before a `(`" rather than "what can precede a call",
     // because the second list is unbounded: `python.import("numpy")` puts a KEYWORD token
     // immediately before the paren, and every keyword usable as a member name would have to
     // be enumerated. Operators and separators are a closed set.
+    // `try` is not a function, and the parenthesised form is what the language's own
+    // precedence error recommends (`parenthesize the whole expression: try (a / b)`).
+    // Rendering it `try(...)` made it read as a call — the very misconception that
+    // makes people write `try(() => f())`.
+    if matches!(prev, Try) && matches!(next, LParen) {
+        return true;
+    }
     if matches!(next, LParen | LBracket)
         && !matches!(
             prev,
@@ -326,6 +346,52 @@ fn needs_space(prev: &Tok, next: &Tok, line: &[&Token], i: usize) -> bool {
         return false;
     }
     true
+}
+
+/// Does the `{` at `at` open a MATCH BODY rather than a record literal?
+///
+/// Both are `Tok::LBrace`, and only what precedes tells them apart: a match body's
+/// brace follows `match <scrutinee>`, so walking back over the scrutinee — balanced,
+/// however complicated — reaches the `match` keyword itself. Anything else is a record.
+/// A brace whose `match` is on an earlier line answers `false` and keeps the record
+/// spacing, which is harmless: a multi-line body's braces sit at line ends where no
+/// spacing rule applies.
+fn opens_match_body(line: &[&Token], at: usize) -> bool {
+    use Tok::*;
+    let mut depth = 0i32;
+    for t in line[..at].iter().rev() {
+        match &t.tok {
+            RParen | RBracket | RBrace => depth += 1,
+            LParen | LBracket | LBrace => {
+                if depth == 0 {
+                    return false; // an enclosing opener came first — not `match …{`
+                }
+                depth -= 1;
+            }
+            Match if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Does the `}` at `at` close a match body? Walk back to its own opener and ask.
+fn closes_match_body(line: &[&Token], at: usize) -> bool {
+    use Tok::*;
+    let mut depth = 0i32;
+    for (k, t) in line[..at].iter().enumerate().rev() {
+        match &t.tok {
+            RBrace => depth += 1,
+            LBrace => {
+                if depth == 0 {
+                    return opens_match_body(line, k);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Is the token at `at` sitting directly inside `[…]` rather than `(…)` or `{…}`?
@@ -515,6 +581,43 @@ mod tests {
             let got = format_source(&format!("{input}\n")).expect("lexes");
             assert_eq!(got.trim_end(), want, "formatting `{input}`");
             // Idempotence, per case rather than only over the tracked corpus.
+            let again = format_source(&got).expect("lexes");
+            assert_eq!(again, got, "`{input}` is not idempotent");
+        }
+    }
+
+    /// A match BODY is not a record, and `try` is not a call — two more places one
+    /// token is owned by two constructs, which is the shape of every spacing bug found
+    /// here so far (the slice colon was the first).
+    ///
+    /// `match x { 1 => "a" }` was rendered `match x {1 => "a"}` by the record rule, and
+    /// `try (1 / 0)` was rendered `try(1 / 0)` by the call rule. The second matters
+    /// beyond looks: `try` is a keyword, the language's own precedence error tells
+    /// people to write `try (a / b)`, and rendering it as a call feeds exactly the
+    /// misconception that makes `try(() => f())` look reasonable.
+    #[test]
+    fn a_match_body_and_a_try_are_not_a_record_and_a_call() {
+        let cases = [
+            // Match bodies get their spaces...
+            ("match x { 1 => \"a\", _ => \"b\" }", "match x { 1 => \"a\", _ => \"b\" }"),
+            ("match x {1 => \"a\"}", "match x { 1 => \"a\" }"),
+            ("match n { 0..10 => \"low\", _ => \"high\" }", "match n { 0..10 => \"low\", _ => \"high\" }"),
+            // ...including when an arm's PATTERN is a record, which still hugs.
+            ("match d { {x: v} => v, _ => 0 }", "match d { {x: v} => v, _ => 0 }"),
+            // Records still read as units, wherever they appear.
+            ("{a: 1, b: 2}", "{a: 1, b: 2}"),
+            ("{ a: 1 }", "{a: 1}"),
+            ("f({k: 1})", "f({k: 1})"),
+            ("{...r, c: 3}", "{...r, c: 3}"),
+            // `try` keeps its space; a real call still binds tight.
+            ("try (1 / 0)", "try (1 / 0)"),
+            ("try(1 / 0)", "try (1 / 0)"),
+            ("f(x)", "f(x)"),
+            ("print(f(1))", "print(f(1))"),
+        ];
+        for (input, want) in cases {
+            let got = format_source(&format!("{input}\n")).expect("lexes");
+            assert_eq!(got.trim_end(), want, "formatting `{input}`");
             let again = format_source(&got).expect("lexes");
             assert_eq!(again, got, "`{input}` is not idempotent");
         }
