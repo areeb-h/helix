@@ -16,6 +16,7 @@
 //! keep-alive, no chunked transfer. Pure `std::net` — no new dependency, so a built
 //! binary stays self-contained.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -74,10 +75,14 @@ impl Drop for NetHandle {
     /// total ([`SSE_PENDING`]) so the accounting a dropped slow client leaves behind can't
     /// permanently shrink the budget for the survivors.
     fn drop(&mut self) {
-        if let NetHandle::Conn { pending, .. } = self {
+        if let NetHandle::Conn { pending, inbuf, .. } = self {
             let n = pending.borrow().len();
             if n > 0 {
                 SSE_PENDING.with(|c| c.set(c.get().saturating_sub(n)));
+            }
+            let m = inbuf.borrow().len();
+            if m > 0 {
+                INBUF_PENDING.with(|c| c.set(c.get().saturating_sub(m)));
             }
         }
     }
@@ -134,14 +139,43 @@ thread_local! {
     /// clients can't each hold [`MAX_PENDING`] and add up to N × 4 MiB. A connection whose
     /// `send` would push the shard total over [`SSE_GLOBAL_PENDING`] is dropped.
     static SSE_PENDING: Cell<usize> = const { Cell::new(0) };
+    /// Sum of buffered *inbound* request bytes across all this shard's connections —
+    /// the read-side mirror of [`SSE_PENDING`]. The per-connection cap bounds one
+    /// oversized request; this bounds a fleet of them (eight concurrent 64 MiB
+    /// uploads must not OOM a 512 MB box). Released on drain and in `Drop`.
+    static INBUF_PENDING: Cell<usize> = const { Cell::new(0) };
+    /// Scratch for `poll_request`'s non-blocking reads. On the stack it was zeroed on
+    /// every call — and the call runs per connection per tick, so at 50 connections
+    /// that was 400 KiB of pure zeroing per event-loop tick.
+    static READ_SCRATCH: RefCell<[u8; 8192]> = const { RefCell::new([0u8; 8192]) };
 }
 
 /// Per-shard cap on the *total* SSE backlog across all connections (see [`SSE_PENDING`]).
 const SSE_GLOBAL_PENDING: usize = 64 << 20; // 64 MiB per shard
 
-/// Stack size for a shard worker — matches the main interpreter thread (the front-end
-/// recurses over the AST); reserved address space, not resident memory.
-const SHARD_STACK: usize = 1024 * 1024 * 1024;
+/// Per-shard cap on total buffered inbound bytes (see [`INBUF_PENDING`]). Must be
+/// >= [`MAX_BODY`] or a single legal max-size request could never be received.
+const INBUF_GLOBAL: usize = 64 << 20; // 64 MiB per shard
+
+/// Stack size for every eval thread — the main interpreter thread and each shard
+/// worker share this, so primary and shards can never diverge on recursion depth.
+/// Measured in the gate build: a Helix call frame costs ~1 KiB of native stack, so
+/// the full `MAX_CALL_DEPTH` (20k) touches ~19 MiB — 128 MiB is ~6x headroom even
+/// for fat frames. The size matters on small machines because a thread-stack
+/// reservation is *committed* memory under strict overcommit
+/// (`vm.overcommit_memory=2`, common on small VPSes): the old 1 GiB per shard meant
+/// 4 shards could not even spawn on a 2 GB box. Debug frames are ~25x larger, so
+/// debug builds keep 1 GiB. `HELIX_STACK_MB` overrides for the rare program that
+/// recurses deep with huge frames.
+pub(crate) fn eval_stack_size() -> usize {
+    if let Ok(v) = std::env::var("HELIX_STACK_MB")
+        && let Ok(mb) = v.trim().parse::<usize>()
+        && mb > 0
+    {
+        return mb << 20;
+    }
+    if cfg!(debug_assertions) { 1 << 30 } else { 128 << 20 }
+}
 
 /// `listen(port)` / `listen(port, shards)` — bind a listener on `127.0.0.1:port`.
 ///
@@ -246,7 +280,7 @@ fn spawn_shards(total: usize, line: usize, col: usize) -> Result<(), HelixError>
         let spec = rerun.clone();
         std::thread::Builder::new()
             .name(format!("shard-{k}"))
-            .stack_size(SHARD_STACK)
+            .stack_size(eval_stack_size())
             .spawn(move || {
                 IS_SHARD.with(|s| s.set(true));
                 match spec {
@@ -494,6 +528,54 @@ fn request_keys() -> (Symbol, Symbol, Symbol, Symbol, Symbol) {
     })
 }
 
+/// The six response-envelope keys, interned once — `build_response` probes them per
+/// response, and `Symbol::as_str` takes the global interner's read lock every call.
+fn respond_keys() -> (Symbol, Symbol, Symbol, Symbol, Symbol, Symbol) {
+    use std::sync::OnceLock;
+    static KEYS: OnceLock<(Symbol, Symbol, Symbol, Symbol, Symbol, Symbol)> = OnceLock::new();
+    *KEYS.get_or_init(|| {
+        (
+            Symbol::intern("status"),
+            Symbol::intern("json"),
+            Symbol::intern("html"),
+            Symbol::intern("text"),
+            Symbol::intern("body"),
+            Symbol::intern("headers"),
+        )
+    })
+}
+
+/// Pre-built `Rc`s for the strings every request repeats: the common verbs, and the
+/// empty string a typical GET's `query`/`body` share. One allocation per shard
+/// instead of three per request. The COW paths that `Rc::get_mut` a pooled string
+/// see `strong_count >= 2` and take their clone arm — byte-identical behavior, and
+/// cloning a verb or an empty string is trivial.
+struct CommonStrs {
+    verbs: [(&'static str, Rc<String>); 7],
+    empty: Rc<String>,
+}
+
+impl CommonStrs {
+    fn method(&self, m: &str) -> Rc<String> {
+        match self.verbs.iter().find(|(k, _)| *k == m) {
+            Some((_, v)) => Rc::clone(v),
+            None => Rc::new(m.to_string()),
+        }
+    }
+
+    fn nonempty(&self, s: String) -> Rc<String> {
+        if s.is_empty() { Rc::clone(&self.empty) } else { Rc::new(s) }
+    }
+}
+
+thread_local! {
+    static COMMON_STRS: CommonStrs = CommonStrs {
+        verbs: ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"]
+            .map(|v| (v, Rc::new(v.to_string()))),
+        empty: Rc::new(String::new()),
+    };
+}
+
 /// Parse one HTTP/1.1 request into a record `{method, path, query, headers, body}`.
 /// Headers are a `Dict` keyed by lowercased name (HTTP names are case-insensitive).
 fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, HelixError> {
@@ -508,7 +590,7 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
         .read_line(&mut request_line)
         .map_err(err)?;
     let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
+    let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("/").to_string();
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
@@ -519,7 +601,7 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
     // read through `take(MAX_HEADER_LINE)` (bounds one giant header) and the count is
     // capped (bounds header-bombing) — the body already has MAX_BODY, so the head needs
     // its own limits to be DoS-safe.
-    let mut headers: Vec<(String, String)> = Vec::new();
+    let mut headers: Vec<(String, String)> = Vec::with_capacity(8);
     let mut content_length = 0usize;
     let mut header_count = 0usize;
     loop {
@@ -565,12 +647,15 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
     let body = String::from_utf8_lossy(&body).into_owned();
 
     let k = request_keys();
+    let (method, query, body) = COMMON_STRS.with(|c| {
+        (c.method(method), c.nonempty(query), c.nonempty(body))
+    });
     let record = vec![
-        (k.0, Value::Str(Rc::new(method))),
+        (k.0, Value::Str(method)),
         (k.1, Value::Str(Rc::new(path))),
-        (k.2, Value::Str(Rc::new(query))),
+        (k.2, Value::Str(query)),
         (k.3, Value::Headers(Rc::new(headers))),
-        (k.4, Value::Str(Rc::new(body))),
+        (k.4, Value::Str(body)),
     ];
     Ok(Value::Record(Rc::new(record)))
 }
@@ -602,7 +687,10 @@ pub fn respond(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -
     // Content-Length/Connection tail used to allocate. `fmt::Write` is imported
     // anonymously so it doesn't shadow the io::Write used for the socket below.
     use std::fmt::Write as _;
-    let mut head = String::with_capacity(64 + body.len());
+    // Sized exactly (status line + computed tail fit in 96): `64 + body` guaranteed
+    // one realloc-and-copy of the whole message on every response.
+    let head_len: usize = headers.iter().map(|(k, v)| k.len() + v.len() + 4).sum();
+    let mut head = String::with_capacity(96 + head_len + body.len());
     let _ = write!(head, "HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
     for (k, v) in &headers {
         head.push_str(k);
@@ -688,7 +776,7 @@ fn parse_request_buf(buf: &[u8]) -> BufParse {
     let mut lines = head.split("\r\n");
     let request_line = lines.next().unwrap_or("");
     let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
+    let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("/").to_string();
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
@@ -697,7 +785,7 @@ fn parse_request_buf(buf: &[u8]) -> BufParse {
     // Ordered pairs, the wire's own casing — a `Headers` value, matching the blocking
     // parser. `content-length` is matched case-insensitively (it can arrive any way) but
     // the stored name is left as sent, because that is what `Headers` promises.
-    let mut headers: Vec<(String, String)> = Vec::new();
+    let mut headers: Vec<(String, String)> = Vec::with_capacity(8);
     let mut content_length = 0usize;
     let mut count = 0usize;
     for line in lines {
@@ -724,12 +812,15 @@ fn parse_request_buf(buf: &[u8]) -> BufParse {
     }
     let body = String::from_utf8_lossy(&buf[head_end + 4..total]).into_owned();
     let k = request_keys();
+    let (method, query, body) = COMMON_STRS.with(|c| {
+        (c.method(method), c.nonempty(query), c.nonempty(body))
+    });
     let record = vec![
-        (k.0, Value::Str(Rc::new(method))),
+        (k.0, Value::Str(method)),
         (k.1, Value::Str(Rc::new(path))),
-        (k.2, Value::Str(Rc::new(query))),
+        (k.2, Value::Str(query)),
         (k.3, Value::Headers(Rc::new(headers))),
-        (k.4, Value::Str(Rc::new(body))),
+        (k.4, Value::Str(body)),
     ];
     BufParse::Complete(Box::new(Value::Record(Rc::new(record))), total)
 }
@@ -797,33 +888,50 @@ pub fn poll_request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<V
             return Ok(Value::Missing);
         };
         let mut buf = inbuf.borrow_mut();
-        let mut tmp = [0u8; 8192];
-        loop {
-            match s.read(&mut tmp) {
-                Ok(0) => {
-                    open.set(false); // EOF: peer closed
-                    break;
-                }
-                Ok(n) => {
-                    buf.extend_from_slice(&tmp[..n]);
-                    if buf.len() > MAX_HEADER_LINE * 8 + MAX_BODY {
-                        open.set(false); // runaway: drop it
+        READ_SCRATCH.with(|sc| {
+            let mut tmp = sc.borrow_mut();
+            loop {
+                match s.read(&mut tmp[..]) {
+                    Ok(0) => {
+                        open.set(false); // EOF: peer closed
+                        break;
+                    }
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        let total = INBUF_PENDING.with(|c| {
+                            let t = c.get() + n;
+                            c.set(t);
+                            t
+                        });
+                        // Per-connection AND per-shard bounds, the same two-level
+                        // shape the SSE side uses — dropping the offender, exactly
+                        // as `push_and_flush` does over there.
+                        if buf.len() > MAX_HEADER_LINE * 8 + MAX_BODY || total > INBUF_GLOBAL {
+                            open.set(false); // runaway: drop it
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break, // nothing more now
+                    Err(_) => {
+                        open.set(false);
                         break;
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break, // nothing more now
-                Err(_) => {
-                    open.set(false);
-                    break;
-                }
             }
-        }
+        });
     }
     // Try to carve a complete request out of the buffer.
     let mut buf = inbuf.borrow_mut();
     match parse_request_buf(&buf) {
         BufParse::Complete(req, consumed) => {
             buf.drain(..consumed);
+            INBUF_PENDING.with(|c| c.set(c.get().saturating_sub(consumed)));
+            // `drain` keeps capacity: without this a connection that once carried a
+            // large body holds its high-water buffer for its whole keep-alive life
+            // (300 idle conns x one historical 1 MiB POST = 300 MiB pinned).
+            if buf.capacity() > MAX_HEADER_LINE && buf.len() <= MAX_HEADER_LINE / 2 {
+                buf.shrink_to(MAX_HEADER_LINE);
+            }
             Ok(*req)
         }
         BufParse::Incomplete => Ok(Value::Missing),
@@ -899,12 +1007,12 @@ pub fn wait(
 
 /// A built HTTP response: status code, header `(name, value)` pairs (always carrying a
 /// `Content-Type`), and the body. `Content-Length`/`Connection` are added by `respond`.
-type Response = (i64, Vec<(String, String)>, String);
+type Response<'a> = (i64, Vec<(Cow<'static, str>, Cow<'static, str>)>, Cow<'a, str>);
 
 /// Derive `(status, headers, body)` from a response value (see [`respond`]). `headers`
 /// always carries a `Content-Type` (overridable) plus any the program supplied; the
 /// caller adds `Content-Length`/`Connection`.
-fn build_response(value: &Value, line: usize, col: usize) -> Result<Response, HelixError> {
+fn build_response<'a>(value: &'a Value, line: usize, col: usize) -> Result<Response<'a>, HelixError> {
     let json_of = |v: &Value| -> Result<String, HelixError> {
         match crate::writers::to_json(std::slice::from_ref(v), line, col)? {
             Value::Str(s) => Ok((*s).clone()),
@@ -913,43 +1021,52 @@ fn build_response(value: &Value, line: usize, col: usize) -> Result<Response, He
     };
     // `text`/`html` stringify any value via Display (a `Dna`, number, etc. — not only a
     // `String`), so `{ text: seq.reverse_complement() }` sends the sequence text.
-    let as_text = |v: &Value| match v {
-        Value::Str(s) => (**s).clone(),
-        other => other.to_string(),
+    // A string body is BORROWED straight out of the value (zero-copy — `respond`
+    // reads it through the `Cow`); only a non-string pays a Display allocation.
+    let as_text = |v: &'a Value| -> Cow<'a, str> {
+        match v {
+            Value::Str(s) => Cow::Borrowed(s.as_str()),
+            other => Cow::Owned(other.to_string()),
+        }
     };
-    let one = |ct: &str, body: String| (vec![("Content-Type".to_string(), ct.to_string())], body);
+    let one = |ct: &'static str, body: Cow<'a, str>| {
+        (vec![(Cow::Borrowed("Content-Type"), Cow::Borrowed(ct))], body)
+    };
 
     let (status, (headers, body)) = match value {
         Value::Record(fields) => {
-            let get = |name: &str| fields.iter().find(|(k, _)| k.as_str() == name).map(|(_, v)| v);
-            let status = match get("status") {
+            // Probes compare interned `Symbol`s (a `u32` each): `as_str` per probe
+            // took the global interner's read lock several times every response.
+            let (k_status, k_json, k_html, k_text, k_body, k_headers) = respond_keys();
+            let get = |sym: Symbol| fields.iter().find(|(k, _)| *k == sym).map(|(_, v)| v);
+            let status = match get(k_status) {
                 Some(Value::Int(n)) => *n,
                 _ => 200,
             };
-            let payload = if let Some(v) = get("json") {
-                one("application/json", json_of(v)?)
-            } else if let Some(v) = get("html") {
+            let payload = if let Some(v) = get(k_json) {
+                one("application/json", Cow::Owned(json_of(v)?))
+            } else if let Some(v) = get(k_html) {
                 one("text/html; charset=utf-8", as_text(v))
-            } else if let Some(v) = get("text").or_else(|| get("body")) {
+            } else if let Some(v) = get(k_text).or_else(|| get(k_body)) {
                 one("text/plain; charset=utf-8", as_text(v))
-            } else if get("status").is_some() || get("headers").is_some() {
+            } else if get(k_status).is_some() || get(k_headers).is_some() {
                 // An explicit response envelope with no body (e.g. a redirect:
                 // `{ status: 302, headers: { Location: "/" } }`) → empty body.
-                one("text/plain; charset=utf-8", String::new())
+                one("text/plain; charset=utf-8", Cow::Borrowed(""))
             } else {
                 // A plain data record (no envelope fields) → JSON of the whole record.
-                one("application/json", json_of(value)?)
+                one("application/json", Cow::Owned(json_of(value)?))
             };
             // Merge any program-supplied response headers (record or dict of name→value).
             let mut payload = payload;
-            if let Some(h) = get("headers") {
+            if let Some(h) = get(k_headers) {
                 merge_headers(&mut payload.0, h)
                     .map_err(|m| HelixError::new(m, line, col))?;
             }
             (status, payload)
         }
-        Value::Str(s) => (200, one("text/plain; charset=utf-8", (**s).clone())),
-        other => (200, one("application/json", json_of(other)?)),
+        Value::Str(s) => (200, one("text/plain; charset=utf-8", Cow::Borrowed(s.as_str()))),
+        other => (200, one("application/json", Cow::Owned(json_of(other)?))),
     };
     Ok((status, headers, body))
 }
@@ -958,7 +1075,10 @@ fn build_response(value: &Value, line: usize, col: usize) -> Result<Response, He
 /// `{ "Set-Cookie" => "…" }` for names that aren't identifiers) into the response
 /// header list. A custom `Content-Type` replaces the auto one; `Content-Length` and
 /// `Connection` are reserved (the server computes them) and silently ignored.
-fn merge_headers(out: &mut Vec<(String, String)>, headers: &Value) -> Result<(), String> {
+fn merge_headers(
+    out: &mut Vec<(Cow<'static, str>, Cow<'static, str>)>,
+    headers: &Value,
+) -> Result<(), String> {
     let text = |v: &Value| match v {
         Value::Str(s) => (**s).clone(),
         other => other.to_string(),
@@ -982,10 +1102,10 @@ fn merge_headers(out: &mut Vec<(String, String)>, headers: &Value) -> Result<(),
         if lname == "content-type"
             && let Some(ct) = out.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
         {
-            ct.1 = val;
+            ct.1 = Cow::Owned(val);
             return;
         }
-        out.push((name, val));
+        out.push((Cow::Owned(name), Cow::Owned(val)));
     };
     match headers {
         Value::Record(fields) => {

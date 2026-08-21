@@ -84,10 +84,8 @@ libm = "0.2"
 # Latest Polars — Arrow-columnar, lazy, multi-threaded execution engine.
 polars = { version = "0.54", features = [
     "lazy",
-    "streaming",
     "csv",
     "parquet",
-    "ipc",
     "json",
     "strings",
     "is_in",

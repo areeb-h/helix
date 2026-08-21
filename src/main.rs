@@ -962,15 +962,17 @@ fn run_emit_hbc(args: &[String]) -> ExitCode {
 /// this stack could overflow (the totality guarantee). Scoped, so `f` can borrow
 /// caller-local data (the source text and loaded program) without cloning.
 fn run_on_big_stack<F: FnOnce() -> ExitCode + Send>(f: F) -> ExitCode {
-    // A 1 GiB stack gives the tree-walker's native recursion (capped at
-    // MAX_CALL_DEPTH = 20_000) ample headroom while reserving less address space than a
-    // 2 GiB stack, so the spawn is far less likely to be refused under a tight
-    // memory/ulimit. If the OS still refuses the thread, fail with a clean error rather
-    // than aborting the process (the previous `.expect` turned constrained memory into
-    // a crash for every program).
+    // The stack size is shared with shard workers (`serve::eval_stack_size`) so the
+    // primary and its shards can never diverge on recursion depth: 128 MiB in release
+    // (~6x headroom over MAX_CALL_DEPTH at the measured ~1 KiB/frame), 1 GiB in debug
+    // (~25x fatter frames), `HELIX_STACK_MB` to override. Small sizes matter beyond
+    // ulimits: a thread-stack reservation is committed memory under strict overcommit.
+    // If the OS refuses the thread, fail with a clean error rather than aborting the
+    // process (the previous `.expect` turned constrained memory into a crash for
+    // every program).
     std::thread::scope(|scope| {
         match std::thread::Builder::new()
-            .stack_size(1024 * 1024 * 1024)
+            .stack_size(crate::serve::eval_stack_size())
             .spawn_scoped(scope, f)
         {
             Ok(handle) => handle.join().unwrap_or(ExitCode::FAILURE),
