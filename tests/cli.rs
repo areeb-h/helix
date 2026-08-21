@@ -6068,3 +6068,164 @@ fn a_binding_used_before_its_definition_says_so() {
         assert_eq!(out, "4\n", "{name}");
     }
 }
+
+/// Splitting on the FIRST separator is the commonest parsing step there is, and it
+/// had no spelling: the idiom was `let eq = part.split("="), k = eq[0], v = if
+/// eq.count() <= 1 then "" else part.drop(k.count() + 1)` — split everything, discard
+/// the rest, recover the tail by arithmetic on the first part's length — repeated in
+/// five modules of one corpus, each an off-by-one waiting to happen.
+///
+/// `index_of` answers in CHARACTERS, the unit every other String method counts in, so
+/// the index can be fed straight back to `drop`/`take`/`s[a:b]`. Answering in bytes
+/// would work on ASCII and silently mislocate on anything else; the pin below proves
+/// it agrees with `chars().position(…)` on a multi-byte string.
+#[test]
+fn string_search_answers_in_characters() {
+    let src = "print(\"hello\".index_of(\"l\"))\n\
+               print(\"hello\".index_of(\"z\"))\n\
+               print(\"héllo\".index_of(\"l\"))\n\
+               print(\"héllo\".chars().position(c => c == \"l\"))\n\
+               k = \"key=val\".index_of(\"=\")\n\
+               print(\"key=val\".drop(k + 1))\n\
+               print(\"abc\".index_of(\"\"))\n\
+               print(\"abc\".contains(\"\"))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("index_of_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "2\nmissing\n2\n2\nval\n0\ntrue\n", "{name}");
+    }
+
+    let once = "print(\"a=b=c\".split_once(\"=\"))\n\
+                print(\"abc\".split_once(\"=\"))\n\
+                print(\"k=\".split_once(\"=\"))\n\
+                k, v = \"key=val=x\".split_once(\"=\")\n\
+                print(k)\n\
+                print(v)\n\
+                r = try (\"a\".split_once(\"\"))\n\
+                print(r.error)\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(once, env, &format!("split_once_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(
+            out,
+            "(\"a\", \"b=c\")\nmissing\n(\"k\", \"\")\nkey\nval=x\n\
+             `split_once` separator cannot be empty\n",
+            "{name}"
+        );
+    }
+
+    // The idiom it replaces, and the replacement, on the same input.
+    let both = "part = \"key=val=x\"\n\
+                eq = part.split(\"=\")\n\
+                a = eq[0]\n\
+                b = if eq.count() <= 1 then \"\" else part.drop(a.count() + 1)\n\
+                c, d = part.split_once(\"=\")\n\
+                print(a == c)\n\
+                print(b == d)\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(both, env, &format!("split_once_idiom_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "true\ntrue\n", "{name}");
+    }
+}
+
+/// `Dna` has had `windows` since the bio work; an array had to hand-roll
+/// `range(0, len - n + 1).map(i => xs.drop(i).take(n))` — two intermediate arrays per
+/// window — and signal processing and k-mer scanning both did. `windows` slides and
+/// overlaps; `chunks` partitions, and its last group is SHORT when the length does
+/// not divide evenly, because dropping it would silently lose data.
+#[test]
+fn arrays_can_window_and_chunk() {
+    let src = "print([1, 2, 3, 4].windows(2))\n\
+               print([1, 2, 3, 4].windows(3))\n\
+               print([1, 2].windows(5))\n\
+               print([].windows(2))\n\
+               print([1, 2, 3, 4, 5].chunks(2))\n\
+               print([1, 2, 3, 4].chunks(2))\n\
+               print([].chunks(2))\n\
+               r = try ([1, 2].windows(0))\n\
+               print(r.error)\n";
+    let want = "[[1, 2], [2, 3], [3, 4]]\n\
+                [[1, 2, 3], [2, 3, 4]]\n\
+                []\n\
+                []\n\
+                [[1, 2], [3, 4], [5]]\n\
+                [[1, 2], [3, 4]]\n\
+                []\n\
+                `windows` needs a positive size, got 0\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("windows_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+
+    // A moving average, and agreement with the hand-rolled spelling it replaces.
+    let use_it = "xs = [1.0, 2.0, 3.0, 4.0, 5.0]\n\
+                  print(xs.windows(3).map(w => w.mean()))\n\
+                  ys = [1, 2, 3, 4]\n\
+                  print(range(0, ys.count() - 1).map(i => ys.drop(i).take(2)) == ys.windows(2))\n\
+                  print(ys.chunks(2).flatten() == ys)\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(use_it, env, &format!("windows_use_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "[2.0, 3.0, 4.0]\ntrue\ntrue\n", "{name}");
+    }
+}
+
+/// A pair is a pair however it is written. `(k, v)` stays canonical, but a table
+/// transcribed from JSON or a reference document arrives as two-element ARRAYS, and
+/// refusing those sent people to `reduce(dict(), (d, kv) => d.insert(kv[0], kv[1]))`
+/// — a fold standing in for a literal, counted seventeen times in one corpus. The
+/// arity is still checked: a three-element row is a mistake, not a pair.
+#[test]
+fn to_dict_takes_a_pair_however_it_is_written() {
+    let src = "print([(\"a\", 1), (\"b\", 2)].to_dict())\n\
+               print([[\"a\", 1], [\"b\", 2]].to_dict())\n\
+               print([(\"a\", 1), [\"b\", 2]].to_dict())\n\
+               print([].to_dict())\n\
+               print([\"a\", \"b\", \"a\"].frequencies().to_dict())\n\
+               REASONS = [[100, \"Continue\"], [404, \"Not Found\"]].to_dict()\n\
+               print(REASONS.get(404))\n";
+    let want = "{\"a\" => 1, \"b\" => 2}\n\
+                {\"a\" => 1, \"b\" => 2}\n\
+                {\"a\" => 1, \"b\" => 2}\n\
+                {}\n\
+                {\"a\" => 2, \"b\" => 1}\n\
+                Not Found\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("to_dict_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+
+    // Wrong arity is still wrong, and the message names the shape that was found.
+    let bad = "print((try ([[1, 2, 3]].to_dict())).error)\n\
+               print((try ([[1]].to_dict())).error)\n\
+               print((try ([5].to_dict())).error)\n";
+    let bad_want = "`to_dict` needs (key, value) pairs, but element 0 is a 3-element array\n\
+                    `to_dict` needs (key, value) pairs, but element 0 is a 1-element array\n\
+                    `to_dict` needs (key, value) pairs, but element 0 is an Int\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(bad, env, &format!("to_dict_bad_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, bad_want, "{name}");
+    }
+}
+
+/// `concat` joins two sequences, and meant that on an Array but did not exist on a
+/// String — an asymmetry with no reason a reader could state. Interpolation stays the
+/// everyday way to build a string; this is about one verb meaning one thing.
+#[test]
+fn concat_joins_strings_as_well_as_arrays() {
+    let src = "print(\"a\".concat(\"b\"))\n\
+               print([1, 2].concat([3]))\n\
+               print(\"a\".concat(\"b\").concat(\"c\").upper())\n\
+               a = \"x\"\n\
+               b = \"y\"\n\
+               print(a.concat(b) == \"{a}{b}\")\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("concat_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "ab\n[1, 2, 3]\nABC\ntrue\n", "{name}");
+    }
+}

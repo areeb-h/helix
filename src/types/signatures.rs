@@ -860,6 +860,9 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         "join" => Type::String,
         // `concat` keeps the element type; `flatten` removes one level of nesting.
         "concat" => Type::Array(Box::new(el.clone())),
+        // `windows` slides and overlaps, `chunks` partitions — both group the same
+        // elements, so both are an array of arrays of the element type.
+        "windows" | "chunks" => Type::Array(Box::new(Type::Array(Box::new(el.clone())))),
         "flatten" => match el {
             Type::Array(inner) => Type::Array(inner.clone()),
             _ => Type::Array(Box::new(Type::Unknown)),
@@ -902,10 +905,16 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
 
 pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "upper" | "lower" | "reverse" | "trim" | "replace" => Type::String,
+        "upper" | "lower" | "reverse" | "trim" | "replace" | "concat" => Type::String,
         "take" | "drop" | "repeat" | "ljust" | "rjust" | "center" => Type::String,
-        "count" | "length" => Type::Int,
+        // `index_of` is the first match's CHARACTER index, or `missing` when absent —
+        // typed `Int`, the same way `Array.index_of` and `Dna.find` are typed.
+        "count" | "length" | "index_of" => Type::Int,
         "split" | "chars" => Type::Array(Box::new(Type::String)),
+        // `split_once` splits at the FIRST separator: `(before, after)`, or `missing`
+        // when it does not occur. A pair rather than an array because the two halves
+        // mean different things, and because a tuple destructures: `k, v = s.split_once("=")`.
+        "split_once" => Type::Tuple(vec![Type::String, Type::String]),
         "contains" | "starts_with" | "ends_with" => Type::Bool,
         // FASTQ Phred+33 quality string → per-base integer quality scores.
         "phred" => Type::Array(Box::new(Type::Int)),

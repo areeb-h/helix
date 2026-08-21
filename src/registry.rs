@@ -273,13 +273,15 @@ pub static ARRAY_METHODS: &[&str] = &[
     "total_length", "bar_chart", "histogram", "line_chart", "sparkline", "scatter", "svg_bar",
     "svg_line", "write_csv", "write_tsv", "write_json", "to_html", "to_markdown", "to_table",
     "to_dict", "write_fasta", "write_fastq", "shuffle", "sample", "choice",
+    "windows", "chunks",
 ];
 
 /// String methods.
 pub static STRING_METHODS: &[&str] = &[
     "upper", "lower", "count", "length", "chars", "reverse", "trim", "split", "replace", "contains",
     "starts_with", "ends_with", "take", "drop", "repeat", "ljust", "rjust", "center", "phred",
-    "parse_json", "to_float", "to_int", "write_to", "append_to",
+    "parse_json", "to_float", "to_int", "write_to", "append_to", "index_of", "split_once",
+    "concat",
 ];
 
 /// DNA-sequence methods.

@@ -1780,19 +1780,32 @@ fn array_method(
             use crate::value::DictKey;
             let mut map = std::collections::BTreeMap::new();
             for (i, item) in items.iter().enumerate() {
-                let pair = match item {
-                    Value::Tuple(t) if t.len() == 2 => t,
-                    other => {
+                // A pair is a pair however it is written. `(k, v)` is the canonical
+                // spelling, but a two-element ARRAY is what a table transcribed from
+                // JSON, a CSV, or a reference document looks like, and refusing it
+                // sent people to `reduce(dict(), (d, kv) => d.insert(kv[0], kv[1]))` —
+                // a fold standing in for a literal, seventeen times in one corpus.
+                // The ARITY still has to be two: a three-element row is a mistake, not
+                // a pair, and silently taking its first two would be worse than saying so.
+                let pair: Option<Vec<Value>> = match item {
+                    Value::Tuple(t) if t.len() == 2 => Some(t.to_vec()),
+                    Value::Array(a) if a.len() == 2 => Some(vec![a.get(0), a.get(1)]),
+                    _ => None,
+                };
+                let pair = match pair {
+                    Some(p) => p,
+                    None => {
+                        let what = match item {
+                            Value::Tuple(t) => format!("a {}-element tuple", t.len()),
+                            Value::Array(a) => format!("a {}-element array", a.len()),
+                            other => crate::value::with_article(other.type_name()).to_string(),
+                        };
                         return Err(HelixError::new(
-                            format!(
-                                "`to_dict` needs (key, value) pairs, but element {} is {}",
-                                i,
-                                crate::value::with_article(other.type_name())
-                            ),
+                            format!("`to_dict` needs (key, value) pairs, but element {i} is {what}"),
                             line,
                             col,
                         )
-                        .hint("e.g. `[(\"a\", 1), (\"b\", 2)].to_dict()` or `xs.frequencies().to_dict()`."));
+                        .hint("each element must hold exactly two values — `[(\"a\", 1), (\"b\", 2)]` or `[[\"a\", 1], [\"b\", 2]]`."));
                     }
                 };
                 let key = DictKey::from_value(&pair[0]).map_err(|m| HelixError::new(m, line, col))?;
@@ -1864,6 +1877,52 @@ fn array_method(
                 }
             }
             Ok(Value::array_sniff(out))
+        }
+        // Every consecutive run of `n` elements, overlapping — the sliding window
+        // signal processing and k-mer scanning both want. `Dna` has had this since
+        // the bio work; an array had to hand-roll
+        // `range(0, len - n + 1).map(i => xs.drop(i).take(n))`, which allocates two
+        // intermediate arrays per window. Shorter than `n` yields `[]`, the same
+        // answer `Dna.windows` gives, so the two read alike.
+        "windows" | "chunks" => {
+            if args.len() != 1 {
+                return Err(HelixError::new(
+                    format!("`{name}` expects 1 argument, got {}", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            let n = as_int(&args[0], name, line, col)?;
+            if n <= 0 {
+                return Err(HelixError::new(
+                    format!("`{}` needs a positive size, got {}", name, n),
+                    line,
+                    col,
+                )
+                .hint("the window size counts elements, so it must be at least 1."));
+            }
+            let n = n as usize;
+            let mut out: Vec<Value> = Vec::new();
+            if name == "windows" {
+                if n <= items.len() {
+                    let count = items.len() - n + 1;
+                    window_count_guard("windows", count, line, col)?;
+                    out.reserve(count);
+                    for w in items.windows(n) {
+                        out.push(Value::array(w.to_vec()));
+                    }
+                }
+            } else {
+                // `chunks` partitions instead of sliding: no element appears twice, and
+                // the last group is short when the length does not divide evenly —
+                // dropping it would silently lose data, which is worse than a ragged
+                // tail the caller can see and handle.
+                window_count_guard("chunks", items.len().div_ceil(n), line, col)?;
+                for c in items.chunks(n) {
+                    out.push(Value::array(c.to_vec()));
+                }
+            }
+            Ok(Value::array(out))
         }
         // `xss.flatten()` — one level: spread each array element, keep scalars. Turns
         // an array of arrays (e.g. dictionary column-groups) into one array.
@@ -2665,6 +2724,55 @@ fn string_method(
             let parts: Vec<Value> =
                 s.split(sep).map(|p| Value::Str(Rc::new(p.to_string()))).collect();
             Ok(Value::array(parts))
+        }
+        // Where a needle starts, as a CHARACTER index — the unit every other String
+        // method counts in (`take`, `drop`, `chars`, `s[a:b]`), not the byte offset
+        // the underlying search returns. Answering in bytes would be a silent trap on
+        // any non-ASCII input, since the index is meant to be fed straight back to
+        // `take`/`drop`. `missing` when absent, exactly like an array's `index_of`.
+        // An empty needle answers 0, matching its neighbour `contains("")` — the two
+        // ask the same question, so they agree.
+        "index_of" => {
+            arity(1)?;
+            let needle = str_arg(args, 0, name, line, col)?;
+            Ok(match s.find(needle) {
+                Some(byte) => Value::Int(s[..byte].chars().count() as i64),
+                None => Value::Missing,
+            })
+        }
+        // `split` at the FIRST separator only, keeping the rest of the tail intact:
+        // `(before, after)`, or `missing` when the separator does not occur. The
+        // spelling this replaces was `let eq = part.split("="), k = eq[0], v = if
+        // eq.count() <= 1 then "" else part.drop(k.count() + 1)` — split everything,
+        // discard the rest, then recover the tail by arithmetic on the first part's
+        // length, which is easy to get wrong by one. An empty separator is refused
+        // exactly as `split` refuses it: same argument role, same rule.
+        "split_once" => {
+            arity(1)?;
+            let sep = str_arg(args, 0, name, line, col)?;
+            if sep.is_empty() {
+                return Err(HelixError::new("`split_once` separator cannot be empty", line, col)
+                    .hint("split on a non-empty string, e.g. `s.split_once(\"=\")`."));
+            }
+            Ok(match s.split_once(sep) {
+                Some((a, b)) => Value::Tuple(Rc::new(vec![
+                    Value::Str(Rc::new(a.to_string())),
+                    Value::Str(Rc::new(b.to_string())),
+                ])),
+                None => Value::Missing,
+            })
+        }
+        // The sibling of `Array.concat`. Interpolation ("{a}{b}") remains the everyday
+        // way to build a string; this exists so that a verb which joins two sequences
+        // means the same thing on both sequence types, which is the whole of the
+        // surprise the review reported.
+        "concat" => {
+            arity(1)?;
+            let other = str_arg(args, 0, name, line, col)?;
+            let mut out = String::with_capacity(s.len() + other.len());
+            out.push_str(s);
+            out.push_str(other);
+            Ok(Value::Str(Rc::new(out)))
         }
         "replace" => {
             arity(2)?;
