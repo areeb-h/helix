@@ -447,13 +447,23 @@ impl Interp {
             }
             Expr::RecordUpdate { base, fields, line, col } => {
                 let base_v = self.eval(base)?;
-                let Value::Record(base_fields) = base_v else {
-                    return Err(HelixError::new(
-                        format!("`...` record update needs a record, got {}", crate::value::with_article(base_v.type_name())),
-                        *line,
-                        *col,
-                    )
-                    .hint("the spread base must be a record, e.g. `{ ...resp, status: 500 }`."));
+                let base_fields: Rc<Vec<(Symbol, Value)>> = match &base_v {
+                    Value::Record(f) => f.clone(),
+                    // A DICT spreads too: its string keys become fields. That is the
+                    // request-builder shape — known typed fields plus a bag of caller
+                    // options — which otherwise needs one `if opts.has(…)` per field.
+                    Value::Dict(map) => Rc::new(
+                        crate::value::dict_as_record_fields(map)
+                            .map_err(|m| HelixError::new(m, *line, *col))?,
+                    ),
+                    other => {
+                        return Err(HelixError::new(
+                            format!("`...` record update needs a record, got {}", crate::value::with_article(other.type_name())),
+                            *line,
+                            *col,
+                        )
+                        .hint("the spread base must be a record or a dict, e.g. `{ ...resp, status: 500 }`."))
+                    }
                 };
                 // Clone the base fields, then set (override) or append each update field, in
                 // order — a later field wins over a same-named base field or earlier update.

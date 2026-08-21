@@ -1438,13 +1438,22 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let start = stack.len() - names.len();
                 let vals: Vec<Value> = stack.split_off(start);
                 let base = stack.pop().unwrap();
-                let Value::Record(base_fields) = base else {
-                    return Err(HelixError::new(
-                        format!("`...` record update needs a record, got {}", crate::value::with_article(base.type_name())),
-                        line,
-                        col,
-                    )
-                    .hint("the spread base must be a record, e.g. `{ ...resp, status: 500 }`."));
+                let base_fields: std::rc::Rc<Vec<(crate::symbol::Symbol, Value)>> = match &base {
+                    Value::Record(f) => f.clone(),
+                    // A DICT spreads too — same helper as the tree-walker, so the two
+                    // engines cannot disagree about what came out.
+                    Value::Dict(map) => std::rc::Rc::new(
+                        crate::value::dict_as_record_fields(map)
+                            .map_err(|m| HelixError::new(m, line, col))?,
+                    ),
+                    other => {
+                        return Err(HelixError::new(
+                            format!("`...` record update needs a record, got {}", crate::value::with_article(other.type_name())),
+                            line,
+                            col,
+                        )
+                        .hint("the spread base must be a record or a dict, e.g. `{ ...resp, status: 500 }`."))
+                    }
                 };
                 // Clone the base, then set (override) or append each update field, in order.
                 let mut out: Vec<(crate::symbol::Symbol, Value)> = (*base_fields).clone();

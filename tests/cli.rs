@@ -6478,3 +6478,123 @@ fn block_comments_span_lines_and_nest() {
         assert!(err.contains(":5:7"), "{name}: line count drifted: {err}");
     }
 }
+
+/// `url_encode` / `url_decode` — RFC 3986 percent-encoding, without which a web
+/// library cannot build a correct URL. Before this,
+/// `ps.map((k, v) => "{k}={v}").join("&")` produced `q=hello world&n=2`, which is not
+/// a query string, and the hand-rolled fix could not be right: `s.chars().map(…)` maps
+/// CHARACTERS, and percent-encoding is defined over UTF-8 BYTES — which is the case
+/// this test exists for. `café` must be `caf%C3%A9`, two escapes for one character.
+#[test]
+fn percent_encoding_round_trips_bytes_not_characters() {
+    let src = "print(url_encode(\"a b&c=d/e?f\"))\n\
+               print(url_encode(\"abcXYZ012-._~\"))\n\
+               print(url_encode(\"café\"))\n\
+               print(url_decode(url_encode(\"café\")))\n\
+               print(url_decode(\"a%20b%26c\"))\n\
+               print(url_decode(url_encode(\"hello world & more=x\")))\n\
+               print(url_encode(missing))\n";
+    // The unreserved set survives untouched; everything else is UPPERCASE hex, which is
+    // what the RFC says producers should emit.
+    let want = "a%20b%26c%3Dd%2Fe%3Ff\n\
+                abcXYZ012-._~\n\
+                caf%C3%A9\n\
+                café\n\
+                a b&c\n\
+                hello world & more=x\n\
+                missing\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("urlenc_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+
+    // A truncated escape is an error, not data: the caller is usually parsing something
+    // that arrived over a network, where a silent pass-through hides a real corruption.
+    // Space is `%20`, never `+` — `+`-for-space is form encoding, a different thing, and
+    // conflating them corrupts a literal plus. Form bodies decode in the other order,
+    // which is the last line here.
+    let edges = "r = try (url_decode(\"a%2\"))\n\
+                 print(r.error)\n\
+                 print(url_encode(\"a+b\"))\n\
+                 print(url_decode(\"a%2Bb\"))\n\
+                 print(url_decode(\"a+b\".replace(\"+\", \" \")))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(edges, env, &format!("urlenc_edge_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(
+            out,
+            "`url_decode` found a `%` that is not followed by two hex digits, at position 1\n\
+             a%2Bb\na+b\na b\n",
+            "{name}"
+        );
+    }
+
+    // The whole point, end to end: build a query string and read it back.
+    let trip = "ps = [(\"q\", \"hello world\"), (\"tag\", \"a&b\")]\n\
+                qs = ps.map((k, v) => \"{url_encode(k)}={url_encode(v)}\").join(\"&\")\n\
+                print(qs)\n\
+                back = qs.split(\"&\").map(kv => kv.split_once(\"=\"))\n\
+                          .map((k, v) => (url_decode(k), url_decode(v))).to_dict()\n\
+                print(back.get(\"tag\"))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(trip, env, &format!("urlenc_trip_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "q=hello%20world&tag=a%26b\na&b\n", "{name}");
+    }
+}
+
+/// `{...dict, k: v}` — a Dict spreads into a record. The review's last web-shaped
+/// complaint was that it could not, "which forced branch-per-field code in
+/// `llm/request.helix`": that is the shape of every request builder, where some fields
+/// are known and typed and the rest arrive as a bag of caller options, and the result
+/// has to be one object to serialise.
+///
+/// Only STRING keys can cross, because a record field is a NAME. A key that has no
+/// spelling as a field is refused rather than skipped — dropping part of a payload
+/// silently is worse than not building it.
+#[test]
+fn a_dict_spreads_into_a_record() {
+    let src = "d = [(\"a\", 1), (\"b\", 2)].to_dict()\n\
+               print({...d, c: 3})\n\
+               print({...d, a: 99})\n\
+               print({...dict(), a: 1})\n\
+               print({...{a: 1}, b: 2})\n\
+               opts = [(\"temperature\", 0.7), (\"top_p\", 0.9)].to_dict()\n\
+               print({...opts, model: \"helix-1\", stream: false}.to_json())\n";
+    let want = "{a: 1, b: 2, c: 3}\n\
+                {a: 99, b: 2}\n\
+                {a: 1}\n\
+                {a: 1, b: 2}\n\
+                {\"model\":\"helix-1\",\"stream\":false,\"temperature\":0.7,\"top_p\":0.9}\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("dictspread_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+
+    // A non-name key is only knowable once the dict exists, so this is a RUNTIME
+    // error and `try` catches it.
+    let bad_key = "d = [(1, \"x\")].to_dict()\n\
+                   r = try ({...d, a: 1})\n\
+                   print(r.error)\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(bad_key, env, &format!("dictspread_key_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(
+            out,
+            "a record field must be a name, but this dict has the key `1`\n",
+            "{name}"
+        );
+    }
+
+    // An ARRAY base is provable statically, so the checker rejects the program before
+    // any engine runs — `try` never gets the chance, which is the correct split.
+    let bad_base = "print({...[1, 2], a: 1})\n";
+    for (name, env) in ENGINES {
+        let (_, err, code) = run_source(bad_base, env, &format!("dictspread_base_{name}"));
+        assert_eq!(code, Some(1), "{name}: an array base is a check-time error");
+        assert!(err.contains("`...` record update needs a record, got Array"), "{name}: {err}");
+        assert!(err.contains("must be a record or a dict"), "{name}: {err}");
+    }
+}

@@ -732,13 +732,17 @@ impl Checker {
                     // The base's shape isn't known (a `parse_json` result, a parameter, …).
                     // The result is a record, but its full field set can't be proven — stay
                     // permissive, exactly as for dynamic field access.
+                    // A DICT lands here too: it is `Unknown` to the checker (the
+                    // opaque-type pattern), and its keys are not known statically, so a
+                    // spread of one is a record whose field set cannot be proven —
+                    // which is exactly what this arm already answers.
                     Type::Unknown | Type::Missing => Ok(Type::Unknown),
                     other => Err(HelixError::new(
                         format!("`...` record update needs a record, got {other}"),
                         *line,
                         *col,
                     )
-                    .hint("the spread base must be a record, e.g. `{ ...resp, status: 500 }`.")),
+                    .hint("the spread base must be a record or a dict, e.g. `{ ...resp, status: 500 }`.")),
                 }
             }
             Expr::Field {

@@ -972,3 +972,32 @@ fn display_elem(v: &Value, line: usize, col: usize) -> Result<String, HelixError
         other => display_value(other, line, col),
     }
 }
+
+/// A Dict's entries as record fields, for `{...dict, k: v}`.
+///
+/// A record field is a NAME, so only string keys can cross; an `Int`/`Bool`/`Dna` key
+/// has no spelling as a field and is refused rather than skipped, because dropping part
+/// of a payload silently is worse than not building it. Shared by the tree-walker and
+/// the VM so the two cannot disagree about what a spread produced.
+pub fn dict_as_record_fields(
+    map: &std::collections::BTreeMap<DictKey, Value>,
+) -> Result<Vec<(crate::symbol::Symbol, Value)>, String> {
+    let mut out = Vec::with_capacity(map.len());
+    for (k, val) in map {
+        match k {
+            DictKey::Str(s) => out.push((crate::symbol::Symbol::intern(s), val.clone())),
+            other => {
+                let shown = match other {
+                    DictKey::Int(i) => i.to_string(),
+                    DictKey::Bool(b) => b.to_string(),
+                    DictKey::Dna(d) => d.to_string(),
+                    DictKey::Str(_) => unreachable!("string keys handled above"),
+                };
+                return Err(format!(
+                    "a record field must be a name, but this dict has the key `{shown}`"
+                ));
+            }
+        }
+    }
+    Ok(out)
+}

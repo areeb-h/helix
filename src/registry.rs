@@ -59,7 +59,8 @@ pub fn category_of(name: &str) -> &'static str {
         "sha256" | "hmac_sha256" | "aes_keygen" | "aes_encrypt" | "aes_decrypt"
         | "ed25519_keygen" | "ed25519_sign" | "ed25519_verify" => "crypto",
         // Encoding.
-        "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" => "encoding",
+        "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" | "url_encode"
+        | "url_decode" => "encoding",
         // Reproducible random.
         "random" | "randn" | "random_int" => "random",
         // Statistics, ML metrics, regression.
@@ -200,6 +201,9 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "base64_decode", pure: true },
     BuiltinDef { path: "hex_encode", pure: true },
     BuiltinDef { path: "hex_decode", pure: true },
+    // Percent-encoding (RFC 3986) — pure, and the pair a URL cannot be built without.
+    BuiltinDef { path: "url_encode", pure: true },
+    BuiltinDef { path: "url_decode", pure: true },
     // AES-256-GCM. keygen/encrypt draw fresh randomness (NOT memoizable); decrypt is pure.
     BuiltinDef { path: "aes_keygen", pure: false },
     BuiltinDef { path: "aes_encrypt", pure: false },

@@ -6666,8 +6666,10 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             // ...and a MISPLACED spread keeps its own, different message: these are two
             // distinct mistakes and the reader should be told which one they made
             ("a = {x: 1}\n{q: 1, ...a}", "must be the first element"),
-            // the spread base still has to be a record
-            ("d = [(\"a\", 1)].to_dict()\n{...d, x: 1}", "needs a record"),
+            // the spread base still has to be something with fields. A DICT is now one
+            // of those (its string keys become fields — the request-builder shape), so
+            // this asks with an Array, which has no keys at all.
+            ("{...[1, 2], x: 1}", "needs a record"),
         ] {
             let (tw, vm) = (run_tw(src), run_vm(src));
             assert_eq!(tw, vm, "engines disagree on `{src}`");

@@ -551,6 +551,81 @@ impl super::Interp {
                 let hex: String = tag.iter().map(|b| format!("{:02x}", b)).collect();
                 Ok(Value::Str(Rc::new(hex)))
             }
+            // Percent-encoding, RFC 3986. Encodes BYTES, not characters: `é` is two
+            // UTF-8 bytes and becomes `%C3%A9`, which a per-character mapping cannot
+            // express. Only the unreserved set survives; uppercase hex, as the RFC
+            // says producers should emit.
+            "url_encode" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Missing => Ok(Value::Missing),
+                    Value::Str(s) => {
+                        let mut out = String::with_capacity(s.len());
+                        for byte in s.as_bytes() {
+                            match byte {
+                                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_'
+                                | b'~' => out.push(*byte as char),
+                                other => out.push_str(&format!("%{:02X}", other)),
+                            }
+                        }
+                        Ok(Value::Str(Rc::new(out)))
+                    }
+                    other => Err(type_err("url_encode", "a string", other, line, col)),
+                }
+            }
+            // The inverse. A `%` that is not followed by two hex digits is an error
+            // rather than a pass-through: silently keeping it would turn a truncated
+            // or mistyped escape into data, and the caller is usually parsing something
+            // that arrived over a network.
+            "url_decode" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Missing => Ok(Value::Missing),
+                    Value::Str(s) => {
+                        let bytes = s.as_bytes();
+                        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+                        let mut i = 0usize;
+                        while i < bytes.len() {
+                            if bytes[i] == b'%' {
+                                let hex = bytes.get(i + 1..i + 3).and_then(|h| {
+                                    std::str::from_utf8(h)
+                                        .ok()
+                                        .and_then(|h| u8::from_str_radix(h, 16).ok())
+                                });
+                                match hex {
+                                    Some(v) => {
+                                        out.push(v);
+                                        i += 3;
+                                    }
+                                    None => {
+                                        return Err(HelixError::new(
+                                            format!(
+                                                "`url_decode` found a `%` that is not followed by two hex digits, at position {i}"
+                                            ),
+                                            line,
+                                            col,
+                                        )
+                                        .hint("a literal percent sign is written `%25`."))
+                                    }
+                                }
+                            } else {
+                                out.push(bytes[i]);
+                                i += 1;
+                            }
+                        }
+                        match String::from_utf8(out) {
+                            Ok(text) => Ok(Value::Str(Rc::new(text))),
+                            Err(_) => Err(HelixError::new(
+                                "`url_decode` produced non-UTF-8 bytes — Helix strings are text, so binary payloads aren't representable",
+                                line,
+                                col,
+                            )
+                            .hint("decode binary with `base64_decode`, or keep it encoded.")),
+                        }
+                    }
+                    other => Err(type_err("url_decode", "a string", other, line, col)),
+                }
+            }
             "base64_encode" => {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {

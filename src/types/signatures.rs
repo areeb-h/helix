@@ -489,7 +489,8 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::String)
         }
-        "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" => {
+        "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" | "url_encode"
+        | "url_decode" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
