@@ -194,3 +194,38 @@ jobs:
       # And the allocator-debugging build, which is what `--no-default-features` is for.
       - name: no default features
         run: cargo check --no-default-features
+
+  installer:
+    name: install.sh logic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # install.sh carries the repo's only version-comparison logic, and it runs on
+      # every user's machine, under an unknown `sh`, before anything else can go
+      # right. shellcheck it as POSIX sh, then table-test `version_lt` and the
+      # glibc-floor routing with dash (the strictest common /bin/sh).
+      - name: shellcheck (POSIX sh)
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck dash
+          shellcheck -s sh install.sh
+      - name: version_lt table test (dash)
+        run: |
+          { sed -n '/^GLIBC_FLOOR=/p' install.sh
+            sed -n '/^glibc_version() {/,/^}/p' install.sh
+            sed -n '/^version_lt() {/,/^}/p' install.sh; } > /tmp/fns.sh
+          dash -e -c '
+            . /tmp/fns.sh
+            fail=0
+            t() {
+              if version_lt "$1" "$2"; then got=lt; else got=ge; fi
+              [ "$got" = "$3" ] || { echo "FAIL: $1 vs $2 -> $got (want $3)"; fail=1; }
+            }
+            t 2.17 2.35 lt;  t 2.28 2.35 lt;  t 2.31 2.35 lt;  t 2.34 2.35 lt
+            t 2.35 2.35 ge;  t 2.36 2.35 ge;  t 2.39 2.35 ge;  t 3.0 2.35 ge
+            t 2.4  2.35 lt;  t 2.35.1 2.35 ge;  t 3.0 3 ge;  t 2 2.35 lt
+            case "$GLIBC_FLOOR" in
+              [0-9]*.[0-9]*) ;;
+              *) echo "FAIL: GLIBC_FLOOR must be MAJOR.MINOR, got: $GLIBC_FLOOR"; fail=1 ;;
+            esac
+            exit $fail
+          '

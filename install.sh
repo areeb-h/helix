@@ -13,8 +13,10 @@
 #   HELIX_INSTALL_DIR   where to put the binary (default: $HOME/.local/bin)
 #   HELIX_VERSION       release tag to fetch (default: latest)
 #   HELIX_FROM_SOURCE   set to 1 to force a source build
-#   HELIX_MUSL          set to 1 to fetch the fully-static musl binary on x86_64 Linux
-#                       (maximum portability / air-gapped; the default gnu build is PGO)
+#   HELIX_MUSL          set to 1 to force the fully-static musl binary on x86_64 Linux
+#                       (maximum portability / air-gapped; the default gnu build is PGO).
+#                       Auto-selected on musl distros and on glibc older than the gnu
+#                       build's floor — no knob needed there.
 #   HELIX_NO_VERIFY     set to 1 to skip checksum verification (NOT recommended)
 #   HELIX_REPO          owner/name on GitHub (default: areeb-h/helix)
 
@@ -86,12 +88,68 @@ install_binary_from() {
   "$INSTALL_DIR/$BIN" version || true
 }
 
+# The gnu artifact's glibc floor. This must describe the PUBLISHED release, not
+# the workflow's intent: every release up to v0.3.0 was built on ubuntu-latest
+# (glibc 2.39). release.yml now pins build-pgo to ubuntu-22.04 (floor 2.35) and
+# asserts this constant covers the artifact — LOWER THIS TO "2.35" in the same
+# commit that cuts the first release from the pinned runner. Format: MAJOR.MINOR.
+GLIBC_FLOOR="2.39"
+
+# The running system's glibc version ("2.35"), or empty on a non-glibc libc
+# (musl/Alpine — `getconf GNU_LIBC_VERSION` errors and `ldd --version` says musl).
+glibc_version() {
+  v="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')" || v=""
+  # Keep only the leading digits-and-dots ("2.35-r1" -> "2.35") so version_lt's
+  # numeric compares can never see a suffix.
+  v="${v%%[!0-9.]*}"
+  case "$v" in
+    [0-9]*.[0-9]*) printf '%s' "$v" ;;
+    *) printf '%s' "" ;;
+  esac
+}
+
+# True when $1 sorts strictly below $2 as a version (portable: no sort -V on busybox
+# — compare major, then minor, numerically).
+version_lt() {
+  # A dot-less operand ("3") would echo through ${1#*.} unchanged and invert the
+  # compare — normalize it to X.0 first.
+  case "$1" in *.*) ;; *) set -- "$1.0" "$2" ;; esac
+  case "$2" in *.*) ;; *) set -- "$1" "$2.0" ;; esac
+  a_maj="${1%%.*}"; a_min="${1#*.}"; a_min="${a_min%%.*}"
+  b_maj="${2%%.*}"; b_min="${2#*.}"; b_min="${b_min%%.*}"
+  [ "$a_maj" -lt "$b_maj" ] || { [ "$a_maj" -eq "$b_maj" ] && [ "$a_min" -lt "$b_min" ]; }
+}
+
 from_release() {
   target="$(detect_target)"
-  # Opt into the fully-static musl artifact on x86_64 Linux (air-gapped / maximum
-  # portability). The default x86_64 Linux build is the glibc PGO binary.
-  if [ "${HELIX_MUSL:-0}" = "1" ] && [ "$target" = "x86_64-unknown-linux-gnu" ]; then
-    target="x86_64-unknown-linux-musl"
+  # The default x86_64 Linux build is the glibc PGO binary; the static musl artifact
+  # is for air-gapped use, musl distros, and machines older than the gnu build's
+  # glibc floor. Three ways to it: HELIX_MUSL=1 forces it, a non-glibc libc
+  # (Alpine) needs it — the gnu binary cannot start there at all — and a glibc
+  # below the floor gets it automatically rather than a loader error at first run.
+  if [ "$target" = "x86_64-unknown-linux-gnu" ]; then
+    if [ "${HELIX_MUSL:-0}" = "1" ]; then
+      target="x86_64-unknown-linux-musl"
+    else
+      glibc="$(glibc_version)"
+      if [ -z "$glibc" ]; then
+        if ldd --version 2>&1 | grep -qi musl; then
+          say "musl libc detected — using the static musl binary"
+        else
+          say "could not determine the glibc version — using the static musl binary (safe everywhere)"
+        fi
+        target="x86_64-unknown-linux-musl"
+      elif version_lt "$glibc" "$GLIBC_FLOOR"; then
+        say "glibc $glibc is older than the gnu build's floor ($GLIBC_FLOOR) — using the static musl binary"
+        target="x86_64-unknown-linux-musl"
+      fi
+    fi
+  elif [ "$target" = "aarch64-unknown-linux-gnu" ]; then
+    # No musl artifact for aarch64 — warn early instead of a loader error later.
+    glibc="$(glibc_version)"
+    if [ -z "$glibc" ] || version_lt "$glibc" "$GLIBC_FLOOR"; then
+      say "warning: this system's libc (${glibc:-non-glibc}) is below the aarch64 build's floor — if helix fails to start, build from source: HELIX_FROM_SOURCE=1"
+    fi
   fi
   ver="${HELIX_VERSION:-latest}"
   if [ "$ver" = "latest" ]; then

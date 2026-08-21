@@ -88,7 +88,9 @@ helix emit-hbc script.helix  # compile to a .hbc bytecode container (portable co
 helix help                   # all commands
 ```
 
-`HELIX_MUSL=1` fetches the fully-static build (verified `static-pie linked`);
+The installer picks the static musl build automatically on musl distros (Alpine) and
+on glibc older than the gnu build's floor; `HELIX_MUSL=1` forces it (verified
+`static-pie linked`).
 `HELIX_INSTALL_DIR` changes where it lands. A checksum **mismatch aborts** rather than
 warning — the installer will not install what it cannot verify.
 

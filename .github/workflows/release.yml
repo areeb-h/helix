@@ -85,7 +85,9 @@ jobs:
           # a binary that links but will not start is a release-day bug, and running it
           # once costs nothing. The cross-compiled ones cannot be run here, and claiming
           # otherwise would be the kind of unearned confidence this project audits out.
-          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, cross: true }
+          # Pinned for the same reason as build-pgo below: the cross toolchain's libc
+          # (libc6-dev-arm64-cross) sets this artifact's glibc floor — 22.04 = 2.35.
+          - { os: ubuntu-22.04,  target: aarch64-unknown-linux-gnu, cross: true }
           - { os: macos-latest,   target: x86_64-apple-darwin }
           - { os: macos-latest,   target: aarch64-apple-darwin, smoke: true }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, smoke: true }
@@ -146,7 +148,13 @@ jobs:
   build-pgo:
     name: build x86_64-unknown-linux-gnu (PGO)
     needs: create-release
-    runs-on: ubuntu-latest
+    # PINNED, not `-latest`: the artifact inherits the runner's glibc as its floor,
+    # and `ubuntu-latest` silently raised it to 2.39 (24.04) — locking out Ubuntu
+    # 22.04 LTS (2.35), Debian 12 (2.36), and every RHEL: exactly the older machines
+    # a portable binary is for. 22.04 gives a 2.35 floor; install.sh knows this
+    # number (GLIBC_FLOOR) and auto-falls-back to the static musl artifact on
+    # anything older — keep the two in sync when this runner changes.
+    runs-on: ubuntu-22.04
     permissions:
       contents: write   # uploads release assets
     steps:
@@ -180,6 +188,19 @@ jobs:
           scripts/perf-verify.sh \
             target/baseline/x86_64-unknown-linux-gnu/release/helix \
             target/x86_64-unknown-linux-gnu/release/helix --scale 0.25
+      - name: Assert the artifact's real glibc floor is covered by install.sh
+        # install.sh routes glibc < GLIBC_FLOOR to the musl artifact. If this runner
+        # ever silently changes (a -latest remap, a toolchain bump), the artifact's
+        # requirement rises above what the installer advertises and old machines get
+        # a loader error AFTER install — this step turns that into a release failure.
+        run: |
+          BIN=target/x86_64-unknown-linux-gnu/release/helix
+          max="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)"
+          floor="$(sed -n 's/^GLIBC_FLOOR="\(.*\)"$//p' install.sh)"
+          echo "artifact requires glibc <= $max; install.sh advertises $floor"
+          [ "$(printf '%s
+%s
+' "$max" "$floor" | sort -V | tail -1)" = "$floor" ]             || { echo "FLOOR DRIFT: artifact needs $max, install.sh says $floor" >&2; exit 1; }
       - name: Package
         run: tar -czf "helix-x86_64-unknown-linux-gnu.tar.gz" -C "target/x86_64-unknown-linux-gnu/release" helix
       - name: Upload to the draft release
