@@ -37,6 +37,7 @@ they are made deliberately and in the open.
 | [0028](0028-query-name-resolution.md) | In a DataFrame query, does a bare name mean the column or the binding? | **Accepted** — a binding in scope wins, `@name` still pins the column; **implemented**; breaking, ships in v0.2.0 |
 | [0029](0029-linear-accumulation.md) | Is a fold that rebuilds its accumulator allowed to be quadratic on any engine? | **Accepted** — amortized-linear is a language guarantee via Rc-uniqueness take-append-store; not yet implemented; plan in docs/linear-accumulation-plan.md |
 | [0030](0030-time.md) | Can a reproducible language tell the time? | **Proposed** — monotonic  as a declared  effect, durations only, judgments-not-raw-times idiom; awaiting acceptance |
+| [0031](0031-http-client-hardening.md) | What does an HTTP client owe a program that trusts it? | **Proposed** — redirect boundary rules (credentials stripped cross-origin, no https→http, QUERY keeps its method per RFC 10008), an explicit cookie jar with the Public Suffix List, per-request timeouts and limits, and headers as a case-insensitive type that refuses CRLF; awaiting acceptance |
 
 ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
 (23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a
