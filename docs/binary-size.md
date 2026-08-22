@@ -76,7 +76,7 @@ Investigated and ruled out:
   sites exist outside the backend file. A `dataframes` cargo feature (default-ON; the
   small build is opt-in) sheds the 27 polars crates AND the object_store/tokio tail
   for ~Small surgery. **Landed 2026-08-22** (ADR 0032 steps 1+2): the `appliance`
-  profile builds **12.7 MB at the shipped release profile** (fat LTO + strip; vs
+  profile builds **8.6 MB at the shipped release profile** (12.7 with the JIT in) (fat LTO + strip; vs
   51.8 MB default release), 13.4 MB vs 75.7 MB stripped at the gate profile — with
   the full language surface intact (gate-the-body: every verb still type-checks and
   describes itself; running one names the feature to rebuild with).
