@@ -88,12 +88,11 @@ install_binary_from() {
   "$INSTALL_DIR/$BIN" version || true
 }
 
-# The gnu artifact's glibc floor. This must describe the PUBLISHED release, not
-# the workflow's intent: every release up to v0.3.0 was built on ubuntu-latest
-# (glibc 2.39). release.yml now pins build-pgo to ubuntu-22.04 (floor 2.35) and
-# asserts this constant covers the artifact — LOWER THIS TO "2.35" in the same
-# commit that cuts the first release from the pinned runner. Format: MAJOR.MINOR.
-GLIBC_FLOOR="2.39"
+# The gnu artifact's glibc floor — true as of v0.4.0, the first release built on
+# the pinned ubuntu-22.04 runner (release.yml `build-pgo` asserts the artifact
+# stays under this constant, so a runner change becomes a release failure, not a
+# user's loader error). Format: MAJOR.MINOR.
+GLIBC_FLOOR="2.35"
 
 # The running system's glibc version ("2.35"), or empty on a non-glibc libc
 # (musl/Alpine — `getconf GNU_LIBC_VERSION` errors and `ldd --version` says musl).

@@ -1,6 +1,43 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 — 2026-08-23
+
+**The trust release.** Everything here is about what a program can rely on: an HTTP
+client that is secure by default (ADR 0031, all four steps), frames whose semantics
+are the language's own (ADR 0033/0034), printed output no environment variable can
+bend, binaries that start on a 2022 Linux and fit on a small one, and a method call
+that can never capture the wrong thing. The minor version moves because
+`print(df)`'s bytes changed — everything else is additive or stricter.
+
+### Security — the HTTP client earns its defaults (ADR 0031)
+
+- **Header injection is refused before the wire**, both directions: a CR/LF (or any
+  C0 control) in a header name or value is a positioned error at construction —
+  request and response alike.
+- **`Headers` is a type**, not a Dict: case-insensitive lookup (`get`/`get_all`/
+  `has`/`keys`/`values`/`items`), wire order preserved, repeated headers kept — an
+  HTTP/2-style lowercase response and an HTTP/1.1 one read identically.
+- **Per-request `total_ms`/`connect_ms`/`read_ms`/`max_body`** — every limit that
+  trips is an error naming itself, never a truncated body pretending completeness.
+- **Redirects enforce the boundary rules**: `Authorization`/`Cookie`/
+  `Proxy-Authorization` stripped when the origin changes (not configurable),
+  `https` never silently downgrades, non-http(s) schemes refused, ten hops max,
+  and the chain comes back as data (`redirects`). QUERY keeps its method and body
+  through 301/302 per RFC 10008.
+- **A cookie jar** (`cookie_jar()`), explicit program-held state threaded per
+  request — never ambient. Supercookies are structurally refused via the Public
+  Suffix List (`Domain=.co.uk` falls back to host-only); `Secure` never crosses
+  plain http; `Max-Age` beats `Expires`; expired cookies evict on read and write.
+
+### Added — the appliance profile (ADR 0032)
+
+`--no-default-features --features appliance` builds a **9.3 MB** helix (was
+51.8 MB) with the FULL language surface: every DataFrame, genomics, and JIT verb
+still exists, type-checks, and describes itself — running one names the feature to
+rebuild with. Feature gates: `dataframes` (polars), `bio` (noodles + needletail),
+`jit` (cranelift; bytecode is identical either way — the flag changes speed, never
+output), `native-df` (the new engine below, included in appliance). Defaults
+unchanged: `cargo install helix` is still the full flagship.
 
 ### Changed — printed DataFrames have a Helix-owned format (ADR 0033, Stage 0)
 
@@ -35,6 +72,37 @@ construction. The appliance profile now includes it: full frame pipelines
 (read_csv/where/with/sort/group/join/write_csv) in a 9.3 MB binary. The default
 build still uses polars; a dual build (`--features native-df` on top of default)
 runs both engines and is differential-tested verb by verb.
+
+### Fixed
+
+- **UFCS could capture a Python attribute call**: `np.round(1.5)` was rewritten to
+  `round(np, 1.5)` because dynamic-dispatch receivers resolve attributes at run
+  time. The parser rewrite now covers user-defined functions only; builtin
+  chaining is restored by a runtime fallback that fires only after method dispatch
+  fails on the receiver — provably additive, and excluded for PyObject/Node/
+  DataFrame/GroupBy receivers.
+- **The event-loop server's request headers** had drifted to a case-sensitive Dict
+  on the concurrent path while the blocking path got the `Headers` type —
+  `get("content-type")` missed at 55k req/s. One shared parser now serves both.
+- **Release binaries start on 2022-era Linux again**: the gnu artifacts silently
+  inherited the CI runner's glibc 2.39 floor (locking out Ubuntu 22.04, Debian 12,
+  and every RHEL); both gnu builds are now pinned to a 2.35 floor, the workflow
+  asserts the artifact matches what the installer advertises, and `install.sh`
+  auto-selects the static musl build on musl distros and any glibc below the floor.
+
+### Performance
+
+- **Serving**: `listen(port, shards)` composed with the event loop measures
+  317–336k req/s on a 6-core box (~2x a node 24 cluster at equal workers), p50
+  0.29 ms — near-linear scaling; the previously recorded ~90k ceiling was a host
+  power-management measurement artifact, now documented.
+- **Old hardware**: serving 100 connections fits under a hard 20 MB memory cap at
+  full throughput; a 40%-throttled core sustains 21k req/s. Keep-alive buffers
+  shrink after large bodies (was: 300 idle connections could pin 300 MB), inbound
+  reads gained a 64 MiB per-shard budget mirroring the SSE side, and every eval
+  thread's stack reservation dropped 1 GiB -> 128 MiB (measured ~1 KiB/frame;
+  strict-overcommit VPSes can actually spawn shards now; `HELIX_STACK_MB`
+  overrides).
 
 ## v0.3.0 — 2026-08-20
 
