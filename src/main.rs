@@ -11,7 +11,25 @@ mod ast;
 mod autodiff;
 mod backend;
 mod bed;
+#[cfg(feature = "bio")]
 mod bio;
+/// The engine-less twin (ADR 0032): same names, same signatures, the clean
+/// "rebuild with --features bio" error. The registry, checker, and describe
+/// never notice the difference.
+#[cfg(not(feature = "bio"))]
+mod bio {
+    use crate::error::HelixError;
+    use crate::value::Value;
+
+    pub fn read_fasta(_path: &str, line: usize, col: usize) -> Result<Value, HelixError> {
+        Err(crate::bioio::no_bio(line, col))
+    }
+
+    pub fn read_fastq(_path: &str, line: usize, col: usize) -> Result<Value, HelixError> {
+        Err(crate::bioio::no_bio(line, col))
+    }
+}
+mod bioio;
 mod bundle;
 mod bytecode;
 mod capability;
@@ -20,8 +38,19 @@ mod dataframe;
 mod doctest;
 mod error;
 mod fmt;
+#[cfg(feature = "bio")]
 mod gff;
+#[cfg(not(feature = "bio"))]
+mod gff {
+    use crate::backend::Df;
+    use crate::error::HelixError;
+
+    pub fn read_gff(_path: &str, line: usize, col: usize) -> Result<Df, HelixError> {
+        Err(crate::bioio::no_bio(line, col))
+    }
+}
 mod hbc;
+#[cfg_attr(not(feature = "http"), allow(dead_code))]
 mod cookiejar;
 mod http;
 mod interp;
@@ -39,7 +68,30 @@ mod python;
 mod registry;
 mod render;
 mod rng;
+#[cfg(feature = "bio")]
 mod sam;
+#[cfg(not(feature = "bio"))]
+mod sam {
+    use crate::backend::Df;
+    use crate::error::HelixError;
+
+    pub fn read_sam(_path: &str, line: usize, col: usize) -> Result<Df, HelixError> {
+        Err(crate::bioio::no_bio(line, col))
+    }
+
+    pub fn read_bam(_path: &str, line: usize, col: usize) -> Result<Df, HelixError> {
+        Err(crate::bioio::no_bio(line, col))
+    }
+
+    pub fn read_bam_region(
+        _path: &str,
+        _region: &str,
+        line: usize,
+        col: usize,
+    ) -> Result<Df, HelixError> {
+        Err(crate::bioio::no_bio(line, col))
+    }
+}
 mod serve;
 mod simd;
 mod stats;
@@ -50,7 +102,30 @@ mod tensor;
 mod token;
 mod types;
 mod value;
+#[cfg(feature = "bio")]
 mod vcf;
+#[cfg(not(feature = "bio"))]
+mod vcf {
+    use crate::backend::Df;
+    use crate::error::HelixError;
+
+    pub fn read_vcf(_path: &str, line: usize, col: usize) -> Result<Df, HelixError> {
+        Err(crate::bioio::no_bio(line, col))
+    }
+
+    pub fn read_bcf(_path: &str, line: usize, col: usize) -> Result<Df, HelixError> {
+        Err(crate::bioio::no_bio(line, col))
+    }
+
+    pub fn read_vcf_region(
+        _path: &str,
+        _region: &str,
+        line: usize,
+        col: usize,
+    ) -> Result<Df, HelixError> {
+        Err(crate::bioio::no_bio(line, col))
+    }
+}
 mod vm;
 mod writers;
 

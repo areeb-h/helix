@@ -56,26 +56,26 @@ url = "2"
 # the list revision, so its staleness is visible rather than silent.
 psl = "2"
 num-bigint = "0.4"
-needletail = "0.7.3"
+needletail = { version = "0.7.3", optional = true }
 # Spec-compliant genomics parsers (the bio flagship stands on the Rust bio
 # ecosystem the way it stands on Polars). VCF gives header-typed INFO fields and
 # BGZF; BCF is its binary form (same record model); GFF/BED add feature/interval
 # formats. Pure Rust, no system deps. The BCF version is pinned to the one that
 # depends on noodles-vcf 0.88 so a single copy of each noodles crate is resolved.
-noodles-vcf = "0.88"
-noodles-bcf = "0.86"
-noodles-gff = "0.57"
+noodles-vcf = { version = "0.88", optional = true }
+noodles-bcf = { version = "0.86", optional = true }
+noodles-gff = { version = "0.57", optional = true }
 # SAM/BAM sequence alignments (the most common post-FASTQ format). BAM is the
 # binary, BGZF-framed form of SAM; noodles yields the same alignment RecordBuf for
 # both, so read_sam/read_bam share one column-building core. Versions pinned to the
 # set that depends on the noodles-core/bgzf/csi already in the tree (single copy).
-noodles-sam = "0.85"
-noodles-bam = "0.90"
+noodles-sam = { version = "0.85", optional = true }
+noodles-bam = { version = "0.90", optional = true }
 # Genomic region/interval types (`Region` = "chr17:43k-44k") for indexed region
 # queries — read just the variants in a region from a bgzipped+tabix-indexed VCF
 # without scanning the whole file (the local-first capability). Pinned to the copy
 # already in the tree. The .tbi index reader lives in noodles-vcf.
-noodles-core = "0.20"
+noodles-core = { version = "0.20", optional = true }
 # musl's libm, ported to Rust — used ONLY for `erf`/`erfc` (src/stats.rs): the two
 # functions Rust's std does not provide, and which a rational approximation cannot
 # compute to double precision. Already compiled into this binary via
@@ -93,7 +93,7 @@ polars = { version = "0.54", features = [
     "cum_agg",
     "dtype-full",
     "performant",
-] }
+], optional = true }
 # Fast, deterministic hashing for the interpreter environment.
 rustc-hash = "2"
 # JSON for `parse_json`/`to_json` — consuming and producing API/data payloads.
@@ -175,13 +175,32 @@ libc = "0.2"
 [features]
 # HTTP data-fetching and the fast allocator are on by default; build with
 # `--no-default-features` for a network-free / system-allocator binary.
-default = ["http", "mimalloc"]
+default = ["http", "mimalloc", "dataframes", "bio"]
 # Swap in the mimalloc global allocator (a pure runtime win; see src/main.rs).
 mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 # `http_get` — fetch data over HTTP(S) from a Helix program.
 http = ["dep:ureq"]
 # Enable the embedded-CPython bridge: `cargo build --features python`.
-python = ["dep:pyo3", "dep:pyo3-polars", "dep:numpy"]
+# The DataFrame engine (polars) behind the ADR 0012 seam. Off = the appliance
+# build: every DataFrame verb still exists, type-checks, and describes itself —
+# running one says what to rebuild with (ADR 0032's gate-the-body pattern).
+dataframes = ["dep:polars"]
+# The genomics readers (noodles x6, needletail). Five of the seven return a
+# DataFrame, so `bio` implies `dataframes`; read_bed is hand-rolled and ungated.
+bio = [
+    "dataframes",
+    "dep:noodles-vcf",
+    "dep:noodles-bcf",
+    "dep:noodles-gff",
+    "dep:noodles-sam",
+    "dep:noodles-bam",
+    "dep:noodles-core",
+    "dep:needletail",
+]
+# The small-server profile: full language surface, no heavy backends.
+appliance = ["http", "mimalloc"]
+# Python interop hands whole frames across via Arrow, so it needs the engine.
+python = ["dataframes", "dep:pyo3", "dep:pyo3-polars", "dep:numpy"]
 # Managed runtimes: verified downloads + extraction (managed Python, etc.).
 managed = ["http"]
 

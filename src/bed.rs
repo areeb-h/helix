@@ -18,7 +18,7 @@ use std::io::BufRead;
 
 use crate::backend::ColData;
 use crate::error::{reserve_rows, HelixError};
-use crate::vcf::open_maybe_gzip;
+use crate::bioio::open_maybe_gzip;
 
 pub fn read_bed(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, HelixError> {
     let err = |msg: String| HelixError::new(msg, line, col);

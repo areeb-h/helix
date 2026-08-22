@@ -17,7 +17,7 @@ use noodles_gff as gff;
 
 use crate::backend::ColData;
 use crate::error::{reserve_rows, HelixError};
-use crate::vcf::{open_maybe_gzip, widen_f32};
+use crate::bioio::{open_maybe_gzip, widen_f32};
 
 pub fn read_gff(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, HelixError> {
     let err = |msg: String| HelixError::new(msg, line, col);

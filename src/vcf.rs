@@ -25,32 +25,14 @@
 //! record model and column-building core — only the reader construction differs.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 
-use flate2::read::MultiGzDecoder;
 use noodles_bcf as bcf;
 use noodles_core::Region;
 use noodles_vcf::{self as vcf, header::record::value::map::info::{Number, Type as InfoType}};
 
 use crate::backend::ColData;
+use crate::bioio::{open_maybe_gzip, widen_f32};
 use crate::error::{reserve_rows, HelixError};
-
-/// Open `path` as a buffered byte stream, transparently decompressing gzip/BGZF.
-/// BGZF (what `bgzip` produces for `.vcf.gz`) is a concatenation of gzip members,
-/// which `MultiGzDecoder` handles like any multi-member gzip. Shared by the
-/// genomics readers.
-pub(crate) fn open_maybe_gzip(path: &str) -> std::io::Result<Box<dyn BufRead>> {
-    let mut file = BufReader::new(std::fs::File::open(path)?);
-    let is_gzip = {
-        let head = file.fill_buf()?;
-        head.len() >= 2 && head[0] == 0x1f && head[1] == 0x8b
-    };
-    if is_gzip {
-        Ok(Box::new(BufReader::new(MultiGzDecoder::new(file))))
-    } else {
-        Ok(Box::new(file))
-    }
-}
 
 /// The Polars dtype a given INFO key maps to, decided once from the header.
 #[derive(Clone, Copy)]
@@ -258,16 +240,6 @@ where
     }
 
     crate::backend::build_frame(columns, line, col)
-}
-
-/// Widen an `f32` (how noodles parses a text-VCF `Float`/`QUAL`) to `f64` through
-/// its shortest round-trip decimal, *not* a raw `as f64` cast. A raw cast exposes
-/// the binary `f32` error — `0.001_f32 as f64` is 0.00100000004…, so `af > 0.001`
-/// would spuriously match a `0.001` row. Round-tripping through the shortest decimal
-/// recovers the value the VCF author actually wrote, so comparisons behave as a
-/// scientist expects. Shared with the other genomics readers (GFF score).
-pub(crate) fn widen_f32(f: f32) -> f64 {
-    f.to_string().parse::<f64>().unwrap_or(f as f64)
 }
 
 /// Join an iterator of strings with `sep`, yielding `None` when empty (the VCF `.`

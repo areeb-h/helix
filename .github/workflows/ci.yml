@@ -194,6 +194,13 @@ jobs:
       # And the allocator-debugging build, which is what `--no-default-features` is for.
       - name: no default features
         run: cargo check --no-default-features
+      # ADR 0032: the appliance profile is a shipped configuration, so it gets the
+      # strict treatment — clippy at -D warnings catches the cfg'd-out build's
+      # dead-code/unused-import drift that nothing else compiles. The dataframes
+      # axis alone guards the seam: one stray `use crate::backend::polars::...`
+      # outside backend/polars.rs re-links 27 crates, and this cell is what notices.
+      - name: appliance profile (clippy, deny warnings)
+        run: cargo clippy --no-default-features --features appliance -- -D warnings
 
   installer:
     name: install.sh logic

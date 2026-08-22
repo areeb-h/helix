@@ -15,6 +15,7 @@
 //! produces identical Helix error messages. The back half (`ColExpr` → engine
 //! expression) is each backend's own business.
 
+#[cfg(feature = "dataframes")]
 pub mod polars;
 
 use std::rc::Rc;
@@ -31,6 +32,7 @@ pub type Df = Rc<dyn DataHandle>;
 /// (VCF/GFF/BED). A reader emits `Vec<(String, ColData)>` and never touches an
 /// engine type; [`build_frame`] turns it into a [`Df`]. This keeps the
 /// "polars types live in one file" seam intact for the construction path too.
+#[cfg_attr(not(feature = "dataframes"), allow(dead_code))]
 pub enum ColData {
     /// A non-null string column.
     Str(Vec<String>),
@@ -55,7 +57,24 @@ pub fn build_frame(
     line: usize,
     col: usize,
 ) -> Result<Df, HelixError> {
-    polars::build_frame(columns, line, col)
+    #[cfg(feature = "dataframes")]
+    {
+        polars::build_frame(columns, line, col)
+    }
+    #[cfg(not(feature = "dataframes"))]
+    {
+        let _ = columns;
+        Err(no_dataframes(line, col))
+    }
+}
+
+/// The error every DataFrame constructor answers with in a build without the
+/// engine — same shape as the http feature's: name the capability, say how to
+/// get it. The verbs stay in the registry/checker/describe in every build.
+#[cfg(not(feature = "dataframes"))]
+pub fn no_dataframes(line: usize, col: usize) -> HelixError {
+    HelixError::new("this build has no DataFrame support", line, col)
+        .hint("build without `--no-default-features`, or with `--features dataframes`.")
 }
 
 /// A column expression in a DataFrame query (`age > 40`, `weight / height`),
@@ -64,6 +83,7 @@ pub fn build_frame(
 /// backend lowers it to its own expression type (a Polars `Expr`, or a fused
 /// compute kernel).
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "dataframes"), allow(dead_code))]
 pub enum ColExpr {
     Col(String),
     Lit(Value),
@@ -82,6 +102,7 @@ pub enum ColExpr {
 pub trait DataHandle {
     /// For downcasting to a concrete backend — e.g. `join` needs both operands to
     /// be the same engine. Each impl returns `self`.
+    #[cfg_attr(not(feature = "dataframes"), allow(dead_code))]
     fn as_any(&self) -> &dyn std::any::Any;
 
     fn column_names(&self, line: usize, col: usize) -> Result<Vec<String>, HelixError>;
@@ -350,6 +371,7 @@ pub fn validate_predicate(pred: &ColExpr, line: usize, col: usize) -> Result<(),
 
 /// Validate join keys against both frames' schemas (shared by every backend) so a
 /// typo reads as a clean Helix error rather than an engine's lazy-plan dump.
+#[cfg_attr(not(feature = "dataframes"), allow(dead_code))]
 pub fn validate_join_keys(
     left_cols: &[String],
     right_cols: &[String],

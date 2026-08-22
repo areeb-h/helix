@@ -59,6 +59,7 @@ impl HelixError {
 /// error. `try_reserve(1)` is amortized O(1) — when capacity already exists it does
 /// nothing, and when it grows it still grows geometrically — so this is as cheap as
 /// a plain `push` on the happy path.
+#[cfg_attr(not(feature = "bio"), allow(dead_code))]
 pub fn try_push<T>(
     v: &mut Vec<T>,
     item: T,

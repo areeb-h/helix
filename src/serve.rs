@@ -59,6 +59,7 @@ pub enum NetHandle {
     /// line-by-line by `.next()`, so a model's token stream (Ollama NDJSON, OpenAI SSE) is
     /// forwarded chunk-by-chunk by the program's own loop — the client mirror of the
     /// `accept`→`send` server loop. `reader` is `None` once EOF is reached.
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     HttpStream {
         status: i64,
         reader: RefCell<Option<std::io::BufReader<Box<dyn std::io::Read>>>>,

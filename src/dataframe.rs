@@ -8,4 +8,19 @@
 //! type ever escapes `backend/polars.rs`.
 
 pub use crate::backend::ast_to_colexpr;
+#[cfg(feature = "dataframes")]
 pub use crate::backend::polars::{read_csv, read_parquet};
+
+// Without the engine the readers still exist — they answer with the same clean
+// error `build_frame` gives, so the builtin arms above this shim never change.
+#[cfg(not(feature = "dataframes"))]
+pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, crate::error::HelixError> {
+    let _ = path;
+    Err(crate::backend::no_dataframes(line, col))
+}
+
+#[cfg(not(feature = "dataframes"))]
+pub fn read_parquet(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, crate::error::HelixError> {
+    let _ = path;
+    Err(crate::backend::no_dataframes(line, col))
+}

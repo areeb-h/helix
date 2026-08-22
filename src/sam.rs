@@ -35,7 +35,7 @@ use crate::error::{reserve_rows, HelixError};
 pub fn read_sam(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, HelixError> {
     let err = |msg: String| HelixError::new(msg, line, col);
 
-    let inner = crate::vcf::open_maybe_gzip(path)
+    let inner = crate::bioio::open_maybe_gzip(path)
         .map_err(|e| err(format!("could not open SAM `{path}`: {e}")))?;
     let mut reader = sam::io::Reader::new(inner);
     let header = reader
@@ -261,7 +261,7 @@ mod tests {
         // Write the BAM in a scope so the writer flushes and the file closes before
         // `bam::fs::index` reopens it to build the index.
         {
-            let inner = crate::vcf::open_maybe_gzip("examples/data/alignments.sam").unwrap();
+            let inner = crate::bioio::open_maybe_gzip("examples/data/alignments.sam").unwrap();
             let mut reader = sam::io::Reader::new(inner);
             let header = reader.read_header().unwrap();
 
