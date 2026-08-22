@@ -192,15 +192,17 @@ jobs:
         # install.sh routes glibc < GLIBC_FLOOR to the musl artifact. If this runner
         # ever silently changes (a -latest remap, a toolchain bump), the artifact's
         # requirement rises above what the installer advertises and old machines get
-        # a loader error AFTER install — this step turns that into a release failure.
+        # a loader error AFTER install - this step turns that into a release failure.
         run: |
           BIN=target/x86_64-unknown-linux-gnu/release/helix
           max="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)"
-          floor="$(sed -n 's/^GLIBC_FLOOR="\(.*\)"$//p' install.sh)"
+          floor="$(grep '^GLIBC_FLOOR=' install.sh | cut -d'"' -f2)"
           echo "artifact requires glibc <= $max; install.sh advertises $floor"
-          [ "$(printf '%s
-%s
-' "$max" "$floor" | sort -V | tail -1)" = "$floor" ]             || { echo "FLOOR DRIFT: artifact needs $max, install.sh says $floor" >&2; exit 1; }
+          highest="$( { echo "$max"; echo "$floor"; } | sort -V | tail -1)"
+          if [ "$highest" != "$floor" ]; then
+            echo "FLOOR DRIFT: artifact needs $max, install.sh says $floor" >&2
+            exit 1
+          fi
       - name: Package
         run: tar -czf "helix-x86_64-unknown-linux-gnu.tar.gz" -C "target/x86_64-unknown-linux-gnu/release" helix
       - name: Upload to the draft release
