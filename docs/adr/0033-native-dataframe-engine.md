@@ -1,8 +1,10 @@
 # ADR 0033 — A native DataFrame engine: replace polars, staged, with polars as the oracle
 
-- **Status:** **Proposed 2026-08-23** — the product of a three-reader audit plus an
-  adversarial judgment over the full used surface, the byte-contract, and the crate
-  options. Nothing implemented. Stage 0 is safe to start on acceptance.
+- **Status:** **Accepted 2026-08-23; Stage 0 implemented** (commit `5c203dc`) — the
+  frozen frame format lives in `src/framefmt.rs` (the module doc IS the spec; its
+  first test asserts the spec's example byte-for-byte), `collect_string` left the
+  seam, `POLARS_FMT_*` no longer reaches program output, three engines verified
+  byte-identical. Stage 1 (NativeFrame in the appliance profile) is next.
 - **Date:** 2026-08-23
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0012](0012-dataframe-backend-seam.md) (the seam that makes this
