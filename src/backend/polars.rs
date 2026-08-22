@@ -3,7 +3,7 @@
 //! touches only here. Operations are lazy (they extend the `LazyFrame` query
 //! plan); Polars fuses the whole plan and executes it multi-threaded — and, with
 //! the streaming engine, out-of-core — at the single `collect()` materialization
-//! point (`row_count`/`column_values`/`collect_string`/`write_parquet`).
+//! point (`row_count`/`column_values`/`write_parquet`).
 //!
 //! The interesting part is `lower`: it translates the backend-agnostic
 //! [`ColExpr`] (e.g. `age > 40`) into a Polars expression, so a Helix
@@ -350,7 +350,7 @@ impl DataHandle for PolarsFrame {
     /// (a Polars bump, a different machine), reading two columns out of one sorted
     /// frame would pair values from two different orderings — and ties are the common
     /// case (categories, chromosomes, group keys). `maintain_order: true` makes the
-    /// stability ADR 0020 assumes a guarantee instead of an accident.
+    /// stability ADR 0025 (ordering) assumes a guarantee instead of an accident.
     fn sort(&self, names: &[String], _line: usize, _col: usize) -> Result<Df, HelixError> {
         let exprs: Vec<Expr> = names.iter().map(|n| pcol(n.as_str())).collect();
         Ok(self.derive(self.lf.clone().sort_by_exprs(
@@ -410,7 +410,7 @@ impl DataHandle for PolarsFrame {
         // two column reads of one joined-then-grouped frame could pair keys from one
         // ordering with values from another (the sort-tearing class, realized: ~490
         // of 500 rows silently mispaired in the stabilization sweep's repro).
-        // `LeftRight` pins reading order for every join type; the same ADR 0020
+        // `LeftRight` pins reading order for every join type; the same ADR 0025
         // doctrine as `sort`'s maintain_order above.
         jargs.maintain_order = MaintainOrderJoin::LeftRight;
         let joined = self.lf.clone().join(rf.lf.clone(), on.clone(), on, jargs);
@@ -651,15 +651,4 @@ impl DataHandle for PolarsFrame {
             .map_err(|e| HelixError::new(format!("could not write CSV `{}`: {}", path, e), line, col))
     }
 
-    fn collect_string(&self) -> Result<String, String> {
-        match self.lf.clone().collect() {
-            Ok(df) => Ok(format!("{}", df)),
-            // Through `tidy` like every other engine error. This one does not go through
-            // `pl` — it returns a `String` across the seam rather than a `HelixError` — so
-            // it was the last place a Polars advice block ("Consider setting
-            // 'truncate_ragged_lines=true'", an option Helix does not have) still reached
-            // the user, on `print(df)` of a ragged CSV.
-            Err(e) => Err(tidy(&e.to_string()).0),
-        }
-    }
 }

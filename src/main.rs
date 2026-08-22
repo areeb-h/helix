@@ -38,6 +38,7 @@ mod dataframe;
 mod doctest;
 mod error;
 mod fmt;
+mod framefmt;
 #[cfg(feature = "bio")]
 mod gff;
 #[cfg(not(feature = "bio"))]

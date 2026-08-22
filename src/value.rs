@@ -738,11 +738,10 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Dna(s) => write!(f, "{}", s),
             Value::Tensor(t) => write!(f, "{}", t),
-            // Printing is the materialization point: execute the lazy plan.
-            Value::DataFrame(df) => match df.collect_string() {
-                Ok(s) => write!(f, "{}", s),
-                Err(e) => write!(f, "<dataframe — query failed: {}>", e),
-            },
+            // Printing is the materialization point: execute the lazy plan. The
+            // text is the FROZEN Helix format (framefmt, ADR 0033 Stage 0), never
+            // an engine's own Display.
+            Value::DataFrame(df) => write!(f, "{}", crate::framefmt::frame_text_lossy(&***df)),
             Value::GroupBy(g) => write!(f, "<grouped by {}>", g.keys.join(", ")),
             Value::Function(g) => write!(f, "<function/{}>", g.params.len()),
             Value::VmFunc { arity, .. } => write!(f, "<function/{}>", arity),
@@ -843,9 +842,7 @@ impl fmt::Display for Value {
 /// other (leaf) value can't fail and delegates to `Display`.
 pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, HelixError> {
     match v {
-        Value::DataFrame(df) => df.collect_string().map_err(|e| {
-            HelixError::new(format!("could not render the DataFrame: {}", e), line, col)
-        }),
+        Value::DataFrame(df) => crate::framefmt::frame_text(&***df, line, col),
         Value::Array(items) => {
             let mut s = String::from("[");
             for (i, it) in items.to_values().iter().enumerate() {

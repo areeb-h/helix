@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Changed — printed DataFrames have a Helix-owned format (ADR 0033, Stage 0)
+
+`print(df)` and `"{df}"` interpolation now emit Helix's own frozen table text
+instead of the engine's (polars') display:
+
+```text
+region  samples    af
+------  -------  ----
+east         12   0.5
+(1 rows)
+```
+
+Why it changed: the old text was whatever the DataFrame engine printed — it varied
+with `POLARS_FMT_*` environment variables (the same program, different bytes, based
+on the caller's environment) and would have changed again with any engine change.
+The new format is deterministic, environment-insensitive, engine-independent, and
+identical across all three engines; cells format exactly as the language's own
+scalars (`2.0` floats, `missing`, ungrouped integers). Scripts that parsed the old
+box-drawn table must switch to `write_csv`/`to_json` (which were always the stable
+interfaces) or the new format. Interactive rich rendering is unchanged.
+
 ## v0.3.0 — 2026-08-20
 
 **The language-surface release.** A 13-library / 117-module / 15,260-line review of

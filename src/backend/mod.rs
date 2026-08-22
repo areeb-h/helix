@@ -147,10 +147,6 @@ pub trait DataHandle {
     fn write_parquet(&self, path: &str, line: usize, col: usize) -> Result<(), HelixError>;
     /// Write the frame as delimited text (CSV when `sep` is `b','`, TSV for `b'\t'`).
     fn write_csv(&self, path: &str, sep: u8, line: usize, col: usize) -> Result<(), HelixError>;
-    /// Render the (materialized) frame for `print`. `Err` carries the engine's
-    /// message, which `Display` (which can't propagate errors) wraps into a
-    /// placeholder.
-    fn collect_string(&self) -> Result<String, String>;
 }
 
 /// Translate a Helix AST expression into the backend-agnostic [`ColExpr`],
