@@ -463,6 +463,7 @@ pub enum IndexBound {
 /// JIT lowers each to a native `extern "C" fn(i64 start, i64 end, i64 init)->i64`;
 /// the index into [`Program::reduce_loops`] is the `loop_idx` in [`Op::TryJitReduce`].
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
 pub struct ReduceLoop {
     /// The accumulator binder name (lambda param 0).
     pub pa: String,
@@ -534,6 +535,7 @@ pub struct ReduceLoop {
 /// `src[i]` where `body(src[i])` holds. Indexed by the `kernel_idx` of the matching
 /// [`Op::TryJitMap`] / [`Op::TryJitFilter`].
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
 pub struct ArrayKernel {
     /// The element binder name (the lambda's single parameter).
     pub binder: String,
@@ -582,6 +584,7 @@ pub struct ArrayKernel {
 /// One stage of a fused pipeline (`xs.filter(g).map(f)…`). Each is a pure single-binder
 /// `i64` transform the JIT threads through one native loop with no intermediate array.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
 pub enum FusionStage {
     /// `cur = body(cur)`.
     Map { binder: String, body: Expr },
@@ -591,6 +594,7 @@ pub enum FusionStage {
 
 /// What a fused pipeline produces.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
 pub enum FusionSink {
     /// Build one output `Int` array from the surviving elements.
     Collect,
@@ -612,6 +616,7 @@ pub enum FusionSink {
 /// loop: a source (an `Int` array, or a `range` counter), a chain of [`FusionStage`]s,
 /// and a [`FusionSink`]. Indexed by the `kernel_idx` of [`Op::TryJitFused`].
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
 pub struct FusedKernel {
     /// `true` if the source is a `range(start,end)` counter (no input array); otherwise
     /// the source is an `Int` array passed in.

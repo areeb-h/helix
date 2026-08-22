@@ -3940,7 +3940,10 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         ("src/parser.rs", 6),
         ("src/bio.rs", 0),
         ("src/value.rs", 0),
-        ("src/jit.rs", 1),
+        // The ADR 0032 split moved jit.rs's one budgeted call into analysis.rs.
+        ("src/jit.rs", 0),
+        ("src/jit/analysis.rs", 1),
+        ("src/jit/codegen.rs", 0),
         ("src/jit/ffi.rs", 0),
         ("src/types.rs", 0),
         ("src/types/synth.rs", 0),

@@ -37,11 +37,11 @@ strip = false        # keep symbols so a test panic gives a real backtrace
 opt-level = 3
 
 [dependencies]
-cranelift-codegen = "0.132.2"
-cranelift-frontend = "0.132.2"
-cranelift-jit = "0.132.2"
-cranelift-module = "0.132.2"
-cranelift-native = "0.132.2"
+cranelift-codegen = { version = "0.132.2", optional = true }
+cranelift-frontend = { version = "0.132.2", optional = true }
+cranelift-jit = { version = "0.132.2", optional = true }
+cranelift-module = { version = "0.132.2", optional = true }
+cranelift-native = { version = "0.132.2", optional = true }
 ndarray = "0.17.2"
 # Exact arbitrary-precision rationals (reuses num-bigint, already in the tree via
 # polars) for the Rational value type - exact coefficients (PSLQ/lll), fractions.
@@ -175,7 +175,7 @@ libc = "0.2"
 [features]
 # HTTP data-fetching and the fast allocator are on by default; build with
 # `--no-default-features` for a network-free / system-allocator binary.
-default = ["http", "mimalloc", "dataframes", "bio"]
+default = ["http", "mimalloc", "dataframes", "bio", "jit"]
 # Swap in the mimalloc global allocator (a pure runtime win; see src/main.rs).
 mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 # `http_get` — fetch data over HTTP(S) from a Helix program.
@@ -196,6 +196,16 @@ bio = [
     "dep:noodles-bam",
     "dep:noodles-core",
     "dep:needletail",
+]
+# The Cranelift codegen half of src/jit. Off = the VM runs every guard's bytecode
+# fallback — identical output (the HELIX_NOJIT contract, decided at build time);
+# eligibility analysis stays in, so bytecode never differs across builds.
+jit = [
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-jit",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
 ]
 # The small-server profile: full language surface, no heavy backends.
 appliance = ["http", "mimalloc"]
