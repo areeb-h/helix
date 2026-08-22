@@ -1,6 +1,10 @@
 # ADR 0032 — The appliance profile: a small binary without a smaller language
 
-- **Status:** **Steps 1+2 implemented 2026-08-22** — the `dataframes` and `bio`
+- **Status:** **Steps 1+2+4 implemented 2026-08-22/23** (step 4 = the jit gate,
+  commit `eb30a33`: appliance 13.4 -> 9.1 MB gate-stripped; tensor remains
+  last-or-never; step 3's re-measure now reads: the next lever is frames WITHOUT
+  polars — see [ADR 0033](0033-native-dataframe-engine.md))
+  <!-- original: --> — the `dataframes` and `bio`
   gates landed (commit `1e0d56e`): appliance binary **12.7 MB at the
   shipped release profile** (vs 51.8 MB; 13.4 vs 75.7 MB at the gate profile),
   serving at full speed, all five feature configs
