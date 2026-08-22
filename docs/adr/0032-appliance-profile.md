@@ -1,7 +1,11 @@
 # ADR 0032 — The appliance profile: a small binary without a smaller language
 
-- **Status:** **Proposed 2026-08-22** — scoped by a read-only audit of every gate's
-  blast radius (counts verified against the tree); nothing implemented. The
+- **Status:** **Steps 1+2 implemented 2026-08-22** — the `dataframes` and `bio`
+  gates landed (commit `1e0d56e`): appliance binary **12.7 MB at the
+  shipped release profile** (vs 51.8 MB; 13.4 vs 75.7 MB at the gate profile),
+  serving at full speed, all five feature configs
+  clippy/check clean, default build unchanged. Steps 3-5 (re-measure, then jit and
+  tensor only if the number still justifies the surgery) remain open. The
   `dtype-full` question that prompted this is settled and recorded as a non-decision
   below.
 - **Date:** 2026-08-22

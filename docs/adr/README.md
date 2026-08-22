@@ -38,7 +38,7 @@ they are made deliberately and in the open.
 | [0029](0029-linear-accumulation.md) | Is a fold that rebuilds its accumulator allowed to be quadratic on any engine? | **Accepted** — amortized-linear is a language guarantee via Rc-uniqueness take-append-store; not yet implemented; plan in docs/linear-accumulation-plan.md |
 | [0030](0030-time.md) | Can a reproducible language tell the time? | **Proposed** — monotonic  as a declared  effect, durations only, judgments-not-raw-times idiom; awaiting acceptance |
 | [0031](0031-http-client-hardening.md) | What does an HTTP client owe a program that trusts it? | **Accepted & Implemented** — all four steps landed; redirect boundary rules (credentials stripped cross-origin, no https→http, QUERY keeps its method per RFC 10008), an explicit cookie jar with the Public Suffix List, per-request timeouts and limits, and headers as a case-insensitive type that refuses CRLF |
-| [0032](0032-appliance-profile.md) | The appliance profile — a small binary without a smaller language | **Proposed** — dataframes/bio/jit/tensor gates behind the http house pattern; dtype-full settled as a non-decision (stays) |
+| [0032](0032-appliance-profile.md) | The appliance profile — a small binary without a smaller language | **Steps 1+2 implemented** — dataframes+bio gates landed: 13.4 MB appliance binary (82% off), full speed, defaults unchanged; jit/tensor open pending re-measure; dtype-full settled (stays) |
 
 ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
 (23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a
