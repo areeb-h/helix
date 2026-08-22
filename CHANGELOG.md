@@ -23,6 +23,19 @@ scalars (`2.0` floats, `missing`, ungrouped integers). Scripts that parsed the o
 box-drawn table must switch to `write_csv`/`to_json` (which were always the stable
 interfaces) or the new format. Interactive rich rendering is unchanged.
 
+### Added — a native DataFrame engine (ADR 0033 Stage 1, ADR 0034)
+
+Builds without polars can now carry working DataFrames: `--features native-df`
+brings an eager, deterministic engine whose column expressions run through the
+interpreter's own scalar kernel — a frame expression means exactly what the same
+expression means on scalars, including euclidean `%`, true division, and
+division-by-zero as a positioned error naming the row. Aggregations implement
+the missing-propagation doctrine directly; joins and groups are deterministic by
+construction. The appliance profile now includes it: full frame pipelines
+(read_csv/where/with/sort/group/join/write_csv) in a 9.3 MB binary. The default
+build still uses polars; a dual build (`--features native-df` on top of default)
+runs both engines and is differential-tested verb by verb.
+
 ## v0.3.0 — 2026-08-20
 
 **The language-surface release.** A 13-library / 117-module / 15,260-line review of

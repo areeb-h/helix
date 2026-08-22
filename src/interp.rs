@@ -1106,32 +1106,41 @@ impl Interp {
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
-        match op {
-            UnOp::Neg => match v {
-                // wrapping so `-(i64::MIN)` doesn't panic in debug
-                Value::Int(i) => Ok(Value::Int(i.wrapping_neg())),
-                Value::Float(f) => Ok(Value::Float(-f)),
-                Value::Missing => Ok(Value::Missing), // negation propagates
-                other => Err(HelixError::new(
-                    format!("cannot negate a value of type {}", other.type_name()),
-                    line,
-                    col,
-                )),
-            },
-            UnOp::Not => match v {
-                Value::Bool(b) => Ok(Value::Bool(!b)),
-                Value::Missing => Ok(Value::Missing), // not missing -> missing
-                other => Err(HelixError::new(
-                    format!("expected a boolean, found a value of type {}", other.type_name()),
-                    line,
-                    col,
-                )),
-            },
-        }
+        eval_unary(op, v, line, col)
     }
-
 }
 
+/// The scalar unary kernel, free-standing so the native DataFrame engine can
+/// evaluate cells through the interpreter's own semantics (ADR 0034).
+pub(crate) fn eval_unary(
+    op: &UnOp,
+    v: Value,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    match op {
+        UnOp::Neg => match v {
+            // wrapping so `-(i64::MIN)` doesn't panic in debug
+            Value::Int(i) => Ok(Value::Int(i.wrapping_neg())),
+            Value::Float(f) => Ok(Value::Float(-f)),
+            Value::Missing => Ok(Value::Missing), // negation propagates
+            other => Err(HelixError::new(
+                format!("cannot negate a value of type {}", other.type_name()),
+                line,
+                col,
+            )),
+        },
+        UnOp::Not => match v {
+            Value::Bool(b) => Ok(Value::Bool(!b)),
+            Value::Missing => Ok(Value::Missing), // not missing -> missing
+            other => Err(HelixError::new(
+                format!("expected a boolean, found a value of type {}", other.type_name()),
+                line,
+                col,
+            )),
+        },
+    }
+}
 // ---------- free helpers ----------
 
 pub(crate) fn as_bool(v: &Value, line: usize, col: usize) -> Result<bool, HelixError> {
@@ -1795,7 +1804,7 @@ mod access;
 pub(crate) use access::*;
 
 
-mod ops;
+pub(crate) mod ops;
 pub(crate) use ops::*;
 
 

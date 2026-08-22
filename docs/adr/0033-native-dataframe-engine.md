@@ -4,7 +4,15 @@
   frozen frame format lives in `src/framefmt.rs` (the module doc IS the spec; its
   first test asserts the spec's example byte-for-byte), `collect_string` left the
   seam, `POLARS_FMT_*` no longer reaches program output, three engines verified
-  byte-identical. Stage 1 (NativeFrame in the appliance profile) is next.
+  byte-identical. **Stage 1 implemented** the same day: `src/backend/native/`
+  (ten single-purpose files), the full DataHandle surface through the
+  interpreter's own scalar kernel per ADR 0034, 12/12 differential tests against
+  the polars oracle (the harness caught two real ordering divergences on first
+  contact — keep-last row order, right-join column layout — both fixed), the
+  dataframes examples byte-identical across engines modulo the decided deltas,
+  and the appliance profile now ships WORKING frames at 9.3 MB. First honest
+  perf probe (1M rows, CSV-heavy, min of 3): native 156 ms vs polars 77 ms —
+  parse-dominated, the Stage 3 item, outputs byte-identical. Stages 2-3 next.
 - **Date:** 2026-08-23
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0012](0012-dataframe-backend-seam.md) (the seam that makes this

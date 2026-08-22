@@ -15,6 +15,8 @@
 //! produces identical Helix error messages. The back half (`ColExpr` → engine
 //! expression) is each backend's own business.
 
+#[cfg(feature = "native-df")]
+pub mod native;
 #[cfg(feature = "dataframes")]
 pub mod polars;
 
@@ -57,21 +59,43 @@ pub fn build_frame(
     line: usize,
     col: usize,
 ) -> Result<Df, HelixError> {
-    #[cfg(feature = "dataframes")]
+    // Engine routing (ADR 0033): polars is the default while it remains the
+    // oracle; the native engine serves builds without it, and a dual-engine dev
+    // build can pick native explicitly (differential runs only).
+    #[cfg(all(feature = "dataframes", feature = "native-df"))]
+    {
+        if native_selected() {
+            return native::build_frame(columns, line, col);
+        }
+        polars::build_frame(columns, line, col)
+    }
+    #[cfg(all(feature = "dataframes", not(feature = "native-df")))]
     {
         polars::build_frame(columns, line, col)
     }
-    #[cfg(not(feature = "dataframes"))]
+    #[cfg(all(not(feature = "dataframes"), feature = "native-df"))]
+    {
+        native::build_frame(columns, line, col)
+    }
+    #[cfg(all(not(feature = "dataframes"), not(feature = "native-df")))]
     {
         let _ = columns;
         Err(no_dataframes(line, col))
     }
 }
 
+/// Dual-engine dev builds only: `HELIX_DF_ENGINE=native` opts a run into the
+/// native engine so the differential harness can drive both from one binary.
+/// Single-engine builds never consult the environment (reproducibility).
+#[cfg(all(feature = "dataframes", feature = "native-df"))]
+pub(crate) fn native_selected() -> bool {
+    std::env::var("HELIX_DF_ENGINE").map(|v| v == "native").unwrap_or(false)
+}
+
 /// The error every DataFrame constructor answers with in a build without the
 /// engine — same shape as the http feature's: name the capability, say how to
 /// get it. The verbs stay in the registry/checker/describe in every build.
-#[cfg(not(feature = "dataframes"))]
+#[cfg(all(not(feature = "dataframes"), not(feature = "native-df")))]
 pub fn no_dataframes(line: usize, col: usize) -> HelixError {
     HelixError::new("this build has no DataFrame support", line, col)
         .hint("build without `--no-default-features`, or with `--features dataframes`.")

@@ -171,6 +171,7 @@ libmimalloc-sys = { version = "0.1", default-features = false, features = ["exte
 # cleanly instead of panicking on a broken stdout pipe (usage is `#[cfg(unix)]`).
 # Already in the tree transitively, so this adds no new crate.
 libc = "0.2"
+csv = { version = "1", optional = true }
 
 [features]
 # HTTP data-fetching and the fast allocator are on by default; build with
@@ -207,8 +208,12 @@ jit = [
     "dep:cranelift-module",
     "dep:cranelift-native",
 ]
+# The native DataFrame engine (ADR 0033 Stage 1): eager, deterministic, frames
+# that follow the language's own scalar semantics (ADR 0034). Serves builds
+# without polars; coexists with it in dev builds for the differential harness.
+native-df = ["dep:csv"]
 # The small-server profile: full language surface, no heavy backends.
-appliance = ["http", "mimalloc"]
+appliance = ["http", "mimalloc", "native-df"]
 # Python interop hands whole frames across via Arrow, so it needs the engine.
 python = ["dataframes", "dep:pyo3", "dep:pyo3-polars", "dep:numpy"]
 # Managed runtimes: verified downloads + extraction (managed Python, etc.).

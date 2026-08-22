@@ -201,6 +201,10 @@ jobs:
       # outside backend/polars.rs re-links 27 crates, and this cell is what notices.
       - name: appliance profile (clippy, deny warnings)
         run: cargo clippy --no-default-features --features appliance -- -D warnings
+      # The dual-engine dev build (polars + native) is what the differential
+      # campaign runs on — it must always compile.
+      - name: dual DataFrame engines
+        run: cargo clippy --features native-df -- -D warnings
 
   installer:
     name: install.sh logic
