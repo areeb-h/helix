@@ -12,7 +12,11 @@
   dataframes examples byte-identical across engines modulo the decided deltas,
   and the appliance profile now ships WORKING frames at 9.3 MB. First honest
   perf probe (1M rows, CSV-heavy, min of 3): native 156 ms vs polars 77 ms —
-  parse-dominated, the Stage 3 item, outputs byte-identical. Stages 2-3 next.
+  parse-dominated, the Stage 3 item, outputs byte-identical. **Stage 2 implemented**
+  (commit `fc1bd3e`): native parquet via the apache crate, no arrow — cross-engine
+  compatible both directions (zstd 3, the polars default), foreign dtypes as text
+  per ADR 0034's totality, nested refused at the root; the appliance does full
+  frame IO at 11.3 MB. Stage 3 (parallel CSV vs the anchor) remains.
 - **Date:** 2026-08-23
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0012](0012-dataframe-backend-seam.md) (the seam that makes this
