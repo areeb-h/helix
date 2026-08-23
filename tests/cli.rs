@@ -3907,10 +3907,27 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
     // are excluded — a panicking assert in a test is the point of a test.)
     const BUDGET: &[(&str, usize)] = &[
         ("src/interp.rs", 7),
-        ("src/interp/methods.rs", 1),
+        ("src/interp/methods/array.rs", 1),
+        ("src/interp/methods/dictrec.rs", 0),
+        ("src/interp/methods/dna.rs", 0),
+        ("src/interp/methods/headers.rs", 0),
+        ("src/interp/methods/mod.rs", 0),
+        ("src/interp/methods/net.rs", 0),
+        ("src/interp/methods/string.rs", 0),
         ("src/interp/ops.rs", 3),
         ("src/interp/access.rs", 1),
-        ("src/interp/builtins.rs", 8),
+        ("src/interp/builtins/autodiff_fns.rs", 0),
+        ("src/interp/builtins/bio.rs", 0),
+        ("src/interp/builtins/corefns.rs", 0),
+        ("src/interp/builtins/encoding.rs", 1),
+        ("src/interp/builtins/frames.rs", 1),
+        ("src/interp/builtins/io.rs", 0),
+        ("src/interp/builtins/mathfns.rs", 3),
+        ("src/interp/builtins/mod.rs", 1),
+        ("src/interp/builtins/net.rs", 0),
+        ("src/interp/builtins/output.rs", 0),
+        ("src/interp/builtins/stats.rs", 0),
+        ("src/interp/builtins/tensors.rs", 2),
         // 7: `fold_take_append`'s two `env.get_mut(pa).unwrap()`s plus
         // `fold_append_str`'s one — the reduce arm inserts both binders
         // unconditionally before the loop and nothing removes them until the restore
