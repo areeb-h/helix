@@ -1053,7 +1053,7 @@ impl Compiler {
             },
             Expr::Unary { op, expr, line, col } => {
                 self.compile_expr(b, expr)?;
-                b.emit(Op::Unary(op.clone()), *line, *col);
+                b.emit(Op::Unary(*op), *line, *col);
             }
             Expr::Binary { op, left, right, line, col } => match op {
                 BinOp::And => {
@@ -1120,22 +1120,22 @@ impl Compiler {
                         {
                             b.code.truncate(n - 2);
                             b.pos.truncate(n - 2);
-                            b.emit(Op::LoadLocalBinary(a, c, op.clone()), *line, *col);
+                            b.emit(Op::LoadLocalBinary(a, c, *op), *line, *col);
                         }
                         (Some(Op::LoadLocal(a)), Some(Op::Const(k)))
                             if left_simple && right_simple && right_one =>
                         {
                             b.code.truncate(n - 2);
                             b.pos.truncate(n - 2);
-                            b.emit(Op::LoadLocalConstBinary(a, k, op.clone()), *line, *col);
+                            b.emit(Op::LoadLocalConstBinary(a, k, *op), *line, *col);
                         }
                         (_, Some(Op::Const(k))) if right_simple && right_one => {
                             b.code.truncate(n - 1);
                             b.pos.truncate(n - 1);
-                            b.emit(Op::ConstBinary(k, op.clone()), *line, *col);
+                            b.emit(Op::ConstBinary(k, *op), *line, *col);
                         }
                         _ => {
-                            b.emit(Op::Binary(op.clone()), *line, *col);
+                            b.emit(Op::Binary(*op), *line, *col);
                         }
                     }
                 }

@@ -1142,14 +1142,14 @@ fn subst_acc(e: &Expr, pa: &str, n: usize, fields: &[String]) -> Expr {
     let s = |c: &Expr| Box::new(subst_acc(c, pa, n, fields));
     match e {
         Expr::Binary { op, left, right, line, col } => Expr::Binary {
-            op: op.clone(),
+            op: *op,
             left: s(left),
             right: s(right),
             line: *line,
             col: *col,
         },
         Expr::Unary { op, expr, line, col } => Expr::Unary {
-            op: op.clone(),
+            op: *op,
             expr: s(expr),
             line: *line,
             col: *col,
@@ -1201,13 +1201,13 @@ pub fn subst_ident(e: &Expr, name: &str, repl: &Expr) -> Option<Expr> {
             }
         }
         Expr::Unary { op, expr, line, col } => Expr::Unary {
-            op: op.clone(),
+            op: *op,
             expr: Box::new(subst_ident(expr, name, repl)?),
             line: *line,
             col: *col,
         },
         Expr::Binary { op, left, right, line, col } => Expr::Binary {
-            op: op.clone(),
+            op: *op,
             left: Box::new(subst_ident(left, name, repl)?),
             right: Box::new(subst_ident(right, name, repl)?),
             line: *line,

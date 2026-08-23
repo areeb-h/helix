@@ -22,6 +22,12 @@ pub fn group_agg(
     line: usize,
     col: usize,
 ) -> Result<NativeFrame, HelixError> {
+    // The typed single-key path serves the common shapes; this generic path
+    // DEFINES the semantics it must reproduce (the differential tests hold
+    // both to the polars oracle).
+    if let Some(r) = super::fast::group_agg(frame, keys, agg, value_col, line, col) {
+        return r;
+    }
     if !matches!(agg, "count" | "mean" | "sum" | "min" | "max" | "std") {
         return Err(HelixError::new(format!("`{agg}` is not a grouped aggregation"), line, col)
             .hint("try mean, sum, min, max, count, or std."));

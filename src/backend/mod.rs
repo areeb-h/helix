@@ -249,14 +249,14 @@ pub fn ast_to_colexpr(
         }
         Ast::Unary { op, expr, .. } => {
             let inner = ast_to_colexpr(expr, columns, resolve_var)?;
-            Ok(ColExpr::Unary(op.clone(), Box::new(inner)))
+            Ok(ColExpr::Unary(*op, Box::new(inner)))
         }
         Ast::Binary {
             op, left, right, ..
         } => {
             let l = ast_to_colexpr(left, columns, resolve_var)?;
             let r = ast_to_colexpr(right, columns, resolve_var)?;
-            Ok(ColExpr::Binary(op.clone(), Box::new(l), Box::new(r)))
+            Ok(ColExpr::Binary(*op, Box::new(l), Box::new(r)))
         }
         _ => Err(HelixError::new(
             "this expression isn't supported inside a DataFrame query yet",

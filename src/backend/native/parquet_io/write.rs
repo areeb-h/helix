@@ -101,7 +101,7 @@ pub fn write_parquet(
                         .iter()
                         .zip(valid)
                         .filter(|(_, ok)| **ok)
-                        .map(|(s, _)| ByteArray::from(s.as_str()))
+                        .map(|(s, _)| ByteArray::from(s.as_str().as_bytes().to_vec()))
                         .collect();
                     let defs: Vec<i16> = valid.iter().map(|ok| i16::from(*ok)).collect();
                     cw.typed::<ByteArrayType>()

@@ -12,6 +12,7 @@
 //!   sort.rs    — multi-key stable sort, missing first
 //!   join.rs    — hash join, four kinds, left-then-right order
 //!   group.rs   — first-seen-order grouped aggregation
+//!   fast.rs    — typed fast paths that reproduce eval.rs/group.rs exactly
 //!   key.rs     — hashable row keys shared by join/group/unique
 //!   csv.rs     — RFC 4180 read/write with the pinned inference policy
 //!   tests.rs   — the differential campaign against the polars oracle
@@ -19,6 +20,7 @@
 mod columns;
 mod csv;
 mod eval;
+mod fast;
 mod group;
 mod join;
 mod key;

@@ -16,7 +16,7 @@ pub enum KeyCell {
     /// NaN; `-0.0` and `0.0` are distinct bit patterns, as the oracle behaves).
     Float(u64),
     Bool(bool),
-    Str(String),
+    Str(std::rc::Rc<String>),
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -39,8 +39,8 @@ impl KeyCell {
             Value::Int(i) => KeyCell::Int(*i),
             Value::Float(x) => KeyCell::Float(x.to_bits()),
             Value::Bool(b) => KeyCell::Bool(*b),
-            Value::Str(s) => KeyCell::Str((**s).clone()),
-            other => KeyCell::Str(other.to_string()),
+            Value::Str(s) => KeyCell::Str(s.clone()),
+            other => KeyCell::Str(std::rc::Rc::new(other.to_string())),
         }
     }
 }

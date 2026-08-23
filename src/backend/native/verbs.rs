@@ -17,6 +17,11 @@ pub fn filter(
     line: usize,
     col: usize,
 ) -> Result<NativeFrame, HelixError> {
+    // Typed fast path for `col <op> literal` — same results as the boxed
+    // evaluator below, which stays the definition of the semantics.
+    if let Some(keep) = super::fast::filter_keep(frame, pred, line, col) {
+        return Ok(frame.take(&keep?));
+    }
     let cells = eval(frame, pred, line, col)?.into_rows(frame.len());
     let mut keep: Vec<usize> = Vec::new();
     for (i, v) in cells.iter().enumerate() {

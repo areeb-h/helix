@@ -15,7 +15,7 @@ pub enum Col {
     I64 { vals: Vec<i64>, valid: Vec<bool> },
     F64 { vals: Vec<f64>, valid: Vec<bool> },
     Bool { vals: Vec<bool>, valid: Vec<bool> },
-    Str { vals: Vec<String>, valid: Vec<bool> },
+    Str { vals: Vec<Rc<String>>, valid: Vec<bool> },
     /// A column with no non-missing value (its dtype is unknowable).
     Null { len: usize },
 }
@@ -45,7 +45,7 @@ impl Col {
                 if valid[i] { Value::Bool(vals[i]) } else { Value::Missing }
             }
             Col::Str { vals, valid } => {
-                if valid[i] { Value::Str(Rc::new(vals[i].clone())) } else { Value::Missing }
+                if valid[i] { Value::Str(vals[i].clone()) } else { Value::Missing }
             }
             Col::Null { .. } => Value::Missing,
         }
@@ -96,11 +96,12 @@ impl Col {
         match data {
             ColData::Str(v) => {
                 let valid = vec![true; v.len()];
-                Col::Str { vals: v, valid }
+                Col::Str { vals: v.into_iter().map(Rc::new).collect(), valid }
             }
             ColData::StrOpt(v) => {
                 let valid: Vec<bool> = v.iter().map(Option::is_some).collect();
-                let vals = v.into_iter().map(Option::unwrap_or_default).collect();
+                let vals =
+                    v.into_iter().map(|o| Rc::new(o.unwrap_or_default())).collect();
                 Col::Str { vals, valid }
             }
             ColData::Int(v) => {
@@ -237,11 +238,11 @@ impl Col {
                 for v in cells {
                     match v {
                         Value::Str(s) => {
-                            vals.push((**s).clone());
+                            vals.push(s.clone());
                             valid.push(true);
                         }
                         _ => {
-                            vals.push(String::new());
+                            vals.push(Rc::new(String::new()));
                             valid.push(false);
                         }
                     }

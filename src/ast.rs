@@ -3,7 +3,7 @@
 //! Nodes that can fail at runtime carry a (line, col) so the interpreter can
 //! point errors back at the source.
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     Neg,
     Not,
@@ -25,7 +25,7 @@ pub enum TypeAnn {
     Dna,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
     Sub,
