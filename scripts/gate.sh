@@ -35,7 +35,23 @@ if command -v mold >/dev/null 2>&1; then
 fi
 
 rc=0
-log() { printf '\n=== %s ===\n' "$1"; }
+T0=$SECONDS
+PHASE_T=$SECONDS
+log() {
+  printf '\n=== %s (prev phase %ss, total %ss) ===\n' "$1" "$((SECONDS - PHASE_T))" "$((SECONDS - T0))"
+  PHASE_T=$SECONDS
+}
+
+# GATE_QUICK=1: the mid-iteration loop — clippy + lib tests only. LOUDLY not
+# the merge bar (no CLI suite, no parity diff, no checkall); the full gate is
+# still the only thing allowed to call a change done.
+if [ "${GATE_QUICK:-0}" = "1" ]; then
+  echo "== QUICK LOOP: lib tests only — NOT the merge bar =="
+  cargo clippy --all-targets -- -D warnings 2>&1 | tail -2 || rc=1
+  cargo test "${TEST_ARGS[@]}" --lib 2>&1 | grep -E "test result:|FAILED|panicked" | tail -6 || rc=1
+  echo "QUICK_RC=$rc (run the full gate before calling it done)"
+  exit "$rc"
+fi
 
 # `-D warnings`, EXACTLY AS CI RUNS IT. Without it this step reported and moved on, so a
 # change could be green here and red there — which is precisely what happened: threading two

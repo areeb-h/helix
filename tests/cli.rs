@@ -5647,6 +5647,69 @@ export fn unrelated() = 1
     assert!(out.contains("1 passed"), "{out}");
 }
 
+/// docs/reference.md is `helix doc --markdown`'s output, committed. Regenerate
+/// and byte-compare: a docs-table change that forgets the reference fails here
+/// with the one command that fixes it.
+#[test]
+fn generated_reference_is_current() {
+    let (out, err, code) = run(&["doc", "--markdown"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let committed = std::fs::read_to_string("docs/reference.md").expect("docs/reference.md exists");
+    assert_eq!(
+        out.replace("\r\n", "\n"),
+        committed.replace("\r\n", "\n"),
+        "docs/reference.md is stale — regenerate with `helix doc --markdown > docs/reference.md`"
+    );
+}
+
+/// `helix test --json` answers the SAME verdict as the prose mode, as one JSON
+/// document (totals + per-event detail) instead of text to scrape; and
+/// `helix check --lint` flags the field corpus's traps with the fix in the
+/// message, without changing the exit code.
+#[test]
+fn test_json_and_check_lint() {
+    let dir = std::env::temp_dir().join(format!("hx_json_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::write(
+        dir.join("m.helix"),
+        "## Doc'd.\n##\n##     >>> add2(1)\n##     3\nexport fn add2(x) = x + 2\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("bad_test.helix"), "assert_eq(1 + 1, 3)\n").unwrap();
+    let (prose, _, pcode) = run(&["test", dir.to_str().unwrap()], &[], "");
+    let (jout, jerr, jcode) = run(&["test", "--json", dir.to_str().unwrap()], &[], "");
+    assert_eq!(pcode, jcode, "modes must agree on the verdict");
+    let doc: serde_json::Value = match serde_json::from_str(&jout) {
+        Ok(d) => d,
+        Err(e) => panic!("expected valid JSON ({e}): {jerr}
+{jout}"),
+    };
+    assert_eq!(doc["failed"], 1, "{jout}");
+    assert_eq!(doc["passed"], 1, "{jout}");
+    assert!(prose.contains("1 passed, 1 failed"), "{prose}");
+    let events = doc["events"].as_array().unwrap();
+    assert!(
+        events.iter().any(|e| e["kind"] == "doc" && e["status"] == "ok" && e["line"] == 3),
+        "{jout}"
+    );
+    assert!(
+        events.iter().any(|e| e["kind"] == "file" && e["status"] == "fail"),
+        "{jout}"
+    );
+
+    std::fs::write(
+        dir.join("l.helix"),
+        "fn f(xs) = xs.reduce(dict(), (d, kv) => d)\nexport fn g(y) = 0 - y\n",
+    )
+    .unwrap();
+    let (lout, _, lcode) = run(&["check", "--lint", dir.join("l.helix").to_str().unwrap()], &[], "");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(lcode, Some(0), "lints never change the exit code");
+    assert!(lout.contains("LAST-wins"), "{lout}");
+    assert!(lout.contains("unary minus"), "{lout}");
+    assert!(lout.contains("no `>>>` doc example"), "{lout}");
+}
+
 /// THE DRIFT-PROOF for the docs table: every entry `helix describe` reports
 /// with an `example_out` is EXECUTED (wrapped in `print(...)`, exactly as the
 /// doc-example runner wraps its last line) and must produce byte-for-byte that

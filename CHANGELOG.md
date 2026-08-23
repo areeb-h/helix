@@ -65,6 +65,33 @@
   `try` binds tighter and how to bind first; a doc-example failure with a `...`
   continuation states the one-line rule.
 
+### Added — tooling, organization, and the generated reference (2026-08-24)
+
+- **`where` clauses** (ADR 0035): `fn f(c) = LOOKUP.get(c) ?? "…" where LOOKUP = …`
+  — the scaffolding after the point, desugared to `let … in` at parse time (the
+  engines cannot drift). fn definitions only; `where` remains an ordinary name.
+- **`helix test --json`** — one JSON document (version, totals, per-event
+  file/line/code/expected/got) with exit codes identical to the prose mode.
+- **`helix check --lint`** — advisory notes for the field corpus's real traps
+  (`reduce(dict(), …)` with the last-wins warning, `0 - x` now that unary
+  minus is universal, `export fn` without an executable doc example). Never
+  changes the exit code.
+- **`helix doc --markdown` and docs/reference.md** — the full stdlib reference
+  (357 names: signature, doc line, notes, executed example) generated from the
+  docs table; a gate test regenerates and byte-compares it, so the committed
+  reference cannot go stale.
+- **A tracked exponent differentiates**: the full `a ** b` node (d/db =
+  a^b·ln a) replaces the refusal; a non-positive base under a tracked exponent
+  still refuses, saying why. The receiver lift is gated on the tape's own
+  method names, and a tracked value in a plain op's error is called "a tracked
+  value" with a pointer at describe's `differentiable` flag.
+- **The codebase reorganized**: `interp/builtins` (11 topical modules) and
+  `interp/methods` (per-type files) replace the two fattest files in the tree —
+  verbatim moves, gate-proven behavior-identical. `scripts/release.sh` +
+  docs/RELEASING.md codify the versioning policy and release ritual;
+  `scripts/gate.sh` prints per-phase timings and gains a loudly-labeled
+  `GATE_QUICK=1` iteration loop.
+
 ### Changed
 
 - **Records print in canonical sorted field order.** `==` always ignored order

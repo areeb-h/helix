@@ -138,7 +138,7 @@ fn serve(listener) = do {
 serve(listen(8080))
 ```
 
-More in [`examples/`](examples/) and the [language & DX guide](docs/syntax-and-dx.md).
+More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md) (generated, gate-verified), and the [language & DX guide](docs/syntax-and-dx.md).
 
 ## What's inside
 
