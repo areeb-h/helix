@@ -64,15 +64,34 @@ pub fn join(
                     emit(lrow, if *ok { index.get(v) } else { None });
                 }
             }
-            (1, Col::Str { vals: lv, valid: lm }, Col::Str { vals: rv, valid: rm }) => {
-                let mut index: HashMap<&str, Vec<usize>> = HashMap::new();
-                for (row, (v, ok)) in rv.iter().zip(rm).enumerate() {
+            (
+                1,
+                Col::Str { dict: ld, codes: lc, valid: lm },
+                Col::Str { dict: rd, codes: rc, valid: rm },
+            ) => {
+                // Rows indexed by RIGHT code (dense — dictionaries are small);
+                // left codes translate to right codes once per dict entry, so
+                // per-row probing is two array lookups.
+                let mut by_rcode: Vec<Vec<usize>> = vec![Vec::new(); rd.len()];
+                for (row, (code, ok)) in rc.iter().zip(rm).enumerate() {
                     if *ok {
-                        index.entry(v.as_str()).or_default().push(row);
+                        by_rcode[*code as usize].push(row);
                     }
                 }
-                for (lrow, (v, ok)) in lv.iter().zip(lm).enumerate() {
-                    emit(lrow, if *ok { index.get(v.as_str()) } else { None });
+                let rmap: HashMap<&str, u32> = rd
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (s.as_str(), i as u32))
+                    .collect();
+                let trans: Vec<Option<u32>> =
+                    ld.iter().map(|s| rmap.get(s.as_str()).copied()).collect();
+                for (lrow, (code, ok)) in lc.iter().zip(lm).enumerate() {
+                    let m = if *ok {
+                        trans[*code as usize].map(|rcode| &by_rcode[rcode as usize])
+                    } else {
+                        None
+                    };
+                    emit(lrow, m);
                 }
             }
             _ => {

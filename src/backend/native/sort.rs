@@ -56,10 +56,21 @@ pub fn sort(
                 let idx: Vec<usize> = keys.iter().map(|(_, _, i)| *i as usize).collect();
                 return Ok(frame.take(&idx));
             }
-            Col::Str { vals, valid } => {
-                idx.sort_by(|&a, &b| {
-                    valid[a].cmp(&valid[b]).then_with(|| vals[a].cmp(&vals[b]))
-                });
+            Col::Str { dict, codes, valid } => {
+                // Rank the dictionary once (it is small), then the row sort is
+                // an integer pack-sort: rank order == text order, unique ranks
+                // per distinct text, row index keeps ties in input order.
+                let mut order: Vec<u32> = (0..dict.len() as u32).collect();
+                order.sort_by(|&a, &b| dict[a as usize].cmp(&dict[b as usize]));
+                let mut rank = vec![0u32; dict.len()];
+                for (r, &d) in order.iter().enumerate() {
+                    rank[d as usize] = r as u32;
+                }
+                let mut keys: Vec<(bool, u32, u32)> = (0..codes.len())
+                    .map(|i| (valid[i], rank[codes[i] as usize], i as u32))
+                    .collect();
+                keys.par_sort_unstable();
+                let idx: Vec<usize> = keys.iter().map(|(_, _, i)| *i as usize).collect();
                 return Ok(frame.take(&idx));
             }
             _ => {}

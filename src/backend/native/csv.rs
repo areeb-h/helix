@@ -144,7 +144,7 @@ enum Seg {
     I64(Vec<i64>, Vec<bool>),
     F64(Vec<f64>, Vec<bool>),
     Bool(Vec<bool>, Vec<bool>),
-    Str(Vec<String>, Vec<bool>),
+    Str { dict: Vec<String>, index: std::collections::HashMap<String, u32>, codes: Vec<u32>, valid: Vec<bool> },
 }
 
 impl Seg {
@@ -153,9 +153,12 @@ impl Seg {
             Ty::Int => Seg::I64(Vec::with_capacity(cap), Vec::with_capacity(cap)),
             Ty::Float => Seg::F64(Vec::with_capacity(cap), Vec::with_capacity(cap)),
             Ty::Bool => Seg::Bool(Vec::with_capacity(cap), Vec::with_capacity(cap)),
-            Ty::Unknown | Ty::Str => {
-                Seg::Str(Vec::with_capacity(cap), Vec::with_capacity(cap))
-            }
+            Ty::Unknown | Ty::Str => Seg::Str {
+                dict: Vec::new(),
+                index: std::collections::HashMap::new(),
+                codes: Vec::with_capacity(cap),
+                valid: Vec::with_capacity(cap),
+            },
         }
     }
 
@@ -194,12 +197,21 @@ impl Seg {
                 }
                 other => return Err(ctx(other, "true or false")),
             },
-            Seg::Str(vals, valid) => {
+            Seg::Str { dict, index, codes, valid } => {
                 if field.is_empty() {
-                    vals.push(String::new());
+                    codes.push(0);
                     valid.push(false);
                 } else {
-                    vals.push(field.to_string());
+                    let code = match index.get(field) {
+                        Some(&c) => c,
+                        None => {
+                            let c = dict.len() as u32;
+                            dict.push(field.to_string());
+                            index.insert(field.to_string(), c);
+                            c
+                        }
+                    };
+                    codes.push(code);
                     valid.push(true);
                 }
             }
@@ -281,44 +293,51 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
         return Err(err(format!("CSV `{path}` row {}: {m}", row + 2)));
     }
 
-    let mut cols: Vec<(String, Col)> = headers
+    // Splice: typed columns extend; string columns hash-cons into their
+    // dictionary (chunk workers hand over plain Strings — Send — and the
+    // builder dedups here, single-threaded but per-distinct, not per-cell).
+    enum Acc {
+        I(Vec<i64>, Vec<bool>),
+        F(Vec<f64>, Vec<bool>),
+        B(Vec<bool>, Vec<bool>),
+        S(super::columns::StrBuilder),
+    }
+    let n = rows.len();
+    let mut accs: Vec<Acc> = tys
         .iter()
-        .zip(&tys)
-        .map(|(name, ty)| {
-            let n = rows.len();
-            let c = match ty {
-                Ty::Int => Col::I64 { vals: Vec::with_capacity(n), valid: Vec::with_capacity(n) },
-                Ty::Float => {
-                    Col::F64 { vals: Vec::with_capacity(n), valid: Vec::with_capacity(n) }
-                }
-                Ty::Bool => {
-                    Col::Bool { vals: Vec::with_capacity(n), valid: Vec::with_capacity(n) }
-                }
-                Ty::Unknown | Ty::Str => {
-                    Col::Str { vals: Vec::with_capacity(n), valid: Vec::with_capacity(n) }
-                }
-            };
-            (name.clone(), c)
+        .map(|ty| match ty {
+            Ty::Int => Acc::I(Vec::with_capacity(n), Vec::with_capacity(n)),
+            Ty::Float => Acc::F(Vec::with_capacity(n), Vec::with_capacity(n)),
+            Ty::Bool => Acc::B(Vec::with_capacity(n), Vec::with_capacity(n)),
+            Ty::Unknown | Ty::Str => Acc::S(super::columns::StrBuilder::with_capacity(n)),
         })
         .collect();
     for segs in results.into_iter().flatten() {
-        for (slot, seg) in cols.iter_mut().zip(segs) {
-            match (&mut slot.1, seg) {
-                (Col::I64 { vals, valid }, Seg::I64(v, m)) => {
+        for (acc, seg) in accs.iter_mut().zip(segs) {
+            match (acc, seg) {
+                (Acc::I(vals, valid), Seg::I64(v, m)) => {
                     vals.extend(v);
                     valid.extend(m);
                 }
-                (Col::F64 { vals, valid }, Seg::F64(v, m)) => {
+                (Acc::F(vals, valid), Seg::F64(v, m)) => {
                     vals.extend(v);
                     valid.extend(m);
                 }
-                (Col::Bool { vals, valid }, Seg::Bool(v, m)) => {
+                (Acc::B(vals, valid), Seg::Bool(v, m)) => {
                     vals.extend(v);
                     valid.extend(m);
                 }
-                (Col::Str { vals, valid }, Seg::Str(v, m)) => {
-                    vals.extend(v.into_iter().map(Rc::new));
-                    valid.extend(m);
+                (Acc::S(b), Seg::Str { dict, codes, valid, .. }) => {
+                    // Remap: per-chunk dict entry -> global code, once per
+                    // DISTINCT value; the 5M cells are integer rewrites.
+                    let trans: Vec<u32> = dict.iter().map(|s| b.intern(s)).collect();
+                    for (code, ok) in codes.iter().zip(valid) {
+                        if ok {
+                            b.push_code(trans[*code as usize]);
+                        } else {
+                            b.push_missing();
+                        }
+                    }
                 }
                 _ => {
                     return Err(err("internal: CSV segment dtype drift".to_string()));
@@ -326,14 +345,27 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
             }
         }
     }
+    let mut cols: Vec<(String, Col)> = headers
+        .iter()
+        .zip(accs)
+        .map(|(name, acc)| {
+            let c = match acc {
+                Acc::I(vals, valid) => Col::I64 { vals, valid },
+                Acc::F(vals, valid) => Col::F64 { vals, valid },
+                Acc::B(vals, valid) => Col::Bool { vals, valid },
+                Acc::S(b) => b.finish(),
+            };
+            (name.clone(), c)
+        })
+        .collect();
     // An all-missing column reads as Str today (empty fields constrain nothing);
     // normalize to the Null column the rest of the engine uses for "no evidence".
     for (_, c) in cols.iter_mut() {
-        if let Col::Str { vals, valid } = c
+        if let Col::Str { codes, valid, .. } = c
             && !valid.is_empty()
             && valid.iter().all(|v| !v)
         {
-            *c = Col::Null { len: vals.len() };
+            *c = Col::Null { len: codes.len() };
         }
     }
     NativeFrame::new(cols, line, col).map(|f| Rc::new(f) as crate::backend::Df)
@@ -371,7 +403,7 @@ pub fn write_csv(
         I(&'a [i64], &'a [bool]),
         F(&'a [f64], &'a [bool]),
         B(&'a [bool], &'a [bool]),
-        S(Vec<&'a str>, &'a [bool]),
+        S(Vec<&'a str>, &'a [u32], &'a [bool]),
         N,
     }
     let views: Vec<View> = frame
@@ -381,8 +413,8 @@ pub fn write_csv(
             Col::I64 { vals, valid } => View::I(vals, valid),
             Col::F64 { vals, valid } => View::F(vals, valid),
             Col::Bool { vals, valid } => View::B(vals, valid),
-            Col::Str { vals, valid } => {
-                View::S(vals.iter().map(|s| s.as_str()).collect(), valid)
+            Col::Str { dict, codes, valid } => {
+                View::S(dict.iter().map(|s| s.as_str()).collect(), codes, valid)
             }
             Col::Null { .. } => View::N,
         })
@@ -432,9 +464,9 @@ pub fn write_csv(
                                 });
                             }
                         }
-                        View::S(vals, valid) => {
+                        View::S(dict, codes, valid) => {
                             if valid[row] {
-                                push_field(&mut buf, vals[row].as_bytes(), sep);
+                                push_field(&mut buf, dict[codes[row] as usize].as_bytes(), sep);
                             }
                         }
                         View::N => {}

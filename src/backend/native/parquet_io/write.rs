@@ -56,9 +56,22 @@ pub fn write_parquet(
     // Zstd level 3 = what polars' default writes; try_new(3) cannot fail for a
     // constant inside 1..=22, and the fallback keeps this panic-free anyway.
     let level = ZstdLevel::try_new(3).unwrap_or_default();
-    let props = Arc::new(
-        WriterProperties::builder().set_compression(Compression::ZSTD(level)).build(),
-    );
+    // Dictionary encoding OFF for string columns: our columns are already
+    // dictionary-encoded, and the writer re-hashing 5M cells to rebuild its own
+    // dictionary was the string-write cost; PLAIN + zstd compresses the
+    // repetition nearly as well without the per-cell hashing. (Numeric columns
+    // keep the writer's dictionary — it wins there and costs little.)
+    let mut builder =
+        WriterProperties::builder().set_compression(Compression::ZSTD(level));
+    for (name, c) in frame.columns() {
+        if matches!(c, Col::Str { .. }) {
+            builder = builder.set_column_dictionary_enabled(
+                parquet::schema::types::ColumnPath::from(name.as_str()),
+                false,
+            );
+        }
+    }
+    let props = Arc::new(builder.build());
     let file = std::fs::File::create(path).map_err(|e| pq_err("create", path, e, line, col))?;
     let mut writer = SerializedFileWriter::new(file, schema, props).map_err(werr)?;
 
@@ -96,22 +109,18 @@ pub fn write_parquet(
                         .write_batch(&present, Some(&defs), None)
                         .map_err(werr)?;
                 }
-                Col::Str { vals, valid } => {
-                    // One arena, then zero-copy slices: 5M strings as 5M
-                    // individual Vec allocations was the whole write gap for
-                    // string-heavy frames. `Bytes::slice` is a refcount view.
-                    let total: usize = vals
-                        .iter()
-                        .zip(valid)
-                        .filter(|(_, ok)| **ok)
-                        .map(|(s, _)| s.len())
-                        .sum();
-                    let mut arena = Vec::with_capacity(total);
-                    let mut spans = Vec::with_capacity(vals.len());
-                    for (s, ok) in vals.iter().zip(valid) {
+                Col::Str { dict, codes, valid } => {
+                    // One arena of the PRESENT cells' text (written per row so
+                    // each ByteArray owns its own slice — cloning shared
+                    // per-dict-entry handles serialized on 50 hot refcounts and
+                    // measured slower, not faster).
+                    let mut arena = Vec::new();
+                    let mut spans = Vec::new();
+                    for (code, ok) in codes.iter().zip(valid) {
                         if *ok {
+                            let s = dict[*code as usize].as_bytes();
                             let start = arena.len();
-                            arena.extend_from_slice(s.as_bytes());
+                            arena.extend_from_slice(s);
                             spans.push((start, s.len()));
                         }
                     }

@@ -17,7 +17,6 @@
 #![allow(clippy::needless_range_loop)]
 
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use crate::ast::BinOp;
 use crate::backend::ColExpr;
@@ -320,13 +319,14 @@ fn apply(op: BinOp, l: TOp, r: TOp, line: usize, col: usize) -> Result<TOp, Heli
 
 /// A single key column's typed key (missing keys form their own group, same as
 /// the generic `RowKey`). Float keys stay on the generic path (bit-pattern
-/// grouping there; rare enough not to duplicate).
+/// grouping there; rare enough not to duplicate). A string key is its DICT
+/// CODE — dictionary entries are unique, so code equality is string equality.
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum FastKey {
     Missing,
     Int(i64),
     Bool(bool),
-    Str(Rc<String>),
+    Code(u32),
 }
 
 /// `Some(frame)` when key/value columns match the fast shapes; `None` → generic.
@@ -369,8 +369,8 @@ pub fn group_agg(
             Col::Bool { vals, valid } => {
                 if valid[row] { FastKey::Bool(vals[row]) } else { FastKey::Missing }
             }
-            Col::Str { vals, valid } => {
-                if valid[row] { FastKey::Str(vals[row].clone()) } else { FastKey::Missing }
+            Col::Str { codes, valid, .. } => {
+                if valid[row] { FastKey::Code(codes[row]) } else { FastKey::Missing }
             }
             _ => unreachable!("shape-checked above"),
         };

@@ -1,21 +1,25 @@
-//! The reader: classify every leaf column once, then one typed pass per row
-//! group. Definition levels reconstruct nulls; dictionary encoding is already
-//! resolved below this API. Nested schemas are refused at the ROOT (optional
-//! groups raise def levels without repetition, so checking rep levels alone
-//! would miss them).
+//! The reader: classify every leaf column once, then decode COLUMNS IN
+//! PARALLEL — the file loads into `Bytes` once and every column task opens its
+//! own footer-cheap reader over a zero-copy clone. Each task produces a typed,
+//! Send segment (strings hash-cons into a per-column dictionary of plain
+//! `String`s); the main thread wraps dictionaries into the engine's `Rc` form.
+//! Definition levels reconstruct nulls; dictionary encoding resolves below this
+//! API. Nested schemas are refused at the ROOT (optional groups raise def
+//! levels without repetition, so checking rep levels alone would miss them).
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use parquet::basic::{ConvertedType, LogicalType, Repetition, TimeUnit, Type as PhysicalType};
 use parquet::column::reader::ColumnReader;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::schema::types::ColumnDescriptor;
+use rayon::prelude::*;
 
 use crate::backend::Df;
 use crate::error::HelixError;
-use crate::value::Value;
 
-use super::super::columns::Col;
+use super::super::columns::{Col, StrBuilder};
 use super::super::NativeFrame;
 use super::foreign;
 use super::pq_err;
@@ -100,53 +104,445 @@ fn classify(desc: &ColumnDescriptor, path: &str, line: usize, col: usize) -> Res
     })
 }
 
-/// Read `count` typed values + def levels from one column reader, appending
-/// cells (missing where def == 0). One closure per physical type keeps the
-/// def-level walk in exactly one place.
-fn drain<T: parquet::data_type::DataType>(
+/// A column decoded on a worker thread — everything here is Send; the engine's
+/// `Rc` wrapping happens on the main thread.
+enum SendCol {
+    I64(Vec<i64>, Vec<bool>),
+    F64(Vec<f64>, Vec<bool>),
+    Bool(Vec<bool>, Vec<bool>),
+    Str { dict: Vec<String>, codes: Vec<u32>, valid: Vec<bool> },
+}
+
+/// Read one column's typed values + def levels across all row groups,
+/// reconstructing the validity mask. `push` sees each PRESENT value in row
+/// order; `gap` records a missing row.
+fn drain_typed<T: parquet::data_type::DataType>(
     r: &mut parquet::column::reader::ColumnReaderImpl<T>,
     optional: bool,
     rows: usize,
-    mut cell: impl FnMut(&T::T) -> Result<Value, HelixError>,
-    out: &mut Vec<Value>,
-) -> Result<(), HelixError> {
+    mut cell: impl FnMut(Option<&T::T>) -> Result<(), String>,
+) -> Result<(), String> {
     let mut values: Vec<T::T> = Vec::with_capacity(rows);
     let mut defs: Vec<i16> = Vec::with_capacity(if optional { rows } else { 0 });
     loop {
         let (records, _, _) = r
-            .read_records(8192, optional.then_some(&mut defs), None, &mut values)
-            .map_err(|e| HelixError::new(format!("parquet read failed: {e}"), 0, 0))?;
+            .read_records(16 * 1024, optional.then_some(&mut defs), None, &mut values)
+            .map_err(|e| format!("parquet read failed: {e}"))?;
         if records == 0 {
             break;
         }
-    }
-    if optional {
-        let mut vi = values.iter();
-        for &d in &defs {
-            if d > 0 {
-                let v = vi.next().ok_or_else(|| {
-                    HelixError::new("parquet definition levels disagree with values", 0, 0)
-                })?;
-                out.push(cell(v)?);
-            } else {
-                out.push(Value::Missing);
+        if optional {
+            let mut vi = values.iter();
+            for &d in &defs {
+                if d > 0 {
+                    let v = vi
+                        .next()
+                        .ok_or("parquet definition levels disagree with values")?;
+                    cell(Some(v))?;
+                } else {
+                    cell(None)?;
+                }
+            }
+            defs.clear();
+        } else {
+            for v in &values {
+                cell(Some(v))?;
             }
         }
-    } else {
-        for v in &values {
-            out.push(cell(v)?);
-        }
+        values.clear();
     }
     Ok(())
 }
 
-pub fn read_parquet(path: &str, line: usize, col: usize) -> Result<Df, HelixError> {
-    let file = std::fs::File::open(path)
-        .map_err(|e| pq_err("open", path, e, line, col))?;
+/// Decode column `ci` of every row group into a Send segment. Runs on a worker.
+fn read_column(
+    bytes: &bytes::Bytes,
+    ci: usize,
+    kind: &Kind,
+    total_rows: usize,
+) -> Result<SendCol, String> {
     let reader =
-        SerializedFileReader::new(file).map_err(|e| pq_err("read", path, e, line, col))?;
+        SerializedFileReader::new(bytes.clone()).map_err(|e| format!("re-open failed: {e}"))?;
+    let schema = reader.metadata().file_metadata().schema_descr();
+    let desc = schema.column(ci);
+    let optional = desc.max_def_level() > 0;
+    let name = desc.name().to_string();
+
+    // Accumulators — exactly one becomes the result, per the classified kind.
+    let mut ivals = Vec::new();
+    let mut fvals = Vec::new();
+    let mut bvals = Vec::new();
+    let mut dict: Vec<String> = Vec::new();
+    let mut index: HashMap<String, u32> = HashMap::new();
+    let mut codes: Vec<u32> = Vec::new();
+    let mut valid = Vec::with_capacity(total_rows);
+
+    macro_rules! cons {
+        ($s:expr, $valid:expr, $codes:expr) => {{
+            let s: String = $s;
+            let code = match index.get(s.as_str()) {
+                Some(&c) => c,
+                None => {
+                    let c = dict.len() as u32;
+                    index.insert(s.clone(), c);
+                    dict.push(s);
+                    c
+                }
+            };
+            $codes.push(code);
+            $valid.push(true);
+        }};
+    }
+
+    for rg_idx in 0..reader.num_row_groups() {
+        let rg = reader.get_row_group(rg_idx).map_err(|e| format!("row group: {e}"))?;
+        let rows = rg.metadata().num_rows() as usize;
+        let cr = rg.get_column_reader(ci).map_err(|e| format!("column reader: {e}"))?;
+        match cr {
+            ColumnReader::BoolColumnReader(mut r) => drain_typed(
+                &mut r,
+                optional,
+                rows,
+                |o| match o {
+                    Some(v) => {
+                    bvals.push(*v);
+                    valid.push(true);
+                    Ok(())
+                    }
+                    None => {
+                    bvals.push(false);
+                    valid.push(false);
+                        Ok(())
+                    }
+                },
+            )?,
+            ColumnReader::Int64ColumnReader(mut r) => match kind {
+                Kind::Timestamp { per_sec, width, utc } => {
+                    let (p, w, u) = (*per_sec, *width, *utc);
+                    drain_typed(
+                        &mut r,
+                        optional,
+                        rows,
+                        |o| match o {
+                            Some(v) => {
+                            let mut s = foreign::timestamp_str(*v, p, w);
+                            if u {
+                                s.push_str(" UTC");
+                            }
+                            cons!(s, valid, codes);
+                            Ok(())
+                            }
+                            None => {
+                            codes.push(0);
+                            valid.push(false);
+                                Ok(())
+                            }
+                        },
+                    )?
+                }
+                Kind::Time { per_sec, width } => {
+                    let (p, w) = (*per_sec, *width);
+                    drain_typed(
+                        &mut r,
+                        optional,
+                        rows,
+                        |o| match o {
+                            Some(v) => {
+                            cons!(foreign::time_str(*v, p, w), valid, codes);
+                            Ok(())
+                            }
+                            None => {
+                            codes.push(0);
+                            valid.push(false);
+                                Ok(())
+                            }
+                        },
+                    )?
+                }
+                Kind::Decimal { scale } => {
+                    let sc = *scale;
+                    drain_typed(
+                        &mut r,
+                        optional,
+                        rows,
+                        |o| match o {
+                            Some(v) => {
+                            cons!(foreign::decimal_str(*v as i128, sc), valid, codes);
+                            Ok(())
+                            }
+                            None => {
+                            codes.push(0);
+                            valid.push(false);
+                                Ok(())
+                            }
+                        },
+                    )?
+                }
+                _ => drain_typed(
+                    &mut r,
+                    optional,
+                    rows,
+                    |o| match o {
+                        Some(v) => {
+                        ivals.push(*v);
+                        valid.push(true);
+                        Ok(())
+                        }
+                        None => {
+                        ivals.push(0);
+                        valid.push(false);
+                            Ok(())
+                        }
+                    },
+                )?,
+            },
+            ColumnReader::Int32ColumnReader(mut r) => match kind {
+                Kind::Date => drain_typed(
+                    &mut r,
+                    optional,
+                    rows,
+                    |o| match o {
+                        Some(v) => {
+                        cons!(foreign::date_str(*v), valid, codes);
+                        Ok(())
+                        }
+                        None => {
+                        codes.push(0);
+                        valid.push(false);
+                            Ok(())
+                        }
+                    },
+                )?,
+                Kind::Time { per_sec, width } => {
+                    let (p, w) = (*per_sec, *width);
+                    drain_typed(
+                        &mut r,
+                        optional,
+                        rows,
+                        |o| match o {
+                            Some(v) => {
+                            cons!(foreign::time_str(*v as i64, p, w), valid, codes);
+                            Ok(())
+                            }
+                            None => {
+                            codes.push(0);
+                            valid.push(false);
+                                Ok(())
+                            }
+                        },
+                    )?
+                }
+                Kind::Decimal { scale } => {
+                    let sc = *scale;
+                    drain_typed(
+                        &mut r,
+                        optional,
+                        rows,
+                        |o| match o {
+                            Some(v) => {
+                            cons!(foreign::decimal_str(*v as i128, sc), valid, codes);
+                            Ok(())
+                            }
+                            None => {
+                            codes.push(0);
+                            valid.push(false);
+                                Ok(())
+                            }
+                        },
+                    )?
+                }
+                Kind::UintWiden => drain_typed(
+                    &mut r,
+                    optional,
+                    rows,
+                    |o| match o {
+                        Some(v) => {
+                        ivals.push((*v as u32) as i64);
+                        valid.push(true);
+                        Ok(())
+                        }
+                        None => {
+                        ivals.push(0);
+                        valid.push(false);
+                            Ok(())
+                        }
+                    },
+                )?,
+                _ => drain_typed(
+                    &mut r,
+                    optional,
+                    rows,
+                    |o| match o {
+                        Some(v) => {
+                        ivals.push(*v as i64);
+                        valid.push(true);
+                        Ok(())
+                        }
+                        None => {
+                        ivals.push(0);
+                        valid.push(false);
+                            Ok(())
+                        }
+                    },
+                )?,
+            },
+            ColumnReader::Int96ColumnReader(mut r) => drain_typed(
+                &mut r,
+                optional,
+                rows,
+                |o| match o {
+                    Some(v) => {
+                    cons!(
+                        foreign::timestamp_str(v.to_nanos(), 1_000_000_000, 9),
+                        valid,
+                        codes
+                    );
+                    Ok(())
+                    }
+                    None => {
+                    codes.push(0);
+                    valid.push(false);
+                        Ok(())
+                    }
+                },
+            )?,
+            ColumnReader::FloatColumnReader(mut r) => drain_typed(
+                &mut r,
+                optional,
+                rows,
+                |o| match o {
+                    Some(v) => {
+                    fvals.push(*v as f64);
+                    valid.push(true);
+                    Ok(())
+                    }
+                    None => {
+                    fvals.push(0.0);
+                    valid.push(false);
+                        Ok(())
+                    }
+                },
+            )?,
+            ColumnReader::DoubleColumnReader(mut r) => drain_typed(
+                &mut r,
+                optional,
+                rows,
+                |o| match o {
+                    Some(v) => {
+                    fvals.push(*v);
+                    valid.push(true);
+                    Ok(())
+                    }
+                    None => {
+                    fvals.push(0.0);
+                    valid.push(false);
+                        Ok(())
+                    }
+                },
+            )?,
+            ColumnReader::ByteArrayColumnReader(mut r) => match kind {
+                Kind::Decimal { scale } => {
+                    let sc = *scale;
+                    drain_typed(
+                        &mut r,
+                        optional,
+                        rows,
+                        |o| match o {
+                            Some(v) => {
+                            cons!(
+                                foreign::decimal_str(foreign::be_bytes_to_i128(v.data()), sc),
+                                valid,
+                                codes
+                            );
+                            Ok(())
+                            }
+                            None => {
+                            codes.push(0);
+                            valid.push(false);
+                                Ok(())
+                            }
+                        },
+                    )?
+                }
+                _ => drain_typed(
+                    &mut r,
+                    optional,
+                    rows,
+                    |o| match o {
+                        Some(v) => {
+                        let s = v
+                            .as_utf8()
+                            .map_err(|_| format!("column `{name}` holds non-UTF-8 bytes"))?;
+                        // Hash-cons without allocating on dictionary hits.
+                        match index.get(s) {
+                            Some(&c) => {
+                                codes.push(c);
+                                valid.push(true);
+                            }
+                            None => {
+                                let owned = s.to_string();
+                                let c = dict.len() as u32;
+                                index.insert(owned.clone(), c);
+                                dict.push(owned);
+                                codes.push(c);
+                                valid.push(true);
+                            }
+                        }
+                        Ok(())
+                        }
+                        None => {
+                        codes.push(0);
+                        valid.push(false);
+                            Ok(())
+                        }
+                    },
+                )?,
+            },
+            ColumnReader::FixedLenByteArrayColumnReader(mut r) => match kind {
+                Kind::Decimal { scale } => {
+                    let sc = *scale;
+                    drain_typed(
+                        &mut r,
+                        optional,
+                        rows,
+                        |o| match o {
+                            Some(v) => {
+                            cons!(
+                                foreign::decimal_str(foreign::be_bytes_to_i128(v.data()), sc),
+                                valid,
+                                codes
+                            );
+                            Ok(())
+                            }
+                            None => {
+                            codes.push(0);
+                            valid.push(false);
+                                Ok(())
+                            }
+                        },
+                    )?
+                }
+                _ => return Err("unreachable FLBA kind".to_string()),
+            },
+        }
+    }
+
+    Ok(match kind {
+        Kind::Bool => SendCol::Bool(bvals, valid),
+        Kind::Float | Kind::F32Widen => SendCol::F64(fvals, valid),
+        Kind::Int | Kind::UintWiden => SendCol::I64(ivals, valid),
+        _ => SendCol::Str { dict, codes, valid },
+    })
+}
+
+pub fn read_parquet(path: &str, line: usize, col: usize) -> Result<Df, HelixError> {
+    let raw = std::fs::read(path).map_err(|e| pq_err("open", path, e, line, col))?;
+    let bytes = bytes::Bytes::from(raw);
+    let reader = SerializedFileReader::new(bytes.clone())
+        .map_err(|e| pq_err("read", path, e, line, col))?;
     let meta = reader.metadata();
     let schema = meta.file_metadata().schema_descr();
+    let total_rows = meta.file_metadata().num_rows().max(0) as usize;
 
     // Flat-schema gate, at the root.
     for field in schema.root_schema().get_fields() {
@@ -167,136 +563,36 @@ pub fn read_parquet(path: &str, line: usize, col: usize) -> Result<Df, HelixErro
     let kinds: Vec<Kind> = (0..schema.num_columns())
         .map(|i| classify(schema.column(i).as_ref(), path, line, col))
         .collect::<Result<_, _>>()?;
+    let names: Vec<String> =
+        (0..schema.num_columns()).map(|i| schema.column(i).name().to_string()).collect();
 
-    let mut cells: Vec<Vec<Value>> = vec![Vec::new(); schema.num_columns()];
-    for rg_idx in 0..reader.num_row_groups() {
-        let rg = reader.get_row_group(rg_idx).map_err(|e| pq_err("read", path, e, line, col))?;
-        let rows = rg.metadata().num_rows() as usize;
-        for ci in 0..schema.num_columns() {
-            let desc = schema.column(ci);
-            let optional = desc.max_def_level() > 0;
-            let cr = rg.get_column_reader(ci).map_err(|e| pq_err("read", path, e, line, col))?;
-            let out = &mut cells[ci];
-            let kind = &kinds[ci];
-            let res = match cr {
-                ColumnReader::BoolColumnReader(mut r) => {
-                    drain(&mut r, optional, rows, |v| Ok(Value::Bool(*v)), out)
-                }
-                ColumnReader::Int64ColumnReader(mut r) => match kind {
-                    Kind::Timestamp { per_sec, width, utc } => {
-                        let (p, w, u) = (*per_sec, *width, *utc);
-                        drain(&mut r, optional, rows, |v| {
-                            let mut s = foreign::timestamp_str(*v, p, w);
-                            if u {
-                                s.push_str(" UTC");
-                            }
-                            Ok(Value::Str(Rc::new(s)))
-                        }, out)
-                    }
-                    Kind::Time { per_sec, width } => {
-                        let (p, w) = (*per_sec, *width);
-                        drain(&mut r, optional, rows, |v| {
-                            Ok(Value::Str(Rc::new(foreign::time_str(*v, p, w))))
-                        }, out)
-                    }
-                    Kind::Decimal { scale } => {
-                        let s = *scale;
-                        drain(&mut r, optional, rows, |v| {
-                            Ok(Value::Str(Rc::new(foreign::decimal_str(*v as i128, s))))
-                        }, out)
-                    }
-                    // Signed and unsigned both pass through the i64 payload —
-                    // the bridge wraps u64 > i64::MAX the same way.
-                    _ => drain(&mut r, optional, rows, |v| Ok(Value::Int(*v)), out),
-                },
-                ColumnReader::Int32ColumnReader(mut r) => match kind {
-                    Kind::Date => drain(&mut r, optional, rows, |v| {
-                        Ok(Value::Str(Rc::new(foreign::date_str(*v))))
-                    }, out),
-                    Kind::Time { per_sec, width } => {
-                        let (p, w) = (*per_sec, *width);
-                        drain(&mut r, optional, rows, |v| {
-                            Ok(Value::Str(Rc::new(foreign::time_str(*v as i64, p, w))))
-                        }, out)
-                    }
-                    Kind::Decimal { scale } => {
-                        let s = *scale;
-                        drain(&mut r, optional, rows, |v| {
-                            Ok(Value::Str(Rc::new(foreign::decimal_str(*v as i128, s))))
-                        }, out)
-                    }
-                    Kind::UintWiden => drain(&mut r, optional, rows, |v| {
-                        Ok(Value::Int((*v as u32) as i64))
-                    }, out),
-                    _ => drain(&mut r, optional, rows, |v| Ok(Value::Int(*v as i64)), out),
-                },
-                ColumnReader::Int96ColumnReader(mut r) => drain(&mut r, optional, rows, |v| {
-                    Ok(Value::Str(Rc::new(foreign::timestamp_str(
-                        v.to_nanos(),
-                        1_000_000_000,
-                        9,
-                    ))))
-                }, out),
-                ColumnReader::FloatColumnReader(mut r) => {
-                    drain(&mut r, optional, rows, |v| Ok(Value::Float(*v as f64)), out)
-                }
-                ColumnReader::DoubleColumnReader(mut r) => {
-                    drain(&mut r, optional, rows, |v| Ok(Value::Float(*v)), out)
-                }
-                ColumnReader::ByteArrayColumnReader(mut r) => match kind {
-                    Kind::Decimal { scale } => {
-                        let s = *scale;
-                        drain(&mut r, optional, rows, |v| {
-                            Ok(Value::Str(Rc::new(foreign::decimal_str(
-                                foreign::be_bytes_to_i128(v.data()),
-                                s,
-                            ))))
-                        }, out)
-                    }
-                    _ => {
-                        let name = desc.name().to_string();
-                        drain(&mut r, optional, rows, move |v| {
-                            let s = v.as_utf8().map_err(|_| {
-                                HelixError::new(
-                                    format!("parquet column `{name}` holds non-UTF-8 bytes"),
-                                    0,
-                                    0,
-                                )
-                            })?;
-                            Ok(Value::Str(Rc::new(s.to_string())))
-                        }, out)
-                    }
-                },
-                ColumnReader::FixedLenByteArrayColumnReader(mut r) => match kind {
-                    Kind::Decimal { scale } => {
-                        let s = *scale;
-                        drain(&mut r, optional, rows, |v| {
-                            Ok(Value::Str(Rc::new(foreign::decimal_str(
-                                foreign::be_bytes_to_i128(v.data()),
-                                s,
-                            ))))
-                        }, out)
-                    }
-                    // classify() refused every other FLBA shape already.
-                    _ => Err(HelixError::new("unreachable FLBA kind", line, col)),
-                },
-            };
-            res.map_err(|e| {
-                // The drain helpers have no path context — restore it here.
-                if e.message.starts_with("parquet") || e.message.starts_with("could not") {
-                    e
-                } else {
-                    pq_err("read", path, e.message.clone(), line, col)
-                }
-            })?;
-        }
+    // Decode every column in parallel; each worker re-opens the (in-memory)
+    // file — a footer parse, microseconds against a column decode.
+    let segs: Vec<Result<SendCol, String>> = kinds
+        .par_iter()
+        .enumerate()
+        .map(|(ci, kind)| read_column(&bytes, ci, kind, total_rows))
+        .collect();
+
+    let mut cols: Vec<(String, Col)> = Vec::with_capacity(names.len());
+    for (name, seg) in names.into_iter().zip(segs) {
+        let seg = seg.map_err(|m| pq_err("read", path, m, line, col))?;
+        let c = match seg {
+            SendCol::I64(vals, valid) => Col::I64 { vals, valid },
+            SendCol::F64(vals, valid) => Col::F64 { vals, valid },
+            SendCol::Bool(vals, valid) => Col::Bool { vals, valid },
+            SendCol::Str { dict, codes, valid } => {
+                // The worker's dictionary wraps into the engine's Rc form —
+                // per DISTINCT value, not per cell.
+                let mut b = StrBuilder::with_capacity(0);
+                let trans: Vec<u32> = dict.iter().map(|s| b.intern(s)).collect();
+                let _ = trans; // codes are already the worker's dict order,
+                               // which intern() reproduces 1:1 on a fresh builder
+                b.set_codes(codes, valid);
+                b.finish()
+            }
+        };
+        cols.push((name, c));
     }
-
-    let cols: Vec<(String, Col)> = (0..schema.num_columns())
-        .map(|i| {
-            let name = schema.column(i).name().to_string();
-            Col::from_values(&name, &cells[i], line, col).map(|c| (name, c))
-        })
-        .collect::<Result<_, _>>()?;
     NativeFrame::new(cols, line, col).map(|f| Rc::new(f) as Df)
 }
