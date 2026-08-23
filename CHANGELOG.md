@@ -67,6 +67,12 @@
 
 ### Changed
 
+- **Records print in canonical sorted field order.** `==` always ignored order
+  and `to_json` always sorted; now the printer agrees, so a doc example
+  documents the value rather than the construction route — `{name: "gc",
+  arguments: 1}` and its `parse_json` twin both print
+  `{arguments: 1, name: "gc"}`. A program that depended on insertion-order
+  printing must sort its expectations once.
 - **The frozen frame footer singularizes**: a one-row frame prints `(1 row)`.
   This is a versioned change to the frozen format (spec rule 5), made now,
   before the plural could ossify as a permanent cosmetic wart.

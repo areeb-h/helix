@@ -594,7 +594,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         sig: "confusion_matrix(y_true, y_pred, pos_label?)",
         doc: "Binary counts {tp, fp, fn, tn} against the positive class (default 1).",
         example: "confusion_matrix([1, 0, 1, 0], [1, 1, 0, 0])",
-        example_out: "{tp: 1, fp: 1, fn: 1, tn: 1}",
+        example_out: "{fn: 1, fp: 1, tn: 1, tp: 1}",
         notes: "",
     },
     DocEntry {
@@ -1124,7 +1124,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         sig: "align(a, b, mode?, scoring?)",
         doc: "Pairwise alignment of two arrays; returns score, matches, and gap-padded copies.",
         example: "align([1, 2, 3], [1, 3])",
-        example_out: "{score: 1, matches: 2, length: 3, a_aligned: [1, 2, 3], b_aligned: [1, missing, 3]}",
+        example_out: "{a_aligned: [1, 2, 3], b_aligned: [1, missing, 3], length: 3, matches: 2, score: 1}",
         notes: "",
     },
     DocEntry {
@@ -1837,7 +1837,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             sig: "summary()",
             doc: "A descriptive-stats record: count, mean, std, min, median, max.",
             example: "[1, 3].summary()",
-            example_out: "{count: 2, mean: 2.0, std: 1.0, min: 1.0, median: 2.0, max: 3.0}",
+            example_out: "{count: 2, max: 3.0, mean: 2.0, median: 2.0, min: 1.0, std: 1.0}",
             notes: "",
         },
     ),
@@ -2366,7 +2366,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         doc: "Pairwise-align to target (global/local/semiglobal); a record of score and CIGAR.",
         example: "dna(\"ACGT\").align(dna(\"ACGT\"))",
         example_out:
-            "{score: 4, cigar: \"4=\", query: \"ACGT\", target: \"ACGT\", start: 0, end: 4}",
+            "{cigar: \"4=\", end: 4, query: \"ACGT\", score: 4, start: 0, target: \"ACGT\"}",
         notes: "",
     }),
     ("Dna", DocEntry {
@@ -2430,7 +2430,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         sig: "base_counts()",
         doc: "Per-base tally as a record {A, C, G, T, N}; N collects every non-ACGT code.",
         example: "dna(\"ACGGT\").base_counts()",
-        example_out: "{A: 1, C: 1, G: 2, T: 1, N: 0}",
+        example_out: "{A: 1, C: 1, G: 2, N: 0, T: 1}",
         notes: "",
     }),
     ("Dna", DocEntry {

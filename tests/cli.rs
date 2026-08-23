@@ -7031,7 +7031,7 @@ fn a_quoted_key_makes_a_brace_a_dict() {
                print({\"model\": \"x\", \"n\": 2}.to_json())\n\
                print({...h, extra: 1})\n";
     let want = "{\"Content-Type\" => \"application/json\", \"X-Req-Id\" => \"7\"}\n\
-                {name: \"Ada\", age: 41}\n\
+                {age: 41, name: \"Ada\"}\n\
                 {}\n\
                 {\"a\" => {\"b\" => 1}}\n\
                 {\"a\" => 6, \"b\" => [1, 2]}\n\

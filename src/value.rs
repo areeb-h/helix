@@ -789,8 +789,16 @@ impl fmt::Display for Value {
                 write!(f, ")")
             }
             Value::Record(fields) => {
+                // CANONICAL field order (sorted by name, decided 2026-08-24):
+                // `==` always ignored order and `to_json` always sorted, so the
+                // printer was the one place a record's CONSTRUCTION ROUTE showed
+                // — a doc example would document one code path and fail on the
+                // other (field review §1.5). Sorting prints the VALUE.
+                let mut order: Vec<usize> = (0..fields.len()).collect();
+                order.sort_by(|&a, &b| fields[a].0.as_str().cmp(fields[b].0.as_str()));
                 write!(f, "{{")?;
-                for (i, (k, v)) in fields.iter().enumerate() {
+                for (i, &fi) in order.iter().enumerate() {
+                    let (k, v) = &fields[fi];
                     if i > 0 {
                         write!(f, ", ")?;
                     }
@@ -870,8 +878,12 @@ pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, Helix
             Ok(s)
         }
         Value::Record(fields) => {
+            // Canonical sorted field order — the same rule `Display` applies.
+            let mut order: Vec<usize> = (0..fields.len()).collect();
+            order.sort_by(|&a, &b| fields[a].0.as_str().cmp(fields[b].0.as_str()));
             let mut s = String::from("{");
-            for (i, (k, val)) in fields.iter().enumerate() {
+            for (i, &fi) in order.iter().enumerate() {
+                let (k, val) = &fields[fi];
                 if i > 0 {
                     s.push_str(", ");
                 }
