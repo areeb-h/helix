@@ -35,6 +35,7 @@ mod bytecode;
 mod capability;
 mod chart;
 mod dataframe;
+mod docs;
 mod doctest;
 mod error;
 mod fmt;
@@ -328,7 +329,7 @@ fn run() -> ExitCode {
         // `helix doc [Type]` — list the methods on a type (API discovery).
         Some("doc") => cli_doc(&args),
         // `helix describe` — the whole API as JSON (machine-readable, for LLMs/agents/tools).
-        Some("describe") => cli_describe(),
+        Some("describe") => cli_describe(&args),
         // Shorthand: `helix script.helix` runs a file directly.
         Some(path) => run_file(path),
     }
@@ -367,8 +368,22 @@ fn cli_doc(args: &[String]) -> ExitCode {
             let q = query.to_ascii_lowercase();
             match tables.iter().find(|(ty, _)| ty.to_ascii_lowercase() == q) {
                 Some((ty, methods)) => {
-                    println!("{} methods ({}):\n  {}", ty, methods.len(), sorted(methods));
+                    println!("{} methods ({}):", ty, methods.len());
+                    let mut names: Vec<&str> = methods.to_vec();
+                    names.sort_unstable();
+                    for m in names {
+                        match crate::docs::method_doc(ty, m) {
+                            Some(d) => {
+                                println!("  {:<28} {}", d.sig, d.doc);
+                                if !d.notes.is_empty() {
+                                    println!("  {:<28} NOTE: {}", "", d.notes);
+                                }
+                            }
+                            None => println!("  {m}"),
+                        }
+                    }
                     println!("\nUniversal (any value): {}", registry::UNIVERSAL_METHODS.join(", "));
+                    println!("`helix describe <name>` gives one name's full entry as JSON.");
                     ExitCode::SUCCESS
                 }
                 None => {
@@ -386,10 +401,25 @@ fn cli_doc(args: &[String]) -> ExitCode {
                         if methods.contains(&query) {
                             let eff = capability::method_effect_of(query).label();
                             let recv = suggest::receiver_for(ty);
-                            println!(
-                                "`{query}` is a method on {ty} (effect: {eff}) — e.g. \
-                                 `{recv}.{query}(...)`; full list: `helix doc {ty}`"
-                            );
+                            match crate::docs::method_doc(ty, query) {
+                                Some(d) => {
+                                    let _ = recv;
+                                    println!(
+                                        "`{}` on {ty} (effect: {eff}): {} — e.g. `{}` => {}",
+                                        d.sig,
+                                        d.doc,
+                                        d.example,
+                                        if d.example_out.is_empty() { "…" } else { d.example_out },
+                                    );
+                                    if !d.notes.is_empty() {
+                                        println!("  NOTE: {}", d.notes);
+                                    }
+                                }
+                                None => println!(
+                                    "`{query}` is a method on {ty} (effect: {eff}) — e.g. \
+                                     `{recv}.{query}(...)`; full list: `helix doc {ty}`"
+                                ),
+                            }
                             found = true;
                         }
                     }
@@ -481,8 +511,85 @@ fn probe_returns(name: &str, k: usize) -> Option<String> {
     (seen.len() == 1).then(|| seen.into_iter().next().unwrap())
 }
 
-fn cli_describe() -> ExitCode {
+/// Fold a docs-table entry into a describe JSON object (absent fields stay
+/// absent — an empty string is not information).
+fn enrich(entry: &mut serde_json::Value, doc: Option<&'static docs::DocEntry>) {
+    if let Some(d) = doc {
+        entry["sig"] = serde_json::Value::String(d.sig.to_string());
+        entry["doc"] = serde_json::Value::String(d.doc.to_string());
+        entry["example"] = serde_json::Value::String(d.example.to_string());
+        if !d.example_out.is_empty() {
+            entry["example_out"] = serde_json::Value::String(d.example_out.to_string());
+        }
+        if !d.notes.is_empty() {
+            entry["notes"] = serde_json::Value::String(d.notes.to_string());
+        }
+    }
+}
+
+/// `helix describe <name>` — the one entry (or every type's entry for a shared
+/// method name), as JSON. Unknown names route through the same suggester every
+/// "is not defined" error uses.
+fn cli_describe_one(query: &str) -> ExitCode {
     use crate::{capability, registry};
+    let mut found: Vec<serde_json::Value> = Vec::new();
+    if let Some(b) = registry::lookup(query) {
+        let mut entry = serde_json::json!({
+            "kind": "builtin",
+            "name": b.path,
+            "pure": b.pure,
+            "effect": capability::effect_of(b.path).label(),
+            "category": registry::category_of(b.path),
+        });
+        enrich(&mut entry, docs::builtin_doc(b.path));
+        if autodiff::differentiable_builtin(b.path) {
+            entry["differentiable"] = serde_json::Value::Bool(true);
+        }
+        found.push(entry);
+    }
+    for (ty, ms) in registry::type_method_tables() {
+        if ms.contains(&query) {
+            let mut entry = serde_json::json!({
+                "kind": "method",
+                "on": ty,
+                "name": query,
+                "effect": capability::method_effect_of(query).label(),
+            });
+            enrich(&mut entry, docs::method_doc(ty, query));
+            found.push(entry);
+        }
+    }
+    if registry::UNIVERSAL_METHODS.contains(&query) {
+        found.push(serde_json::json!({ "kind": "universal_method", "name": query }));
+    }
+    if found.is_empty() {
+        eprintln!("error: `{query}` is not a builtin or method name.");
+        if let Some(h) = suggest::hint(query, suggest::Site::Function, &[]) {
+            eprintln!("help: {h}");
+        }
+        eprintln!("help: `helix doc <Type>` lists a type's methods; `helix describe` dumps everything.");
+        return ExitCode::FAILURE;
+    }
+    match serde_json::to_string_pretty(&serde_json::Value::Array(found)) {
+        Ok(s) => {
+            println!("{s}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: could not serialize: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cli_describe(args: &[String]) -> ExitCode {
+    use crate::{capability, registry};
+    // `helix describe <name>` — ONE name's full entry (the 45 KB dump made
+    // every lookup a filtering job, so the field wrote a Python script to do
+    // what this argument now does).
+    if let Some(query) = args.get(2) {
+        return cli_describe_one(query);
+    }
     let builtins: Vec<serde_json::Value> = registry::BUILTINS
         .iter()
         .map(|b| {
@@ -520,6 +627,10 @@ fn cli_describe() -> ExitCode {
             if let Some(r) = loose_returns {
                 entry["returns"] = serde_json::Value::String(r);
             }
+            enrich(&mut entry, docs::builtin_doc(b.path));
+            if autodiff::differentiable_builtin(b.path) {
+                entry["differentiable"] = serde_json::Value::Bool(true);
+            }
             entry
         })
         .collect();
@@ -527,7 +638,14 @@ fn cli_describe() -> ExitCode {
     for (ty, ms) in registry::type_method_tables() {
         let arr: Vec<serde_json::Value> = ms
             .iter()
-            .map(|&m| serde_json::json!({ "name": m, "effect": capability::method_effect_of(m).label() }))
+            .map(|&m| {
+                let mut entry = serde_json::json!({
+                    "name": m,
+                    "effect": capability::method_effect_of(m).label(),
+                });
+                enrich(&mut entry, docs::method_doc(ty, m));
+                entry
+            })
             .collect();
         methods.insert(ty.to_string(), serde_json::Value::Array(arr));
     }

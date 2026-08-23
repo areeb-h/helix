@@ -4801,7 +4801,8 @@ print(q.ok, "|", q.error)
 fn helix_doc_reverse_looks_up_methods_and_builtins() {
     let (out, _, code) = run(&["doc", "scan"], &[], "");
     assert_eq!(code, Some(0));
-    assert!(out.contains("`scan` is a method on Array") && out.contains("helix doc Array"), "{out}");
+    // The docs table now answers with signature, doc line, and worked example.
+    assert!(out.contains("on Array (effect:") && out.contains("e.g."), "{out}");
 
     let (out, _, code) = run(&["doc", "sqrt"], &[], "");
     assert_eq!(code, Some(0));
@@ -4810,7 +4811,7 @@ fn helix_doc_reverse_looks_up_methods_and_builtins() {
     let (out, _, code) = run(&["doc", "max"], &[], "");
     assert_eq!(code, Some(0));
     for ty in ["Array", "Tensor", "GroupBy"] {
-        assert!(out.contains(&format!("is a method on {ty}")), "missing owner {ty}:\n{out}");
+        assert!(out.contains(&format!("on {ty} (effect:")), "missing owner {ty}:\n{out}");
     }
 
     let (_, err, code) = run(&["doc", "zzz"], &[], "");
@@ -5511,6 +5512,46 @@ bANana 3 1
         assert_eq!(code, Some(0), "{name}: {err}");
         assert_eq!(out, want, "{name}: the additive surface drifted");
     }
+}
+
+/// THE DRIFT-PROOF for the docs table: every entry `helix describe` reports
+/// with an `example_out` is EXECUTED (wrapped in `print(...)`, exactly as the
+/// doc-example runner wraps its last line) and must produce byte-for-byte that
+/// output. Documentation that lies fails the gate.
+#[test]
+fn doc_table_examples_all_run() {
+    let (out, err, code) = run(&["describe"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("describe emits JSON");
+    let mut checked = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    let mut check = |name: &str, entry: &serde_json::Value| {
+        let (Some(ex), Some(want)) = (
+            entry.get("example").and_then(|v| v.as_str()),
+            entry.get("example_out").and_then(|v| v.as_str()),
+        ) else {
+            return;
+        };
+        let (got, rerr, rcode) = run(&["eval", &format!("print({ex})")], &[], "");
+        if rcode != Some(0) {
+            failures.push(format!("{name}: example errored: {}", rerr.lines().next().unwrap_or("")));
+        } else if got.trim_end() != want {
+            failures.push(format!("{name}: expected {want:?}, got {:?}", got.trim_end()));
+        }
+        checked += 1;
+    };
+    for b in doc["builtins"].as_array().expect("builtins array") {
+        check(b["name"].as_str().unwrap_or("?"), b);
+    }
+    for (ty, ms) in doc["methods"].as_object().expect("methods map") {
+        for m in ms.as_array().expect("method array") {
+            check(&format!("{ty}.{}", m["name"].as_str().unwrap_or("?")), m);
+        }
+    }
+    assert!(checked > 250, "the table shrank: only {checked} runnable examples");
+    assert!(failures.is_empty(), "docs-table drift ({}):
+  {}", failures.len(), failures.join("
+  "));
 }
 
 /// The field review's silent-wrong paths, closed and pinned: an unknown

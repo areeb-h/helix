@@ -784,6 +784,21 @@ pub fn binary_builtin(
     Ok(Value::Node(out))
 }
 
+/// Does this free builtin ACCEPT A TRACKED VALUE and extend the tape? The
+/// list `helix describe` reports — kept honest by a unit test that actually
+/// differentiates every flagged name. (`variable`/`gradient`/`value_of` are the
+/// tape's own tooling; `to_array` reads a value OFF the tape — their describe
+/// notes say so, and none of them is an "op" in this sense.)
+pub fn differentiable_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "relu" | "sigmoid" | "tanh" | "exp" | "ln" | "sqrt" | "sin" | "cos" | "abs" | "tan"
+            | "asin" | "acos" | "atan" | "sinh" | "cosh" | "log2" | "log10" | "cbrt"
+            | "degrees" | "radians" | "erf" | "normal_cdf" | "normal_pdf" | "max" | "min"
+            | "clamp" | "hypot"
+    )
+}
+
 /// The tape's own method names. `ufcs_fallback_applies` consults this so a
 /// FAILED method call on a tracked value may retry as the free builtin
 /// (`v.to_array()` → `to_array(v)`, `v.tan()` → `tan(v)`), while a name the
@@ -952,5 +967,35 @@ fn grad_of(x: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
             line,
             col,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value::Value;
+
+    /// Every name `differentiable_builtin` flags REALLY differentiates: build a
+    /// leaf, apply the op, and demand a graph node back — the describe flag can
+    /// never claim an op the tape refuses.
+    #[test]
+    fn the_differentiable_flag_is_honest() {
+        let leaf = |x: f64| variable(&Value::Float(x), 0, 0).expect("leaf");
+        for name in [
+            "relu", "sigmoid", "tanh", "exp", "ln", "sqrt", "sin", "cos", "abs", "tan", "asin",
+            "acos", "atan", "sinh", "cosh", "log2", "log10", "cbrt", "degrees", "radians", "erf",
+            "normal_cdf", "normal_pdf",
+        ] {
+            assert!(differentiable_builtin(name), "{name} missing from the flag");
+            let out = unary_builtin(name, &leaf(0.5), 0, 0);
+            assert!(matches!(out, Ok(Value::Node(_))), "{name} refused a tracked value");
+        }
+        for name in ["max", "min", "hypot"] {
+            assert!(differentiable_builtin(name), "{name} missing from the flag");
+            let out = binary_builtin(name, &leaf(0.5), &Value::Float(1.0), 0, 0);
+            assert!(matches!(out, Ok(Value::Node(_))), "{name} refused a tracked value");
+        }
+        assert!(differentiable_builtin("clamp"), "clamp is min(max(x, lo), hi) on the tape");
+        assert!(!differentiable_builtin("floor"), "floor must stay refused (zero derivative)");
     }
 }
