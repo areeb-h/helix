@@ -26,6 +26,7 @@ mod join;
 mod key;
 mod logic;
 mod parquet_io;
+mod sel;
 mod sort;
 mod verbs;
 #[cfg(test)]
@@ -43,40 +44,60 @@ use columns::Col;
 pub use csv::read_csv;
 pub use parquet_io::read_parquet;
 
-/// One column slot: decoded data, or a pending parquet column that decodes on
-/// first touch. The memo cell is shared through the frame's `Rc`, so `cache()`
-/// clones and every take/read after a decode reuses it.
+/// Where a not-yet-computed column's data comes from.
+pub(crate) enum Source {
+    /// Decoded at construction — the memo cell is already set.
+    None,
+    /// A parquet column still on disk.
+    Parquet(parquet_io::PendingCol),
+    /// Rows of another frame's column, gathered on first touch. Holding the
+    /// source store alive is the point: memo cells are shared, so the source
+    /// decodes once no matter how many frames select rows from it.
+    Gather { src: Rc<Vec<(String, LazyCol)>>, at: usize, sel: Rc<sel::RowSel> },
+}
+
+/// One column slot: decoded data, or a recipe that produces it on first touch.
+/// The memo cell is shared through the frame's `Rc`, so `cache()` clones and
+/// every take/read after a compute reuses it.
 pub(crate) struct LazyCol {
     cell: OnceCell<Col>,
-    pending: Option<parquet_io::PendingCol>,
+    src: Source,
 }
 
 impl LazyCol {
     fn eager(c: Col) -> LazyCol {
         let cell = OnceCell::new();
         let _ = cell.set(c);
-        LazyCol { cell, pending: None }
+        LazyCol { cell, src: Source::None }
     }
 
     fn ready(&self) -> Option<&Col> {
         self.cell.get()
     }
 
-    /// The column, decoding it now if pending. Compute happens BEFORE the memo
-    /// write, so a decode error surfaces cleanly and can retry.
+    /// The column, computing it now if needed. Compute happens BEFORE the memo
+    /// write, so an error surfaces cleanly and can retry.
     fn get(&self, line: usize, col: usize) -> Result<&Col, HelixError> {
         if let Some(c) = self.cell.get() {
             return Ok(c);
         }
-        let pending = self.pending.as_ref().ok_or_else(|| {
-            HelixError::new("internal: an empty column slot", line, col)
-        })?;
-        let computed = pending
-            .decode()
-            .map_err(|m| HelixError::new(format!("could not read parquet: {m}"), line, col))?;
+        let computed = match &self.src {
+            Source::None => {
+                return Err(HelixError::new("internal: an empty column slot", line, col))
+            }
+            Source::Parquet(p) => p.decode().map_err(|m| {
+                HelixError::new(format!("could not read parquet: {m}"), line, col)
+            })?,
+            // Chains resolve recursively; each level memoizes in ITS store.
+            Source::Gather { src, at, sel } => src[*at].1.get(line, col)?.take(sel.indices()),
+        };
         Ok(self.cell.get_or_init(|| computed))
     }
 }
+
+/// Beyond this many stacked deferred takes, materialize: an unbounded chain
+/// would pin every ancestor store (and its memoized columns) in memory.
+const MAX_DEFER_DEPTH: u32 = 8;
 
 /// A frame: named columns of one shared length, possibly still on disk. The
 /// storage is `Rc`-shared so `cache()` is a refcount bump and a decoded column
@@ -84,6 +105,8 @@ impl LazyCol {
 pub struct NativeFrame {
     cols: Rc<Vec<(String, LazyCol)>>,
     rows: usize,
+    /// Length of the deferred-take chain above this frame (`MAX_DEFER_DEPTH`).
+    depth: u32,
 }
 
 impl NativeFrame {
@@ -109,6 +132,7 @@ impl NativeFrame {
         Ok(NativeFrame {
             cols: Rc::new(cols.into_iter().map(|(n, c)| (n, LazyCol::eager(c))).collect()),
             rows,
+            depth: 0,
         })
     }
 
@@ -121,10 +145,11 @@ impl NativeFrame {
         NativeFrame {
             cols: Rc::new(
                 cols.into_iter()
-                    .map(|(n, p)| (n, LazyCol { cell: OnceCell::new(), pending: Some(p) }))
+                    .map(|(n, p)| (n, LazyCol { cell: OnceCell::new(), src: Source::Parquet(p) }))
                     .collect(),
             ),
             rows,
+            depth: 0,
         }
     }
 
@@ -136,35 +161,91 @@ impl NativeFrame {
         self.cols.len()
     }
 
-    /// Every column, decoded. Pending columns decode IN PARALLEL on first full
-    /// materialization (the same worker path the reader uses), then memoize.
+    /// Every column, computed. Still-on-disk parquet columns — this frame's
+    /// own and, through gather chains, its ancestors' — decode IN PARALLEL
+    /// first; the gathers themselves then run serially (decodes dominate).
     fn columns(&self, line: usize, col: usize) -> Result<Vec<(&String, &Col)>, HelixError> {
-        use rayon::prelude::*;
-        let pending: Vec<(usize, &parquet_io::PendingCol)> = self
-            .cols
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, lc))| lc.ready().is_none())
-            .filter_map(|(i, (_, lc))| lc.pending.as_ref().map(|p| (i, p)))
-            .collect();
-        if !pending.is_empty() {
-            // Workers produce the Send intermediates; the Rc wrapping happens
-            // here on the engine thread.
-            let decoded: Vec<(usize, Result<parquet_io::SendCol, String>)> = pending
-                .par_iter()
-                .map(|(i, p)| (*i, p.decode_send()))
-                .collect();
-            for (i, r) in decoded {
-                let seg = r.map_err(|m| {
-                    HelixError::new(format!("could not read parquet: {m}"), line, col)
-                })?;
-                let _ = self.cols[i].1.cell.set(parquet_io::PendingCol::finish(seg));
-            }
-        }
+        self.prefetch_parquet(line, col)?;
         self.cols
             .iter()
             .map(|(n, lc)| lc.get(line, col).map(|c| (n, c)))
             .collect()
+    }
+
+    /// Walk the gather chain from this frame and decode every parquet column
+    /// it will need in one rayon batch (the same worker split the reader
+    /// uses), filling the owning stores' memo cells.
+    fn prefetch_parquet(&self, line: usize, col: usize) -> Result<(), HelixError> {
+        use rayon::prelude::*;
+        let mut stores: Vec<Rc<Vec<(String, LazyCol)>>> = vec![Rc::clone(&self.cols)];
+        let mut queue: Vec<(usize, usize)> = (0..self.cols.len()).map(|i| (0, i)).collect();
+        let mut jobs: Vec<(usize, usize)> = Vec::new();
+        let mut qi = 0;
+        while qi < queue.len() {
+            let (k, i) = queue[qi];
+            qi += 1;
+            // The borrow of this slot ends before any push into `stores`.
+            let follow = {
+                let lc = &stores[k][i].1;
+                if lc.ready().is_some() {
+                    continue;
+                }
+                match &lc.src {
+                    Source::None => None,
+                    Source::Parquet(_) => {
+                        jobs.push((k, i));
+                        None
+                    }
+                    Source::Gather { src, at, .. } => Some((Rc::clone(src), *at)),
+                }
+            };
+            if let Some((src, at)) = follow {
+                let k2 = match stores.iter().position(|s| Rc::ptr_eq(s, &src)) {
+                    Some(k2) => k2,
+                    None => {
+                        stores.push(src);
+                        stores.len() - 1
+                    }
+                };
+                queue.push((k2, at));
+            }
+        }
+        jobs.sort_unstable();
+        jobs.dedup();
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        // Workers produce the Send intermediates; the Rc wrapping happens
+        // here on the engine thread.
+        let work: Vec<((usize, usize), &parquet_io::PendingCol)> = jobs
+            .iter()
+            .filter_map(|&(k, i)| match &stores[k][i].1.src {
+                Source::Parquet(p) => Some(((k, i), p)),
+                _ => None,
+            })
+            .collect();
+        let decoded: Vec<((usize, usize), Result<parquet_io::SendCol, String>)> =
+            work.par_iter().map(|&(ki, p)| (ki, p.decode_send())).collect();
+        for ((k, i), r) in decoded {
+            let seg = r.map_err(|m| {
+                HelixError::new(format!("could not read parquet: {m}"), line, col)
+            })?;
+            let _ = stores[k][i].1.cell.set(parquet_io::PendingCol::finish(seg));
+        }
+        Ok(())
+    }
+
+    /// A still-on-disk parquet column by name, or None once decoded (the
+    /// flat fast paths are better then) or for any other source.
+    pub(crate) fn parquet_pending(&self, name: &str) -> Option<&parquet_io::PendingCol> {
+        let (_, lc) = self.cols.iter().find(|(n, _)| n == name)?;
+        if lc.ready().is_some() {
+            return None;
+        }
+        match &lc.src {
+            Source::Parquet(p) => Some(p),
+            _ => None,
+        }
     }
 
     /// A column by name, with the column list in the error — the same shape the
@@ -181,11 +262,45 @@ impl NativeFrame {
     }
 
     /// Gather whole rows by index — the primitive every verb reduces to.
-    /// Materializes (the output frame owns real data).
-    fn take(&self, idx: &[usize]) -> NativeFrame {
+    fn take(&self, idx: Vec<usize>) -> NativeFrame {
+        self.take_sel(Rc::new(sel::RowSel::from_idx(idx)))
+    }
+
+    /// Gather by selection, DEFERRED: the result frame's columns are recipes
+    /// pointing back at this frame's store, so a column no verb ever touches
+    /// is never gathered — and if this frame's column was still on disk, it
+    /// stays there. `count()` on the result reads `sel.len()` only.
+    fn take_sel(&self, sel: Rc<sel::RowSel>) -> NativeFrame {
+        if self.depth >= MAX_DEFER_DEPTH {
+            return self.take_eager(sel.indices());
+        }
+        let rows = sel.len();
+        let cols: Vec<(String, LazyCol)> = self
+            .cols
+            .iter()
+            .enumerate()
+            .map(|(at, (n, _))| {
+                (
+                    n.clone(),
+                    LazyCol {
+                        cell: OnceCell::new(),
+                        src: Source::Gather {
+                            src: Rc::clone(&self.cols),
+                            at,
+                            sel: Rc::clone(&sel),
+                        },
+                    },
+                )
+            })
+            .collect();
+        NativeFrame { cols: Rc::new(cols), rows, depth: self.depth + 1 }
+    }
+
+    /// The materializing gather (the defer cap; the output owns real data).
+    fn take_eager(&self, idx: &[usize]) -> NativeFrame {
         let cols: Vec<(String, Col)> = match self.columns(0, 0) {
             Ok(cs) => cs.iter().map(|(n, c)| ((*n).clone(), c.take(idx))).collect(),
-            // A decode failure surfaces on the fallible paths; take() has no
+            // A decode failure surfaces on the fallible paths; take has no
             // Result channel, so an unreadable pending column becomes Null —
             // the fallible verbs all call columns()/col() first in practice.
             Err(_) => self
@@ -198,6 +313,7 @@ impl NativeFrame {
         NativeFrame {
             cols: Rc::new(cols.into_iter().map(|(n, c)| (n, LazyCol::eager(c))).collect()),
             rows,
+            depth: 0,
         }
     }
 }
@@ -303,7 +419,7 @@ impl DataHandle for NativeFrame {
     /// The storage is Rc-shared and per-column memoized — a cache IS a clone
     /// of the handle.
     fn cache(&self, _line: usize, _col: usize) -> Result<Df, HelixError> {
-        Ok(Rc::new(NativeFrame { cols: self.cols.clone(), rows: self.rows }) as Df)
+        Ok(Rc::new(NativeFrame { cols: self.cols.clone(), rows: self.rows, depth: self.depth }) as Df)
     }
 
     fn write_parquet(&self, path: &str, line: usize, col: usize) -> Result<(), HelixError> {

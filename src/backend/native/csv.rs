@@ -65,23 +65,64 @@ fn classify(field: &str) -> Ty {
 /// Pass 1: record spans `(start, end)` (end excludes the terminator), honoring
 /// quote parity — `""` inside a quoted field toggles twice and lands back
 /// in-quote, so a plain toggle is exact for boundary purposes.
+///
+/// The scan runs in TWO PARALLEL SWEEPS over fixed chunks: sweep one counts
+/// each chunk's quotes, a serial prefix-xor then hands every chunk its
+/// starting parity, and sweep two collects each chunk's parity-zero newlines.
+/// Fixed boundaries + in-order stitching make the result identical to the
+/// serial walk — thread count can never change it.
 fn record_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
-    let mut bounds = Vec::new();
-    let mut start = 0usize;
-    let mut in_quotes = false;
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'"' => in_quotes = !in_quotes,
-            b'\n' if !in_quotes => {
-                let mut end = i;
-                if end > start && bytes[end - 1] == b'\r' {
-                    end -= 1;
-                }
-                bounds.push((start, end));
-                start = i + 1;
+    const CHUNK: usize = 1 << 20;
+    let newlines: Vec<usize> = if bytes.len() <= CHUNK {
+        let mut out = Vec::new();
+        let mut in_quotes = false;
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'"' => in_quotes = !in_quotes,
+                b'\n' if !in_quotes => out.push(i),
+                _ => {}
             }
-            _ => {}
         }
+        out
+    } else {
+        let chunks: Vec<&[u8]> = bytes.chunks(CHUNK).collect();
+        let odd_quotes: Vec<bool> = chunks
+            .par_iter()
+            .map(|c| c.iter().filter(|&&b| b == b'"').count() % 2 == 1)
+            .collect();
+        let mut parity = Vec::with_capacity(chunks.len());
+        let mut p = false;
+        for q in &odd_quotes {
+            parity.push(p);
+            p ^= q;
+        }
+        chunks
+            .par_iter()
+            .enumerate()
+            .flat_map_iter(|(k, c)| {
+                let mut in_quotes = parity[k];
+                let base = k * CHUNK;
+                let mut out = Vec::new();
+                for (i, &b) in c.iter().enumerate() {
+                    match b {
+                        b'"' => in_quotes = !in_quotes,
+                        b'\n' if !in_quotes => out.push(base + i),
+                        _ => {}
+                    }
+                }
+                out
+            })
+            .collect()
+    };
+    let mut bounds = Vec::with_capacity(newlines.len() + 1);
+    let mut start = 0usize;
+    for &i in &newlines {
+        let mut end = i;
+        if end > start && bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+        bounds.push((start, end));
+        start = i + 1;
     }
     if start < bytes.len() {
         let mut end = bytes.len();
@@ -91,6 +132,73 @@ fn record_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
         bounds.push((start, end));
     }
     bounds
+}
+
+/// Split one record into field BODY spans `(start, end, has_escape)` without
+/// allocating — the structural twin of `parse_fields`, byte-for-byte the same
+/// error messages in the same order.
+fn split_fields(rec: &[u8], out: &mut Vec<(usize, usize, bool)>) -> Result<(), String> {
+    out.clear();
+    if rec.is_empty() {
+        return Ok(());
+    }
+    let mut i = 0usize;
+    loop {
+        if i < rec.len() && rec[i] == b'"' {
+            i += 1;
+            let body = i;
+            let mut has_esc = false;
+            loop {
+                match rec.get(i) {
+                    Some(b'"') if rec.get(i + 1) == Some(&b'"') => {
+                        has_esc = true;
+                        i += 2;
+                    }
+                    Some(b'"') => break,
+                    Some(_) => i += 1,
+                    None => return Err("unterminated quoted field".to_string()),
+                }
+            }
+            // Validate here so a non-UTF-8 field errors in the structural
+            // pass, exactly where `parse_fields` would have said it.
+            std::str::from_utf8(&rec[body..i]).map_err(|_| "non-UTF-8 bytes".to_string())?;
+            out.push((body, i, has_esc));
+            i += 1;
+        } else {
+            let end = rec[i..].iter().position(|&b| b == b',').map(|p| i + p).unwrap_or(rec.len());
+            std::str::from_utf8(&rec[i..end]).map_err(|_| "non-UTF-8 bytes".to_string())?;
+            out.push((i, end, false));
+            i = end;
+        }
+        match rec.get(i) {
+            Some(b',') => i += 1,
+            None => return Ok(()),
+            Some(_) => return Err("stray bytes after a closing quote".to_string()),
+        }
+    }
+}
+
+/// A field span's text: borrowed straight from the record, or — only when the
+/// field carried a `""` escape — folded into `scratch`.
+fn field_text<'a>(
+    rec: &'a [u8],
+    span: (usize, usize, bool),
+    scratch: &'a mut String,
+) -> Result<&'a str, String> {
+    let (s, e, esc) = span;
+    let body = std::str::from_utf8(&rec[s..e]).map_err(|_| "non-UTF-8 bytes".to_string())?;
+    if !esc {
+        return Ok(body);
+    }
+    scratch.clear();
+    scratch.reserve(body.len());
+    let mut rest = body;
+    while let Some(p) = rest.find("\"\"") {
+        scratch.push_str(&rest[..p + 1]);
+        rest = &rest[p + 2..];
+    }
+    scratch.push_str(rest);
+    Ok(scratch)
 }
 
 /// Parse one record's fields. Unquoted fields borrow-copy directly; a quoted
@@ -261,17 +369,19 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
             let base = ci * chunk; // first row index of this chunk (0-based data row)
             let mut segs: Vec<Seg> =
                 tys.iter().map(|t| Seg::new(*t, spans.len())).collect();
-            let mut fields: Vec<String> = Vec::with_capacity(ncol);
+            let mut fspans: Vec<(usize, usize, bool)> = Vec::with_capacity(ncol);
+            let mut scratch = String::new();
             for (r, &(s, e)) in spans.iter().enumerate() {
                 let row = base + r;
-                parse_fields(&bytes[s..e], &mut fields).map_err(|m| (row, m))?;
-                if fields.len() != ncol {
+                let rec = &bytes[s..e];
+                split_fields(rec, &mut fspans).map_err(|m| (row, m))?;
+                if fspans.len() != ncol {
                     return Err((
                         row,
-                        format!("has {} fields, expected {ncol}", fields.len()),
+                        format!("has {} fields, expected {ncol}", fspans.len()),
                     ));
                 }
-                for (c, f) in fields.iter().enumerate() {
+                for (c, &span) in fspans.iter().enumerate() {
                     let name = &headers[c];
                     let ctx = |field: &str, want: &str| {
                         format!(
@@ -279,6 +389,7 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
                              was inferred from the first {INFER_ROWS} rows)"
                         )
                     };
+                    let f = field_text(rec, span, &mut scratch).map_err(|m| (row, m))?;
                     segs[c].push(f, &ctx).map_err(|m| (row, m))?;
                 }
             }

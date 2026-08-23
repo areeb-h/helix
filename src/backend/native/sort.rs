@@ -39,7 +39,7 @@ pub fn sort(
                 // their placeholder key (0) plus the row tiebreak keeps them
                 // in input order — same as cell_cmp's Equal under stability.
                 let idx: Vec<usize> = keys.iter().map(|(_, _, i)| *i as usize).collect();
-                return Ok(frame.take(&idx));
+                return Ok(frame.take(idx));
             }
             Col::F64 { vals, valid } => {
                 // f64 packed by its total_cmp bit trick: flip all bits of
@@ -54,7 +54,7 @@ pub fn sort(
                     .collect();
                 keys.par_sort_unstable();
                 let idx: Vec<usize> = keys.iter().map(|(_, _, i)| *i as usize).collect();
-                return Ok(frame.take(&idx));
+                return Ok(frame.take(idx));
             }
             Col::Str { dict, codes, valid } => {
                 // Rank the dictionary once (it is small), then the row sort is
@@ -71,7 +71,7 @@ pub fn sort(
                     .collect();
                 keys.par_sort_unstable();
                 let idx: Vec<usize> = keys.iter().map(|(_, _, i)| *i as usize).collect();
-                return Ok(frame.take(&idx));
+                return Ok(frame.take(idx));
             }
             _ => {}
         }
@@ -85,7 +85,7 @@ pub fn sort(
         }
         Ordering::Equal
     });
-    Ok(frame.take(&idx))
+    Ok(frame.take(idx))
 }
 
 /// Ascending cell order: missing first, then the value's own order. Cells in one

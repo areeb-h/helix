@@ -55,20 +55,32 @@ pub fn decode(
             let bytes = total_bits / 8;
             let chunk = data.get(pos..pos + bytes).ok_or("RLE stream ends inside a group")?;
             pos += bytes;
+            let take = (groups * 8).min(count - (out.len() - start));
+            let w = bit_width as usize;
+            if w == 0 {
+                out.extend(std::iter::repeat_n(0u32, take));
+                continue;
+            }
+            let mask: u32 = if w == 32 { u32::MAX } else { (1u32 << w) - 1 };
+            // A sliding u64 read covers the in-byte shift (≤ 7) plus the
+            // width (≤ 32) in one load; the last few values, whose window
+            // would run past the chunk, assemble theirs byte by byte.
             let mut bit = 0usize;
-            for _ in 0..groups * 8 {
-                if out.len() - start >= count {
-                    break;
-                }
-                let mut v: u32 = 0;
-                for k in 0..bit_width as usize {
-                    let idx = bit + k;
-                    if chunk[idx / 8] & (1 << (idx % 8)) != 0 {
-                        v |= 1 << k;
+            for _ in 0..take {
+                let byte = bit / 8;
+                let win = if byte + 8 <= chunk.len() {
+                    let mut a = [0u8; 8];
+                    a.copy_from_slice(&chunk[byte..byte + 8]);
+                    u64::from_le_bytes(a)
+                } else {
+                    let mut win = 0u64;
+                    for (k, &b) in chunk[byte..].iter().enumerate() {
+                        win |= (b as u64) << (8 * k);
                     }
-                }
-                bit += bit_width as usize;
-                out.push(v);
+                    win
+                };
+                out.push(((win >> (bit % 8)) as u32) & mask);
+                bit += w;
             }
         }
     }

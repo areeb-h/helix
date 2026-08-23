@@ -13,6 +13,7 @@
 
 mod foreign;
 mod read;
+mod pages;
 mod rle;
 mod write;
 

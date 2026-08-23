@@ -20,7 +20,7 @@ pub fn filter(
     // Typed fast path for `col <op> literal` — same results as the boxed
     // evaluator below, which stays the definition of the semantics.
     if let Some(keep) = super::fast::filter_keep(frame, pred, line, col) {
-        return Ok(frame.take(&keep?));
+        return Ok(frame.take_sel(std::rc::Rc::new(keep?)));
     }
     let cells = eval(frame, pred, line, col)?.into_rows(frame.len());
     let mut keep: Vec<usize> = Vec::new();
@@ -41,7 +41,7 @@ pub fn filter(
             }
         }
     }
-    Ok(frame.take(&keep))
+    Ok(frame.take(keep))
 }
 
 pub fn select(
@@ -87,7 +87,7 @@ pub fn with_columns(
 
 pub fn head(frame: &NativeFrame, n: usize) -> NativeFrame {
     let take: Vec<usize> = (0..frame.len().min(n)).collect();
-    frame.take(&take)
+    frame.take(take)
 }
 
 pub fn vstack(
@@ -175,5 +175,5 @@ pub fn unique_by(
     // row's position wins, so a re-appended key moves DOWN to its newest row.
     let mut keep: Vec<usize> = order.iter().map(|k| chosen[k]).collect();
     keep.sort_unstable();
-    Ok(frame.take(&keep))
+    Ok(frame.take(keep))
 }

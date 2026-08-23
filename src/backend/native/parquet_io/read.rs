@@ -140,6 +140,74 @@ impl PendingCol {
     pub(crate) fn decode(&self) -> Result<Col, String> {
         Ok(Self::finish(self.decode_send()?))
     }
+
+    /// Try `col OP literal` straight off this column's pages (no decode).
+    /// `None` = shape not covered; the caller decodes and filters flat.
+    pub(crate) fn filter_i64(
+        &self,
+        pred: impl Fn(i64) -> bool + Sync,
+    ) -> Result<Option<(Vec<bool>, usize)>, String> {
+        if !matches!(self.kind, Kind::Int) {
+            return Ok(None);
+        }
+        let (reader, optional) = self.open()?;
+        if reader.metadata().file_metadata().schema_descr().column(self.ci).physical_type()
+            != PhysicalType::INT64
+        {
+            return Ok(None);
+        }
+        super::pages::filter_prim(
+            &self.bytes,
+            reader.metadata(),
+            self.ci,
+            optional,
+            self.rows,
+            i64::from_le_bytes,
+            pred,
+            |_| false,
+        )
+    }
+
+    /// The float twin of `filter_i64`; NaNs anywhere defer to the flat path.
+    pub(crate) fn filter_f64(
+        &self,
+        pred: impl Fn(f64) -> bool + Sync,
+    ) -> Result<Option<(Vec<bool>, usize)>, String> {
+        if !matches!(self.kind, Kind::Float) {
+            return Ok(None);
+        }
+        let (reader, optional) = self.open()?;
+        if reader.metadata().file_metadata().schema_descr().column(self.ci).physical_type()
+            != PhysicalType::DOUBLE
+        {
+            return Ok(None);
+        }
+        super::pages::filter_prim(
+            &self.bytes,
+            reader.metadata(),
+            self.ci,
+            optional,
+            self.rows,
+            f64::from_le_bytes,
+            pred,
+            |v| v.is_nan(),
+        )
+    }
+
+    /// A footer-cheap reader over the shared bytes, plus the optionality of
+    /// this column.
+    fn open(&self) -> Result<(SerializedFileReader<bytes::Bytes>, bool), String> {
+        let reader = SerializedFileReader::new(self.bytes.clone())
+            .map_err(|e| format!("re-open failed: {e}"))?;
+        let optional = reader
+            .metadata()
+            .file_metadata()
+            .schema_descr()
+            .column(self.ci)
+            .max_def_level()
+            > 0;
+        Ok((reader, optional))
+    }
 }
 
 /// A column decoded on a worker thread — everything here is Send; the engine's
@@ -332,6 +400,150 @@ fn read_str_pages(
     Ok(Some(SendCol::Str { dict, codes, valid }))
 }
 
+/// A decoded primitive column: values plus validity.
+type PrimCol<T> = (Vec<T>, Vec<bool>);
+
+/// Page-level fast path for 8-byte primitive columns (INT64 / DOUBLE): the
+/// dictionary page memcpys into a typed dict and data-page RLE codes map
+/// through it; PLAIN data pages memcpy straight into the output. Answers
+/// `None` (value-level fallback) for any other page shape.
+fn read_prim_pages<T: Copy>(
+    reader: &SerializedFileReader<bytes::Bytes>,
+    ci: usize,
+    optional: bool,
+    rows: usize,
+    zero: T,
+    from_le: impl Fn([u8; 8]) -> T,
+) -> Result<Option<PrimCol<T>>, String> {
+    use parquet::basic::Encoding;
+    use parquet::column::page::Page;
+
+    let mut vals: Vec<T> = Vec::with_capacity(rows);
+    let mut valid: Vec<bool> = Vec::with_capacity(rows);
+    let mut dict: Vec<T> = Vec::new();
+
+    let take8 = |b: &[u8], at: usize| -> Result<[u8; 8], String> {
+        b.get(at..at + 8)
+            .map(|s| [s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])
+            .ok_or_else(|| "page ends inside a value".to_string())
+    };
+
+    for rg_idx in 0..reader.num_row_groups() {
+        let rg = reader.get_row_group(rg_idx).map_err(|e| format!("row group: {e}"))?;
+        let mut pages =
+            rg.get_column_page_reader(ci).map_err(|e| format!("page reader: {e}"))?;
+        let mut saw_dict = false;
+        while let Some(page) = pages.get_next_page().map_err(|e| format!("page: {e}"))? {
+            match page {
+                Page::DictionaryPage { buf, num_values, encoding, .. } => {
+                    if !matches!(encoding, Encoding::PLAIN | Encoding::PLAIN_DICTIONARY) {
+                        return Ok(None);
+                    }
+                    saw_dict = true;
+                    dict.clear();
+                    dict.reserve(num_values as usize);
+                    for i in 0..num_values as usize {
+                        dict.push(from_le(take8(&buf, i * 8)?));
+                    }
+                }
+                Page::DataPage { buf, num_values, encoding, def_level_encoding, .. } => {
+                    let n = num_values as usize;
+                    let mut pos = 0usize;
+                    let mut present = n;
+                    let defs_start = valid.len();
+                    if optional {
+                        if def_level_encoding != Encoding::RLE {
+                            return Ok(None);
+                        }
+                        let lenb =
+                            buf.get(0..4).ok_or("data page ends inside the level length")?;
+                        let dlen =
+                            u32::from_le_bytes([lenb[0], lenb[1], lenb[2], lenb[3]]) as usize;
+                        pos = 4 + dlen;
+                        let mut levels: Vec<u32> = Vec::with_capacity(n);
+                        rle::decode(
+                            buf.get(4..4 + dlen).ok_or("data page ends inside levels")?,
+                            1,
+                            n,
+                            &mut levels,
+                        )?;
+                        present = 0;
+                        for l in levels {
+                            valid.push(l == 1);
+                            if l == 1 {
+                                present += 1;
+                            }
+                        }
+                    } else {
+                        valid.extend(std::iter::repeat_n(true, n));
+                    }
+                    match encoding {
+                        Encoding::RLE_DICTIONARY | Encoding::PLAIN_DICTIONARY => {
+                            if !saw_dict {
+                                return Ok(None);
+                            }
+                            let width =
+                                *buf.get(pos).ok_or("data page ends before the bit width")?;
+                            if width > 32 {
+                                return Err(
+                                    "dictionary index width exceeds 32 bits".to_string()
+                                );
+                            }
+                            let mut codes: Vec<u32> = Vec::with_capacity(present);
+                            rle::decode(
+                                buf.get(pos + 1..).ok_or("data page ends inside the codes")?,
+                                width,
+                                present,
+                                &mut codes,
+                            )?;
+                            if present == n {
+                                // The all-valid page maps codes straight through.
+                                for &code in &codes {
+                                    vals.push(
+                                        *dict
+                                            .get(code as usize)
+                                            .ok_or("dictionary code out of range")?,
+                                    );
+                                }
+                            } else {
+                                let mut c = codes.iter();
+                                for &ok in &valid[defs_start..] {
+                                    if ok {
+                                        let &code = c
+                                            .next()
+                                            .ok_or("fewer codes than present values")?;
+                                        vals.push(
+                                            *dict
+                                                .get(code as usize)
+                                                .ok_or("dictionary code out of range")?,
+                                        );
+                                    } else {
+                                        vals.push(zero);
+                                    }
+                                }
+                            }
+                        }
+                        Encoding::PLAIN => {
+                            let mut at = pos;
+                            for &ok in &valid[defs_start..] {
+                                if ok {
+                                    vals.push(from_le(take8(&buf, at)?));
+                                    at += 8;
+                                } else {
+                                    vals.push(zero);
+                                }
+                            }
+                        }
+                        _ => return Ok(None),
+                    }
+                }
+                Page::DataPageV2 { .. } => return Ok(None),
+            }
+        }
+    }
+    Ok(Some((vals, valid)))
+}
+
 /// Decode column `ci` of every row group into a Send segment. Runs on a worker.
 fn read_column(
     bytes: &bytes::Bytes,
@@ -353,6 +565,46 @@ fn read_column(
         && let Some(seg) = read_str_pages(&reader, ci, optional)?
     {
         return Ok(seg);
+    }
+
+    // Plain 8-byte numeric columns get the same page-level treatment — the
+    // parallel raw-page walk first (zstd/uncompressed), then the crate-page
+    // serial path (any codec), then the value-level reader.
+    if matches!(kind, Kind::Int) && desc.physical_type() == PhysicalType::INT64 {
+        if let Some((vals, valid)) = super::pages::read_prim(
+            bytes,
+            reader.metadata(),
+            ci,
+            optional,
+            total_rows,
+            0i64,
+            i64::from_le_bytes,
+        )? {
+            return Ok(SendCol::I64(vals, valid));
+        }
+        if let Some((vals, valid)) =
+            read_prim_pages(&reader, ci, optional, total_rows, 0i64, i64::from_le_bytes)?
+        {
+            return Ok(SendCol::I64(vals, valid));
+        }
+    }
+    if matches!(kind, Kind::Float) && desc.physical_type() == PhysicalType::DOUBLE {
+        if let Some((vals, valid)) = super::pages::read_prim(
+            bytes,
+            reader.metadata(),
+            ci,
+            optional,
+            total_rows,
+            0f64,
+            f64::from_le_bytes,
+        )? {
+            return Ok(SendCol::F64(vals, valid));
+        }
+        if let Some((vals, valid)) =
+            read_prim_pages(&reader, ci, optional, total_rows, 0f64, f64::from_le_bytes)?
+        {
+            return Ok(SendCol::F64(vals, valid));
+        }
     }
 
     // Accumulators — exactly one becomes the result, per the classified kind.

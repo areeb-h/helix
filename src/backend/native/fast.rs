@@ -29,12 +29,16 @@ use super::NativeFrame;
 // ---- filter ----
 
 /// `Some(keep)` when the predicate matches a fast shape; `None` → boxed path.
+/// Chunk size for the parallel mask build (row indices stay derivable from
+/// the chunk index, which the NaN error path needs).
+const FILTER_CHUNK: usize = 64 * 1024;
+
 pub fn filter_keep(
     frame: &NativeFrame,
     pred: &ColExpr,
     line: usize,
     col: usize,
-) -> Option<Result<Vec<usize>, HelixError>> {
+) -> Option<Result<super::sel::RowSel, HelixError>> {
     let ColExpr::Binary(op, a, b) = pred else { return None };
     if !matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne) {
         return None;
@@ -46,51 +50,106 @@ pub fn filter_keep(
         _ => return None,
     };
     let op = if flipped { flip(op) } else { *op };
+    // A parquet column still on disk: build the mask straight from its pages
+    // (the predicate runs per DISTINCT dictionary value). `None` falls
+    // through to the decode-then-filter path below.
+    if let Some(p) = frame.parquet_pending(name) {
+        let paged = match lit {
+            Value::Int(k) => {
+                let k = *k;
+                p.filter_i64(move |v| int_cmp(op, v, k)).transpose()
+            }
+            Value::Float(k) if !k.is_nan() => {
+                let k = *k;
+                p.filter_f64(move |v| float_cmp(op, v, k)).transpose()
+            }
+            _ => None,
+        };
+        if let Some(r) = paged {
+            return Some(match r {
+                Ok((mask, n)) => Ok(super::sel::RowSel::from_mask(mask, n)),
+                Err(m) => Err(HelixError::new(
+                    format!("could not read parquet: {m}"),
+                    line,
+                    col,
+                )),
+            });
+        }
+    }
     let c = match frame.col(name, line, col) {
         Ok(c) => c,
         Err(e) => return Some(Err(e)),
     };
     match (c, lit) {
         (Col::I64 { vals, valid }, Value::Int(k)) => {
+            use rayon::prelude::*;
             let k = *k;
-            let mut keep = Vec::new();
-            for (i, (v, ok)) in vals.iter().zip(valid).enumerate() {
-                if *ok && int_cmp(op, *v, k) {
-                    keep.push(i);
-                }
-            }
-            Some(Ok(keep))
+            let mut mask = vec![false; vals.len()];
+            let n: usize = mask
+                .par_chunks_mut(FILTER_CHUNK)
+                .zip(vals.par_chunks(FILTER_CHUNK).zip(valid.par_chunks(FILTER_CHUNK)))
+                .map(|(mc, (vc, okc))| {
+                    let mut cnt = 0usize;
+                    for j in 0..vc.len() {
+                        if okc[j] && int_cmp(op, vc[j], k) {
+                            mc[j] = true;
+                            cnt += 1;
+                        }
+                    }
+                    cnt
+                })
+                .sum();
+            Some(Ok(super::sel::RowSel::from_mask(mask, n)))
         }
         (Col::F64 { vals, valid }, Value::Float(k)) => {
+            use rayon::prelude::*;
             if k.is_nan() {
                 return None; // the kernel owns the NaN error text
             }
             let k = *k;
-            let mut keep = Vec::new();
-            for (i, (v, ok)) in vals.iter().zip(valid).enumerate() {
-                if !*ok {
-                    continue;
-                }
-                if v.is_nan() {
-                    // Reproduce the kernel's exact NaN error (with its hint).
-                    let e = crate::interp::ops::eval_binary(
-                        &op,
-                        Value::Float(*v),
-                        Value::Float(k),
-                        line,
-                        col,
-                    )
-                    .err();
-                    return Some(Err(e.unwrap_or_else(|| {
-                        HelixError::new("cannot compare these values (NaN?)", line, col)
-                    })
-                    .hint(format!("at row {i} of the frame."))));
-                }
-                if float_cmp(op, *v, k) {
-                    keep.push(i);
-                }
+            let mut mask = vec![false; vals.len()];
+            // Each chunk reports (matches, first NaN row in it); the error, if
+            // any, fires for the first NaN in ROW order — exactly the row the
+            // serial walk would have stopped at.
+            let per_chunk: Vec<(usize, Option<usize>)> = mask
+                .par_chunks_mut(FILTER_CHUNK)
+                .zip(vals.par_chunks(FILTER_CHUNK).zip(valid.par_chunks(FILTER_CHUNK)))
+                .enumerate()
+                .map(|(ci, (mc, (vc, okc)))| {
+                    let base = ci * FILTER_CHUNK;
+                    let mut cnt = 0usize;
+                    for j in 0..vc.len() {
+                        if !okc[j] {
+                            continue;
+                        }
+                        if vc[j].is_nan() {
+                            return (cnt, Some(base + j));
+                        }
+                        if float_cmp(op, vc[j], k) {
+                            mc[j] = true;
+                            cnt += 1;
+                        }
+                    }
+                    (cnt, None)
+                })
+                .collect();
+            if let Some(i) = per_chunk.iter().find_map(|(_, nan)| *nan) {
+                // Reproduce the kernel's exact NaN error (with its hint).
+                let e = crate::interp::ops::eval_binary(
+                    &op,
+                    Value::Float(vals[i]),
+                    Value::Float(k),
+                    line,
+                    col,
+                )
+                .err();
+                return Some(Err(e.unwrap_or_else(|| {
+                    HelixError::new("cannot compare these values (NaN?)", line, col)
+                })
+                .hint(format!("at row {i} of the frame."))));
             }
-            Some(Ok(keep))
+            let n = per_chunk.iter().map(|(c, _)| *c).sum();
+            Some(Ok(super::sel::RowSel::from_mask(mask, n)))
         }
         _ => None,
     }
