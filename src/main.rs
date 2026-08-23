@@ -1280,6 +1280,10 @@ fn run_test_roots(
         // library of documented modules with no `*_test.helix` beside them is a real
         // project shape, and reporting "no tests found" over a dozen live examples would
         // be the same lie this pass is removing everywhere else.
+        // Provenance first, on EVERY path: the field ran a full round of results
+        // against a stale binary on PATH and only caught it a session later. One
+        // line prevents it.
+        println!("helix {}", env!("CARGO_PKG_VERSION"));
         if files.is_empty() && !roots.iter().any(|r| any_doc_examples(r)) {
             println!(
                 "no tests found (looked for `*_test.helix`, and for `>>>` doc examples, under {root_shown})"
@@ -1461,6 +1465,12 @@ fn run_doc_examples(
                 println!("        code:     {}", ex.code.join(" ; "));
                 println!("        expected: {}", want.trim_end());
                 println!("        got:      {got}");
+                if ex.expect.iter().any(|l| l.trim_start().starts_with("...")) {
+                    println!(
+                        "        note: a doc example is ONE line — there is no `...` \
+                         continuation. Write the call on a single line."
+                    );
+                }
             } else {
                 ok += 1;
                 println!("  ok    {where_} (doc)");

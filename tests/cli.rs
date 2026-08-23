@@ -5463,6 +5463,55 @@ print(g)
     }
 }
 
+/// The field review's silent-wrong paths, closed and pinned: an unknown
+/// request-record field is refused BY NAME (the `cookies:`-for-`jar:` and
+/// `timeout_ms`-for-`total_ms` traps each get their own hint), a failed format
+/// spec names the literal-brace escape, `try(f()).ok` teaches the binding rule
+/// instead of the generic field hint, and `dna` is idempotent — `T(x)` where
+/// `x : T` passes through, statically and through a parameter.
+#[test]
+fn the_silent_wrong_answer_paths_are_closed() {
+    let (_, err, code) = run_source(
+        r#"print(http_request({method: "GET", url: "http://127.0.0.1:1", cookies: 1}))"#,
+        &[],
+        "swk_cookies",
+    );
+    assert_eq!(code, Some(1));
+    assert!(err.contains("does not read a field named `cookies`"), "{err}");
+    assert!(err.contains("the cookie-jar field is `jar:`"), "{err}");
+
+    let (_, err, code) = run_source(
+        r#"print(http_request({method: "GET", url: "http://127.0.0.1:1", timeout_ms: 5}))"#,
+        &[],
+        "swk_timeout",
+    );
+    assert_eq!(code, Some(1));
+    assert!(err.contains("does not read a field named `timeout_ms`"), "{err}");
+    assert!(err.contains("`total_ms`"), "{err}");
+
+    let (_, err, code) = run_source(r#"print(".a{color:red}")"#, &[], "swk_brace");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("unknown format type"), "{err}");
+    assert!(err.contains("write `{{` and `}}`"), "{err}");
+
+    let (_, err, code) = run_source("fn f() = 1
+print(try(f()).ok)", &[], "swk_tryok");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("binds tighter than `.ok`"), "{err}");
+    assert!(err.contains("let r = try(...) in r.ok"), "{err}");
+
+    let src = "fn wrap(x) = dna(x)
+print(dna(dna(\"ACGT\")))
+print(wrap(dna(\"ACGT\")))";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("swk_dna_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "ACGT
+ACGT
+", "{name}: dna must be idempotent");
+    }
+}
+
 /// The 0.4.0 field review's autodiff asks, pinned end to end: the whole routed
 /// elementary family differentiates (each gradient checked against a central
 /// difference computed IN the program), max/min/clamp/hypot carry gradients

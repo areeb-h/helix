@@ -1029,7 +1029,29 @@ impl Checker {
                          `try (f(x))`.",
                     ));
                 }
-                let vt = self.synth(expr)?;
+                let vt = match self.synth(expr) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        // `try(f()).ok` parses as `try` OF `f().ok` — the postfix
+                        // chain binds tighter than `try`. When the inner failure is
+                        // exactly a missing `ok`/`value`/`error` field, the generic
+                        // "field access works on records" hint is the WRONG lesson —
+                        // replace it with the one naming the real rule.
+                        if let Expr::Field { name, .. } = &**expr
+                            && matches!(name.as_str(), "ok" | "value" | "error")
+                            && e.message.contains(&format!("has no field `{name}`"))
+                        {
+                            let mut e = e;
+                            e.hint = Some(format!(
+                                "`try` binds tighter than `.{name}`, so this reads \
+                                 `.{name}` on the inner value. Bind the result first: \
+                                 `let r = try(...) in r.{name}`."
+                            ));
+                            return Err(e);
+                        }
+                        return Err(e);
+                    }
+                };
                 Ok(Type::Record(vec![
                     ("ok".to_string(), Type::Bool),
                     ("value".to_string(), vt),

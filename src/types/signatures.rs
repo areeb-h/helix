@@ -202,7 +202,8 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
-            if !compatible(&args[0], &Type::String) {
+            // A Dna passes through unchanged (the runtime is idempotent).
+            if !compatible(&args[0], &Type::String) && !compatible(&args[0], &Type::Dna) {
                 return Err(type_err("dna", "a string", &args[0], line, col));
             }
             Ok(Type::Dna)

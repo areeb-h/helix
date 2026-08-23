@@ -269,6 +269,11 @@ impl super::Interp {
                 arity(name, &args, 1, line, col)?;
                 match &args[0] {
                     Value::Str(s) => make_dna(s, line, col),
+                    // Idempotent: `dna(x)` where x is already a Dna answers x.
+                    // `T(x)` with x : T has one sensible meaning, and the field's
+                    // defensive `dna(primer)` calls were raising on the module's
+                    // own documented input type.
+                    d @ Value::Dna(_) => Ok(d.clone()),
                     other => Err(type_err("dna", "a string", other, line, col)),
                 }
             }
@@ -376,6 +381,16 @@ impl super::Interp {
                 // `{status, body, headers}`. One primitive for PUT/DELETE/PATCH + custom
                 // request headers + returned response headers; get/post are the shortcuts.
                 arity(name, &args, 1, line, col)?;
+                validate_request_fields(
+                    &args[0],
+                    &[
+                        "method", "url", "body", "headers", "jar", "total_ms", "connect_ms",
+                        "read_ms", "max_body",
+                    ],
+                    name,
+                    line,
+                    col,
+                )?;
                 let (method, url, body, hdrs) = http_request_fields(&args[0], line, col)?;
                 #[cfg(feature = "http")]
                 {
@@ -421,6 +436,13 @@ impl super::Interp {
                 // then `s.next()` in a loop, `missing` at EOF — for token-by-token model
                 // output (Ollama NDJSON / OpenAI SSE), the client mirror of accept→send.
                 arity(name, &args, 1, line, col)?;
+                validate_request_fields(
+                    &args[0],
+                    &["method", "url", "body", "headers", "timeout_ms"],
+                    name,
+                    line,
+                    col,
+                )?;
                 let (method, url, body, hdrs) = http_request_fields(&args[0], line, col)?;
                 // Optional `timeout_ms` (per-chunk read deadline) — a positive integer field.
                 let timeout_ms = http_timeout_ms(&args[0], line, col)?;
@@ -2437,6 +2459,43 @@ fn hex_to_array32(hex: &str, what: &str, line: usize, col: usize) -> Result<[u8;
 type HttpReqParts = (String, String, String, Vec<(String, String)>);
 
 #[cfg_attr(not(feature = "http"), allow(dead_code))]
+/// Refuse an unrecognized field in a request record, naming it and listing the
+/// ones that are read. A typo'd `timeout_ms` (for `total_ms`) silently left a
+/// request with NO total deadline, and `cookies:` (for `jar:`) a session with
+/// no cookies and no error anywhere — the field report's §1.4. The rule is the
+/// one `helix.toml` already applies: an unknown key is a hard error, because a
+/// field that silently does nothing is a bug that ships. Non-record shapes fall
+/// through — the field readers own those errors.
+fn validate_request_fields(
+    req: &Value,
+    allowed: &[&str],
+    who: &str,
+    line: usize,
+    col: usize,
+) -> Result<(), HelixError> {
+    let Value::Record(fields) = req else { return Ok(()) };
+    for (k, _) in fields.iter() {
+        let k = k.as_str();
+        if !allowed.contains(&k) {
+            let hint = match k {
+                "cookies" => "the cookie-jar field is `jar:` (a jar from `cookie_jar()`).".to_string(),
+                "timeout_ms" if who == "http_request" => {
+                    "the deadline fields are `total_ms` (whole request), `connect_ms`, and `read_ms`."
+                        .to_string()
+                }
+                _ => format!("fields read: {}.", allowed.join(", ")),
+            };
+            return Err(HelixError::new(
+                format!("`{who}` does not read a field named `{k}`"),
+                line,
+                col,
+            )
+            .hint(hint));
+        }
+    }
+    Ok(())
+}
+
 fn http_request_fields(req: &Value, line: usize, col: usize) -> Result<HttpReqParts, HelixError> {
     let Value::Record(fields) = req else {
         return Err(type_err("http_request", "a `{ method, url, … }` record", req, line, col));

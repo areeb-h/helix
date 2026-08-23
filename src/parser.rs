@@ -2560,8 +2560,17 @@ impl Parser {
                             // error pointing at the string (never a runtime surprise).
                             let spec = match spec_src {
                                 Some(sp) => Some(
-                                    crate::strfmt::parse_spec(&sp)
-                                        .map_err(|m| HelixError::new(m, l, c))?,
+                                    // A failed spec is often not a spec at all:
+                                    // `".a{color:red}"` is CSS whose brace was read
+                                    // as a hole (`:red` as the spec). Name the
+                                    // escape hatch every time.
+                                    crate::strfmt::parse_spec(&sp).map_err(|m| {
+                                        HelixError::new(m, l, c).hint(
+                                            "a `{...}` hole interpolates; for literal \
+                                             braces (CSS, JSON) write `{{` and `}}` — \
+                                             `\".a{{color:red}}\"` prints `.a{color:red}`.",
+                                        )
+                                    })?,
                                 ),
                                 None => None,
                             };

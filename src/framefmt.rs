@@ -32,8 +32,9 @@
 //!    shown cells are all numeric (`Int`/`Float`/`Missing`) is right-aligned;
 //!    anything else is left-aligned. Two spaces separate columns; lines carry no
 //!    trailing whitespace.
-//! 5. The footer is `(N rows)`, or `(showing K of N rows)` when the preview
-//!    truncates. A frame with no columns prints `(empty dataframe)`.
+//! 5. The footer is `(N rows)` — `(1 row)` when N is 1 — or
+//!    `(showing K of N rows)` when the preview truncates. A frame with no
+//!    columns prints `(empty dataframe)`.
 //!
 //! Changing anything above is a versioned, release-noted format change — this
 //! text is program output, and programs get diffed.
@@ -103,10 +104,11 @@ pub fn frame_text(df: &dyn DataHandle, line: usize, col: usize) -> Result<String
     for r in 0..shown {
         push_row(&|i| cells[i][r].clone(), &mut out);
     }
+    let noun = if total == 1 { "row" } else { "rows" };
     if shown < total {
-        out.push_str(&format!("(showing {shown} of {total} rows)"));
+        out.push_str(&format!("(showing {shown} of {total} {noun})"));
     } else {
-        out.push_str(&format!("({total} rows)"));
+        out.push_str(&format!("({total} {noun})"));
     }
     Ok(out)
 }
@@ -162,6 +164,14 @@ mod tests {
             0,
         )
         .expect("demo frame builds")
+    }
+
+    /// One row is a row: the footer singularizes, per spec rule 5.
+    #[test]
+    fn a_single_row_footer_is_singular() {
+        let df = build_frame(vec![("x".to_string(), ColData::Int(vec![7]))], 0, 0).unwrap();
+        let text = frame_text(&*df, 0, 0).unwrap();
+        assert!(text.ends_with("(1 row)"), "footer was: {text:?}");
     }
 
     /// The spec's own example, byte for byte — the doc comment and the code can
