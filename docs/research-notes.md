@@ -1,5 +1,7 @@
 # Research notes
 
+> **Historical record (2026-06)** — the research base behind the founding ADRs; later decisions are recorded in `docs/adr/` and `docs/research/`.
+
 Helix is built research-first: existing systems inform the design rather than being
 copied directly, and the best approach is synthesized from them. This file preserves
 the cited research that drove the major decisions, so the reasoning is retained beyond

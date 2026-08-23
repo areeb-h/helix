@@ -33,7 +33,7 @@ them. Ordering is leverage/risk as argued per item.
 - `helix describe` signature enrichment (describe-sigs): probe the checker's own tables (types/signatures.rs builtin_type + per-receiver fns) with Type::Unknown vectors to derive arity and returns — sound today, arm-by-arm verified — plus hand-authored `params` names in registry::BUILTINS (131 entries) drift-pinned to the probe by a types/tests.rs test. Needs decisions: `arity: null` honesty for the 15 unguarded builtins (signatures.rs:780-795); universal_methods strings→objects compat; `returns: null` for comprehension verbs and Dict/Net.
 - string-append FIX 2 — Op::AppendStrIntoLocal fast path for `"{acc}{x}"` folds on VM/JIT: a new opcode (ops.rs, hbc.rs name table, every exhaustive Op match) with byte-for-byte MAX_STRING_LEN error parity, non-Str-first-iteration fallback, and format-spec-hole decline. MUST coordinate with the in-flight uncommitted work in src/bytecode/comprehensions.rs (+57) and src/jit.rs (+138) — anchor by fn name, not line.
 - string-append FIX 3 — the tree-walker never got the append wall fix (256k int appends still 6.3s, quadratic; matches the pre-fix number): the walker's reduce rebinds acc so the Rc is always shared. Touches the carefully-commented binder save/restore choreography ((a,a) same-name binders, error-mid-fold restore) — decline the fast path for same-name binders; needs its own design pass.
-- DataFrame missing-filter semantics (live footgun 1): `where(@v == missing)` silently returns 0 rows, `.is_missing()` unsupported in queries, no `drop_missing` — the fix plan already slates 'work or error'. This is query-semantics design work under ADR 0001, not a patch.
+- DataFrame missing-filter semantics (live footgun 1): `where(@v == missing)` silently returns 0 rows, `.is_missing()` unsupported in queries, no `drop_missing` — the fix plan already slates 'work or error'. This is query-semantics design work under ADR 0001, not a patch. **STATUS: resolved the "work" way** — `.is_missing()` is admitted inside queries and frames have `drop_missing()`; `@v == missing` deliberately keeps selecting nothing, in agreement with arrays (see the `ColExpr::IsMissing` note, src/backend/mod.rs).
 - Printable signature/doc-line metadata table (follow-up to describe-sigs + doc-verb): a genuinely new source of truth so `helix doc scan` can print a signature and doc sentence. Larger change; only after the probe-based describe enrichment proves the shape.
 - Dict.get(k, default) parity with Record.get (which already takes a default) — small code, but an API-surface decision; fold into the errors-as-values (ADR 0004) discussion since `expect` will migrate there too.
 - D2 `--explain-jit` / HELIX_JIT_EXPLAIN=1 — already deliberately deferred to v0.2.2 with a sketch in docs/v0.2.1-fix-plan.md; AGENTS.md documents the cliff until then.
@@ -182,6 +182,10 @@ with mechanisms so nothing has to be rediscovered:
 - **`where(@v == missing)` / `!= missing` still silently return 0 rows** (v0.2.1
   finding, unchanged in v0.2.6). `drop_missing()` is the sanctioned spelling; the
   equality spellings should ERROR with a hint, not silently match nothing.
+  **STATUS: resolved differently** — `.is_missing()` is now admitted inside queries
+  and frames have `drop_missing()`; the equality spelling deliberately keeps
+  selecting nothing (ADR 0001 agreement with arrays; `ColExpr::IsMissing`,
+  src/backend/mod.rs) rather than erroring.
 - **`strip_mangling` corrupts user strings shaped like `m<digits>$`** in multi-file
   error renders (src/main.rs:1554→1468): a dict key `m5$gone` in an `expect()` error
   is reported as `gone` — but only when an import exists. Real fix is demangling
@@ -232,6 +236,11 @@ UFCS is now restricted to **user-defined functions**. What that leaves:
   emitter). That is a real change and it should be made deliberately, not smuggled in
   behind a bug fix. With it, builtins could chain again — `tensor(t).to_array()`,
   `(0 - 1).abs()` — which is what the narrowing costs today.
+  **STATUS: landed ("half two")** — a builtin-named method call that fails dispatch
+  now retries the builtin on the receiver at run time, on all engines
+  (`ufcs_fallback_applies` in src/interp.rs; the VM's `ufcs_name` seam), restoring
+  builtin chaining. The reverse direction — methods as free functions, the
+  half-resolution below — remains open, as recorded.
 - **The residue.** A user's own `fn` can still collide with a Python attribute they also
   call (`fn helper` plus `np.helper(...)`). It is a name they chose and can see, and it
   was an error before UFCS existed, so nothing that worked changes — but it is not
@@ -275,6 +284,8 @@ wish, because an undecided list is what a later reader has to re-litigate.
   trivia) plus `fmt` awareness — `fmt` re-emits comment bytes verbatim and never
   reflows, so a block form is preserved by construction, but its indentation rule needs
   stating. The largest purely cosmetic cost in the corpus.
+  **STATUS: landed in v0.3.0** — `#[ … ]#`, nesting, with an unclosed-block hint
+  (src/lexer.rs).
 - **`group_by(key)` on arrays.** A DataFrame has `group`; an array has `frequencies`
   (counts only) and nothing that groups elements by a computed key, so the corpus folds
   a dict by hand. Distinct from `chunks`/`windows`, which group by POSITION. Returns
@@ -284,6 +295,8 @@ wish, because an undecided list is what a later reader has to re-litigate.
   in `llm/request.helix`. A record has fixed known fields and a dict has dynamic keys,
   so this is a real question (what is the field set?), not an oversight — but the
   one-way direction (dict → record, keys must be strings) is answerable.
+  **STATUS: landed in v0.3.0** — a Dict spread base is accepted (string keys become
+  fields; both engines — see the `RecordUpdate` Dict arm in src/interp.rs / src/vm.rs).
 - **Destructuring in `let` and `fn` parameters.** `a, b = expr` works as a STATEMENT
   and lambda parameters destructure tuples, so the gap is narrower than it looks:
   `let [a, b] = …` and `fn f([a, b])`. Medium cost, and the statement form covers most
@@ -300,6 +313,8 @@ wish, because an undecided list is what a later reader has to re-litigate.
 - **Selective import** (`from status import reason`). `import status as st` works. This
   is module-system surface and interacts with the parse-time import-name resolution
   already recorded above as scope-blind.
+  **STATUS: shipped** as `import lib.mod.{f, g}` (no new keyword — the brace tail
+  mirrors the dotted path; see ROADMAP Phase 7).
 
 **Declined, with the reason, so it is not re-proposed.**
 
@@ -414,7 +429,7 @@ an owner's ruling.
 - **`helix describe` signature enrichment** (describe-sigs — claim fully current, v0.2.1 output has zero signature keys, verified by walking all JSON keys): probe `builtin_type` (types/signatures.rs:36-817) with `vec![Type::Unknown; k]`, k=0..=5 — sound because `compatible(Unknown,_)=true` (types.rs:100) and every non-arity guard admits Unknown (verified arm-by-arm) — Ok-set = arity; refine returns per-k via palette probes ([Float;k],[String;k],[Array(Float);k],[Unknown;k]). Additive JSON: `params` (new hand-authored data in `BuiltinDef`, 131 entries), `arity` (`null` for the 15 unguarded builtins at signatures.rs:780-795 — never fabricate), `returns` (per-arity; structured record/tuple rendering; `null` for comprehension verbs typed in synth.rs:353-414 / parser desugars, and for all Dict/Net methods — no checker tables). Needs: pub wrapper seam at types.rs:948-949; drift-pin test (every builtin probes to nonempty arity or is arity-null — converts a future Unknown-rejecting guard into a gate failure); decision on `universal_methods` strings→objects (cli.rs:2428-2462 only checks `.as_array()`, but external tooling may index strings — or add a parallel key).
 - **string FIX 2 — `Op::AppendStrIntoLocal`**: linearize `\"{acc}{x}\"` folds on VM/JIT (currently ×13–21 per ×4 n, but only 3.4s at 2MB — real, not urgent). New opcode beside ConcatIntoLocal (ops.rs:183), hbc.rs name row (~:582), every exhaustive Op match, byte-for-byte MAX_STRING_LEN error parity (vm.rs:1275-1332, interp.rs:33 = 1 GiB), decline on format-spec holes, write_value fallback for a non-Str first iteration, scan-shares-emit-path test. **Coordinate with the uncommitted comprehensions.rs/jit.rs work.**
 - **string FIX 3 — walker append wall**: the walker never got the v0.2.0 fix (256k int appends 6.33s — numerically the pre-fix 6.493s). `concat_in_place`/`insert_in_place` are vm.rs-only callers; the walker's reduce (interp/comprehensions.rs:258, rebinding at :317-333) keeps the Rc shared. Touches the binder save/restore choreography — decline for same-name binders `(a,a)`; own design pass.
-- **DataFrame missing-filter semantics**: `where(@v == missing)` → 0 silently; `.is_missing()` rejected in queries; no `drop_missing`. Fix-plan already says 'work or error'. ADR-0001-level query-semantics design.
+- **DataFrame missing-filter semantics**: `where(@v == missing)` → 0 silently; `.is_missing()` rejected in queries; no `drop_missing`. Fix-plan already says 'work or error'. ADR-0001-level query-semantics design. **STATUS: resolved the "work" way** (`.is_missing()` in queries, frame `drop_missing()`; `== missing` stays missing-propagating by design — see the sweep entry above).
 - **Printable signature/doc-line metadata**: the new source of truth doc-verb's original ask needs; only after the probe-based describe enrichment settles the shape.
 - **`Dict.get(k, default)`** — Record.get already takes a default (methods.rs:634-645), Dict's is strictly 1-arg: an undocumented asymmetry; decide inside the ADR 0004 errors-as-values work.
 - **D2 `--explain-jit`** — already deferred to v0.2.2 with a sketch (fix-plan STATUS 5). AGENTS.md documents the cliff meanwhile.

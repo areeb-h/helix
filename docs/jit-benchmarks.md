@@ -4,7 +4,8 @@
 >
 > **Read [`bench/kernels/RESULTS.md`](../bench/kernels/RESULTS.md) instead.** This document
 > is kept for its engineering history (what each JIT lever did, and why), **not** for its
-> cross-language verdicts.
+> cross-language verdicts. (Since v0.4.0 the JIT is also a cargo feature, `jit`, on by
+> default — bytecode is identical with or without it.)
 >
 > **What was wrong.** Every `C 0.47 s` figure here — and so every "≈ C" / "C-parity" /
 > "beats 1-thread C" conclusion drawn from it — measured a C reference that was **not

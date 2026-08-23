@@ -1,6 +1,6 @@
 # ADR 0034 — Native frame semantics: frames follow the language
 
-- **Status:** **Accepted 2026-08-23** — the policy contract ADR 0033's Stage 1
+- **Status:** **Accepted & Implemented 2026-08-23** — the policy contract ADR 0033's Stage 1
   implements. Written BEFORE the engine so the differential campaign against the
   polars oracle has decided answers, not ad-hoc ones.
 - **Date:** 2026-08-23

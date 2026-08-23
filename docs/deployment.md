@@ -17,11 +17,29 @@ for the glibc build). It is built with:
 - A fully **static musl** variant (`helix-x86_64-unknown-linux-musl`) with no shared-
   library dependencies — for air-gapped use and the container image.
 
-Install (prebuilt, glibc-PGO by default; set `HELIX_MUSL=1` for the static binary):
+Install (prebuilt, glibc-PGO by default). The gnu build's glibc floor is **2.35**
+(as of v0.4.0); `install.sh` falls back to the static musl binary automatically on
+musl distros and on older glibc, and `HELIX_MUSL=1` forces it:
 
 ```sh
 curl -LsSf https://raw.githubusercontent.com/<owner>/helix/main/install.sh | sh
 ```
+
+## The appliance build
+
+For small boxes where the full binary is mostly dead weight, the `appliance` feature
+profile ([ADR 0032](adr/0032-appliance-profile.md)) keeps the full language surface —
+HTTP, mimalloc, and the native DataFrame engine ([ADR 0033](adr/0033-native-dataframe-engine.md))
+— while leaving out polars, the genomics readers, and the JIT:
+
+```sh
+cargo build --no-default-features --features appliance
+```
+
+That is ~9.3 MB stripped (gate profile) against ~76 MB for the full build. Frames run
+on the native engine (filter/select/with/sort/group/join/unique/vstack/head, CSV and
+parquet in both directions); a verb needing an absent backend says what to rebuild
+with instead of failing obscurely.
 
 ## Docker
 
@@ -48,7 +66,9 @@ Two natural models:
 Note: the Cranelift JIT emits executable memory and is x86_64-Linux-only; some
 serverless sandboxes restrict that (W^X). The bytecode **VM** (`HELIX_NOJIT=1`) is the
 universal fallback and remains fast, so run on the VM where the sandbox or architecture
-(e.g. arm64) precludes the JIT.
+(e.g. arm64) precludes the JIT. Since v0.4.0 the JIT is also a build-time gate (cargo
+feature `jit`, on by default): a binary built without it carries no codegen at all and
+runs identical bytecode on the VM.
 
 ## Capping CPU — `HELIX_THREADS`
 
@@ -86,7 +106,8 @@ are billed per core-second, running several jobs on one box, or on a laptop, set
 
 ## Status & roadmap
 
-Built: mimalloc allocator, PGO CI pipeline, static musl artifact, distroless Dockerfile,
+Built: mimalloc allocator, PGO CI pipeline, static musl artifact with the installer's
+glibc-2.35-floor auto-fallback, the `appliance` profile (ADR 0032), distroless Dockerfile,
 the `scripts/perf-verify.sh` regression gate. Deferred (see ADR 0016): BOLT, an
 x86-64-v3 *extra* artifact with CPU detection, ready-made Lambda/Cloud-Run examples, and
 a WASM/WASI edge build (interpreter+VM only — no JIT, limited Polars).

@@ -1,5 +1,7 @@
 # Full-breadth sweep — findings catalog (2026-07-16)
 
+> **Historical record (2026-07)** — the fixes landed in the 2026-07 sweep commits; regressions pinned in `tests/cli.rs` ("Full-breadth sweep regressions").
+
 Eight-lens adversarial sweep over the subsystems no prior pass audited
 (parser/lexer, strings/interpolation, collections, match/try/missing, closures,
 typed pipeline, DataFrames/tensors, fuzzer-grammar coverage). ~40 findings, all

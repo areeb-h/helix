@@ -167,7 +167,17 @@ nums.filter(it % 2 == 0).map(it * it)      # vs Python: [x*x for x in nums if x%
 
 ---
 
-## Proposal 5 — A pipe operator `|>` *(optional; weigh carefully)*
+## Proposal 5 — A pipe operator `|>` ✅ *resolved differently — UFCS (v0.3.0)*
+
+> **Decision:** no `|>` was added. UFCS shipped instead: a user-defined function is
+> callable in method position — `x.f(a)` means `f(x, a)` when `f` is a user function
+> and no type owns the name — so a plain-function pipeline chains with the *one*
+> existing method syntax: `"data.csv".load().clean().normalize().summarize()`.
+> A *builtin*-named method that fails dispatch also retries as the free call, decided
+> at run time on the receiver — except for `PyObject`, `Node`, `DataFrame`, and
+> `GroupBy` receivers, which never fall back (see `ufcs_fallback_applies` in
+> `src/interp/methods.rs`; the PyObject exclusion is what keeps `np.round(1.5)` a
+> Python call). The original analysis is kept below.
 
 Method chains read top-to-bottom, but *plain functions* nest inside-out:
 ```helix
@@ -225,6 +235,8 @@ req2    = { ...req, headers: merged, query: parsed }     # add/replace several
   headers/query; `{ ...req, … }` fixed that class of bug by construction.
 - **Semantics:** later keys win; spread is evaluated left-to-right; the result is a
   fresh immutable record. Type-checked structurally like any record literal.
+- **Dicts spread too (v0.3.0):** the spread base may be a dict as well as a record —
+  its string keys become fields, under the same later-keys-win rule.
 
 ---
 
@@ -260,11 +272,12 @@ map) expressible in-model. Full rationale and the method-vs-value disambiguation
 1. **Named arguments** (Proposal 2) ✅ *shipped* — highest DX/effort ratio, table-stakes, no
    churn to existing code (v1: user functions + literal defaults).
 2. **Range literal `a..b`** (Proposal 3) ✅ *shipped* — tiny, high-legibility win.
-3. **Column sigil `@col`** (Proposal 1) — the strategic call; do it before an ecosystem of
-   code locks in bare names (migration cost compounds — see R's painful NSE retrofits). Pair
-   with the column-aware LSP.
+3. **Column sigil `@col`** (Proposal 1) ✅ *shipped* — the strategic call, made before an
+   ecosystem of code locked in bare names (migration cost compounds — see R's painful NSE
+   retrofits).
 4. **Document implicit `it`** (Proposal 4) — free.
-5. Revisit pipe (5) and blocks (6) only if real code shows the need.
+5. Blocks (6) ✅ *shipped* as `do { … }`; pipe (5) resolved by UFCS in v0.3.0 instead of a
+   new operator.
 
 The meta-principle throughout: **progressive disclosure** — the simple case is one obvious,
 low-symbol line; the complex case (explicit lambdas, types, `match`, units) stays reachable

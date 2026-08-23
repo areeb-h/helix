@@ -1,5 +1,7 @@
 # Which builtins reach native code, and why the rest do not
 
+> **Historical record (2026-07-31)** — the audit's standing result at that date; the remaining JIT-eligibility work is tracked in `docs/dx-plan.md`.
+
 Helix's JIT compiles a *subset* of expressions. A builtin outside that subset does not merely
 run slower — it **forces the entire enclosing loop onto the bytecode VM**, because eligibility is
 all-or-nothing per body. That makes a missing builtin a cliff, not a gradient: measured at

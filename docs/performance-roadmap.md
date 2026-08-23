@@ -1,5 +1,12 @@
 # Performance roadmap
 
+> **Status dateline 2026-08-24.** Track B is landed: the Cranelift JIT is the
+> shipped tier (cargo feature `jit`, on by default since v0.4.0; x86-64 Linux;
+> bytecode identical with or without it). Current cross-language numbers live in
+> [`bench/kernels/RESULTS.md`](../bench/kernels/RESULTS.md), not in the tables
+> below. A second, native DataFrame backend now exists behind the ADR 0012 seam
+> (ADR 0033, stages 0–3; polars remains the default and the oracle).
+
 Synthesized from three 2025 research sweeps (fast interpreters, modern JITs, and
 the data/tensor frontier). The central thesis:
 
@@ -11,7 +18,7 @@ the data/tensor frontier). The central thesis:
 > existing language does. On Helix's *actual* target workloads — data and
 > tensors — Helix is already faster than Python, R, and pandas today via Polars.
 
-## Current status
+## Status at Track B's first landing (historical)
 
 `fib(35)` (≈30M calls, pure scalar recursion — the interpreter's worst case),
 release, same machine:
@@ -36,6 +43,10 @@ general code still falls back to the VM or tree-walker until later JIT stages
 widen coverage. (C at 0.01s is near timer resolution; the JIT-to-C ratio is
 approximate at these small times, though the ranking is firm.)
 
+*(Historical: coverage has since widened well past this subset, and
+auto-memoization later moved `fib(40)` to ~0.006 s — see
+[jit-benchmarks.md](jit-benchmarks.md) §5.1 and `bench/kernels/RESULTS.md`.)*
+
 ## Track D — compute less (purity-enabled)
 
 The principal way a managed language can outperform hand-written C is by **not
@@ -45,8 +56,11 @@ running redundant work**, which purity makes safe and which C cannot prove.
       functions (≥2 self-calls), gated on `Int` arguments, bounded. `fib(35)`:
       ~30M calls reduced to ~35, executing faster than C (`gcc -O2` 0.01s).
       Observably transparent. See [caching-and-memory.md](caching-and-memory.md).
-- [ ] Kernel **fusion** (Track C) — the same approach for array/tensor pipelines:
-      eliminate intermediates that C libraries materialize. Weld measured 29–31×.
+- [x] *(scalar pipelines)* Kernel **fusion** (Track C) — landed for `Int`
+      `map`/`filter`/`reduce` chains: a chain compiles to a single native loop
+      with no intermediate array at any stage (see
+      [vectorized-kernels.md](vectorized-kernels.md) §Pipeline fusion).
+      Tensor-pipeline fusion remains open. Weld measured 29–31×.
 
 ## Track A — interpreter: match CPython (no JIT)
 
@@ -149,7 +163,9 @@ inferred types (the Julia approach: monomorphize, unbox, function barriers).
 | 3 peak (optional) | **LLVM** (`inkwell`) for proven-hot vectorizable kernels only | **C-class** on autovectorizable loops | XL |
 
 Recommendation: **Cranelift first** (the lowest-risk Rust-native path to the
-Go/Node target; the crate exists today). Add copy-and-patch as a fast baseline tier
+Go/Node target; the crate exists today) — **taken and landed**: the Cranelift
+tier is the production JIT (cargo feature `jit`, default-on since v0.4.0).
+Add copy-and-patch as a fast baseline tier
 later (the CPython 3.13/3.14 architecture). Reserve LLVM for the few kernels that
 require it. A **method JIT** (per-signature specialization) fits Helix better than a
 tracing JIT, because types are already static; tracing's principal benefit (runtime
@@ -167,10 +183,13 @@ The structural advantage no incumbent has: **one type system and one deferred
 expression graph** that fans out to three best-in-class engines.
 
 1. **Tabular → Polars/Arrow** (today): lazy optimizer, columnar, multicore —
-   already **8–11× faster than raw Python-Polars** (docs/benchmarks.md states plainly
-   that pandas and DuckDB have NOT been measured — an earlier draft of this line said
-   "pandas", which no run in this repo supports); 50M-row query ~0.2s. The checker must lower
-   to *lazy* frames so pushdown and fusion carry through.
+   Helix delegates with **no meaningful query overhead**: the 50M-row query runs
+   ~0.20 s end-to-end vs 0.28 s for raw Python-Polars, same engine underneath
+   (docs/benchmarks.md — which states plainly that pandas and DuckDB have NOT
+   been measured; an earlier draft of this line claimed "8–11× faster than raw
+   Python-Polars", which no run in this repo supports). The checker must lower
+   to *lazy* frames so pushdown and fusion carry through. (Since ADR 0033 a
+   native second backend covers the appliance profile; polars stays the default.)
 2. **Scalar/control → type-specialized JIT** (Track B): Mojo demonstrated 78–119×
    over CPython from type specialization, native SIMD, and no GC.
 3. **Tensor → a Helix-owned typed fusing IR** (Weld/TACO/XLA lineage), lowering to
@@ -189,7 +208,8 @@ wholesale (too heavy for a Rust team); instead Helix owns a small Rust fusion IR
 1. The **typed deferred expression graph** as the universal IR; everything else
    compounds on it.
 2. Lower tabular operations to **Polars lazy frames** in the checker (substantial
-   gain, low cost).
+   gain, low cost) — **landed**: the polars backend is lazy end-to-end
+   (`src/backend/polars.rs` extends a `LazyFrame` query plan per operation).
 3. Prototype the **numeric-kernel subset → CubeCL** on one fused workload to
    de-risk the CPU/GPU-portable tensor path.
 

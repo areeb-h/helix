@@ -1,5 +1,49 @@
 # Helix DataFrame benchmarks
 
+> **Dateline 2026-08-24.** Helix now has **two** DataFrame backends behind one seam
+> (ADR 0012, ADR 0033): the **polars backend** — still the default engine and the
+> correctness oracle — and a **native engine** (cargo feature `native-df`, included
+> in the appliance profile). The section immediately below summarizes the native
+> engine's head-to-head against the polars backend; everything from
+> "The polars-backend benchmark" down is the original polars-backend
+> measurement, kept as a dated record.
+
+## Native engine vs the polars backend (2026-08, 16-verb matrix)
+
+Measured on a 5M-row matrix on the dev machine below, **min-of-3**, with every
+result **cell-compared against the polars backend** before timing counted. The
+native engine was faster on **all 16 verbs measured**. Example ratios (native
+wall ÷ polars-backend wall; lower means native is faster):
+
+| verb | native / polars-backend |
+|---|---:|
+| filter | ~0.01× |
+| `with` (arithmetic) | 0.14× |
+| group + aggregate | 0.36–0.48× |
+| join | 0.85× |
+| unique | 0.58× |
+| sort + parquet write | 0.53× |
+| write_parquet | 0.38× |
+| write_csv | 0.39× |
+| read_csv | 0.84× |
+| read_parquet (full materialize) | 0.01× |
+| read_parquet (filtered scan) | 0.58× |
+
+The mechanisms: dictionary-encoded string columns; a hand-rolled parquet RLE
+codec with page-level IO; lazy per-column parquet decode with deferred gathers
+(`count()` reads only the footer); page-level predicate pushdown (the predicate
+runs once per distinct dictionary value); and parallel CSV in both directions.
+
+**Read this honestly.** One machine, one workload matrix. The comparison is
+against **our own polars backend's use of polars** through the Helix seam —
+polars is a lazy query engine, and this measures how the two backends serve
+Helix's frame surface, not polars at its best in some other program. Do **not**
+read it as "Helix is faster than polars" in general. The polars backend remains
+the **default** engine and the oracle; ADR 0033 Stage 4 (flipping the default to
+native) has deliberately not been taken.
+
+## The polars-backend benchmark (2026-06, dated record)
+
 **Summary:** Helix scales to multi-million-row analytical queries by compiling
 high-level syntax into **Polars lazy DataFrame operations**. A 50M-row
 filter→group→mean→sort→head query runs in **~0.20s from Parquet** (~2.3s from CSV)

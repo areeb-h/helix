@@ -56,7 +56,8 @@ declining is the correctness rule rather than a missed optimization.
 Anything else — `Float` *filters*, a float body using `/` or `if`/comparison/call, a
 non-`Int` capture at run time, `missing`, multi-binder destructuring — transparently **falls
 through to the bytecode loop**. Correct everywhere; accelerated where it can be. The JIT itself is
-x86-64 Linux only; other targets always run the bytecode loop.
+x86-64 Linux only, and since v0.4.0 it is a cargo feature (`jit`, on by default); other
+targets — and builds without the feature — always run the bytecode loop, byte-identically.
 
 Every path is held to the tree-walker's result byte-for-byte (the parity oracle): integer
 arithmetic wraps identically, and `map`/`filter` preserve element order.
@@ -101,6 +102,14 @@ bounds — the native kernel's absolute speed is real):
 | **native kernel** | **0.21 s** (~13×) | **0.53 s** (~21×) |
 
 ## Why not threads
+
+> **Superseded in part.** Parallelism was later reintroduced where it measurably
+> wins and is provably order-preserving: the map (array-construction) kernels run
+> chunked-parallel and the nested-reduce outer loop runs across cores (rayon,
+> above a size threshold, results byte-identical — see `src/jit/ffi.rs`, which
+> documents per kernel why its parallel form is safe or why it stays serial, and
+> [jit-benchmarks.md](jit-benchmarks.md) §Parallelism disclosure). The analysis
+> below is kept as the record of the original decision.
 
 An earlier iteration ran these kernels across worker threads. We removed it: measurement
 showed this class of integer kernels is **memory-bound** — reading and writing the buffers

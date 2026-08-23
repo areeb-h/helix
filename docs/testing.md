@@ -86,6 +86,23 @@ raising; the first failing assertion stops that file and prints the error (with 
 caret), and the runner exits non-zero if any file failed — so it drops straight into CI.
 Pass a single file (`helix test math_test.helix`) to run just that one.
 
+## The Rust-side gate
+
+The toolchain's own suite runs through `scripts/gate.sh` (clippy with `-D warnings`,
+the full test suite on the `gate` profile, and the example parity diff). Its current
+shape: **445 lib tests + 223 CLI tests + 3 other integration tests**. Three pieces
+worth knowing about:
+
+- **The differential DataFrame suite** (`src/backend/native/tests.rs`): the same data
+  through **both** DataFrame backends — native and Polars — verb by verb, compared as
+  column values and as frozen `framefmt` bytes. ADR 0034's decided semantic deltas are
+  asserted *as* deltas, so an accidental divergence cannot hide behind a decided one.
+- **Cross-engine example byte-diffs** (`scripts/vmparity.sh`): every runnable example
+  must produce byte-identical output on the default engine and under `HELIX_NOVM=1`.
+- **Whole-tree type-check** (`scripts/checkall.sh`): `helix check` plus `helix fmt
+  --check` over every tracked `.helix` outside `tests/corpus/`, covering programs the
+  running gates cannot start (they need generated fixtures).
+
 ## Testing the compiler itself
 
 Beyond `helix test`, the repo carries generators that attack the toolchain rather than a

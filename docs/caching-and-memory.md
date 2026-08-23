@@ -21,10 +21,10 @@ mutable systems; there is no case in which the data changes underneath the cache
    precisely because values are immutable. It is also why a 200-operation run holds
    RSS flat (see [memory-safety](memory-safety.md)).
 
-2. **`DataFrame.cache()` — explicit, eager, safe.** A lazy frame normally
-   re-scans its source file on every materialization. `df.cache()` materializes
-   it **once** into memory and re-wraps it as lazy, so every subsequent query
-   reuses the in-memory result:
+2. **`DataFrame.cache()` — explicit, eager, safe.** On the default (Polars)
+   backend, a lazy frame normally re-scans its source file on every
+   materialization. `df.cache()` materializes it **once** into memory and
+   re-wraps it as lazy, so every subsequent query reuses the in-memory result:
 
    ```helix
    big = read_csv("huge.csv").cache()
@@ -39,8 +39,18 @@ mutable systems; there is no case in which the data changes underneath the cache
    without it (regression-tested, `dataframe_cache_is_transparent`). Use it when a
    base frame feeds several queries; omit it for a single use.
 
+   On the native engine (`native-df`, the appliance backend), column storage is
+   already `Rc`-shared with per-column memoized decode, so `cache()` is an `Rc`
+   clone — a refcount bump, an identity operation
+   (`cache_is_identity_and_count_is_free`, `src/backend/native/tests.rs`). The
+   same call is cheap there because the memoization the polars backend buys
+   eagerly is built into the native frame's storage.
+
 3. **Parquet metadata (free).** `read_parquet` is memory-mapped and `count()` is
-   O(1) from file metadata; the format already caches what is required.
+   O(1) from file metadata; the format already caches what is required. The
+   native reader takes this further: columns decode lazily and are memoized
+   per-column, so `count()` and `cache()` read the footer without touching a
+   data page.
 
 4. **JIT-compiled code (per run).** Each eligible function is compiled to native
    code once at startup and reused for the entire run; recursion never recompiles.
@@ -89,10 +99,12 @@ mutable systems; there is no case in which the data changes underneath the cache
 
 The objective is to process data far larger than RAM, with full precision.
 
-- **Columnar and zero-copy (Arrow/Polars):** data resides in typed columnar
-  buffers rather than 24-byte boxed `Value`s, so numeric arrays avoid the
-  interpreter's per-element overhead. (The scalar interpreter's `Value` is being
-  reduced separately; see [performance-roadmap](performance-roadmap.md) Track A.)
+- **Columnar and zero-copy:** data resides in typed columnar buffers rather than
+  24-byte boxed `Value`s, so numeric arrays avoid the interpreter's per-element
+  overhead — Arrow/Polars on the default backend; the native engine
+  (`native-df`) keeps its own typed columns, dictionary-encoded for strings.
+  (The scalar interpreter's `Value` is being reduced separately; see
+  [performance-roadmap](performance-roadmap.md) Track A.)
 - **Lazy execution:** DataFrame verbs extend a query plan that materializes once,
   with predicate and projection pushdown, so only the required columns and rows are
   read.
@@ -114,18 +126,24 @@ whether it is needed now that the VM exists:
 
 - **The bytecode VM is already the iterative evaluator.** Helix function calls push
   frames onto a heap `Vec` rather than the native stack, so recursion is bounded by
-  memory rather than stack size. The VM performs **100 000-deep recursion on an
-  ordinary thread stack** (test `deep_recursion_is_iterative`), with a
-  1 000 000-frame guard that converts true runaway recursion into a clean error. For
-  everything the VM compiles, the native-stack limit is *already eliminated*.
-- **The tree-walker (fallback) is guarded and does not crash.** Programs the VM
-  cannot yet compile run on the recursive tree-walker, on a 2 GiB thread with a
-  20 000-call depth guard; deep recursion works, and anything deeper produces a
-  graceful *"maximum recursion depth"* error rather than a stack-overflow abort.
+  memory rather than stack size. The VM performs **100 000-deep tail recursion on an
+  ordinary thread stack** (test `deep_recursion_is_iterative`; tail calls reuse
+  their frame, so they run at constant depth), and the shared 20 000-frame
+  `MAX_CALL_DEPTH` guard converts true runaway non-tail recursion into a clean
+  error. For everything the VM compiles, the native-stack limit is *already
+  eliminated*.
+- **The tree-walker (fallback) is guarded and does not crash.** Programs routed to
+  the recursive tree-walker (REPL, `HELIX_NOVM`, the rare fallback) run on an
+  on-demand big-stack thread — 128 MiB in release, 1 GiB in debug,
+  `HELIX_STACK_MB` to override — with the same 20 000-call depth guard; deep
+  recursion works, and anything deeper produces a graceful *"maximum recursion
+  depth"* error rather than a stack-overflow abort.
 
-The core is therefore **already robust**: no input crashes it; deep recursion
-either runs (VM, to a million frames) or errors cleanly (tree-walker, beyond
-20 000). A standalone trampoline of the tree-walker would be a large rewrite of a
+The core is therefore **already robust**: no input crashes it; deep tail recursion
+runs in constant space on every engine, and non-tail recursion beyond the shared
+20 000-frame guard errors cleanly on every engine (identical text,
+`recursion_depth_is_aligned_across_engines`). A standalone trampoline of the
+tree-walker would be a large rewrite of a
 *fallback* path for the narrow case of >20 000-deep recursion that also uses
 not-yet-compiled features (arrays/methods), and it would be **superseded
 automatically** as the VM widens, since every feature moved into the VM inherits

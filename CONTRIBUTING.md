@@ -16,16 +16,18 @@ twenty minutes and several gigabytes in one rustc. The `gate` profile keeps `opt
 so the differential fuzzers and perf-sensitive tests run at full speed, and drops LTO. No
 test's pass/fail depends on the optimization level, so it is a faithful gate.
 
-CI runs the same four things, plus `cargo audit` and a non-default-feature check
-(`--features python`, `--features managed`, `--no-default-features` — none of which any other
-job builds). All five jobs block.
+CI runs the same four things, plus `cargo audit`, an MSRV build, the installer's logic
+tests, and a non-default-feature job (`--features python`, `--features managed`,
+`--no-default-features`, the `appliance` profile at `-D warnings`, and the dual-engine
+`native-df` build — none of which any other job builds). All six jobs block.
 
 ## The one rule that is not negotiable
 
 **Three engines must agree, byte for byte, on values *and* on error text.**
 
 Helix runs your program on a Cranelift JIT (default), a bytecode VM (`HELIX_NOJIT=1`), and a
-tree-walking interpreter (`HELIX_NOVM=1`). The JIT is thousands of lines of code generation
+tree-walking interpreter (`HELIX_NOVM=1`). Since v0.4.0 the JIT is also a build-time gate
+(cargo feature `jit`, on by default); a build without it runs identical bytecode on the VM. The JIT is thousands of lines of code generation
 standing between a program and its answer; the other two exist so that generation can be
 checked against something simpler. A change that makes them disagree is a bug even when the
 new answer looks more correct — fix all three, or fix none.

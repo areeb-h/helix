@@ -1,9 +1,10 @@
 # Python interop (calling Python from Helix)
 
 > **Status: v1.** Helix can import Python modules, read attributes, call functions,
-> pass primitives + arrays, and turn Python exceptions into Helix errors. Zero-copy
-> DataFrame/Tensor sharing and a bundled interpreter are planned (see the roadmap at
-> the bottom). Design rationale: [ADR 0008](adr/0008-cpython-interop.md).
+> pass primitives + arrays, share DataFrames zero-copy, and turn Python exceptions
+> into Helix errors. Buffer-sharing Tensors and a bundled interpreter are planned
+> (see the roadmap at the bottom). Design rationale:
+> [ADR 0008](adr/0008-cpython-interop.md).
 
 Helix does not yet replace NumPy, pysam, scikit-learn, or PyTorch; it calls them
 instead. A pipeline is written in Helix, reaching into Python only where a library
@@ -22,6 +23,9 @@ A Python interpreter must be available on the system (the build links against it
 and any imported Python packages (`numpy`, `pysam`, …) must be installed in that
 environment (`pip install numpy`). The standard library (`math`, `statistics`,
 `json`, …) is always available.
+
+The `python` feature implies the `dataframes` feature (the polars backend): whole
+frames cross the boundary as Arrow buffers, so interop needs that engine present.
 
 Using `python` in a Helix built **without** the feature produces a clear error:
 
@@ -56,6 +60,13 @@ print(m.pi)                 # 3.141592653589793   (attribute)
 print(m.gcd(12, 18))        # 6                   (method call)
 print(m.floor(3.7))         # 3
 ```
+
+A method call on a handle **always** takes the Python path. UFCS (v0.3.0) lets a
+builtin-named method that fails dispatch retry as the free call `name(recv, …)`, but
+that fallback deliberately never applies to a `PyObject` receiver: Python resolves
+attributes at run time, so no static table can see them, and a fallback would have
+silently rewritten `np.round(1.5)` into the two-argument builtin `round(np, 1.5)`.
+(The gate is `ufcs_fallback_applies` in `src/interp/methods.rs`.)
 
 ## What converts, and what stays opaque
 
@@ -193,8 +204,10 @@ error: python error: ModuleNotFoundError: No module named 'no_such_module_xyz'
   |     ^
 ```
 
-(Helix does not yet provide `try`/`catch`, so a Python error stops the program
-rather than being recoverable. This will change when Helix gains error handling.)
+A Python exception is an ordinary Helix runtime error, so `try EXPR` recovers it
+like any other: `try python.import("no_such_module_xyz")` returns a record
+`{ok: false, value: missing, error: "…"}` with the message in `error`, instead of
+aborting.
 
 ## Performance: cross the boundary once
 
@@ -246,7 +259,8 @@ Run it with `cargo run --features python examples/python/interop.helix`.
   *copies*; a future DLPack path could share GPU/large buffers where the mutability
   semantics allow it. (`to_array` also copies plain Python lists, since lists are not
   Arrow-backed.)
-- **A bundled Python.** The current feature build links the system Python; the plan
-  is to bundle a relocatable CPython so a Python-enabled Helix ships self-contained.
-- **Recoverable errors** (needs `try`/`catch`), and **Python → Helix** (calling
-  Helix from Python for performance-critical sections).
+- **A bundled Python.** `helix python install` (feature `managed`) already
+  downloads, verifies, and extracts a relocatable CPython, but the `python` build
+  still links the system interpreter; wiring the managed one in is the next
+  increment.
+- **Python → Helix** (calling Helix from Python for performance-critical sections).

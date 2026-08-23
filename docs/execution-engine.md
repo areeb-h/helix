@@ -8,11 +8,14 @@ lex → parse → type-check ─┬─ bytecode::compile ─ Ok  ─┬─ jit::
                           └─ bytecode::compile ─ Err ────────────────────── → Interp::run
 ```
 
-`run_source` tries the bytecode compiler first. If it returns `Unsupported` (some
-construct isn't compiled yet), the program runs on the tree-walker instead. Within the VM,
-eligible numeric `map`/`filter`/`reduce`/`scan` bodies and tail-recursive functions are
-compiled to native code by the Cranelift JIT and dispatched at run time; anything
+`run_source` compiles to bytecode; the compiler is total over type-checked programs
+(see [The compiler is total](#the-compiler-is-total)), so the VM is the sole automatic
+engine and the `Err` edge above is a defensive backstop, not a routine path. Within the
+VM, eligible numeric `map`/`filter`/`reduce`/`scan` bodies and tail-recursive functions
+are compiled to native code by the Cranelift JIT and dispatched at run time; anything
 ineligible falls through to the bytecode loop, always, and never to a wrong answer.
+Since v0.4.0 the JIT is a cargo feature (`jit`, in the default set); a build without it
+runs the identical bytecode on the VM.
 
 Two environment variables select an engine explicitly, and the whole correctness story
 rests on them:
@@ -59,9 +62,11 @@ first iteration that a JIT can later consume.
   rather than a hash lookup.
 - **Heap call stack.** A call pushes a `Frame` onto a `Vec`; `Return` pops it.
   Recursion therefore resides on the heap, bounded by memory rather than the
-  native stack. This addresses the depth limit for which the tree-walker requires
-  a 2 GiB thread: the VM performs 100 000-deep recursion on an ordinary stack. A
-  high `VM_MAX_DEPTH` still converts genuine runaway recursion into a clean error.
+  native stack: the VM performs 100 000-deep tail recursion on an ordinary
+  stack. `VM_MAX_DEPTH` is the same shared `MAX_CALL_DEPTH` (20 000) the
+  tree-walker uses, so every engine refuses runaway non-tail recursion with the
+  identical error (`recursion_depth_is_aligned_across_engines`); tail calls
+  reuse their frame and never count against it.
 - **Whole-program fallback.** The compiler operates on an all-or-nothing basis per
   program: the first unsupported node causes `compile` to return `Unsupported`,
   and the tree-walker takes over. This keeps the two engines cleanly separated,
@@ -134,9 +139,10 @@ pushing a new frame. Tail recursion then runs in **genuinely constant stack spac
   correct behaviour for an intentional loop and the standard TCO trade-off. (Test
   fixtures that relied on such a function *erroring* were changed to a non-tail form,
   `1 + f(n+1)`, which still hits the depth guard.)
-- **Parity:** verified constant-space by `deep_tail_recursion` and reconciled across
-  engines by `tail_calls_match_tree_walker_on_vm`; the tree-walker reaches the same
-  results (its own recursion is guarded at `MAX_CALL_DEPTH`).
+- **Parity:** reconciled across engines by `tail_calls_match_tree_walker_on_vm` and
+  `recursion_depth_is_aligned_across_engines`; the tree-walker reaches the same
+  results (it frame-reuses tail calls through its own trampoline; non-tail recursion
+  is guarded at the shared `MAX_CALL_DEPTH`).
 
 ### Collapse to one engine
 
@@ -152,13 +158,16 @@ column-verbs (type-directed); error-cases (immutable reassignment now raises on
 the VM); and a gate test (`examples_compile_on_the_vm`) asserting that every
 shipped example compiles to bytecode and never falls back.
 
-**The 2 GiB stack thread is no longer on the default path.** The VM recurses on
+**The big-stack thread is no longer on the default path.** The VM recurses on
 the heap (frames in a `Vec`), so it runs on the ordinary main-thread stack and
-performs 100 000-deep recursion without a special stack. Only the tree-walker
+performs 100 000-deep tail recursion without a special stack. Only the tree-walker
 recurses on the native stack, and it is now reached only for the REPL,
-`HELIX_NOVM`, or the rare fallback; those paths spawn a 2 GiB-stack thread **on
-demand** (`run_on_big_stack`, or a scoped thread in `run_source`). A normal
-`helix script.helix` therefore no longer reserves 2 GiB in advance.
+`HELIX_NOVM`, or the rare fallback; those paths spawn a big-stack thread **on
+demand** (`run_on_big_stack`, or a scoped thread in `run_source`), sized by
+`serve::eval_stack_size`: 128 MiB in release, 1 GiB in debug, `HELIX_STACK_MB` to
+override — shared with `listen` shard workers so the primary and its shards can
+never diverge on recursion depth. A normal `helix script.helix` therefore no
+longer reserves a multi-GiB stack in advance.
 
 ## Correctness gates
 
@@ -171,10 +180,10 @@ sixth covers the ground none of them can reach.
   their results compared (`parity_scalar_and_control_flow`,
   `parity_functions_and_recursion`). `deep_recursion_is_iterative` proves the heap-frame
   design; `errors_propagate` proves runtime errors still fire.
-- **All-examples diff** (`scripts/vmparity.sh`): every `examples/*.helix` must produce
-  identical output under both engines. (The DataFrame example differs only in Polars'
-  nondeterministic group-by row order; both runs use the tree-walker there, since
-  DataFrame methods do not yet compile.)
+- **All-examples diff** (`scripts/vmparity.sh`): every runnable example
+  (`examples/{language,numerics,dataframes,statistics,bio}`) must produce
+  byte-identical output on the default engine and under `HELIX_NOVM=1` —
+  DataFrame examples included, since column-verbs compile to bytecode.
 - **The pinned corpus** (`tests/corpus/`): each program is run on all three engines and
   its output compared against a checked-in `.expected` file, so a change that alters
   behaviour identically on all three — which parity alone would accept — still fails.
@@ -194,7 +203,7 @@ hypothetical — nine `bench/` programs still called `io.read_csv` / `bio.read_f
 finally noticed was `v0.1.0`'s release pipeline dying in its PGO training step. So:
 
 - **Whole-tree type-check** (`scripts/checkall.sh`): `helix check` over every tracked
-  `.helix` outside `tests/corpus/` — 85 programs in ~30 ms, because type-checking needs no
+  `.helix` outside `tests/corpus/` — 86 programs in ~30 ms, because type-checking needs no
   fixture, no data and no network. It proves only that they compile, which is exactly the
   property the running gates could not cover. `tests/corpus/` is excluded on purpose: a
   dozen of those files are negative fixtures that must *not* compile, and their exact error
@@ -211,5 +220,4 @@ where no error text could reveal it.
 
 `fib(30)` (pure scalar recursion, ~2.7M calls), debug build:
 **tree-walker 3.86 s, bytecode VM 1.31 s (~3× faster).** The gap widens in release
-builds and on call-heavy code. This engine is the foundation for the JIT
-(Stage 3).
+builds and on call-heavy code. This engine is the foundation the JIT now sits on.

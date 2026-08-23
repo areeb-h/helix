@@ -1,5 +1,7 @@
 # Architecture and correctness audit (2026-06-22)
 
+> Historical record. The networked surface has since gained [ADR 0031](adr/0031-http-client-hardening.md)'s client hardening (complete in v0.4.0); test counts and JIT scope below are as of their datelines.
+
 An adversarial audit across four dimensions — the JIT, the new memoization,
 cross-engine divergence, and panic/robustness — undertaken because the project now
 has three execution engines that must agree, `unsafe` codegen, and a new caching

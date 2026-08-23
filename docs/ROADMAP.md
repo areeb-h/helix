@@ -97,14 +97,14 @@ Lexer → parser → AST → tree-walking interpreter.
 - [x] Tensor **first-axis** indexing and slicing (`t[i]` row/scalar, `t[1:3]`
       sub-tensor, `t[i][j]` scalar, `t[::-1]`).
 - [ ] Tensor **multi-axis** subscript `t[i, j]`, `t[1:3, :]`; `xs[i] = v` assignment.
-- [ ] String-keyed / dynamic dicts `{"col": v}` with `r["key"]` access.
+- [x] String-keyed / dynamic dicts `{"col": v}` with `r["key"]` access — shipped in
+      v0.3.0 (dict literals, dict spread into records; `to_dict` accepts 2-element arrays).
 - [x] **Tuples and destructuring** `(a, b)`, `a, b = pair`, `mut a, b = …`, tuple
       indexing; `zip`/`enumerate` yield tuples. Destructure arity type-checked.
 - [x] **Lambda-param destructuring** `pairs.map((a, b) => a + b)` (over tuples
       from `zip`/`enumerate`, or any tuple/array element). Type-checked.
 - [x] **Optional chaining unneeded** — `.` is already missing-safe (propagates
       through field and method access), so `user.name ?? "anon"` needs no `?.`.
-- [ ] String-keyed / dynamic dicts `{"col": v}` with `r["key"]` access.
 
 ### Local bindings and blocks
 - [x] **`let a = x, b = y in body`** — local bindings as expressions (sequential,
@@ -199,10 +199,19 @@ Lexer → parser → AST → tree-walking interpreter.
 - [ ] Streaming engine toggle for true out-of-core reads on large files.
 - [ ] `head`-preview on print so printing a large frame does not materialize it fully.
 - [ ] **Cross-statement caching** — reusing a DataFrame binding re-scans the file.
-- [ ] Additional IO: Arrow IPC, JSON, FASTA; `write_csv`.
+- [ ] Additional IO: Arrow IPC, JSON, FASTA. (`write_csv` shipped, both backends.)
 - [ ] DataFrame `missing` as the Arrow validity bitmap (unified with ADR 0001).
 - [x] Derived columns (`df.with({bmi: @weight / @height})`) and joins
       (`df.join(other, @key)`, inner/left/right/outer; keys validated eagerly).
+- [x] **A second, native DataFrame backend** behind the same seam
+      ([ADR 0033](adr/0033-native-dataframe-engine.md) stages 0–3 done; its semantics
+      are the language's own, fixed by [ADR 0034](adr/0034-native-frame-semantics.md)) —
+      the `native-df` feature covers filter/select/with/sort/group + six
+      aggregations/join (inner/left/right/outer)/unique/vstack/head, CSV read+write,
+      and parquet read+write (zstd). Polars remains the **default and the oracle**;
+      Stage 4 (flipping the default) is deliberately not taken. On the dev box's
+      5M-row verb matrix the native engine is faster than our polars backend on all
+      16 measured verbs (one machine, one workload; every result cell-compared).
 - [ ] Formal benchmarks: variance/CI, against pandas/DuckDB; 100M+ rows.
 
 ## Phase 3.5 — Math & numerics core (shipped)
@@ -253,6 +262,13 @@ estimators they require.
       downloads, token streams — instead of buffering). Default-on (`http` feature;
       `--no-default-features` for a network-free binary). Demo:
       [examples/api/fetch.helix](../examples/api/fetch.helix).
+- [x] **HTTP client hardening** ([ADR 0031](adr/0031-http-client-hardening.md),
+      complete in v0.4.0) — header injection refused in both directions; `Headers` as
+      a case-insensitive type (wire order and repeats kept); per-request
+      `total_ms`/`connect_ms`/`read_ms`/`max_body`; redirect boundary rules
+      (Authorization/Cookie stripped on origin change, https never downgrades,
+      non-http(s) refused, 10-hop cap, the chain returned as data); an explicit
+      cookie jar with Public-Suffix-List supercookie defence.
 - [x] **Native HTTP server (from-scratch, `std::net`, no async runtime, no new dep)** —
       `listen`/`accept`/`respond` with custom headers/redirects/cookies/CORS; non-blocking
       `poll` for cooperative multi-client; **Server-Sent Events** (`sse`/`send`);
@@ -1192,6 +1208,12 @@ motivates this phase.
       **`.github/workflows/release.yml`** (cross-builds the self-contained core for
       Linux/macOS/Windows on a tag). Prepared; prebuilt downloads activate once the
       repo is on GitHub.
+- [x] **Appliance profile** ([ADR 0032](adr/0032-appliance-profile.md); steps 1, 2
+      and 4 implemented in v0.4.0) — `dataframes`, `bio` and `jit` are cargo
+      features (default-on; bytecode is identical with the JIT gate on or off), so
+      the `appliance` profile (http, mimalloc, native-df) builds a ~9.3 MB stripped
+      gate binary against ~76 MB full. The tensor gate is deliberately not taken.
+- [x] **glibc floor 2.35 with musl auto-fallback** in `install.sh` (v0.4.0).
 - [ ] Package-manager presence (Homebrew, Scoop/winget, `cargo binstall`); a
       Windows `install.ps1`. The differentiator: **managed Python for interop**
       (uv-style) so interop operates reliably and reproducibly.
@@ -2153,9 +2175,11 @@ confidently wrong claim: that Helix had no unary minus. It has one. What it lack
 - [ ] **No inclusive range.** `(0..3)` is exclusive and `(0..=3)` does not parse, so an
       inclusive bound must be written `(0..n + 1)`.
 - [ ] **No `~`** (bitwise NOT), though `&`, `|`, `^`, `<<`, `>>` are all present.
-- [ ] **No `+` on strings.** `"a" + "b"` raises, and STRING_METHODS has no `concat`/`join`,
+- [x] **No `+` on strings.** `"a" + "b"` raises, and STRING_METHODS has no `concat`/`join`,
       so interpolation is the ONLY way to join two strings. Arguably correct under
       "one obvious way" — recorded so the decision is explicit rather than accidental.
+      *Update (v0.3.0): `String.concat` (plus `split_once`/`index_of`) shipped; `+` on
+      strings still raises, by design.*
 - [ ] **A bare named predicate binds inconsistently.** `xs.map(f)`/`any(f)`/`all(f)` wrap `f`
       into `it => f(it)`; `xs.position(f)`, `take_while(f)`, `min_by(f)` do not, and return
       `missing` instead of erroring. `wrap_bound_fn_arg` (src/parser.rs) only reaches the

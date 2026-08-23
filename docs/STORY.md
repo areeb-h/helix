@@ -29,7 +29,7 @@ strong static typing with extensive inference; educational errors; memory effici
 
 ## Implementation stages
 
-Each stage delivered working, tested code (the test count grew from 44 to the ~540 cases the gate runs today: 412 unit + 127 CLI, as of 2026-08-11).
+Each stage delivered working, tested code (the test count grew from 44 to the ~670 cases the gate runs today: 445 unit + 223 CLI + 3 other, as of v0.4.0, 2026-08).
 
 1. **Core interpreter** — lexer → parser → AST → tree-walking interpreter. Immutable
    bindings and `mut`, Int/Float/String/Bool/Array/Dna/Function, word-based booleans,
@@ -81,7 +81,10 @@ and one value model:
   Tiered: the JIT handles the numeric core; any construct it cannot compile falls back to
   the VM; any construct the VM cannot compile falls back to the tree-walker. The same
   language and the same results, verified by parity tests at every boundary.
-- **Bulk tabular** → Polars/Arrow (lazy, columnar, multicore, SIMD).
+- **Bulk tabular** → Polars/Arrow (lazy, columnar, multicore, SIMD) — the default
+  backend and the oracle; a second, native backend (`native-df`,
+  [ADR 0033](adr/0033-native-dataframe-engine.md)) sits behind the same seam for
+  dependency-light appliance builds.
 - **Tensors** → ndarray currently; a typed fusing compiler (CPU `rayon`+SIMD, GPU
   `CubeCL`) is the planned Track C — a structural distinction no incumbent provides.
 
@@ -160,24 +163,29 @@ claim about a specific, excellent project.)
 
 ## Current limitations
 
-- **JIT scope:** integer and float numeric recursion only — `+ - * /`, comparisons, `if`,
-  `let`, calls, ≤4 params. Arrays, loops, `Mod`, `Pow`, and strings are not yet supported
-  in native code; those run on the VM or tree-walker. Mutual recursion compiles and runs
-  (two-pass function registration) but is deliberately **not** JIT-compiled: a native frame
-  has no depth guard, so every function on a recursion cycle runs on the VM instead, where
-  a missing base case raises a catchable error rather than killing the process.
-- **VM scope:** arrays, comprehensions, methods, records, tensors, DataFrames, lambdas,
-  and interpolation fall back to the tree-walker (correct, but not the fast path).
+- **JIT scope:** the numeric core — scalar numeric recursion (integer and float) plus
+  the array kernels (`map`/`filter`/`reduce` over numeric arrays and ranges, with
+  captures, indexed reads, and a growing builtin set — see
+  [ROADMAP Phase 5](ROADMAP.md) for the stage-by-stage record). Strings, records,
+  tensors, and DataFrames run on the VM or tree-walker. Mutual recursion compiles and
+  runs (two-pass function registration) but is deliberately **not** JIT-compiled: a
+  native frame has no depth guard, so every function on a recursion cycle runs on the
+  VM instead, where a missing base case raises a catchable error rather than killing
+  the process.
+- **VM scope:** any construct the VM cannot yet compile falls back per program to the
+  tree-walker (correct, but not the fast path); see
+  [execution-engine.md](execution-engine.md) for the current coverage.
 - **DataFrames:** no cross-statement caching (a file used twice is re-scanned); print
-  materializes the whole frame; limited IO (no Arrow IPC, JSON, FASTA-as-frame, or
-  `write_csv` yet); no joins or derived columns.
-- **Tensors:** no slicing or stacking, single dtype (`f64`), no GPU or autodiff yet.
-- **Computational biology:** FASTA only so far; VCF→DataFrame, FASTQ, GFF/BED, and BAM
-  are planned next.
+  materializes the whole frame; limited IO (no Arrow IPC, JSON, or FASTA-as-frame yet).
+- **Tensors:** no multi-axis subscript or stacking, single dtype (`f64`), no GPU or
+  autodiff yet.
+- **Computational biology:** no CRAM or BCF region queries yet; RNA/protein sequence
+  types are still planned (FASTA/FASTQ, VCF/BCF, GFF/BED, SAM/BAM, and indexed region
+  queries are shipped — see [ROADMAP §Flagship](ROADMAP.md)).
 - **Types:** no `Maybe`/nullable tracking, no column-level DataFrame typing.
-- **Ecosystem:** modules and a v1 Python bridge are implemented ([Phase 7](ROADMAP.md));
-  there is not yet a package manager, zero-copy DataFrame/Tensor sharing, or a bundled
-  interpreter.
+- **Ecosystem:** modules and a v1 Python bridge are implemented ([Phase 7](ROADMAP.md)),
+  including the DataFrame↔polars crossing zero-copy and Tensor↔NumPy by copy; there is not yet a
+  package manager, DLPack-level buffer sharing, or a bundled relocatable CPython.
 - **No async or threads at the language level** (data-parallelism is implicit via Polars).
 
 These limitations are tracked in [ROADMAP.md](ROADMAP.md).
@@ -189,12 +197,12 @@ These limitations are tracked in [ROADMAP.md](ROADMAP.md).
 - **Performance** ([performance-roadmap.md](performance-roadmap.md)): Track A (faster
   interpreter: register VM and quickening), Track B (JIT — implemented, expanding), Track C
   (the unified fusing graph: Polars, JIT, and tensor compiler, CPU to GPU).
-- **Flagship computational biology** ([ROADMAP.md](ROADMAP.md)): FASTA (done) →
-  VCF→DataFrame → FASTQ/GFF/BED → BAM (mmap/streaming) → RNA/protein → Python interop
-  (v1 done).
+- **Flagship computational biology** ([ROADMAP.md](ROADMAP.md)): FASTA/FASTQ,
+  VCF/BCF→DataFrame, GFF/BED, SAM/BAM, indexed region queries, pairwise alignment
+  (all done) → CRAM, RNA/protein types → Python interop (v1 done).
 - **Adoption** ([ROADMAP §7](ROADMAP.md), [adoption.md](adoption.md)): modules (done) →
   CPython interop v1 (done) → zero-copy Arrow/DLPack sharing → package manager → Jupyter.
-- **Correctness and safety:** leak-free and parity-tested at every engine boundary; ~540
+- **Correctness and safety:** leak-free and parity-tested at every engine boundary; ~670
   tests, zero warnings, maintained as a gate.
 
 ---

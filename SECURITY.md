@@ -21,10 +21,17 @@ Helix runs untrusted-ish input in several places, and these are the ones worth r
   security bug, not merely a crash.
 - **Sandbox escape in the capability system.** `helix.toml` declares capabilities
   (filesystem, network); a program obtaining an effect it was not granted is in scope.
-- **The website playground** (`website/src/app/api/run/route.ts`) executes submitted
-  programs when `HELIX_PLAYGROUND=1`. It refuses anything the binary's own registry marks
-  impure, runs in a temp directory with a minimal environment, and enforces a timeout and
-  output cap. A way around any of that is in scope.
+- **The HTTP client's hardening boundaries**
+  ([ADR 0031](docs/adr/0031-http-client-hardening.md), complete in v0.4.0). Header
+  injection is refused in both directions; redirects strip `Authorization` and `Cookie`
+  on an origin change and never downgrade https; the cookie jar refuses supercookies via
+  the Public Suffix List (`src/cookiejar.rs`). A request that crosses any of those
+  boundaries is in scope.
+- **The website playground** (maintained in its own repository — the `website/` tree
+  moved out of this one) executes submitted programs when `HELIX_PLAYGROUND=1`. It
+  refuses anything the binary's own registry marks impure, runs in a temp directory with
+  a minimal environment, and enforces a timeout and output cap. A way around any of that
+  is in scope.
 - **The installers** (`install.sh`, `install.ps1`) download and execute a binary. They
   verify SHA-256 against a published `SHA256SUMS` and abort on mismatch. A way to make
   them install an unverified or substituted artifact is in scope.

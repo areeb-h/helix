@@ -46,7 +46,7 @@ cmp a.out b.out && cmp a.out c.out
 
 1. **Filtering on `missing` finds nothing, silently.** `where(@v == missing)` returns
    0 rows because `missing == missing` is `missing`. The keep-non-missing idiom is
-   `where(@v == @v)`. There is no `drop_missing` yet.
+   `where(@v == @v)`; `drop_missing` (on Array and DataFrame) is the explicit form.
 2. **i64 arithmetic wraps silently** — `9223372036854775807 + 1` is min-i64, exit 0.
    Deliberate; see `docs/integer-semantics.md`.
 3. **`sum()` and its `reduce` spelling diverge at the i64 edge**: `sum()` widens to

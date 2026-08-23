@@ -6,6 +6,22 @@ crates — including an async runtime (`tokio`) and a cloud object-store
 why it is not currently fixable without a major change — so the question is not
 re-litigated.
 
+## Update (2026-08-24) — the major change happened
+
+The "replace the DataFrame backend" route the bottom of this doc calls a
+multi-week rewrite has landed as **ADR 0033 stages 0–3**: a native engine
+(`src/backend/native/`, cargo feature `native-df`) behind the same ADR 0012 seam,
+covering filter/select/with/sort/group + aggregations/join (inner, left, right,
+outer)/unique/vstack/head, CSV read+write, and parquet read+write (zstd). ADR
+0032 is **Accepted, steps 1/2/4 implemented**: `dataframes`, `bio`, and `jit`
+are cargo gates (the tensor gate deliberately not taken). The **appliance
+profile is now `http + mimalloc + native-df`** — a binary with *working* frames
+at **~9.3 MB stripped (gate profile)** vs ~76 MB with the full default feature
+set. The polars backend remains the **default** engine and the correctness
+oracle; ADR 0033 Stage 4 (flipping the default) has not been taken. Everything
+below stands as the record of *why* the polars tail cannot be trimmed
+feature-by-feature.
+
 ## Update (2026-06-25) — re-measured, and the seam that changes the calculus
 
 Two refinements after the ADR 0012 backend-seam work:
@@ -79,7 +95,9 @@ Investigated and ruled out:
   profile builds **8.6 MB at the shipped release profile** (12.7 with the JIT in) (fat LTO + strip; vs
   51.8 MB default release), 13.4 MB vs 75.7 MB stripped at the gate profile — with
   the full language surface intact (gate-the-body: every verb still type-checks and
-  describes itself; running one names the feature to rebuild with).
+  describes itself; running one names the feature to rebuild with). The appliance
+  has since gained `native-df` — *working* frames at ~9.3 MB gate-stripped; see
+  the 2026-08-24 update above.
 
 Note on `dtype-full` (asked and settled 2026-08-22): trimming it is a REGRESSION, not
 a size win — the bridge's total string-fallback becomes a polars schema-layer panic
@@ -87,6 +105,8 @@ a size win — the bridge's total string-fallback becomes a polars schema-layer 
 fixture suite would not catch it (every parquet in the tree is Helix-written), and the
 tail enters via `polars-error` regardless of dtype features. It stays.
 
-Until a decision on ADR 0032, the trade-off is accepted deliberately: a large but
-genuinely self-contained, fast-starting binary, in exchange for the maturity and
-speed of the Polars engine.
+ADR 0032 has since been decided (Accepted; steps 1/2/4 implemented — see the
+2026-08-24 update above). For the **default** build the trade-off is still
+accepted deliberately: a large but genuinely self-contained, fast-starting
+binary, in exchange for the maturity and speed of the Polars engine (which also
+serves as the native engine's oracle). The small build is the appliance profile.

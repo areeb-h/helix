@@ -19,7 +19,8 @@ An audit of `src/` finds **none of the second kind** in the interpreter/VM core.
 > non-test Rust sources: **97 `unsafe { … }` blocks and 38 `unsafe fn` declarations, in 8
 > files.** The claim was written when the JIT had a single entry point and was never
 > re-measured as the FFI surface grew. It is stated correctly below, because a
-> memory-safety document that cannot be checked is worse than none.
+> memory-safety document that cannot be checked is worse than none. (Re-measured
+> 2026-08-23: unchanged — 97 blocks, 38 `unsafe fn`, 8 files.)
 
 `unsafe` is concentrated where crossing to native code requires it, and is absent from the
 language core:
@@ -51,7 +52,7 @@ is freed deterministically when its last `Rc` is dropped.
 
 ## The guarantee, by test
 
-Two tests in `src/interp.rs` support this empirically:
+Two tests in `src/interp/tests.rs` support this empirically:
 
 - **`no_reference_leaks`** — the test helper drops the `Interp` *before* returning
   a result, so if that result's allocation has `Rc::strong_count == 1`, the
@@ -69,13 +70,19 @@ Two tests in `src/interp.rs` support this empirically:
 ## Robustness: recursion depth
 
 The interpreter is a tree-walker, so each Helix function call recurses on the
-native stack (~25 KB per call in debug builds). Two measures keep this safe:
+native stack (~1 KiB per call in release builds, ~25 KiB in debug). The default
+engine is the bytecode VM, which keeps its call frames on the *heap*, so this
+section concerns only the tree-walker paths (the REPL, `HELIX_NOVM`, and the
+rare compile-fallback). Two measures keep them safe:
 
-1. **`main` runs the interpreter on a dedicated 2 GiB-stack thread**, so deep but
-   bounded recursion (e.g. `sum(15000)`) succeeds instead of overflowing the
-   default 8 MB main stack.
+1. **Tree-walker paths run on an on-demand big-stack thread** (`run_on_big_stack`,
+   sized by `serve::eval_stack_size`: 128 MiB in release, 1 GiB in debug,
+   `HELIX_STACK_MB` to override), so deep but bounded recursion (e.g. `sum(15000)`)
+   succeeds instead of overflowing the default 8 MB main stack.
 2. **`MAX_CALL_DEPTH` (20 000)** converts runaway or excessively deep recursion
    into a clean Helix error — *"maximum recursion depth exceeded"* — well before the
-   2 GiB stack could be exhausted, rather than an uncatchable stack-overflow abort.
+   stack could be exhausted (20 000 release frames touch ~19 MiB against 128 MiB),
+   rather than an uncatchable stack-overflow abort. The VM shares the same limit,
+   so every engine refuses at the same depth with the same text.
 
 `deep_recursion_is_safe` regression-tests both on the same large-stack thread.

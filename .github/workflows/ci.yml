@@ -10,7 +10,7 @@ name: ci
 # the two ever disagree, the local gate is the one people actually run, so this file
 # follows it.
 #
-# ALL FIVE JOBS BLOCK. Three of them shipped advisory — clippy on 9 warnings, MSRV
+# ALL SIX JOBS BLOCK. Three of them shipped advisory — clippy on 9 warnings, MSRV
 # unverified, `cargo audit` on 6 advisories — each with a written condition for promotion,
 # because asserting an unchecked claim as a gate is how a badge starts lying. Those
 # conditions have been met: the clippy warnings are fixed, MSRV was observed green on run

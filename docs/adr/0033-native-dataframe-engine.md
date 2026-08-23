@@ -16,7 +16,13 @@
   (commit `fc1bd3e`): native parquet via the apache crate, no arrow — cross-engine
   compatible both directions (zstd 3, the polars default), foreign dtypes as text
   per ADR 0034's totality, nested refused at the root; the appliance does full
-  frame IO at 11.3 MB. Stage 3 (parallel CSV vs the anchor) remains.
+  frame IO at 11.3 MB. **Stage 3 implemented** 2026-08-23 (commits `85f16de` through
+  `26b9d88`): parallel CSV both directions, dictionary-encoded string columns,
+  hand-rolled parquet pages, lazy per-column decode with page-level predicate
+  pushdown — native crossed over on the 1M anchor and now beats the polars backend
+  on all 16 verbs of the 5M-row matrix (one machine, one workload, min of 3, every
+  result cell compared against the polars oracle). Stage 4 (flip the default) is
+  NOT taken — polars remains the default and the oracle.
 - **Date:** 2026-08-23
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0012](0012-dataframe-backend-seam.md) (the seam that makes this

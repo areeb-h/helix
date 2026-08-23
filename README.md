@@ -54,8 +54,10 @@ separately in [docs/benchmarks.md](docs/benchmarks.md).
 ## Install
 
 Helix ships as a **single self-contained binary** — no runtime to install (no Python, no system
-BLAS; the core links nothing external beyond the C runtime). It's ~60 MB because it embeds the
-Polars engine, yet starts instantly.
+BLAS; the core links nothing external beyond the C runtime). The full build is ~76 MB because it
+embeds the Polars engine, yet starts instantly. There is also an **appliance profile**
+(`cargo build --release --no-default-features --features appliance`, ADR 0032): the full language
+surface with the native DataFrame engine in place of Polars, at ~9.3 MB stripped.
 
 ```sh
 # macOS / Linux — downloads the binary for your platform and verifies its SHA-256:
@@ -73,7 +75,7 @@ $ curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | s
 helix-install: downloading https://github.com/areeb-h/helix/releases/latest/download/helix-x86_64-unknown-linux-gnu.tar.gz
 helix-install: checksum ok (helix-x86_64-unknown-linux-gnu.tar.gz)
 helix-install: installed helix -> /home/areeb/.local/bin/helix
-helix 0.1.1
+helix 0.4.0
 helix-install: done. try:  helix eval "print(1 + 2)"   or   helix repl
 ```
 
@@ -89,7 +91,7 @@ helix help                   # all commands
 ```
 
 The installer picks the static musl build automatically on musl distros (Alpine) and
-on glibc older than the gnu build's floor; `HELIX_MUSL=1` forces it (verified
+on glibc older than the gnu build's floor (2.35); `HELIX_MUSL=1` forces it (verified
 `static-pie linked`).
 `HELIX_INSTALL_DIR` changes where it lands. A checksum **mismatch aborts** rather than
 warning — the installer will not install what it cannot verify.
@@ -97,8 +99,8 @@ warning — the installer will not install what it cannot verify.
 > **Use `v0.1.1` or later.** `v0.1.0` is published but nothing can be installed from it: its
 > pipeline uploaded four of six platforms and no `SHA256SUMS`, so the installers correctly
 > refuse even the platforms that did upload. All three causes are fixed rather than worked
-> around — see [CHANGELOG.md](CHANGELOG.md). `releases/latest` resolves to `v0.1.1`, so the
-> commands above pick it up without you doing anything.
+> around — see [CHANGELOG.md](CHANGELOG.md). `releases/latest` resolves to the current release
+> (`v0.4.0`), so the commands above pick it up without you doing anything.
 
 ## A tour
 
@@ -146,7 +148,10 @@ More in [`examples/`](examples/) and the [language & DX guide](docs/syntax-and-d
 - **Records, tuples, destructuring** — `{name: "Ada", age: 41}` with `.field` access;
   `(a, b)` tuples that unpack (`q, r = divmod(17, 5)`) and destructure in lambda params
   (`pairs.map((k, v) => …)`). Record spread/update: `{ ...base, status: 500 }`.
-- **Pattern matching** — `match` with literal, or-, guard, and binding patterns.
+- **Pattern matching** — `match` with literal, range (half-open, matched by magnitude), or-,
+  guard, and binding patterns.
+- **Dicts and UFCS** — string-keyed dict literals that spread into records; any user function is
+  callable as a method on its first argument (builtins fall back at runtime on the receiver).
 - **`missing`-safe by design** — a single dedicated absent value (not `NaN`), propagated through
   `.` access, method calls, and arithmetic, with three-valued boolean logic; `x ?? default`
   supplies a fallback. No `?.` operator needed.
@@ -160,7 +165,8 @@ More in [`examples/`](examples/) and the [language & DX guide](docs/syntax-and-d
 ### Numeric compute & the JIT
 - **Three execution engines** behind one language: a tree-walker, a **bytecode VM**, and a
   **Cranelift JIT**. The VM runs everything; the JIT accelerates the numeric hot paths it
-  recognizes and transparently falls back for everything else.
+  recognizes and transparently falls back for everything else. (The JIT is the default-on
+  `jit` cargo feature; building without it changes no program's bytecode or output.)
 - **What compiles to native code:** scalar recursion; `map`/`filter`/`reduce`/`scan` over `i64`
   and `f64` ranges and packed arrays; **array-indexed reductions** (`a[j]` and `a[i]` — dot
   products, weighted sums, **all-pairs distance/Hamming matrices**); **tuple/record accumulators**
@@ -176,6 +182,13 @@ More in [`examples/`](examples/) and the [language & DX guide](docs/syntax-and-d
   `dataframe({…})`, then `where`/`select`/`sort`/`group` + aggregations, `write_csv`/`write_parquet`
   and `to_html`/`to_markdown`. A chain builds a single query plan and materializes once, delegated
   to Polars' columnar, multi-threaded execution with predicate/projection pushdown.
+- **A second, native DataFrame engine** (`native-df`, standard in the appliance build) behind the
+  same seam (ADR 0033): eager, deterministic, and following the language's own scalar semantics
+  (ADR 0034) — filter/select/with/sort/group + aggregations, four join kinds, `unique`/`vstack`/`head`,
+  CSV and Parquet (zstd) in both directions. Polars remains the default backend and the oracle
+  every native result is cell-compared against. On a 5M-row, 16-verb benchmark on one dev
+  machine, the native engine beat our polars backend on all 16 verbs — a comparison against our
+  own use of Polars on one workload, not a general claim about Polars.
 - **Math standard library** that broadcasts over arrays/tensors and propagates `missing`: the full
   transcendental/rounding set plus `hypot`, `atan2`, constants, and the `**` power operator.
 
@@ -194,7 +207,13 @@ More in [`examples/`](examples/) and the [language & DX guide](docs/syntax-and-d
 - **Concurrency by *not* sharing** — a cooperative event loop within a core (`poll()`), and
   share-nothing **`SO_REUSEPORT` sharding** across cores (no locks, no `Arc`, nothing crosses a
   thread) — the ScyllaDB/Redpanda thread-per-core architecture Helix's immutable core is built for.
-- **HTTP client** — `http_get`, POST with methods/body, and pull-based streaming (`http_stream`).
+- **HTTP client, secure by default** (ADR 0031) — `http_get`, POST with methods/body, and
+  pull-based streaming (`http_stream`). Header injection is refused in both directions; headers
+  are a case-insensitive `Headers` type that keeps wire order and repeats; per-request
+  `total_ms`/`connect_ms`/`read_ms`/`max_body` limits; redirects strip `Authorization`/`Cookie`
+  on origin change, never downgrade https, refuse non-http(s) schemes, cap at 10 hops, and
+  return the chain as data; cookies live in an explicit jar with Public-Suffix-List
+  supercookie defence.
 - **Real-time** — `emit` (flushed NDJSON sink) + `sleep` compose into paced live streams.
 
 ### Cryptography
@@ -249,13 +268,13 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 
 ## Status & roadmap
 
-A mature implementation, **not a prototype**: ~420 tests, zero compiler warnings, a
-differential oracle and VM/tree-walker parity gate on every change. Phase status (full plan in
+A mature implementation, **not a prototype**: ~670 tests (445 library + 223 CLI), zero compiler
+warnings, a differential oracle and VM/tree-walker parity gate on every change. Phase status (full plan in
 [docs/ROADMAP.md](docs/ROADMAP.md)):
 
 1. **Core language & interpreter** — done
 2. **Type checker & module system** — done (package manager pending)
-3. **DataFrame engine** (Polars/Arrow) — done
+3. **DataFrame engine** (Polars/Arrow; a second, native backend covers the core verb matrix) — done
 4. **Tensor engine & linear algebra** — done
 5. **JIT compilation** — done for numeric kernels (coverage expanding; SIMD is the next lever)
 6. **GPU support** — future

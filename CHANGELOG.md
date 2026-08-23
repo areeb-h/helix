@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Performance — the native engine wins its own matrix (ADR 0033 Stages 2–3)
+
+- **Native is faster than the polars backend on all 16 verbs** of the 5M-row
+  matrix on the dev box (min-of-3, every result cell-compared against the polars
+  backend). Ratios are native's time as a fraction of the polars backend's:
+  filters ~0.01x, with-arithmetic 0.14x, groups 0.36–0.48x, join 0.85x, unique
+  0.58x, sort + parquet write 0.53x. One machine, one workload, and the
+  comparison is against our own polars backend's use of a lazy query engine —
+  not a universal "faster than polars" claim.
+- **The crossover happened at the 1M anchor first** (ADR 0033 Stage 3), then the
+  full matrix fell in four passes: dictionary-encoded string columns, hand-built
+  parquet pages, lazy per-column decode, and page-level predicate pushdown (the
+  predicate runs once per distinct dictionary value, not once per row). polars
+  remains the default backend and the oracle — Stage 4 (flipping the default) is
+  deliberately not taken.
+
+### Added — the native engine reads and writes parquet, and CSV goes parallel (ADR 0033 Stage 2)
+
+- **A native parquet reader and writer** (zstd): the appliance build reads and
+  writes the sibling engine's files. The writer hand-rolls the RLE codec and
+  page-level IO (write_parquet 0.38x); the reader decodes columns lazily with
+  deferred gathers — `count()` reads the footer only, a full-materialize read
+  lands at 0.01x, a filtered scan at 0.58x.
+- **CSV is parallel in both directions**: write_csv 0.39x, read_csv 0.84x
+  against the polars backend on the same matrix.
+
+### Fixed
+
+- **A tz-aware timestamp no longer aborts the process**: the polars backend
+  prints tz-aware datetimes as UTC text instead of panicking mid-print.
+
 ## v0.4.0 — 2026-08-23
 
 **The trust release.** Everything here is about what a program can rely on: an HTTP

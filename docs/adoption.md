@@ -8,7 +8,8 @@ between a well-designed language and a tool selected for production work.
 
 ## Summary verdict
 
-Helix is a credible language implementation with **no ecosystem and no interop**,
+Helix is a credible language implementation with **no package ecosystem and only a
+v1 of Python interop**,
 which in scientific computing means it is **not yet adoptable for production work**;
 engine speed and syntax design do not change this. The path forward is not to compete
 with Python directly, but to fully address one narrow niche, with Python interop as
@@ -41,9 +42,10 @@ Grounded in the current source, not aspirations:
    attribute access and method calls forward to Python, scalars convert back
    natively, containers/objects remain opaque until `to_array(...)`, and Python
    exceptions surface as Helix errors. Helix can therefore call real Python
-   libraries. This remains a deliberately scoped v1: no zero-copy DataFrame/Tensor
-   bridge (Arrow C Data Interface / DLPack, the differentiator) yet, no bundled
-   interpreter (it uses the ambient Python), and no Python→Helix direction. The
+   libraries. Since then the DataFrame↔polars crossing (zero-copy via Arrow) and the Tensor↔NumPy crossing (copying)
+   have landed ([ROADMAP Phase 7](ROADMAP.md)); still absent: DLPack-level buffer
+   sharing, a bundled
+   interpreter (it uses the ambient Python), and the Python→Helix direction. The
    default build remains self-contained (no libpython) and prints a rebuild hint if
    `python` is used without the feature.
 2. **A module system exists, but no packages.** `import name` loads a sibling
@@ -58,20 +60,20 @@ Grounded in the current source, not aspirations:
    instead of aborting the program. Programs that use `try` currently run on the
    tree-walker (the bytecode VM does not yet implement exception handling). A
    surfaced `Result`/`?` form is not yet provided.
-4. **An approximately 40-function standard library.** `print`, `range`,
-   `read_csv`/`parquet`/`fasta`, `write_parquet`, tensor constructors, and a math
-   library, plus the Array/String/Dna/Tensor/DataFrame methods. No plotting, no
-   statistics beyond array aggregates, no dates, no JSON, no HTTP, no regex, no
-   comprehensive string library.
+4. **A standard library of roughly 140 builtins** plus the
+   Array/String/Dna/Tensor/DataFrame methods: IO (CSV/Parquet and the genomics
+   formats), a math and statistics core (t-tests, regression), JSON, a hardened
+   HTTP client and a native HTTP server, and a substantial string surface. Still
+   absent: plotting, dates ([ADR 0030](adr/0030-time.md) remains Proposed), and
+   regex.
 5. **Tensors without autodiff or GPU.** An ndarray-backed tensor type exists, but
    without gradients or an accelerator, so it does not compete with PyTorch/JAX for
    the workloads tensors are intended to serve.
 6. **No notebook support.** A line-at-a-time REPL exists; there is no Jupyter kernel,
    no inline plots, and none of the exploratory workflow that science relies on.
-7. **Unstable by construction.** The version is `0.1.0`; the execution engine, type
-   system, and semantics are still changing (the current cycle replaced the runtime
-   model). Durable work cannot be built on a moving target, and there is no
-   compatibility policy yet.
+7. **Unstable by construction.** The version is `0.4.0`; the execution engine, type
+   system, and semantics are still changing. Durable work cannot be built on a
+   moving target, and there is no compatibility policy yet.
 
 ## Current strengths
 

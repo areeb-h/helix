@@ -13,7 +13,7 @@ each engine and diffs, so an example is a regression test as well as a document)
 New to Helix? Start with [`language/tour.helix`](language/tour.helix).
 
 Looking for the *semantics* rather than a tour? [`tests/corpus/`](../tests/corpus)
-holds ~50 small programs — one per verified behavior (scoping, tail calls,
+holds ~70 small programs — one per verified behavior (scoping, tail calls,
 three-valued equality, engine-dispatch edges, diagnostics) — each pinned to a
 golden output on all three engines.
 
@@ -36,6 +36,7 @@ golden output on all three engines.
 | [control-flow.helix](language/control-flow.helix) | `if`/`match`/`do`-blocks as expressions |
 | [operators.helix](language/operators.helix) | Arithmetic, boolean, bitwise (`& \| ^ << >>`), `??` |
 | [collections.helix](language/collections.helix) | Array verbs: map/filter/reduce, zip/zipmap, min_by, ranges |
+| [ordering.helix](language/ordering.helix) | Every spelling of "put these in order", and what each does with `missing`, `NaN`, signed zeros (ADR 0025) |
 | [error-handling.helix](language/error-handling.helix) | `try` and recovering from runtime errors |
 | [errors.helix](language/errors.helix) | What good error messages look like |
 | [named-arguments.helix](language/named-arguments.helix) | Calling with named arguments |
@@ -50,6 +51,7 @@ golden output on all three engines.
 | [rationals.helix](numerics/rationals.helix) | Exact arbitrary-precision fractions — `rational(n, d)`, exact +−×÷** (no float drift) |
 | [autodiff.helix](numerics/autodiff.helix) | Reverse-mode autodiff — `variable`/`gradient`, activations, and gradient-descent training |
 | [tensors.helix](numerics/tensors.helix) | N-d tensors: matmul, transpose, solve |
+| [matrices.helix](numerics/matrices.helix) | Matrices from nested comprehensions — build, convert, multiply natively |
 | [kernels.helix](numerics/kernels.helix) | The native core: fused comprehensions, parallel array math, JIT'd scalar/tail/mixed functions |
 | [random.helix](numerics/random.helix) | Reproducible seeded RNG (`random`/`randn`/shuffle/sample) |
 
@@ -85,6 +87,8 @@ golden output on all three engines.
 [`shapes.helix`](modules/shapes.helix) imports [`geometry.helix`](modules/geometry.helix).
 Run `helix examples/modules/shapes.helix`.
 
-## interop/ — outside the runtime (need optional features)
+## interop/ — outside the runtime (network or optional features)
 - [`python/`](python/) — CPython interop (`--features python`): DataFrames, tensors, calling Python.
 - [`api/fetch.helix`](api/fetch.helix) — HTTP requests (needs network).
+- [`api/event_server.helix`](api/event_server.helix) — a cooperative event-loop HTTP server: one thread, many keep-alive connections.
+- [`api/stream_proxy.helix`](api/stream_proxy.helix) — proxy an upstream model's SSE token stream straight to a browser.
