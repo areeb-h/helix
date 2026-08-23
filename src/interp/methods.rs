@@ -2793,6 +2793,16 @@ fn string_method(
                 None => Value::Missing,
             })
         }
+        // The LAST occurrence — a CHARACTER index exactly like `index_of` (a byte
+        // index would silently mislocate anything past a multi-byte character).
+        "last_index_of" => {
+            arity(1)?;
+            let needle = str_arg(args, 0, name, line, col)?;
+            Ok(match s.rfind(needle) {
+                Some(byte) => Value::Int(s[..byte].chars().count() as i64),
+                None => Value::Missing,
+            })
+        }
         // `split` at the FIRST separator only, keeping the rest of the tail intact:
         // `(before, after)`, or `missing` when the separator does not occur. The
         // spelling this replaces was `let eq = part.split("="), k = eq[0], v = if
@@ -2832,6 +2842,14 @@ fn string_method(
             let from = str_arg(args, 0, name, line, col)?;
             let to = str_arg(args, 1, name, line, col)?;
             Ok(Value::Str(Rc::new(s.replace(from, to))))
+        }
+        // `replace` swaps EVERY occurrence; this swaps exactly the first — the
+        // pair every string library ends up needing both halves of.
+        "replace_first" => {
+            arity(2)?;
+            let from = str_arg(args, 0, name, line, col)?;
+            let to = str_arg(args, 1, name, line, col)?;
+            Ok(Value::Str(Rc::new(s.replacen(from, to, 1))))
         }
         "contains" => {
             arity(1)?;

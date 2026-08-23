@@ -511,8 +511,8 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Unknown)
         }
-        "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" | "url_encode"
-        | "url_decode" => {
+        "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" | "url_decode"
+        | "url_decode_lenient" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
@@ -523,6 +523,37 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 return Err(type_err(name, "a string", &args[0], line, col));
             }
             Ok(Type::String)
+        }
+        "url_encode" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(HelixError::new(
+                    format!(
+                        "`url_encode` takes a string and an optional set name, got {} arguments",
+                        args.len()
+                    ),
+                    line,
+                    col,
+                ));
+            }
+            if matches!(args[0], Type::Missing) {
+                return Ok(Type::Missing);
+            }
+            if !matches!(args[0], Type::String | Type::Unknown) {
+                return Err(type_err(name, "a string", &args[0], line, col));
+            }
+            if let Some(t) = args.get(1)
+                && !matches!(t, Type::String | Type::Unknown)
+            {
+                return Err(type_err(name, "a set name (a string)", t, line, col));
+            }
+            Ok(Type::String)
+        }
+        "headers" => {
+            if args.len() != 1 {
+                return Err(arity_err("headers", 1, args.len(), line, col));
+            }
+            // The Headers value is runtime-dispatched (like Dict and Net).
+            Ok(Type::Unknown)
         }
         "aes_keygen" => {
             if !args.is_empty() {
@@ -869,7 +900,7 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         "min" | "max" | "first" | "last" => el.clone(),
         // `length` is an alias for `count`; `index_of` is the first matching index (or
         // `missing` when absent, like `Dna.find` — typed `Int`).
-        "count" | "length" | "index_of" => Type::Int,
+        "count" | "length" | "index_of" | "count_where" => Type::Int,
         "normalize" => Type::Array(Box::new(Type::Float)),
         "sort" | "reverse" | "drop_missing" | "take" | "drop" | "unique" => {
             Type::Array(Box::new(el.clone()))
@@ -886,6 +917,7 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         // `windows` slides and overlaps, `chunks` partitions — both group the same
         // elements, so both are an array of arrays of the element type.
         "windows" | "chunks" => Type::Array(Box::new(Type::Array(Box::new(el.clone())))),
+        "flat_map" => Type::Array(Box::new(Type::Unknown)),
         "flatten" => match el {
             Type::Array(inner) => Type::Array(inner.clone()),
             _ => Type::Array(Box::new(Type::Unknown)),
@@ -928,11 +960,13 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
 
 pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "upper" | "lower" | "reverse" | "trim" | "replace" | "concat" => Type::String,
+        "upper" | "lower" | "reverse" | "trim" | "replace" | "replace_first" | "concat" => {
+            Type::String
+        }
         "take" | "drop" | "repeat" | "ljust" | "rjust" | "center" => Type::String,
-        // `index_of` is the first match's CHARACTER index, or `missing` when absent —
-        // typed `Int`, the same way `Array.index_of` and `Dna.find` are typed.
-        "count" | "length" | "index_of" => Type::Int,
+        // `index_of`/`last_index_of` are the first/last match's CHARACTER index, or
+        // `missing` when absent — typed `Int`, like `Array.index_of` and `Dna.find`.
+        "count" | "length" | "index_of" | "last_index_of" => Type::Int,
         "split" | "chars" => Type::Array(Box::new(Type::String)),
         // `split_once` splits at the FIRST separator: `(before, after)`, or `missing`
         // when it does not occur. A pair rather than an array because the two halves

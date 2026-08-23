@@ -302,6 +302,94 @@ impl super::Interp {
             }
             "to_dataframe" => {
                 arity(name, &args, 1, line, col)?;
+                // An ARRAY OF RECORDS is the row-oriented twin of `dataframe({cols})`
+                // — the shape `db` rows and parsed JSON produce — and builds NATIVELY
+                // (no Python needed). Column order is the FIRST record's field order;
+                // every record must carry exactly that field set, because a frame
+                // column has one length — an absent field is an error naming the row,
+                // never a silent hole.
+                if let Value::Array(rows) = &args[0] {
+                    if rows.is_empty() {
+                        return Err(HelixError::new(
+                            "`to_dataframe` cannot infer a schema from an empty array",
+                            line,
+                            col,
+                        )
+                        .hint("build an empty frame with explicit columns: `dataframe({a: [], b: []})`."));
+                    }
+                    if let Some(bad) =
+                        rows.iter_values().position(|r| !matches!(r, Value::Record(_)))
+                    {
+                        let it = rows.get(bad);
+                        return Err(HelixError::new(
+                            format!(
+                                "`to_dataframe` takes an array of records, but element {bad} is {}",
+                                crate::value::with_article(it.type_name())
+                            ),
+                            line,
+                            col,
+                        )
+                        .hint(
+                            "rows look like `[{id: 1, v: 2.0}, {id: 2, v: 3.5}]`; \
+                             column-wise data goes to `dataframe({...})`.",
+                        ));
+                    }
+                    let first = rows.get(0);
+                    let Value::Record(first_fields) = &first else { unreachable!() };
+                    let names: Vec<Symbol> = first_fields.iter().map(|(s, _)| *s).collect();
+                    let mut cols: Vec<Vec<Value>> =
+                        names.iter().map(|_| Vec::with_capacity(rows.len())).collect();
+                    for (ri, row) in rows.iter_values().enumerate() {
+                        let Value::Record(fields) = &row else { unreachable!() };
+                        if fields.len() != names.len() {
+                            return Err(HelixError::new(
+                                format!(
+                                    "`to_dataframe` row {ri} has {} fields, expected {}",
+                                    fields.len(),
+                                    names.len()
+                                ),
+                                line,
+                                col,
+                            )
+                            .hint(format!(
+                                "every row must carry the first row's fields: {}.",
+                                names.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                            )));
+                        }
+                        for (ci, want) in names.iter().enumerate() {
+                            match fields.iter().find(|(s, _)| s == want) {
+                                Some((_, v)) => cols[ci].push(v.clone()),
+                                None => {
+                                    return Err(HelixError::new(
+                                        format!(
+                                            "`to_dataframe` row {ri} has no field `{}`",
+                                            want.as_str()
+                                        ),
+                                        line,
+                                        col,
+                                    )
+                                    .hint(format!(
+                                        "every row must carry the first row's fields: {}.",
+                                        names
+                                            .iter()
+                                            .map(|s| s.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", ")
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    let mut columns = Vec::with_capacity(names.len());
+                    for (want, vals) in names.iter().zip(cols) {
+                        let cname = want.as_str();
+                        columns.push((
+                            cname.to_string(),
+                            array_to_coldata(cname, &Value::array(vals), line, col)?,
+                        ));
+                    }
+                    return Ok(Value::dataframe(crate::backend::build_frame(columns, line, col)?));
+                }
                 // Bring a Python polars/pandas/pyarrow frame into Helix as a native
                 // DataFrame, zero-copy via Arrow.
                 crate::python::to_dataframe(args.into_iter().next().unwrap(), line, col)
@@ -690,7 +778,44 @@ impl super::Interp {
             // express. Only the unreserved set survives; uppercase hex, as the RFC
             // says producers should emit.
             "url_encode" => {
-                arity(name, &args, 1, line, col)?;
+                if args.is_empty() || args.len() > 2 {
+                    return Err(HelixError::new(
+                        format!(
+                            "`url_encode` takes a string and an optional set name, got {} arguments",
+                            args.len()
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+                // Which characters survive unescaped: the RFC 3986 grammar named by
+                // the second argument. The default stays the STRICT unreserved set —
+                // over-escaping is always safe — but a path segment, query, fragment
+                // and userinfo each legally carry more, and a hand-rolled encoder was
+                // the field's workaround for the sets this refused.
+                let extra: &[u8] = match args.get(1) {
+                    None => b"",
+                    Some(Value::Str(set)) => match set.as_str() {
+                        "segment" => b"!$&'()*+,;=:@",
+                        "query" | "fragment" => b"!$&'()*+,;=:@/?",
+                        "userinfo" => b"!$&'()*+,;=:",
+                        other => {
+                            return Err(HelixError::new(
+                                format!("`url_encode` does not know the character set `{other}`"),
+                                line,
+                                col,
+                            )
+                            .hint(
+                                "sets: \"segment\", \"query\", \"fragment\", \"userinfo\" — \
+                                 RFC 3986's grammars; omit the argument for the strict \
+                                 unreserved-only set.",
+                            ))
+                        }
+                    },
+                    Some(other) => {
+                        return Err(type_err("url_encode", "a set name (a string)", other, line, col))
+                    }
+                };
                 match &args[0] {
                     Value::Missing => Ok(Value::Missing),
                     Value::Str(s) => {
@@ -699,6 +824,7 @@ impl super::Interp {
                             match byte {
                                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_'
                                 | b'~' => out.push(*byte as char),
+                                other if extra.contains(other) => out.push(*other as char),
                                 other => out.push_str(&format!("%{:02X}", other)),
                             }
                         }
@@ -758,6 +884,41 @@ impl super::Interp {
                         }
                     }
                     other => Err(type_err("url_decode", "a string", other, line, col)),
+                }
+            }
+            // The lenient twin, for ATTACKER-CHOSEN input at a server edge, where
+            // the strict error is a denial-of-service primitive: a malformed `%`
+            // stays a literal `%`, and non-UTF-8 decodes with replacement
+            // characters — this NEVER raises on any string. `url_decode` stays the
+            // right call for trusted input, where a malformed escape is a bug
+            // worth hearing about. (Both `http` and `web` in the field corpus had
+            // hand-rolled exactly this, twice.)
+            "url_decode_lenient" => {
+                arity(name, &args, 1, line, col)?;
+                match &args[0] {
+                    Value::Missing => Ok(Value::Missing),
+                    Value::Str(s) => {
+                        let bytes = s.as_bytes();
+                        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+                        let mut i = 0usize;
+                        while i < bytes.len() {
+                            if bytes[i] == b'%'
+                                && let Some(v) = bytes.get(i + 1..i + 3).and_then(|h| {
+                                    std::str::from_utf8(h)
+                                        .ok()
+                                        .and_then(|h| u8::from_str_radix(h, 16).ok())
+                                })
+                            {
+                                out.push(v);
+                                i += 3;
+                            } else {
+                                out.push(bytes[i]);
+                                i += 1;
+                            }
+                        }
+                        Ok(Value::Str(Rc::new(String::from_utf8_lossy(&out).into_owned())))
+                    }
+                    other => Err(type_err("url_decode_lenient", "a string", other, line, col)),
                 }
             }
             "base64_encode" => {
@@ -1109,6 +1270,61 @@ impl super::Interp {
                     return crate::autodiff::tensor_node(&args[0], line, col);
                 }
                 Ok(Value::Tensor(Rc::new(tensor::from_value(&args[0], line, col)?)))
+            }
+            "headers" => {
+                // Construct a `Headers` value from wire-ordered (name, value) pairs —
+                // the same type a live response carries, so a test double can BE the
+                // real thing (the field's mocks were case-sensitive Dicts that
+                // diverged from live traffic at exactly the boundary tests cross).
+                // Order kept, repeats kept; names and values validated like every
+                // other header that reaches the wire.
+                arity(name, &args, 1, line, col)?;
+                let items = match &args[0] {
+                    Value::Array(a) => a,
+                    other => {
+                        return Err(type_err(
+                            "headers",
+                            "an array of (name, value) pairs",
+                            other,
+                            line,
+                            col,
+                        )
+                        .hint("e.g. `headers([(\"Content-Type\", \"text/html\")])`."))
+                    }
+                };
+                let mut out: Vec<(String, String)> = Vec::with_capacity(items.len());
+                for (i, item) in items.iter_values().enumerate() {
+                    let pair: Option<(Value, Value)> = match &item {
+                        Value::Tuple(t) if t.len() == 2 => Some((t[0].clone(), t[1].clone())),
+                        Value::Array(a) if a.len() == 2 => Some((a.get(0), a.get(1))),
+                        _ => None,
+                    };
+                    let Some((k, v)) = pair else {
+                        return Err(HelixError::new(
+                            format!(
+                                "`headers` needs (name, value) pairs, but element {i} is {}",
+                                crate::value::with_article(item.type_name())
+                            ),
+                            line,
+                            col,
+                        )
+                        .hint("each element must hold exactly two strings."));
+                    };
+                    let (Value::Str(k), Value::Str(v)) = (&k, &v) else {
+                        return Err(HelixError::new(
+                            format!(
+                                "`headers` needs string names and values, but pair {i} holds {} and {}",
+                                crate::value::with_article(k.type_name()),
+                                crate::value::with_article(v.type_name())
+                            ),
+                            line,
+                            col,
+                        ));
+                    };
+                    crate::value::validate_header(k, v).map_err(|m| HelixError::new(m, line, col))?;
+                    out.push(((**k).clone(), (**v).clone()));
+                }
+                Ok(Value::Headers(Rc::new(out)))
             }
             "dataframe" => {
                 // Build a DataFrame from in-memory columns: `dataframe({age: [30, 41],

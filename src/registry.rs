@@ -43,7 +43,7 @@ pub fn category_of(name: &str) -> &'static str {
         // Time / pacing.
         "sleep" | "clock_monotonic" => "time",
         // Constructors — make a value of a given type.
-        "dna" | "range" | "tensor" | "zeros" | "ones" | "eye" | "to_array" | "to_dataframe"
+        "dna" | "headers" | "range" | "tensor" | "zeros" | "ones" | "eye" | "to_array" | "to_dataframe"
         | "to_tensor" | "dataframe" | "dict" | "rational" | "linspace" => "constructor",
         // Scalar conversions / accessors.
         "chr" | "ord" | "to_float" | "to_int" | "numerator" | "denominator" => "conversion",
@@ -60,7 +60,7 @@ pub fn category_of(name: &str) -> &'static str {
         | "ed25519_keygen" | "ed25519_sign" | "ed25519_verify" => "crypto",
         // Encoding.
         "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" | "url_encode"
-        | "url_decode" => "encoding",
+        | "url_decode" | "url_decode_lenient" => "encoding",
         "parse_cookies" | "parse_set_cookie" | "cookie_jar" => "http",
         // Reproducible random.
         "random" | "randn" | "random_int" => "random",
@@ -118,6 +118,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "http_stream", pure: false },
     // --- constructors / conversions ---
     BuiltinDef { path: "dna", pure: true },
+    BuiltinDef { path: "headers", pure: true },
     BuiltinDef { path: "range", pure: true },
     BuiltinDef { path: "tensor", pure: true },
     BuiltinDef { path: "zeros", pure: true },
@@ -205,6 +206,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     // Percent-encoding (RFC 3986) — pure, and the pair a URL cannot be built without.
     BuiltinDef { path: "url_encode", pure: true },
     BuiltinDef { path: "url_decode", pure: true },
+    BuiltinDef { path: "url_decode_lenient", pure: true },
     // Cookies, both directions — pure parsing of a header value.
     BuiltinDef { path: "parse_cookies", pure: true },
     BuiltinDef { path: "parse_set_cookie", pure: true },
@@ -284,7 +286,7 @@ pub static ARRAY_METHODS: &[&str] = &[
     "total_length", "bar_chart", "histogram", "line_chart", "sparkline", "scatter", "svg_bar",
     "svg_line", "write_csv", "write_tsv", "write_json", "to_html", "to_markdown", "to_table",
     "to_dict", "write_fasta", "write_fastq", "shuffle", "sample", "choice",
-    "windows", "chunks",
+    "windows", "chunks", "flat_map", "count_where",
 ];
 
 /// String methods.
@@ -292,7 +294,7 @@ pub static STRING_METHODS: &[&str] = &[
     "upper", "lower", "count", "length", "chars", "reverse", "trim", "split", "replace", "contains",
     "starts_with", "ends_with", "take", "drop", "repeat", "ljust", "rjust", "center", "phred",
     "parse_json", "to_float", "to_int", "write_to", "append_to", "index_of", "split_once",
-    "concat",
+    "concat", "replace_first", "last_index_of",
 ];
 
 /// HTTP-header methods (the `Headers` value): case-insensitive reads, wire order.

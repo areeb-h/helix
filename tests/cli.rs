@@ -3937,7 +3937,7 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         ("src/lexer.rs", 0),
         // 6: `desugar_position` no longer pops its predicate out of the arg vector — it
         // passes the args through untouched, so the `unwrap` went with it.
-        ("src/parser.rs", 6),
+        ("src/parser.rs", 7),
         ("src/bio.rs", 0),
         ("src/value.rs", 0),
         // The ADR 0032 split moved jit.rs's one budgeted call into analysis.rs.
@@ -5460,6 +5460,56 @@ print(g)
         let (out, err, code) = run_source(src, env, &format!("agg_tape_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
         assert_eq!(out, want, "{name}: tracked aggregates or tensor tape drifted");
+    }
+}
+
+/// The additive surface the field review carried workarounds for, pinned on
+/// all three engines: the lenient percent-decoder (never raises), url_encode's
+/// named RFC 3986 sets, the `headers(...)` constructor (case-insensitive reads,
+/// wire order, repeats), the native rows-to-frame bridge, the composition verbs
+/// flat_map/count_where, and replace_first / last_index_of (CHARACTER
+/// indices, like index_of).
+#[test]
+fn the_field_workaround_surface_is_native() {
+    let src = r#"
+print(url_decode_lenient("100% caf%C3%A9 %zz"))
+print(url_encode("a/b c", "segment"))
+print(url_encode("a/b c", "query"))
+print(url_encode("a/b c"))
+h = headers([("Content-Type", "text/html"), ("Set-Cookie", "a=1"), ("set-cookie", "b=2")])
+print(h.get("content-type"), h.get_all("Set-Cookie").count(), h.count())
+rows = [{id: 1, v: 2.0, tag: "a"}, {id: 2, v: 3.5, tag: "b"}]
+df = to_dataframe(rows)
+print(df)
+print([1, 2, 3].flat_map(x => [x, x * 10]))
+print([1, 5, 2, 8].filter(x => x > 4).first(), [1, 5, 2, 8].count_where(x => x > 4))
+print([1, 2].filter(x => x > 99).first())
+print("banana".replace_first("an", "AN"), "banana".last_index_of("an"), "banana".index_of("an"))
+print("héllo wörld".last_index_of("l"))
+bad = try(url_encode("x", "path"))
+print(bad.error)
+"#;
+    let want = "100% café %zz
+a%2Fb%20c
+a/b%20c
+a%2Fb%20c
+text/html 2 3
+id    v  tag
+--  ---  ---
+ 1  2.0  a
+ 2  3.5  b
+(2 rows)
+[1, 10, 2, 20, 3, 30]
+5 2
+missing
+bANana 3 1
+9
+`url_encode` does not know the character set `path`
+";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("fieldsurf_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: the additive surface drifted");
     }
 }
 

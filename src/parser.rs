@@ -220,6 +220,47 @@ fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Ex
 /// near the front: `(0..90_000_000).take_while(it < 5)` took **17.4s and 2.1 GB** to
 /// answer `5`, while the already-lazy `any` answered the same shape in 0.07s and 14 MB.
 /// `position` short-circuits, so both are now O(prefix).
+/// `flat_map`/`count_where` — one-line compositions of existing verbs,
+/// desugared so both engines get them for free (parity by construction):
+/// `xs.flat_map(f)` is `xs.map(f).flatten()`; `xs.count_where(p)` is
+/// `xs.filter(p).count()`. NOT here: `find` — Dna owns that name for motif
+/// search, and a desugar is receiver-blind (this file's namespace-gate lesson),
+/// so an Array `find` would hijack `seq.find("ATG")` at parse time. The
+/// spelling for arrays stays `xs.filter(p).first()`.
+fn desugar_filter_compose(
+    recv: Expr,
+    name: &str,
+    mut args: Vec<Expr>,
+    l: usize,
+    c: usize,
+) -> Result<Expr, HelixError> {
+    if args.len() != 1 {
+        return Err(HelixError::new(
+            format!("`{}` takes one function, got {} arguments", name, args.len()),
+            l,
+            c,
+        )
+        .hint(match name {
+            "flat_map" => "e.g. `xs.flat_map(x => [x, x])`.",
+            _ => "e.g. `xs.count_where(x => x > 0)`.",
+        }));
+    }
+    // Cannot panic: the arity check above guarantees exactly one element.
+    let f = args.pop().unwrap();
+    let m = |recv: Expr, nm: &str, args: Vec<Expr>| Expr::Method {
+        recv: Box::new(recv),
+        name: nm.into(),
+        args,
+        named: vec![],
+        line: l,
+        col: c,
+    };
+    Ok(match name {
+        "flat_map" => m(m(recv, "map", vec![f]), "flatten", vec![]),
+        _ => m(m(recv, "filter", vec![f]), "count", vec![]),
+    })
+}
+
 fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize, c: usize) -> Result<Expr, HelixError> {
     if args.len() != 1 {
         return Err(HelixError::new(
@@ -1726,7 +1767,9 @@ impl Parser {
                         // false rejection (an arity-MATCHING call slipped past the check
                         // and resolved correctly, which is how the physics library found
                         // the seam). Seven names were affected: position, sort_by,
-                        // take_while, drop_while, min_by, max_by, zipmap.
+                        // take_while, drop_while, min_by, max_by, zipmap — and the list
+                        // has since grown flat_map and count_where, which follow the
+                        // same rule through this same gate.
                         if matches!(&e, Expr::Ident { name: n, .. } if self.imports.contains(n)) {
                             e = Expr::Method {
                                 recv: Box::new(e),
@@ -1805,6 +1848,9 @@ impl Parser {
                                 desugar_take_drop_while(e, &name, args, l, c)?
                             }
                             "position" => desugar_position(e, args, l, c)?,
+                            "flat_map" | "count_where" => {
+                                desugar_filter_compose(e, &name, args, l, c)?
+                            }
                             // `a.zipmap(b, f)` == `a.zip(b).map(f)` — a paired
                             // elementwise map, desugared so both engines reuse the
                             // tested zip+map (parity by construction). For plain
