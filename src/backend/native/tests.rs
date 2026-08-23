@@ -333,3 +333,199 @@ fn the_trait_object_shape_holds() {
     );
     assert_eq!(f.row_count(0, 0).unwrap(), 1);
 }
+
+// ---- parquet (ADR 0033 Stage 2) ----
+
+fn tdir() -> std::path::PathBuf {
+    let d = std::env::temp_dir().join("helix_native_pq_test");
+    std::fs::create_dir_all(&d).expect("test tmpdir");
+    d
+}
+
+#[test]
+fn parquet_round_trips_with_dtypes_and_missing() {
+    let p = tdir().join("rt.parquet");
+    let p = p.to_str().expect("utf8 path");
+    let f = super::build_frame(
+        vec![
+            ("id".to_string(), ColData::IntOpt(vec![Some(1), None, Some(3)])),
+            ("name".to_string(), ColData::StrOpt(vec![Some("a".into()), Some("b".into()), None])),
+            ("score".to_string(), ColData::Float(vec![Some(1.5), None, Some(3.5)])),
+            ("ok".to_string(), ColData::Bool(vec![true, false, true])),
+        ],
+        0,
+        0,
+    )
+    .unwrap();
+    f.write_parquet(p, 0, 0).unwrap();
+    let back = super::parquet_io::read_parquet(p, 0, 0).unwrap();
+    for c in ["id", "name", "score", "ok"] {
+        assert_eq!(
+            reprs(&back.column_values(c, 0, 0).unwrap()),
+            reprs(&f.column_values(c, 0, 0).unwrap()),
+            "column `{c}` survives the round trip"
+        );
+    }
+    let _ = std::fs::remove_file(p);
+}
+
+#[test]
+fn an_empty_frame_round_trips_as_schema_only() {
+    let p = tdir().join("empty.parquet");
+    let p = p.to_str().expect("utf8 path");
+    let f = super::build_frame(
+        vec![("x".to_string(), ColData::Int(vec![])), ("s".to_string(), ColData::Str(vec![]))],
+        0,
+        0,
+    )
+    .unwrap();
+    f.write_parquet(p, 0, 0).unwrap();
+    let back = super::parquet_io::read_parquet(p, 0, 0).unwrap();
+    assert_eq!(back.row_count(0, 0).unwrap(), 0);
+    assert_eq!(back.column_names(0, 0).unwrap(), vec!["x", "s"]);
+    let _ = std::fs::remove_file(p);
+}
+
+/// Foreign flat dtypes, from a file this test writes with the low-level parquet
+/// API — dates read as their text; plain INT32 widens to Int.
+#[test]
+fn foreign_dtypes_read_as_text_or_widen() {
+    use parquet::basic::{LogicalType, Repetition, Type as PhysType};
+    use parquet::data_type::Int32Type;
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::types::Type;
+    use std::sync::Arc;
+
+    let p = tdir().join("foreign.parquet");
+    let path = p.to_str().expect("utf8 path");
+    let fields = vec![
+        Arc::new(
+            Type::primitive_type_builder("d", PhysType::INT32)
+                .with_logical_type(Some(LogicalType::Date))
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .unwrap(),
+        ),
+        Arc::new(
+            Type::primitive_type_builder("n", PhysType::INT32)
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .unwrap(),
+        ),
+    ];
+    let schema =
+        Arc::new(Type::group_type_builder("schema").with_fields(fields).build().unwrap());
+    let file = std::fs::File::create(path).unwrap();
+    let mut w =
+        SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+            .unwrap();
+    let mut rg = w.next_row_group().unwrap();
+    let mut cw = rg.next_column().unwrap().expect("date column");
+    cw.typed::<Int32Type>().write_batch(&[0, 20688], None, None).unwrap();
+    cw.close().unwrap();
+    let mut cw = rg.next_column().unwrap().expect("int column");
+    cw.typed::<Int32Type>().write_batch(&[-5, 41], None, None).unwrap();
+    cw.close().unwrap();
+    rg.close().unwrap();
+    w.close().unwrap();
+
+    let back = super::parquet_io::read_parquet(path, 0, 0).unwrap();
+    assert_eq!(
+        reprs(&back.column_values("d", 0, 0).unwrap()),
+        vec!["String:1970-01-01", "String:2026-08-23"],
+        "dates read as ISO text"
+    );
+    assert_eq!(
+        reprs(&back.column_values("n", 0, 0).unwrap()),
+        vec!["Int:-5", "Int:41"],
+        "INT32 widens to Int"
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+/// A nested file is refused with a clean, named error — not a panic, not a
+/// half-read frame.
+#[test]
+fn a_nested_file_is_refused_cleanly() {
+    use parquet::basic::{Repetition, Type as PhysType};
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::types::Type;
+    use std::sync::Arc;
+
+    let p = tdir().join("nested.parquet");
+    let path = p.to_str().expect("utf8 path");
+    let leaf = Arc::new(
+        Type::primitive_type_builder("item", PhysType::INT64)
+            .with_repetition(Repetition::REPEATED)
+            .build()
+            .unwrap(),
+    );
+    let group = Arc::new(
+        Type::group_type_builder("xs")
+            .with_repetition(Repetition::OPTIONAL)
+            .with_fields(vec![leaf])
+            .build()
+            .unwrap(),
+    );
+    let schema =
+        Arc::new(Type::group_type_builder("schema").with_fields(vec![group]).build().unwrap());
+    let file = std::fs::File::create(path).unwrap();
+    let w =
+        SerializedFileWriter::new(file, schema, Arc::new(WriterProperties::builder().build()))
+            .unwrap();
+    w.close().unwrap();
+
+    let err = match super::parquet_io::read_parquet(path, 0, 0) {
+        Err(e) => e,
+        Ok(_) => panic!("nested schema must be refused"),
+    };
+    assert!(err.message.contains("nested"), "{}", err.message);
+    assert!(err.message.contains("xs"), "the column is named: {}", err.message);
+    let _ = std::fs::remove_file(path);
+}
+
+#[cfg(feature = "dataframes")]
+mod parquet_cross_engine {
+    use super::*;
+
+    /// The compatibility contract both ways: files the polars engine writes,
+    /// the native engine reads — and vice versa — cell-identical.
+    #[test]
+    fn each_engine_reads_the_others_files() {
+        let dir = super::tdir();
+        let cols = || data();
+
+        // polars writes -> native reads
+        let p1 = dir.join("polars_wrote.parquet");
+        let p1s = p1.to_str().expect("utf8 path");
+        let pf = crate::backend::polars::build_frame(cols(), 0, 0).unwrap();
+        pf.write_parquet(p1s, 0, 0).unwrap();
+        let native_read = crate::backend::native::read_parquet(p1s, 0, 0).unwrap();
+        let polars_read = crate::backend::polars::read_parquet(p1s, 0, 0).unwrap();
+        for c in ["region", "samples", "af", "qc"] {
+            assert_eq!(
+                reprs(&native_read.column_values(c, 0, 0).unwrap()),
+                reprs(&polars_read.column_values(c, 0, 0).unwrap()),
+                "native reads polars' file: column `{c}`"
+            );
+        }
+
+        // native writes -> polars reads
+        let p2 = dir.join("native_wrote.parquet");
+        let p2s = p2.to_str().expect("utf8 path");
+        let nf = super::super::build_frame(cols(), 0, 0).unwrap();
+        nf.write_parquet(p2s, 0, 0).unwrap();
+        let polars_read = crate::backend::polars::read_parquet(p2s, 0, 0).unwrap();
+        for c in ["region", "samples", "af", "qc"] {
+            assert_eq!(
+                reprs(&polars_read.column_values(c, 0, 0).unwrap()),
+                reprs(&nf.column_values(c, 0, 0).unwrap()),
+                "polars reads the native file: column `{c}`"
+            );
+        }
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
+}

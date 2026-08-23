@@ -21,18 +21,19 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
 }
 
 #[cfg(all(feature = "dataframes", feature = "native-df"))]
-pub use crate::backend::polars::read_parquet;
+pub fn read_parquet(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, crate::error::HelixError> {
+    if crate::backend::native_selected() {
+        return crate::backend::native::read_parquet(path, line, col);
+    }
+    crate::backend::polars::read_parquet(path, line, col)
+}
 
 // Native-only build: CSV is native; parquet is a Stage 2 promise, said plainly.
 #[cfg(all(not(feature = "dataframes"), feature = "native-df"))]
 pub use crate::backend::native::read_csv;
 
 #[cfg(all(not(feature = "dataframes"), feature = "native-df"))]
-pub fn read_parquet(path: &str, line: usize, col: usize) -> Result<crate::backend::Df, crate::error::HelixError> {
-    let _ = path;
-    Err(crate::error::HelixError::new("this build has no parquet support", line, col)
-        .hint("parquet for the native engine lands in ADR 0033 Stage 2; build with `--features dataframes` for it today."))
-}
+pub use crate::backend::native::read_parquet;
 
 // Without the engine the readers still exist — they answer with the same clean
 // error `build_frame` gives, so the builtin arms above this shim never change.

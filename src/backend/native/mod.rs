@@ -23,6 +23,7 @@ mod group;
 mod join;
 mod key;
 mod logic;
+mod parquet_io;
 mod sort;
 mod verbs;
 #[cfg(test)]
@@ -37,6 +38,7 @@ use super::{ColData, ColExpr, DataHandle, Df};
 use columns::Col;
 
 pub use csv::read_csv;
+pub use parquet_io::read_parquet;
 
 /// An eager frame: named, typed columns of one shared length.
 pub struct NativeFrame {
@@ -205,9 +207,8 @@ impl DataHandle for NativeFrame {
         Ok(Rc::new(self.take(&(0..self.len()).collect::<Vec<_>>())) as Df)
     }
 
-    fn write_parquet(&self, _path: &str, line: usize, col: usize) -> Result<(), HelixError> {
-        Err(HelixError::new("this build has no parquet support", line, col)
-            .hint("parquet for the native engine lands in ADR 0033 Stage 2; build with `--features dataframes` for it today."))
+    fn write_parquet(&self, path: &str, line: usize, col: usize) -> Result<(), HelixError> {
+        parquet_io::write_parquet(self, path, line, col)
     }
 
     fn write_csv(&self, path: &str, sep: u8, line: usize, col: usize) -> Result<(), HelixError> {

@@ -172,6 +172,16 @@ libmimalloc-sys = { version = "0.1", default-features = false, features = ["exte
 # Already in the tree transitively, so this adds no new crate.
 libc = "0.2"
 csv = { version = "1", optional = true }
+# Parquet for the native engine (ADR 0033 Stage 2) — the apache crate WITHOUT its
+# arrow half. The codec set exists for cross-engine truth: the polars engine
+# writes zstd by default, so a native build that cannot read zstd cannot read
+# files the sibling engine wrote.
+parquet = { version = "59", default-features = false, features = [
+    "snap",
+    "zstd",
+    "lz4",
+    "flate2-zlib-rs",
+], optional = true }
 
 [features]
 # HTTP data-fetching and the fast allocator are on by default; build with
@@ -211,7 +221,7 @@ jit = [
 # The native DataFrame engine (ADR 0033 Stage 1): eager, deterministic, frames
 # that follow the language's own scalar semantics (ADR 0034). Serves builds
 # without polars; coexists with it in dev builds for the differential harness.
-native-df = ["dep:csv"]
+native-df = ["dep:csv", "dep:parquet"]
 # The small-server profile: full language surface, no heavy backends.
 appliance = ["http", "mimalloc", "native-df"]
 # Python interop hands whole frames across via Arrow, so it needs the engine.
