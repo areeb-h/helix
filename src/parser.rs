@@ -862,6 +862,43 @@ impl Parser {
         &self.toks[idx].tok
     }
 
+    /// The ADR 0035 `where` clause: after a fn body, `where NAME = EXPR`
+    /// (comma-separated, later bindings seeing earlier ones) wraps the body in
+    /// the equivalent `let`. Answers the body unchanged when the next tokens
+    /// are not exactly that shape.
+    fn maybe_where_clause(&mut self, body: Expr) -> Result<Expr, HelixError> {
+        let mut k = 0usize;
+        while matches!(self.peek_at(k), Tok::Newline) {
+            k += 1;
+        }
+        let gate = matches!(self.peek_at(k), Tok::Ident(n) if n == "where")
+            && matches!(self.peek_at(k + 1), Tok::Ident(_))
+            && matches!(self.peek_at(k + 2), Tok::Eq);
+        if !gate {
+            return Ok(body);
+        }
+        for _ in 0..=k {
+            self.advance(); // the newline run and `where` itself
+        }
+        let mut bindings: Vec<(String, Expr)> = Vec::new();
+        loop {
+            let name = self.ident_name("after `where`")?;
+            self.eat(&Tok::Eq, "after the `where` binding's name")
+                .map_err(|e| e.hint("a `where` binding looks like `where LOOKUP = {…}`."))?;
+            let value = self.expr()?;
+            bindings.push((name, value));
+            if matches!(self.peek(), Tok::Comma) {
+                self.advance();
+                while matches!(self.peek(), Tok::Newline) {
+                    self.advance();
+                }
+                continue;
+            }
+            break;
+        }
+        Ok(Expr::Let { bindings, body: Box::new(body) })
+    }
+
     fn advance(&mut self) -> Token {
         let t = self.toks[self.pos].clone();
         if self.pos < self.toks.len() - 1 {
@@ -1077,6 +1114,14 @@ impl Parser {
             self.eat(&Tok::Eq, "before the function body")
                 .map_err(|e| e.hint("a function body is an expression: `fn f(x) = x + 1`."))?;
             let body = self.expr()?;
+            // ADR 0035: an optional `where` clause — the scaffolding AFTER the
+            // point, scoped to this function. `where` stays an ordinary
+            // identifier everywhere else (frames own a `.where(...)` verb), so
+            // the gate is the exact shape `where <name> =` after the body,
+            // optionally across newlines — no legal program parses that today.
+            // Desugars to the `let … in` the body could have written: zero new
+            // engine surface, parity by construction.
+            let body = self.maybe_where_clause(body)?;
             return Ok(Stmt::Func {
                 name,
                 params,

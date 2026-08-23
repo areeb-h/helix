@@ -153,7 +153,8 @@ pub fn format_source(src: &str) -> Result<String, HelixError> {
         // judgement `cook_newlines` makes about whether the break between them is real.
         // Only at the top level: inside brackets the bracket step is already the signal, and
         // both would step an argument list twice, since every line of a list ends in a comma.
-        let starts_continuation = code.first().is_some_and(|t| continues_before_this_line(&t.tok));
+        let starts_continuation = code.first().is_some_and(|t| continues_before_this_line(&t.tok))
+            || starts_where_clause(&code);
         if (continuing || starts_continuation) && closed_to.is_none() {
             indent += 1;
         }
@@ -193,7 +194,15 @@ pub fn format_source(src: &str) -> Result<String, HelixError> {
             // both opens and ends in a continuer, and charging it twice steps the body two
             // levels where one is meant.
             Some(_) if opened => false,
-            Some(t) => continues_after_this_line(&t.tok),
+            // A DEPTH-0 line ending in a comma has exactly one legal reading —
+            // the next line continues its binding list (a `where` clause) — so
+            // that break is a continuation. Inside brackets a trailing comma is
+            // every list line's normal ending and the bracket step already
+            // pays for it (the double-step trap the comment above describes).
+            Some(t) => {
+                continues_after_this_line(&t.tok)
+                    || (matches!(t.tok, Tok::Comma) && end_depth == 0)
+            }
         };
     }
 
@@ -444,6 +453,16 @@ fn is_unary_minus(line: &[&Token], at: usize) -> bool {
 /// [`continues_after_this_line`], and deliberately `cook_newlines`'s `continues_after` list:
 /// none of these can begin a statement, so a line that starts with one is a continuation and
 /// is indented to say so. This is what keeps a dangling `else` from landing in column 0.
+/// ADR 0035: a line of the exact shape `where NAME = …` is the where-clause of
+/// the fn definition above it — one continuation step, like `else` or `in`.
+/// The 3-token gate mirrors the parser's, so `where = 5` (a binding named
+/// where) and `where(x)` (a call) keep their own indentation.
+fn starts_where_clause(code: &[&Token]) -> bool {
+    matches!(code.first().map(|t| &t.tok), Some(Tok::Ident(n)) if n == "where")
+        && matches!(code.get(1).map(|t| &t.tok), Some(Tok::Ident(_)))
+        && matches!(code.get(2).map(|t| &t.tok), Some(Tok::Eq))
+}
+
 fn continues_before_this_line(t: &Tok) -> bool {
     use Tok::*;
     matches!(

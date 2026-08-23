@@ -257,6 +257,25 @@ map) expressible in-model. Full rationale and the method-vs-value disambiguation
 
 ---
 
+## `where` clauses (ADR 0035, shipped 2026-08-24)
+
+A function definition may put its scaffolding AFTER the point:
+
+```
+fn class_name(c) = LOOKUP.get(c) ?? "Invalid"
+  where LOOKUP = [[2, "Success"], [4, "Client error"]].to_dict()
+```
+
+- Exactly `fn class_name(c) = let LOOKUP = … in LOOKUP.get(c) ?? "Invalid"` — a
+  parser desugar, so the engines cannot drift.
+- Multiple bindings separate with commas; later bindings see earlier ones, and
+  every binding sees the parameters.
+- `fn` definitions only (an arbitrary expression already has `let … in`; the
+  ADR states the one-obvious-way argument).
+- `where` is NOT a keyword: frames keep `.where(...)`, and a binding named
+  `where` still works — the clause is recognized by its exact
+  `where NAME = …` shape after a fn body.
+
 ## The Result shape (stated 2026-08-24, from the consolidated field review)
 
 `try EXPR` produces THE canonical result record, and libraries should pass it

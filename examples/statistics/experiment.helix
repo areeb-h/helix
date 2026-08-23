@@ -20,7 +20,7 @@ print("train RMSE:", r3(rmse(fit.predictions, ys)))
 feats = [xs, xs.map(x => x * x), xs.map(x => sin(x))]
 fn mdl(active) =
   let cols = active.map(j => feats[j]),
-f = multiple_regression(cols, ys, true)
+  f = multiple_regression(cols, ys, true)
   in ln(f.rss) * 20.0 + (active.count() + 1.0) * ln(40.0)
 
 candidates = [[0], [0, 1], [0, 2], [0, 1, 2]]

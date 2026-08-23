@@ -5514,6 +5514,62 @@ bANana 3 1
     }
 }
 
+/// ADR 0035, pinned end to end: `where` puts a fn's scaffolding after the
+/// point — a pure desugar to `let … in` (all three engines byte-identical by
+/// construction), sequential visibility between bindings, params in scope,
+/// the one-line form, and `where` still perfectly usable as an ordinary
+/// binding name. fmt indents the clause one continuation step and is
+/// idempotent over it.
+#[test]
+fn where_clauses_desugar_and_format() {
+    let src = r#"
+fn class_name(c) = LOOKUP.get(c) ?? "Invalid"
+  where LOOKUP = [[1, "Informational"], [2, "Success"], [3, "Redirection"],
+                  [4, "Client error"], [5, "Server error"]].to_dict()
+print(class_name(2), class_name(9))
+
+fn hyp(a, b) = sqrt(s)
+  where s = a * a + b * b
+print(hyp(3.0, 4.0))
+
+fn chain(x) = a + b
+  where a = x * 2,
+        b = a + 1
+print(chain(10))
+
+fn one_line(x) = y * y where y = x + 1
+print(one_line(3))
+
+where_named = 5
+print(where_named)
+"#;
+    let want = "Success Invalid
+5.0
+41
+16
+5
+";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("where_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: where drifted");
+    }
+    // fmt: formats to the documented layout, then reports already-formatted.
+    let dir = std::env::temp_dir().join(format!("hx_where_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let f = dir.join("w.helix");
+    std::fs::write(&f, src).unwrap();
+    let (_, _, code) = run(&["fmt", f.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0));
+    let (out2, _, code) = run(&["fmt", f.to_str().unwrap(), "--check"], &[], "");
+    assert_eq!(code, Some(0), "fmt must be idempotent over where: {out2}");
+    let formatted = std::fs::read_to_string(&f).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(formatted.contains("
+  where LOOKUP"), "where takes one continuation step:
+{formatted}");
+}
+
 /// The decided-bug fixes, pinned: the FULL pow node (a tracked exponent
 /// differentiates — d/db = a^b ln a — where it used to refuse; a non-positive
 /// base still refuses because ln has nothing to give), and a tracked value in
