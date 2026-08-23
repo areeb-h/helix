@@ -4,6 +4,8 @@
 
 use std::cmp::Ordering;
 
+use rayon::prelude::*;
+
 use crate::error::HelixError;
 use crate::value::Value;
 
@@ -32,7 +34,7 @@ pub fn sort(
                 let mut keys: Vec<(bool, i64, u32)> = (0..vals.len())
                     .map(|i| (valid[i], vals[i], i as u32))
                     .collect();
-                keys.sort_unstable();
+                keys.par_sort_unstable();
                 // Missing first: false < true puts invalid rows ahead, and
                 // their placeholder key (0) plus the row tiebreak keeps them
                 // in input order — same as cell_cmp's Equal under stability.
@@ -50,7 +52,7 @@ pub fn sort(
                 let mut keys: Vec<(bool, u64, u32)> = (0..vals.len())
                     .map(|i| (valid[i], enc(vals[i]), i as u32))
                     .collect();
-                keys.sort_unstable();
+                keys.par_sort_unstable();
                 let idx: Vec<usize> = keys.iter().map(|(_, _, i)| *i as usize).collect();
                 return Ok(frame.take(&idx));
             }

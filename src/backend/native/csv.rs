@@ -346,53 +346,131 @@ pub fn write_csv(
     line: usize,
     col: usize,
 ) -> Result<(), HelixError> {
+    use std::io::Write as _;
     let err = |m: String| HelixError::new(m, line, col);
-    let mut w = csv::WriterBuilder::new()
-        .delimiter(sep)
-        .from_path(path)
-        .map_err(|e| err(format!("could not write `{path}`: {e}")))?;
-    let names: Vec<&str> = frame.columns().iter().map(|(n, _)| n.as_str()).collect();
-    w.write_record(&names).map_err(|e| err(format!("could not write `{path}`: {e}")))?;
-    // Typed row loop: one reused scratch buffer, no Value and no String per
-    // cell. Missing is an empty field; floats keep their point (`2.0`) so a
-    // round-trip re-infers the same dtype — fmt_float's exact text.
-    let mut scratch = String::new();
-    let werr = |e: csv::Error| err(format!("could not write `{path}`: {e}"));
-    for row in 0..frame.len() {
-        for (_, c) in frame.columns() {
-            scratch.clear();
-            use std::fmt::Write as _;
-            match c {
-                Col::I64 { vals, valid } => {
-                    if valid[row] {
-                        let _ = write!(scratch, "{}", vals[row]);
-                    }
-                }
-                Col::F64 { vals, valid } => {
-                    if valid[row] {
-                        let x = vals[row];
-                        if x.is_finite() && x == x.trunc() {
-                            let _ = write!(scratch, "{x:.1}");
-                        } else {
-                            let _ = write!(scratch, "{x}");
-                        }
-                    }
-                }
-                Col::Bool { vals, valid } => {
-                    if valid[row] {
-                        scratch.push_str(if vals[row] { "true" } else { "false" });
-                    }
-                }
-                Col::Str { vals, valid } => {
-                    if valid[row] {
-                        scratch.push_str(vals[row].as_str());
-                    }
-                }
-                Col::Null { .. } => {}
-            }
-            w.write_field(scratch.as_bytes()).map_err(werr)?;
+
+    // Hand-rolled, chunk-parallel writer. Field text is typed straight from the
+    // columns (no Value, no per-cell String); quoting is the standard
+    // when-necessary rule (field contains the separator, a quote, or a line
+    // break). Chunks of rows format in parallel and concatenate in order, so
+    // the bytes are identical at any thread count. Floats keep their point
+    // (`2.0`, fmt_float's exact text) so a round-trip re-infers the dtype.
+    let n = frame.len();
+    let mut head = Vec::new();
+    for (i, (name, _)) in frame.columns().iter().enumerate() {
+        if i > 0 {
+            head.push(sep);
         }
-        w.write_record(None::<&[u8]>).map_err(werr)?;
+        push_field(&mut head, name.as_bytes(), sep);
     }
-    w.flush().map_err(|e| err(format!("could not write `{path}`: {e}")))
+    head.extend_from_slice(b"\n");
+
+    // Send-able views: an `Rc<String>` cannot cross threads, but `&str`
+    // borrowed out of one can — collect the borrow per string column once.
+    enum View<'a> {
+        I(&'a [i64], &'a [bool]),
+        F(&'a [f64], &'a [bool]),
+        B(&'a [bool], &'a [bool]),
+        S(Vec<&'a str>, &'a [bool]),
+        N,
+    }
+    let views: Vec<View> = frame
+        .columns()
+        .iter()
+        .map(|(_, c)| match c {
+            Col::I64 { vals, valid } => View::I(vals, valid),
+            Col::F64 { vals, valid } => View::F(vals, valid),
+            Col::Bool { vals, valid } => View::B(vals, valid),
+            Col::Str { vals, valid } => {
+                View::S(vals.iter().map(|s| s.as_str()).collect(), valid)
+            }
+            Col::Null { .. } => View::N,
+        })
+        .collect();
+
+    let chunk = (n / (rayon::current_num_threads() * 4).max(1)).max(8192);
+    let starts: Vec<usize> = (0..n).step_by(chunk).collect();
+    let blocks: Vec<Vec<u8>> = starts
+        .par_iter()
+        .map(|&start| {
+            let end = (start + chunk).min(n);
+            let mut buf = Vec::with_capacity((end - start) * 24);
+            let mut scratch = String::new();
+            for row in start..end {
+                for (i, view) in views.iter().enumerate() {
+                    if i > 0 {
+                        buf.push(sep);
+                    }
+                    match view {
+                        View::I(vals, valid) => {
+                            if valid[row] {
+                                use std::fmt::Write as _;
+                                scratch.clear();
+                                let _ = write!(scratch, "{}", vals[row]);
+                                buf.extend_from_slice(scratch.as_bytes());
+                            }
+                        }
+                        View::F(vals, valid) => {
+                            if valid[row] {
+                                use std::fmt::Write as _;
+                                scratch.clear();
+                                let x = vals[row];
+                                if x.is_finite() && x == x.trunc() {
+                                    let _ = write!(scratch, "{x:.1}");
+                                } else {
+                                    let _ = write!(scratch, "{x}");
+                                }
+                                buf.extend_from_slice(scratch.as_bytes());
+                            }
+                        }
+                        View::B(vals, valid) => {
+                            if valid[row] {
+                                buf.extend_from_slice(if vals[row] {
+                                    b"true"
+                                } else {
+                                    b"false"
+                                });
+                            }
+                        }
+                        View::S(vals, valid) => {
+                            if valid[row] {
+                                push_field(&mut buf, vals[row].as_bytes(), sep);
+                            }
+                        }
+                        View::N => {}
+                    }
+                }
+                buf.push(b'\n');
+            }
+            buf
+        })
+        .collect();
+
+    let file = std::fs::File::create(path)
+        .map_err(|e| err(format!("could not write `{path}`: {e}")))?;
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    out.write_all(&head).map_err(|e| err(format!("could not write `{path}`: {e}")))?;
+    for b in &blocks {
+        out.write_all(b).map_err(|e| err(format!("could not write `{path}`: {e}")))?;
+    }
+    out.flush().map_err(|e| err(format!("could not write `{path}`: {e}")))
+}
+
+/// One text field with when-necessary quoting (quote doubled inside quotes).
+/// Numbers and booleans never need it — only callers with real text use this.
+fn push_field(buf: &mut Vec<u8>, field: &[u8], sep: u8) {
+    let needs =
+        field.iter().any(|&b| b == sep || b == b'"' || b == b'\n' || b == b'\r');
+    if !needs {
+        buf.extend_from_slice(field);
+        return;
+    }
+    buf.push(b'"');
+    for &b in field {
+        if b == b'"' {
+            buf.push(b'"');
+        }
+        buf.push(b);
+    }
+    buf.push(b'"');
 }

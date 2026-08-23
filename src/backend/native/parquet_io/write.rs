@@ -97,11 +97,28 @@ pub fn write_parquet(
                         .map_err(werr)?;
                 }
                 Col::Str { vals, valid } => {
-                    let present: Vec<ByteArray> = vals
+                    // One arena, then zero-copy slices: 5M strings as 5M
+                    // individual Vec allocations was the whole write gap for
+                    // string-heavy frames. `Bytes::slice` is a refcount view.
+                    let total: usize = vals
                         .iter()
                         .zip(valid)
                         .filter(|(_, ok)| **ok)
-                        .map(|(s, _)| ByteArray::from(s.as_str().as_bytes().to_vec()))
+                        .map(|(s, _)| s.len())
+                        .sum();
+                    let mut arena = Vec::with_capacity(total);
+                    let mut spans = Vec::with_capacity(vals.len());
+                    for (s, ok) in vals.iter().zip(valid) {
+                        if *ok {
+                            let start = arena.len();
+                            arena.extend_from_slice(s.as_bytes());
+                            spans.push((start, s.len()));
+                        }
+                    }
+                    let arena = bytes::Bytes::from(arena);
+                    let present: Vec<ByteArray> = spans
+                        .into_iter()
+                        .map(|(start, len)| ByteArray::from(arena.slice(start..start + len)))
                         .collect();
                     let defs: Vec<i16> = valid.iter().map(|ok| i16::from(*ok)).collect();
                     cw.typed::<ByteArrayType>()
