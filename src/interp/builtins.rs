@@ -1256,6 +1256,9 @@ impl super::Interp {
             }
             "floor" | "ceil" | "trunc" => {
                 arity(name, &args, 1, line, col)?;
+                if matches!(&args[0], Value::Node(_)) {
+                    return Err(crate::autodiff::not_differentiable(name, line, col));
+                }
                 let f: fn(f64) -> f64 = match name {
                     "floor" => f64::floor,
                     "ceil" => f64::ceil,
@@ -1273,6 +1276,9 @@ impl super::Interp {
                         line,
                         col,
                     ));
+                }
+                if matches!(&args[0], Value::Node(_)) {
+                    return Err(crate::autodiff::not_differentiable("round", line, col));
                 }
                 if args.len() == 1 {
                     return apply_round_fn("round", f64::round, &args[0], line, col);
@@ -1309,6 +1315,9 @@ impl super::Interp {
             }
             "sign" => {
                 arity(name, &args, 1, line, col)?;
+                if matches!(&args[0], Value::Node(_)) {
+                    return Err(crate::autodiff::not_differentiable("sign", line, col));
+                }
                 super::apply_sign(&args[0], line, col)
             }
             // IEEE float predicates → Bool (Bool array / 0.0-or-1.0 tensor mask when
@@ -1360,6 +1369,12 @@ impl super::Interp {
             }
             "hypot" => {
                 arity(name, &args, 2, line, col)?;
+                if matches!(args[0], Value::Missing) || matches!(args[1], Value::Missing) {
+                    return Ok(Value::Missing);
+                }
+                if matches!(args[0], Value::Node(_)) || matches!(args[1], Value::Node(_)) {
+                    return crate::autodiff::binary_builtin(name, &args[0], &args[1], line, col);
+                }
                 match two_nums(name, &args[0], &args[1], line, col)? {
                     None => Ok(Value::Missing),
                     Some((a, b)) => Ok(Value::Float(a.hypot(b))),
@@ -1761,6 +1776,11 @@ impl super::Interp {
                 if matches!(args[0], Value::Missing) || matches!(args[1], Value::Missing) {
                     return Ok(Value::Missing);
                 }
+                // A tracked argument builds a graph node (ties send the gradient
+                // to the FIRST argument — the convention relu's kink pins).
+                if matches!(args[0], Value::Node(_)) || matches!(args[1], Value::Node(_)) {
+                    return crate::autodiff::binary_builtin(name, &args[0], &args[1], line, col);
+                }
                 let a = args[0]
                     .as_f64()
                     .ok_or_else(|| type_err(name, "a number", &args[0], line, col))?;
@@ -1777,6 +1797,24 @@ impl super::Interp {
                 arity(name, &args, 3, line, col)?;
                 if args.iter().any(|a| matches!(a, Value::Missing)) {
                     return Ok(Value::Missing);
+                }
+                // A tracked argument: clamp IS min(max(x, lo), hi), so the tape
+                // gets exactly that composition — gradient 1 inside the band
+                // (boundaries included, per max/min's ties-to-first rule), 0
+                // outside. Plain bounds are still validated first.
+                if args.iter().any(|a| matches!(a, Value::Node(_))) {
+                    if let (Some(lo), Some(hi)) = (args[1].as_f64(), args[2].as_f64())
+                        && lo > hi
+                    {
+                        return Err(HelixError::new(
+                            format!("`clamp` needs lo <= hi, got lo = {lo}, hi = {hi}"),
+                            line,
+                            col,
+                        )
+                        .hint("clamp(x, lo, hi) bounds x to [lo, hi]; pass the low bound before the high one."));
+                    }
+                    let m = crate::autodiff::binary_builtin("max", &args[0], &args[1], line, col)?;
+                    return crate::autodiff::binary_builtin("min", &m, &args[2], line, col);
                 }
                 let x = args[0].as_f64().ok_or_else(|| type_err(name, "a number", &args[0], line, col))?;
                 let lo = args[1].as_f64().ok_or_else(|| type_err(name, "a number", &args[1], line, col))?;

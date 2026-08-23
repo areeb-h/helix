@@ -1599,6 +1599,16 @@ fn array_method(
             if missing_or_nan(items) {
                 return Ok(Value::Missing);
             }
+            // A tracked element: fold with the differentiable max/min. The fold
+            // plus the ties-to-first rule means the FIRST extreme element gets
+            // the gradient — deterministic, and consistent with the scalar pair.
+            if items.iter().any(|v| matches!(v, Value::Node(_))) {
+                let mut acc = items[0].clone();
+                for v in &items[1..] {
+                    acc = crate::autodiff::binary_builtin(name, &acc, v, line, col)?;
+                }
+                return Ok(acc);
+            }
             // WIDENED TO `sort`'s DOMAIN — ADR 0025 (b), option b1: all numbers, all
             // strings, or all DNA, each ordered by the comparator `sort` uses for that
             // type. `min`/`max` were the one ordering spelling still numbers-only, so
@@ -3497,10 +3507,15 @@ fn complement(s: &str) -> String {
 /// * `PyObject` — its attributes are resolved by Python at run time; no static table
 ///   sees them, and capturing one silently rewrote `np.round(1.5)` into
 ///   `round(np, 1.5)`, which type-checks. The bug this predicate exists to prevent.
-/// * `Node` — the tape's method set (`autodiff::method`) is likewise not in the
-///   registry tables, and its errors teach the differentiable surface.
+/// * `Node` falls back only for names the tape does NOT own
+///   (`autodiff::is_tape_method`): `v.sum(1)` keeps the tape's arity error, while
+///   `v.to_array()` and `v.tan()` retry as the free builtins — which handle a
+///   tracked value themselves, so the two spellings can no longer disagree.
 /// * `DataFrame` / `GroupBy` — both engines dispatch these BEFORE the shared
 ///   `call_method`, so a fallback here would fire on one engine and not the other.
+///
+/// The four kinds that never fall back: PyObject, DataFrame, GroupBy — and, for
+/// tape-owned names only, Node.
 ///
 /// Everything else falls back only when its own table does not claim the name — a
 /// method that owns its name always wins — and the caller must only consult this
@@ -3509,9 +3524,9 @@ fn complement(s: &str) -> String {
 pub(crate) fn ufcs_fallback_applies(recv: &Value, name: &str) -> bool {
     match recv {
         Value::PyObject(_)
-        | Value::Node(_)
         | Value::DataFrame(_)
         | Value::GroupBy(_) => false,
+        Value::Node(_) => !crate::autodiff::is_tape_method(name),
         other => !crate::registry::type_owns_method(other.type_name(), name),
     }
 }

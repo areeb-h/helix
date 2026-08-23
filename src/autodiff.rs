@@ -169,6 +169,26 @@ fn pow_scalar(a: &Rc<Node>, n: f64) -> Rc<Node> {
     }))
 }
 
+/// A two-parent elementwise node: `fwd` computes the value, `dl`/`dr` the local
+/// derivatives with respect to each side at `(x, y)`. Broadcasting follows the
+/// same `ew`/`unbroadcast` adjoint pair the arithmetic primitives use.
+fn binary_ew(
+    a: &Rc<Node>,
+    b: &Rc<Node>,
+    fwd: fn(f64, f64) -> f64,
+    dl: fn(f64, f64) -> f64,
+    dr: fn(f64, f64) -> f64,
+) -> Rc<Node> {
+    let value = ew(&a.value, &b.value, fwd);
+    let (av, bv) = (a.value.clone(), b.value.clone());
+    let (sa, sb) = (a.value.shape().to_vec(), b.value.shape().to_vec());
+    make(value, vec![a.clone(), b.clone()], Box::new(move |g| {
+        let ga = ew(g, &ew(&av, &bv, dl), |x, d| x * d);
+        let gb = ew(g, &ew(&av, &bv, dr), |x, d| x * d);
+        vec![unbroadcast(&ga, &sa), unbroadcast(&gb, &sb)]
+    }))
+}
+
 fn unary(a: &Rc<Node>, fwd: fn(f64) -> f64, deriv: fn(f64) -> f64) -> Rc<Node> {
     let value = a.value.mapv(fwd);
     let av = a.value.clone();
@@ -634,6 +654,32 @@ pub fn unary_builtin(name: &str, v: &Value, line: usize, col: usize) -> Result<V
                 }
             },
         ),
+        "tan" => unary(&a, |x| x.tan(), |x| {
+            let c = x.cos();
+            1.0 / (c * c)
+        }),
+        "asin" => unary(&a, |x| x.asin(), |x| 1.0 / (1.0 - x * x).sqrt()),
+        "acos" => unary(&a, |x| x.acos(), |x| -1.0 / (1.0 - x * x).sqrt()),
+        "atan" => unary(&a, |x| x.atan(), |x| 1.0 / (1.0 + x * x)),
+        "sinh" => unary(&a, |x| x.sinh(), |x| x.cosh()),
+        "cosh" => unary(&a, |x| x.cosh(), |x| x.sinh()),
+        "log2" => unary(&a, |x| x.log2(), |x| 1.0 / (x * std::f64::consts::LN_2)),
+        "log10" => unary(&a, |x| x.log10(), |x| 1.0 / (x * std::f64::consts::LN_10)),
+        "cbrt" => unary(&a, |x| x.cbrt(), |x| {
+            let c = x.cbrt();
+            1.0 / (3.0 * c * c)
+        }),
+        "degrees" => unary(&a, |x| x.to_degrees(), |_| 180.0 / std::f64::consts::PI),
+        "radians" => unary(&a, |x| x.to_radians(), |_| std::f64::consts::PI / 180.0),
+        // d/dx erf(x) = 2/sqrt(pi) * e^(-x^2); d/dx normal_cdf(x) = normal_pdf(x);
+        // d/dx normal_pdf(x) = -x * normal_pdf(x). All exact, all elementary.
+        "erf" => unary(&a, crate::stats::erf, |x| {
+            2.0 / std::f64::consts::PI.sqrt() * (-x * x).exp()
+        }),
+        "normal_cdf" => unary(&a, crate::stats::normal_cdf, crate::stats::normal_pdf),
+        "normal_pdf" => unary(&a, crate::stats::normal_pdf, |x| {
+            -x * crate::stats::normal_pdf(x)
+        }),
         _ => {
             return Err(HelixError::new(
                 format!("`{name}` is not differentiable on a tracked value"),
@@ -643,6 +689,127 @@ pub fn unary_builtin(name: &str, v: &Value, line: usize, col: usize) -> Result<V
         }
     };
     Ok(Value::Node(out))
+}
+
+/// The uniform refusal for an op whose derivative is zero or undefined almost
+/// everywhere (`floor`, `round`, `sign`, …): the error names the real problem —
+/// the OPERATION — never the value's type, and says what to do instead.
+pub fn not_differentiable(name: &str, line: usize, col: usize) -> HelixError {
+    HelixError::new(format!("`{name}` is not differentiable on a tracked value"), line, col)
+        .hint(
+            "its derivative is zero (or undefined) almost everywhere, so the tape refuses \
+             rather than silently zeroing your gradient; `value_of(x)` deliberately leaves \
+             the tape if the plain number is what you want.",
+        )
+}
+
+/// Named two-argument differentiable builtins — the binary twin of
+/// `unary_builtin`. Ties route the gradient to the FIRST argument, the same
+/// convention `relu`'s kink already sets (relu'(0) = 0), so `max(a, b)` and the
+/// field idiom `a + relu(b - a)` agree everywhere, tie included.
+pub fn binary_builtin(
+    name: &str,
+    l: &Value,
+    r: &Value,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    let bad = |v: &Value| {
+        HelixError::new(
+            format!(
+                "a tracked value can't be combined with {}",
+                crate::value::with_article(v.type_name())
+            ),
+            line,
+            col,
+        )
+        .hint(
+            "differentiable ops are + - * / ** , matmul, and max/min/clamp/hypot, over \
+             numbers and tensors.",
+        )
+    };
+    let a = to_node(l).ok_or_else(|| bad(l))?;
+    let b = to_node(r).ok_or_else(|| bad(r))?;
+    // The same guard `binary()` carries: refuse exactly where the plain path
+    // refuses, before `ew`'s defensive fallback can fabricate a forward value.
+    if broadcast_shape(a.value.shape(), b.value.shape()).is_none() {
+        return Err(HelixError::new(
+            format!(
+                "cannot broadcast tensors of shape {:?} and {:?}",
+                a.value.shape(),
+                b.value.shape()
+            ),
+            line,
+            col,
+        )
+        .hint("shapes must match, or a dimension of 1 stretches to fit (NumPy rules)."));
+    }
+    let out = match name {
+        "max" => binary_ew(
+            &a,
+            &b,
+            f64::max,
+            |x, y| if x >= y { 1.0 } else { 0.0 },
+            |x, y| if x >= y { 0.0 } else { 1.0 },
+        ),
+        "min" => binary_ew(
+            &a,
+            &b,
+            f64::min,
+            |x, y| if x <= y { 1.0 } else { 0.0 },
+            |x, y| if x <= y { 0.0 } else { 1.0 },
+        ),
+        // d/dx hypot = x/hypot, d/dy = y/hypot; the origin's subgradient is 0.
+        "hypot" => binary_ew(
+            &a,
+            &b,
+            f64::hypot,
+            |x, y| {
+                let h = x.hypot(y);
+                if h == 0.0 { 0.0 } else { x / h }
+            },
+            |x, y| {
+                let h = x.hypot(y);
+                if h == 0.0 { 0.0 } else { y / h }
+            },
+        ),
+        _ => {
+            return Err(HelixError::new(
+                format!("`{name}` is not differentiable on a tracked value"),
+                line,
+                col,
+            ))
+        }
+    };
+    Ok(Value::Node(out))
+}
+
+/// The tape's own method names. `ufcs_fallback_applies` consults this so a
+/// FAILED method call on a tracked value may retry as the free builtin
+/// (`v.to_array()` → `to_array(v)`, `v.tan()` → `tan(v)`), while a name the
+/// tape owns keeps the tape's error — a method that owns its name always wins.
+pub fn is_tape_method(name: &str) -> bool {
+    matches!(
+        name,
+        "matmul"
+            | "dot"
+            | "sum"
+            | "mean"
+            | "t"
+            | "transpose"
+            | "relu"
+            | "sigmoid"
+            | "tanh"
+            | "exp"
+            | "ln"
+            | "sqrt"
+            | "sin"
+            | "cos"
+            | "abs"
+            | "shape"
+            | "count"
+            | "ndim"
+    )
 }
 
 /// A method call on a node (`matmul`/`dot`/`sum`/`mean`/`t`/`transpose`).
@@ -701,7 +868,8 @@ pub fn method(n: &Rc<Node>, name: &str, args: &[Value], line: usize, col: usize)
         )
         .hint(
             "methods: matmul/dot, sum, mean, t/transpose, relu, sigmoid, tanh, exp, ln, \
-             sqrt, sin, cos, abs; shape/count/ndim read the value.",
+             sqrt, sin, cos, abs; shape/count/ndim read the value. Any free builtin also \
+             chains — `v.tan()` means `tan(v)`.",
         )),
     }
 }

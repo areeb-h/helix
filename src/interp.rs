@@ -1123,7 +1123,17 @@ pub(crate) fn eval_unary(
             // wrapping so `-(i64::MIN)` doesn't panic in debug
             Value::Int(i) => Ok(Value::Int(i.wrapping_neg())),
             Value::Float(f) => Ok(Value::Float(-f)),
-            Value::Missing => Ok(Value::Missing), // negation propagates
+            Value::Missing => Ok(Value::Missing),
+            // A tracked value: `-x` IS `0.0 - x`, which the tape already
+            // differentiates — the field carried 52 load-bearing `0.0 - x`
+            // sites working around exactly this arm's absence.
+            n @ Value::Node(_) => crate::autodiff::binary(
+                &crate::ast::BinOp::Sub,
+                &Value::Float(0.0),
+                &n,
+                line,
+                col,
+            ), // negation propagates
             other => Err(HelixError::new(
                 format!("cannot negate a value of type {}", other.type_name()),
                 line,

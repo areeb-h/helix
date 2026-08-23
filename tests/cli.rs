@@ -5463,6 +5463,73 @@ print(g)
     }
 }
 
+/// The 0.4.0 field review's autodiff asks, pinned end to end: the whole routed
+/// elementary family differentiates (each gradient checked against a central
+/// difference computed IN the program), max/min/clamp/hypot carry gradients
+/// with the ties-to-first rule, unary minus works on a tracked value (scalar
+/// and tensor), the method and free spellings agree (UFCS falls through for
+/// names the tape does not own), and the zero-derivative ops refuse by naming
+/// the OP — never "expected a number, found a value of type Node".
+#[test]
+fn the_differentiable_surface_covers_the_elementary_family() {
+    let src = r#"
+fn cdiff(f, x) = (f(x + 0.0001) - f(x - 0.0001)) / 0.0002
+fn ck(name, g, want) = do {
+    assert_close(g, want, 0.0001)
+    print("{name} ok")
+}
+v = variable(0.6)
+ck("tan", gradient(tan(v), v), cdiff(x => tan(x), 0.6))
+ck("asin", gradient(asin(v), v), cdiff(x => asin(x), 0.6))
+ck("acos", gradient(acos(v), v), cdiff(x => acos(x), 0.6))
+ck("atan", gradient(atan(v), v), cdiff(x => atan(x), 0.6))
+ck("sinh", gradient(sinh(v), v), cdiff(x => sinh(x), 0.6))
+ck("cosh", gradient(cosh(v), v), cdiff(x => cosh(x), 0.6))
+ck("log2", gradient(log2(v), v), cdiff(x => log2(x), 0.6))
+ck("log10", gradient(log10(v), v), cdiff(x => log10(x), 0.6))
+ck("cbrt", gradient(cbrt(v), v), cdiff(x => cbrt(x), 0.6))
+ck("degrees", gradient(degrees(v), v), cdiff(x => degrees(x), 0.6))
+ck("radians", gradient(radians(v), v), cdiff(x => radians(x), 0.6))
+ck("erf", gradient(erf(v), v), cdiff(x => erf(x), 0.6))
+ck("normal_cdf", gradient(normal_cdf(v), v), cdiff(x => normal_cdf(x), 0.6))
+ck("normal_pdf", gradient(normal_pdf(v), v), cdiff(x => normal_pdf(x), 0.6))
+a = variable(2.0)
+b = variable(5.0)
+print(gradient(max(a, b), a), gradient(max(a, b), b), gradient(min(a, b), a))
+t1 = variable(3.0)
+t2 = variable(3.0)
+print(gradient(max(t1, t2), t1), gradient(max(t1, t2), t2))
+x3 = variable(3.0)
+y4 = variable(4.0)
+print(gradient(hypot(x3, y4), x3), gradient(hypot(x3, y4), y4))
+c = variable(2.5)
+print(gradient(clamp(c, 0.0, 1.0), c), gradient(clamp(c, 0.0, 5.0), c), gradient(clamp(c, 3.0, 5.0), c))
+u = variable(2.0)
+print(gradient(-u, u), value_of(-u))
+u2 = variable(2.0)
+print(gradient(0.0 - u2, u2) == gradient(-u2, u2))
+tv = variable(tensor([1.0, -2.0]))
+print(value_of(-tv))
+w = variable(7.0)
+print(gradient(w.tan(), w) == gradient(tan(w), w))
+print(w.to_array())
+m1 = variable(1.0)
+m2 = variable(9.0)
+mx = [m1, m2].max()
+print(value_of(mx), gradient(mx, m1), gradient(mx, m2))
+bad = try(floor(w))
+print(bad.error)
+bad2 = try(sign(w))
+print(bad2.error)
+"#;
+    let want = "tan ok\nasin ok\nacos ok\natan ok\nsinh ok\ncosh ok\nlog2 ok\nlog10 ok\ncbrt ok\ndegrees ok\nradians ok\nerf ok\nnormal_cdf ok\nnormal_pdf ok\n0.0 1.0 1.0\n1.0 0.0\n0.6 0.8\n0.0 1.0 0.0\n-1.0 -2.0\ntrue\n[-1, 2]\ntrue\n[7.0]\n9.0 0.0 1.0\n`floor` is not differentiable on a tracked value\n`sign` is not differentiable on a tracked value\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("ad_family_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: the differentiable surface drifted");
+    }
+}
+
 /// `body_raises` covers `Let` (the v0.2.6 stabilization sweep's two criticals, one
 /// root cause). The predicate decides whether a kernel is built WITH its poison cell;
 /// the `let` widening admitted `Let` bodies into the f64 analyses and codegen but this
