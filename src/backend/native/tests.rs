@@ -529,3 +529,76 @@ mod parquet_cross_engine {
         let _ = std::fs::remove_file(&p2);
     }
 }
+
+#[cfg(feature = "dataframes")]
+mod tz_aware_timestamps {
+    use super::*;
+
+    /// Write a parquet with isAdjustedToUTC=true timestamps via the low-level
+    /// API, then read it through the POLARS engine. Totality (ADR 0024) demands
+    /// a value or a clean error — never a panic/abort.
+    #[test]
+    fn the_polars_engine_reads_a_utc_timestamp_file_without_panicking() {
+        use parquet::basic::{LogicalType, Repetition, TimeUnit, TimestampType, Type as PhysType};
+        use parquet::data_type::Int64Type;
+        use parquet::file::properties::WriterProperties;
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::types::Type;
+        use std::sync::Arc;
+
+        let p = super::tdir().join("tzaware.parquet");
+        let path = p.to_str().expect("utf8 path");
+        let fields = vec![Arc::new(
+            Type::primitive_type_builder("ts", PhysType::INT64)
+                .with_logical_type(Some(LogicalType::Timestamp(TimestampType {
+                    is_adjusted_to_u_t_c: true,
+                    unit: TimeUnit::MILLIS,
+                })))
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .unwrap(),
+        )];
+        let schema =
+            Arc::new(Type::group_type_builder("schema").with_fields(fields).build().unwrap());
+        let file = std::fs::File::create(path).unwrap();
+        let mut w = SerializedFileWriter::new(
+            file,
+            schema,
+            Arc::new(WriterProperties::builder().build()),
+        )
+        .unwrap();
+        let mut rg = w.next_row_group().unwrap();
+        let mut cw = rg.next_column().unwrap().expect("ts column");
+        cw.typed::<Int64Type>().write_batch(&[1_787_443_200_123], None, None).unwrap();
+        cw.close().unwrap();
+        rg.close().unwrap();
+        w.close().unwrap();
+
+        // The polars engine: a value or a clean error — the assert is that we
+        // GET HERE at all (a panic aborts the test process).
+        match crate::backend::polars::read_parquet(path, 0, 0) {
+            Ok(df) => {
+                let vals = df.column_values("ts", 0, 0);
+                match vals {
+                    Ok(v) => {
+                        assert_eq!(v.len(), 1);
+                        // Cross-engine agreement: the native reader's rendering.
+                        let native = crate::backend::native::read_parquet(path, 0, 0).unwrap();
+                        assert_eq!(
+                            reprs(&v),
+                            reprs(&native.column_values("ts", 0, 0).unwrap()),
+                            "both engines render the tz-aware instant identically"
+                        );
+                    }
+                    Err(e) => {
+                        println!("polars column_values errored cleanly: {}", e.message);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("polars read_parquet errored cleanly: {}", e.message);
+            }
+        }
+        let _ = std::fs::remove_file(path);
+    }
+}

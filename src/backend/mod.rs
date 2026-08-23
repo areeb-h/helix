@@ -17,6 +17,7 @@
 
 #[cfg(feature = "native-df")]
 pub mod native;
+pub mod timefmt;
 #[cfg(feature = "dataframes")]
 pub mod polars;
 

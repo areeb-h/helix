@@ -275,6 +275,20 @@ pub fn read_parquet(path: &str, line: usize, col: usize) -> Result<Df, HelixErro
 /// floats of any width widen to `Int`/`Float`; strings and booleans map across
 /// directly; any remaining dtype (dates, categoricals, …) falls back to its string
 /// form so the conversion is total and never panics.
+/// The tz-aware instant as UTC text + ` UTC` — see the match arms above for
+/// why polars cannot render this itself in our build.
+fn utc_instant_str(v: i64, unit: &polars::prelude::TimeUnit) -> String {
+    use polars::prelude::TimeUnit as TU;
+    let (per_sec, width) = match unit {
+        TU::Milliseconds => (1_000, 3),
+        TU::Microseconds => (1_000_000, 6),
+        TU::Nanoseconds => (1_000_000_000, 9),
+    };
+    let mut s = crate::backend::timefmt::timestamp_str(v, per_sec, width);
+    s.push_str(" UTC");
+    s
+}
+
 fn anyvalue_to_value(av: &AnyValue) -> Value {
     match av {
         AnyValue::Null => Value::Missing,
@@ -291,6 +305,18 @@ fn anyvalue_to_value(av: &AnyValue) -> Value {
         AnyValue::Float64(f) => Value::Float(*f),
         AnyValue::String(s) => Value::Str(Rc::new((*s).to_string())),
         AnyValue::StringOwned(s) => Value::Str(Rc::new(s.to_string())),
+        // A tz-aware datetime is the one AnyValue whose Display PANICS in this
+        // build (polars' `timezones` feature is off; its formatter demands the
+        // tz database) — reproduced from a foreign parquet file with
+        // isAdjustedToUTC timestamps, which is an ADR 0024 abort. The value IS
+        // a UTC instant, so render it as UTC text ourselves, byte-identical to
+        // the native engine's rendering of the same file.
+        AnyValue::Datetime(v, unit, Some(_)) => {
+            Value::Str(Rc::new(utc_instant_str(*v, unit)))
+        }
+        AnyValue::DatetimeOwned(v, unit, Some(_)) => {
+            Value::Str(Rc::new(utc_instant_str(*v, unit)))
+        }
         other => Value::Str(Rc::new(other.to_string())),
     }
 }
