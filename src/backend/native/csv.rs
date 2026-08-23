@@ -388,8 +388,9 @@ pub fn write_csv(
     // the bytes are identical at any thread count. Floats keep their point
     // (`2.0`, fmt_float's exact text) so a round-trip re-infers the dtype.
     let n = frame.len();
+    let frame_cols = frame.columns(line, col)?;
     let mut head = Vec::new();
-    for (i, (name, _)) in frame.columns().iter().enumerate() {
+    for (i, (name, _)) in frame_cols.iter().enumerate() {
         if i > 0 {
             head.push(sep);
         }
@@ -406,10 +407,9 @@ pub fn write_csv(
         S(Vec<&'a str>, &'a [u32], &'a [bool]),
         N,
     }
-    let views: Vec<View> = frame
-        .columns()
+    let views: Vec<View> = frame_cols
         .iter()
-        .map(|(_, c)| match c {
+        .map(|(_, c)| match *c {
             Col::I64 { vals, valid } => View::I(vals, valid),
             Col::F64 { vals, valid } => View::F(vals, valid),
             Col::Bool { vals, valid } => View::B(vals, valid),

@@ -152,28 +152,30 @@ pub fn join(
         out.push((final_name, packed));
     };
 
+    let left_cols = left.columns(line, col)?;
+    let right_cols = right.columns(line, col)?;
     if how == "right" {
-        for (name, c) in left.columns() {
+        for (name, c) in &left_cols {
             if key_at(name).is_none() {
-                push(name.clone(), c.take_opt(&left_idx), &mut out);
+                push((*name).clone(), c.take_opt(&left_idx), &mut out);
             }
         }
-        for (name, c) in right.columns() {
+        for (name, c) in &right_cols {
             match key_at(name) {
-                Some(k) => push(name.clone(), coalesced(k)?, &mut out),
-                None => push(name.clone(), c.take_opt(&right_idx), &mut out),
+                Some(k) => push((*name).clone(), coalesced(k)?, &mut out),
+                None => push((*name).clone(), c.take_opt(&right_idx), &mut out),
             }
         }
     } else {
-        for (name, c) in left.columns() {
+        for (name, c) in &left_cols {
             match key_at(name) {
-                Some(k) => push(name.clone(), coalesced(k)?, &mut out),
-                None => push(name.clone(), c.take_opt(&left_idx), &mut out),
+                Some(k) => push((*name).clone(), coalesced(k)?, &mut out),
+                None => push((*name).clone(), c.take_opt(&left_idx), &mut out),
             }
         }
-        for (name, c) in right.columns() {
+        for (name, c) in &right_cols {
             if key_at(name).is_none() {
-                push(name.clone(), c.take_opt(&right_idx), &mut out);
+                push((*name).clone(), c.take_opt(&right_idx), &mut out);
             }
         }
     }

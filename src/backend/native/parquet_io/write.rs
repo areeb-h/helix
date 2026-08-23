@@ -43,8 +43,9 @@ pub fn write_parquet(
 ) -> Result<(), HelixError> {
     let werr = |e: parquet::errors::ParquetError| pq_err("write", path, e, line, col);
 
-    let fields: Vec<TypePtr> = frame
-        .columns()
+    let frame_cols =
+        frame.columns(line, col).map_err(|e| pq_err("write", path, e.message, line, col))?;
+    let fields: Vec<TypePtr> = frame_cols
         .iter()
         .map(|(name, c)| {
             let builder = match c {
@@ -91,10 +92,9 @@ pub fn write_parquet(
             .build(),
     );
 
-    let views: Vec<WView> = frame
-        .columns()
+    let views: Vec<WView> = frame_cols
         .iter()
-        .map(|(_, c)| match c {
+        .map(|(_, c)| match *c {
             Col::I64 { vals, valid } => WView::I(vals, valid),
             Col::F64 { vals, valid } => WView::F(vals, valid),
             Col::Bool { vals, valid } => WView::B(vals, valid),

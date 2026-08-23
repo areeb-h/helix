@@ -17,6 +17,7 @@ mod rle;
 mod write;
 
 pub use read::read_parquet;
+pub(crate) use read::{PendingCol, SendCol};
 pub use write::write_parquet;
 
 use crate::error::HelixError;

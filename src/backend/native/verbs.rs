@@ -63,7 +63,11 @@ pub fn with_columns(
     line: usize,
     col: usize,
 ) -> Result<NativeFrame, HelixError> {
-    let mut out = frame.columns().to_vec();
+    let mut out: Vec<(String, Col)> = frame
+        .columns(line, col)?
+        .iter()
+        .map(|(n, c)| ((*n).clone(), (*c).clone()))
+        .collect();
     for (name, expr) in cols {
         // Typed arithmetic first; the boxed evaluator stays the semantics.
         let packed = if let Some(r) = super::fast::eval_typed(frame, expr, line, col) {
@@ -92,19 +96,26 @@ pub fn vstack(
     line: usize,
     col: usize,
 ) -> Result<NativeFrame, HelixError> {
-    let (a, b) = (top.columns(), bottom.columns());
-    let names = |cs: &[(String, Col)]| cs.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
-    if names(a) != names(b) {
+    let a = top.columns(line, col)?;
+    let b = bottom.columns(line, col)?;
+    let names = |cs: &[(&String, &Col)]| {
+        cs.iter().map(|(n, _)| (*n).clone()).collect::<Vec<_>>()
+    };
+    if names(&a) != names(&b) {
         return Err(HelixError::new(
             "vstack needs both frames to have the same columns in the same order",
             line,
             col,
         )
-        .hint(format!("left: [{}]; right: [{}].", names(a).join(", "), names(b).join(", "))));
+        .hint(format!(
+            "left: [{}]; right: [{}].",
+            names(&a).join(", "),
+            names(&b).join(", ")
+        )));
     }
     // The eager dtype check (spec §6) — a strict improvement over erroring at
     // some later materialization.
-    for ((n, ca), (_, cb)) in a.iter().zip(b) {
+    for ((n, ca), (_, cb)) in a.iter().zip(&b) {
         if !ca.same_dtype(cb) {
             return Err(HelixError::new(
                 format!(
@@ -119,11 +130,11 @@ pub fn vstack(
     }
     let cols: Vec<(String, Col)> = a
         .iter()
-        .zip(b)
+        .zip(&b)
         .map(|((n, ca), (_, cb))| {
             let mut cells: Vec<Value> = (0..ca.len()).map(|i| ca.get(i)).collect();
             cells.extend((0..cb.len()).map(|i| cb.get(i)));
-            Col::from_values(n, &cells, line, col).map(|c| (n.clone(), c))
+            Col::from_values(n, &cells, line, col).map(|c| ((*n).clone(), c))
         })
         .collect::<Result<_, _>>()?;
     NativeFrame::new(cols, line, col)
@@ -137,7 +148,7 @@ pub fn unique_by(
 ) -> Result<NativeFrame, HelixError> {
     use std::collections::HashMap;
     let key_cols: Vec<&Col> = if subset.is_empty() {
-        frame.columns().iter().map(|(_, c)| c).collect()
+        frame.columns(line, col)?.into_iter().map(|(_, c)| c).collect()
     } else {
         subset.iter().map(|k| frame.col(k, line, col)).collect::<Result<_, _>>()?
     };

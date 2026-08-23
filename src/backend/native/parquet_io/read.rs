@@ -14,7 +14,6 @@ use parquet::basic::{ConvertedType, LogicalType, Repetition, TimeUnit, Type as P
 use parquet::column::reader::ColumnReader;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use parquet::schema::types::ColumnDescriptor;
-use rayon::prelude::*;
 
 use crate::backend::Df;
 use crate::error::HelixError;
@@ -105,9 +104,47 @@ fn classify(desc: &ColumnDescriptor, path: &str, line: usize, col: usize) -> Res
     })
 }
 
+/// A parquet column not yet decoded: everything needed to produce it, Send so
+/// a full materialization can fan out. Decoding is memoized by the frame.
+pub(crate) struct PendingCol {
+    bytes: bytes::Bytes,
+    ci: usize,
+    kind: Kind,
+    rows: usize,
+}
+
+impl PendingCol {
+    /// The worker half: everything Send. Runs on rayon for a full
+    /// materialization, inline for a single-column touch.
+    pub(crate) fn decode_send(&self) -> Result<SendCol, String> {
+        read_column(&self.bytes, self.ci, &self.kind, self.rows)
+    }
+
+    /// The main-thread half: wrap into the engine's Rc'd column.
+    pub(crate) fn finish(seg: SendCol) -> Col {
+        match seg {
+            SendCol::I64(vals, valid) => Col::I64 { vals, valid },
+            SendCol::F64(vals, valid) => Col::F64 { vals, valid },
+            SendCol::Bool(vals, valid) => Col::Bool { vals, valid },
+            SendCol::Str { dict, codes, valid } => {
+                let mut b = StrBuilder::with_capacity(0);
+                for s in &dict {
+                    b.intern(s);
+                }
+                b.set_codes(codes, valid);
+                b.finish()
+            }
+        }
+    }
+
+    pub(crate) fn decode(&self) -> Result<Col, String> {
+        Ok(Self::finish(self.decode_send()?))
+    }
+}
+
 /// A column decoded on a worker thread — everything here is Send; the engine's
 /// `Rc` wrapping happens on the main thread.
-enum SendCol {
+pub(crate) enum SendCol {
     I64(Vec<i64>, Vec<bool>),
     F64(Vec<f64>, Vec<bool>),
     Bool(Vec<bool>, Vec<bool>),
@@ -710,39 +747,16 @@ pub fn read_parquet(path: &str, line: usize, col: usize) -> Result<Df, HelixErro
         }
     }
 
-    let kinds: Vec<Kind> = (0..schema.num_columns())
-        .map(|i| classify(schema.column(i).as_ref(), path, line, col))
-        .collect::<Result<_, _>>()?;
-    let names: Vec<String> =
-        (0..schema.num_columns()).map(|i| schema.column(i).name().to_string()).collect();
-
-    // Decode every column in parallel; each worker re-opens the (in-memory)
-    // file — a footer parse, microseconds against a column decode.
-    let segs: Vec<Result<SendCol, String>> = kinds
-        .par_iter()
-        .enumerate()
-        .map(|(ci, kind)| read_column(&bytes, ci, kind, total_rows))
-        .collect();
-
-    let mut cols: Vec<(String, Col)> = Vec::with_capacity(names.len());
-    for (name, seg) in names.into_iter().zip(segs) {
-        let seg = seg.map_err(|m| pq_err("read", path, m, line, col))?;
-        let c = match seg {
-            SendCol::I64(vals, valid) => Col::I64 { vals, valid },
-            SendCol::F64(vals, valid) => Col::F64 { vals, valid },
-            SendCol::Bool(vals, valid) => Col::Bool { vals, valid },
-            SendCol::Str { dict, codes, valid } => {
-                // The worker's dictionary wraps into the engine's Rc form —
-                // per DISTINCT value, not per cell.
-                let mut b = StrBuilder::with_capacity(0);
-                let trans: Vec<u32> = dict.iter().map(|s| b.intern(s)).collect();
-                let _ = trans; // codes are already the worker's dict order,
-                               // which intern() reproduces 1:1 on a fresh builder
-                b.set_codes(codes, valid);
-                b.finish()
-            }
-        };
-        cols.push((name, c));
+    // No decoding here: every column is handed to the frame PENDING, with the
+    // row count from the footer — `count()` and `cache()` never touch a page,
+    // and a verb that reads two columns decodes exactly two.
+    let mut cols = Vec::with_capacity(schema.num_columns());
+    for i in 0..schema.num_columns() {
+        let kind = classify(schema.column(i).as_ref(), path, line, col)?;
+        cols.push((
+            schema.column(i).name().to_string(),
+            PendingCol { bytes: bytes.clone(), ci: i, kind, rows: total_rows },
+        ));
     }
-    NativeFrame::new(cols, line, col).map(|f| Rc::new(f) as Df)
+    Ok(Rc::new(NativeFrame::new_pending(cols, total_rows)) as Df)
 }
