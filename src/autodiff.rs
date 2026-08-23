@@ -829,6 +829,12 @@ pub fn differentiable_builtin(name: &str) -> bool {
     )
 }
 
+/// The forward value's rank — the tracked-fold element gate uses it to admit
+/// exactly the tracked SCALARS the plain folds' number rule admits.
+pub fn node_ndim(n: &Rc<Node>) -> usize {
+    n.value.ndim()
+}
+
 /// The tape's own method names. `ufcs_fallback_applies` consults this so a
 /// FAILED method call on a tracked value may retry as the free builtin
 /// (`v.to_array()` → `to_array(v)`, `v.tan()` → `tan(v)`), while a name the
@@ -851,6 +857,8 @@ pub fn is_tape_method(name: &str) -> bool {
             | "sin"
             | "cos"
             | "abs"
+            | "max"
+            | "min"
             | "shape"
             | "count"
             | "ndim"
@@ -886,6 +894,62 @@ pub fn method(n: &Rc<Node>, name: &str, args: &[Value], line: usize, col: usize)
         "relu" | "sigmoid" | "tanh" | "exp" | "ln" | "sqrt" | "sin" | "cos" | "abs" => {
             no_method_args(name, args, line, col)?;
             unary_builtin(name, &Value::Node(n.clone()), line, col)
+        }
+        // The reductions a PLAIN tensor answers, on the tape (the sweep found
+        // `variable(tensor).max()` stolen by the UFCS fallback into the 2-arg
+        // scalar builtin, with an arity error misdescribing the program).
+        // 0 args = the reduction — gradient 1 to the FIRST extreme element in
+        // logical order, ties-to-first like the scalar pair; 1 arg = the
+        // elementwise binary twin, exactly `max(v, other)`.
+        "max" | "min" => {
+            if args.len() == 1 {
+                return binary_builtin(name, &Value::Node(n.clone()), &args[0], line, col);
+            }
+            no_method_args(name, args, line, col)?;
+            if n.value.is_empty() {
+                return Err(HelixError::new(
+                    format!("cannot take the `{name}` of an empty tensor"),
+                    line,
+                    col,
+                ));
+            }
+            let want_max = name == "max";
+            let mut best: Option<(ndarray::IxDyn, f64)> = None;
+            for (idx, &x) in n.value.indexed_iter() {
+                let better = match &best {
+                    None => true,
+                    Some((_, b)) => {
+                        if want_max {
+                            x > *b
+                        } else {
+                            x < *b
+                        }
+                    }
+                };
+                if better {
+                    best = Some((idx.clone(), x));
+                }
+            }
+            let Some((at, x)) = best else {
+                return Err(HelixError::new(
+                    format!("cannot take the `{name}` of an empty tensor"),
+                    line,
+                    col,
+                ));
+            };
+            let value = scalar(x);
+            let shape = n.value.raw_dim();
+            let out = make(
+                value,
+                vec![n.clone()],
+                Box::new(move |g| {
+                    let s = *g.first().unwrap_or(&0.0);
+                    let mut grad = ArrayD::zeros(shape.clone());
+                    grad[&at] = s;
+                    vec![grad]
+                }),
+            );
+            Ok(Value::Node(out))
         }
         // Metadata, not mathematics: how big a value is does not depend on the
         // tape, and answering "no differentiable method `shape`" would mean

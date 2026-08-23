@@ -14,7 +14,7 @@ false
 true
 missing
 true
-cannot order String and Int — `<` compares two numbers, two strings, or two DNA sequences
+cannot order a String and an Int — `<` compares two numbers, two strings, two DNA sequences, or two tuples of those
 true
 1
 --- stderr ---

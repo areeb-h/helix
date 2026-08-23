@@ -722,6 +722,12 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
         (Value::Rational(a), Value::Float(b)) | (Value::Float(b), Value::Rational(a)) => {
             a.to_f64() == Some(*b)
         }
+        // Structural, like every other container: same shape, elementwise
+        // equal (IEEE per element, so a NaN cell makes the pair unequal).
+        // The sweep found `t == t` silently false through the catch-all.
+        (Value::Tensor(a), Value::Tensor(b)) => {
+            a.shape() == b.shape() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
+        }
         (Value::Array(a), Value::Array(b)) => {
             use crate::value::ArrayData::{Floats, Ints};
             match (&**a, &**b) {
@@ -798,17 +804,33 @@ fn compare(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<
             {
                 return Err(HelixError::new(
                     format!(
-                        "cannot order {} and {} — `{}` compares two numbers, two strings, or two DNA sequences",
-                        l.type_name(),
-                        r.type_name(),
+                        "cannot order {} and {} — `{}` compares two numbers, two strings, two DNA sequences, or two tuples of those",
+                        crate::value::with_article(l.type_name()),
+                        crate::value::with_article(r.type_name()),
                         op.symbol()
                     ),
                     line,
                     col,
                 ));
             }
-            let a = num_operand(op, l, line, col)?;
-            let b = num_operand(op, r, line, col)?;
+            // The unorderable tail. Name the failing SIDE and the truthful
+            // list — "needs numbers" was wrong advice (`"a" < "b"` and tuple
+            // ordering are legal), exactly what the checker's twin now says.
+            let (a, b) = match (l.as_f64(), r.as_f64()) {
+                (Some(a), Some(b)) => (a, b),
+                (a, _) => {
+                    let bad = if a.is_none() { l } else { r };
+                    return Err(HelixError::new(
+                        format!(
+                            "`{}` cannot order {} — it compares two numbers, two strings, two DNA sequences, or two tuples of those",
+                            op.symbol(),
+                            crate::value::with_article(bad.type_name())
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+            };
             a.partial_cmp(&b).ok_or_else(|| {
                 HelixError::new("cannot compare these values (NaN?)", line, col).hint(
                     "a NaN has no order — guard it first with `is_nan(x)` / `is_finite(x)`.",

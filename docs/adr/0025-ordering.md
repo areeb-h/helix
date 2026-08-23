@@ -520,3 +520,15 @@ measures how well the current behaviour is pinned, not how much users depend on 
   one component, and the current workaround (negating the key) stops working the moment
   the key is a tuple. Worth deciding before tuples land in `sort`, or the first real user
   hits it immediately.
+
+## Addendum (2026-08-24): the refusal wording tells the operator's truth
+
+The unorderable-type refusal changed from "operator `<` needs numbers, but got
+a Bool" to "`<` cannot order a Bool — it compares two numbers, two strings,
+two DNA sequences, or two tuples of those", at the checker AND the runtime
+(they now say the same sentence). NO ordering decision changed — the same
+programs refuse — but the old wording predated string/DNA/tuple ordering and
+misdescribed the operator (the stabilization sweep found the runtime still
+carrying it, plus a mixed-pair variant that omitted tuples while refusing a
+tuple). The ordering-matrix pins were updated in this same commit, as this
+file requires.

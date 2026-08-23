@@ -248,6 +248,42 @@ pub fn elementwise(
     Ok(out)
 }
 
+/// The closure-kernel twin of [`elementwise`]: numeric builtins (min/max/
+/// clamp/hypot) broadcast arbitrary f64 kernels through the same shape rules.
+pub fn zip_with(
+    a: &Tensor,
+    b: &Tensor,
+    f: impl Fn(f64, f64) -> f64,
+    line: usize,
+    col: usize,
+) -> Result<Tensor, HelixError> {
+    let shape = broadcast_shape(a.shape(), b.shape()).ok_or_else(|| {
+        HelixError::new(
+            format!("cannot broadcast tensors of shape {:?} and {:?}", a.shape(), b.shape()),
+            line,
+            col,
+        )
+        .hint("shapes must match, or a dimension of 1 stretches to fit (NumPy rules).")
+    })?;
+    let bcast_err = || {
+        HelixError::new(
+            format!("cannot broadcast tensors of shape {:?} and {:?}", a.shape(), b.shape()),
+            line,
+            col,
+        )
+    };
+    let av = a.broadcast(IxDyn(&shape)).ok_or_else(bcast_err)?;
+    let bv = b.broadcast(IxDyn(&shape)).ok_or_else(bcast_err)?;
+    let mut out = ArrayD::zeros(IxDyn(&shape));
+    Zip::from(&mut out).and(&av).and(&bv).for_each(|o, &x, &y| *o = f(x, y));
+    Ok(out)
+}
+
+/// A 0-D scalar tensor — the broadcast identity for scalar-vs-tensor calls.
+pub fn scalar(x: f64) -> Tensor {
+    ArrayD::from_elem(IxDyn(&[]), x)
+}
+
 pub fn scalar_op(op: &BinOp, t: &Tensor, s: f64, tensor_left: bool) -> Tensor {
     if tensor_left {
         t.mapv(|x| apply(op, x, s))

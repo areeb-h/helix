@@ -31,54 +31,118 @@ impl super::Interp {
         if matches!(name, "assert" | "assert_eq" | "assert_close") {
             ASSERTIONS_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        // The dispatch chain: each topical module answers its own names and
-        // hands the arguments back otherwise. Order is cold-to-hot agnostic —
-        // every module's guard is one `matches!` over its literal names.
-        let args = args;
-        let args = match output::call(name, args, line, col) {
-            Called::Done(r) => return r,
-            Called::Not(a) => a,
-        };
-        let args = match corefns::call(name, args, line, col) {
-            Called::Done(r) => return r,
-            Called::Not(a) => a,
-        };
-        let args = match mathfns::call(name, args, line, col) {
-            Called::Done(r) => return r,
-            Called::Not(a) => a,
-        };
-        let args = match stats::call(name, args, line, col) {
-            Called::Done(r) => return r,
-            Called::Not(a) => a,
-        };
-        let args = match autodiff_fns::call(name, args, line, col) {
-            Called::Done(r) => return r,
-            Called::Not(a) => a,
-        };
-        let args = match tensors::call(name, args, line, col) {
-            Called::Done(r) => return r,
-            Called::Not(a) => a,
-        };
-        let args = match frames::call(name, args, line, col) {
-            Called::Done(r) => return r,
-            Called::Not(a) => a,
-        };
-        let args = match encoding::call(name, args, line, col) {
-            Called::Done(r) => return r,
-            Called::Not(a) => a,
-        };
-        let args = match io::call(name, args, line, col) {
-            Called::Done(r) => return r,
-            Called::Not(a) => a,
-        };
-        let args = match net::call(name, args, line, col) {
-            Called::Done(r) => return r,
-            Called::Not(a) => a,
-        };
-        let args = match bio::call(name, args, line, col) {
-            Called::Done(r) => return r,
-            Called::Not(a) => a,
-        };
+        // ONE routing decision, straight to the arm: this match is the
+        // original one-file dispatch's decision structure — each arm is an
+        // #[inline] function in its topical module, so the organized layout
+        // costs nothing (dispatch benchmark: old-vs-new at parity).
+        match name {
+            "print" => return output::a_print(args, line, col),
+            "emit" => return output::a_emit(name, args, line, col),
+            "write" => return output::a_write(name, args, line, col),
+            "elog" => return output::a_elog(name, args, line, col),
+            "read_int" => return output::a_read_int(name, args, line, col),
+            "sleep" => return output::a_sleep(name, args, line, col),
+            "assert" => return output::a_assert(args, line, col),
+            "raise" => return output::a_raise(args, line, col),
+            "source_path" => return output::a_source_path(name, args, line, col),
+            "assert_eq" => return output::a_assert_eq(name, args, line, col),
+            "assert_close" => return output::a_assert_close(args, line, col),
+            "clock_monotonic" => return output::a_clock_monotonic(name, args, line, col),
+            "range" => return corefns::a_range(args, line, col),
+            "chr" => return corefns::a_chr(name, args, line, col),
+            "ord" => return corefns::a_ord(name, args, line, col),
+            "to_float" => return corefns::a_to_float(name, args, line, col),
+            "dict" => return corefns::a_dict(args, line, col),
+            "to_int" => return corefns::a_to_int(name, args, line, col),
+            "random" => return mathfns::a_random(args, line, col),
+            "randn" => return mathfns::a_randn(args, line, col),
+            "random_int" => return mathfns::a_random_int(args, line, col),
+            "sqrt" | "cbrt" | "exp" | "ln" | "log10" | "log2" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "sinh" | "cosh" | "tanh" | "degrees" | "radians" | "erf" | "normal_cdf" | "normal_pdf" | "relu" | "sigmoid" => return mathfns::a_sqrt(name, args, line, col),
+            "floor" | "ceil" | "trunc" => return mathfns::a_floor(name, args, line, col),
+            "round" => return mathfns::a_round(args, line, col),
+            "abs" => return mathfns::a_abs(name, args, line, col),
+            "sign" => return mathfns::a_sign(name, args, line, col),
+            "is_nan" => return mathfns::a_is_nan(name, args, line, col),
+            "is_finite" => return mathfns::a_is_finite(name, args, line, col),
+            "is_infinite" => return mathfns::a_is_infinite(name, args, line, col),
+            "log" => return mathfns::a_log(name, args, line, col),
+            "atan2" => return mathfns::a_atan2(name, args, line, col),
+            "hypot" => return mathfns::a_hypot(name, args, line, col),
+            "gcd" => return mathfns::a_gcd(name, args, line, col),
+            "primes" => return mathfns::a_primes(name, args, line, col),
+            "isqrt" => return mathfns::a_isqrt(name, args, line, col),
+            "rational" => return mathfns::a_rational(name, args, line, col),
+            "numerator" | "denominator" => return mathfns::a_numerator(name, args, line, col),
+            "lll" => return mathfns::a_lll(args, line, col),
+            "lll_exact" => return mathfns::a_lll_exact(args, line, col),
+            "min" | "max" => return mathfns::a_min(name, args, line, col),
+            "clamp" => return mathfns::a_clamp(name, args, line, col),
+            "correlation" => return stats::a_correlation(name, args, line, col),
+            "t_test" => return stats::a_t_test(name, args, line, col),
+            "linear_regression" => return stats::a_linear_regression(name, args, line, col),
+            "multiple_regression" => return stats::a_multiple_regression(name, args, line, col),
+            "least_squares" => return stats::a_least_squares(name, args, line, col),
+            "mse" | "rmse" | "mae" | "r2_score" => return stats::a_mse(name, args, line, col),
+            "aic" | "bic" => return stats::a_aic(name, args, line, col),
+            "accuracy" => return stats::a_accuracy(name, args, line, col),
+            "precision" | "recall" | "f1_score" => return stats::a_precision(name, args, line, col),
+            "confusion_matrix" => return stats::a_confusion_matrix(name, args, line, col),
+            "variable" => return autodiff_fns::a_variable(name, args, line, col),
+            "value_of" => return autodiff_fns::a_value_of(name, args, line, col),
+            "gradient" => return autodiff_fns::a_gradient(name, args, line, col),
+            "to_array" => return tensors::a_to_array(name, args, line, col),
+            "to_tensor" => return tensors::a_to_tensor(name, args, line, col),
+            "tensor" => return tensors::a_tensor(name, args, line, col),
+            "zeros" | "ones" => return tensors::a_zeros(name, args, line, col),
+            "eye" => return tensors::a_eye(name, args, line, col),
+            "argmax" | "argmin" => return tensors::a_argmax(name, args, line, col),
+            "linspace" => return tensors::a_linspace(name, args, line, col),
+            "to_dataframe" => return frames::a_to_dataframe(name, args, line, col),
+            "dataframe" => return frames::a_dataframe(name, args, line, col),
+            "sha256" => return encoding::a_sha256(name, args, line, col),
+            "hmac_sha256" => return encoding::a_hmac_sha256(name, args, line, col),
+            "url_encode" => return encoding::a_url_encode(args, line, col),
+            "url_decode" => return encoding::a_url_decode(name, args, line, col),
+            "url_decode_lenient" => return encoding::a_url_decode_lenient(name, args, line, col),
+            "base64_encode" => return encoding::a_base64_encode(name, args, line, col),
+            "base64_decode" => return encoding::a_base64_decode(name, args, line, col),
+            "hex_encode" => return encoding::a_hex_encode(name, args, line, col),
+            "hex_decode" => return encoding::a_hex_decode(name, args, line, col),
+            "aes_keygen" => return encoding::a_aes_keygen(name, args, line, col),
+            "aes_encrypt" => return encoding::a_aes_encrypt(name, args, line, col),
+            "aes_decrypt" => return encoding::a_aes_decrypt(name, args, line, col),
+            "ed25519_keygen" => return encoding::a_ed25519_keygen(name, args, line, col),
+            "ed25519_sign" => return encoding::a_ed25519_sign(name, args, line, col),
+            "ed25519_verify" => return encoding::a_ed25519_verify(name, args, line, col),
+            "read_csv" => return io::a_read_csv(name, args, line, col),
+            "read_text" => return io::a_read_text(name, args, line, col),
+            "read_json" => return io::a_read_json(name, args, line, col),
+            "file_exists" => return io::a_file_exists(name, args, line, col),
+            "read_dir" => return io::a_read_dir(name, args, line, col),
+            "remove_file" => return io::a_remove_file(name, args, line, col),
+            "mkdir" => return io::a_mkdir(name, args, line, col),
+            "read_parquet" => return io::a_read_parquet(name, args, line, col),
+            "listen" => return net::a_listen(args, line, col),
+            "http_get" => return net::a_http_get(name, args, line, col),
+            "http_post" => return net::a_http_post(name, args, line, col),
+            "http_request" => return net::a_http_request(name, args, line, col),
+            "http_stream" => return net::a_http_stream(name, args, line, col),
+            "cookie_jar" => return net::a_cookie_jar(name, args, line, col),
+            "parse_cookies" => return net::a_parse_cookies(name, args, line, col),
+            "parse_set_cookie" => return net::a_parse_set_cookie(name, args, line, col),
+            "headers" => return net::a_headers(name, args, line, col),
+            "dna" => return bio::a_dna(name, args, line, col),
+            "read_vcf" => return bio::a_read_vcf(args, line, col),
+            "read_bcf" => return bio::a_read_bcf(name, args, line, col),
+            "read_sam" => return bio::a_read_sam(name, args, line, col),
+            "read_bam" => return bio::a_read_bam(args, line, col),
+            "read_gff" => return bio::a_read_gff(name, args, line, col),
+            "read_bed" => return bio::a_read_bed(name, args, line, col),
+            "read_fasta" => return bio::a_read_fasta(name, args, line, col),
+            "read_fastq" => return bio::a_read_fastq(name, args, line, col),
+            "align" => return bio::a_align(args, line, col),
+            _ => {}
+        }
         let _ = args;
         let err =
             HelixError::new(format!("`{}` is not a known function", name), line, col);
@@ -89,14 +153,8 @@ impl super::Interp {
     }
 }
 
-/// One topical module's answer: it either OWNED the name (Done) or hands the
-/// arguments back untouched (Not) for the next module in the chain.
-pub(super) enum Called {
-    Done(Result<Value, HelixError>),
-    Not(Vec<Value>),
-}
-
 mod output;
+pub(crate) use output::{capture_begin, capture_take};
 mod corefns;
 mod mathfns;
 mod stats;
@@ -399,6 +457,18 @@ fn validate_request_fields(
         }
     }
     Ok(())
+}
+
+/// A numeric operand as a tensor for the broadcasting builtins: tensors pass
+/// through, plain numbers become 0-D scalars, everything else answers None —
+/// the caller's scalar path owns that error.
+pub(super) fn tensor_operand(v: &Value) -> Option<crate::tensor::Tensor> {
+    match v {
+        Value::Tensor(t) => Some((**t).clone()),
+        Value::Int(i) => Some(crate::tensor::scalar(*i as f64)),
+        Value::Float(x) => Some(crate::tensor::scalar(*x)),
+        _ => None,
+    }
 }
 
 fn http_request_fields(req: &Value, line: usize, col: usize) -> Result<HttpReqParts, HelixError> {

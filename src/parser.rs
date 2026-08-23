@@ -875,6 +875,28 @@ impl Parser {
             && matches!(self.peek_at(k + 1), Tok::Ident(_))
             && matches!(self.peek_at(k + 2), Tok::Eq);
         if !gate {
+            // NEAR-MISS teaching (the sweep's three natural mistakes all fell
+            // through to a generic "no `;`" error that misdescribed them):
+            // `where` followed by a NAME but no `=` is a malformed clause —
+            // a missing `=`, an attempted destructure, or a stray token —
+            // never two statements.
+            if matches!(self.peek_at(k), Tok::Ident(n) if n == "where")
+                && matches!(self.peek_at(k + 1), Tok::Ident(_))
+            {
+                for _ in 0..=k {
+                    self.advance();
+                }
+                let (l, c) = self.pos();
+                return Err(HelixError::new(
+                    "malformed `where` clause after this function",
+                    l,
+                    c,
+                )
+                .hint(
+                    "a binding is `where NAME = value`; several separate with commas \
+                     (`where a = 1, b = a + 2`). One `where` per fn, and no destructuring.",
+                ));
+            }
             return Ok(body);
         }
         for _ in 0..=k {
@@ -888,13 +910,49 @@ impl Parser {
             let value = self.expr()?;
             bindings.push((name, value));
             if matches!(self.peek(), Tok::Comma) {
+                let (cl, cc) = self.pos();
                 self.advance();
                 while matches!(self.peek(), Tok::Newline) {
                     self.advance();
                 }
+                // A comma must be FOLLOWED by a binding — otherwise it would
+                // swallow the next statement's first token as a binding name
+                // and caret a perfectly well-formed line (the sweep's
+                // trailing-comma finding).
+                if !(matches!(self.peek(), Tok::Ident(_))
+                    && matches!(self.peek_at(1), Tok::Eq))
+                {
+                    return Err(HelixError::new(
+                        "expected another binding after the comma in this `where` clause",
+                        cl,
+                        cc,
+                    )
+                    .hint("remove the trailing comma, or add the binding: `where a = 1, b = 2`."));
+                }
                 continue;
             }
             break;
+        }
+        // A SECOND stacked `where` line is the natural Haskell-style spelling —
+        // teach the comma form instead of letting it fall through to a generic
+        // statement error.
+        let mut k2 = 0usize;
+        while matches!(self.peek_at(k2), Tok::Newline) {
+            k2 += 1;
+        }
+        if matches!(self.peek_at(k2), Tok::Ident(n) if n == "where")
+            && matches!(self.peek_at(k2 + 1), Tok::Ident(_))
+        {
+            for _ in 0..=k2 {
+                self.advance();
+            }
+            let (l, c) = self.pos();
+            return Err(HelixError::new(
+                "a function takes ONE `where` clause",
+                l,
+                c,
+            )
+            .hint("separate the bindings with commas: `where a = 1, b = 2`."));
         }
         Ok(Expr::Let { bindings, body: Box::new(body) })
     }

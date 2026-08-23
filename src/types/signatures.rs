@@ -350,6 +350,17 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             if any(args, |t| matches!(t, Type::Missing)) {
                 return Ok(Type::Missing);
             }
+            // min/max/hypot broadcast over tensors like the rest of the math
+            // family (atan2 stays scalar — its runtime is scalar-only).
+            let tensor_ok = !matches!(name, "atan2");
+            if tensor_ok && any(args, |t| matches!(t, Type::Tensor)) {
+                for a in args {
+                    if !is_numeric(a) && !matches!(a, Type::Tensor) {
+                        return Err(type_err(name, "a number or tensor", a, line, col));
+                    }
+                }
+                return Ok(Type::Tensor);
+            }
             for a in args {
                 if !is_numeric(a) {
                     return Err(type_err(name, "a number", a, line, col));
@@ -371,6 +382,14 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             if any(args, |t| matches!(t, Type::Missing)) {
                 return Ok(Type::Missing);
+            }
+            if any(args, |t| matches!(t, Type::Tensor)) {
+                for a in args {
+                    if !is_numeric(a) && !matches!(a, Type::Tensor) {
+                        return Err(type_err(name, "a number or tensor", a, line, col));
+                    }
+                }
+                return Ok(Type::Tensor);
             }
             for a in args {
                 if !is_numeric(a) {

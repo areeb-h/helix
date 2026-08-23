@@ -305,28 +305,30 @@ A fresh random AES-256 key, as 64 hex chars.
 
 ### `ed25519_keygen()`
 
-A fresh Ed25519 signing keypair record {public, secret} (hex).
+A fresh Ed25519 keypair record {private, public} (hex).
 
 **Note:** fresh randomness each call — a run is not reproducible; store keys, never regenerate.
 
 ```
->>> ed25519_keygen().public.length()
+>>> ed25519_keygen().keys()
 ```
 
-### `ed25519_sign(message, secret)`
+### `ed25519_sign(private, message)`
 
-Sign a message with a secret key; the signature comes back hex-encoded.
+Sign a message with the PRIVATE key (key first); the signature is hex.
 
-```
->>> ed25519_sign("msg", key.secret)
-```
-
-### `ed25519_verify(message, signature, public)`
-
-Verify an Ed25519 signature; answers a Bool, never raises on a bad one.
+**Note:** argument order is (key, message) — the sweep found the docs had it reversed.
 
 ```
->>> ed25519_verify("msg", sig, key.public)
+>>> ed25519_sign(ed25519_keygen().private, "msg").length()
+```
+
+### `ed25519_verify(public, message, signature)`
+
+Verify a signature (public key first); answers a Bool, never raises on a bad one.
+
+```
+>>> ed25519_verify(kp.public, "msg", sig)
 ```
 
 ### `hmac_sha256(key, message)`

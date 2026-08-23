@@ -5531,6 +5531,92 @@ bANana 3 1
     }
 }
 
+/// The stabilization sweep's findings, closed and pinned in one program:
+/// unary minus on plain tensors and rationals; tensor `==` structural (t == t
+/// was silently false); plain max/min/clamp/hypot broadcast over tensors
+/// (they refused what their tracked twins answered — the forked-by-capability
+/// wound); tracked tensor `.max()`/`.min()` reductions with ties-to-first
+/// gradients; the tracked-fold element gate (a tracked tensor in an array
+/// fold refuses with the plain fold's words; missing propagates); and the
+/// runtime ordering refusals tell the same truth the checker tells.
+#[test]
+fn the_sweep_findings_stay_closed() {
+    let src = r#"
+t = tensor([1.0, -2.0])
+print(-t, t == t, t != t, t == tensor([1.0, -2.0]), t == tensor([1.0, 2.0]))
+q = rational(1, 3)
+print(-q)
+print(max(t, 0.0), min(t, 0.0), clamp(tensor([5.0, -5.0, 0.5]), -1.0, 1.0), hypot(tensor([3.0]), 4.0))
+vt = variable(tensor([4.0, 1.0, 4.0]))
+mx = vt.max()
+print(value_of(mx), gradient(mx, vt))
+mn = variable(tensor([[2.0, 0.5], [3.0, 9.0]])).min()
+print(value_of(mn))
+s1 = try([variable(tensor([1.0])), 1.0].sum())
+print(s1.ok, s1.error)
+s2 = [variable(1.0), missing].sum()
+print(s2)
+# r1 checked statically — the laundered r2 below exercises the runtime path
+fn launder(x) = x
+r2 = try(launder(true) < launder(false))
+print(r2.ok, r2.error)
+r3 = try(launder((1, 2)) < launder("a"))
+print(r3.error)
+print((1, 2) < (2, 1))
+"#;
+    let want = "[-1, 2] true false true false
+-1/3
+[1, 0] [0, -2] [1, -1, 0.5] [5]
+4.0 [1, 0, 0]
+0.5
+false `sum` needs an array of numbers, but element 0 is a tracked tensor
+missing
+false `<` cannot order a Bool — it compares two numbers, two strings, two DNA sequences, or two tuples of those
+cannot order a Tuple and a String — `<` compares two numbers, two strings, two DNA sequences, or two tuples of those
+true
+";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("sweep_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: a sweep fix regressed");
+    }
+
+    // The where-clause near-misses teach (they fell through to a generic
+    // "no `;`" error that misdescribed all three natural mistakes).
+    let (_, err, code) = run_source("fn f(x) = x + a
+  where a
+print(f(1))", &[], "sw_weq");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("malformed `where` clause"), "{err}");
+    let (_, err, code) =
+        run_source("fn f(x) = a + b
+  where a = 1
+  where b = 2
+print(f(1))", &[], "sw_wstack");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("ONE `where` clause"), "{err}");
+    let (_, err, code) =
+        run_source("fn f(x) = x + a
+  where a = 5,
+print(f(1))", &[], "sw_wcomma");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("after the comma in this `where` clause"), "{err}");
+
+    // The rich (TTY) renderer prints canonical order too — print(r) and
+    // "{r}" agreed in plain mode but disagreed under HELIX_RICH=1.
+    let (out, err, code) = run_source(
+        "r = {b: 1, a: 2}
+print(r)
+print(\"{r}\")",
+        &[("HELIX_RICH", "1"), ("NO_COLOR", "1")],
+        "sw_rich",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "{a: 2, b: 1}
+{a: 2, b: 1}
+", "rich renderer must sort: {out}");
+}
+
 /// ADR 0035, pinned end to end: `where` puts a fn's scaffolding after the
 /// point — a pure desugar to `let … in` (all three engines byte-identical by
 /// construction), sequential visibility between bindings, params in scope,

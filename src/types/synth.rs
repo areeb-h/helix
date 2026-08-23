@@ -84,7 +84,7 @@ impl super::Checker {
                     // one program read identically.
                     Err(HelixError::new(
                         format!(
-                            "cannot order {} and {} — `{}` compares two numbers, two strings, or two DNA sequences",
+                            "cannot order {} and {} — `{}` compares two numbers, two strings, two DNA sequences, or two tuples of those",
                             lt,
                             rt,
                             op.symbol()
@@ -93,11 +93,14 @@ impl super::Checker {
                         col,
                     ))
                 } else {
+                    // The truthful list — a "needs numbers" wording here predated
+                    // string/DNA/tuple ordering and misdescribed the operator.
+                    let bad = if is_numeric(lt) { rt } else { lt };
                     Err(HelixError::new(
                         format!(
-                            "operator `{}` needs numbers, but got a {}",
+                            "`{}` cannot order {} — it compares two numbers, two strings, two DNA sequences, or two tuples of those",
                             op.symbol(),
-                            if is_numeric(lt) { rt } else { lt }
+                            crate::value::with_article(&bad.to_string()),
                         ),
                         line,
                         col,
@@ -118,9 +121,9 @@ impl super::Checker {
                 } else {
                     Err(HelixError::new(
                         format!(
-                            "bitwise operator `{}` needs integers, but got a {}",
+                            "bitwise operator `{}` needs integers, but got {}",
                             op.symbol(),
-                            if ok(lt) { rt } else { lt }
+                            crate::value::with_article(&if ok(lt) { rt } else { lt }.to_string())
                         ),
                         line,
                         col,
@@ -141,13 +144,18 @@ impl super::Checker {
                     None => {
                         let err = HelixError::new(
                             format!(
-                                "operator `{}` needs numbers, but got a {}",
+                                "operator `{}` needs numbers, but got {}",
                                 op.symbol(),
-                                if is_numeric(lt) || matches!(lt, Type::Array(_) | Type::Tensor) {
-                                    rt
-                                } else {
-                                    lt
-                                }
+                                crate::value::with_article(
+                                    &if is_numeric(lt)
+                                        || matches!(lt, Type::Array(_) | Type::Tensor)
+                                    {
+                                        rt
+                                    } else {
+                                        lt
+                                    }
+                                    .to_string()
+                                )
                             ),
                             line,
                             col,

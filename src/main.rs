@@ -36,6 +36,7 @@ mod capability;
 mod chart;
 mod dataframe;
 mod docs;
+mod visit;
 mod doctest;
 mod error;
 mod fmt;
@@ -1408,6 +1409,10 @@ fn cli_test(args: &[String]) -> ExitCode {
     // agents were scraping `"N passed"` with a regex, which is fragile and
     // loses per-example detail (field review §3.5).
     let json = args[2..].iter().any(|a| a == "--json");
+    if let Some(bad) = args[2..].iter().find(|a| a.starts_with('-') && a.as_str() != "--json") {
+        eprintln!("error: unknown option `{bad}` for `helix test` (the only flag is `--json`)");
+        return ExitCode::FAILURE;
+    }
     let explicit: Vec<PathBuf> =
         args[2..].iter().filter(|a| a.as_str() != "--json").map(PathBuf::from).collect();
     let roots: Vec<PathBuf> = if explicit.is_empty() {
@@ -1525,7 +1530,14 @@ fn run_test_roots(
             let shown = f.strip_prefix(base).unwrap_or(f).display();
             // Per file, so one file's assertions can't vouch for the next one's.
             crate::interp::ASSERTIONS_RUN.store(0, std::sync::atomic::Ordering::Relaxed);
-            match run_file_capture(f) {
+            // Capture the file's own prints: in --json they become the event's
+            // `output` field (a test that prints used to corrupt the one-JSON-
+            // document contract — the sweep's finding); in prose they indent
+            // under the result line instead of interleaving above it.
+            crate::interp::capture_begin();
+            let file_result = run_file_capture(f);
+            let file_output = crate::interp::capture_take();
+            match file_result {
                 Ok(())
                     if crate::interp::ASSERTIONS_RUN
                         .load(std::sync::atomic::Ordering::Relaxed)
@@ -1537,10 +1549,14 @@ fn run_test_roots(
                     let looks_like_fn_tests =
                         std::fs::read_to_string(f).map(|s| s.contains("fn test_")).unwrap_or(false);
                     if json {
-                        ev.push(serde_json::json!({
+                        let mut e = serde_json::json!({
                             "kind": "file", "file": shown.to_string(), "status": "fail",
                             "detail": "ran to completion without asserting anything",
-                        }));
+                        });
+                        if !file_output.is_empty() {
+                            e["output"] = serde_json::Value::String(file_output.clone());
+                        }
+                        ev.push(e);
                     } else {
                         println!("  FAIL  {shown}");
                         println!("        this file ran to completion without asserting anything");
@@ -1562,9 +1578,13 @@ fn run_test_roots(
                 }
                 Ok(()) => {
                     if json {
-                        ev.push(serde_json::json!({
+                        let mut e = serde_json::json!({
                             "kind": "file", "file": shown.to_string(), "status": "ok",
-                        }));
+                        });
+                        if !file_output.is_empty() {
+                            e["output"] = serde_json::Value::String(file_output.clone());
+                        }
+                        ev.push(e);
                     } else {
                         println!("  ok    {shown}");
                     }
@@ -1572,10 +1592,14 @@ fn run_test_roots(
                 Err(rendered) => {
                     failed += 1;
                     if json {
-                        ev.push(serde_json::json!({
+                        let mut e = serde_json::json!({
                             "kind": "file", "file": shown.to_string(), "status": "fail",
                             "detail": rendered,
-                        }));
+                        });
+                        if !file_output.is_empty() {
+                            e["output"] = serde_json::Value::String(file_output.clone());
+                        }
+                        ev.push(e);
                     } else {
                         println!("  FAIL  {shown}");
                         // Indent the rendered error so it reads as detail under the failure.
@@ -1583,6 +1607,11 @@ fn run_test_roots(
                             println!("        {line}");
                         }
                     }
+                }
+            }
+            if !json && !file_output.is_empty() {
+                for line in file_output.lines() {
+                    println!("        | {line}");
                 }
             }
         }
@@ -1654,37 +1683,71 @@ fn emit_test_json(passed: usize, failed: usize, doc_files_skipped: usize, ev: Ve
 /// reading, and a lint that cries wolf trains people to ignore lints. Never an
 /// error, never an exit-code change.
 fn lint_source(shown: &str, src: &str) -> Vec<String> {
-    let mut notes = Vec::new();
-    let lines: Vec<&str> = src.lines().collect();
-    for (i, l) in lines.iter().enumerate() {
-        let t = l.trim_start();
-        if t.starts_with('#') {
-            continue;
-        }
-        if l.contains(".reduce(dict()") {
-            notes.push(format!(
-                "{shown}:{}: `reduce(dict(), …)` — `to_dict()` builds a Dict from pairs. \
-                 NOTE: to_dict is LAST-wins on duplicate keys; a first-wins fold keeps its reduce.",
-                i + 1
-            ));
-        }
-        for pat in ["(0 - ", "(0.0 - ", " = 0 - ", " = 0.0 - ", ", 0 - ", ", 0.0 - "] {
-            if l.contains(pat) {
-                notes.push(format!(
-                    "{shown}:{}: `0 - x` — unary minus (`-x`) works everywhere now, \
-                     tracked values included.",
-                    i + 1
-                ));
-                break;
-            }
+    use crate::ast::{BinOp, Expr};
+    let mut notes: Vec<(usize, String)> = Vec::new();
+    // The AST lints walk the real tree (src/visit.rs) — no textual guessing.
+    // A parse failure returns no notes: `check` already reported it properly.
+    if let Ok(toks) = crate::lexer::lex(src)
+        && let Ok(stmts) = crate::parser::parse(toks)
+    {
+        for s in &stmts {
+            crate::visit::walk_stmt(s, &mut |e| {
+                match e {
+                    // `xs.reduce(dict(), …)` — the fold that stands in for
+                    // `to_dict()`, with the last-wins rule attached so a
+                    // mechanical migration cannot invert a first-wins fold.
+                    Expr::Method { name, args, line, .. } if name == "reduce" => {
+                        if matches!(args.first(),
+                            Some(Expr::Call { name: n, args: a, .. }) if n == "dict" && a.is_empty())
+                        {
+                            notes.push((*line, format!(
+                                "{shown}:{line}: `reduce(dict(), …)` — `to_dict()` builds a \
+                                 Dict from pairs. NOTE: to_dict is LAST-wins on duplicate \
+                                 keys; a first-wins fold keeps its reduce."
+                            )));
+                        }
+                    }
+                    // `0 - x` / `0.0 - x` — the pre-autodiff-unary-minus idiom.
+                    Expr::Binary { op: BinOp::Sub, left, line, .. }
+                        if matches!(&**left, Expr::Int(0)) || matches!(&**left, Expr::Float(f) if *f == 0.0) =>
+                    {
+                        notes.push((*line, format!(
+                            "{shown}:{line}: `0 - x` — unary minus (`-x`) works everywhere \
+                             now, tracked values included."
+                        )));
+                    }
+                    // A `let` head past ~6 bindings: `do {{ }}` (or a `where`
+                    // clause on the fn) reads better than a long preamble.
+                    Expr::Let { bindings, body, .. } if bindings.len() > 6 => {
+                        let at = bindings
+                            .iter()
+                            .find_map(|(_, v)| crate::visit::expr_pos(v))
+                            .or_else(|| crate::visit::expr_pos(body))
+                            .map(|(l, _)| l)
+                            .unwrap_or(1);
+                        notes.push((at, format!(
+                            "{shown}:{at}: a `let` head with {} bindings — `do {{ … }}` \
+                             (sequential bindings) or a `where` clause reads better past ~6.",
+                            bindings.len()
+                        )));
+                    }
+                    _ => {}
+                }
+            });
         }
     }
+    // The doc-example lint is TEXTUAL on purpose: comments exist only in
+    // source, so text is the correct representation, not a workaround.
+    let lines: Vec<&str> = src.lines().collect();
     for (i, l) in lines.iter().enumerate() {
         let t = l.trim_start();
         if let Some(rest) = t.strip_prefix("export fn ") {
             let mut j = i;
             let mut has_example = false;
-            while j > 0 && lines[j - 1].trim_start().starts_with("##") {
+            // Any comment line continues the doc block — the doctest extractor
+            // tolerates a plain `#` between the example and the fn, so the
+            // lint must too (the sweep caught it contradicting `helix test`).
+            while j > 0 && lines[j - 1].trim_start().starts_with('#') {
                 if lines[j - 1].contains(">>>") {
                     has_example = true;
                 }
@@ -1692,15 +1755,17 @@ fn lint_source(shown: &str, src: &str) -> Vec<String> {
             }
             if !has_example {
                 let name = rest.split(['(', ' ']).next().unwrap_or("?");
-                notes.push(format!(
+                notes.push((i + 1, format!(
                     "{shown}:{}: `export fn {name}` has no `>>>` doc example — the house \
                      standard is executable docs (## with a `>>> call` and its output).",
                     i + 1
-                ));
+                )));
             }
         }
     }
-    notes
+    // Source order, numerically — a lexicographic sort put :10 before :1.
+    notes.sort_by_key(|(l, _)| *l);
+    notes.into_iter().map(|(_, n)| n).collect()
 }
 
 fn plural(n: usize) -> &'static str {

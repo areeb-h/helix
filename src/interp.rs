@@ -1133,7 +1133,11 @@ pub(crate) fn eval_unary(
                 &n,
                 line,
                 col,
-            ), // negation propagates
+            ),
+            // The sweep found `-t` refusing while `0.0 - t` and `-variable(t)`
+            // both worked — same for rationals. Every numeric value negates.
+            Value::Tensor(t) => Ok(Value::Tensor(std::rc::Rc::new(t.mapv(|x| -x)))),
+            Value::Rational(q) => Ok(Value::Rational(std::rc::Rc::new(-(*q).clone()))), // negation propagates
             other => Err(HelixError::new(
                 format!("cannot negate a value of type {}", other.type_name()),
                 line,
@@ -1837,5 +1841,6 @@ mod tests;
 mod builtins;
 /// Re-exported for `helix test`, which fails a file that asserted nothing.
 pub(crate) use builtins::ASSERTIONS_RUN;
+pub(crate) use builtins::{capture_begin, capture_take};
 
 mod comprehensions;

@@ -612,6 +612,44 @@ pub(crate) const MAX_ELEMENTS: usize = 100_000_000;
 /// method that owns its name always wins — and the caller must only consult this
 /// AFTER dispatch has failed, which is what makes the whole scheme additive: it
 /// substitutes an answer where an error stood.
+/// The tracked-fold element gate (ADR 0003): a tracked array fold must accept
+/// exactly what the plain fold accepts — numbers, with a tracked SCALAR
+/// counting as a number — and must propagate `missing`/NaN exactly as the
+/// plain fold does. Without this, wrapping ONE element in `variable(...)`
+/// silently granted folds over tensors the plain spelling refuses loudly, and
+/// `[tracked, missing].sum()` errored where the plain sum answers `missing`
+/// (both found by the stabilization sweep). `Ok(Some(v))` short-circuits with
+/// that value; `Ok(None)` means fold away.
+pub(super) fn tracked_fold_gate(
+    items: &[Value],
+    who: &str,
+    line: usize,
+    col: usize,
+) -> Result<Option<Value>, HelixError> {
+    if missing_or_nan(items) {
+        return Ok(Some(Value::Missing));
+    }
+    for (i, v) in items.iter().enumerate() {
+        let ok = match v {
+            Value::Int(_) | Value::Float(_) => true,
+            Value::Node(n) => crate::autodiff::node_ndim(n) == 0,
+            _ => false,
+        };
+        if !ok {
+            let what = match v {
+                Value::Node(_) => "a tracked tensor".to_string(),
+                other => crate::value::with_article(other.type_name()),
+            };
+            return Err(HelixError::new(
+                format!("`{who}` needs an array of numbers, but element {i} is {what}"),
+                line,
+                col,
+            ));
+        }
+    }
+    Ok(None)
+}
+
 pub(crate) fn ufcs_fallback_applies(recv: &Value, name: &str) -> bool {
     match recv {
         Value::PyObject(_)

@@ -1,6 +1,6 @@
 exit: 0
 --- stdout ---
-cannot order String and Int — `<` compares two numbers, two strings, or two DNA sequences
+cannot order a String and an Int — `<` compares two numbers, two strings, two DNA sequences, or two tuples of those
 1000000000000000019884624838656.0
 cannot sort: the array has missing values
 `fs[0]` expects 1 argument, got 2

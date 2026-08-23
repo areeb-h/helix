@@ -382,8 +382,10 @@ fn render_compact(v: &Value, opts: &RenderOpts) -> String {
             format!("{}{}{}", opts.paint(Role::Dim, "("), inner.join(", "), opts.paint(Role::Dim, ")"))
         }
         Value::Record(fields) => {
-            let inner: Vec<String> = fields
-                .iter()
+            // Canonical sorted field order — the same rule `Display` applies;
+            // the sweep found the rich (TTY) path still showing insertion
+            // order, so `print(r)` and `"{r}"` disagreed in one session.
+            let inner: Vec<String> = sorted_fields(fields)
                 .map(|(k, val)| {
                     format!("{}: {}", opts.paint(Role::Key, k.as_str()), render_compact(val, opts))
                 })
@@ -401,6 +403,17 @@ fn compact_plain(v: &Value, opts: &RenderOpts) -> String {
 
 // ---- records ----
 
+/// Fields in canonical (sorted-by-name) order — one interner resolve per
+/// name, mirroring the plain printer's rule and its perf shape.
+fn sorted_fields(fields: &[(Symbol, Value)]) -> impl Iterator<Item = &(Symbol, Value)> {
+    let mut order: Vec<usize> = (0..fields.len()).collect();
+    let names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+    if !names.windows(2).all(|w| w[0] <= w[1]) {
+        order.sort_unstable_by(|&a, &b| names[a].cmp(names[b]));
+    }
+    order.into_iter().map(move |i| &fields[i])
+}
+
 fn render_record(fields: &[(Symbol, Value)], opts: &RenderOpts) -> String {
     let inline = render_compact(&Value::Record(std::rc::Rc::new(fields.to_vec())), opts);
     let plain_w = dw(&compact_plain(&Value::Record(std::rc::Rc::new(fields.to_vec())), opts));
@@ -409,7 +422,7 @@ fn render_record(fields: &[(Symbol, Value)], opts: &RenderOpts) -> String {
     }
     let mut s = opts.paint(Role::Dim, "{");
     s.push('\n');
-    for (k, val) in fields {
+    for (k, val) in sorted_fields(fields) {
         s.push_str("  ");
         s.push_str(&opts.paint(Role::Key, k.as_str()));
         s.push_str(": ");
@@ -431,7 +444,16 @@ fn render_array(vals: &[Value], opts: &RenderOpts) -> String {
         let rows: Vec<Vec<Value>> = vals
             .iter()
             .map(|v| match v {
-                Value::Record(f) => f.iter().map(|(_, val)| val.clone()).collect(),
+                // BY KEY, not by position — rows may be construction-ordered.
+                Value::Record(f) => keys
+                    .iter()
+                    .map(|k| {
+                        f.iter()
+                            .find(|(k2, _)| k2 == k)
+                            .map(|(_, val)| val.clone())
+                            .unwrap_or(Value::Missing)
+                    })
+                    .collect(),
                 _ => Vec::new(),
             })
             .collect();
@@ -447,13 +469,17 @@ fn table_keys(vals: &[Value]) -> Option<Vec<Symbol>> {
         Value::Record(f) if !f.is_empty() => f,
         _ => return None,
     };
-    let keys: Vec<Symbol> = first.iter().map(|(k, _)| *k).collect();
+    // Canonical header order (sorted), and rows may carry the same field SET
+    // in any construction order — the table is a VIEW of values, and records
+    // print order-canonically everywhere now.
+    let mut keys: Vec<Symbol> = first.iter().map(|(k, _)| *k).collect();
+    keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     for v in &vals[1..] {
         let Value::Record(f) = v else { return None };
         if f.len() != keys.len() {
             return None;
         }
-        if f.iter().zip(&keys).any(|((k, _), want)| k != want) {
+        if !f.iter().all(|(k, _)| keys.contains(k)) {
             return None;
         }
     }

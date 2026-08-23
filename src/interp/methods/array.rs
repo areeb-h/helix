@@ -548,6 +548,9 @@ pub(crate) fn array_method(
             // spellings of one concept must not fork by capability (the v0.2.5 field
             // re-verification found `.sum()` closed and this one still open).
             if items.iter().any(|v| matches!(v, Value::Node(_))) {
+                if let Some(short) = tracked_fold_gate(items, "mean", line, col)? {
+                    return Ok(short);
+                }
                 let mut it = items.iter();
                 let mut acc = it.next().cloned().unwrap_or(Value::Int(0));
                 for v in it {
@@ -669,6 +672,9 @@ pub(crate) fn array_method(
             // differentiated while `.sum()` errored, forcing every dot product and
             // loss into hand-written folds.
             if items.iter().any(|v| matches!(v, Value::Node(_))) {
+                if let Some(short) = tracked_fold_gate(items, "sum", line, col)? {
+                    return Ok(short);
+                }
                 let mut it = items.iter();
                 let mut acc = it.next().cloned().unwrap_or(Value::Int(0));
                 for v in it {
@@ -713,6 +719,9 @@ pub(crate) fn array_method(
             // plus the ties-to-first rule means the FIRST extreme element gets
             // the gradient — deterministic, and consistent with the scalar pair.
             if items.iter().any(|v| matches!(v, Value::Node(_))) {
+                if let Some(short) = tracked_fold_gate(items, name, line, col)? {
+                    return Ok(short);
+                }
                 let mut acc = items[0].clone();
                 for v in &items[1..] {
                     acc = crate::autodiff::binary_builtin(name, &acc, v, line, col)?;
@@ -1331,9 +1340,11 @@ pub(crate) fn array_method(
                 return Err(HelixError::new("`product` takes no arguments", line, col));
             }
             // TRACKED elements: fold-mul on the tape — same rule as `.sum()`/`.mean()`.
-            // (`.max()`/`.min()` stay open: their gradient at a tie needs a subgradient
-            // decision the tape has no primitive for yet — see docs/dx-plan.md.)
+            // (`.max()`/`.min()` fold too, via the ties-to-first binary pair.)
             if items.iter().any(|v| matches!(v, Value::Node(_))) {
+                if let Some(short) = tracked_fold_gate(items, "product", line, col)? {
+                    return Ok(short);
+                }
                 let mut it = items.iter();
                 let mut acc = it.next().cloned().unwrap_or(Value::Int(1));
                 for v in it {

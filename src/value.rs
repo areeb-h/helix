@@ -794,8 +794,16 @@ impl fmt::Display for Value {
                 // printer was the one place a record's CONSTRUCTION ROUTE showed
                 // — a doc example would document one code path and fail on the
                 // other (field review §1.5). Sorting prints the VALUE.
+                //
+                // Perf shape: `as_str` takes the interner lock, so resolve each
+                // name ONCE (n locks, not n·log n·2), and an already-sorted
+                // record — the common case once writers adopt the canon — skips
+                // the index sort entirely.
+                let names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
                 let mut order: Vec<usize> = (0..fields.len()).collect();
-                order.sort_by(|&a, &b| fields[a].0.as_str().cmp(fields[b].0.as_str()));
+                if !names.windows(2).all(|w| w[0] <= w[1]) {
+                    order.sort_unstable_by(|&a, &b| names[a].cmp(names[b]));
+                }
                 write!(f, "{{")?;
                 for (i, &fi) in order.iter().enumerate() {
                     let (k, v) = &fields[fi];
@@ -878,9 +886,13 @@ pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, Helix
             Ok(s)
         }
         Value::Record(fields) => {
-            // Canonical sorted field order — the same rule `Display` applies.
+            // Canonical sorted field order — the same rule (and the same perf
+            // shape: one interner resolve per name) `Display` applies.
+            let names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
             let mut order: Vec<usize> = (0..fields.len()).collect();
-            order.sort_by(|&a, &b| fields[a].0.as_str().cmp(fields[b].0.as_str()));
+            if !names.windows(2).all(|w| w[0] <= w[1]) {
+                order.sort_unstable_by(|&a, &b| names[a].cmp(names[b]));
+            }
             let mut s = String::from("{");
             for (i, &fi) in order.iter().enumerate() {
                 let (k, val) = &fields[fi];
