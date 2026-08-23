@@ -28,6 +28,27 @@ pub fn join(
     let lkeys: Vec<&Col> = keys.iter().map(|k| left.col(k, line, col)).collect::<Result<_, _>>()?;
     let rkeys: Vec<&Col> =
         keys.iter().map(|k| right.col(k, line, col)).collect::<Result<_, _>>()?;
+    // Mismatched key dtypes: refuse, never a silent 0-row answer (the polars
+    // backend errors here too; the sweep caught native answering an empty
+    // frame with exit 0). A Null column (empty frame) constrains nothing.
+    for (i, name) in keys.iter().enumerate() {
+        let (l, r) = (lkeys[i], rkeys[i]);
+        if !l.same_dtype(r)
+            && !matches!(l, Col::Null { .. })
+            && !matches!(r, Col::Null { .. })
+        {
+            return Err(HelixError::new(
+                format!(
+                    "join key `{name}` is {} on the left and {} on the right",
+                    l.dtype_name(),
+                    r.dtype_name()
+                ),
+                line,
+                col,
+            )
+            .hint("cast one side first, e.g. `with({id: @id * 1.0})`."));
+        }
+    }
 
     // Right-side index: key -> row numbers, in right-frame order. A key with a
     // missing cell never enters the index — missing matches nothing (§5). A

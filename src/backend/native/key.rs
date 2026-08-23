@@ -13,7 +13,8 @@ pub enum KeyCell {
     Missing,
     Int(i64),
     /// The float's raw bits — join/group equality is identity (NaN groups with
-    /// NaN; `-0.0` and `0.0` are distinct bit patterns, as the oracle behaves).
+    /// NaN), except `-0.0` canonicalizes to `0.0` first: they are `==` in
+    /// scalar Helix and one key in the oracle, so they must be one key here.
     Float(u64),
     Bool(bool),
     Str(std::rc::Rc<String>),
@@ -37,7 +38,11 @@ impl KeyCell {
         match v {
             Value::Missing => KeyCell::Missing,
             Value::Int(i) => KeyCell::Int(*i),
-            Value::Float(x) => KeyCell::Float(x.to_bits()),
+            // -0.0 == 0.0 in scalar Helix (and in the polars backend), so
+            // group/join/unique keys must not tell them apart (sweep find).
+            // `x + 0.0` is the branchless canonicalization: it maps -0.0 to
+            // +0.0 and is the identity for every other value, NaN included.
+            Value::Float(x) => KeyCell::Float((*x + 0.0).to_bits()),
             Value::Bool(b) => KeyCell::Bool(*b),
             Value::Str(s) => KeyCell::Str(s.clone()),
             other => KeyCell::Str(std::rc::Rc::new(other.to_string())),

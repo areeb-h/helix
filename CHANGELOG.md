@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Int↔Float comparison is exact above 2^53** on every engine and every path
+  (`==`, ordering, `min`/`max`, `sort`, `unique`, `frequencies`): the widening
+  collapse (`i64 as f64`) made `[2^53+1, (2^53).0].max()` answer the strictly
+  smaller number depending on order, and called two different numbers equal —
+  equality is transitive again (`interp::ops::int_float_cmp`).
+- **`helix check` catches guaranteed rebind errors**: `x = 1` then `x = 2`,
+  `pi = 3`, and `mut f = ...` over a reached `fn` all checked "ok" and died at
+  run time — the checker now refuses them with the runtime's exact wording,
+  while every legal shadowing idiom (mut rebind chains, re-declaring `mut`,
+  `mut` before a same-named `fn`, duplicate `fn`, `mut e = ...`) stays legal.
+- **`helix check` catches method arity** for String/DNA/Array/Record receivers,
+  fed by the same signature strings `helix doc` prints (`"ATG".upper(1, 2)`
+  checked "ok" and died at run time).
+- **Module files can no longer shadow the seeded constants**: `export pi = 3`
+  (or `fn pi()`) in a module silently rebound pi module-wide, where the same
+  line in a single-file program refuses; the loader now refuses identically
+  (`mut pi = ...` remains an explicit, legal shadow).
+- **`import m.{f}` keeps f's parameter defaults** — the selective spelling
+  silently dropped what the qualified call kept, so `greet("ada")` was an arity
+  error. Named arguments on a selective import now get an honest error naming
+  the situation instead of calling `f` a builtin.
+- **Native frame fixes**, pinned by dual-backend tests: CSV round-trips the
+  empty string (`""` is a string, a bare empty field is missing — both
+  directions were lossy); integer-looking CSV fields too big for i64 stay text
+  instead of rounding through 1e20; `-0.0`/`0.0` collapse as one group/join/
+  unique key; a join whose key dtypes differ refuses instead of answering an
+  empty frame; `group(...).min/max` on a String column answers lexically.
+- **`respond` validates `status`**: `status: 9999` wrote a protocol-invalid
+  wire line and a non-Int status silently became an empty 200, discarding the
+  payload — both now refuse with `status must be an integer between 100 and
+  599`. A present-but-wrong `jar:` on `http_request` is a teaching error
+  instead of a silent cookieless request. Duplicate `df.select(@a, @a)` refuses
+  in Helix's own words on the polars backend too (its error recommended
+  `.alias(...)`, an API Helix does not have).
+- **`[].norm()` is `+0.0`** (Rust's empty float sum is `-0.0`, and
+  `sqrt(-0.0)` is `-0.0` — a negative empty-vector norm).
+- **Message and doc polish**: `parse_cookies` docs say what it returns (a Dict,
+  last value wins); the `to_dataframe([])` hint no longer recommends a refused
+  idiom; record field-list hints print in canonical sorted order; the static
+  slice help names tensors; `helix test --json` emits a JSON document even for
+  a missing path; multi-line doc-test failures keep their indent.
+
 ## v0.5.0 — 2026-08-23
 
 ### Performance — the native engine wins its own matrix (ADR 0033 Stages 2–3)

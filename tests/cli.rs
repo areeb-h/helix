@@ -4312,9 +4312,9 @@ fn check_type_checks_without_running_anything() {
     );
     w("bad.helix", "print(undefined_name)\n");
     w("alsobad.helix", "print([1, 2].no_such_method())\n");
-    // NOT a type error: immutable reassignment is enforced by the VM at run time (see
-    // `immutable_reassignment_errors_on_the_vm`). `check` is a TYPE check, not a proof
-    // that the program will run — pinned below so the boundary stays honest.
+    // Since v0.5.1 this IS a check error: statements are straight-line at the top
+    // level, so a plain reassignment over an immutable binding ALWAYS fails at run
+    // time, and the checker now says so up front — pinned below, same diagnostic.
     w("runtime_only.helix", "x = 1\nx = 2\nprint(x)\n");
 
     let at = |args: &[&str]| -> (String, String, Option<i32>) {
@@ -4348,14 +4348,16 @@ fn check_type_checks_without_running_anything() {
         assert!(rout.is_empty(), "run leaked output before the error: {rout:?}");
     }
 
-    // THE BOUNDARY, stated rather than implied: `check` is a type check. A program that
-    // only fails at run time — here, reassigning an immutable binding, which the VM
-    // enforces — checks CLEAN and then fails when run. Passing `check` means "this
-    // compiles", never "this works".
-    assert_eq!(at(&["check", "runtime_only.helix"]).2, Some(0));
+    // THE BOUNDARY MOVED (v0.5.1): reassigning an immutable binding is guaranteed
+    // to fail — statements are straight-line at the top level — so `check` now
+    // catches it, with exactly the diagnostic `run` gives (the same-error rule
+    // of section (2): a second front end must not phrase things differently).
+    let (_, cerr, ccode) = at(&["check", "runtime_only.helix"]);
+    assert_eq!(ccode, Some(1), "`check` should catch the guaranteed reassignment");
     let (_, rerr, rcode) = at(&["run", "runtime_only.helix"]);
     assert_eq!(rcode, Some(1));
     assert!(rerr.contains("immutable"), "expected the runtime error: {rerr}");
+    assert_eq!(cerr, rerr, "`check` and `run` disagree on the reassignment diagnostic");
 
     // (3) A batch checks EVERY file and reports the count — it does not stop at the first
     // failure, and the summary is the number CI reads.
@@ -7783,4 +7785,239 @@ fn the_cookie_jar_stores_sends_and_isolates() {
     // A request without the jar carried nothing — the isolation the design is for.
     assert_eq!(l[4], "cookie=NONE", "a jar-less request leaked cookies: {out}");
     assert_eq!(l[5], "0", "clear did not empty the jar: {out}");
+}
+
+// ---------------------------------------------------------------------------
+// v0.5.1 correctness-sweep pins. Each was found by the release sweep, written
+// against the broken binary first, and confirmed to fail there.
+// ---------------------------------------------------------------------------
+
+/// Type-check a source string (no execution), returning (stdout, stderr, code).
+fn check_source(src: &str, tag: &str) -> (String, String, Option<i32>) {
+    let path = std::env::temp_dir().join(format!("helix_ck_{tag}.helix"));
+    std::fs::write(&path, src).unwrap();
+    let r = run(&["check", path.to_str().unwrap()], &[], "");
+    let _ = std::fs::remove_file(&path);
+    r
+}
+
+/// Int-vs-Float comparison is EXACT above 2^53 on every engine. The widening
+/// collapse (`i64 as f64`) made `[bi, bf].max()` answer the strictly SMALLER
+/// number, permutation-dependent — and `bi == bf` answered true for two
+/// different numbers.
+#[test]
+fn int_float_comparison_is_exact_above_2_53() {
+    let src = "bi = 9007199254740993\nbf = 9007199254740992.0\n\
+               print([bi, bf].max())\nprint([bf, bi].max())\n\
+               print([bi, bf].min())\nprint(bi == bf)\nprint(bf < bi)\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("exact_cmp_{name}"));
+        assert_eq!(code, Some(0), "[{name}] stderr: {err}");
+        assert_eq!(
+            out, "9007199254740993\n9007199254740993\n9007199254740992.0\nfalse\ntrue\n",
+            "[{name}]"
+        );
+    }
+}
+
+/// `[].norm()` is +0.0: Rust's empty f64 `sum()` is -0.0, and sqrt(-0.0) is
+/// -0.0 — a negative empty-vector norm.
+#[test]
+fn empty_norm_is_positive_zero() {
+    for (name, env) in ENGINES {
+        let (out, err, code) =
+            run_source("x = [].norm()\nprint(x)\nprint(x == 0.0)\n", env, &format!("norm0_{name}"));
+        assert_eq!(code, Some(0), "[{name}] stderr: {err}");
+        assert_eq!(out, "0.0\ntrue\n", "[{name}]");
+    }
+}
+
+/// Selecting the same column twice refuses in Helix's own words on every
+/// backend — the polars error recommended `.alias("new_name")`, an API that
+/// does not exist in this language.
+#[test]
+fn duplicate_select_refuses_in_helix_words() {
+    let (_, stderr, code) = run_source(
+        "df = dataframe({a: [1], b: [2]})\nprint(df.select(@a, @a))\n",
+        &[],
+        "dup_select",
+    );
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("duplicate column `a`"), "stderr: {stderr}");
+    assert!(!stderr.contains("alias"), "a polars-internal hint leaked: {stderr}");
+}
+
+/// The checker's reassignment class: `pi = 3` and `mut f = ...` over a reached
+/// `fn` are GUARANTEED runtime errors, so `check` says so — while every legal
+/// shadowing idiom stays legal.
+#[test]
+fn check_catches_constant_and_fn_reassignment() {
+    let (_, err, code) = check_source("pi = 3\n", "ck_const");
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("built-in constant"), "{err}");
+
+    let (_, err, code) = check_source("fn f() = 1\nmut f = 2\n", "ck_mutfn");
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("immutable"), "{err}");
+
+    // A value binding then a same-named `fn` is the SAME refusal (bind errors
+    // at the definition), while the reverse order legally shadows — see below.
+    let (_, err, code) = check_source("x = 1\nfn x() = 2\n", "ck_valfn");
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("immutable"), "{err}");
+
+    // The legal idioms, all in one program: a mut rebind chain, re-declaring
+    // mut, `mut` BEFORE a same-named fn (the definition rebinds it), a
+    // duplicate fn (first wins), a plain assign over a `fn` (a fn name is not
+    // a value global, so the assign shadows it — corpus `m1b_assign_over_fn`),
+    // and an explicit `mut e` shadow.
+    let legal = "mut x = 1\nx = 2\nmut x = 3\nx = 4\n\
+                 mut f = 1\nfn f() = 2\n\
+                 fn g() = 1\nfn g() = 2\n\
+                 fn h() = 1\nh = 5\n\
+                 mut e = 5\nprint(x, f(), g(), h, e)\n";
+    let (out, _, code) = check_source(legal, "ck_legal");
+    assert_eq!(code, Some(0), "legal shadowing idioms must stay legal: {out}");
+}
+
+/// The checker's method-arity gate, fed by the SAME sig strings `helix doc`
+/// prints: `"ATG".upper(1, 2)` checked "ok" and died at run time.
+#[test]
+fn check_catches_method_arity() {
+    let (_, err, code) = check_source("s = \"ATG\"\nprint(s.upper(1, 2))\n", "ck_ar1");
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("`upper` takes no arguments, got 2"), "{err}");
+    assert!(err.contains("signature:"), "{err}");
+
+    let (_, err, code) = check_source("print([1, 2].take(1, 2, 3))\n", "ck_ar2");
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("`take` takes exactly 1 argument, got 3"), "{err}");
+
+    // Optional parameters stay optional.
+    let (out, _, code) =
+        check_source("print([3, 1].sort())\nprint(\"a,b\".split(\",\"))\n", "ck_ar3");
+    assert_eq!(code, Some(0), "{out}");
+}
+
+/// `import m.{f}` keeps f's parameter DEFAULTS — the selective spelling used to
+/// silently drop what the qualified call kept. Named arguments on a selective
+/// import are still unresolvable in the importing file; the error now says
+/// that, instead of calling `f` a builtin.
+#[test]
+fn selective_import_keeps_defaults() {
+    let lib = "export fn greet(name, punct = \"!\") = \"hi {name}{punct}\"\n";
+    let main = "import lib.{greet}\nprint(greet(\"ada\"))\n";
+    let (out, stderr, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "seldef");
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "hi ada!");
+
+    let named = "import lib.{greet}\nprint(greet(\"ada\", punct: \"?\"))\n";
+    let (_, stderr, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", named)], "main.helix", &[], "selnamed");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("imported selectively"), "stderr:\n{stderr}");
+}
+
+/// A module binding cannot shadow a seeded constant: module top-levels mangle,
+/// so `export pi = 3` used to shadow pi module-wide SILENTLY where the same
+/// line in a single-file program refuses at run time. `mut` stays an explicit,
+/// legal shadow — exactly as in a single file.
+#[test]
+fn module_bindings_cannot_shadow_seeded_constants() {
+    let lib = "export pi = 3\nexport fn area(r) = pi * r * r\n";
+    let main = "import lib\nprint(lib.area(2))\n";
+    let (_, stderr, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "modpi");
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("built-in constant"), "stderr:\n{stderr}");
+
+    let fnlib = "export fn pi() = 1\n";
+    let (_, stderr, code) = run_modules(
+        &[("lib.helix", fnlib), ("main.helix", "import lib\nprint(lib.pi())\n")],
+        "main.helix",
+        &[],
+        "modpifn",
+    );
+    assert_ne!(code, Some(0));
+    assert!(stderr.contains("built-in constant"), "stderr:\n{stderr}");
+
+    let mutlib = "mut e = 5\nexport fn get() = e\n";
+    let (out, stderr, code) = run_modules(
+        &[("lib.helix", mutlib), ("main.helix", "import lib\nprint(lib.get())\n")],
+        "main.helix",
+        &[],
+        "modmute",
+    );
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(out.trim(), "5");
+}
+
+/// A present-but-wrong `jar:` is a teaching error, like every limit field —
+/// it used to be silently ignored, running the request cookieless.
+#[test]
+fn http_request_refuses_a_wrong_jar_value() {
+    let src = "r = http_request({method: \"GET\", url: \"http://127.0.0.1:1/x\", jar: 5})\nprint(r.status)\n";
+    let (_, stderr, code) = run_source(src, &[], "bad_jar");
+    assert_ne!(code, Some(0));
+    assert!(
+        stderr.contains("`jar` must be a cookie jar from `cookie_jar()`, got an Int"),
+        "stderr: {stderr}"
+    );
+}
+
+/// A present-but-invalid `status` never reaches the wire: `status: 9999` used
+/// to write a protocol-invalid line Helix's own client could not parse, and a
+/// non-Int status silently became an EMPTY 200, discarding the payload.
+#[test]
+fn respond_refuses_an_invalid_status() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::Duration;
+    let dir = std::env::temp_dir();
+    let src = dir.join("helix_serve_badstatus.helix");
+    std::fs::write(
+        &src,
+        "conn = listen(18239).accept()\n\
+         conn.respond({ status: 9999, text: \"x\" })\n",
+    )
+    .unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(&src)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn the server");
+    let mut stream = None;
+    for _ in 0..50 {
+        if let Ok(s) = TcpStream::connect("127.0.0.1:18239") {
+            stream = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut stream = stream.expect("server never started listening on 18239");
+    stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut resp = String::new();
+    let _ = stream.read_to_string(&mut resp);
+    let out = child.wait_with_output().expect("wait on the server");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0), "respond should have raised");
+    assert!(
+        stderr.contains("`status` must be an integer between 100 and 599"),
+        "stderr: {stderr}"
+    );
+    assert!(!resp.contains("9999"), "the invalid status reached the wire: {resp}");
+    let _ = std::fs::remove_file(&src);
+}
+
+/// `helix test --json` answers with a JSON document even when the path is
+/// missing — a stdout-only consumer must never get empty input.
+#[test]
+fn test_json_missing_path_still_emits_a_document() {
+    let (out, _, code) = run(&["test", "--json", "definitely_missing_dir_xyz"], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(out.contains("\"error\""), "stdout: {out}");
+    assert!(out.contains("\"events\": []"), "stdout: {out}");
 }

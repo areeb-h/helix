@@ -602,3 +602,120 @@ mod tz_aware_timestamps {
         let _ = std::fs::remove_file(path);
     }
 }
+
+// ---------------------------------------------------------------------------
+// v0.5.1 sweep pins: cross-backend divergences the release sweep caught. Each
+// was written against the broken engine first and confirmed to fail there.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn csv_distinguishes_empty_string_from_missing() {
+    // RFC 4180: `""` is an empty STRING; a bare empty field is MISSING. The
+    // reader conflated them (a valid `""` came back missing) and the writer
+    // wrote a valid empty string as a bare field — data loss both directions.
+    let dir = std::env::temp_dir().join("helix_native_csv_empty");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("empty.csv");
+    let p = path.to_str().unwrap();
+    std::fs::write(&path, "a,s\n1,x\n2,\"\"\n3,\n").unwrap();
+    let back = super::csv::read_csv(p, 0, 0).unwrap();
+    assert_eq!(
+        reprs(&back.column_values("s", 0, 0).unwrap()),
+        reprs(&[
+            Value::Str(Rc::new("x".to_string())),
+            Value::Str(Rc::new(String::new())),
+            Value::Missing,
+        ]),
+        "quoted empty is a string; bare empty is missing"
+    );
+    // And back out: the `""` cell writes as `""`, the missing cell as nothing.
+    back.write_csv(p, b',', 0, 0).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "a,s\n1,x\n2,\"\"\n3,\n");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn csv_integer_overflow_stays_text() {
+    // Twenty digits don't fit i64 and must NOT round through f64 (they silently
+    // became 1e20 — data loss); the column stays Str, as the polars backend does.
+    let dir = std::env::temp_dir().join("helix_native_csv_big");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("big.csv");
+    std::fs::write(&path, "v\n99999999999999999999\n1\n").unwrap();
+    let back = super::csv::read_csv(path.to_str().unwrap(), 0, 0).unwrap();
+    assert_eq!(
+        reprs(&back.column_values("v", 0, 0).unwrap()),
+        reprs(&[
+            Value::Str(Rc::new("99999999999999999999".to_string())),
+            Value::Str(Rc::new("1".to_string())),
+        ]),
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn join_key_dtype_mismatch_refuses() {
+    // Int keys left, Float keys right: the hash keys can never collide, so the
+    // old behavior was a silent 0-row inner join — exit 0 hiding a schema bug.
+    let l = super::build_frame(
+        vec![
+            ("id".into(), ColData::IntOpt(vec![Some(1), Some(2)])),
+            ("u".into(), ColData::IntOpt(vec![Some(1), Some(1)])),
+        ],
+        0,
+        0,
+    )
+    .unwrap();
+    let r = super::build_frame(
+        vec![
+            ("id".into(), ColData::Float(vec![Some(1.0), Some(2.5)])),
+            ("w".into(), ColData::IntOpt(vec![Some(2), Some(2)])),
+        ],
+        0,
+        0,
+    )
+    .unwrap();
+    let err = match l.join(&r, &["id".to_string()], "inner", 0, 0) {
+        Err(e) => e,
+        Ok(_) => panic!("mismatched key dtypes must refuse"),
+    };
+    assert!(err.message.contains("join key `id` is"), "{}", err.message);
+}
+
+#[test]
+fn group_string_min_max_is_lexical() {
+    // Strings order in scalar Helix ("a" < "b"), so a Str column answers
+    // lexical min/max — the polars backend already did; native refused.
+    let f = super::build_frame(
+        vec![
+            ("k".into(), ColData::Str(vec!["a".into(), "a".into()])),
+            ("s".into(), ColData::Str(vec!["y".into(), "x".into()])),
+        ],
+        0,
+        0,
+    )
+    .unwrap();
+    let mn = f.group_agg(&["k".to_string()], "min", "s", 0, 0).unwrap();
+    let mx = f.group_agg(&["k".to_string()], "max", "s", 0, 0).unwrap();
+    assert_eq!(
+        reprs(&mn.column_values("s", 0, 0).unwrap()),
+        reprs(&[Value::Str(Rc::new("x".to_string()))]),
+    );
+    assert_eq!(
+        reprs(&mx.column_values("s", 0, 0).unwrap()),
+        reprs(&[Value::Str(Rc::new("y".to_string()))]),
+    );
+}
+
+#[test]
+fn float_keys_collapse_signed_zero() {
+    // -0.0 == 0.0 as a scalar (and in the polars backend), so unique/group/join
+    // keys must not tell them apart — raw `to_bits` keys did.
+    let f = super::build_frame(
+        vec![("x".into(), ColData::Float(vec![Some(-0.0), Some(0.0), Some(1.0)]))],
+        0,
+        0,
+    )
+    .unwrap();
+    assert_eq!(f.unique_by(&[], 0, 0).unwrap().row_count(0, 0).unwrap(), 2);
+}

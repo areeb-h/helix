@@ -136,10 +136,10 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
     DocEntry {
         name: "parse_cookies",
         sig: "parse_cookies(header)",
-        doc: "Parse a Cookie request header into an array of {name, value} records.",
-        example: "parse_cookies(\"a=1; b=2\").count()",
+        doc: "Parse a Cookie request header into a Dict of name => value.",
+        example: "parse_cookies(\"a=1; b=2\").get(\"b\")",
         example_out: "2",
-        notes: "",
+        notes: "a Dict, not an array — duplicate cookie names keep the LAST value.",
     },
     DocEntry {
         name: "parse_set_cookie",
@@ -3442,6 +3442,30 @@ pub fn builtin_doc(name: &str) -> Option<&'static DocEntry> {
 /// The entry for `ty.name(...)`, if written yet.
 pub fn method_doc(ty: &str, name: &str) -> Option<&'static DocEntry> {
     METHOD_DOCS.iter().find(|(t, d)| *t == ty && d.name == name).map(|(_, d)| d)
+}
+
+/// Parse a `sig` string's parameter list into a (required, maximum) arity — the
+/// checker's method-arity gate reads the SAME signatures the reference prints,
+/// so the two cannot drift. `?` marks an optional parameter, `...` a variadic
+/// tail (no maximum). `None` = the sig has no parameter list to read.
+pub fn sig_arity(sig: &str) -> Option<(usize, Option<usize>)> {
+    let inner = sig.split_once('(')?.1.strip_suffix(')')?.trim();
+    if inner.is_empty() {
+        return Some((0, Some(0)));
+    }
+    let (mut required, mut total, mut variadic) = (0usize, 0usize, false);
+    for p in inner.split(',') {
+        let p = p.trim();
+        if p == "..." {
+            variadic = true;
+            continue;
+        }
+        total += 1;
+        if !p.ends_with('?') {
+            required += 1;
+        }
+    }
+    Some((required, if variadic { None } else { Some(total) }))
 }
 
 #[cfg(test)]

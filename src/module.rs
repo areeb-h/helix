@@ -518,6 +518,10 @@ struct Ctx {
     /// Each selectively-imported name → its dependency's prefix, so a bare reference
     /// rewrites to the dependency's mangled name.
     selected: HashMap<String, String>,
+    /// Each selectively-imported name → its exported signature, so a bare call
+    /// `f(...)` fills omitted trailing defaults exactly as the qualified
+    /// `alias.f(...)` spelling does (they used to be silently dropped here).
+    selected_sigs: HashMap<String, FnSig>,
     /// Added to every line number, mapping this module into its global line range.
     line_offset: usize,
 }
@@ -550,6 +554,18 @@ fn offset_expr_line(e: &mut Expr, off: usize) {
     }
 }
 
+/// Refuse a module binding over a seeded global constant (`Interp::new`), which
+/// is immutable in every file — module top-levels MANGLE, so without this check
+/// `export pi = 3` silently shadowed the constant module-wide where the same
+/// line in a single-file program refuses at run time.
+fn refuse_seeded(name: &str, line: usize, col: usize) -> Result<(), HelixError> {
+    if matches!(name, "pi" | "e" | "inf" | "python") {
+        let (msg, hint) = crate::error::immutable_reassign(name);
+        return Err(HelixError::new(msg, line, col).hint(hint));
+    }
+    Ok(())
+}
+
 fn rewrite_module(
     modules: &[Module],
     idx: usize,
@@ -579,12 +595,45 @@ fn rewrite_module(
             .iter()
             .map(|(n, dep)| (n.clone(), format!("m{dep}")))
             .collect(),
+        selected_sigs: m
+            .selected
+            .iter()
+            .filter_map(|(n, dep)| {
+                module_fn_sigs(&modules[*dep], modules).get(n).cloned().map(|s| (n.clone(), s))
+            })
+            .collect(),
         line_offset,
     };
     let mut out = Vec::with_capacity(m.stmts.len());
+    // `mut pi = ...` stays legal — an explicit shadow, exactly as in a single
+    // file — and it unlocks the name for the statements after it, mirroring the
+    // interpreter's `bind` order (a plain rebind of a mutable binding is legal).
+    let mut mut_shadows: HashSet<String> = HashSet::new();
     for s in &m.stmts {
         if matches!(s, Stmt::Import { .. }) {
             continue; // imports are resolved away
+        }
+        match s {
+            Stmt::Assign { name, mutable, line, col, .. } => {
+                if *mutable {
+                    mut_shadows.insert(name.clone());
+                } else if !mut_shadows.contains(name) {
+                    refuse_seeded(name, *line + line_offset, *col)?;
+                }
+            }
+            Stmt::Destructure { names, mutable, line, col, .. } => {
+                for n in names {
+                    if *mutable {
+                        mut_shadows.insert(n.clone());
+                    } else if !mut_shadows.contains(n) {
+                        refuse_seeded(n, *line + line_offset, *col)?;
+                    }
+                }
+            }
+            Stmt::Func { name, line, col, .. } if !mut_shadows.contains(name) => {
+                refuse_seeded(name, *line + line_offset, *col)?;
+            }
+            _ => {}
         }
         let mut s = s.clone();
         rewrite_stmt(&mut s, &ctx)?;
@@ -753,6 +802,20 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
                 if ctx.top_level.contains(name) {
                     *name = mangle(&ctx.prefix, name);
                 } else if let Some(dep) = ctx.selected.get(name) {
+                    // Fill omitted trailing defaults from the dependency's
+                    // signature, exactly as `resolve_qualified_call` does for the
+                    // qualified spelling. Defaults are literal expressions (see
+                    // `Stmt::Func`), so cloning them across files is safe.
+                    if let Some(sig) = ctx.selected_sigs.get(name.as_str())
+                        && args.len() < sig.params.len()
+                    {
+                        for d in &sig.defaults[args.len()..] {
+                            match d {
+                                Some(v) => args.push(v.clone()),
+                                None => break,
+                            }
+                        }
+                    }
                     *name = mangle(dep, name);
                 }
             }

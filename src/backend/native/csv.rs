@@ -46,15 +46,24 @@ impl Ty {
     }
 }
 
-fn classify(field: &str) -> Ty {
+fn classify(field: &str, quoted: bool) -> Ty {
     if field.is_empty() {
-        return Ty::Unknown; // missing constrains nothing
+        // an unquoted empty is missing (constrains nothing); a quoted `""`
+        // is an empty STRING and pins the column to Str
+        return if quoted { Ty::Str } else { Ty::Unknown };
     }
     if field == "true" || field == "false" {
         return Ty::Bool;
     }
     if field.parse::<i64>().is_ok() {
         return Ty::Int;
+    }
+    // An integer-LOOKING token too big for i64 must not round through f64
+    // (20 digits silently became 1e20 — data loss; the polars backend keeps
+    // the column text, and now so do we).
+    let digits = field.strip_prefix(['+', '-']).unwrap_or(field);
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Ty::Str;
     }
     if field.parse::<f64>().is_ok() {
         return Ty::Float;
@@ -137,7 +146,7 @@ fn record_bounds(bytes: &[u8]) -> Vec<(usize, usize)> {
 /// Split one record into field BODY spans `(start, end, has_escape)` without
 /// allocating — the structural twin of `parse_fields`, byte-for-byte the same
 /// error messages in the same order.
-fn split_fields(rec: &[u8], out: &mut Vec<(usize, usize, bool)>) -> Result<(), String> {
+fn split_fields(rec: &[u8], out: &mut Vec<(usize, usize, bool, bool)>) -> Result<(), String> {
     out.clear();
     if rec.is_empty() {
         return Ok(());
@@ -162,12 +171,12 @@ fn split_fields(rec: &[u8], out: &mut Vec<(usize, usize, bool)>) -> Result<(), S
             // Validate here so a non-UTF-8 field errors in the structural
             // pass, exactly where `parse_fields` would have said it.
             std::str::from_utf8(&rec[body..i]).map_err(|_| "non-UTF-8 bytes".to_string())?;
-            out.push((body, i, has_esc));
+            out.push((body, i, has_esc, true));
             i += 1;
         } else {
             let end = rec[i..].iter().position(|&b| b == b',').map(|p| i + p).unwrap_or(rec.len());
             std::str::from_utf8(&rec[i..end]).map_err(|_| "non-UTF-8 bytes".to_string())?;
-            out.push((i, end, false));
+            out.push((i, end, false, false));
             i = end;
         }
         match rec.get(i) {
@@ -182,10 +191,10 @@ fn split_fields(rec: &[u8], out: &mut Vec<(usize, usize, bool)>) -> Result<(), S
 /// field carried a `""` escape — folded into `scratch`.
 fn field_text<'a>(
     rec: &'a [u8],
-    span: (usize, usize, bool),
+    span: (usize, usize, bool, bool),
     scratch: &'a mut String,
 ) -> Result<&'a str, String> {
-    let (s, e, esc) = span;
+    let (s, e, esc, _) = span;
     let body = std::str::from_utf8(&rec[s..e]).map_err(|_| "non-UTF-8 bytes".to_string())?;
     if !esc {
         return Ok(body);
@@ -270,7 +279,12 @@ impl Seg {
         }
     }
 
-    fn push(&mut self, field: &str, ctx: &dyn Fn(&str, &str) -> String) -> Result<(), String> {
+    fn push(
+        &mut self,
+        field: &str,
+        quoted: bool,
+        ctx: &dyn Fn(&str, &str) -> String,
+    ) -> Result<(), String> {
         match self {
             Seg::I64(vals, valid) => {
                 if field.is_empty() {
@@ -306,7 +320,9 @@ impl Seg {
                 other => return Err(ctx(other, "true or false")),
             },
             Seg::Str { dict, index, codes, valid } => {
-                if field.is_empty() {
+                // RFC 4180: `""` (quoted, empty) is an empty STRING; only an
+                // unquoted empty field is missing.
+                if field.is_empty() && !quoted {
                     codes.push(0);
                     valid.push(false);
                 } else {
@@ -349,11 +365,16 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
     // Inference window (serial — at most INFER_ROWS records, re-parsed cheaply
     // again by the parallel pass).
     let mut tys = vec![Ty::Unknown; ncol];
+    let mut ispans: Vec<(usize, usize, bool, bool)> = Vec::with_capacity(ncol);
+    let mut iscratch = String::new();
     for (r, &(s, e)) in rows.iter().take(INFER_ROWS).enumerate() {
-        parse_fields(&bytes[s..e], &mut fields)
+        let rec = &bytes[s..e];
+        split_fields(rec, &mut ispans)
             .map_err(|m| err(format!("could not parse CSV `{path}` row {}: {m}", r + 2)))?;
-        for (c, f) in fields.iter().enumerate().take(ncol) {
-            tys[c] = tys[c].join(classify(f));
+        for (c, &span) in ispans.iter().enumerate().take(ncol) {
+            let f = field_text(rec, span, &mut iscratch)
+                .map_err(|m| err(format!("could not parse CSV `{path}` row {}: {m}", r + 2)))?;
+            tys[c] = tys[c].join(classify(f, span.3));
         }
     }
     let tys: Vec<Ty> =
@@ -369,7 +390,7 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
             let base = ci * chunk; // first row index of this chunk (0-based data row)
             let mut segs: Vec<Seg> =
                 tys.iter().map(|t| Seg::new(*t, spans.len())).collect();
-            let mut fspans: Vec<(usize, usize, bool)> = Vec::with_capacity(ncol);
+            let mut fspans: Vec<(usize, usize, bool, bool)> = Vec::with_capacity(ncol);
             let mut scratch = String::new();
             for (r, &(s, e)) in spans.iter().enumerate() {
                 let row = base + r;
@@ -390,7 +411,7 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
                         )
                     };
                     let f = field_text(rec, span, &mut scratch).map_err(|m| (row, m))?;
-                    segs[c].push(f, &ctx).map_err(|m| (row, m))?;
+                    segs[c].push(f, span.3, &ctx).map_err(|m| (row, m))?;
                 }
             }
             Ok(segs)
@@ -577,7 +598,14 @@ pub fn write_csv(
                         }
                         View::S(dict, codes, valid) => {
                             if valid[row] {
-                                push_field(&mut buf, dict[codes[row] as usize].as_bytes(), sep);
+                                let s = dict[codes[row] as usize].as_bytes();
+                                if s.is_empty() {
+                                    // RFC 4180: the empty STRING is `""`; a bare
+                                    // empty field is the MISSING encoding.
+                                    buf.extend_from_slice(b"\"\"");
+                                } else {
+                                    push_field(&mut buf, s, sep);
+                                }
                             }
                         }
                         View::N => {}

@@ -24,7 +24,8 @@ the kernel per column later — behind the same differential tests, Stage 3.)
    on v0.3.0 and visible only at the Stage-4 flip (release-noted then):
    `%` is euclidean everywhere (`7 % -3` is `1`; polars gave `-2`); `/` is true
    division and yields Float (`2 / 2` is `1.0`; polars kept Int); division and
-   modulo **by zero are errors** naming the row (`division by zero at row 2`;
+   modulo **by zero are errors** naming the row, 0-based, as a hint
+   (`division by zero` + `at row 2 of the frame.`;
    polars gave `missing` — an unknown that was actually a known bug in the data).
 2. **Missing propagates per ADR 0001**, elementwise. A `where` predicate that
    evaluates to `missing` keeps the row out — the same observable outcome the
@@ -63,3 +64,35 @@ Every policy above is exercised by dual-backend tests (both engines in one dev
 binary) plus the corpus against polars-frozen `.expected` files. A divergence is a
 bug in the native engine UNLESS it is one of the numbered deltas above — those are
 asserted AS deltas (the test proves the divergence is exactly the decided one).
+
+## Addendum (v0.5.1) — the cross-backend sweep
+
+The 0.5.1 release sweep ran the two engines head-to-head on adversarial inputs.
+Four divergences were BUGS and are fixed on both sides with pinned tests
+(`backend::native::tests`, "v0.5.1 sweep pins"):
+
+- **CSV empty string vs missing** — RFC 4180: `"" ` is an empty STRING, a bare
+  empty field is MISSING. The native reader conflated them and the writer wrote
+  a valid `""` as a bare field; both directions now round-trip.
+- **Integer-looking CSV fields too big for i64** stay `Str` (they silently
+  rounded through f64 — 20 digits became `1e20`).
+- **Signed-zero float keys**: `-0.0 == 0.0` as a scalar, so unique/group/join
+  keys collapse them (raw `to_bits` keys did not).
+- **Join key dtype mismatch refuses** (`join key `id` is Int on the left and
+  Float on the right`) — it was a silent 0-row inner join. String columns also
+  answer lexical `min`/`max` in `group` now, matching scalar string ordering.
+
+Known REMAINING deltas, decided and deliberate (each follows the doctrine that
+the native engine refuses what polars guesses; tightening the polars side is a
+behavior change deferred to 0.6.0):
+
+- `sum` on a Bool column: native refuses; polars counts `true`s.
+- CSV `True`/`FALSE` (mixed case): polars infers Bool; native keeps Str
+  (`true`/`false` exactly, per policy 8).
+- Ragged CSV rows: native refuses naming the row; polars pads/truncates
+  silently.
+- Duplicate CSV headers: native refuses (`duplicate column`); polars renames
+  with an internal `_duplicated_N` suffix.
+- Error WORDING for the same refusal can differ across backends (same class,
+  different sentence). The `.alias(...)` polars hint on duplicate `select` was
+  the worst of these and is now intercepted; the rest are cosmetic.

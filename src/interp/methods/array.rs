@@ -1307,7 +1307,9 @@ pub(crate) fn array_method(
                 return Ok(Value::Missing);
             }
             let xs = numeric_vec(items, "norm", line, col)?;
-            Ok(Value::Float(xs.iter().map(|x| x * x).sum::<f64>().sqrt()))
+            // fold seeded +0.0: Rust's empty f64 `sum()` is -0.0, and
+            // sqrt(-0.0) is -0.0 — a negative empty-vector norm (sweep find).
+            Ok(Value::Float(xs.iter().map(|x| x * x).fold(0.0f64, |s, x| s + x).sqrt()))
         }
         "cumsum" => {
             if !args.is_empty() {

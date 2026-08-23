@@ -368,6 +368,38 @@ impl super::Checker {
             // only say "no method".
             return builtin_type(name, &bts, line, col);
         }
+        // Arity, from the docs table — the same sig strings `helix doc` prints
+        // (`"ATG".upper(1, 2)` checked "ok" and died at run time). Only for
+        // receivers whose sig IS the whole truth: DataFrame and GroupBy args are
+        // a runtime schema boundary, and Tensor's table already takes the count.
+        // A method the table doesn't document keeps its own table's answer.
+        // `position` is exempt: the parser enforces its surface arity itself
+        // (`desugar_position`), and `take_while`/`drop_while` SYNTHESIZE an
+        // unwritable two-argument form the docs sig deliberately doesn't state.
+        if result.is_ok()
+            && name != "position"
+            && matches!(rt, Type::String | Type::Dna | Type::Array(_) | Type::Record(_))
+            && let Some(d) = crate::docs::method_doc(&Self::receiver_table_name(&rt), name)
+            && let Some((min, max)) = crate::docs::sig_arity(d.sig)
+        {
+            let n = args.len();
+            if n < min || max.is_some_and(|m| n > m) {
+                let s = |k: usize| if k == 1 { "" } else { "s" };
+                let msg = match (min, max) {
+                    (0, Some(0)) => format!("`{name}` takes no arguments, got {n}"),
+                    (a, Some(b)) if a == b => {
+                        format!("`{name}` takes exactly {a} argument{}, got {n}", s(a))
+                    }
+                    (a, None) => {
+                        format!("`{name}` takes at least {a} argument{}, got {n}", s(a))
+                    }
+                    (a, Some(b)) => format!("`{name}` takes {a} to {b} arguments, got {n}"),
+                };
+                return Err(
+                    HelixError::new(msg, line, col).hint(format!("signature: `{}`.", d.sig))
+                );
+            }
+        }
         result
     }
 

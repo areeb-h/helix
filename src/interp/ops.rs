@@ -609,6 +609,63 @@ fn arith(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<Va
     Ok(Value::Float(v))
 }
 
+/// EXACT Int-vs-Float comparison — the one remaining lossy numeric pair.
+/// Compares through the float's integer part (exact for every finite f64;
+/// f64 integers convert to i128 exactly), sign-decided beyond i128's range.
+/// `None` = the float is NaN (no order, and not equal to anything).
+pub(crate) fn int_float_cmp(a: i64, b: f64) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering::*;
+    // Fast path: |a| ≤ 2^53 converts to f64 EXACTLY, so the widened compare IS
+    // the exact answer whatever `b` is — NaN (None) and infinities included.
+    // This keeps the hot mixed-compare loops at their old speed; only the
+    // pathological >2^53 integers pay for the slow exactness below.
+    const EXACT: i64 = 1 << 53;
+    if (-EXACT..=EXACT).contains(&a) {
+        return (a as f64).partial_cmp(&b);
+    }
+    if b.is_nan() {
+        return None;
+    }
+    if b == f64::INFINITY {
+        return Some(Less);
+    }
+    if b == f64::NEG_INFINITY {
+        return Some(Greater);
+    }
+    let fl = b.floor();
+    const I128_MAX_F: f64 = 1.7014118346046923e38;
+    if fl >= I128_MAX_F {
+        return Some(Less);
+    }
+    if fl <= -I128_MAX_F {
+        return Some(Greater);
+    }
+    let bi = fl as i128;
+    Some(match (a as i128).cmp(&bi) {
+        Equal => {
+            if b > fl {
+                Less // a == floor(b) and b has a fraction: the int is smaller
+            } else {
+                Equal
+            }
+        }
+        other => other,
+    })
+}
+
+/// Turn an ordering into the boolean the comparison operator asks for.
+fn finish_order(op: &BinOp, ord: std::cmp::Ordering) -> Result<Value, HelixError> {
+    use std::cmp::Ordering::*;
+    Ok(Value::Bool(match op {
+        BinOp::Lt => ord == Less,
+        BinOp::Gt => ord == Greater,
+        BinOp::Le => ord != Greater,
+        BinOp::Ge => ord != Less,
+        // The caller dispatches only the four ordering operators here.
+        _ => false,
+    }))
+}
+
 fn num_operand(op: &BinOp, v: &Value, line: usize, col: usize) -> Result<f64, HelixError> {
     v.as_f64().ok_or_else(|| {
         let err = HelixError::new(
@@ -711,7 +768,12 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
         (Value::Missing, Value::Missing) => true,
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::Float(a), Value::Float(b)) => a == b,
-        (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => (*a as f64) == *b,
+        // EXACT, not widened: `i64 as f64` collapses distinct values above
+        // 2^53, which made `[2^53+1, 2^53.0].min()` answer the strictly LARGER
+        // number depending on order (the 0.5.1 sweep's find).
+        (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
+            int_float_cmp(*a, *b) == Some(std::cmp::Ordering::Equal)
+        }
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Dna(a), Value::Dna(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -812,6 +874,21 @@ fn compare(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<
                     line,
                     col,
                 ));
+            }
+            // Mixed Int/Float compares EXACTLY (see `int_float_cmp`); a NaN
+            // falls through to the NaN error below via the widen path.
+            match (l, r) {
+                (Value::Int(a), Value::Float(b)) => {
+                    if let Some(ord) = int_float_cmp(*a, *b) {
+                        return finish_order(op, ord);
+                    }
+                }
+                (Value::Float(b), Value::Int(a)) => {
+                    if let Some(ord) = int_float_cmp(*a, *b) {
+                        return finish_order(op, ord.reverse());
+                    }
+                }
+                _ => {}
             }
             // The unorderable tail. Name the failing SIDE and the truthful
             // list — "needs numbers" was wrong advice (`"a" < "b"` and tuple

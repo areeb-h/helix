@@ -1428,6 +1428,18 @@ fn cli_test(args: &[String]) -> ExitCode {
             && let Some(missing) = roots.iter().find(|r| !r.exists())
         {
             eprintln!("error: no such file or directory: {}", missing.display());
+            if json {
+                // A stdout-only JSON consumer still gets a document, never
+                // empty input (sweep lens-3 observation).
+                let doc = serde_json::json!({
+                    "helix_version": env!("CARGO_PKG_VERSION"),
+                    "error": format!("no such file or directory: {}", missing.display()),
+                    "passed": 0, "failed": 0, "events": [],
+                });
+                if let Ok(s) = serde_json::to_string_pretty(&doc) {
+                    println!("{s}");
+                }
+            }
             return ExitCode::FAILURE;
         }
         let mut files = Vec::new();
@@ -1871,8 +1883,18 @@ fn run_doc_examples(
                 } else {
                     println!("  FAIL  {where_} (doc)");
                     println!("        code:     {}", ex.code.join(" ; "));
-                    println!("        expected: {}", want.trim_end());
-                    println!("        got:      {got}");
+                    // Multi-line values keep the detail indent on every line.
+                    let indented = |label: &str, text: &str| {
+                        for (i, l) in text.lines().enumerate() {
+                            if i == 0 {
+                                println!("        {label} {l}");
+                            } else {
+                                println!("        {:width$} {l}", "", width = label.len());
+                            }
+                        }
+                    };
+                    indented("expected:", want.trim_end());
+                    indented("got:     ", got);
                     if ex.expect.iter().any(|l| l.trim_start().starts_with("...")) {
                         println!(
                             "        note: a doc example is ONE line — there is no `...` \

@@ -1041,8 +1041,26 @@ fn build_response<'a>(value: &'a Value, line: usize, col: usize) -> Result<Respo
             let (k_status, k_json, k_html, k_text, k_body, k_headers) = respond_keys();
             let get = |sym: Symbol| fields.iter().find(|(k, _)| *k == sym).map(|(_, v)| v);
             let status = match get(k_status) {
-                Some(Value::Int(n)) => *n,
-                _ => 200,
+                Some(Value::Int(n)) if (100..=599).contains(n) => *n,
+                // A present-but-invalid status must never reach the wire:
+                // `status: 9999` wrote a protocol-invalid line Helix's own
+                // client could not parse, and `status: "active"` silently
+                // became an EMPTY 200, discarding the payload (sweep finds).
+                Some(other) => {
+                    return Err(HelixError::new(
+                        format!(
+                            "`status` must be an integer between 100 and 599, got {}",
+                            match other {
+                                Value::Int(n) => n.to_string(),
+                                v => crate::value::with_article(v.type_name()),
+                            }
+                        ),
+                        line,
+                        col,
+                    )
+                    .hint("RFC 9110: a status code is exactly three digits."));
+                }
+                None => 200,
             };
             let payload = if let Some(v) = get(k_json) {
                 one("application/json", Cow::Owned(json_of(v)?))

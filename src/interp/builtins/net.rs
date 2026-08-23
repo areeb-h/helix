@@ -121,7 +121,7 @@ pub(super) fn a_http_request(name: &str, args: Vec<Value>, line: usize, col: usi
             // An optional `jar:` field carries a cookie jar (from `cookie_jar()`);
             // the request sends its matching cookies and stores what the response
             // sets. The jar mutates through its RefCell — the program holds it.
-            let jar_handle = http_jar(&args[0]);
+            let jar_handle = http_jar(&args[0], line, col)?;
             let jar_ref = jar_handle.as_deref().and_then(|h| match h {
                 crate::serve::NetHandle::CookieJar(j) => Some(j),
                 _ => None,

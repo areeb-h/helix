@@ -329,6 +329,9 @@ pub(crate) fn eval_field(r: &Value, name: Symbol, line: usize, col: usize) -> Re
                 if let Some(s) = suggest(name.as_str(), &keys) {
                     err = err.hint(format!("did you mean `{}`?", s));
                 } else {
+                    // Canonical order, matching how the record itself prints.
+                    let mut keys = keys;
+                    keys.sort_unstable();
                     err = err.hint(format!("fields: {}", keys.join(", ")));
                 }
                 err

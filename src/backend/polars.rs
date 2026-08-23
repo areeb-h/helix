@@ -345,6 +345,17 @@ impl DataHandle for PolarsFrame {
     }
 
     fn select(&self, names: &[String], _line: usize, _col: usize) -> Result<Df, HelixError> {
+        // Refuse a duplicate up front, in the native backend's words — polars'
+        // own error recommends `.alias("new_name")`, an API Helix doesn't have.
+        for (i, name) in names.iter().enumerate() {
+            if names[..i].contains(name) {
+                return Err(HelixError::new(
+                    format!("duplicate column `{name}`"),
+                    _line,
+                    _col,
+                ));
+            }
+        }
         let exprs: Vec<Expr> = names.iter().map(|n| pcol(n.as_str())).collect();
         Ok(self.derive(self.lf.clone().select(exprs)))
     }

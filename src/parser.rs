@@ -79,6 +79,7 @@ fn parse_expression(
         fn_sigs: (*sigs).clone(),
         do_bindings: Vec::new(),
         imports: imports.clone(),
+        selected_imports: std::collections::HashSet::new(),
         // Threaded for the same reason `imports` is, and recorded above: a hole's
         // parser that does not inherit an enclosing rule makes that rule hold outside
         // strings and not inside them, which is where people meet it first.
@@ -753,6 +754,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
         fn_sigs: HashMap::new(),
         do_bindings: Vec::new(),
         imports: std::collections::HashSet::new(),
+        selected_imports: std::collections::HashSet::new(),
         fn_names,
     };
     let program = p.program()?;
@@ -835,6 +837,11 @@ struct Parser {
     /// The comprehension-sugar desugars consult this: a method on an imported
     /// namespace is a QUALIFIED MODULE CALL, never array sugar, however it is named.
     imports: std::collections::HashSet<String>,
+    /// Names bound by SELECTIVE imports (`import m.{f}`) — for diagnostics only:
+    /// a named-argument call on one is unresolvable in this file (the signature
+    /// lives in the imported module), and the error should say so, not call `f`
+    /// a builtin.
+    selected_imports: std::collections::HashSet<String>,
     /// Every name introduced by a `fn` anywhere in this file, pre-scanned from the
     /// token stream before parsing begins.
     ///
@@ -1079,7 +1086,9 @@ impl Parser {
             // Record the bound namespace so the comprehension-sugar desugars know a
             // method on it is a qualified module call. Selective imports bind function
             // names directly and create no namespace, so they are not recorded.
-            if selected.is_none() {
+            if let Some(names) = &selected {
+                self.selected_imports.extend(names.iter().cloned());
+            } else {
                 self.imports.insert(alias.clone());
             }
             return Ok(Stmt::Import { segments, alias, selected, line: l, col: c });
@@ -2163,6 +2172,23 @@ impl Parser {
     ) -> Result<Vec<Expr>, HelixError> {
         let Some(sig) = self.fn_sigs.get(name) else {
             if !named.is_empty() {
+                // A selectively-imported function IS user-defined — its parameter
+                // names just live in another file, which this parser cannot see.
+                if self.selected_imports.contains(name) {
+                    return Err(HelixError::new(
+                        format!(
+                            "`{name}` was imported selectively, so its parameter \
+                             names are not visible here"
+                        ),
+                        line,
+                        col,
+                    )
+                    .hint(format!(
+                        "import the module under its name and call `m.{name}(...)` \
+                         qualified — qualified calls support named arguments — or \
+                         pass the arguments positionally."
+                    )));
+                }
                 return Err(HelixError::new(
                     format!("named arguments are only supported for user-defined functions, not `{name}`"),
                     line,

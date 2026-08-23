@@ -5638,12 +5638,12 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             // `values_equal` collapses 1 == 1.0 across types...
             ("[1, 1.0, 2].frequencies()", "[(1, 2), (2, 1)]"),
             ("[1, 1.0, 2].unique()", "[1, 2]"),
-            // ...and above 2^53 that collapse is not even TRANSITIVE, so no hash key
-            // could reproduce it: both integers equal the float, but not each other.
-            // (Order-dependent by nature — the scan is the definition here.)
+            // ...and since v0.5.1 that collapse is EXACT (`int_float_cmp`), so it
+            // is transitive above 2^53 too: the float equals the even integer and
+            // NOT the odd one (widening used to merge all three, order-dependently).
             (
                 "[9007199254740993, 9007199254740992.0, 9007199254740992].frequencies()",
-                "[(9007199254740993, 2), (9007199254740992, 1)]",
+                "[(9007199254740992.0, 2), (9007199254740993, 1)]",
             ),
             ("[9007199254740993, 9007199254740992].unique().length()", "2"),
             // ---- Text: `dna("AT")` and `"AT"` are DIFFERENT identities. `values_equal`

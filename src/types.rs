@@ -345,6 +345,17 @@ pub struct Checker {
     /// compile `d.where(…)` as a DataFrame verb after `d` was rebound to an
     /// array, diverging from the walker's runtime dispatch).
     mut_globals: FxHashSet<String>,
+    /// Names bound by a `fn` statement REACHED so far. Deliberately not the
+    /// hoisted pre-pass: `mut f = ...` ABOVE the `fn` is legal (the definition
+    /// rebinds it), while `mut f = ...` BELOW it is bind's immutable-reassign
+    /// error — this set draws exactly that line.
+    fn_decls: FxHashSet<String>,
+    /// Names bound by a VALUE statement (`x = ...`, destructure) reached so far,
+    /// plus the seeded constants — bind's actual immutable set. Deliberately NOT
+    /// the whole `env`: a `fn` name is not a value global, so `fn f() = 1` then
+    /// `f = 5` legally shadows the function (pinned by corpus
+    /// `m1b_assign_over_fn`), while `f = 5` then `fn f() = 1` refuses.
+    value_globals: FxHashSet<String>,
     /// Every name bound by a top-level value statement anywhere in the file, for
     /// DIAGNOSIS only: it lets an unbound name be reported as "not defined yet"
     /// when the file does bind it further down.
@@ -384,17 +395,21 @@ impl Checker {
             env,
             types: FxHashMap::default(),
             mut_globals: FxHashSet::default(),
+            fn_decls: FxHashSet::default(),
+            value_globals: ["pi", "e", "inf", "python"].iter().map(|s| s.to_string()).collect(),
             deferred_globals: FxHashSet::default(),
         }
     }
 
     pub fn exec_stmt(&mut self, s: &Stmt) -> Result<(), HelixError> {
         match s {
-            Stmt::Assign { name, mutable, value, .. } => {
+            Stmt::Assign { name, mutable, value, line, col, .. } => {
                 let t = self.synth(value)?;
+                self.check_rebind(name, *mutable, *line, *col)?;
                 if *mutable {
                     self.mut_globals.insert(name.clone());
                 }
+                self.value_globals.insert(name.clone());
                 self.env.insert(name.clone(), t);
                 Ok(())
             }
@@ -412,6 +427,10 @@ impl Checker {
                     }
                 }
                 let t = self.synth(value)?;
+                for n in names.iter() {
+                    self.check_rebind(n, *mutable, *line, *col)?;
+                    self.value_globals.insert(n.clone());
+                }
                 match &t {
                     Type::Tuple(els) => {
                         if els.len() != names.len() {
@@ -473,6 +492,32 @@ impl Checker {
         }
     }
 
+    /// The static twin of the interpreter's `bind`: statements only occur
+    /// straight-line at the top level, so a plain `name = ...` over an existing
+    /// immutable VALUE binding — or `mut name = ...` over a reached `fn` —
+    /// ALWAYS fails at run time. Say so at check time, with bind's exact
+    /// wording. (`mut` over a value binding legally re-declares it as mutable,
+    /// a duplicate `fn` is legal — first definition wins — and a plain assign
+    /// over a `fn` legally shadows it, so none of those are flagged.)
+    fn check_rebind(
+        &self,
+        name: &str,
+        mutable: bool,
+        line: usize,
+        col: usize,
+    ) -> Result<(), HelixError> {
+        let clash = if mutable {
+            self.fn_decls.contains(name)
+        } else {
+            self.value_globals.contains(name) && !self.mut_globals.contains(name)
+        };
+        if clash {
+            let (msg, hint) = crate::error::immutable_reassign(name);
+            return Err(HelixError::new(msg, line, col).hint(hint));
+        }
+        Ok(())
+    }
+
     fn check_func(
         &mut self,
         name: &str,
@@ -521,6 +566,12 @@ impl Checker {
             .collect();
         let ret_ann = ret.as_ref().map(ann_to_type);
 
+        // A `fn` over an existing immutable VALUE binding is bind's
+        // immutable-reassign error (over a `mut` binding it legally rebinds).
+        self.check_rebind(name, false, line, col)?;
+        // Mirror the runtime's `fn_decls`: from here on, `mut name = ...` is
+        // the immutable-reassign error (`bind` refuses `mut` over a reached fn).
+        self.fn_decls.insert(name.to_string());
         // Insert a provisional signature BEFORE checking the body so recursive
         // self-calls type (as Unknown return) instead of "not defined".
         self.env.insert(
@@ -767,6 +818,9 @@ impl Checker {
                             if let Some(s) = suggest(name, &keys) {
                                 err = err.hint(format!("did you mean `{}`?", s));
                             } else {
+                                // Canonical order, matching how the record itself prints.
+                                let mut keys = keys;
+                                keys.sort_unstable();
                                 err = err.hint(format!("fields: {}", keys.join(", ")));
                             }
                             err
@@ -921,7 +975,7 @@ impl Checker {
                             *line,
                             *col,
                         )
-                        .hint("slicing works on arrays, strings, and DNA sequences."))
+                        .hint("slicing works on arrays, strings, DNA, and tensors (first axis)."))
                     }
                 })
             }

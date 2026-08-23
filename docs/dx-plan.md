@@ -157,6 +157,33 @@ The doc/describe lines are copied **verbatim** from `print_help()` (same `\\n   
 
 ## DO LATER (real features — design/ADR first)
 
+### Recorded by the v0.5.1 correctness sweep (2026-08-24)
+
+What the sweep found but deliberately did NOT fix in a patch release, with the
+mechanism so nothing has to be rediscovered:
+
+- **Desugar blame-name threading.** Errors inside desugared sugar blame the
+  desugar target, not what the user wrote: `count_where(pred)` errors say
+  `filter`, `zipmap` errors say `zip`. Fix needs a blame channel on the
+  synthesized nodes (a `blame: Option<String>` the error path prefers), touching
+  parser desugars + both engines' error paths. Message-only in effect but
+  pin-heavy; do it in one sweep with the pins updated together.
+- **Named arguments on selectively-imported functions.** `import m.{f}` +
+  `f(x, punct: "?")` now gets an honest parse error (the signature lives in
+  another file), and positional defaults fill at load time — but full support
+  needs `Expr::Call` to CARRY named pairs to the module loader (today only
+  `Expr::Method` does), i.e. an AST change + parser deferral for names in
+  `selected_imports`. Surface addition → 0.6.0.
+- **Static/runtime error family drift.** The checker says `type Int has no
+  method ...`, the runtime says `an Int has no method ...` — same refusal, two
+  sentence families, both pinned in many places. Unifying is a coordinated
+  message change across `types/synth.rs` + `interp/methods` + every pin;
+  worth doing once, not incrementally.
+- **Polars-side tightenings** decided in ADR 0034's addendum (bool `sum`
+  refusal, exact-case Bool inference, ragged-row refusal, duplicate-header
+  refusal) — each narrows polars-backend behavior to the native doctrine, so
+  each is a minor-version change.
+
 ### Recorded by the 2026-08-19 stabilization sweep (lower tier — engine-identical, no oracle divergence)
 
 The sweep's top tier (poison-cell Let arm, autodiff broadcast/exponent/stale-grad,

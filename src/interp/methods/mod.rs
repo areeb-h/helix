@@ -445,6 +445,21 @@ fn missing_or_nan(items: &[Value]) -> bool {
 fn numeric_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        // Mixed Int/Float: exact via the float's integer part (the widening
+        // collapse made min/max permutation-dependent above 2^53). A NaN falls
+        // to the total_cmp tail so sort's comparator stays a TOTAL order.
+        (Value::Int(x), Value::Float(y)) => {
+            match crate::interp::ops::int_float_cmp(*x, *y) {
+                Some(o) => o,
+                None => (*x as f64).total_cmp(y),
+            }
+        }
+        (Value::Float(y), Value::Int(x)) => {
+            match crate::interp::ops::int_float_cmp(*x, *y) {
+                Some(o) => o.reverse(),
+                None => y.total_cmp(&(*x as f64)),
+            }
+        }
         // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)`: the old fallback made a
         // `NaN` compare *Equal* to every other value, which is intransitive (`3 == NaN`,
         // `NaN == 1`, yet `3 > 1`). Rust's sort detects such a non-total comparator and

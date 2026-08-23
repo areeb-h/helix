@@ -552,17 +552,30 @@ fn http_request_fields(req: &Value, line: usize, col: usize) -> Result<HttpReqPa
 /// Absent fields keep the defaults the client has always used; a present field with a
 /// non-positive or non-integer value is a clean error naming the field, not a
 /// silently-ignored one.
-/// The optional `jar:` field of a request record — a `cookie_jar()` handle, or `None`.
-/// A `jar` that is not a cookie jar is ignored rather than erroring: the field is
-/// optional, and a wrong value there is the caller's to notice, not a request-breaker.
+/// The optional `jar:` field of a request record — a `cookie_jar()` handle.
+/// A PRESENT `jar` holding anything else is a teaching error, exactly like the
+/// limit fields: the old silent-ignore ran the request cookieless with zero
+/// diagnostics (the sweep's find), while `max_body: "big"` refused loudly.
 #[cfg(feature = "http")]
-fn http_jar(req: &Value) -> Option<Rc<crate::serve::NetHandle>> {
-    let Value::Record(fields) = req else { return None };
+fn http_jar(
+    req: &Value,
+    line: usize,
+    col: usize,
+) -> Result<Option<Rc<crate::serve::NetHandle>>, HelixError> {
+    let Value::Record(fields) = req else { return Ok(None) };
     match fields.iter().find(|(s, _)| s.as_str() == "jar").map(|(_, v)| v) {
         Some(Value::Net(h)) if matches!(&**h, crate::serve::NetHandle::CookieJar(_)) => {
-            Some(h.clone())
+            Ok(Some(h.clone()))
         }
-        _ => None,
+        Some(other) => Err(HelixError::new(
+            format!(
+                "`jar` must be a cookie jar from `cookie_jar()`, got {}",
+                crate::value::with_article(other.type_name())
+            ),
+            line,
+            col,
+        )),
+        None => Ok(None),
     }
 }
 

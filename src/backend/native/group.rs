@@ -85,6 +85,25 @@ fn aggregate(
     if cells.iter().any(|v| matches!(v, Value::Missing)) {
         return Ok(Value::Missing);
     }
+    // Strings order in scalar Helix ("a" < "b"), so a String column answers
+    // lexical min/max — the polars backend already did; native refused (sweep).
+    // First-cell check up front so numeric groups pay one discriminant test,
+    // not a full pass, before their own kernel.
+    if matches!(agg, "min" | "max")
+        && matches!(cells.first(), Some(Value::Str(_)))
+        && cells.iter().all(|v| matches!(v, Value::Str(_)))
+    {
+        let mut best = 0usize;
+        for i in 1..cells.len() {
+            if let (Value::Str(a), Value::Str(b)) = (&cells[i], &cells[best]) {
+                let better = if agg == "min" { a < b } else { a > b };
+                if better {
+                    best = i;
+                }
+            }
+        }
+        return Ok(cells[best].clone());
+    }
     // All cells present; numeric aggregations promote Int to Float where the
     // operation demands it (mean/std), and keep Int for sum/min/max of Ints —
     // the same shapes the whole-column methods answer.

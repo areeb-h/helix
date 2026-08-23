@@ -434,10 +434,12 @@ A fresh, empty cookie jar to thread through http_request via the jar field.
 
 ### `parse_cookies(header)`
 
-Parse a Cookie request header into an array of {name, value} records.
+Parse a Cookie request header into a Dict of name => value.
+
+**Note:** a Dict, not an array — duplicate cookie names keep the LAST value.
 
 ```
->>> parse_cookies("a=1; b=2").count()
+>>> parse_cookies("a=1; b=2").get("b")
 2
 ```
 

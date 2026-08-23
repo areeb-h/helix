@@ -27,7 +27,11 @@ pub(super) fn a_to_dataframe(name: &str, args: Vec<Value>, line: usize, col: usi
                     line,
                     col,
                 )
-                .hint("build an empty frame with explicit columns: `dataframe({a: [], b: []})`."));
+                .hint(
+                        "give each column at least one value (`dataframe({a: [1]})`), or \
+                         read a header-only CSV — a truly empty frame cannot state its \
+                         column types yet.",
+                    ));
             }
             if let Some(bad) =
                 rows.iter_values().position(|r| !matches!(r, Value::Record(_)))
