@@ -1692,6 +1692,7 @@ dependencies = [
  "toml_edit",
  "ureq",
  "url",
+ "zstd",
 ]
 
 [[package]]

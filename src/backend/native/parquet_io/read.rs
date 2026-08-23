@@ -23,6 +23,7 @@ use super::super::columns::{Col, StrBuilder};
 use super::super::NativeFrame;
 use super::foreign;
 use super::pq_err;
+use super::rle;
 
 /// How one leaf column's physical values become cells.
 enum Kind {
@@ -154,6 +155,146 @@ fn drain_typed<T: parquet::data_type::DataType>(
     Ok(())
 }
 
+/// Try the page-level fast path for a plain string column: stream each row
+/// group's DICTIONARY page straight into a dict + RLE-decode the data pages'
+/// codes and definition levels. Answers `None` (fall back to the value-level
+/// reader) for anything but the standard shape: a dict page followed by V1
+/// data pages in RLE_DICTIONARY/PLAIN_DICTIONARY encoding with RLE def levels.
+fn read_str_pages(
+    reader: &SerializedFileReader<bytes::Bytes>,
+    ci: usize,
+    optional: bool,
+) -> Result<Option<SendCol>, String> {
+    use parquet::basic::Encoding;
+    use parquet::column::page::Page;
+
+    let mut dict: Vec<String> = Vec::new();
+    let mut index: HashMap<String, u32> = HashMap::new();
+    let mut codes: Vec<u32> = Vec::new();
+    let mut valid: Vec<bool> = Vec::new();
+
+    for rg_idx in 0..reader.num_row_groups() {
+        let rg = reader.get_row_group(rg_idx).map_err(|e| format!("row group: {e}"))?;
+        let mut pages =
+            rg.get_column_page_reader(ci).map_err(|e| format!("page reader: {e}"))?;
+        // Per-row-group dictionary, remapped to the global one per DISTINCT.
+        let mut local: Vec<u32> = Vec::new();
+        let mut saw_dict = false;
+        while let Some(page) = pages.get_next_page().map_err(|e| format!("page: {e}"))? {
+            match page {
+                Page::DictionaryPage { buf, num_values, encoding, .. } => {
+                    if !matches!(encoding, Encoding::PLAIN | Encoding::PLAIN_DICTIONARY) {
+                        return Ok(None);
+                    }
+                    saw_dict = true;
+                    local.clear();
+                    local.reserve(num_values as usize);
+                    let mut pos = 0usize;
+                    for _ in 0..num_values {
+                        let lenb = buf
+                            .get(pos..pos + 4)
+                            .ok_or("dictionary page ends inside a length")?;
+                        let len =
+                            u32::from_le_bytes([lenb[0], lenb[1], lenb[2], lenb[3]]) as usize;
+                        pos += 4;
+                        let s = buf
+                            .get(pos..pos + len)
+                            .ok_or("dictionary page ends inside a value")?;
+                        pos += len;
+                        let s = std::str::from_utf8(s)
+                            .map_err(|_| "column holds non-UTF-8 bytes".to_string())?;
+                        let g = match index.get(s) {
+                            Some(&g) => g,
+                            None => {
+                                let g = dict.len() as u32;
+                                index.insert(s.to_string(), g);
+                                dict.push(s.to_string());
+                                g
+                            }
+                        };
+                        local.push(g);
+                    }
+                }
+                Page::DataPage {
+                    buf,
+                    num_values,
+                    encoding,
+                    def_level_encoding,
+                    ..
+                } => {
+                    if !saw_dict
+                        || !matches!(
+                            encoding,
+                            Encoding::RLE_DICTIONARY | Encoding::PLAIN_DICTIONARY
+                        )
+                    {
+                        return Ok(None);
+                    }
+                    let n = num_values as usize;
+                    let mut pos = 0usize;
+                    let mut present = n;
+                    let defs_start = valid.len();
+                    if optional {
+                        if def_level_encoding != Encoding::RLE {
+                            return Ok(None);
+                        }
+                        let lenb =
+                            buf.get(0..4).ok_or("data page ends inside the level length")?;
+                        let dlen =
+                            u32::from_le_bytes([lenb[0], lenb[1], lenb[2], lenb[3]]) as usize;
+                        pos = 4 + dlen;
+                        let mut levels: Vec<u32> = Vec::with_capacity(n);
+                        rle::decode(
+                            buf.get(4..4 + dlen).ok_or("data page ends inside levels")?,
+                            1,
+                            n,
+                            &mut levels,
+                        )?;
+                        present = 0;
+                        for l in levels {
+                            valid.push(l == 1);
+                            if l == 1 {
+                                present += 1;
+                            }
+                        }
+                    } else {
+                        valid.extend(std::iter::repeat_n(true, n));
+                    }
+                    let width = *buf.get(pos).ok_or("data page ends before the bit width")?;
+                    if width > 32 {
+                        return Err("dictionary index width exceeds 32 bits".to_string());
+                    }
+                    let mut page_codes: Vec<u32> = Vec::with_capacity(present);
+                    rle::decode(
+                        buf.get(pos + 1..).ok_or("data page ends inside the codes")?,
+                        width,
+                        present,
+                        &mut page_codes,
+                    )?;
+                    // Fill codes in row order, remapped through the local dict.
+                    let mut pi = 0usize;
+                    for &ok in &valid[defs_start..] {
+                        if ok {
+                            let lc = *page_codes
+                                .get(pi)
+                                .ok_or("fewer dictionary codes than present values")?;
+                            pi += 1;
+                            let g = *local
+                                .get(lc as usize)
+                                .ok_or("dictionary code out of range")?;
+                            codes.push(g);
+                        } else {
+                            codes.push(0);
+                        }
+                    }
+                }
+                Page::DataPageV2 { .. } => return Ok(None),
+            }
+        }
+    }
+    Ok(Some(SendCol::Str { dict, codes, valid }))
+}
+
 /// Decode column `ci` of every row group into a Send segment. Runs on a worker.
 fn read_column(
     bytes: &bytes::Bytes,
@@ -167,6 +308,15 @@ fn read_column(
     let desc = schema.column(ci);
     let optional = desc.max_def_level() > 0;
     let name = desc.name().to_string();
+
+    // Plain string columns: the page-level fast path streams dictionary pages
+    // straight into the engine's own dict representation. Anything nonstandard
+    // falls through to the value-level reader below.
+    if matches!(kind, Kind::Str)
+        && let Some(seg) = read_str_pages(&reader, ci, optional)?
+    {
+        return Ok(seg);
+    }
 
     // Accumulators — exactly one becomes the result, per the classified kind.
     let mut ivals = Vec::new();

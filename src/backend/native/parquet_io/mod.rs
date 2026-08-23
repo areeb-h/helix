@@ -13,6 +13,7 @@
 
 mod foreign;
 mod read;
+mod rle;
 mod write;
 
 pub use read::read_parquet;

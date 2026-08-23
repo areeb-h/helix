@@ -182,6 +182,10 @@ parquet = { version = "59", default-features = false, features = [
     "lz4",
     "flate2-zlib-rs",
 ], optional = true }
+# Page compression for the hand-built parquet chunks (the crate's own codec
+# module hides behind a flag that drags the arrow stack in; zstd is already in
+# every build's tree via other deps).
+zstd = { version = "0.13", optional = true }
 
 [features]
 # HTTP data-fetching and the fast allocator are on by default; build with
@@ -221,7 +225,7 @@ jit = [
 # The native DataFrame engine (ADR 0033 Stage 1): eager, deterministic, frames
 # that follow the language's own scalar semantics (ADR 0034). Serves builds
 # without polars; coexists with it in dev builds for the differential harness.
-native-df = ["dep:parquet", "dep:bytes"]
+native-df = ["dep:parquet", "dep:bytes", "dep:zstd"]
 # The small-server profile: full language surface, no heavy backends.
 appliance = ["http", "mimalloc", "native-df"]
 # Python interop hands whole frames across via Arrow, so it needs the engine.
