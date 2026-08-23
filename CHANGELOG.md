@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 — 2026-08-23
 
 ### Performance — the native engine wins its own matrix (ADR 0033 Stages 2–3)
 
