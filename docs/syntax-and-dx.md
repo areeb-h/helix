@@ -257,6 +257,28 @@ map) expressible in-model. Full rationale and the method-vs-value disambiguation
 
 ---
 
+## The Result shape (stated 2026-08-24, from the consolidated field review)
+
+`try EXPR` produces THE canonical result record, and libraries should pass it
+through rather than invent near-misses of it:
+
+```
+try(1 + 1)   =>  {ok: true,  value: 2,       error: missing}
+try(1 / 0)   =>  {ok: false, value: missing, error: "division by zero"}
+```
+
+Two rules matter and are easy to get wrong from another language's prior:
+
+- **Success carries `error: missing`, not `error: ""`.** A branch on `r.error`
+  must test against `missing` (or use `r.ok`); hand-built records that write
+  `""` on success will disagree with `try`'s at every library seam.
+- `try` binds tighter than a postfix chain: `try(f()).ok` reads `.ok` on `f()`'s
+  result. Bind first — `let r = try(f()) in r.ok` (the checker now says exactly
+  this).
+
+If a user-level Result type with constructors is ever wanted, that is an ADR,
+not a convention — until then, `try`'s record is the shape.
+
 ## Anti-proposals — what NOT to do (the evidence forbids it)
 
 - **Don't add C-style symbols** (`&&`, `||`, `?:`, `++`, `x++`) — Stefik shows they perform

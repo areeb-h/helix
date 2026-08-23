@@ -28,6 +28,49 @@
 - **CSV is parallel in both directions**: write_csv 0.39x, read_csv 0.84x
   against the polars backend on the same matrix.
 
+### Added — the consolidated field review, answered (2026-08-24)
+
+- **The differentiable surface closes over the elementary family.** Every routed
+  unary (tan, asin, acos, atan, sinh, cosh, log2, log10, cbrt, degrees, radians,
+  erf, normal_cdf, normal_pdf) joins relu/sigmoid/tanh/exp/ln/sqrt/sin/cos/abs on
+  the tape; `max`/`min`/`clamp`/`hypot` carry gradients (ties route to the FIRST
+  argument — the same convention relu's kink sets, so `max(a, b)` and the field
+  idiom `a + relu(b - a)` agree everywhere); Array `.max()`/`.min()` fold tracked
+  elements; **unary minus works on a tracked value** (`-v` is `0.0 - v`); and the
+  method and free spellings agree — `v.to_array()` and `v.tan()` fall through to
+  the free builtins, while tape-owned names keep the tape's errors. What still
+  refuses (floor/ceil/trunc/round/sign) refuses HONESTLY: the error names the op
+  and the way out (`value_of`), never "expected a number, found a Node".
+- **An unrecognized field in an `http_request`/`http_stream` record is a hard
+  error** naming the field and listing the ones read — `cookies:` (for `jar:`)
+  had silently produced a cookie-less session; a typo'd `timeout_ms` left a
+  request with no total deadline. The helix.toml unknown-key rule, one layer down.
+- **`headers(pairs)`** constructs the case-insensitive Headers type (wire order,
+  repeats kept, injection-validated) so test doubles can be the type live
+  responses carry. **`url_decode_lenient`** never raises on any string (malformed
+  `%` stays literal) — the server-edge twin of the strict decoder.
+  **`url_encode(s, set)`** names RFC 3986's grammars ("segment", "query",
+  "fragment", "userinfo"). **`to_dataframe(rows)`** builds a frame natively from
+  an array of records (previously python-gated with no bridge at all).
+  **`flat_map`/`count_where`** (parser desugars), String **`replace_first`** and
+  **`last_index_of`** (character index, like `index_of`). `dna` is idempotent.
+- **`helix describe <name>`** answers about ONE name — with a signature, a doc
+  sentence, ONE executed example, a `differentiable` flag, and a `notes` channel
+  for semantic surprises (last-wins, raises-on, seed-threaded); `helix doc <Type>`
+  lists per-method signatures and doc lines. Every example with an output is run
+  by the gate, so the documentation cannot drift. `helix test` states its version
+  first, on every path.
+- **Errors that teach, per the review's evidence**: a failed format spec names
+  the `{{`/`}}` escape (the CSS/JSON brace trap); `try(f()).ok` explains that
+  `try` binds tighter and how to bind first; a doc-example failure with a `...`
+  continuation states the one-line rule.
+
+### Changed
+
+- **The frozen frame footer singularizes**: a one-row frame prints `(1 row)`.
+  This is a versioned change to the frozen format (spec rule 5), made now,
+  before the plural could ossify as a permanent cosmetic wart.
+
 ### Fixed
 
 - **A tz-aware timestamp no longer aborts the process**: the polars backend

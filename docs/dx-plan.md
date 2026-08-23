@@ -382,7 +382,10 @@ an owner's ruling.
   method `solve`" instead of `solve`'s own error. Gate the lift on the tracked
   method table rather than on the presence of a Node argument. Low severity now; it
   grows with every method added to either side.
-- **`Node` still leaks as a type name** in a few error paths (`value.rs:669`).
+- **`Node` leaks as a type name** in FEWER error paths after 2026-08-24 (the
+  min/max/clamp/hypot/floor/round/sign families now answer differentiability
+  errors or differentiate, never "found a value of type Node"), but the generic
+  `type_err` fallback can still surface it (`value.rs:669`).
   Display is clean — a tracked value prints as its value everywhere, including in
   interpolation — so a user who meets the word has no way to connect it to anything
   they wrote. Route user-facing mentions through "a tracked value".
@@ -435,16 +438,44 @@ an owner's ruling.
 - **D2 `--explain-jit`** — already deferred to v0.2.2 with a sketch (fix-plan STATUS 5). AGENTS.md documents the cliff meanwhile.
 - **AGENTS.md rot pin** — a test that executes its command examples, since footguns 1 and 5 have scheduled fixes and nothing fails today if the file rots.
 
-- **Autodiff surface gaps** (from the ml-engine field report, 2026-08-16, mapped not
-  guessed): the native reverse-mode tape (`variable`/`gradient`) differentiates
-  `+ - * / **`, `relu`/`sigmoid`/`tanh`, `exp`/`ln`/`sqrt`, and `reduce` folds — but
-  NOT `sin`/`cos`/`log10`/`abs`, and NOT `array.sum()` (while `reduce` sums
-  differentiate, so the two spellings of one concept diverge — an ADR-0003
-  one-verb-per-concept wound). Candidates in value order: (1) route `.sum()`'s tracked
-  path through the same tape rule as the reduce fold; (2) derivative arms for
-  `sin`/`cos` (the errors are already excellent — "`sin` is not differentiable on a
-  tracked value" — so this is adding arms, not designing surface); (3) `abs` via the
-  subgradient convention. Needs the tape's op-table location scouted first.
+Recorded by the consolidated 0.4.0 field review response (2026-08-24):
+
+- **`where` clauses** — drafted as ADR 0035 (Proposed), the review's #2 ask; the
+  ADR-0003 tension is stated in the ADR itself. Owner decision.
+- **Canonical record print order** — records print insertion order while `==`
+  ignores it, so a doc example can document one construction route and fail on the
+  other (review §1.5). The fix that makes printing canonical (sort fields, aligning
+  with `to_json`) is a BREAKING output change that would touch the field's passing
+  examples — owner decision, recommended for the next minor with a release note.
+- **Float `.0` default printing** (review §6): `"{1.0}rem"` → `1.0rem`. `{x:g}`
+  already answers it; changing the default is a breaking output change. Declined
+  for now; the docs table's notes channel points at `:g`.
+- **Array `find`** — BUILT AND WITHDRAWN 2026-08-24: Dna owns `find` (motif
+  search) and desugars are receiver-blind, so the parser desugar hijacked
+  `seq.find("ATG")` (three gate tests + an example caught it). The spelling stays
+  `filter(p).first()`; do not re-add without receiver-aware dispatch.
+- **`group_by` / `partition`** — still deferred: group_by needs engine
+  closure-calling (a reduce-desugar exists but is quadratic on group concat);
+  partition's desugar would double-evaluate the predicate. Both need engine work,
+  not parser sugar.
+- **`helix test --json`** (review §3.5) and the **trap lints** (§3.6) — accepted
+  in principle, not yet built.
+- **A doc block's own `>>> import` preamble** (§3.7) — accepted in principle;
+  needs the doc-example synthesizer to thread imports.
+- **The Result shape** (review §1.3) — documented in syntax-and-dx.md: `try`'s
+  record IS the shape, success carries `error: missing`. Constructors for a
+  user-level Result type would be an ADR.
+
+- **Autodiff surface gaps — CLOSED (2026-08-24).** Everything the 2026-08-16 entry
+  listed landed earlier (`.sum()`, `sin`/`cos`, `abs`), and the consolidated 0.4.0
+  field review's remainder landed with it: the whole routed elementary family
+  (tan/asin/acos/atan/sinh/cosh/log2/log10/cbrt/degrees/radians/erf/normal_cdf/
+  normal_pdf), max/min/clamp/hypot (ties-to-first, the relu-kink convention),
+  Array `.max()`/`.min()` tracked folds, unary minus on a Node, and UFCS falling
+  through for names the tape does not own. `describe` now reports a
+  `differentiable` flag kept honest by a unit test. Still refused BY DESIGN, with
+  the refusal naming the op: floor/ceil/trunc/round/sign (zero/undefined
+  derivative). Still open: the real `d/db a**b` pow node (below).
 
 ## SKIP (declined, with why)
 
