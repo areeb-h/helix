@@ -1203,6 +1203,16 @@ pub(crate) fn as_int(v: &Value, who: &str, line: usize, col: usize) -> Result<i6
 }
 
 fn type_err(who: &str, want: &str, got: &Value, line: usize, col: usize) -> HelixError {
+    // A tape node is an implementation detail a user never wrote — name what it
+    // IS, and say where the differentiable surface is documented.
+    if matches!(got, Value::Node(_)) {
+        return HelixError::new(
+            format!("`{who}` expected {want}, found a tracked value"),
+            line,
+            col,
+        )
+        .hint("`helix describe <name>` says whether an operation is differentiable.");
+    }
     HelixError::new(
         format!("`{}` expected {}, found a value of type {}", who, want, got.type_name()),
         line,

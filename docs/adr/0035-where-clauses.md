@@ -1,7 +1,9 @@
 # ADR 0035 — `where` clauses
 
-- **Status:** Proposed (awaiting owner) — drafted 2026-08-24 from the consolidated
-  0.4.0 field review, which ranks this second of everything it asks for.
+- **Status:** Accepted — 2026-08-24. Drafted from the consolidated 0.4.0 field
+  review (its #2 ask); the owner delegated the decision the same day ("let's
+  make the best decisions") and the fn-only scope below is what earns the
+  ADR 0003 exception.
 - **Deciders:** project owner
 - **Informed by:** 13 libraries / 124 modules / 20,081 lines of field code; ADR 0003
   (one obvious way); the withdrawn top-level-hoisting change (2026-08-20).
@@ -31,7 +33,7 @@ corpus also shows `do { … }` is under-discovered (47 uses against 472 `let`
 heads), but `do` is not the answer here: it is for *sequential steps*, and these
 are *named sub-expressions*.
 
-## Decision (proposed)
+## Decision
 
 Add `where` as a clause on **function definitions only**:
 

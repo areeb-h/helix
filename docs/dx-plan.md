@@ -440,16 +440,18 @@ an owner's ruling.
 
 Recorded by the consolidated 0.4.0 field review response (2026-08-24):
 
-- **`where` clauses** — drafted as ADR 0035 (Proposed), the review's #2 ask; the
-  ADR-0003 tension is stated in the ADR itself. Owner decision.
-- **Canonical record print order** — records print insertion order while `==`
-  ignores it, so a doc example can document one construction route and fail on the
-  other (review §1.5). The fix that makes printing canonical (sort fields, aligning
-  with `to_json`) is a BREAKING output change that would touch the field's passing
-  examples — owner decision, recommended for the next minor with a release note.
-- **Float `.0` default printing** (review §6): `"{1.0}rem"` → `1.0rem`. `{x:g}`
-  already answers it; changing the default is a breaking output change. Declined
-  for now; the docs table's notes channel points at `:g`.
+- **`where` clauses** — ADR 0035 ACCEPTED 2026-08-24 (decision delegated by the
+  owner) and implemented as the fn-only parser desugar the ADR specifies.
+- **Canonical record print order — DECIDED (2026-08-24, delegated): SORT.**
+  Records now print with fields in sorted order, aligning the printer with
+  `to_json` and with `==` (which always ignored order), so a doc example
+  documents the VALUE, not the construction route. Breaking output change,
+  shipped under the next minor with a release note.
+- **Float `.0` default printing — DECLINED (2026-08-24, delegated), final.** The
+  trailing `.0` is what keeps Int and Float distinguishable in printed output —
+  load-bearing for a language whose three engines are byte-compared and whose
+  numeric tower splits the two types. `{x:g}` is the documented spelling for
+  display contexts (CSS), and the docs table's notes say so on the spot.
 - **Array `find`** — BUILT AND WITHDRAWN 2026-08-24: Dna owns `find` (motif
   search) and desugars are receiver-blind, so the parser desugar hijacked
   `seq.find("ATG")` (three gate tests + an example caught it). The spelling stays
@@ -460,8 +462,10 @@ Recorded by the consolidated 0.4.0 field review response (2026-08-24):
   not parser sugar.
 - **`helix test --json`** (review §3.5) and the **trap lints** (§3.6) — accepted
   in principle, not yet built.
-- **A doc block's own `>>> import` preamble** (§3.7) — accepted in principle;
-  needs the doc-example synthesizer to thread imports.
+- **A doc block's own `>>> import` preamble** (§3.7) — turned out to ALREADY
+  WORK (2026-08-24): a `>>>` block is a multi-line program, and an import line
+  composes with the lines after it. It was only undocumented; comments-and-docs
+  now shows it, and a CLI pin keeps it true.
 - **The Result shape** (review §1.3) — documented in syntax-and-dx.md: `try`'s
   record IS the shape, success carries `error: missing`. Constructors for a
   user-level Result type would be an ADR.

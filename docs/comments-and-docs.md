@@ -160,3 +160,21 @@ fn smallest(xs) = xs.min()
 The middle case is not hypothetical: `min` on `[0.0, -0.0]` does *not* reliably give the
 first element — it depends on the array's representation (see `docs/ROADMAP.md`). A prose
 claim would have shipped that; an example would have caught it.
+
+## Two doc-example rules worth knowing (2026-08-24)
+
+- **An example LINE is one statement — there is no `...` continuation marker**
+  (the failure message says so too). But a `>>>` BLOCK is a multi-line program:
+  consecutive `>>>` lines run together, and only the last line's value is
+  compared against the expectation.
+- **That makes an import preamble just work.** A module's doc example may bring
+  in a sibling the module itself does not import:
+
+  ```
+  ##     >>> import message as m
+  ##     >>> m.user("hi").role
+  ##     user
+  ```
+
+  The synthesized program is the module source plus the block's lines in order,
+  so relative imports resolve exactly as a caller's would.

@@ -5514,6 +5514,66 @@ bANana 3 1
     }
 }
 
+/// The decided-bug fixes, pinned: the FULL pow node (a tracked exponent
+/// differentiates — d/db = a^b ln a — where it used to refuse; a non-positive
+/// base still refuses because ln has nothing to give), and a tracked value in
+/// a plain op's error is named "a tracked value", never "type Node".
+#[test]
+fn the_pow_node_and_tracked_value_wording() {
+    let src = r#"
+fn cdiff(f, x) = (f(x + 0.0001) - f(x - 0.0001)) / 0.0002
+b = variable(3.0)
+g = gradient(2.0 ** b, b)
+assert_close(g, cdiff(x => 2.0 ** x, 3.0), 0.001)
+print("pow d/db ok")
+a2 = variable(2.0)
+b2 = variable(3.0)
+z = a2 ** b2
+assert_close(gradient(z, a2), 12.0, 0.0001)
+assert_close(gradient(z, b2), 8.0 * ln(2.0), 0.0001)
+print("pow both ok")
+neg = variable(-2.0)
+bad = try(neg ** variable(2.0))
+print(bad.ok)
+r2 = try(hypot(variable(1.0), "a"))
+print(r2.error)
+"#;
+    let want = "pow d/db ok
+pow both ok
+false
+a tracked value can't be combined with a String
+";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("pownode_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}: pow node or wording drifted");
+    }
+
+    // A doc-example block is a multi-line program, so an import preamble works
+    // (comments-and-docs documents it; this keeps it true).
+    let dir = std::env::temp_dir().join(format!("hx_docimp_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::write(dir.join("helper.helix"), "## Helper.
+export fn double(x) = x * 2
+").unwrap();
+    std::fs::write(
+        dir.join("uses.helix"),
+        "## Uses helper.
+##
+##     >>> import helper as h
+##     >>> h.double(21)
+##     42
+export fn unrelated() = 1
+",
+    )
+    .unwrap();
+    let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, Some(0), "{err}
+{out}");
+    assert!(out.contains("1 passed"), "{out}");
+}
+
 /// THE DRIFT-PROOF for the docs table: every entry `helix describe` reports
 /// with an `example_out` is EXECUTED (wrapped in `print(...)`, exactly as the
 /// doc-example runner wraps its last line) and must produce byte-for-byte that
@@ -5753,15 +5813,20 @@ fn tracked_shape_mismatch_raises_like_the_plain_path() {
 /// footgun. (3) d/dx x^0 is 0 everywhere, including x = 0 (was 0·inf = NaN).
 #[test]
 fn tracked_gradients_answer_for_the_current_tape_only() {
+    // The tracked exponent now DIFFERENTIATES (full pow node: d/db = a^b ln a);
+    // the refusal that remains is a non-positive base, where ln has nothing to give.
     let pow = "x = variable(3.0)\n\
                print(gradient(x ** 2.0, x))\n\
                y = variable(1.0)\n\
-               print(gradient(2.0 ** y, y))\n";
+               assert_close(gradient(2.0 ** y, y), 2.0 * ln(2.0), 0.000000000001)\n\
+               print(\"exp ok\")\n\
+               neg = variable(0.0 - 2.0)\n\
+               negtry = try(neg ** variable(2.0))\n\
+               print(negtry.ok)\n";
     for (name, env) in ENGINES {
         let (out, err, code) = run_source(pow, env, &format!("adpow_{name}"));
-        assert_eq!(code, Some(1), "{name}: tracked exponent must refuse: {out}");
-        assert_eq!(out, "6.0\n", "{name}: constant exponent must still work");
-        assert!(err.contains("constant scalar power"), "{name}: {err}");
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "6.0\nexp ok\nfalse\n", "{name}: the pow node drifted");
     }
     let stale = "x = variable(2.0)\n\
                  y = variable(3.0)\n\

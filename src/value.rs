@@ -898,6 +898,11 @@ pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, Helix
 /// feel unfinished. Vowel-initial names are the common ones (`Int`, `Array`), so this is
 /// not a rare case.
 pub fn with_article(type_name: &str) -> String {
+    // The tape's node is an implementation name a user never wrote — say what
+    // it IS (dx-plan: route user-facing mentions through "a tracked value").
+    if type_name == "Node" {
+        return "a tracked value".to_string();
+    }
     // The rule is about SOUND, not spelling. `U` is excluded deliberately: the only
     // U-initial type name is `Unit`, pronounced with a consonant glide — "a Unit", the
     // same as "a user". Every other vowel-initial name here (`Int`, `Array`) takes "an".

@@ -41,7 +41,7 @@ they are made deliberately and in the open.
 | [0032](0032-appliance-profile.md) | The appliance profile — a small binary without a smaller language | **Accepted — steps 1+2+4 implemented** (`dataframes`, `bio`, `jit` gates; default build unchanged); tensor gate deliberately never; dtype-full settled (stays) |
 | [0033](0033-native-dataframe-engine.md) | A native DataFrame engine — replace polars, staged, with polars as the oracle | **Accepted — Stages 0–3 implemented** (frozen format; native engine with differential parity; native parquet cross-compatible with polars; parallel CSV + parquet page work put native ahead on all 16 verbs of the 5M matrix on the dev box, every cell compared against the polars oracle); Stage 4 (flip the default) open — polars remains the default and the oracle |
 | [0034](0034-native-frame-semantics.md) | Native frame semantics — frames follow the language | **Accepted & implemented** — scalar-kernel evaluation, decided deltas (% euclidean, / true division, /0 errors), aggregation doctrine, CSV policy |
-| [0035](0035-where-clauses.md) | `where` clauses on function definitions | Proposed (awaiting owner) — drafted 2026-08-24 from the consolidated field review |
+| [0035](0035-where-clauses.md) | `where` clauses on function definitions | Accepted 2026-08-24 (delegated) — implemented as a parser desugar |
 
 ADRs 0001–0007 are grounded in [verified deep research](../research/2026-06-21-foundational-design.md)
 (23 of 25 claims survived 3-vote adversarial verification); ADR 0008 in a

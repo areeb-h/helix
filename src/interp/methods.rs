@@ -303,8 +303,12 @@ pub(crate) fn call_method(
     }
     // If a method argument is tracked (autodiff) but the receiver is a plain number
     // or tensor, lift the receiver into the graph too — so `X.matmul(w)` differentiates
-    // through `w` even though `X` is a constant.
+    // through `w` even though `X` is a constant. Gated on the TAPE'S OWN method
+    // names: an un-gated lift hijacked every method a tracked argument touched
+    // (`tensor(..).solve(variable(..))` reported "no differentiable method
+    // `solve`" instead of solve's own error — the dx-plan's name-blind-lift item).
     if !matches!(recv, Value::Node(_))
+        && crate::autodiff::is_tape_method(name)
         && args.iter().any(|a| matches!(a, Value::Node(_)))
         && let Some(n) = crate::autodiff::lift(recv)
     {

@@ -590,21 +590,51 @@ pub fn binary(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Resu
         Mul => mul(&a, &b),
         Div => div(&a, &b),
         Pow => {
-            // Only a CONSTANT scalar exponent is differentiable here. A tracked
-            // exponent must refuse, not freeze at its current value: reading
-            // `b.value` drops b from the graph, and `gradient(2.0 ** x, x)`
-            // silently answers 0.0 where the truth is 2^x·ln 2 (the sweep's
-            // repro). d/db needs a full pow node — a feature, not this arm.
+            // A constant scalar exponent keeps `pow_scalar`'s wider domain
+            // (negative bases, integer powers). A TRACKED exponent gets the
+            // full two-parent node: d/da = b·a^(b-1), d/db = a^b·ln a — the
+            // d/db term needs ln a, so it demands a strictly positive base
+            // rather than freezing the exponent (the stabilization sweep's
+            // silent-0.0 repro, now a feature instead of a refusal).
+            let exp_tracked = matches!(r, Value::Node(_));
             let n = b.value.first().copied();
-            match (matches!(r, Value::Node(_)), b.value.ndim() == 0, n) {
-                (false, true, Some(n)) => pow_scalar(&a, n),
-                _ => {
+            if !exp_tracked && b.value.ndim() == 0 {
+                match n {
+                    Some(n) => pow_scalar(&a, n),
+                    None => {
+                        return Err(HelixError::new(
+                            "a tracked value can only be raised to a constant scalar power",
+                            line,
+                            col,
+                        ))
+                    }
+                }
+            } else if exp_tracked {
+                if a.value.iter().any(|&x| x <= 0.0) {
                     return Err(HelixError::new(
-                        "a tracked value can only be raised to a constant scalar power",
+                        "a tracked exponent needs a strictly positive base \
+                         (d/db of a**b is a**b·ln a)",
                         line,
                         col,
-                    ))
+                    )
+                    .hint(
+                        "if the exponent is really a constant here, read it off the tape \
+                         with `value_of(...)`.",
+                    ));
                 }
+                binary_ew(
+                    &a,
+                    &b,
+                    f64::powf,
+                    |x, y| y * x.powf(y - 1.0),
+                    |x, y| x.powf(y) * x.ln(),
+                )
+            } else {
+                return Err(HelixError::new(
+                    "a tracked value can only be raised to a constant scalar power",
+                    line,
+                    col,
+                ));
             }
         }
         _ => {
