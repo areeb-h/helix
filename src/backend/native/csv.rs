@@ -353,22 +353,46 @@ pub fn write_csv(
         .map_err(|e| err(format!("could not write `{path}`: {e}")))?;
     let names: Vec<&str> = frame.columns().iter().map(|(n, _)| n.as_str()).collect();
     w.write_record(&names).map_err(|e| err(format!("could not write `{path}`: {e}")))?;
+    // Typed row loop: one reused scratch buffer, no Value and no String per
+    // cell. Missing is an empty field; floats keep their point (`2.0`) so a
+    // round-trip re-infers the same dtype — fmt_float's exact text.
+    let mut scratch = String::new();
+    let werr = |e: csv::Error| err(format!("could not write `{path}`: {e}"));
     for row in 0..frame.len() {
-        let rec: Vec<String> =
-            frame.columns().iter().map(|(_, c)| cell_csv(&c.get(row))).collect();
-        w.write_record(&rec).map_err(|e| err(format!("could not write `{path}`: {e}")))?;
+        for (_, c) in frame.columns() {
+            scratch.clear();
+            use std::fmt::Write as _;
+            match c {
+                Col::I64 { vals, valid } => {
+                    if valid[row] {
+                        let _ = write!(scratch, "{}", vals[row]);
+                    }
+                }
+                Col::F64 { vals, valid } => {
+                    if valid[row] {
+                        let x = vals[row];
+                        if x.is_finite() && x == x.trunc() {
+                            let _ = write!(scratch, "{x:.1}");
+                        } else {
+                            let _ = write!(scratch, "{x}");
+                        }
+                    }
+                }
+                Col::Bool { vals, valid } => {
+                    if valid[row] {
+                        scratch.push_str(if vals[row] { "true" } else { "false" });
+                    }
+                }
+                Col::Str { vals, valid } => {
+                    if valid[row] {
+                        scratch.push_str(vals[row].as_str());
+                    }
+                }
+                Col::Null { .. } => {}
+            }
+            w.write_field(scratch.as_bytes()).map_err(werr)?;
+        }
+        w.write_record(None::<&[u8]>).map_err(werr)?;
     }
     w.flush().map_err(|e| err(format!("could not write `{path}`: {e}")))
-}
-
-/// A cell's CSV text: missing is an empty field; floats keep their point
-/// (`2.0`) so a round-trip re-infers the same dtype.
-fn cell_csv(v: &crate::value::Value) -> String {
-    use crate::value::Value;
-    match v {
-        Value::Missing => String::new(),
-        Value::Float(x) => crate::value::fmt_float(*x),
-        Value::Str(s) => (**s).clone(),
-        other => other.to_string(),
-    }
 }

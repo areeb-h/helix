@@ -74,6 +74,179 @@ impl Col {
         }
     }
 
+    /// Gather with missing fill: `None` slots become invalid. The join's side
+    /// columns reduce to this — typed, never boxing a cell.
+    pub fn take_opt(&self, idx: &[Option<usize>]) -> Col {
+        match self {
+            Col::I64 { vals, valid } => {
+                let mut v = Vec::with_capacity(idx.len());
+                let mut m = Vec::with_capacity(idx.len());
+                for o in idx {
+                    match o {
+                        Some(i) => {
+                            v.push(vals[*i]);
+                            m.push(valid[*i]);
+                        }
+                        None => {
+                            v.push(0);
+                            m.push(false);
+                        }
+                    }
+                }
+                Col::I64 { vals: v, valid: m }
+            }
+            Col::F64 { vals, valid } => {
+                let mut v = Vec::with_capacity(idx.len());
+                let mut m = Vec::with_capacity(idx.len());
+                for o in idx {
+                    match o {
+                        Some(i) => {
+                            v.push(vals[*i]);
+                            m.push(valid[*i]);
+                        }
+                        None => {
+                            v.push(0.0);
+                            m.push(false);
+                        }
+                    }
+                }
+                Col::F64 { vals: v, valid: m }
+            }
+            Col::Bool { vals, valid } => {
+                let mut v = Vec::with_capacity(idx.len());
+                let mut m = Vec::with_capacity(idx.len());
+                for o in idx {
+                    match o {
+                        Some(i) => {
+                            v.push(vals[*i]);
+                            m.push(valid[*i]);
+                        }
+                        None => {
+                            v.push(false);
+                            m.push(false);
+                        }
+                    }
+                }
+                Col::Bool { vals: v, valid: m }
+            }
+            Col::Str { vals, valid } => {
+                let mut v = Vec::with_capacity(idx.len());
+                let mut m = Vec::with_capacity(idx.len());
+                for o in idx {
+                    match o {
+                        Some(i) => {
+                            v.push(vals[*i].clone());
+                            m.push(valid[*i]);
+                        }
+                        None => {
+                            v.push(Rc::new(String::new()));
+                            m.push(false);
+                        }
+                    }
+                }
+                Col::Str { vals: v, valid: m }
+            }
+            Col::Null { .. } => Col::Null { len: idx.len() },
+        }
+    }
+
+    /// Coalesce-gather for a join's key column: the left row's cell when the
+    /// pair has one, else the right's. Both sides share a dtype (checked by the
+    /// caller); mixed dtypes take the boxed path instead.
+    pub fn coalesce_gather(
+        left: &Col,
+        right: &Col,
+        pairs: &[(Option<usize>, Option<usize>)],
+    ) -> Option<Col> {
+        match (left, right) {
+            (Col::I64 { vals: lv, valid: lm }, Col::I64 { vals: rv, valid: rm }) => {
+                let mut v = Vec::with_capacity(pairs.len());
+                let mut m = Vec::with_capacity(pairs.len());
+                for (l, r) in pairs {
+                    match (l, r) {
+                        (Some(i), _) => {
+                            v.push(lv[*i]);
+                            m.push(lm[*i]);
+                        }
+                        (None, Some(j)) => {
+                            v.push(rv[*j]);
+                            m.push(rm[*j]);
+                        }
+                        (None, None) => {
+                            v.push(0);
+                            m.push(false);
+                        }
+                    }
+                }
+                Some(Col::I64 { vals: v, valid: m })
+            }
+            (Col::Str { vals: lv, valid: lm }, Col::Str { vals: rv, valid: rm }) => {
+                let mut v = Vec::with_capacity(pairs.len());
+                let mut m = Vec::with_capacity(pairs.len());
+                for (l, r) in pairs {
+                    match (l, r) {
+                        (Some(i), _) => {
+                            v.push(lv[*i].clone());
+                            m.push(lm[*i]);
+                        }
+                        (None, Some(j)) => {
+                            v.push(rv[*j].clone());
+                            m.push(rm[*j]);
+                        }
+                        (None, None) => {
+                            v.push(Rc::new(String::new()));
+                            m.push(false);
+                        }
+                    }
+                }
+                Some(Col::Str { vals: v, valid: m })
+            }
+            (Col::F64 { vals: lv, valid: lm }, Col::F64 { vals: rv, valid: rm }) => {
+                let mut v = Vec::with_capacity(pairs.len());
+                let mut m = Vec::with_capacity(pairs.len());
+                for (l, r) in pairs {
+                    match (l, r) {
+                        (Some(i), _) => {
+                            v.push(lv[*i]);
+                            m.push(lm[*i]);
+                        }
+                        (None, Some(j)) => {
+                            v.push(rv[*j]);
+                            m.push(rm[*j]);
+                        }
+                        (None, None) => {
+                            v.push(0.0);
+                            m.push(false);
+                        }
+                    }
+                }
+                Some(Col::F64 { vals: v, valid: m })
+            }
+            (Col::Bool { vals: lv, valid: lm }, Col::Bool { vals: rv, valid: rm }) => {
+                let mut v = Vec::with_capacity(pairs.len());
+                let mut m = Vec::with_capacity(pairs.len());
+                for (l, r) in pairs {
+                    match (l, r) {
+                        (Some(i), _) => {
+                            v.push(lv[*i]);
+                            m.push(lm[*i]);
+                        }
+                        (None, Some(j)) => {
+                            v.push(rv[*j]);
+                            m.push(rm[*j]);
+                        }
+                        (None, None) => {
+                            v.push(false);
+                            m.push(false);
+                        }
+                    }
+                }
+                Some(Col::Bool { vals: v, valid: m })
+            }
+            _ => None,
+        }
+    }
+
     pub fn dtype_name(&self) -> &'static str {
         match self {
             Col::I64 { .. } => "int",

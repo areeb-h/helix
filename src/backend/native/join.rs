@@ -30,22 +30,16 @@ pub fn join(
         keys.iter().map(|k| right.col(k, line, col)).collect::<Result<_, _>>()?;
 
     // Right-side index: key -> row numbers, in right-frame order. A key with a
-    // missing cell never enters the index — missing matches nothing (§5).
-    let mut index: HashMap<RowKey, Vec<usize>> = HashMap::new();
-    for row in 0..right.len() {
-        let key = RowKey::at(&rkeys, row);
-        if !key.has_missing() {
-            index.entry(key).push_or_insert(row);
-        }
-    }
-
-    // The output as row-index pairs (None = that side missing-filled).
+    // missing cell never enters the index — missing matches nothing (§5). A
+    // single key skips the per-row Vec entirely (a KeyCell is one enum).
+    // Pair emission is generic over "how do I probe row r": each typed key
+    // shape supplies index-build and probe closures that never box a cell; the
+    // generic RowKey machinery remains for multi-key and rare dtypes.
     let mut pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
     let mut right_hit = vec![false; right.len()];
-    for lrow in 0..left.len() {
-        let key = RowKey::at(&lkeys, lrow);
-        let matches = if key.has_missing() { None } else { index.get(&key) };
-        match matches {
+    let keep_unmatched_left = matches!(how, "left" | "outer" | "full");
+    {
+        let mut emit = |lrow: usize, rrows: Option<&Vec<usize>>| match rrows {
             Some(rrows) => {
                 for &rrow in rrows {
                     pairs.push((Some(lrow), Some(rrow)));
@@ -53,8 +47,46 @@ pub fn join(
                 }
             }
             None => {
-                if matches!(how, "left" | "outer" | "full") {
+                if keep_unmatched_left {
                     pairs.push((Some(lrow), None));
+                }
+            }
+        };
+        match (keys.len(), lkeys[0], rkeys[0]) {
+            (1, Col::I64 { vals: lv, valid: lm }, Col::I64 { vals: rv, valid: rm }) => {
+                let mut index: HashMap<i64, Vec<usize>> = HashMap::new();
+                for (row, (v, ok)) in rv.iter().zip(rm).enumerate() {
+                    if *ok {
+                        index.entry(*v).or_default().push(row);
+                    }
+                }
+                for (lrow, (v, ok)) in lv.iter().zip(lm).enumerate() {
+                    emit(lrow, if *ok { index.get(v) } else { None });
+                }
+            }
+            (1, Col::Str { vals: lv, valid: lm }, Col::Str { vals: rv, valid: rm }) => {
+                let mut index: HashMap<&str, Vec<usize>> = HashMap::new();
+                for (row, (v, ok)) in rv.iter().zip(rm).enumerate() {
+                    if *ok {
+                        index.entry(v.as_str()).or_default().push(row);
+                    }
+                }
+                for (lrow, (v, ok)) in lv.iter().zip(lm).enumerate() {
+                    emit(lrow, if *ok { index.get(v.as_str()) } else { None });
+                }
+            }
+            _ => {
+                let mut index: HashMap<RowKey, Vec<usize>> = HashMap::new();
+                for row in 0..right.len() {
+                    let key = RowKey::at(&rkeys, row);
+                    if !key.has_missing() {
+                        index.entry(key).push_or_insert(row);
+                    }
+                }
+                for lrow in 0..left.len() {
+                    let key = RowKey::at(&lkeys, lrow);
+                    let m = if key.has_missing() { None } else { index.get(&key) };
+                    emit(lrow, m);
                 }
             }
         }
@@ -74,52 +106,55 @@ pub fn join(
     // the left frame; for `right` it is (left non-keys first, then) the right
     // frame's order.
     let key_at = |name: &String| keys.iter().position(|k| k == name);
-    let coalesced = |k: usize| -> Vec<Value> {
-        pairs
+    // Typed assembly: side columns are optional gathers, key columns coalesce
+    // typed when both sides share a dtype. The boxed builders exist only as the
+    // mixed-dtype fallback (Int key joined to Float key, etc.).
+    let coalesced = |k: usize| -> Result<Col, HelixError> {
+        if let Some(c) = Col::coalesce_gather(lkeys[k], rkeys[k], &pairs) {
+            return Ok(c);
+        }
+        let cells: Vec<Value> = pairs
             .iter()
             .map(|(l, r)| match (l, r) {
                 (Some(lr), _) => lkeys[k].get(*lr),
                 (None, Some(rr)) => rkeys[k].get(*rr),
                 (None, None) => Value::Missing,
             })
-            .collect()
+            .collect();
+        Col::from_values(&keys[k], &cells, line, col)
     };
-    type Pick = fn(&(Option<usize>, Option<usize>)) -> Option<usize>;
-    let picked = |c: &Col, pick: Pick| -> Vec<Value> {
-        pairs.iter().map(|p| pick(p).map(|r| c.get(r)).unwrap_or(Value::Missing)).collect()
-    };
+    let left_idx: Vec<Option<usize>> = pairs.iter().map(|p| p.0).collect();
+    let right_idx: Vec<Option<usize>> = pairs.iter().map(|p| p.1).collect();
 
     let mut out: Vec<(String, Col)> = Vec::with_capacity(left.width() + right.width() - keys.len());
-    let push = |name: String, cells: Vec<Value>, out: &mut Vec<(String, Col)>| -> Result<(), HelixError> {
+    let push = |name: String, packed: Col, out: &mut Vec<(String, Col)>| {
         let final_name =
             if out.iter().any(|(n, _)| *n == name) { format!("{name}_right") } else { name };
-        let packed = Col::from_values(&final_name, &cells, line, col)?;
         out.push((final_name, packed));
-        Ok(())
     };
 
     if how == "right" {
         for (name, c) in left.columns() {
             if key_at(name).is_none() {
-                push(name.clone(), picked(c, |p| p.0), &mut out)?;
+                push(name.clone(), c.take_opt(&left_idx), &mut out);
             }
         }
         for (name, c) in right.columns() {
             match key_at(name) {
-                Some(k) => push(name.clone(), coalesced(k), &mut out)?,
-                None => push(name.clone(), picked(c, |p| p.1), &mut out)?,
+                Some(k) => push(name.clone(), coalesced(k)?, &mut out),
+                None => push(name.clone(), c.take_opt(&right_idx), &mut out),
             }
         }
     } else {
         for (name, c) in left.columns() {
             match key_at(name) {
-                Some(k) => push(name.clone(), coalesced(k), &mut out)?,
-                None => push(name.clone(), picked(c, |p| p.0), &mut out)?,
+                Some(k) => push(name.clone(), coalesced(k)?, &mut out),
+                None => push(name.clone(), c.take_opt(&left_idx), &mut out),
             }
         }
         for (name, c) in right.columns() {
             if key_at(name).is_none() {
-                push(name.clone(), picked(c, |p| p.1), &mut out)?;
+                push(name.clone(), c.take_opt(&right_idx), &mut out);
             }
         }
     }

@@ -131,6 +131,191 @@ fn float_cmp(op: BinOp, a: f64, b: f64) -> bool {
     }
 }
 
+// ---- with_columns: typed arithmetic ----
+
+/// An owned typed operand: a column's data or a broadcast scalar.
+enum TOp {
+    I(Vec<i64>, Vec<bool>),
+    F(Vec<f64>, Vec<bool>),
+    IScalar(i64),
+    FScalar(f64),
+}
+
+/// Evaluate an arithmetic ColExpr tree over numeric columns without boxing.
+/// `None` = a shape outside the covered set (the boxed evaluator, which DEFINES
+/// the semantics, takes over). Covered: Col/Lit leaves (i64/f64), Add/Sub/Mul
+/// (int wraps, exactly the kernel), Div (always Float; a zero divisor delegates
+/// that cell to the kernel so the ERROR is byte-identical, row named).
+pub fn eval_typed(
+    frame: &NativeFrame,
+    expr: &ColExpr,
+    line: usize,
+    col: usize,
+) -> Option<Result<Col, HelixError>> {
+    match tev(frame, expr, line, col)? {
+        Err(e) => Some(Err(e)),
+        Ok(TOp::I(vals, valid)) => Some(Ok(Col::I64 { vals, valid })),
+        Ok(TOp::F(vals, valid)) => Some(Ok(Col::F64 { vals, valid })),
+        // A bare scalar expression broadcasts — leave that rarity to the boxed path.
+        Ok(_) => None,
+    }
+}
+
+fn tev(
+    frame: &NativeFrame,
+    expr: &ColExpr,
+    line: usize,
+    col: usize,
+) -> Option<Result<TOp, HelixError>> {
+    match expr {
+        ColExpr::Lit(Value::Int(k)) => Some(Ok(TOp::IScalar(*k))),
+        ColExpr::Lit(Value::Float(k)) => Some(Ok(TOp::FScalar(*k))),
+        ColExpr::Col(name) => match frame.col(name, line, col) {
+            Err(e) => Some(Err(e)),
+            Ok(Col::I64 { vals, valid }) => Some(Ok(TOp::I(vals.clone(), valid.clone()))),
+            Ok(Col::F64 { vals, valid }) => Some(Ok(TOp::F(vals.clone(), valid.clone()))),
+            Ok(_) => None,
+        },
+        ColExpr::Binary(op, a, b)
+            if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) =>
+        {
+            let l = match tev(frame, a, line, col)? {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let r = match tev(frame, b, line, col)? {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            Some(apply(*op, l, r, line, col))
+        }
+        _ => None,
+    }
+}
+
+fn iop(op: BinOp, x: i64, y: i64) -> i64 {
+    match op {
+        BinOp::Add => x.wrapping_add(y),
+        BinOp::Sub => x.wrapping_sub(y),
+        _ => x.wrapping_mul(y),
+    }
+}
+
+fn fop(op: BinOp, x: f64, y: f64) -> f64 {
+    match op {
+        BinOp::Add => x + y,
+        BinOp::Sub => x - y,
+        BinOp::Mul => x * y,
+        _ => x / y,
+    }
+}
+
+/// The kernel's own error for this cell — so the typed path's failure bytes
+/// match the boxed path exactly (message and at-row hint).
+fn cell_err(op: BinOp, a: Value, b: Value, row: usize, line: usize, col: usize) -> HelixError {
+    match crate::interp::ops::eval_binary(&op, a, b, line, col) {
+        Err(e) => e.hint(format!("at row {row} of the frame.")),
+        Ok(_) => HelixError::new("internal: typed path expected a kernel error", line, col),
+    }
+}
+
+fn apply(op: BinOp, l: TOp, r: TOp, line: usize, col: usize) -> Result<TOp, HelixError> {
+    use TOp::*;
+    // Division is ALWAYS float (true division, ADR 0034) and checks its divisor.
+    let div = op == BinOp::Div;
+    let as_f = |t: TOp| -> TOp {
+        match t {
+            I(v, m) => F(v.into_iter().map(|x| x as f64).collect(), m),
+            IScalar(k) => FScalar(k as f64),
+            other => other,
+        }
+    };
+    // Int stays int only for Add/Sub/Mul with both sides int.
+    let both_int = matches!((&l, &r), (I(..) | IScalar(_), I(..) | IScalar(_)));
+    if both_int && !div {
+        return Ok(match (l, r) {
+            (I(mut v, m), IScalar(k)) => {
+                for x in v.iter_mut() {
+                    *x = iop(op, *x, k);
+                }
+                I(v, m)
+            }
+            (IScalar(k), I(mut v, m)) => {
+                for x in v.iter_mut() {
+                    *x = iop(op, k, *x);
+                }
+                I(v, m)
+            }
+            (I(mut v, m), I(v2, m2)) => {
+                for ((x, y), ok2) in v.iter_mut().zip(v2).zip(&m2) {
+                    let _ = ok2;
+                    *x = iop(op, *x, y);
+                }
+                let m: Vec<bool> = m.iter().zip(&m2).map(|(a, b)| *a && *b).collect();
+                I(v, m)
+            }
+            (IScalar(a), IScalar(b)) => IScalar(iop(op, a, b)),
+            _ => unreachable!("both_int checked"),
+        });
+    }
+    // Everything else runs in f64.
+    let (l, r) = (as_f(l), as_f(r));
+    Ok(match (l, r) {
+        (F(mut v, m), FScalar(k)) => {
+            if div && k == 0.0 {
+                // Every present cell divides by zero — the FIRST one errors.
+                if let Some(row) = m.iter().position(|ok| *ok) {
+                    return Err(cell_err(op, Value::Float(v[row]), Value::Float(k), row, line, col));
+                }
+            }
+            for x in v.iter_mut() {
+                *x = fop(op, *x, k);
+            }
+            F(v, m)
+        }
+        (FScalar(k), F(mut v, m)) => {
+            if div
+                && let Some(row) = v.iter().zip(&m).position(|(y, ok)| *ok && *y == 0.0)
+            {
+                return Err(cell_err(op, Value::Float(k), Value::Float(v[row]), row, line, col));
+            }
+            for x in v.iter_mut() {
+                *x = fop(op, k, *x);
+            }
+            F(v, m)
+        }
+        (F(mut v, m), F(v2, m2)) => {
+            if div
+                && let Some(row) = v2
+                    .iter()
+                    .zip(m.iter().zip(&m2))
+                    .position(|(y, (a, b))| *a && *b && *y == 0.0)
+            {
+                return Err(cell_err(
+                    op,
+                    Value::Float(v[row]),
+                    Value::Float(v2[row]),
+                    row,
+                    line,
+                    col,
+                ));
+            }
+            for (x, y) in v.iter_mut().zip(&v2) {
+                *x = fop(op, *x, *y);
+            }
+            let m: Vec<bool> = m.iter().zip(&m2).map(|(a, b)| *a && *b).collect();
+            F(v, m)
+        }
+        (FScalar(a), FScalar(b)) => {
+            if div && b == 0.0 {
+                return Err(cell_err(op, Value::Float(a), Value::Float(b), 0, line, col));
+            }
+            FScalar(fop(op, a, b))
+        }
+        _ => unreachable!("promoted above"),
+    })
+}
+
 // ---- group_agg ----
 
 /// A single key column's typed key (missing keys form their own group, same as

@@ -65,8 +65,13 @@ pub fn with_columns(
 ) -> Result<NativeFrame, HelixError> {
     let mut out = frame.columns().to_vec();
     for (name, expr) in cols {
-        let cells = eval(frame, expr, line, col)?.into_rows(frame.len());
-        let packed = Col::from_values(name, &cells, line, col)?;
+        // Typed arithmetic first; the boxed evaluator stays the semantics.
+        let packed = if let Some(r) = super::fast::eval_typed(frame, expr, line, col) {
+            r?
+        } else {
+            let cells = eval(frame, expr, line, col)?.into_rows(frame.len());
+            Col::from_values(name, &cells, line, col)?
+        };
         // Replace in place, or append (spec §7).
         match out.iter_mut().find(|(n, _)| n == name) {
             Some(slot) => slot.1 = packed,
