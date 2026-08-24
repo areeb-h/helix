@@ -1,0 +1,14 @@
+exit: 0
+--- stdout ---
+500000500000
+111
+even
+500500
+false
+maximum recursion depth (20000) exceeded
+1250025000
+196418
+20
+50
+--- stderr ---
+

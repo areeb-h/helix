@@ -1,0 +1,29 @@
+exit: 0
+--- stdout ---
+built:
+run  model      rmse
+---  ---------  ----
+  1  linear     0.42
+  2  quadratic  0.19
+  3  cubic      0.21
+(3 rows)
+
+csv exists? true
+reloaded 3 rows; best by rmse:
+run  model      rmse
+---  ---------  ----
+  2  quadratic  0.19
+(1 row)
+
+parquet rows back: 3
+
+after vstack: 4 rows
+after re-append + unique: 4 rows
+upsert by model: 4 distinct models
+
+read_json: [1, 2, 3, 4]  sum: 10
+
+sha256(config): 39689bae33c254058816098daefc8f8eec11b4d7e0b666b5a789027c918bdfa1
+cleaned up nums.json: true
+--- stderr ---
+

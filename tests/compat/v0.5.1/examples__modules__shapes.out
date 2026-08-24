@@ -1,0 +1,7 @@
+exit: 0
+--- stdout ---
+rectangle 3x4 -> area 12 perimeter 14
+circle r=2 -> area 12.566370614359172
+pi from the module: 3.141592653589793
+--- stderr ---
+

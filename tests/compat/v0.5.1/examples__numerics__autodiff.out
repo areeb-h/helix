@@ -1,0 +1,19 @@
+exit: 0
+--- stdout ---
+d(x^2)/dx at 3: 6.0
+d(sigmoid)/ds at 0: 0.25
+grad sum(v^2): [2, 4, 6]
+grad of a*b wrt [a,b]: [5.0, 2.0]
+
+start loss: 57.0
+loss after 200 steps: 0.0005292283015653099
+loss after 1000 steps: 0.00000000004361709096200043
+learned weights (≈ [2, 1]): [2.000004287719922, 0.9999845199705957]
+
+layer out: 1.25
+d out/d each weight: [1.0, 2.0, 1.0, 2.0]
+W[0][1] = -0.5 → d/dw12 = 1.0
+first row sum grad wrt w11: 1.0
+shape: [2, 2] count: 4
+--- stderr ---
+

@@ -1,0 +1,9 @@
+exit: 0
+--- stdout ---
+slope: 1.929  intercept: 1.458
+R^2: 0.968  RSS: 43.354
+train RMSE: 1.041
+candidate scores: [82.766, 86.389, 85.559, 88.811]
+MDL picks feature set: [0]  (0=x, 1=x^2, 2=sin x)
+--- stderr ---
+

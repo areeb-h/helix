@@ -1,0 +1,12 @@
+exit: 0
+--- stdout ---
+pi (builtin RNG): 3.1415
+pi (xorshift64):  3.1422
+raw hit count:    1571083
+bootstrap mean:   12.960
+95% CI:           [11.730, 14.200]
+final position:   26
+max excursion:    172
+zero crossings:   556
+--- stderr ---
+

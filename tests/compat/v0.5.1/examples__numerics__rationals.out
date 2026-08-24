@@ -1,0 +1,22 @@
+exit: 0
+--- stdout ---
+float thirds:    1.0
+rational thirds: 1
+4/8 reduces to 1/2
+6/3 is the integer 2
+1/2 + 1/3 = 5/6
+2/3 * 3/4 = 1/2
+3/4 / 2/3 = 9/8
+(2/3)^3   = 8/27
+(3/5)^-2  = 25/9
+1/2 + 5  = 11/2
+1/2 + 0.1 = 0.6
+1/3 < 1/2: true
+3/6 == 1/2: true
+tiny sum: 1/750000000
+numerator: 355  denominator: 113
+as float: 3.1415929203539825
+exact total: 1
+sorted: [1/6, 1/3, 1/2]
+--- stderr ---
+

@@ -1,0 +1,22 @@
+exit: 0
+--- stdout ---
+doubled: [84, 16, 30, 32, 46, 8]
+evens:   [42, 8, 16, 4]
+sum:     108
+min/max/mean: 4 42 18.0
+sorted: [4, 8, 15, 16, 23, 42]  reversed: [4, 23, 16, 15, 8, 42]
+first 3: [42, 8, 15]  drop 2: [15, 16, 23, 4]
+contains 23? true
+youngest: Bo
+oldest:   Cy
+zip:     [(1, 10), (2, 20), (3, 30)]
+zipmap:  [20, 40, 60]
+a + b:   [11, 22, 33]   a * b: [10, 40, 90]
+flatten: [1, 2, 3, 4, 5, 6]
+concat:  [1, 2, 3, 10, 20, 30, 99]
+range: [0, 1, 2, 3, 4] [2, 3, 4, 5, 6, 7] [0, 5, 10, 15] [10, 8, 6, 4, 2]
+longest word: expressive
+lengths:      [2, 3, 4, 5, 10]
+total chars:  24
+--- stderr ---
+

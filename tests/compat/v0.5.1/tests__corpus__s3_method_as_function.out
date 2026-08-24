@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `sum` is not a known function
+  --> <src>:1:7
+  |
+1 | print(sum([1, 2, 3]))
+  |       ^
+help: `sum` is a method: `xs.sum()`.

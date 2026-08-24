@@ -1,0 +1,13 @@
+exit: 0
+--- stdout ---
+20
+local
+global
+6 10
+100 101 102
+11
+70
+20
+set once
+--- stderr ---
+

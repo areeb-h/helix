@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: unexpected character `;`
+  --> <src>:1:6
+  |
+1 | x = 1; y = 2
+  |      ^
+help: each statement goes on its own line; Helix has no `;`.

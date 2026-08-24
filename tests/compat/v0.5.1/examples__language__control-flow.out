@@ -1,0 +1,10 @@
+exit: 0
+--- stdout ---
+grade: B
+size: none a few many
+polarity: zero positive negative
+safe_div: 5.0 0.0
+stats: n=6 total=108 mean=18.0
+point: inside ring outside
+--- stderr ---
+

@@ -1,0 +1,19 @@
+exit: 0
+--- stdout ---
+zero
+a few
+many
+zero
+positive
+negative
+55
+no value
+got a value
+success
+client error
+unknown
+6
+5.0
+0
+--- stderr ---
+

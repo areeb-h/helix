@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `match` guard is `missing` — cannot decide the arm
+  --> <src>:1:7
+  |
+1 | print(match 1 { x if missing => "m", _ => "w" })
+  |       ^
+help: handle the missing case first, e.g. `x if x.is_missing() => ...`.

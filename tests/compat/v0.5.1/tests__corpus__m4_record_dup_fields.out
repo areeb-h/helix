@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: duplicate field `a` in record literal
+  --> <src>:1:12
+  |
+1 | x = {a: 1, a: 2}
+  |            ^
+help: each field may appear once; derive a changed record with `{ ...base, field: value }`.

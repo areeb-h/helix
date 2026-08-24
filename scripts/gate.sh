@@ -68,6 +68,22 @@ log "tests ($PROFILE)"
 TLOG=$(mktemp)
 cargo test "${TEST_ARGS[@]}" >"$TLOG" 2>&1 || rc=1
 grep -E "test result:|FAILED|error\[|panicked" "$TLOG" | tail -25
+
+# THE DUAL-ENGINE DIFFERENTIAL CAMPAIGN. Until now this ran NOWHERE: `native-df`
+# is not in Cargo.toml's `default`, this script runs a bare `cargo test`, and CI's
+# only native-df step was a clippy WITHOUT `--all-targets` — so the test targets
+# were never even compiled. 28 `#[test]` in src/backend/native/tests.rs, including
+# every `mod against_the_oracle` comparison against the polars oracle, were written,
+# reviewed, committed, and then executed by nothing. docs/testing.md told readers
+# they ran through this script.
+#
+# Scoped to `backend::native` and given its OWN target dir: the feature set differs
+# from the main build, so sharing a target dir would make the two invocations evict
+# each other's cache on every gate run. ~47s warm, nearly all of it the crate
+# recompile; the tests themselves are 0.02s.
+log "native-df differential (the dual-engine campaign)"
+CARGO_TARGET_DIR=target/dual cargo test "${TEST_ARGS[@]}" --features native-df --bins backend::native >"$TLOG" 2>&1 || rc=1
+grep -E "test result:|FAILED|error\[|panicked" "$TLOG" | tail -5
 rm -f "$TLOG"
 
 log "vmparity (BIN=$BIN)"

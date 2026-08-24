@@ -1,0 +1,19 @@
+exit: 0
+--- stdout ---
+hello Areeb
+counter is 1
+mean: 2.5
+std:  1.118033988749895
+sum:  10
+normalized: [-1.3416407864998738, -0.4472135954999579, 0.4472135954999579, 1.3416407864998738]
+sorted desc: [4, 3, 2, 1]
+first: 1 last: 4
+top scores: [10, 9, 8, 5, 3]
+sequence:     ATGCGTAC
+gc content:   0.5
+complement:   TACGCATG
+rev-comp:     GTACGCAT
+3-mers:       ["ATG", "TGC", "GCG", "CGT", "GTA", "TAC"]
+go? true
+--- stderr ---
+

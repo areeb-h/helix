@@ -1,0 +1,14 @@
+exit: 0
+--- stdout ---
+Hello Ada, you are 41.
+mean 3.8333333333333335, max 9, n 6
+41 in 10 years is 51
+grade: pass
+a set looks like {1, 2, 3}
+timeout = 30
+present = 41
+Hi Helix!
+["sq=1", "sq=4", "sq=9"]
+chars: ["h", "e", "l", "l", "o"]
+--- stderr ---
+

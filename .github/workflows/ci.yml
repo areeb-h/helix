@@ -202,9 +202,16 @@ jobs:
       - name: appliance profile (clippy, deny warnings)
         run: cargo clippy --no-default-features --features appliance -- -D warnings
       # The dual-engine dev build (polars + native) is what the differential
-      # campaign runs on — it must always compile.
-      - name: dual DataFrame engines
-        run: cargo clippy --features native-df -- -D warnings
+      # campaign runs on — it must always compile, AND it must actually run.
+      # `--all-targets` matters: without it the test targets are not compiled, which
+      # is why 28 tests (including every `mod against_the_oracle` comparison against
+      # the polars oracle) were dead in every gate until v0.5.2.
+      - name: dual DataFrame engines (clippy)
+        run: cargo clippy --all-targets --features native-df -- -D warnings
+      # The compile above is already paid, so running the campaign is nearly free.
+      # This is the only place the two DataFrame engines are compared at all.
+      - name: dual DataFrame engines (differential campaign)
+        run: cargo test --features native-df
 
   installer:
     name: install.sh logic

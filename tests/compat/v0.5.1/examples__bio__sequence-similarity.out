@@ -1,0 +1,14 @@
+exit: 0
+--- stdout ---
+global score: 2  matches: 3
+aligned a: [missing, "mul", "x1", "x2"]
+aligned b: ["add", "mul", "x1", "x2"]
+
+local matches: 3  containment: 1.0
+
+numeric: 3 of 4 positions match
+
+default gap score: 2  heavy-gap score: -9
+matches unchanged: 3
+--- stderr ---
+

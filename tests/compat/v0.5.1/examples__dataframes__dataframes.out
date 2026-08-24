@@ -1,0 +1,43 @@
+exit: 0
+--- stdout ---
+columns: ["name", "age", "diagnosis", "resting_hr"]
+rows: 8
+name  age  diagnosis
+----  ---  ---------
+Ada    41  flu
+Finn   45  asthma
+Hana   51  asthma
+Cara   55  flu
+Eve    62  flu
+(5 rows)
+name  age  diagnosis  resting_hr
+----  ---  ---------  ----------
+Ada    41  flu                72
+Finn   45  asthma             68
+Hana   51  asthma             66
+(3 rows)
+name  age  diagnosis  resting_hr  adult  hr_per_decade
+----  ---  ---------  ----------  -----  -------------
+Ada    41  flu                72  true              18
+Ben    38  cold               65  true              21
+Cara   55  flu                80  true              16
+Dan    29  cold               70  true              35
+Eve    62  flu                77  true              12
+Finn   45  asthma             68  true              17
+Gao    33  cold               74  true              24
+Hana   51  asthma             66  true              13
+(8 rows)
+species          expression
+-------  ------------------
+human     8.266666666666666
+mouse     6.433333333333334
+yeast    3.6500000000000004
+(3 rows)
+sample_id  gene   expression  tissue  donor_age
+---------  -----  ----------  ------  ---------
+S1         BRCA1        12.4  breast         41
+S2         BRCA1         8.1  breast         55
+S3         TP53         15.0  lung           38
+(3 rows)
+--- stderr ---
+

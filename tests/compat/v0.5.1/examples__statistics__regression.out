@@ -1,0 +1,11 @@
+exit: 0
+--- stdout ---
+degree    RSS       R2       AIC       BIC
+  1      16.216   0.9683    -32.12    -28.74
+  2       0.972   0.9981   -142.68   -137.61
+  3       0.965   0.9981   -141.00   -134.25
+  4       0.865   0.9983   -143.34   -134.90
+
+best by AIC: degree 4   best by BIC: degree 2   (true model: degree 2)
+--- stderr ---
+

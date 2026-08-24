@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `it` is not defined here
+  --> <src>:1:27
+  |
+1 | fs2 = [1, 2, 3].map((y => it + y))
+  |                           ^
+help: `it` is the implicit element inside a comprehension body; a `=>` function receives the element as its own parameter — write `.map(x => ...)`.

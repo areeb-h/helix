@@ -1,0 +1,23 @@
+exit: 0
+--- stdout ---
+2 ** 10:     1024
+-2 ** 2:     -4
+2 ** 3 ** 2: 512
+2.0 ** 0.5:  1.4142135623730951
+pi: 3.141592653589793  e: 2.718281828459045
+sqrt(2):   1.4142135623730951
+sin(pi/2): 1.0
+ln(e):     1.0
+log(8, 2): 3.0
+hypot 3,4: 5.0
+sqrt array:  [1.0, 2.0, 3.0, 4.0]
+abs array:   [1, 2, 3]
+floor/ceil:  2 3 3
+sqrt(missing): missing
+is_finite(big): false
+is_nan(big - big): true
+guarded: 0.0
+is_finite array: [true, false, true]
+magnitude [3,4]: 5.0
+--- stderr ---
+

@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: unknown string escape `\q`
+  --> <src>:1:7
+  |
+1 | print("a\qb")
+  |       ^
+help: supported escapes: \n \t \r \\ \" \0 \{ \} — strings are UTF-8, paste unicode directly; for literal backslashes use a raw """...""" string.

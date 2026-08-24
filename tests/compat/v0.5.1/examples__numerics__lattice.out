@@ -1,0 +1,8 @@
+exit: 0
+--- stdout ---
+recovered law:  p = [-1, -1, 1]  (±[1,1,-1]: ln2 + ln3 - ln6 = 0)
+residual: -1.0 — rounding noise, ~0 against scale 1e9
+reduced [[3,1],[2,1]]: [[-1.0, 0.0], [0.0, 1.0]]
+exact relation: [-1, -1, 1, 0] — last coord is exactly 0
+--- stderr ---
+

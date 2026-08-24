@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: maximum recursion depth (20000) exceeded
+  --> <src>:1:37
+  |
+1 | fn s(n) = if n == 0 then 0 else n + s(n - 1)
+  |                                     ^
+help: this call is not in TAIL position, so every level keeps a frame. A tail call — where the recursive call is the whole result, with nothing left to do after it — reuses its frame and runs to millions of levels. Otherwise: is a base case missing, or would a comprehension (`map`/`filter`/`reduce`) fit better?

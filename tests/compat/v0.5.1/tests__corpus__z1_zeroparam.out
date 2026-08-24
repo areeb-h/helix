@@ -1,0 +1,14 @@
+exit: 0
+--- stdout ---
+false
+missing
+`map`'s function needs at least one parameter
+false
+missing
+`map`'s function needs at least one parameter
+false
+`filter`'s function needs at least one parameter
+false
+`reduce`'s function needs exactly two parameters, but got 0
+--- stderr ---
+

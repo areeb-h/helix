@@ -1,0 +1,11 @@
+exit: 0
+--- stdout ---
+fused sum:       8333331666666
+built arrays:    5000000 elements each
+dot product:     10559964828.0
+longest collatz: 350
+mandelbrot sum:  492565
+matmul[0,0]:     600.0
+primes < 1e6:    78498
+--- stderr ---
+

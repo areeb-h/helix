@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Testing — the gates that were not gating
+
+- **The dual-engine DataFrame campaign now runs.** 28 tests in
+  `src/backend/native/tests.rs`, including every `mod against_the_oracle` comparison
+  against the polars oracle, executed in **no gate at all**: `native-df` is not a
+  default feature, `scripts/gate.sh` ran a bare `cargo test`, and CI's only `native-df`
+  step was a `clippy` without `--all-targets`, so the test targets were never compiled.
+  They were written, reviewed, committed, and run by nothing — while `docs/testing.md`
+  told readers they ran through the gate. The gate now runs them in their own target
+  directory; CI runs the full `native-df` suite on a compile it was already paying for.
+- **Version-compatibility baselines** (`tests/compat/`): what a released version
+  actually computed — exit, stdout, stderr for 119 deterministic programs — captured by
+  `scripts/capture-compat.sh` and **never rewritten**. Every other gate in this repo
+  compares the tree against itself and so proves only consistency; this is the only one
+  that can answer "does the program I wrote six months ago still compute the same
+  number?". There is deliberately no environment variable that blesses a drift: an
+  intentional change is recorded in `tests/compat/MIGRATIONS.md` with its reason, and
+  that file accumulates into a checkable list of every user-visible behavior change.
+  This matters now specifically — ADR 0033 Stage 4, ADR 0034's arithmetic deltas, the
+  row-order-to-Neumaier switch, and the 0.6.0 polars tightenings are all queued to
+  change printed numbers, and nothing recorded what v0.5 did.
+
 ## v0.5.1 — 2026-08-24
 
 ### Fixed

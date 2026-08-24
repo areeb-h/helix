@@ -1,0 +1,12 @@
+exit: 0
+--- stdout ---
+square 7: 49
+area 3x4: 12
+normalized: [-1.3416407864998738, -0.4472135954999579, 0.4472135954999579, 1.3416407864998738]
+grade 95: A
+grades:  ["A", "B", "A"]
+5! = 120
+double 21: 42
+safe_double missing: missing
+--- stderr ---
+

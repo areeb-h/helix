@@ -1,0 +1,14 @@
+exit: 0
+--- stdout ---
+a[2] = [0.0, 1.0, 2.0, 3.0, 0.5, 1.5]
+b[2] = [0.5, 0.75, 1.0, 0.0, 0.25, 0.5]
+shape: [6, 6]  ndim: 2
+c[3][2] = 5.0
+c.sum() = 127.5
+a.matmul(id) == a: true
+row sums: [0.0, 7.5, 8.0, 8.5, 9.0, 9.5]
+trace of flat: 12.0
+integer product matrix, row 5: [0, 5, 10, 15, 20, 25]
+total: 225
+--- stderr ---
+

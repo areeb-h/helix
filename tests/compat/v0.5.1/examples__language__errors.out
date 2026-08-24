@@ -1,0 +1,5 @@
+exit: 0
+--- stdout ---
+Uncomment a line above to see Helix errors in action.
+--- stderr ---
+

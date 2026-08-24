@@ -1,0 +1,12 @@
+exit: 0
+--- stdout ---
+passing scores: [88, 67, 91, 73, 99]
+how many passed: 5
+average of passers: 83.6
+curved & capped: [47, 93, 72, 96, 60, 78, 35]
+sum via reduce: 545
+top score 99 -> excellent
+labels: ["fail", "pass", "pass", "pass", "fail", "pass", "fail", "pass"]
+bumped grid: [[2, 3], [4, 5]]
+--- stderr ---
+

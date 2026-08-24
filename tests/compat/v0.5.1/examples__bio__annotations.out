@@ -1,0 +1,18 @@
+exit: 0
+--- stdout ---
+gene features:
+seqid      start        end  strand  Name
+-----  ---------  ---------  ------  -----
+chr17   43044295   43125483  +       BRCA1
+chr13   32315474   32400266  +       BRCA2
+chr7   140719327  140924928  -       BRAF
+(3 rows)
+strong peaks (score > 400):
+chrom     start       end  name   score
+-----  --------  --------  -----  -----
+chr17  43044294  43045802  peak1    960
+chr17  43090000  43091500  peak2    500
+chr13  32315473  32316600  peak3    780
+(3 rows)
+--- stderr ---
+

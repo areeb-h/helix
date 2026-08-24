@@ -1,0 +1,30 @@
+exit: 0
+--- stdout ---
+missing
+missing
+missing
+true
+missing
+missing
+missing
+missing
+false
+false
+missing
+true
+missing
+3
+missing
+missing
+[3.0, 5.0]
+4.0
+0
+7
+last resort
+[missing, 1]
+[(missing, 2), (1, 1)]
+true
+cannot sort: the array has missing values
+[1, 3]
+--- stderr ---
+

@@ -89,14 +89,35 @@ Pass a single file (`helix test math_test.helix`) to run just that one.
 ## The Rust-side gate
 
 The toolchain's own suite runs through `scripts/gate.sh` (clippy with `-D warnings`,
-the full test suite on the `gate` profile, and the example parity diff). Its current
-shape: **445 lib tests + 223 CLI tests + 3 other integration tests**. Three pieces
-worth knowing about:
+the full test suite on the `gate` profile, the dual-engine DataFrame campaign, and the
+example parity diff). Its current shape: **449 lib tests + 243 CLI tests + 3 other
+integration tests**, plus **28 dual-engine tests** that need the `native-df` feature.
+Four pieces worth knowing about:
 
 - **The differential DataFrame suite** (`src/backend/native/tests.rs`): the same data
   through **both** DataFrame backends — native and Polars — verb by verb, compared as
   column values and as frozen `framefmt` bytes. ADR 0034's decided semantic deltas are
   asserted *as* deltas, so an accidental divergence cannot hide behind a decided one.
+
+  This paragraph was **false until v0.5.2**, and the way it was false is worth keeping
+  written down. `native-df` is not in `Cargo.toml`'s `default`, `scripts/gate.sh` ran a
+  bare `cargo test`, and CI's only `native-df` step was a `clippy` *without*
+  `--all-targets` — so the test targets were never compiled. All 28 tests, including
+  every `mod against_the_oracle` comparison, were written, reviewed, committed, and then
+  executed by nothing, while this document told readers they ran. A suite that does not
+  run is worse than no suite, because it also spends the confidence. The gate now runs
+  them in their own target directory (the feature set differs from the main build, so a
+  shared directory would make the two invocations evict each other's cache), and CI runs
+  the full `native-df` suite on a compile it was already paying for.
+- **Version-compatibility baselines** (`tests/compat/`): what a *released* version
+  actually computed — exit code, stdout, and stderr for 119 deterministic programs —
+  frozen and **never rewritten**. Every other gate here compares the tree against
+  itself and therefore proves only consistency; this is the only one that can answer
+  "does the program I wrote six months ago still compute the same number?". There is
+  deliberately no environment variable that blesses a drift: an intentional change is
+  recorded in `tests/compat/MIGRATIONS.md` with its reason, and that file accumulates
+  into a checkable list of every user-visible behavior change. See
+  [`tests/compat/README.md`](../tests/compat/README.md).
 - **Cross-engine example byte-diffs** (`scripts/vmparity.sh`): every runnable example
   must produce byte-identical output on the default engine and under `HELIX_NOVM=1`.
 - **Whole-tree type-check** (`scripts/checkall.sh`): `helix check` plus `helix fmt

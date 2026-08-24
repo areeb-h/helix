@@ -1,0 +1,15 @@
+exit: 0
+--- stdout ---
+Sequences:   3
+Total bases: 360
+IDs:         ["seq1", "seq2", "seq3"]
+GC content:  [0.5916666666666667, 0.8833333333333333, 0.041666666666666664]
+
+seq1: 120 bp, GC 0.5916666666666667
+  first 30 bases: ATGCGTACGTTAGCGGCCAATTGGCCGCGC
+  reverse comp:   GGCGCTAACGTACGCATCGGCCAATTGGCC
+  ATGCGT at:      0
+  GGGGGGGG at:    -1
+  top 4-mers:     [("CGTA", 5), ("GCGT", 5), ("GGCC", 5), ("ACGT", 4), ("AGCG", 4)]
+--- stderr ---
+

@@ -1,0 +1,7 @@
+exit: 0
+--- stdout ---
+sorted: [1, 2, 3]  indices: [1, 2, 0]
+min of a column with a hole: missing
+signed-zero tie, first wins: 0
+--- stderr ---
+

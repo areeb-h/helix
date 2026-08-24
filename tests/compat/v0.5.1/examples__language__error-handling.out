@@ -1,0 +1,9 @@
+exit: 0
+--- stdout ---
+parsed: [1, 2, 3]
+ok? false
+error: invalid JSON: expected ident at line 1 column 2
+config: (default)
+the program runs to completion
+--- stderr ---
+

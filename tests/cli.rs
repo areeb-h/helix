@@ -8021,3 +8021,108 @@ fn test_json_missing_path_still_emits_a_document() {
     assert!(out.contains("\"error\""), "stdout: {out}");
     assert!(out.contains("\"events\": []"), "stdout: {out}");
 }
+
+/// **Version compatibility**: what a past release computed, still computed.
+///
+/// Every other gate in this repository compares the tree against ITSELF — the three
+/// engines against each other (`corpus_is_engine_identical_and_pinned`), the two
+/// DataFrame backends against each other (`against_the_oracle`), the corpus against
+/// goldens that `UPDATE_CORPUS=1` rewrites wholesale. All of it proves CONSISTENCY.
+/// None of it can answer "does the program I wrote six months ago still compute the
+/// same number?", because every artifact it compares against moves with the code.
+///
+/// So these baselines are written ONCE and never rewritten, and there is deliberately
+/// no environment variable that blesses them. A drift is either a regression (fix the
+/// code) or an intentional change (record it in `tests/compat/MIGRATIONS.md`, with the
+/// reason). The second path is what makes the migrations file accumulate into the
+/// thing this project has never had: a checkable list of every user-visible behavior
+/// change, written when it happened.
+///
+/// This matters now specifically: ADR 0033 Stage 4, ADR 0034's three arithmetic
+/// deltas, the row-order-to-Neumaier switch, and the 0.6.0 polars tightenings are all
+/// queued to change printed numbers, and before this test nothing in the tree recorded
+/// what v0.5 did.
+#[test]
+fn compat_baselines_hold() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let compat = root.join("tests/compat");
+    let migrations = std::fs::read_to_string(compat.join("MIGRATIONS.md"))
+        .expect("tests/compat/MIGRATIONS.md exists");
+
+    let mut baselines: Vec<std::path::PathBuf> = std::fs::read_dir(&compat)
+        .expect("tests/compat exists")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('v')))
+        .collect();
+    baselines.sort();
+    assert!(!baselines.is_empty(), "no compat baselines found — was tests/compat/v*/ deleted?");
+
+    let mut checked = 0usize;
+    let mut drifted: Vec<String> = Vec::new();
+    let mut migrated: Vec<String> = Vec::new();
+
+    for dir in &baselines {
+        let version = dir.file_name().unwrap().to_string_lossy().to_string();
+        let mut pins: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .unwrap_or_else(|_| panic!("reading {version}"))
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "out"))
+            .collect();
+        pins.sort();
+        // A baseline that quietly shrank is itself a compatibility failure: deleting
+        // the pin is the easiest possible way to make this test green.
+        assert!(
+            pins.len() >= 100,
+            "{version} has only {} pins — programs cannot be dropped from a baseline",
+            pins.len()
+        );
+
+        for pin in pins {
+            let slug = pin.file_stem().unwrap().to_string_lossy().to_string();
+            let rel = slug.replace("__", "/") + ".helix";
+            let src = root.join(&rel);
+            assert!(src.exists(), "{version}/{slug}: source {rel} is gone — if the program was \
+                                   removed on purpose, record it in tests/compat/MIGRATIONS.md");
+
+            let (out, err, code) = run(&[&rel], &[], "");
+            let abs = root.to_string_lossy().to_string();
+            let live = format!(
+                "exit: {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into()),
+                out.trim_end_matches('\n'),
+                err.replace(&format!("{abs}/"), "").replace(&rel, "<src>").trim_end_matches('\n'),
+            );
+            let pinned = std::fs::read_to_string(&pin).unwrap();
+            checked += 1;
+
+            if live.trim_end() != pinned.trim_end() {
+                // Listed in MIGRATIONS.md = a documented, intentional change.
+                if migrations.contains(&format!("`{slug}`")) {
+                    migrated.push(format!("{version}/{slug}"));
+                } else {
+                    drifted.push(format!(
+                        "\n=== {version}/{slug} ({rel})\n--- was ---\n{}\n--- now ---\n{}",
+                        pinned.trim_end(),
+                        live.trim_end()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(checked >= 100, "only {checked} programs checked");
+    assert!(
+        drifted.is_empty(),
+        "{} program(s) changed observable behavior since a released baseline.\n\
+         This is NOT automatically a bug — but it is never nothing.\n\
+         If it is a regression, fix the code. If it is intentional, add the program \
+         name in backticks to tests/compat/MIGRATIONS.md with the reason; the baseline \
+         file itself is a historical record and stays as it is.\n{}",
+        drifted.len(),
+        drifted.join("")
+    );
+    // Loud on purpose: a growing migration list is the release note writing itself.
+    if !migrated.is_empty() {
+        println!("compat: {} documented migration(s): {}", migrated.len(), migrated.join(", "));
+    }
+}
