@@ -44,8 +44,13 @@ if [ -n "$LOCAL" ]; then
   echo "== using $H (skipping install / version / glibc-floor checks)"
 else
   echo "== 1. install v$VER through the PUBLIC installer (it verifies the checksum)"
-  HELIX_INSTALL_DIR="$SCRATCH/bin" \
-    curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | sh
+  # The env var goes on `sh`, NOT on `curl`: a prefix assignment applies to the
+  # command it prefixes, and the installer runs in the shell on the RIGHT of the
+  # pipe. Getting this wrong installs over the developer's own ~/.local/bin/helix
+  # while the script then reports "installer produced no binary" — which is exactly
+  # what it did the first time it was run.
+  curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh \
+    | HELIX_INSTALL_DIR="$SCRATCH/bin" sh
   H="$SCRATCH/bin/helix"
   [ -x "$H" ] || { bad "installer produced no binary at $H"; exit 1; }
 
