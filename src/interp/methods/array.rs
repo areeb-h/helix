@@ -1014,10 +1014,10 @@ pub(crate) fn array_method(
                 let mut seen: std::collections::HashSet<IntKey> = std::collections::HashSet::new();
                 items.iter().filter(|v| seen.insert(int_key(v))).cloned().collect()
             } else if items.iter().all(|v| matches!(v, Value::Float(_) | Value::Missing)) {
-                // Same key as `frequencies` uses, so the two cannot disagree on how many
-                // identities a float array has. A NaN has NO key — it is equal to nothing,
-                // not even itself — so every NaN survives `unique`, which is what the
-                // `values_equal` scan did.
+                // Same key as `frequencies` uses, so the two cannot disagree on how
+                // many identities a float array has — a promise this file makes a few
+                // lines up, and which was briefly BROKEN while only some of the four
+                // `unique` implementations had been updated.
                 let mut seen: std::collections::HashSet<FloatKey> =
                     std::collections::HashSet::new();
                 items
@@ -1575,21 +1575,26 @@ pub(crate) fn int_key(v: &Value) -> IntKey {
 ///
 /// * `-0.0 == 0.0` is TRUE, but their bit patterns differ — so zero is canonicalized and
 ///   the first of the pair seen stays the representative, exactly as the scan would leave it.
-/// * **NaN is not equal to itself**, so a NaN belongs to no equivalence class at all. It
-///   gets `None`: no key, no table entry, a fresh bucket every time — which is precisely
-///   what the `values_equal` scan produced, since `NaN == NaN` is false there too.
+/// * **Every NaN is ONE identity** (ADR 0036 policy 7), so all of them share a single
+///   key whatever their sign or payload. Until v0.6.0 a NaN got `None` — no key, a
+///   fresh bucket every time — because `values_equal` said `NaN != NaN` then, and this
+///   key's contract is to reproduce that relation exactly. When the relation changed,
+///   THIS COMMENT is what said which other line had to change with it.
 ///
 /// As with `IntKey`, an array holding BOTH `Int` and `Float` may not use this: `values_equal`
 /// collapses `1 == 1.0`, and above 2^53 that collapse is not transitive.
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
 pub(crate) enum FloatKey {
     Bits(u64),
+    /// All NaNs, collapsed. Deliberately NOT `Bits(nan.to_bits())`: a NaN has 2^52 bit
+    /// patterns per sign, and one identity must not become 2^53 keys.
+    Nan,
     Missing,
 }
 
 pub(crate) fn float_key(v: &Value) -> Option<FloatKey> {
     match v {
-        Value::Float(f) if f.is_nan() => None,
+        Value::Float(f) if f.is_nan() => Some(FloatKey::Nan),
         // `+0.0` and `-0.0` compare equal, so they must hash equal.
         Value::Float(f) => Some(FloatKey::Bits(if *f == 0.0 { 0.0f64 } else { *f }.to_bits())),
         Value::Missing => Some(FloatKey::Missing),

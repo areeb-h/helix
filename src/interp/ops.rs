@@ -793,7 +793,23 @@ pub(crate) fn eq3(l: &Value, r: &Value) -> Option<bool> {
                 None => Some(false),
             }))
         }
-        // Scalars (and cross-type pairs) are total — no `missing` can hide here.
+        // `==` IS IEEE FOR FLOATS: a NaN equals nothing, including itself.
+        //
+        // This arm is why the two relations must be spelled out separately here.
+        // `values_equal` is the IDENTITY relation — all NaNs are one key (ADR 0036
+        // policy 7) — and `eq3`'s scalar tail delegates to it, so making NaN
+        // self-equal there silently made the `==` OPERATOR self-equal too, on the
+        // tree-walker only. The VM and JIT have their own IEEE float fast path, so the
+        // engines disagreed and the differential oracle caught it.
+        //
+        // Note what that means about the comment on `values_equal`, which claimed
+        // "the `==` OPERATOR does not use this pair": it was FALSE for scalars, and
+        // had been for as long as this tail existed. Nothing depended on the
+        // difference until the two relations actually diverged.
+        (Value::Float(a), Value::Float(b)) => Some(a == b),
+        // Scalars (and cross-type pairs) are total — no `missing` can hide here. The
+        // mixed Int/Float arm inside `values_equal` compares through `int_float_cmp`,
+        // which answers `None` for a NaN and therefore "not equal" — already IEEE.
         _ => Some(values_equal(l, r)),
     }
 }
@@ -818,15 +834,33 @@ fn eq3_all(pairs: impl Iterator<Item = Option<bool>>) -> Option<bool> {
 
 pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
     match (l, r) {
-        // IDENTITY equality: `missing` matches `missing`, so the set-like
-        // operations built on this (`unique`, `frequencies`, `contains`,
-        // `index_of`, alignment) treat all missings as one identity — Julia's
-        // `isequal` convention (ADR 0001). The `==` OPERATOR does not use this
-        // pair: it is three-valued via `eq3`. (`NaN != NaN` stays — floats
-        // keep IEEE semantics in both equalities.)
+        // IDENTITY equality: `missing` matches `missing` and every NaN matches every
+        // NaN, so the set-like operations built on this (`unique`, `frequencies`,
+        // `contains`, `index_of`, alignment) see ONE identity for each — Julia's
+        // `isequal` convention (ADR 0001, ADR 0036 policy 7). The `==` OPERATOR is
+        // three-valued via `eq3` and stays IEEE, so `nan == nan` is `false`.
+        //
+        // CAREFUL: `eq3`'s scalar tail DELEGATES here, so this function is reached by
+        // `==` after all — an earlier version of this comment said it was not, which
+        // was false and cost a real regression. `eq3` now carries its own explicit
+        // float arm so the two relations cannot leak into each other; if you add a
+        // type whose identity differs from its equality, it needs an arm THERE too.
+        //
+        // Until v0.6.0 the NaN half was missing, and the comment here said so:
+        // "`NaN != NaN` stays — floats keep IEEE semantics in both equalities". That
+        // contradicted the very convention it cited (Julia's `isequal(NaN, NaN)` is
+        // TRUE) and, worse, contradicted Helix: frame `unique` collapsed NaNs and a
+        // native frame `join` matched them, while arrays did neither. A key domain
+        // must be an equivalence relation or `unique` is not idempotent and a hash
+        // join is unimplementable — which is why Postgres, polars, pandas, Julia and
+        // numpy >= 1.21 all make NaN self-equal for KEYS while keeping `==` IEEE.
+        //
+        // `-0.0` and `0.0` remain ONE key (they are `==`), which is where this parts
+        // company with Julia's `isequal` and agrees with the frame engines instead —
+        // v0.5.1 made the native `KeyCell` canonicalise them for exactly that reason.
         (Value::Missing, Value::Missing) => true,
         (Value::Int(a), Value::Int(b)) => a == b,
-        (Value::Float(a), Value::Float(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) => a == b || (a.is_nan() && b.is_nan()),
         // EXACT, not widened: `i64 as f64` collapses distinct values above
         // 2^53, which made `[2^53+1, 2^53.0].min()` answer the strictly LARGER
         // number depending on order (the 0.5.1 sweep's find).

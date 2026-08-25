@@ -4684,7 +4684,11 @@ print(range(0, 5).unique())
     for (name, env) in ENGINES {
         let (out, err, code) = run_source(sem, env, &format!("unique_sem_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
-        assert_eq!(out, "4\n[0, 1, 2]\n[0, 1, 2, 3, 4]\n", "{name}: unique classes drifted");
+        // THREE classes: 1.0; the two NaNs, which are ONE identity (ADR 0036
+        // policy 7); and -0.0/0.0, which are one because they are . It was four
+        // while every NaN was its own class -- the drift this fixture exists to
+        // detect, since the packed path picks its keys separately from the scan.
+        assert_eq!(out, "3\n[0, 1, 2]\n[0, 1, 2, 3, 4]\n", "{name}: unique classes drifted");
     }
 }
 
@@ -8661,4 +8665,76 @@ fn the_arg_family_answers_with_the_nan_index() {
         assert_eq!(code, Some(0), "{src}: {err}");
         assert_eq!(out.trim(), want, "{src}");
     }
+}
+
+/// Keys use ONE identity in which all NaNs are one (ADR 0036 policy 7).
+///
+/// This is the second float relation, and both are now named: `==` is IEEE via `eq3`
+/// (`nan == nan` is `false`), while `values_equal` is the IDENTITY relation the
+/// set-like operations use, where every NaN matches every NaN. `values_equal`'s own
+/// comment already cited Julia's `isequal` convention as its justification — and
+/// `isequal(NaN, NaN)` is `true`, so it had been applying the convention to `missing`
+/// and not to NaN.
+///
+/// It lived in FOUR implementations. Three were in `array.rs` (the `values_equal`
+/// scan, the `FloatKey` hash path, and `value_histogram`'s tally); the fourth was
+/// inline in `methods/mod.rs`, operating on `ArrayData::Floats` and skipping the key
+/// set for every NaN with an explicit `continue`. That one is why a first attempt at
+/// this policy was reverted: a grep of `array.rs` cannot see it, and neither can a
+/// grep for the method name.
+#[test]
+fn nan_is_one_key_identity() {
+    // Every set-like operation, on the PACKED and BOXED representations both — the
+    // split that hid the fourth implementation. A `missing` in the array forces the
+    // boxed path; an all-float array is packed.
+    for (src, want) in [
+        ("print([nan, nan, 1.0].unique().count())", "2"),          // packed
+        ("print([nan, nan, missing].unique().count())", "2"),      // boxed
+        ("print([nan, 1, nan].unique().count())", "2"),            // mixed -> scan
+        ("print([nan, nan, 1.0].frequencies().count())", "2"),
+        ("print([1.0, nan].contains(nan))", "true"),
+        ("print([1.0, nan].index_of(nan))", "1"),
+        // Two NaNs of OPPOSITE SIGN are one identity: the sign bit is not observable
+        // from Helix and must not create a second class.
+        ("n = sqrt(0.0 - 1.0)\nprint([n, nan, 1.0].unique().count())", "2"),
+    ] {
+        for (engine, env) in ENGINES {
+            let (out, err, code) =
+                run_source(&format!("{src}\n"), env, &format!("nankey_{}_{engine}", src.len()));
+            assert_eq!(code, Some(0), "[{engine}] {src}: {err}");
+            assert_eq!(out.trim(), want, "[{engine}] {src}");
+        }
+    }
+
+    // The OTHER relation is untouched: `==` stays IEEE at every depth. Two relations,
+    // both named — which is the whole point of policy 7.
+    for (src, want) in [
+        ("print(nan == nan)", "false"),
+        ("print(nan != nan)", "true"),
+        ("print([nan] == [nan])", "false"),
+    ] {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], &format!("naneq_{}", src.len()));
+        assert_eq!(code, Some(0), "{src}: {err}");
+        assert_eq!(out.trim(), want, "{src}");
+    }
+
+    // `missing` remains its own identity, distinct from NaN — the two are never one
+    // key, which is policy 3 seen from the key side.
+    let (out, err, code) = run_source(
+        "print([nan, missing, nan, missing].unique().count())\n",
+        &[],
+        "nan_vs_missing_key",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "2", "NaN and missing are two identities, not one");
+
+    // And `unique` agrees with `frequencies` on how many identities an array has —
+    // a promise `array.rs` makes by construction, and which a partial fix broke.
+    let (out, err, code) = run_source(
+        "xs = [nan, nan, 1.0, 1.0, missing]\nprint(xs.unique().count() == xs.frequencies().count())\n",
+        &[],
+        "unique_freq_agree",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "true", "`unique` and `frequencies` must report the same count");
 }

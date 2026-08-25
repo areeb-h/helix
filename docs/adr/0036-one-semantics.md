@@ -168,47 +168,42 @@ recorded nowhere, and states the rule that makes a sixth impossible:
    Stage 4, which is why this ADR precedes it.
 
 7. **Keys use one total identity in which all NaNs are one, distinct from `missing`.**
-   **NOT YET IMPLEMENTED as of v0.6.0** — attempted, reverted, and the reason is worth
-   recording because it is the only policy here that did not land.
+   `unique`, `frequencies`, `contains`, `index_of` and alignment. `[nan, nan].unique()`
+   is `[NaN]`, and two NaNs of OPPOSITE SIGN are one identity — the sign bit is not
+   observable from Helix and must not create a second class.
 
-   The relation itself is a two-line change and it is *already the right shape*:
-   `values_equal` is Helix's identity relation, separate from `==` (which is `eq3`),
-   and its own comment cites **Julia's `isequal` convention** as justification — while
-   applying it to `missing` and not to NaN, though `isequal(NaN, NaN)` is `true`. Making
-   `values_equal` and `FloatKey` agree on one NaN class fixed `contains`, `index_of`,
-   `frequencies` and `unique` on BOXED arrays, verified by a unit test over three NaN
-   forms (plain, negative, and one with a payload).
-
-   It did NOT fix `unique` on a PACKED float array, which reaches neither the arm nor
-   the branch — instrumentation proved the dispatch bypasses `call_array_method`
-   entirely for that representation, and the third path was not located. That left
-   `unique` and `frequencies` reporting different identity counts for one array, which
-   `array.rs:999` states cannot happen ("the two operations report the same identities
-   by construction"). A half-applied key rule is worse than the old consistent-but-wrong
-   one, so it was reverted whole.
-
-   Whoever finishes this: the relation and the key are correct, the boxed path works,
-   and the missing piece is a packed-`ArrayData::Floats` dispatch for `unique` that does
-   not spell the method name `"unique"`. Start by instrumenting `array_numeric_fast`'s
-   entry rather than its arms.
-
-   `unique`, `frequencies`, `contains`, `index_of`, alignment, `group`, `join` and
-   dict keys. `[nan, nan].unique()` is `[NaN]`; a NaN join key matches a NaN join key.
+   The relation was already the right shape: `values_equal` is Helix's IDENTITY
+   relation, separate from `==` (which is `eq3` and stays IEEE), so the two relations
+   this policy needs already existed and are now both named. `values_equal`'s own
+   comment cited **Julia's `isequal` convention** as its justification while applying it
+   to `missing` and not to NaN — though `isequal(NaN, NaN)` is `true`. A key domain must
+   be an equivalence relation or `unique` is not idempotent and a hash join is
+   unimplementable, which is why Postgres, polars, pandas, Julia and numpy ≥ 1.21 all
+   make NaN self-equal for KEYS while keeping `==` IEEE. `-0.0` and `0.0` stay ONE key,
+   which is where this parts company with `isequal` and agrees with the frame engines.
 
    **This reverses one clause of ADR 0001's 2026-07-17 amendment** ("Floats keep IEEE
-   semantics in both … so `unique` does not collapse NaNs"). Three reasons, stated
-   plainly because a written decision deserves a written reversal. (i) The clause is
-   **already not implemented** — arrays obey it, frames do not: frame `unique`
-   collapses, frame `group` makes one group, frame `join` matches NaN to NaN, on both
-   backends. The amendment describes a language Helix does not have. (ii) A key domain
-   must be an equivalence relation or grouping is undefined and a hash join is
-   unimplementable — which is why Postgres, polars, pandas, Julia and numpy ≥ 1.21 all
-   made NaN self-equal for KEYS while keeping `==` IEEE. (iii) The amendment's stated
-   reason — "one float equality everywhere beats a second float-identity rule" — was
-   never available: Helix already had two float relations, `ops::compare`'s IEEE `<`
-   and `numeric_cmp`'s `total_cmp`, documented as such by ADR 0025. The choice is not
-   one relation versus two. It is two relations named and specified, or two relations
-   undocumented and drifting.
+   semantics in both … so `unique` does not collapse NaNs"). The decisive argument is
+   that the clause **was never implemented**: arrays obeyed it, frames did not — frame
+   `unique` collapsed, and a native frame `join` matched NaN to NaN. A written decision
+   no code follows is worse than an unwritten one, because it makes the divergence look
+   deliberate.
+
+   **It lived in FOUR implementations**, and the count is the lesson. Three were in
+   `array.rs` — the `values_equal` scan, the `FloatKey` hash path, and
+   `value_histogram`'s tally. The fourth was inline in `methods/mod.rs`, working
+   directly on `ArrayData::Floats` and skipping the key set for every NaN with an
+   explicit `continue`. A first attempt at this policy shipped three of the four, which
+   left `unique` and `frequencies` reporting different identity counts for one array —
+   something `array.rs:999` states cannot happen "by construction" — and was reverted
+   whole rather than shipped half-applied. The fourth was found only by instrumenting
+   the dispatch: four greps of the method name had said the other three were all of
+   them.
+
+   **Open, and recorded as a delta:** a frame `join` on NaN keys still matches on the
+   native engine (1 row) and not on polars (0 rows). Closing it needs the same derived
+   `float_key` column the sort uses in `polars.rs`, and no tracked program joins on a
+   float key, so `dfdiff.sh` does not see it.
 
 8. **A `nan` literal is added beside the existing `inf`**, producing a canonical quiet
    NaN. A doctrine whose first sentence is "NaN is an ordinary Float value" cannot

@@ -358,18 +358,30 @@ pub(crate) fn call_method(
                         return Ok(Value::Array(std::rc::Rc::new(ArrayData::Ints(out))));
                     }
                     ArrayData::Floats(xs) => {
+                        // The FOURTH `unique` in the tree, and the one that hid: it
+                        // lives here rather than beside the other three in `array.rs`,
+                        // so a grep of that file — or of the method name — finds
+                        // nothing. It used to `continue` past the key set for every
+                        // NaN, keeping them all; every NaN is ONE identity now
+                        // (ADR 0036 policy 7), matching `values_equal`, `FloatKey`,
+                        // and both frame engines.
+                        //
+                        // `u64::MAX` as the NaN key is safe because it is not a
+                        // reachable `to_bits()` for a non-NaN: it IS a NaN pattern, and
+                        // every NaN takes this branch before the bit key is computed.
                         let mut seen: std::collections::HashSet<u64> =
                             std::collections::HashSet::new();
                         let mut out: Vec<f64> = Vec::new();
                         for &x in xs {
-                            if x.is_nan() {
-                                grow(&mut out, line, col)?;
-                                out.push(x);
-                                continue;
-                            }
-                            let bits = if x == 0.0 { 0.0f64 } else { x }.to_bits();
+                            let key = if x.is_nan() {
+                                u64::MAX
+                            } else if x == 0.0 {
+                                0.0f64.to_bits()
+                            } else {
+                                x.to_bits()
+                            };
                             grow_set(&mut seen, line, col)?;
-                            if seen.insert(bits) {
+                            if seen.insert(key) {
                                 grow(&mut out, line, col)?;
                                 out.push(x);
                             }

@@ -6396,8 +6396,8 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("nz = -0.0
 [nz, 0.0].frequencies()", "[(-0.0, 2)]"),
             // NaN is equal to nothing, so every NaN is its own bucket
-            ("[sqrt(-1.0), sqrt(-1.0)].unique().count()", "2"),
-            ("[sqrt(-1.0), sqrt(-1.0)].frequencies().count()", "2"),
+            ("[sqrt(-1.0), sqrt(-1.0)].unique().count()", "1"),
+            ("[sqrt(-1.0), sqrt(-1.0)].frequencies().count()", "1"),
             ("[1.0, sqrt(-1.0), 1.0].frequencies().count()", "2"),
             // `missing` is one identity and is never a float
             ("[1.0, missing, 1.0, missing].frequencies()", "[(1.0, 2), (missing, 2)]"),
@@ -6836,8 +6836,12 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             ("[1, missing, 3].contains(missing)", "true"),
             ("[1, missing, 3].index_of(missing)", "1"),
             // packed Floats, IEEE: NaN equals nothing, not even itself
-            ("[1.5, inf - inf].contains(inf - inf)", "false"),
-            ("[1.5, inf - inf].index_of(inf - inf)", "missing"),
+            // Every NaN is ONE key identity (ADR 0036 policy 7), so a NaN IS found by
+            // the set-like operations — while `==` stays IEEE and `nan == nan` is
+            // still false. Two relations; these two lines pinned the identity one
+            // to the equality one.
+            ("[1.5, inf - inf].contains(inf - inf)", "true"),
+            ("[1.5, inf - inf].index_of(inf - inf)", "1"),
             // ...and a NaN in the array must not poison the scan for other elements
             ("[1.5, inf - inf].contains(1.5)", "true"),
             ("[inf - inf, 2.5].index_of(2.5)", "1"),
