@@ -5822,11 +5822,30 @@ fn doc_table_examples_all_run() {
         ) else {
             return;
         };
-        let (got, rerr, rcode) = run(&["eval", &format!("print({ex})")], &[], "");
-        if rcode != Some(0) {
-            failures.push(format!("{name}: example errored: {}", rerr.lines().next().unwrap_or("")));
-        } else if got.trim_end() != want {
-            failures.push(format!("{name}: expected {want:?}, got {:?}", got.trim_end()));
+        // ON ALL THREE ENGINES, not just the default.
+        //
+        // This ran the default engine only until v0.6.0, and the cost was concrete:
+        // adding `drop_nan` needed the method in SEVEN lists, one of which is the
+        // BYTECODE COMPILER's frame-verb table. Miss that and the tree-walker answers
+        // while the VM and JIT report "a DataFrame has no method" — a split this loop
+        // walks straight past when it only ever asks one engine.
+        //
+        // The catalog is the best-covered surface the project has (250+ executable
+        // examples spanning every builtin and method), so running it three ways turns
+        // it into a dispatch-parity check for free. Measured cost: ~3s.
+        for (engine, env) in ENGINES {
+            let (got, rerr, rcode) = run(&["eval", &format!("print({ex})")], env, "");
+            if rcode != Some(0) {
+                failures.push(format!(
+                    "{name} [{engine}]: example errored: {}",
+                    rerr.lines().next().unwrap_or("")
+                ));
+            } else if got.trim_end() != want {
+                failures.push(format!(
+                    "{name} [{engine}]: expected {want:?}, got {:?}",
+                    got.trim_end()
+                ));
+            }
         }
         checked += 1;
     };
