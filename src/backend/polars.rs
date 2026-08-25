@@ -273,6 +273,10 @@ fn guarded_arith(l: Expr, r: Expr, op: BinOp) -> Expr {
                     ));
                 }
             }
+            // The message depends on the OPERAND TYPES, exactly as the scalar kernel's
+            // does: `//` says "integer division by zero" only when both sides are Int,
+            // and "division by zero" on the float path. Getting this wrong is how the
+            // guard briefly introduced a divergence of its own.
             let zero = |row: usize| -> PolarsError {
                 match op {
                     BinOp::Div => udf_error(
@@ -280,11 +284,12 @@ fn guarded_arith(l: Expr, r: Expr, op: BinOp) -> Expr {
                         "guard the denominator, e.g. `if d != 0` or check your data.",
                         row,
                     ),
-                    BinOp::FloorDiv => udf_error(
+                    BinOp::FloorDiv if out_int => udf_error(
                         "integer division by zero",
                         "guard the divisor, e.g. `if d != 0`.",
                         row,
                     ),
+                    BinOp::FloorDiv => udf_error("division by zero", "", row),
                     _ => udf_error("modulo by zero", "", row),
                 }
             };
@@ -394,7 +399,11 @@ fn lower(e: &ColExpr, line: usize, col: usize) -> Result<Expr, HelixError> {
             // A LITERAL zero divisor is decidable without touching a row, so it is
             // refused where it was written, with no `at row` hint — the same shape
             // the scalar kernel gives (ADR 0036 policy 1).
-            if matches!(op, BinOp::Div | BinOp::Mod | BinOp::FloorDiv)
+            // NOT `//`: its message depends on whether BOTH operands are Int
+            // ("integer division by zero" vs "division by zero"), and the left one is
+            // a column whose dtype is not known here. `/` and `%` say the same thing
+            // either way, so they can still be refused at the source position.
+            if matches!(op, BinOp::Div | BinOp::Mod)
                 && matches!(
                     &**r,
                     ColExpr::Lit(Value::Int(0)) | ColExpr::Lit(Value::Float(0.0))

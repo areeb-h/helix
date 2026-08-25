@@ -153,6 +153,16 @@ pub(crate) fn eval_binary(
             _ => {
                 let a = num_operand(op, &l, line, col)?;
                 let b = num_operand(op, &r, line, col)?;
+                // Float `% 0` used to answer NaN, on scalars, arrays AND both frame
+                // backends — no divergence, but ADR 0034 policy 1's own sentence
+                // ("modulo by zero is an error") was simply false of Floats, and
+                // `1.0 / 0.0` had errored the whole time. This was the last silent
+                // NaN-producing arithmetic channel in the language (ADR 0036 policy 2),
+                // and closing it is what makes the NaN comparison error affordable:
+                // a NaN now almost always means a genuine computation failure.
+                if b == 0.0 {
+                    return Err(HelixError::new("modulo by zero", line, col));
+                }
                 Ok(Value::Float(a.rem_euclid(b)))
             }
         },
@@ -976,7 +986,13 @@ fn float_binary_result(op: &BinOp, a: f64, b: f64, line: usize, col: usize) -> R
             }
             Value::Float(a.div_euclid(b))
         }
-        Mod => Value::Float(a.rem_euclid(b)),
+        Mod => {
+            // Same rule as `/` two arms up, and as `eval_binary`'s Float path.
+            if b == 0.0 {
+                return Err(HelixError::new("modulo by zero", line, col));
+            }
+            Value::Float(a.rem_euclid(b))
+        }
         Pow => Value::Float(a.powf(b)),
         Eq => Value::Bool(a == b),
         Ne => Value::Bool(a != b),
@@ -1037,6 +1053,9 @@ pub(crate) fn rational_binary(op: &BinOp, l: &Value, r: &Value, line: usize, col
             // Rational modulo is unusual; it's computed in f64 via rem_euclid. A rational
             // too large to represent in f64 would silently become NaN — error instead of
             // returning a lie.
+            if b.is_zero() {
+                return Err(HelixError::new("modulo by zero", line, col));
+            }
             match (a.to_f64(), b.to_f64()) {
                 (Some(af), Some(bf)) => Value::Float(af.rem_euclid(bf)),
                 _ => {

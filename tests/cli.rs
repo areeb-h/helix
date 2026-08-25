@@ -8172,3 +8172,57 @@ fn unavailable_df_engine_is_refused_not_ignored() {
         }
     }
 }
+
+/// Float `% 0` is an error, on every engine and every surface (ADR 0036 policy 2).
+///
+/// It used to answer `NaN` — while `/ 0` had errored the whole time, and while ADR
+/// 0034 policy 1's own sentence claimed "modulo by zero is an error". This was the
+/// last silent NaN-producing arithmetic channel in the language.
+///
+/// The interesting part is HOW it hid. The tree-walker's `eval_binary` was fixed
+/// first, and the VM and JIT kept answering `NaN` from a fast path in `vm.rs` whose
+/// comment asserted it matched `eval_binary`. Three engines held bit-identical by a
+/// 205,000-program differential fuzzer, and the divergence survived — because the
+/// fuzzer's literal pool never emits a zero float divisor, so `x % 0.0` is a program
+/// it structurally cannot generate. A differential oracle only covers inputs somebody
+/// wrote down; this test is that writing-down.
+#[test]
+fn float_modulo_by_zero_is_an_error_on_every_engine() {
+    let cases = [
+        ("literal", "print(1.0 % 0.0)
+"),
+        ("variables", "a = 1.0
+z = 0.0
+print(a % z)
+"),
+        ("through a fn", "fn m(a, b) = a % b
+print(m(1.0, 0.0))
+"),
+        ("elementwise", "print([1.0, 2.0].map(x => x % 0.0))
+"),
+    ];
+    for (what, src) in cases {
+        for (engine, env) in ENGINES {
+            let (out, err, code) =
+                run_source(src, env, &format!("fmod0_{}_{engine}", what.replace(' ', "_")));
+            assert_ne!(code, Some(0), "[{engine}] {what}: `% 0.0` must not succeed: {out:?}");
+            assert!(
+                err.contains("modulo by zero"),
+                "[{engine}] {what}: expected `modulo by zero`, got: {err}"
+            );
+        }
+    }
+    // `//` by a zero float says `division by zero` — NOT "integer division by zero",
+    // which is reserved for Int operands. The two messages are the scalar kernel's,
+    // and the frame backends must reproduce whichever one applies.
+    for (engine, env) in ENGINES {
+        let (_, err, code) = run_source("print(1.0 // 0.0)
+", env, &format!("ffdiv0_{engine}"));
+        assert_ne!(code, Some(0), "[{engine}]");
+        assert!(err.contains("division by zero"), "[{engine}] {err}");
+        assert!(
+            !err.contains("integer division by zero"),
+            "[{engine}] Float `//` must not claim INTEGER division: {err}"
+        );
+    }
+}

@@ -75,8 +75,13 @@ fn binary(op: &BinOp, a: Value, b: Value, line: usize, col: usize) -> Result<Val
                 Mul => return Ok(Value::Float(x * y)),
                 Eq => return Ok(Value::Bool(x == y)),
                 Ne => return Ok(Value::Bool(x != y)),
-                // Float `%` never errors on zero (yields NaN), matching `eval_binary`.
-                Mod => return Ok(Value::Float(x.rem_euclid(y))),
+                // `%` by zero falls through to the full path, which raises — as `/`
+                // by zero already did (ADR 0036 policy 2). Until v0.6.0 this arm
+                // returned NaN and its comment said that matched `eval_binary`; when
+                // the tree-walker started erroring, this line was what made the VM
+                // and JIT disagree with it. The differential fuzzer never generated
+                // `x % 0.0`, so nothing caught it.
+                Mod if y != 0.0 => return Ok(Value::Float(x.rem_euclid(y))),
                 FloorDiv if y != 0.0 => return Ok(Value::Float(x.div_euclid(y))),
                 Div if y != 0.0 => return Ok(Value::Float(x / y)),
                 // Float ordering can hit NaN, which the full path turns into an
