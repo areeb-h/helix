@@ -198,10 +198,16 @@ mod against_the_oracle {
         );
     }
 
-    /// ADR 0034 §1's deltas, asserted AS deltas: the native engine follows the
-    /// language where the polars backend follows polars.
+    /// ADR 0034 §1's deltas WERE asserted as deltas here. As of ADR 0036 there are
+    /// none left to assert: both engines answer the language.
+    ///
+    /// The rename is deliberate. The old name — and the old assertion, which pinned
+    /// `polars % stays truncated (delta recorded)` — encoded the belief that a
+    /// standing delta list was a stable thing to test against. It was not: a policy
+    /// saying "some divergences are expected" cannot detect an unexpected one, and
+    /// twelve more were live in v0.5.1 while this test sat green.
     #[test]
-    fn the_decided_arithmetic_deltas_are_exactly_the_decided_ones() {
+    fn arithmetic_is_one_semantics_on_both_engines() {
         let mk = |native: bool| -> Df {
             let cols = vec![
                 ("x".to_string(), ColData::Int(vec![7, 2])),
@@ -213,40 +219,68 @@ mod against_the_oracle {
                 crate::backend::polars::build_frame(cols, 0, 0).unwrap()
             }
         };
+        // `%` is EUCLIDEAN on both engines now: `7 % -3` is `1`, not polars' floored
+        // `-2`. The expectation is the scalar kernel's own answer, so this pin cannot
+        // drift away from the language even if someone edits both engines together.
         let modexpr = vec![("m".to_string(), bin(BinOp::Mod, col("x"), col("y")))];
-        // Native: euclidean, like the language. 7 % -3 == 1.
-        let nm = mk(true).with_columns(&modexpr, 0, 0).unwrap().column_values("m", 0, 0).unwrap();
-        assert_eq!(repr(&nm[0]), "Int:1", "native % is the language's euclidean %");
-        // Oracle: truncated. 7 % -3 == -2 — the delta, pinned so it can't drift silently.
-        let pm = mk(false).with_columns(&modexpr, 0, 0).unwrap().column_values("m", 0, 0).unwrap();
-        assert_eq!(repr(&pm[0]), "Int:-2", "polars % stays truncated (delta recorded)");
+        let want_mod = crate::interp::ops::eval_binary(
+            &BinOp::Mod,
+            Value::Int(7),
+            Value::Int(-3),
+            0,
+            0,
+        )
+        .expect("scalar kernel");
+        for (label, native) in [("native", true), ("polars", false)] {
+            let got =
+                mk(native).with_columns(&modexpr, 0, 0).unwrap().column_values("m", 0, 0).unwrap();
+            assert_eq!(repr(&got[0]), repr(&want_mod), "[{label}] `%` must be euclidean");
+        }
 
+        // `/` is TRUE DIVISION on both engines: `2 / 2` is `1.0`, never Int `1`.
         let divexpr = vec![("d".to_string(), bin(BinOp::Div, col("x"), col("y")))];
-        // Native: true division -> Float, like the language. 2 / 2 == 1.0.
-        let nd = mk(true).with_columns(&divexpr, 0, 0).unwrap().column_values("d", 0, 0).unwrap();
-        assert_eq!(repr(&nd[1]), "Float:1.0", "native / is true division");
+        for (label, native) in [("native", true), ("polars", false)] {
+            let got =
+                mk(native).with_columns(&divexpr, 0, 0).unwrap().column_values("d", 0, 0).unwrap();
+            assert_eq!(repr(&got[1]), "Float:1.0", "[{label}] `/` must be true division");
+        }
     }
 
-    /// Division by zero: the language errors; the native engine errors WITH the
-    /// row; the polars backend answers missing (the delta).
+    /// Division by zero errors and names the row — on BOTH engines now (ADR 0036).
+    /// The polars backend used to answer `missing`, which this test recorded as a
+    /// delta and which was, in practice, a wrong number with exit 0.
     #[test]
     fn division_by_zero_errors_with_the_row() {
-        let cols = vec![
-            ("x".to_string(), ColData::Int(vec![1, 2])),
-            ("y".to_string(), ColData::Int(vec![0, 2])),
-        ];
-        let n = super::super::build_frame(cols, 0, 0).unwrap();
-        let divexpr = vec![("d".to_string(), bin(BinOp::Div, col("x"), col("y")))];
-        let err = match n.with_columns(&divexpr, 0, 0) {
-            Err(e) => e,
-            Ok(_) => panic!("dividing by zero must error"),
+        let mk = |native: bool| -> Df {
+            let cols = vec![
+                ("x".to_string(), ColData::Int(vec![1, 2])),
+                ("y".to_string(), ColData::Int(vec![0, 2])),
+            ];
+            if native {
+                super::super::build_frame(cols, 0, 0).unwrap()
+            } else {
+                crate::backend::polars::build_frame(cols, 0, 0).unwrap()
+            }
         };
-        assert!(err.message.contains("division by zero"), "{}", err.message);
-        assert!(
-            err.hint.as_deref().unwrap_or("").contains("row 0"),
-            "the row is named: {:?}",
-            err.hint
-        );
+        let divexpr = vec![("d".to_string(), bin(BinOp::Div, col("x"), col("y")))];
+        for (label, native) in [("native", true), ("polars", false)] {
+            // The polars backend is LAZY, so its error may surface at the verb or at
+            // materialization — ADR 0036's declared caret delta. The MESSAGE and the
+            // ROW must be identical either way, and that is what is asserted.
+            let err = match mk(native).with_columns(&divexpr, 0, 0) {
+                Err(e) => e,
+                Ok(built) => match built.column_values("d", 0, 0) {
+                    Err(e) => e,
+                    Ok(v) => panic!("[{label}] dividing by zero must error, got {:?}", reprs(&v)),
+                },
+            };
+            assert!(err.message.contains("division by zero"), "[{label}] {}", err.message);
+            assert!(
+                err.hint.as_deref().unwrap_or("").contains("row 0"),
+                "[{label}] the row is named: {:?}",
+                err.hint
+            );
+        }
     }
 }
 
@@ -718,4 +752,129 @@ fn float_keys_collapse_signed_zero() {
     )
     .unwrap();
     assert_eq!(f.unique_by(&[], 0, 0).unwrap().row_count(0, 0).unwrap(), 2);
+}
+
+/// ADR 0036's arithmetic pins. Separate module so it can import `BinOp`, which
+/// the file's other dual-engine tests get from `mod against_the_oracle`.
+#[cfg(feature = "dataframes")]
+mod one_semantics {
+    use super::*;
+    use crate::ast::BinOp;
+
+    // ---------------------------------------------------------------------------
+    // ADR 0036 (v0.6.0) — one semantics. These are the arithmetic pins: the two
+    // backends must not merely agree with each other, they must agree with the
+    // SCALAR KERNEL, which is why each expected value below is the one
+    // `interp::ops::eval_binary` produces.
+    // ---------------------------------------------------------------------------
+
+    /// The reciprocal-multiply divergence (ADR 0036 policy 1, D13).
+    ///
+    /// polars rewrites division-by-a-constant into multiplication by the reciprocal:
+    /// `41.0 * 0.1` is `4.1000000000000005`, not `4.1`. It needs TWO OR MORE ROWS to
+    /// trigger, which is why a one-row fixture — the natural thing to write — reports
+    /// agreement. Every value here is chosen so `x * 0.1 != x / 10.0`, except `55`,
+    /// which is exact either way and is included precisely so the test cannot pass by
+    /// accident on a lucky value.
+    #[test]
+    fn division_by_a_literal_is_ieee_exact_on_both_engines() {
+        // `ColData` is not `Clone`, so each engine gets freshly built columns.
+        let mk = || vec![("b".to_string(), ColData::Int(vec![41, 38, 55, 29]))];
+        let n = crate::backend::native::build_frame(mk(), 0, 0).unwrap();
+        let p = crate::backend::polars::build_frame(mk(), 0, 0).unwrap();
+        let e = vec![("r".to_string(), bin(BinOp::Div, col("b"), lit(Value::Int(10))))];
+        let expect: Vec<Value> = [41.0f64, 38.0, 55.0, 29.0]
+            .iter()
+            .map(|x| Value::Float(x / 10.0))
+            .collect();
+        for (label, f) in [("native", &n), ("polars", &p)] {
+            let got = f.with_columns(&e, 0, 0).unwrap().column_values("r", 0, 0).unwrap();
+            assert_eq!(reprs(&got), reprs(&expect), "[{label}] division by a literal is not IEEE-exact");
+        }
+    }
+
+    /// `%` and `//` are euclidean on both engines, and keep Int when both operands are
+    /// Int. polars' own `%` is FLOORED (`7 % -3` is `-2` there, `1` in Helix), and it
+    /// refused `//` inside a query outright until v0.6.0.
+    #[test]
+    fn euclidean_mod_and_floordiv_agree_with_the_scalar_kernel() {
+        let mk = || vec![("a".to_string(), ColData::Int(vec![7, -7, 7, -7]))];
+        let n = crate::backend::native::build_frame(mk(), 0, 0).unwrap();
+        let p = crate::backend::polars::build_frame(mk(), 0, 0).unwrap();
+        for (op, rhs) in [(BinOp::Mod, 3i64), (BinOp::Mod, -3), (BinOp::FloorDiv, 2)] {
+            let e = vec![("r".to_string(), bin(op, col("a"), lit(Value::Int(rhs))))];
+            // The scalar kernel IS the expectation — not a hand-written table.
+            let expect: Vec<Value> = [7i64, -7, 7, -7]
+                .iter()
+                .map(|a| {
+                    crate::interp::ops::eval_binary(&op, Value::Int(*a), Value::Int(rhs), 0, 0)
+                        .expect("scalar kernel")
+                })
+                .collect();
+            for (label, f) in [("native", &n), ("polars", &p)] {
+                let got = f.with_columns(&e, 0, 0).unwrap().column_values("r", 0, 0).unwrap();
+                assert_eq!(reprs(&got), reprs(&expect), "[{label}] {op:?} by {rhs}");
+            }
+        }
+    }
+
+    /// A zero divisor is an error naming the 0-based row, on BOTH engines, for `/ % //`.
+    /// polars used to answer three different silent things: `missing` for Int `/0`,
+    /// `inf` for Float `/0`, `NaN` for `0.0 / 0.0`.
+    #[test]
+    fn zero_divisor_errors_with_the_row_on_both_engines() {
+        let mk = || {
+            vec![
+                ("a".to_string(), ColData::Int(vec![1, 2, 3])),
+                ("z".to_string(), ColData::Int(vec![1, 1, 0])),
+            ]
+        };
+        for op in [BinOp::Div, BinOp::Mod, BinOp::FloorDiv] {
+            let n = crate::backend::native::build_frame(mk(), 0, 0).unwrap();
+            let p = crate::backend::polars::build_frame(mk(), 0, 0).unwrap();
+            let e = vec![("r".to_string(), bin(op, col("a"), col("z")))];
+            for (label, f) in [("native", &n), ("polars", &p)] {
+                // The polars backend is LAZY, so the error may surface at materialization
+                // rather than at the verb — hence both are tried. That timing difference
+                // is ADR 0036's declared caret delta; the MESSAGE must not differ.
+                let err = match f.with_columns(&e, 0, 0) {
+                    Err(e) => e,
+                    Ok(built) => match built.column_values("r", 0, 0) {
+                        Err(e) => e,
+                        Ok(v) => panic!("[{label}] {op:?} by zero did not raise: {:?}", reprs(&v)),
+                    },
+                };
+                assert!(
+                    err.message.contains("division by zero")
+                        || err.message.contains("modulo by zero"),
+                    "[{label}] {op:?}: {}",
+                    err.message
+                );
+                assert!(
+                    err.hint.as_deref().unwrap_or("").contains("at row 2 of the frame."),
+                    "[{label}] {op:?} did not name the row: {:?}",
+                    err.hint
+                );
+            }
+        }
+    }
+
+    /// A MISSING divisor is not a zero divisor — it must propagate, not raise (ADR 0001).
+    #[test]
+    fn a_missing_divisor_propagates_rather_than_raising() {
+        let mk = || {
+            vec![
+                ("a".to_string(), ColData::Int(vec![1, 2])),
+                ("z".to_string(), ColData::IntOpt(vec![None, Some(2)])),
+            ]
+        };
+        let n = crate::backend::native::build_frame(mk(), 0, 0).unwrap();
+        let p = crate::backend::polars::build_frame(mk(), 0, 0).unwrap();
+        let e = vec![("r".to_string(), bin(BinOp::Div, col("a"), col("z")))];
+        let expect = vec![Value::Missing, Value::Float(1.0)];
+        for (label, f) in [("native", &n), ("polars", &p)] {
+            let got = f.with_columns(&e, 0, 0).unwrap().column_values("r", 0, 0).unwrap();
+            assert_eq!(reprs(&got), reprs(&expect), "[{label}] missing divisor");
+        }
+    }
 }

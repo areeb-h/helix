@@ -39,6 +39,28 @@ recorded nowhere, and states the rule that makes a sixth impossible:
    `src/types.rs:157` reads `Div => Type::Float, // division is always Float`. Polars
    was the only dissenter in the binary.
 
+   **The thirteenth divergence, found while implementing this ADR and the reason
+   `/` `%` `//` lower to a UDF rather than to polars' own operators:** polars is not
+   IEEE-faithful for a scalar divisor. It rewrites division-by-a-constant into
+   multiplication by the reciprocal, and `41.0 * 0.1` is not `41.0 / 10.0`. Measured
+   on v0.5.1, `@b / 10` over `[41, 38, 55, 29]` answered
+   `[4.1000000000000005, 3.8000000000000003, 5.5, 2.9000000000000004]` where the
+   scalar kernel answers `[4.1, 3.8, 5.5, 2.9]`. It affects EVERY division by a
+   constant in EVERY frame query, it is silent, it is one ULP wide, and — worst — it
+   triggers only at **two rows or more**, so the one-row test anyone would write to
+   check it reports agreement. No cast avoids it: Int/Int-literal, Int/Float-literal,
+   Float/Int-literal and Float/Float-literal all diverge, while column-by-column
+   division is exact. That is why the guard computes the arithmetic itself instead of
+   merely checking for zeros: correctness here is not separable from the guard.
+
+   The UDF is elementwise (`FunctionOptions::elementwise`), so streaming and
+   predicate pushdown survive it, and polars invokes it **once per column** rather
+   than once per morsel — measured at 4, 100k and 1M rows and pinned by
+   `udf_invocation_shape`. That measurement is load-bearing: it is why the row number
+   in `at row N of the frame.` is a global row and is deterministic. If a future
+   polars starts chunking, that test fails rather than users silently reading a
+   wrong row.
+
    Two consequences are load-bearing, because they change WHICH ROWS a query returns
    rather than how a number prints:
    - `where(@x / @y == 2)` on `x=[4,5], y=[2,2]` was 2 rows and is now 1 (`5 / 2` is `2.5`).

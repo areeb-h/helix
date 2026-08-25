@@ -104,10 +104,44 @@ pub fn as_lazyframe(h: &Df, line: usize, col: usize) -> Result<LazyFrame, HelixE
     }
 }
 
+/// Marks an error Helix itself raised from inside a polars UDF, so it comes back
+/// out as the language's own sentence rather than an engine one. `\u{1}` cannot
+/// occur in Helix source or in any polars message, so the framing is unambiguous.
+const HELIX_UDF_ERR: &str = "\u{1}helix\u{1}";
+
+/// Build the sentinel-wrapped error a guard UDF returns: message, hint (possibly
+/// empty) and the 0-based row, joined by the same separator. `usize::MAX` means
+/// "no row applies" (a whole-column refusal, like a non-numeric operand).
+fn udf_error(msg: &str, hint: &str, row: usize) -> PolarsError {
+    let row = if row == usize::MAX { String::new() } else { row.to_string() };
+    PolarsError::ComputeError(format!("{HELIX_UDF_ERR}{msg}\u{1}{hint}\u{1}{row}").into())
+}
+
 /// Map a Polars error into a friendly Helix error at a source position.
 fn pl<T>(r: PolarsResult<T>, ctx: &str, line: usize, col: usize) -> Result<T, HelixError> {
     r.map_err(|e| {
-        let (msg, hint) = tidy(&e.to_string());
+        let raw = e.to_string();
+        // A Helix error raised inside a guard UDF passes straight through. It is
+        // already the language's own message, so prefixing it with an engine context
+        // ("could not read DataFrame schema: division by zero") would be both wrong
+        // and confusing: `tidy()` exists to translate POLARS' words, not ours.
+        if let Some(rest) = raw.strip_prefix(HELIX_UDF_ERR) {
+            let mut parts = rest.split('\u{1}');
+            let msg = parts.next().unwrap_or("").to_string();
+            let hint = parts.next().unwrap_or("").to_string();
+            let row = parts.next().unwrap_or("");
+            let err = HelixError::new(msg, line, col);
+            // The row is the frame-sized counterpart of a position, and when there
+            // IS one it REPLACES the scalar advice — exactly as the native engine
+            // does (`backend::native::eval::at_row` overwrites the hint). Keeping
+            // both would make the two backends print different help for one error,
+            // which is the divergence class this whole release exists to remove.
+            // Without a row (a literal zero divisor, refused statically) the scalar
+            // kernel's own advice stands, which is right: there is no row to name.
+            let hint = if row.is_empty() { hint } else { format!("at row {row} of the frame.") };
+            return if hint.is_empty() { err } else { err.hint(hint) };
+        }
+        let (msg, hint) = tidy(&raw);
         let err = HelixError::new(format!("{ctx}: {msg}"), line, col);
         match hint {
             Some(h) => err.hint(h),
@@ -156,6 +190,162 @@ fn tidy(raw: &str) -> (String, Option<&'static str>) {
     (msg, hint)
 }
 
+/// A polars dtype named the way Helix names types, for an error a user will read.
+fn dtype_type_name(dt: &DataType) -> &'static str {
+    match dt {
+        DataType::Boolean => "Bool",
+        DataType::String => "String",
+        d if d.is_integer() => "Int",
+        d if d.is_float() => "Float",
+        _ => "value",
+    }
+}
+
+/// The scalar kernel's own division/modulo-by-zero errors, reproduced exactly.
+/// Byte-identical to `interp::ops::eval_binary` on purpose: one semantics means one
+/// message, and a frame that said it differently would be a divergence of its own.
+fn zero_divisor_error(op: &BinOp, line: usize, col: usize) -> HelixError {
+    match op {
+        BinOp::Div => HelixError::new("division by zero", line, col)
+            .hint("guard the denominator, e.g. `if d != 0` or check your data."),
+        BinOp::FloorDiv => HelixError::new("integer division by zero", line, col)
+            .hint("guard the divisor, e.g. `if d != 0`."),
+        _ => HelixError::new("modulo by zero", line, col),
+    }
+}
+
+/// `/`, `%` and `//` with the LANGUAGE's exact semantics, as an elementwise UDF.
+///
+/// Two independent reasons this cannot be `l / r`:
+///
+/// 1. **Polars is not IEEE-faithful for a scalar divisor.** `@b / 10` over
+///    `[41, 38, 55, 29]` answered `[4.1000000000000005, 3.8000000000000003, 5.5,
+///    2.9000000000000004]`: it rewrites division-by-a-constant into multiplication
+///    by the reciprocal, and `41.0 * 0.1` is not `41.0 / 10.0`. It triggers only at
+///    two rows or more, so a one-row test — the kind anyone writes — shows
+///    agreement. Every division by a constant in every frame query was silently one
+///    ULP away from the same expression on scalars.
+/// 2. **Division by zero must be an error naming the row** (ADR 0036 policy 1),
+///    where polars gives three different silent answers: `missing` for Int `/0`,
+///    `inf` for Float `/0`, `NaN` for `0.0 / 0.0`.
+///
+/// The arithmetic is `interp::ops::eval_binary`'s, transcribed — including
+/// `wrapping_rem_euclid`/`wrapping_div_euclid`, which exist so `i64::MIN % -1` and
+/// `i64::MIN // -1` wrap rather than abort the process.
+///
+/// ROW NUMBERS ARE GLOBAL because polars invokes an elementwise UDF **once per
+/// column**, not once per morsel — measured at 4, 100k and 1M rows and pinned by
+/// `udf_invocation_shape`, so a future polars that starts chunking is caught by a
+/// test rather than by a user reading a wrong row number.
+/// `%` and `//` keep Int when BOTH operands are integer columns, exactly as the
+/// scalar kernel does; `/` is true division and is always Float. Decided from the
+/// REAL dtypes rather than guessed from the expression, so a column counts.
+fn out_is_int(op: BinOp, a: &DataType, b: &DataType) -> bool {
+    matches!(op, BinOp::Mod | BinOp::FloorDiv) && a.is_integer() && b.is_integer()
+}
+
+fn guarded_arith(l: Expr, r: Expr, op: BinOp) -> Expr {
+    l.map_many(
+        move |cols: &mut [Column]| -> PolarsResult<Column> {
+            // A LITERAL operand arrives as a length-1 column (polars' scalar
+            // broadcast), so zipping it against a full column would silently produce
+            // a one-row result. Broadcast it to the common length first.
+            let n = cols[0].len().max(cols[1].len());
+            let bc = |c: &Column| -> Column {
+                if c.len() == n { c.clone() } else { c.new_from_index(0, n) }
+            };
+            let (a, b) = (bc(&cols[0]), bc(&cols[1]));
+            let (a, b) = (&a, &b);
+            let name = cols[0].name().clone();
+            let out_int = out_is_int(op, a.dtype(), b.dtype());
+            // A non-numeric operand is the scalar kernel's error, not a polars cast
+            // failure — and never the silent nulling `Expr::cast` would give.
+            for c in [a, b] {
+                if !c.dtype().is_primitive_numeric() {
+                    return Err(udf_error(
+                        &format!(
+                            "operator `{}` needs numbers, but got {}",
+                            op.symbol(),
+                            crate::value::with_article(dtype_type_name(c.dtype()))
+                        ),
+                        "",
+                        usize::MAX,
+                    ));
+                }
+            }
+            let zero = |row: usize| -> PolarsError {
+                match op {
+                    BinOp::Div => udf_error(
+                        "division by zero",
+                        "guard the denominator, e.g. `if d != 0` or check your data.",
+                        row,
+                    ),
+                    BinOp::FloorDiv => udf_error(
+                        "integer division by zero",
+                        "guard the divisor, e.g. `if d != 0`.",
+                        row,
+                    ),
+                    _ => udf_error("modulo by zero", "", row),
+                }
+            };
+            if out_int {
+                let (ai, bi) = (a.cast(&DataType::Int64)?, b.cast(&DataType::Int64)?);
+                let (ai, bi) = (ai.i64()?, bi.i64()?);
+                let mut out: Vec<Option<i64>> = Vec::with_capacity(ai.len());
+                for (i, (x, y)) in ai.iter().zip(bi.iter()).enumerate() {
+                    match (x, y) {
+                        (Some(x), Some(y)) => {
+                            if y == 0 {
+                                return Err(zero(i));
+                            }
+                            out.push(Some(if matches!(op, BinOp::Mod) {
+                                x.wrapping_rem_euclid(y)
+                            } else {
+                                x.wrapping_div_euclid(y)
+                            }));
+                        }
+                        // Missing propagates elementwise (ADR 0001) — and a MISSING
+                        // divisor is not a zero divisor, so it must not raise.
+                        _ => out.push(None),
+                    }
+                }
+                Ok(Column::new(name, out))
+            } else {
+                let (af, bf) = (a.cast(&DataType::Float64)?, b.cast(&DataType::Float64)?);
+                let (af, bf) = (af.f64()?, bf.f64()?);
+                let mut out: Vec<Option<f64>> = Vec::with_capacity(af.len());
+                for (i, (x, y)) in af.iter().zip(bf.iter()).enumerate() {
+                    match (x, y) {
+                        (Some(x), Some(y)) => {
+                            // `y == 0.0` is true for -0.0 and false for NaN, which is
+                            // exactly what the scalar kernel's `if b == 0.0` does.
+                            if y == 0.0 {
+                                return Err(zero(i));
+                            }
+                            out.push(Some(match op {
+                                BinOp::Div => x / y,
+                                BinOp::Mod => x.rem_euclid(y),
+                                _ => x.div_euclid(y),
+                            }));
+                        }
+                        _ => out.push(None),
+                    }
+                }
+                Ok(Column::new(name, out))
+            }
+        },
+        &[r],
+        move |_schema: &Schema, fields: &[Field]| {
+            let dt = if out_is_int(op, fields[0].dtype(), fields[1].dtype()) {
+                DataType::Int64
+            } else {
+                DataType::Float64
+            };
+            Ok(Field::new(fields[0].name().clone(), dt))
+        },
+    )
+}
+
 /// Convert a Helix scalar into a Polars literal expression. Non-scalars are
 /// rejected up front by `ast_to_colexpr`, so this stays total in practice.
 fn value_to_lit(v: &Value, line: usize, col: usize) -> Result<Expr, HelixError> {
@@ -201,24 +391,26 @@ fn lower(e: &ColExpr, line: usize, col: usize) -> Result<Expr, HelixError> {
         // Arrow's validity bitmap IS Helix's `missing`, so the null test lowers exactly.
         ColExpr::IsMissing(inner) => lower(inner, line, col)?.is_null(),
         ColExpr::Binary(op, l, r) => {
+            // A LITERAL zero divisor is decidable without touching a row, so it is
+            // refused where it was written, with no `at row` hint — the same shape
+            // the scalar kernel gives (ADR 0036 policy 1).
+            if matches!(op, BinOp::Div | BinOp::Mod | BinOp::FloorDiv)
+                && matches!(
+                    &**r,
+                    ColExpr::Lit(Value::Int(0)) | ColExpr::Lit(Value::Float(0.0))
+                )
+            {
+                return Err(zero_divisor_error(op, line, col));
+            }
             let l = lower(l, line, col)?;
             let r = lower(r, line, col)?;
             match op {
                 BinOp::Add => l + r,
                 BinOp::Sub => l - r,
                 BinOp::Mul => l * r,
-                BinOp::Div => l / r,
-                BinOp::Mod => l % r,
-                // `//` has no faithful column lowering (Polars `/` on ints is
-                // float division); compute it on arrays/scalars, then build the frame.
-                BinOp::FloorDiv => {
-                    return Err(HelixError::new(
-                        "integer division `//` isn't supported inside a DataFrame query",
-                        line,
-                        col,
-                    )
-                    .hint("compute `//` on arrays or scalars, then build the DataFrame."));
-                }
+                BinOp::Div => guarded_arith(l, r, BinOp::Div),
+                BinOp::Mod => guarded_arith(l, r, BinOp::Mod),
+                BinOp::FloorDiv => guarded_arith(l, r, BinOp::FloorDiv),
                 BinOp::Pow => l.pow(r),
                 BinOp::Eq => l.eq(r),
                 BinOp::Ne => l.neq(r),
@@ -695,4 +887,87 @@ impl DataHandle for PolarsFrame {
             .map_err(|e| HelixError::new(format!("could not write CSV `{}`: {}", path, e), line, col))
     }
 
+}
+
+/// The two properties of polars' UDF machinery that `guarded_arith` is built on.
+///
+/// Neither is documented by polars, both were established by measurement, and both
+/// would fail SILENTLY and wrongly if a future version changed them — the first
+/// would turn a Helix error into engine noise, the second would make every reported
+/// row number wrong without anything erroring. So they are pinned here rather than
+/// trusted.
+#[cfg(test)]
+mod udf_contract {
+    use super::*;
+
+    /// A Helix error raised inside a UDF must survive polars' error handling
+    /// verbatim, so `pl()` can hand back the language's own sentence instead of an
+    /// engine one. Measured: polars adds NO wrapping at all — the string that comes
+    /// out is the string the closure put in.
+    #[test]
+    fn a_helix_error_survives_a_udf_verbatim() {
+        let df = df!["a" => [1i64, 2, 3]].unwrap();
+        let raising = pcol("a").map_many(
+            |_cols: &mut [Column]| -> PolarsResult<Column> {
+                Err(udf_error("division by zero", "guard the denominator.", 7))
+            },
+            &[],
+            |_schema: &Schema, fields: &[Field]| Ok(fields[0].clone()),
+        );
+        let err = match df.lazy().with_columns([raising.alias("q")]).collect() {
+            Ok(_) => panic!("the UDF must have raised"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.starts_with(HELIX_UDF_ERR), "the sentinel did not survive: {err:?}");
+
+        // And the whole round trip, exactly as a user would receive it.
+        let helix: Result<(), HelixError> = pl(Err(PolarsError::ComputeError(err.into())), "ctx", 3, 9);
+        let helix = helix.unwrap_err();
+        assert_eq!(helix.message, "division by zero", "engine context leaked into our message");
+        assert_eq!(helix.hint.as_deref(), Some("at row 7 of the frame."));
+        assert_eq!((helix.line, helix.col), (3, 9));
+    }
+
+    /// Polars invokes an ELEMENTWISE UDF once per column, not once per morsel.
+    ///
+    /// This is what makes the row number in `at row N of the frame.` a GLOBAL row,
+    /// and deterministic. If a future polars starts chunking, the index the closure
+    /// computes becomes chunk-local — every reported row silently wrong, and which
+    /// chunk raises first no longer decided. There is no polars API to ask, so the
+    /// only honest thing is to measure it and fail loudly when it changes.
+    #[test]
+    fn udf_invocation_shape() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        for n in [4usize, 100_000, 1_000_000] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let widest = Arc::new(AtomicUsize::new(0));
+            let (c2, w2) = (calls.clone(), widest.clone());
+            let vals: Vec<i64> = (0..n as i64).collect();
+            let df = df!["a" => vals].unwrap();
+            let counted = pcol("a").map_many(
+                move |cols: &mut [Column]| -> PolarsResult<Column> {
+                    c2.fetch_add(1, Ordering::SeqCst);
+                    w2.fetch_max(cols[0].len(), Ordering::SeqCst);
+                    Ok(cols[0].clone())
+                },
+                &[],
+                |_schema: &Schema, fields: &[Field]| Ok(fields[0].clone()),
+            );
+            let out = df.lazy().with_columns([counted.alias("q")]).collect().unwrap();
+            assert_eq!(out.height(), n);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "polars now calls an elementwise UDF more than once at n={n} — \
+                 `guarded_arith`'s row numbers are chunk-local and WRONG until it \
+                 threads a row-index column (see ADR 0036 policy 1)"
+            );
+            assert_eq!(
+                widest.load(Ordering::SeqCst),
+                n,
+                "the UDF saw a partial column at n={n} — row numbers are no longer global"
+            );
+        }
+    }
 }
