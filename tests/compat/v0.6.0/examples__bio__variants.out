@@ -1,0 +1,26 @@
+exit: 0
+--- stdout ---
+total variants: 6
+columns: ["chrom", "pos", "id", "ref", "alt", "qual", "filter", "gene", "consequence", "af"]
+--- BRCA1 variants by consequence ---
+consequence  pos
+-----------  ---
+missense       2
+synonymous     1
+(2 rows)
+--- high-quality variants (qual > 50) ---
+chrom        pos  gene
+-----  ---------  -----
+chr17   43044295  BRCA1
+chr13   32315474  BRCA2
+chr7   140753336  BRAF
+(3 rows)
+BCF variant count (same data): 6
+--- variants in chr17:43044000-43046000 (indexed) ---
+     pos  gene
+--------  -----
+43044295  BRCA1
+43045711  BRCA1
+(2 rows)
+--- stderr ---
+

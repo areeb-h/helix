@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: digits cannot contain `_` separators
+  --> <src>:1:5
+  |
+1 | x = 1_000
+  |     ^
+help: write the digits without separators (e.g. `1000`).

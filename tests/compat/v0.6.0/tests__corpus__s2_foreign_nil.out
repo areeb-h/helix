@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `nil` is not defined
+  --> <src>:1:5
+  |
+1 | x = nil
+  |     ^
+help: did you mean `missing`?

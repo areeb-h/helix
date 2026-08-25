@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: built-in `print` cannot be used as a value
+  --> <src>:1:5
+  |
+1 | f = print
+  |     ^
+help: wrap it in a function instead: `f = (x => print(x))`.

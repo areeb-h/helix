@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `inf` is a built-in constant (positive infinity) and cannot be reassigned
+  --> <src>:1:1
+  |
+1 | fn inf(x) = x + 1
+  | ^
+help: pick another name (`inf_`, `E_CHARGE`, ...) — `mut inf = ...` would shadow the constant for the whole file.

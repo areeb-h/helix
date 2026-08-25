@@ -1,0 +1,16 @@
+exit: 0
+--- stdout ---
+rule                  L(H)  L(D|H)  total-DL   held-out (truth 16,32,64)
+  constant   y=c    16    11.9     27.9     [4, 4, 4]
+  doubling   y=2^x    4    0.0     4.0     [16, 32, 64]
+  degree-3 polynomial    52    0.0     52.0     [15, 26, 42]
+
+MDL pick (shortest total description): doubling   y=2^x
+  generalizes -> [16, 32, 64]   (truth [16, 32, 64])
+flexible exact fit memorizes the 4 points but OVERFITS off-support:
+  degree-3   -> [15, 26, 42]   (truth [16, 32, 64])
+
+=> few-shot induction = MDL: the shortest rule that fits a handful generalizes;
+   a fit flexible enough to interpolate them predicts nonsense (15 != 16).
+--- stderr ---
+

@@ -1,0 +1,9 @@
+exit: 0
+--- stdout ---
+global: 6 3=1X4=
+ACGTACGT
+ACGAACGT
+local core: GATTACA score 7 at target 2 .. 9
+read placed at target 3 .. 10 score 7
+--- stderr ---
+

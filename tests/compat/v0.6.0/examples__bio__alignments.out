@@ -1,0 +1,20 @@
+exit: 0
+--- stdout ---
+total reads: 4
+columns: ["name", "flag", "ref", "pos", "mapq", "cigar", "rnext", "pnext", "tlen", "seq", "qual"]
+mapped reads: 3
+--- confident alignments (mapq > 50) ---
+name   ref   pos  cigar
+-----  ----  ---  -----
+read1  chr1  100  8M
+read4  chr2  200  8M
+(2 rows)
+BAM read count (same data): 4
+--- reads overlapping chr1 (indexed) ---
+name   pos  cigar
+-----  ---  ------
+read1  100  8M
+read2  150  5M2I1M
+(2 rows)
+--- stderr ---
+

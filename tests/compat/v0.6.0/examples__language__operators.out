@@ -1,0 +1,15 @@
+exit: 0
+--- stdout ---
+arith: 10 4 21 2.3333333333333335 1 1024
+int pow: 81   float: 1.4142135623730951
+bool: true true
+bitwise: 8 14 6 16 15
+precedence 5 & 1 == 1: true
+flags: 5
+bit 2 set?  true
+toggle bit 1: 7
+popcount of 5: 2
+wrapped sum: 123
+?? fill: [1.0, 0.0, 3.0]
+--- stderr ---
+

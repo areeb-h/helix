@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `f` is a Int, not a function
+  --> <src>:3:7
+  |
+3 | print(f(1))
+  |       ^
+help: only functions and the built-ins can be called.

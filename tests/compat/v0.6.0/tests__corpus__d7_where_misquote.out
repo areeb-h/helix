@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: type Int has no method `where`
+  --> <src>:1:12
+  |
+1 | fn g(x) = x.where(it > 1)
+  |            ^
+help: `map`, `filter`, `where`, and `reduce` work on arrays.

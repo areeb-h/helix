@@ -1,0 +1,7 @@
+exit: 0
+--- stdout ---
+false
+maximum recursion depth (20000) exceeded
+500500
+--- stderr ---
+

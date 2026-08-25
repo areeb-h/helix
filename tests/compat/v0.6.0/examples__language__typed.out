@@ -1,0 +1,8 @@
+exit: 0
+--- stdout ---
+area 3x4:    12
+hypotenuse:  5.0
+scaled: [10, 20, 30]
+all type-checked and run.
+--- stderr ---
+

@@ -1,6 +1,94 @@
 # Changelog
 
-## Unreleased
+## v0.6.0 — 2026-08-25
+
+### Changed — one semantics: frames, arrays and scalars answer the same question (ADR 0036)
+
+**This release changes answers.** ADR 0034 stated the doctrine — *a column expression
+means exactly what the same expression means on scalars* — and then recorded three
+deltas against the polars backend and deferred closing them. A release sweep found
+**fifteen**, five of which were recorded nowhere. [ADR
+0036](docs/adr/0036-one-semantics.md) closes them and replaces the delta list with a
+rule: a divergence is a bug in whichever side disagrees with the language.
+
+Every change below was verified on both DataFrame backends and all three engines.
+`scripts/dfdiff.sh` runs every tracked program under both engines and reports **0
+undeclared divergences**.
+
+**Arithmetic in a frame now matches arithmetic on scalars.** On the polars backend
+(the default):
+
+| expression | was | now |
+|---|---|---|
+| `@a / 10` on `41` | `4` (integer division) | `4.1` |
+| `@b / 10` on `[41, 38]` | `[4.1000000000000005, …]` | `[4.1, 3.8]` |
+| `@a % -3` on `7` | `-2` (floored) | `1` (euclidean) |
+| `@a // 2` | refused inside a query | `-4` (euclidean) |
+| Int `@a / 0` | `missing` | error naming the row |
+| Float `@a / 0.0` | `inf` | error naming the row |
+| `0.0 / 0.0` | `NaN` | error naming the row |
+| `@s + "y"` on a String column | `"xy"` | error, as on scalars |
+
+The second row is the subtlest and affected every division by a constant in every
+query: polars rewrites division-by-a-constant into multiplication by the reciprocal,
+and `41.0 * 0.1` is not `41.0 / 10.0`. It only triggers at two rows or more, so a
+one-row test reports agreement.
+
+**Two of these change WHICH ROWS a query returns**, not how a number prints:
+`where(@x / @y == 2)` on `x=[4,5], y=[2,2]` was 2 rows and is now 1; `where(@x / @y > 0)`
+over a zero divisor was a silently shorter frame and is now an error.
+
+**`.where(a).where(b)` is sequential** — the frame you filtered is the frame you filter
+again. polars fused adjacent filters and evaluated both over every row, which was
+invisible until a predicate could raise: `.where(not is_nan(@v)).where(@v > 2.0)` raised
+on rows the first filter had already removed, so the guard the error tells you to write
+did not work. Measured cost of the fix: 1.00x on a limited query, 1.04x on a streaming
+write, 1.09x on a full scan.
+
+**A NaN is a failed computation, not absent data**, and nothing converts one into the
+other now:
+
+| expression | was | now |
+|---|---|---|
+| `[1.0, nan, 3.0].max()` | `missing` | `NaN` |
+| `[1.0, nan, 3.0].spread()` | **`2.0`** — a wrong number | `NaN` |
+| `group(@g).max(@v)` over a NaN | `1.0` (skipped) | `NaN` |
+| `[1.0, nan, 3.0].argmin()` | `missing` | `1` (the NaN's index) |
+| `nan > 2.0`, `where(@v > 2.0)` | `true`, row kept | error + the guard to write |
+| `[3.0, sqrt(-1.0), 1.0].sort()` | `[NaN, 1.0, 3.0]` | `[1.0, 3.0, NaN]` |
+| `[nan, nan].unique()` | `[NaN, NaN]` | `[NaN]` |
+| `1.0 % 0.0` | `NaN` | error |
+
+`spread` was the worst: not missing, not NaN, but a plausible and confidently wrong
+number in the stats surface, because it folded with Rust's `f64::min`/`f64::max` —
+IEEE-754-2008 `minNum`, which ignores a NaN by design and was **removed** in 754-2019.
+
+**Sorting places every NaN last, sign-independently.** The old rule ordered by sign bit,
+which is unobservable from Helix and put the same printed value at both ends of one
+sorted array: `[3.0, sqrt(-1.0), abs(sqrt(-1.0)), 1.0].sort()` was
+`[NaN, 1.0, 3.0, NaN]`. `-0.0 < 0.0` is kept and now holds in a frame too.
+
+**`==` stays IEEE** — `nan == nan` is `false` at every depth. Keys are a *separate*
+relation in which all NaNs are one identity, which is what makes `unique` idempotent
+and a hash join implementable. Both relations are now named and cannot leak into each
+other. This knowingly reverses one clause of ADR 0001's 2026-07-17 amendment; the
+argument is that the clause was never implemented — arrays obeyed it, frames did not.
+
+### Added
+
+- **`nan`** joins `pi`/`e`/`inf` as a literal. If your program binds `nan` as a
+  variable name, rename it (`mut nan = …` still shadows, as for any constant).
+- **`.drop_nan()`** on arrays and DataFrames — the single visible opt-out from NaN
+  propagation, parallel to `.drop_missing()`. `xs.drop_nan().max()` is the `nanmax`
+  spelling. The two verbs remove different things: neither touches the other's value.
+- **`is_nan()` and `is_finite()` work inside a DataFrame query**, in both the
+  free-function and method spellings. Until now they were a parse-time refusal on a
+  column, which made the runtime's own advice — "guard it first with `is_nan(x)`" —
+  impossible to follow where it was most needed.
+- **`HELIX_DF_ENGINE` is validated.** Naming an engine the build does not have was
+  silently ignored, so `HELIX_DF_ENGINE=native` on a released binary gave you polars
+  with no diagnostic — and the two disagreed. It now refuses by name and says what the
+  build contains.
 
 ### Testing — the gates that were not gating
 

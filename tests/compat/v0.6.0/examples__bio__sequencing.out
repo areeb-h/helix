@@ -1,0 +1,11 @@
+exit: 0
+--- stdout ---
+reads: 3
+total bases: 36
+mean GC content: 0.4777777777777778
+first read: read1 ACGTACGTACGT
+quality: IIIIIIIIIIII
+first read mean Q: 40.0
+reads with mean Q >= 38: 3
+--- stderr ---
+

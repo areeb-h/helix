@@ -1,0 +1,9 @@
+exit: 0
+--- stdout ---
+26
+30
+variance: 4.0
+low 1, high 9, mean 3.875
+[0.5, 1.0, 1.5, 2.0]
+--- stderr ---
+

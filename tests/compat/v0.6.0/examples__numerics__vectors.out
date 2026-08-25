@@ -1,0 +1,15 @@
+exit: 0
+--- stdout ---
+v + w: [4.0, 6.0]
+2 * v: [6.0, 8.0]
+dot:    11.0
+norm:   5.0
+normalize: [-1.0, 1.0]
+sum/product: 10.0 24.0
+cumsum: [1.0, 3.0, 6.0, 10.0]
+softmax: 0.659 0.242 0.099  (sums to 1.000)
+argsort: [2, 1, 0]
+clamp:   [0, 5, 10, 0]
+zscores: [-1.41, -0.71, 0.0, 0.71, 1.41]
+--- stderr ---
+

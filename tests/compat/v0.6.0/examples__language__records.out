@@ -1,0 +1,11 @@
+exit: 0
+--- stdout ---
+{age: 41, diagnosis: "flu", name: "Ada"}
+Ada is 41, dx flu
+names: ["Ada", "Ben", "Cara"]
+mean age: 44.666666666666664
+lead: Dr. Vance in lab B12
+retries 3, timeout 30
+mean 5.0, std 2.0, n 8
+--- stderr ---
+

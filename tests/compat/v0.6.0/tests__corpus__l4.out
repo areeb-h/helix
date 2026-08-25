@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: Helix has no `0x…` literals
+  --> <src>:1:5
+  |
+1 | x = 0x10
+  |     ^
+help: write the plain decimal value (e.g. `16` instead of `0x10`).

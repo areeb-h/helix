@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `x` is immutable and cannot be reassigned
+  --> <src>:2:1
+  |
+2 | fn x(n) = n
+  | ^
+help: declare it as mutable up front with `mut x = ...` if it needs to change.

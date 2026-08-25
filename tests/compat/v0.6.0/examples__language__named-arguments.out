@@ -1,0 +1,9 @@
+exit: 0
+--- stdout ---
+Hello, Ada
+Hello, Ada!
+Welcome, Ada!
+default gap penalty: -8
+custom gap penalty: -13
+--- stderr ---
+

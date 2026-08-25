@@ -1,0 +1,18 @@
+exit: 0
+--- stdout ---
+Hello, Ada! You scored 0.8765.
+two decimals: 0.88
+as a percent: 87.6%
+scientific:   8.765e-1
+dec 42  hex 2a  oct 52  bin 101010
+right [    42]  left [42    ]  center [  42  ]
+zero  [000042]
+text  [     Ada] [Ada     ] [  Ada   ]
+
+  el   mass
+  H     1.008
+  He    4.003
+  Li    6.940
+slice [20, 30, 40], first formatted 0010
+--- stderr ---
+

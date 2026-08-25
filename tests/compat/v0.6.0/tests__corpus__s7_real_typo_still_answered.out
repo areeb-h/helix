@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `velociti` is not a known function
+  --> <src>:2:7
+  |
+2 | print(velociti(3))
+  |       ^
+help: did you mean `velocity`?
