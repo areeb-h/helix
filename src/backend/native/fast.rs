@@ -460,6 +460,20 @@ pub fn group_agg(
         "sum" | "mean" | "min" | "max" | "std" => {
             // Missing propagation: any missing value poisons its group.
             let mut poisoned = vec![false; ngroups];
+            // A NaN makes every aggregation in its group answer NaN (ADR 0036 policy
+            // 4), and this typed path has no way to say that without a second poison
+            // vector threaded through all seven arms. So it DECLINES, and the generic
+            // path -- which owns the rule -- answers. That is the fast path's standing
+            // discipline: never a different answer, only a faster one or none.
+            //
+            // Detected in the loop that already walks the column, so it costs one
+            // branch per row rather than a second pass. A NaN-bearing column is rare
+            // and is already evidence of a computation that failed.
+            if let Col::F64 { vals, .. } = vc
+                && vals.iter().any(|x| x.is_nan())
+            {
+                return None;
+            }
             match vc {
                 Col::I64 { valid, .. } | Col::F64 { valid, .. } => {
                     for (row, ok) in valid.iter().enumerate() {

@@ -8556,3 +8556,54 @@ fn frame_reductions_propagate_nan_on_both_engines() {
         assert_eq!(out.trim(), "NaN", "column `{r}` must propagate NaN");
     }
 }
+
+/// Grouped aggregates propagate NaN too (ADR 0036 policy 4) — the last place the
+/// laundering lived.
+///
+/// `group().max()` and `group().min()` SKIPPED a NaN on both backends and answered
+/// `1.0`. That is the pandas `skipna` default which ADR 0025:132 wrote down as a red
+/// line, shipping in the frame world on the default engine. Meanwhile `group().sum()`
+/// already propagated, so one binary disagreed with itself about what a NaN means
+/// depending on which aggregate you asked for.
+#[test]
+fn grouped_aggregates_propagate_nan() {
+    let cases = [
+        ("max", "[NaN]"),
+        ("min", "[NaN]"),
+        ("sum", "[NaN]"),
+        ("mean", "[NaN]"),
+        ("std", "[NaN]"),
+    ];
+    for (agg, want) in cases {
+        let src = format!(
+            "print(dataframe({{g: [\"a\", \"a\"], v: [1.0, nan]}}).group(@g).{agg}(@v).column(\"v\"))\n"
+        );
+        let (out, err, code) = run_source(&src, &[], &format!("gnan_{agg}"));
+        assert_eq!(code, Some(0), "group().{agg}(): {err}");
+        assert_eq!(out.trim(), want, "group().{agg}() must propagate NaN");
+    }
+
+    // A NaN poisons ITS GROUP, not the column. This is the case a whole-column guard
+    // would get wrong, and the reason the rule lives per-group.
+    let (out, err, code) = run_source(
+        "print(dataframe({g: [\"a\", \"a\", \"b\", \"b\"], v: [1.0, nan, 2.0, 3.0]}).group(@g).max(@v).column(\"v\"))\n",
+        &[],
+        "gnan_scoped",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "[NaN, 3.0]", "a NaN must poison only its own group");
+
+    // Everything that is not a NaN is untouched, including the two rules this sits
+    // between: `count` counts every row, and `missing` still wins over a NaN.
+    for (src, want) in [
+        ("print(dataframe({g: [\"a\", \"a\"], v: [1.0, missing]}).group(@g).count(@v).column(\"v\"))", "[2]"),
+        ("print(dataframe({g: [\"a\", \"a\"], v: [1.0, missing]}).group(@g).max(@v).column(\"v\"))", "[missing]"),
+        ("print(dataframe({g: [\"a\", \"a\", \"a\"], v: [1.0, missing, nan]}).group(@g).max(@v).column(\"v\"))", "[missing]"),
+        ("print(dataframe({g: [\"a\", \"a\"], v: [3, 1]}).group(@g).min(@v).column(\"v\"))", "[1]"),
+        ("print(dataframe({g: [\"a\", \"a\"], s: [\"y\", \"x\"]}).group(@g).min(@s).column(\"s\"))", "[\"x\"]"),
+    ] {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], &format!("gun_{}", src.len()));
+        assert_eq!(code, Some(0), "{src}: {err}");
+        assert_eq!(out.trim(), want, "{src}");
+    }
+}

@@ -85,6 +85,15 @@ fn aggregate(
     if cells.iter().any(|v| matches!(v, Value::Missing)) {
         return Ok(Value::Missing);
     }
+    // A NaN propagates as NaN, exactly as it does for a whole column or an array
+    // (ADR 0036 policy 4). `min`/`max` used to SKIP it -- `x < best` is false for a
+    // NaN, so it simply never became the best -- which is the pandas `skipna` default
+    // that ADR 0025:132 wrote down as a red line and that both backends then shipped
+    // in the frame world. `count` returns above this, so it still counts every row.
+    // `missing` is checked first: absence is the weaker claim.
+    if cells.iter().any(|v| matches!(v, Value::Float(f) if f.is_nan())) {
+        return Ok(Value::Float(f64::NAN));
+    }
     // Strings order in scalar Helix ("a" < "b"), so a String column answers
     // lexical min/max — the polars backend already did; native refused (sweep).
     // First-cell check up front so numeric groups pay one discriminant test,

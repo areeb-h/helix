@@ -947,6 +947,11 @@ impl DataHandle for PolarsFrame {
     ) -> Result<Df, HelixError> {
         let key_exprs: Vec<Expr> = keys.iter().map(|k| pcol(k.as_str())).collect();
         let c = pcol(value_col);
+        let value_is_float = schema_fields(&self.lf, line, col)?
+            .iter()
+            .find(|(n, _)| n == value_col)
+            .map(|(_, d)| d.is_float())
+            .unwrap_or(false);
         let agg_expr = match agg {
             // `count` counts ROWS, `missing` included — matching `[1.0, 3.0, missing].count()`
             // and `df.column("v").count()`, which both answer 3. Polars' `count()` excludes
@@ -973,6 +978,21 @@ impl DataHandle for PolarsFrame {
                     "min" => c.clone().min(),
                     "max" => c.clone().max(),
                     _ => c.clone().std(1),
+                };
+                // A NaN propagates as NaN (ADR 0036 policy 4). polars' `min`/`max`
+                // SKIP it, which is the pandas `skipna` default ADR 0025:132 names as
+                // a red line; its `sum`/`mean` already propagate through arithmetic.
+                // One guard covers all five so the five cannot drift apart.
+                //
+                // Gated on a FLOAT column: `is_nan` is undefined for `str` in polars
+                // and raises, which is how the equality rewrite broke two bio examples
+                // in C10. An Int column cannot hold a NaN, so it needs nothing.
+                let inner = if value_is_float {
+                    when(c.clone().is_nan().any(true))
+                        .then(lit(f64::NAN))
+                        .otherwise(inner)
+                } else {
+                    inner
                 };
                 when(c.null_count().gt(lit(0u32)))
                     .then(lit(NULL))
