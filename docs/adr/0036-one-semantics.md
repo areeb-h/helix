@@ -89,7 +89,23 @@ recorded nowhere, and states the rule that makes a sixth impossible:
    0001 trains users to accept and move past. ADR 0001's own Consequences section
    forbids exactly that merge: `missing` "must stay distinct from `Result`-error".
 
-4. **Every numeric reduction propagates NaN as NaN.** `max min sum mean product std
+4. **Every numeric reduction propagates NaN as NaN.** Measured before implementing,
+   because the laundering turned out NOT to be uniform — it is four behaviours across
+   thirteen reductions, and two of them are worse than laundering:
+
+   | today | reductions |
+   |---|---|
+   | `missing` (laundered) | `max min sum mean std var median argmin argmax` |
+   | `NaN` (already correct) | `product norm` |
+   | **`2.0` — a wrong number** | `spread` |
+   | skips the NaN | `group().max()`, `group().min()` |
+   | propagates | `group().sum()`, `group().mean()` |
+
+   `[1.0, nan, 3.0].spread()` answering `2.0` is the worst of them: not missing, not
+   NaN, but a plausible and confidently wrong number in the stats surface of a language
+   aimed at scientific work. And `sum` disagrees with `group().sum()` in one binary —
+   the ungrouped form launders, the grouped form propagates.
+ `max min sum mean product std
    var median quantile summary spread norm normalize`, the `argmin`/`argmax` family,
    and every grouped aggregate on both backends. Never `missing`, never a skip.
    `spread` stops using Rust's `f64::min`/`f64::max` (IEEE-754-2008 `minNum`, REMOVED
@@ -102,9 +118,16 @@ recorded nowhere, and states the rule that makes a sixth impossible:
 
    **`.drop_nan()` is the single visible opt-out**, a verb parallel to
    `.drop_missing()` — not a `skipna=` flag, per ADR 0001's visible-verb choice.
-   `xs.drop_nan().max()` is the `nanmax` spelling. Before this release *no spelling at
-   all* extracted a real maximum from a NaN-bearing array: `drop_missing().max()` was
-   still `missing`. The laundering was not a convenience, it was a dead end.
+   `xs.drop_nan().max()` is the `nanmax` spelling.
+
+   An earlier draft of this policy claimed *no spelling at all* extracted a real
+   maximum from a NaN-bearing array. That was **wrong**, and measuring beats
+   asserting: `xs.filter(x => not is_nan(x)).max()` returns `3.0` today.
+   `drop_missing().max()` is indeed a dead end (still `missing`), which is what the
+   claim was generalised from. So `.drop_nan()` is a SHORTHAND for something that
+   already works, not a new capability, and the migration is gentler than the
+   overstatement implied — which matters, because a policy resting on "there is no
+   alternative" is weaker than one resting on "the alternative is verbose".
 
 5. **Ordering comparisons on a NaN are an error; `==`/`!=` stay IEEE.** `< > <= >=`
    raise `cannot compare these values (NaN?)` on scalars, arrays and BOTH frame

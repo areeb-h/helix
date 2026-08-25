@@ -49,13 +49,35 @@
 ##     >>> [1, missing, 3].max()
 ##     missing
 
-## NaN is placed by SORT (by sign bit, so a negative NaN sorts first) and propagates as
-## `missing` through `min`/`max`.
+## NaN SORTS LAST, whatever its sign. A NaN is a Float value meaning "this computation
+## failed" — it is not missing data, and nothing in Helix converts one into the other.
+## `sqrt(-1.0)` happens to produce a NaN with its sign bit set on x86; that is invisible
+## from Helix and does not change where it sorts.
 ##
 ##     >>> [1.0, sqrt(0.0 - 1.0), 3.0].sort()
-##     [NaN, 1.0, 3.0]
+##     [1.0, 3.0, NaN]
 ##
-##     >>> [1.0, sqrt(0.0 - 1.0), 3.0].min()
+##     >>> [1.0, nan, 3.0].sort()
+##     [1.0, 3.0, NaN]
+
+## Sorting and COMPARING are different questions, and they answer differently on purpose.
+## A sort has to put every value somewhere, so it puts NaN last. A comparison has to
+## answer a Bool, and for a NaN there is no honest one — so it raises, and tells you the
+## guard to write.
+##
+##     >>> [1.0, nan, 3.0].filter(x => x > 2.0)
+##     error: cannot compare these values (NaN?)
+##
+##     >>> [1.0, nan, 3.0].filter(x => not is_nan(x)).filter(x => x > 2.0)
+##     [3.0]
+
+## `is_nan` and `is_missing` ask different questions, and a value answers `true` to at
+## most one of them.
+##
+##     >>> nan.is_missing()
+##     false
+##
+##     >>> missing.is_nan()
 ##     missing
 
 ## SIGNED ZEROS: `sort` orders them (`-0.0` before `0.0`), while the `_by` family and the

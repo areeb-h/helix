@@ -262,7 +262,7 @@ pub(crate) fn array_numeric_fast(
                     if rev {
                         v.reverse();
                     } else {
-                        v.sort_unstable_by(f64::total_cmp);
+                        v.sort_unstable_by(|a, b| crate::interp::ops::float_order(*a, *b));
                     }
                     Some(Value::float_array(v))
                 }
@@ -338,7 +338,8 @@ pub(crate) fn array_numeric_fast(
                 ArrayData::Floats(xs) => {
                     let mut idx: Vec<i64> = (0..xs.len() as i64).collect();
                     idx.sort_unstable_by(|&a, &b| {
-                        xs[a as usize].total_cmp(&xs[b as usize]).then(a.cmp(&b))
+                        crate::interp::ops::float_order(xs[a as usize], xs[b as usize])
+                            .then(a.cmp(&b))
                     });
                     Some(Value::int_array(idx))
                 }
@@ -479,7 +480,7 @@ pub(crate) fn array_float_reduce(xs: &[f64], name: &str, line: usize, col: usize
             // NaN-containing array to the general path, which yields `missing` (ADR 0001).
             let mut best = xs[0];
             for &x in &xs[1..] {
-                let ord = x.total_cmp(&best);
+                let ord = crate::interp::ops::float_order(x, best);
                 if (name == "min" && ord == std::cmp::Ordering::Less)
                     || (name == "max" && ord == std::cmp::Ordering::Greater)
                 {

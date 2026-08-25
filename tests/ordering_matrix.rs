@@ -121,13 +121,27 @@ const CASES: &[(&str, &str, &str)] = &[
     // spellings PLACE the NaN; every reduction spelling — `min`/`max`, `min_by`/`max_by`,
     // method AND free `argmin`/`argmax` — propagates `missing`.
     //
-    // Note where the NaN lands: FIRST, not last. `sqrt(-1.0)` produces a NaN with its
-    // sign bit SET, and `total_cmp` orders by the sign bit — so ADR 0024's prose
-    // ("after `+inf`, numpy-style") does not describe what ships. numpy places every
-    // NaN last regardless of sign; Helix places it by sign. Pinned as it behaves.
-    ("float_nan/sort", "[1.0, sqrt(0.0 - 1.0), 3.0].sort()", "[NaN, 1.0, 3.0]"),
-    ("float_nan/argsort", "[1.0, sqrt(0.0 - 1.0), 3.0].argsort()", "[1, 0, 2]"),
-    ("float_nan/sort_by", "[1.0, sqrt(0.0 - 1.0), 3.0].sort_by(it)", "[NaN, 1.0, 3.0]"),
+    // The NaN lands LAST, whatever its sign (ADR 0036 policy 6, ADR 0025 addendum).
+    //
+    // These three cells pinned the opposite until v0.6.0, and the comment here
+    // explained why: `sqrt(-1.0)` produces a NaN with its sign bit SET, `total_cmp`
+    // orders by that bit, so a negative NaN sorted first. It closed with "Pinned as it
+    // behaves" — an honest description of a rule nobody had decided. What made it
+    // indefensible is that the SAME printed value could appear at both ends of one
+    // sorted array: `[3.0, sqrt(-1.0), abs(sqrt(-1.0)), 1.0].sort()` was
+    // `[NaN, 1.0, 3.0, NaN]`. The sign bit is unobservable from Helix, so no user could
+    // predict which end. Every comparable system (numpy, pandas, polars, Julia,
+    // Postgres) places NaN last; Helix now does too.
+    ("float_nan/sort", "[1.0, sqrt(0.0 - 1.0), 3.0].sort()", "[1.0, 3.0, NaN]"),
+    ("float_nan/argsort", "[1.0, sqrt(0.0 - 1.0), 3.0].argsort()", "[0, 2, 1]"),
+    ("float_nan/sort_by", "[1.0, sqrt(0.0 - 1.0), 3.0].sort_by(it)", "[1.0, 3.0, NaN]"),
+    // Sign-independence, pinned directly: one array and its sign-flipped twin must
+    // sort the same way. This is the cell the old rule could not have passed.
+    (
+        "float_nan/sort_both_signs",
+        "[3.0, sqrt(0.0 - 1.0), abs(sqrt(0.0 - 1.0)), 1.0].sort()",
+        "[1.0, 3.0, NaN, NaN]",
+    ),
     ("float_nan/min", "[1.0, sqrt(0.0 - 1.0), 3.0].min()", "missing"),
     ("float_nan/max", "[1.0, sqrt(0.0 - 1.0), 3.0].max()", "missing"),
     ("float_nan/min_by", "[1.0, sqrt(0.0 - 1.0), 3.0].min_by(it)", "missing"),

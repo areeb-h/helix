@@ -8438,3 +8438,55 @@ fn a_guarded_filter_does_not_see_removed_rows() {
     assert_ne!(code, Some(0), "`and` does not short-circuit per row; it must still raise");
     assert!(err.contains("cannot compare these values (NaN?)"), "{err}");
 }
+
+/// One sort order, on every surface: NaN last, sign-independently (ADR 0036 policy 6).
+///
+/// The rule this replaced was `f64::total_cmp` — ordering by SIGN BIT — and the single
+/// most damning fact about it is the third case below: the same printed value at BOTH
+/// ENDS of one sorted array, decided by a bit no Helix operation can observe.
+/// `sqrt(-1.0)` produces a NEGATIVE NaN on x86 and `nan` is positive, so an array
+/// holding both used to sort to `[NaN, 1.0, 3.0, NaN]`.
+///
+/// It was known: the comparator's own comment described the sign-bit behaviour, having
+/// been corrected once from a wrong claim that NaN sorted "after +inf, as numpy does",
+/// and concluded that fixing it "would mean a semantics change rather than a comment
+/// fix". This is that change.
+#[test]
+fn one_sort_order_across_every_surface() {
+    let neg = "n = sqrt(0.0 - 1.0)\n"; // a NEGATIVE NaN on x86
+    let cases = [
+        ("array sort", format!("{neg}print([3.0, n, 1.0].sort())"), "[1.0, 3.0, NaN]"),
+        (
+            "array sort, both signs",
+            format!("{neg}print([3.0, n, nan, 1.0].sort())"),
+            "[1.0, 3.0, NaN, NaN]",
+        ),
+        ("array argsort", format!("{neg}print([3.0, n, 1.0].argsort())"), "[2, 0, 1]"),
+        ("array sort_by", format!("{neg}print([3.0, n, 1.0].sort_by(x => x))"), "[1.0, 3.0, NaN]"),
+        (
+            "frame sort",
+            format!("{neg}print(dataframe({{v: [3.0, n, 1.0]}}).sort(@v).column(\"v\"))"),
+            "[1.0, 3.0, NaN]",
+        ),
+        (
+            "frame sort keeps missing first",
+            format!("{neg}print(dataframe({{v: [3.0, missing, n, 1.0]}}).sort(@v).column(\"v\"))"),
+            "[missing, 1.0, 3.0, NaN]",
+        ),
+        // ADR 0025's signed-zero rule survives, and now holds in a frame too — the
+        // polars backend had been canonicalising -0.0 and 0.0 to equal.
+        (
+            "signed zeros stay ordered",
+            "z = 0.0 * (0.0 - 1.0)\nprint(dataframe({v: [0.0, z]}).sort(@v).column(\"v\"))".to_string(),
+            "[-0.0, 0.0]",
+        ),
+    ];
+    for (what, src, want) in cases {
+        for (engine, env) in ENGINES {
+            let (out, err, code) =
+                run_source(&format!("{src}\n"), env, &format!("sortord_{}_{engine}", what.len()));
+            assert_eq!(code, Some(0), "[{engine}] {what}: {err}");
+            assert_eq!(out.trim(), want, "[{engine}] {what}");
+        }
+    }
+}

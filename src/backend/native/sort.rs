@@ -42,13 +42,12 @@ pub fn sort(
                 return Ok(frame.take(idx));
             }
             Col::F64 { vals, valid } => {
-                // f64 packed by its total_cmp bit trick: flip all bits of
-                // negatives, flip the sign bit of non-negatives — u64 order is
-                // then exactly total_cmp order.
-                let enc = |x: f64| -> u64 {
-                    let b = x.to_bits();
-                    if b >> 63 == 1 { !b } else { b | (1u64 << 63) }
-                };
+                // The language's float order as a u64 key (`ops::float_key`):
+                // the same bit trick, plus every NaN mapped to `u64::MAX` so it
+                // sorts last regardless of sign. Sharing the function with the
+                // comparator is what stops the packed path and the boxed path from
+                // disagreeing — they did, on the sign of a NaN.
+                let enc = crate::interp::ops::float_key;
                 let mut keys: Vec<(bool, u64, u32)> = (0..vals.len())
                     .map(|i| (valid[i], enc(vals[i]), i as u32))
                     .collect();
@@ -97,7 +96,7 @@ fn cell_cmp(a: &Value, b: &Value) -> Ordering {
         (Value::Missing, _) => Ordering::Less,
         (_, Value::Missing) => Ordering::Greater,
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
-        (Value::Float(x), Value::Float(y)) => x.total_cmp(y),
+        (Value::Float(x), Value::Float(y)) => crate::interp::ops::float_order(*x, *y),
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         (Value::Str(x), Value::Str(y)) => x.cmp(y),
         _ => Ordering::Equal,

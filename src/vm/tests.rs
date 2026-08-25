@@ -7002,7 +7002,11 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             ("[3.5, 1.5, 2.5].argsort()", "[1, 2, 0]"),
             ("[0.0, -0.0].argsort()", "[1, 0]"),
             ("[-0.0, 0.0].argsort()", "[0, 1]"),
-            ("[1.0, inf - inf, 2.0].argsort()", "[1, 0, 2]"),
+            // These two differ ONLY in the NaN's sign, and until v0.6.0 they
+            // pinned two different orders -- which is what made the sign-bit rule
+            // indefensible. Every NaN sorts last now (ADR 0036 policy 6), so they
+            // agree, as one array and its sign-flipped twin always should have.
+            ("[1.0, inf - inf, 2.0].argsort()", "[0, 2, 1]"),
             ("[1.0, -(inf - inf), 2.0].argsort()", "[0, 2, 1]"),
             ("[inf, -inf, 1.0].argsort()", "[1, 2, 0]"),
             // exact i64 above 2^53 — an f64 collapse would give [0, 1] (stable tie)
@@ -7023,7 +7027,7 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
                 "[{k: 2, v: \"x\"}, {k: 1, v: \"y\"}, {k: 2, v: \"z\"}].sort_by(r => r.k)",
                 "[{k: 1, v: \"y\"}, {k: 2, v: \"x\"}, {k: 2, v: \"z\"}]",
             ),
-            ("[1.0, inf - inf, 2.0].sort_by(it)", "[NaN, 1.0, 2.0]"),
+            ("[1.0, inf - inf, 2.0].sort_by(it)", "[1.0, 2.0, NaN]"),
         ] {
             let (tw, vm) = (run_tw(src), run_vm(src));
             assert_eq!(tw, vm, "engines disagree on `{src}`");
@@ -7840,7 +7844,7 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             // A NaN never aborts the sort (a non-total comparator would make Rust panic).
             // Note it lands FIRST here, not after `+inf`: `inf - inf` has its sign bit
             // set, and `total_cmp` orders by that bit. See `numeric_cmp`.
-            ("[1.0, inf - inf, -inf, 2.0].sort()", "[NaN, -inf, 1.0, 2.0]"),
+            ("[1.0, inf - inf, -inf, 2.0].sort()", "[-inf, 1.0, 2.0, NaN]"),
             ("[1.0, -(inf - inf), -inf, 2.0].sort()", "[-inf, 1.0, 2.0, NaN]"),
             ("[1.5, 2.5].reverse().reverse()", "[1.5, 2.5]"),
             // lazy Range — reversing one is another range, so this stays O(1)

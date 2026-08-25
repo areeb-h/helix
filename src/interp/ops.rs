@@ -12,6 +12,43 @@ use crate::error::HelixError;
 use crate::tensor;
 use crate::value::Value;
 
+/// **The** total order Helix sorts floats by: every NaN last, sign-independently;
+/// `-0.0` before `0.0`; `total_cmp` otherwise.
+///
+/// It replaces bare `f64::total_cmp`, which orders by SIGN BIT — a bit no Helix
+/// operation can observe, and which produced
+/// `[3.0, sqrt(-1.0), abs(sqrt(-1.0)), 1.0].sort()` = `[NaN, 1.0, 3.0, NaN]`: the same
+/// printed value at BOTH ENDS of one sorted array, decided by something invisible.
+/// NumPy, pandas, polars, Julia and Postgres all place NaN last (ADR 0036 policy 6).
+///
+/// Sorting is a TOTAL order, so it is deliberately not the comparison operators —
+/// those raise on a NaN (policy 5) because a comparison has to answer a Bool and
+/// there is no honest one. A sort has to put the value somewhere, and "last" is the
+/// answer every neighbouring system gives.
+pub(crate) fn float_order(a: f64, b: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering::*;
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => Equal,
+        (true, false) => Greater,
+        (false, true) => Less,
+        // `total_cmp` for the rest, which is what keeps `-0.0 < 0.0` (ADR 0025).
+        (false, false) => a.total_cmp(&b),
+    }
+}
+
+/// The same order as a sortable `u64` key, for engines that sort by key rather than
+/// by comparator. `float_order(a, b) == float_key(a).cmp(&float_key(b))`, which is
+/// asserted over a boundary table in `float_order_is_one_order`.
+pub(crate) fn float_key(x: f64) -> u64 {
+    if x.is_nan() {
+        // Above every finite key AND above +inf (0xFFF0_0000_0000_0000), so all
+        // NaNs land together at the end whatever their sign or payload.
+        return u64::MAX;
+    }
+    let b = x.to_bits();
+    if b >> 63 == 1 { !b } else { b | (1u64 << 63) }
+}
+
 /// The one "these do not order" error, message and advice together.
 ///
 /// It existed in three variants: this one (with the advice), the native engine's
@@ -1108,4 +1145,63 @@ pub(crate) fn rational_binary(op: &BinOp, l: &Value, r: &Value, line: usize, col
         }
         And | Or | Coalesce => unreachable!("short-circuit ops never reach here"),
     })
+}
+
+#[cfg(test)]
+mod float_order_tests {
+    use super::{float_key, float_order};
+    use std::cmp::Ordering::*;
+
+    /// The comparator and the sort KEY must agree, because four implementations rely
+    /// on one or the other: array `sort`/`argsort` and native's boxed compare use
+    /// `float_order`; native's packed column sort and the polars key expression use
+    /// `float_key`. If they ever disagree, two engines sort the same column
+    /// differently and nothing else would notice.
+    #[test]
+    fn float_order_is_one_order() {
+        let vals = [
+            f64::NEG_INFINITY,
+            -1.5,
+            -0.0,
+            0.0,
+            f64::MIN_POSITIVE,
+            1.5,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NAN,
+            -f64::NAN,
+            f64::from_bits(0x7FF8_0000_0000_0001), // a NaN with a payload
+        ];
+        for &a in &vals {
+            for &b in &vals {
+                assert_eq!(
+                    float_order(a, b),
+                    float_key(a).cmp(&float_key(b)),
+                    "comparator and key disagree on ({a:?}, {b:?})"
+                );
+            }
+        }
+    }
+
+    /// The three rules, stated as tests rather than as prose.
+    #[test]
+    fn every_nan_sorts_last_regardless_of_sign() {
+        for &n in &[f64::NAN, -f64::NAN, f64::from_bits(0x7FF8_0000_0000_0001)] {
+            assert_eq!(float_order(n, f64::INFINITY), Greater, "NaN must follow +inf");
+            assert_eq!(float_order(f64::INFINITY, n), Less);
+            assert_eq!(float_order(n, f64::NEG_INFINITY), Greater);
+        }
+        // All NaNs are one class to the ORDER (they are still `!=` to each other under
+        // `==`, which is IEEE and a different question -- ADR 0036 policy 5).
+        assert_eq!(float_order(f64::NAN, -f64::NAN), Equal);
+    }
+
+    /// ADR 0025's signed-zero rule survives: it is the half of `total_cmp` worth
+    /// keeping, and the polars backend had been canonicalising the two to equal.
+    #[test]
+    fn negative_zero_precedes_positive_zero() {
+        assert_eq!(float_order(-0.0, 0.0), Less);
+        assert_eq!(float_order(0.0, -0.0), Greater);
+        assert!(float_key(-0.0) < float_key(0.0));
+    }
 }

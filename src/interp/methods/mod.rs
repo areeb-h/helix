@@ -451,13 +451,15 @@ fn numeric_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
         (Value::Int(x), Value::Float(y)) => {
             match crate::interp::ops::int_float_cmp(*x, *y) {
                 Some(o) => o,
-                None => (*x as f64).total_cmp(y),
+                // `int_float_cmp` answers `None` only for a NaN, which `float_order`
+                // places last — so a NaN is Greater than any Int.
+                None => crate::interp::ops::float_order(*x as f64, *y),
             }
         }
         (Value::Float(y), Value::Int(x)) => {
             match crate::interp::ops::int_float_cmp(*x, *y) {
                 Some(o) => o.reverse(),
-                None => y.total_cmp(&(*x as f64)),
+                None => crate::interp::ops::float_order(*y, *x as f64),
             }
         }
         // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)`: the old fallback made a
@@ -467,17 +469,20 @@ fn numeric_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
         // interpreter on a valid array like `[1.0, sqrt(-1.0), 3.0].sort()`. `total_cmp`
         // is a genuine total order, so `sort`/`argsort` are total and never abort.
         //
-        // Where a `NaN` lands is decided by its SIGN BIT, which is worth stating plainly
-        // because an earlier version of this comment claimed "after `+inf`, as numpy
-        // does" and named `sqrt(-1.0)` as the example — and that example sorts to the
-        // FRONT, because the NaN it produces has its sign bit set. Only a positive NaN
-        // sorts last. numpy puts every NaN last regardless of sign, so this does NOT
-        // match numpy; matching it would mean a comparator that normalizes NaN sign, a
-        // semantics change rather than a comment fix. Documented as it behaves.
-        // Reductions
-        // (`min`/`max`/`median`) filter `NaN` to `missing` before comparing, so they are
-        // unaffected; this only changes where a `NaN` lands in a *sorted* result.
-        _ => a.as_f64().unwrap_or(f64::NAN).total_cmp(&b.as_f64().unwrap_or(f64::NAN)),
+        // Every NaN sorts LAST, sign-independently (`ops::float_order`, ADR 0036 policy
+        // 6). Until v0.6.0 the comparator was bare `total_cmp`, which orders by SIGN
+        // BIT — and the comment here said so, having been corrected once already from
+        // a wrong claim that NaN sorted "after `+inf`, as numpy does". It then observed
+        // that matching numpy "would mean a comparator that normalizes NaN sign, a
+        // semantics change rather than a comment fix", and documented the behaviour
+        // instead. That was the right call for a comment and the wrong resting place
+        // for the language: the rule was invisible from Helix source, matched no
+        // comparable system, and put the same printed value at both ends of one sorted
+        // array. ADR 0036 made the semantics change the comment declined to.
+        _ => crate::interp::ops::float_order(
+            a.as_f64().unwrap_or(f64::NAN),
+            b.as_f64().unwrap_or(f64::NAN),
+        ),
     }
 }
 

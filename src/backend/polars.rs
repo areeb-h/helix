@@ -777,8 +777,46 @@ impl DataHandle for PolarsFrame {
     /// frame would pair values from two different orderings — and ties are the common
     /// case (categories, chromosomes, group keys). `maintain_order: true` makes the
     /// stability ADR 0025 (ordering) assumes a guarantee instead of an accident.
-    fn sort(&self, names: &[String], _line: usize, _col: usize) -> Result<Df, HelixError> {
-        let exprs: Vec<Expr> = names.iter().map(|n| pcol(n.as_str())).collect();
+    fn sort(&self, names: &[String], line: usize, col: usize) -> Result<Df, HelixError> {
+        // A FLOAT column sorts by `ops::float_key`, not by polars' own float order.
+        // Polars places every NaN last (right) but canonicalises `-0.0` and `0.0` to
+        // equal (wrong — ADR 0025 orders them, and the native engine does). There is
+        // no flag for that pair; a key expression is the only way to get both.
+        //
+        // Nulls stay null through the map, so `nulls_last: false` still puts
+        // `missing` first — do NOT set a null flag here, there is no `nan_first` knob
+        // and the two concerns are separate.
+        let fields = schema_fields(&self.lf, line, col)?;
+        let mut exprs: Vec<Expr> = Vec::with_capacity(names.len());
+        for n in names {
+            let is_float = fields
+                .iter()
+                .find(|(name, _)| name == n)
+                .map(|(_, d)| d.is_float())
+                .unwrap_or(false);
+            if is_float {
+                exprs.push(
+                    pcol(n.as_str())
+                        .cast(DataType::Float64)
+                        .map(
+                            |c: Column| -> PolarsResult<Column> {
+                                let f = c.f64()?;
+                                let keys: Vec<Option<u64>> = f
+                                    .iter()
+                                    .map(|v| v.map(crate::interp::ops::float_key))
+                                    .collect();
+                                Ok(Column::new(c.name().clone(), keys))
+                            },
+                            |_s: &Schema, fl: &Field| {
+                                Ok(Field::new(fl.name().clone(), DataType::UInt64))
+                            },
+                        )
+                        .alias(format!("__helix_sortkey_{n}")),
+                );
+            } else {
+                exprs.push(pcol(n.as_str()));
+            }
+        }
         Ok(self.derive(self.lf.clone().sort_by_exprs(
             exprs,
             SortMultipleOptions::default().with_maintain_order(true),
