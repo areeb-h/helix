@@ -142,8 +142,13 @@ const CASES: &[(&str, &str, &str)] = &[
         "[3.0, sqrt(0.0 - 1.0), abs(sqrt(0.0 - 1.0)), 1.0].sort()",
         "[1.0, 3.0, NaN, NaN]",
     ),
-    ("float_nan/min", "[1.0, sqrt(0.0 - 1.0), 3.0].min()", "missing"),
-    ("float_nan/max", "[1.0, sqrt(0.0 - 1.0), 3.0].max()", "missing"),
+    // A NaN PROPAGATES as NaN — it is a computation that failed, not absent data, and
+    // nothing converts one into the other (ADR 0036 policy 3/4). These two pinned
+    // `missing` until v0.6.0. Note that `min()` is therefore NOT `sort().first()` on a
+    // NaN-bearing array — the same relationship numpy, R and Julia all have, because a
+    // sort must place every value while a reduction propagates the failure.
+    ("float_nan/min", "[1.0, sqrt(0.0 - 1.0), 3.0].min()", "NaN"),
+    ("float_nan/max", "[1.0, sqrt(0.0 - 1.0), 3.0].max()", "NaN"),
     ("float_nan/min_by", "[1.0, sqrt(0.0 - 1.0), 3.0].min_by(it)", "missing"),
     ("float_nan/max_by", "[1.0, sqrt(0.0 - 1.0), 3.0].max_by(it)", "missing"),
     ("float_nan/argmin", "[1.0, sqrt(0.0 - 1.0), 3.0].argmin()", "missing"),

@@ -426,15 +426,31 @@ fn numeric_vec(items: &[Value], who: &str, line: usize, col: usize) -> Result<Ve
     Ok(out)
 }
 
-/// True if any element is `missing` *or* a `NaN` float — every numeric aggregation
-/// propagates both as `missing` (ADR-0001). `NaN` is "not a number" and, being
-/// unordered, would otherwise silently corrupt sort-based stats (a stray `NaN`
-/// lands at an arbitrary position, giving a wrong median/quantile). `inf` is left
-/// alone: it orders correctly and yields a well-defined (if extreme) result.
-fn missing_or_nan(items: &[Value]) -> bool {
-    items
-        .iter()
-        .any(|v| matches!(v, Value::Missing) || matches!(v, Value::Float(f) if f.is_nan()))
+/// The answer a numeric reduction owes when its input contains a `missing` or a
+/// `NaN`, or `None` when it contains neither and the reduction should just run.
+///
+/// These are TWO questions with two answers, and until v0.6.0 one function answered
+/// both with `missing` (ADR 0036 policy 3): a NaN — a computation that FAILED — was
+/// filed under "the data was incomplete", which is the category ADR 0001 trains users
+/// to accept and move past. Not one comparable system does that: NumPy, pandas, R,
+/// Julia, Postgres and polars all keep NaN as NaN.
+///
+/// `missing` is checked FIRST because absence is the weaker claim: an array holding
+/// both yields `missing`.
+///
+/// The old function's stated reason was sound and is preserved — a stray NaN would
+/// silently corrupt a SORT-BASED statistic (median, quantile, summary), landing at an
+/// arbitrary position. Answering NaN keeps that protection while telling the truth
+/// about which of the two things happened. `inf` is still left alone: it orders and
+/// yields a well-defined, if extreme, result.
+fn degenerate_reduction(items: &[Value]) -> Option<Value> {
+    if items.iter().any(|v| matches!(v, Value::Missing)) {
+        return Some(Value::Missing);
+    }
+    if items.iter().any(|v| matches!(v, Value::Float(f) if f.is_nan())) {
+        return Some(Value::Float(f64::NAN));
+    }
+    None
 }
 
 /// Order two numeric `Value`s, comparing two `Int`s **exactly** rather than via
@@ -646,8 +662,8 @@ pub(super) fn tracked_fold_gate(
     line: usize,
     col: usize,
 ) -> Result<Option<Value>, HelixError> {
-    if missing_or_nan(items) {
-        return Ok(Some(Value::Missing));
+    if let Some(v) = degenerate_reduction(items) {
+        return Ok(Some(v));
     }
     for (i, v) in items.iter().enumerate() {
         let ok = match v {

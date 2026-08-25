@@ -7284,9 +7284,13 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             ("[-inf, 1.0].min()", "-inf"),
             ("[0.0].min()", "0.0"),
             ("[-0.0].max()", "-0.0"),
-            // NaN and missing still yield missing; ints and ranges untouched
-            ("[1.5, inf - inf].min()", "missing"),
+            // A NaN propagates AS NaN; `missing` still yields `missing`. Two different
+            // things, two different answers (ADR 0036 policy 3) — this line pinned them
+            // to one until v0.6.0. Ints and ranges untouched.
+            ("[1.5, inf - inf].min()", "NaN"),
             ("[1.5, missing].max()", "missing"),
+            // Both present: `missing` wins, because absence is the weaker claim.
+            ("[1.5, missing, inf - inf].max()", "missing"),
             ("[3, 1, 2].min()", "1"),
             ("[9007199254740993, 9007199254740992].max()", "9007199254740993"),
             ("range(10, 0, -2).max()", "10"),

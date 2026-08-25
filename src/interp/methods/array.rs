@@ -565,8 +565,8 @@ pub(crate) fn array_method(
                     col,
                 );
             }
-            if missing_or_nan(items) {
-                return Ok(Value::Missing);
+            if let Some(v) = degenerate_reduction(items) {
+                return Ok(v);
             }
             let xs = numeric_vec(items, "mean", line, col)?;
             empty_guard(&xs, "mean", line, col)?;
@@ -575,8 +575,8 @@ pub(crate) fn array_method(
         "std" => {
             // Optional `ddof`: `std()` = population (÷n, default), `std(1)` = sample (÷n−1).
             let ddof = parse_ddof(name, args, line, col)?;
-            if missing_or_nan(items) {
-                return Ok(Value::Missing);
+            if let Some(v) = degenerate_reduction(items) {
+                return Ok(v);
             }
             let xs = numeric_vec(items, "std", line, col)?;
             empty_guard(&xs, "std", line, col)?;
@@ -591,8 +591,8 @@ pub(crate) fn array_method(
         }
         "median" => {
             no_args(name)?;
-            if missing_or_nan(items) {
-                return Ok(Value::Missing);
+            if let Some(v) = degenerate_reduction(items) {
+                return Ok(v);
             }
             let xs = numeric_vec(items, "median", line, col)?;
             empty_guard(&xs, "median", line, col)?;
@@ -601,8 +601,8 @@ pub(crate) fn array_method(
         "var" => {
             // Optional `ddof`: `var()` = population (÷n, default), `var(1)` = sample (÷n−1).
             let ddof = parse_ddof(name, args, line, col)?;
-            if missing_or_nan(items) {
-                return Ok(Value::Missing);
+            if let Some(v) = degenerate_reduction(items) {
+                return Ok(v);
             }
             let xs = numeric_vec(items, "var", line, col)?;
             empty_guard(&xs, "var", line, col)?;
@@ -637,8 +637,8 @@ pub(crate) fn array_method(
                 )
                 .hint("0 is the minimum, 0.5 the median, 1 the maximum."));
             }
-            if missing_or_nan(items) {
-                return Ok(Value::Missing);
+            if let Some(v) = degenerate_reduction(items) {
+                return Ok(v);
             }
             let xs = numeric_vec(items, "quantile", line, col)?;
             empty_guard(&xs, "quantile", line, col)?;
@@ -646,8 +646,8 @@ pub(crate) fn array_method(
         }
         "summary" => {
             no_args(name)?;
-            if missing_or_nan(items) {
-                return Ok(Value::Missing);
+            if let Some(v) = degenerate_reduction(items) {
+                return Ok(v);
             }
             let mut xs = numeric_vec(items, "summary", line, col)?;
             empty_guard(&xs, "summary", line, col)?;
@@ -683,8 +683,8 @@ pub(crate) fn array_method(
                 }
                 return Ok(acc);
             }
-            if missing_or_nan(items) {
-                return Ok(Value::Missing);
+            if let Some(v) = degenerate_reduction(items) {
+                return Ok(v);
             }
             // Keep Int if every element is an Int; otherwise compensated float sum.
             if items.iter().all(|v| matches!(v, Value::Int(_))) {
@@ -713,8 +713,8 @@ pub(crate) fn array_method(
         }
         "min" | "max" => {
             no_args(name)?;
-            if missing_or_nan(items) {
-                return Ok(Value::Missing);
+            if let Some(v) = degenerate_reduction(items) {
+                return Ok(v);
             }
             // A tracked element: fold with the differentiable max/min. The fold
             // plus the ties-to-first rule means the FIRST extreme element gets
@@ -792,8 +792,8 @@ pub(crate) fn array_method(
         }
         "normalize" => {
             no_args(name)?;
-            if missing_or_nan(items) {
-                return Ok(Value::Missing);
+            if let Some(v) = degenerate_reduction(items) {
+                return Ok(v);
             }
             let xs = numeric_vec(items, "normalize", line, col)?;
             empty_guard(&xs, "normalize", line, col)?;
@@ -1154,8 +1154,16 @@ pub(crate) fn array_method(
         }
         // --- descriptive statistics over one numeric array (missing propagates) ---
         "standard_error" | "coefficient_of_variation" | "iqr" | "spread" | "zscores" => {
-            if items.iter().any(|v| matches!(v, Value::Missing)) {
-                return Ok(Value::Missing);
+            // This family checked only `missing`, so a NaN fell through to the
+            // computation — and `spread` folds with Rust's `f64::min`/`f64::max`,
+            // which are IEEE-754-2008 `minNum`/`maxNum` and IGNORE a NaN operand by
+            // design (both were REMOVED in 754-2019 for being non-associative). The
+            // result was `[1.0, nan, 3.0].spread()` == `2.0`: not missing, not NaN,
+            // but a plausible and confidently WRONG number, in the stats surface of a
+            // language aimed at scientific work. It was the only reduction returning a
+            // wrong value rather than a wrong kind of answer.
+            if let Some(v) = degenerate_reduction(items) {
+                return Ok(v);
             }
             let xs = numeric_vec(items, name, line, col)?;
             if xs.is_empty() {

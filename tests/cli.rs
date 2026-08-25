@@ -8490,3 +8490,69 @@ fn one_sort_order_across_every_surface() {
         }
     }
 }
+
+/// A NaN propagates through every numeric reduction as NaN — never as `missing`,
+/// never skipped (ADR 0036 policies 3 and 4).
+///
+/// The laundering filed a FAILED COMPUTATION under "the data was incomplete", which is
+/// the category ADR 0001 trains users to accept and move past. No comparable system
+/// does it: NumPy, pandas, R, Julia, Postgres and polars all keep NaN as NaN.
+///
+/// It was also not uniform, which is why this test enumerates rather than samples.
+/// Measured before the fix, one array through thirteen reductions gave FOUR different
+/// behaviours: `missing` from nine of them, `NaN` from `product`/`norm`, and `2.0`
+/// from `spread` — a plausible, confidently wrong NUMBER rather than a wrong kind of
+/// answer, because that family checked only `missing` and then folded with Rust's
+/// `f64::min`/`f64::max`, which are IEEE-754-2008 `minNum`/`maxNum` and ignore a NaN
+/// operand by design (both were removed in 754-2019 for being non-associative).
+#[test]
+fn every_numeric_reduction_propagates_nan() {
+    // `spread` is first because it is the one that returned a wrong number.
+    let reductions = [
+        "spread()", "max()", "min()", "sum()", "mean()", "product()", "std()", "var()",
+        "median()", "norm()",
+    ];
+    for r in reductions {
+        let src = format!("print([1.0, nan, 3.0].{r})\n");
+        for (engine, env) in ENGINES {
+            let (out, err, code) =
+                run_source(&src, env, &format!("nanred_{}_{engine}", r.trim_end_matches("()")));
+            assert_eq!(code, Some(0), "[{engine}] {r}: {err}");
+            assert_eq!(out.trim(), "NaN", "[{engine}] `{r}` must propagate NaN, not launder it");
+        }
+    }
+
+    // `missing` is unchanged and still WINS over a NaN when both are present: absence
+    // is the weaker claim (ADR 0001 is untouched by this).
+    for (src, want) in [
+        ("print([1.0, missing, 3.0].max())", "missing"),
+        ("print([1.0, missing, nan].max())", "missing"),
+        ("print([1.0, 2.0, 3.0].max())", "3.0"),
+    ] {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], &format!("nanmix_{}", src.len()));
+        assert_eq!(code, Some(0), "{src}: {err}");
+        assert_eq!(out.trim(), want, "{src}");
+    }
+
+    // The two questions stay distinct at every depth.
+    let (out, err, code) = run_source(
+        "print([1.0, nan].max().is_nan(), [1.0, nan].max().is_missing())\n",
+        &[],
+        "nan_vs_missing",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "true false");
+}
+
+/// The same rule on a DataFrame column, on BOTH backends.
+#[test]
+fn frame_reductions_propagate_nan_on_both_engines() {
+    for r in ["max()", "min()", "sum()", "mean()", "median()"] {
+        let src = format!(
+            "print(dataframe({{v: [1.0, nan, 3.0]}}).column(\"v\").{r})\n"
+        );
+        let (out, err, code) = run_source(&src, &[], &format!("fnanred_{}", r.len()));
+        assert_eq!(code, Some(0), "{r}: {err}");
+        assert_eq!(out.trim(), "NaN", "column `{r}` must propagate NaN");
+    }
+}
