@@ -105,14 +105,23 @@ recorded nowhere, and states the rule that makes a sixth impossible:
    NaN, but a plausible and confidently wrong number in the stats surface of a language
    aimed at scientific work. And `sum` disagrees with `group().sum()` in one binary —
    the ungrouped form launders, the grouped form propagates.
- `max min sum mean product std
-   var median quantile summary spread norm normalize`, the `argmin`/`argmax` family,
-   and every grouped aggregate on both backends. Never `missing`, never a skip.
-   `spread` stops using Rust's `f64::min`/`f64::max` (IEEE-754-2008 `minNum`, REMOVED
-   in 754-2019 for being non-associative) — it answered `2.0` for `[3.0, NaN, 1.0]`, a
-   wrong number in the flagship's own stats surface. The polars backend's
-   `group().max()` stops skipping NaN: that is precisely the pandas `skipna` behavior
-   ADR 0025:132 wrote down as a red line and then shipped in the frame world.
+
+   **The rule:** `max min sum mean product std var median quantile summary spread norm
+   normalize`, the `argmin`/`argmax` family, and every grouped aggregate on both
+   backends propagate NaN. Never `missing`, never a skip.
+
+   `spread` stops folding with Rust's `f64::min`/`f64::max` — IEEE-754-2008
+   `minNum`/`maxNum`, which IGNORE a NaN operand by design and were REMOVED in 754-2019
+   for being non-associative. The wrong answer came from a standard-conformant function
+   doing exactly what its (later withdrawn) specification said, in a place where that
+   specification was wrong for us.
+
+   `group().max()`/`group().min()` stop skipping the NaN on both backends: that is
+   precisely the pandas `skipna` behaviour ADR 0025:132 wrote down as a red line and
+   then shipped in the frame world. The `argmin`/`argmax` family answers with the NaN's
+   INDEX rather than `missing`, because `min()` returns the NaN and
+   `xs[xs.argmin()] == xs.min()` must keep holding — the same answer numpy gives.
+
    `missing` propagation under ADR 0001 is unchanged and independent; an array holding
    both yields `missing`, because absence is the weaker claim.
 
@@ -159,6 +168,30 @@ recorded nowhere, and states the rule that makes a sixth impossible:
    Stage 4, which is why this ADR precedes it.
 
 7. **Keys use one total identity in which all NaNs are one, distinct from `missing`.**
+   **NOT YET IMPLEMENTED as of v0.6.0** — attempted, reverted, and the reason is worth
+   recording because it is the only policy here that did not land.
+
+   The relation itself is a two-line change and it is *already the right shape*:
+   `values_equal` is Helix's identity relation, separate from `==` (which is `eq3`),
+   and its own comment cites **Julia's `isequal` convention** as justification — while
+   applying it to `missing` and not to NaN, though `isequal(NaN, NaN)` is `true`. Making
+   `values_equal` and `FloatKey` agree on one NaN class fixed `contains`, `index_of`,
+   `frequencies` and `unique` on BOXED arrays, verified by a unit test over three NaN
+   forms (plain, negative, and one with a payload).
+
+   It did NOT fix `unique` on a PACKED float array, which reaches neither the arm nor
+   the branch — instrumentation proved the dispatch bypasses `call_array_method`
+   entirely for that representation, and the third path was not located. That left
+   `unique` and `frequencies` reporting different identity counts for one array, which
+   `array.rs:999` states cannot happen ("the two operations report the same identities
+   by construction"). A half-applied key rule is worse than the old consistent-but-wrong
+   one, so it was reverted whole.
+
+   Whoever finishes this: the relation and the key are correct, the boxed path works,
+   and the missing piece is a packed-`ArrayData::Floats` dispatch for `unique` that does
+   not spell the method name `"unique"`. Start by instrumenting `array_numeric_fast`'s
+   entry rather than its arms.
+
    `unique`, `frequencies`, `contains`, `index_of`, alignment, `group`, `join` and
    dict keys. `[nan, nan].unique()` is `[NaN]`; a NaN join key matches a NaN join key.
 
