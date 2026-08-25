@@ -58,7 +58,14 @@
   matching polars' Display byte-for-byte — is optional.
 - **The oracle harness already runs in CI.** 143 corpus fixtures pinned
   engine-identical, dfcheck.sh (built to catch row-order nondeterminism), vmparity,
-  two differential fuzzers. The `.expected` files ARE frozen polars output. Both
+  two differential fuzzers.
+
+  > **Correction (v0.6.0).** `dfcheck.sh` is named here as standing evidence and was not
+  > evidence: the path it ran had moved, so it diffed three copies of "no such file" and
+  > reported them identical. It is deleted. `scripts/dfdiff.sh` replaces it and runs every
+  > tracked `.helix` under both backends — the first run found the fifteen divergences
+  > [ADR 0036](0036-one-semantics.md) closes. Read every "already runs in CI" claim in this
+  > ADR against that. The `.expected` files ARE frozen polars output. Both
   backends can coexist in a dev binary (cross-backend join/vstack already errors
   cleanly via `as_any`), so side-by-side property tests need no seam changes.
 
@@ -88,6 +95,12 @@ has no frames today, so the regression surface is zero. Acceptance gate: full
 corpus + dfcheck + fuzzers against the polars-frozen `.expected` files, plus a
 dual-backend binary running side-by-side property comparisons; every divergence
 fixed or written down as a decided policy delta.
+
+> **Correction (v0.6.0).** This gate was declared met while `dfcheck` was inert (see the
+> correction above) and while "every divergence fixed or written down" was false —
+> fifteen were live, five recorded nowhere. `scripts/dfdiff.sh` is what the clause
+> intended and now enforces it, at 0 undeclared divergences ([ADR
+> 0036](0036-one-semantics.md)).
 
 **Stage 2** — apache `parquet` (no arrow glue) for the four dtypes +
 foreign-dtype-to-string fallback + footer-metadata count. **Stage 3** — parallel

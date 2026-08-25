@@ -29,6 +29,13 @@ rests on them:
 All three must produce **byte-identical** output — values *and* error text — for every
 program. That is enforced in CI, not asserted here: see [Correctness gates](#correctness-gates).
 
+The **DataFrame backend is a separate axis** from the engine, selected by
+`HELIX_DF_ENGINE=polars|native` on a build that has both (`native-df`; polars is the
+default and the oracle, ADR 0033). The same byte-identity requirement applies across it,
+and since v0.6.0 naming a backend the build does not contain is **refused by name** rather
+than silently ignored — the old behaviour handed you polars with no diagnostic while you
+believed you were measuring the other engine, and the two did not agree (ADR 0036).
+
 > **This document was written when there were two engines and has been corrected rather
 > than rewritten.** Sections below that reason about "the two engines" are describing the
 > VM-vs-tree-walker relationship, which is unchanged and still the foundation the JIT sits
@@ -208,6 +215,18 @@ finally noticed was `v0.1.0`'s release pipeline dying in its PGO training step. 
   property the running gates could not cover. `tests/corpus/` is excluded on purpose: a
   dozen of those files are negative fixtures that must *not* compile, and their exact error
   text is already pinned on all three engines.
+
+Every gate above compares the tree **against itself**, along one axis — the engine. v0.6.0
+added the two axes that answer a different question:
+
+- **The backend axis** (`scripts/dfdiff.sh`): every tracked `.helix` under both DataFrame
+  backends, byte-compared, divergences declared in `scripts/dfdiff-allow.txt`. Verb-level
+  parity tests were green while fifteen semantic divergences were live, because the deltas
+  hid in expression shapes no verb test built (ADR 0036).
+- **The time axis** (`tests/compat/`): what a *released* version actually computed — exit,
+  stdout, stderr for 119 deterministic programs, written once and never rewritten. Nothing
+  else here can answer "does the program I wrote six months ago still compute the same
+  number?", because everything else moves with the tree.
 
 **This is not decorative.** Defects the oracle has caught, each found because one engine
 answered differently: a signed-zero comparison that made a packed `min`/`max` disagree

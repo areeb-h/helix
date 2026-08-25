@@ -90,16 +90,16 @@ Pass a single file (`helix test math_test.helix`) to run just that one.
 
 The toolchain's own suite runs through `scripts/gate.sh` (clippy with `-D warnings`,
 the full test suite on the `gate` profile, the dual-engine DataFrame campaign, and the
-example parity diff). Its current shape: **449 lib tests + 243 CLI tests + 3 other
-integration tests**, plus **28 dual-engine tests** that need the `native-df` feature.
-Four pieces worth knowing about:
+example parity diff). Its current shape: **454 lib tests + 257 CLI tests + 3 other
+integration tests**, plus **32 dual-engine tests** that need the `native-df` feature.
+Five pieces worth knowing about:
 
 - **The differential DataFrame suite** (`src/backend/native/tests.rs`): the same data
   through **both** DataFrame backends — native and Polars — verb by verb, compared as
   column values and as frozen `framefmt` bytes. ADR 0034's decided semantic deltas are
   asserted *as* deltas, so an accidental divergence cannot hide behind a decided one.
 
-  This paragraph was **false until v0.5.2**, and the way it was false is worth keeping
+  This paragraph was **false until v0.6.0**, and the way it was false is worth keeping
   written down. `native-df` is not in `Cargo.toml`'s `default`, `scripts/gate.sh` ran a
   bare `cargo test`, and CI's only `native-df` step was a `clippy` *without*
   `--all-targets` — so the test targets were never compiled. All 28 tests, including
@@ -109,6 +109,16 @@ Four pieces worth knowing about:
   them in their own target directory (the feature set differs from the main build, so a
   shared directory would make the two invocations evict each other's cache), and CI runs
   the full `native-df` suite on a compile it was already paying for.
+- **Cross-backend program diffs** (`scripts/dfdiff.sh`): every tracked `.helix` run under
+  *both* DataFrame backends, byte-compared, with any accepted divergence declared in
+  `scripts/dfdiff-allow.txt` — currently 119 programs and **0 undeclared divergences**.
+  The suite above tests the backends verb by verb; this one tests them the way a user
+  meets them, through whole programs. It exists because verb-level parity was green while
+  fifteen divergences were live: the deltas hid in expression *shapes* no verb test built
+  (a division by a literal, two `.where()`s in a row, a NaN reaching a grouped aggregate).
+  Its predecessor, `scripts/dfcheck.sh`, was worse than absent — it ran a path that had
+  moved, so it diffed three copies of "no such file" and reported them identical while
+  ADR 0033 cited it as acceptance evidence. A gate that cannot fail is not a gate.
 - **Version-compatibility baselines** (`tests/compat/`): what a *released* version
   actually computed — exit code, stdout, and stderr for 119 deterministic programs —
   frozen and **never rewritten**. Every other gate here compares the tree against
