@@ -831,6 +831,23 @@ pub(crate) fn array_method(
                 .collect();
             Ok(Value::array(out))
         }
+        // The single visible opt-out from NaN propagation (ADR 0036 policy 4) —
+        // a VERB parallel to `drop_missing`, not a `skipna=` flag, per ADR 0001's
+        // visible-verb choice. `xs.drop_nan().max()` is the `nanmax` spelling.
+        //
+        // It drops NaN and NOTHING ELSE: `drop_nan` does not drop `missing`, just as
+        // `drop_missing` does not drop NaN. They are different facts about a value and
+        // removing one must never remove the other (ADR 0036 policy 3).
+        "drop_nan" => {
+            no_args(name)?;
+            // Same zero-allocation share as `drop_missing` when there is nothing to
+            // drop, which is the overwhelmingly common case.
+            let is_nan = |v: &Value| matches!(v, Value::Float(f) if f.is_nan());
+            if !items.iter().any(is_nan) {
+                return Ok(Value::array(items.to_vec()));
+            }
+            Ok(Value::array(items.iter().filter(|v| !is_nan(v)).cloned().collect::<Vec<_>>()))
+        }
         "sort" => {
             no_args(name)?;
             let mut sorted: Vec<Value> = items.to_vec();

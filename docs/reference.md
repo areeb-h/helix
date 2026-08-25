@@ -1449,9 +1449,22 @@ The array without its first n elements.
 
 The array with every missing element removed.
 
+**Note:** Does not remove NaN — a failed computation is not absent data. Use drop_nan().
+
 ```
 >>> [1, missing, 3].drop_missing()
 [1, 3]
+```
+
+### `drop_nan()`
+
+The array with every NaN element removed.
+
+**Note:** The opt-out from NaN propagation: reductions answer NaN, so drop_nan() first for a nanmax. Does not remove missing.
+
+```
+>>> [1.0, nan, 3.0].drop_nan().max()
+3.0
 ```
 
 ### `drop_while(pred)`
@@ -2683,9 +2696,22 @@ The number of rows.
 
 Keep the rows where every column is non-missing.
 
+**Note:** Does not remove NaN — a failed computation is not absent data. Use drop_nan().
+
 ```
 >>> dataframe({a: [1, missing], b: [3.0, 4.5]}).drop_missing().count()
 1
+```
+
+### `drop_nan()`
+
+Keep the rows where no column holds a NaN.
+
+**Note:** The opt-out from NaN propagation. A column that cannot hold a NaN (Int, String, Bool) never excludes a row. Does not remove missing.
+
+```
+>>> dataframe({v: [1.0, nan, 3.0]}).drop_nan().count()
+2
 ```
 
 ### `filter(predicate)`

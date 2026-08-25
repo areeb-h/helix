@@ -1413,7 +1413,8 @@ impl Compiler {
                 // array comprehension (`where`/`filter`) or a value method (`sort`).
                 if matches!(
                     n,
-                    "where" | "filter" | "drop_missing" | "select" | "sort" | "group" | "with"
+                    "where" | "filter" | "drop_missing" | "drop_nan" | "select" | "sort"
+                    | "group" | "with"
                 ) && (matches!(self.recv_type(recv), Some(Type::DataFrame))
                     || (matches!(self.recv_type(recv), Some(Type::Unknown) | None)
                         && args.iter().any(mentions_column)))

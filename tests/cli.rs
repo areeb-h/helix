@@ -8738,3 +8738,59 @@ fn nan_is_one_key_identity() {
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "true", "`unique` and `frequencies` must report the same count");
 }
+
+/// `.drop_nan()` — the single visible opt-out from NaN propagation (ADR 0036 policy 4).
+///
+/// A VERB parallel to `.drop_missing()`, not a `skipna=` flag, per ADR 0001's
+/// visible-verb choice. Until it existed, ADR 0036 documented an escape hatch the
+/// language did not have: `xs.drop_nan().max()` is the `nanmax` spelling, and policy 4
+/// names it as the way to get a real maximum out of a NaN-bearing array.
+///
+/// THE TWO VERBS REMOVE DIFFERENT THINGS, which is policy 3 seen from the verb side:
+/// `drop_nan` does not drop `missing` and `drop_missing` does not drop NaN. A failed
+/// computation and an absent datum are different facts, so removing one must never
+/// remove the other.
+#[test]
+fn drop_nan_is_the_opt_out_and_removes_only_nan() {
+    for (src, want) in [
+        ("print([1.0, nan, 3.0].drop_nan())", "[1.0, 3.0]"),
+        // the spelling ADR 0036 policy 4 promises
+        ("print([1.0, nan, 3.0].drop_nan().max())", "3.0"),
+        ("print([1.0, nan, 3.0].drop_nan().mean())", "2.0"),
+        // nothing to drop: unchanged (and internally an Rc share, not a copy)
+        ("print([1.0, 2.0].drop_nan())", "[1.0, 2.0]"),
+        // the two verbs are not interchangeable
+        ("print([1.0, missing, nan].drop_nan())", "[1.0, missing]"),
+        ("print([1.0, missing, nan].drop_missing())", "[1.0, NaN]"),
+        ("print([1.0, missing, nan].drop_nan().drop_missing())", "[1.0]"),
+    ] {
+        for (engine, env) in ENGINES {
+            let (out, err, code) =
+                run_source(&format!("{src}\n"), env, &format!("dropnan_{}_{engine}", src.len()));
+            assert_eq!(code, Some(0), "[{engine}] {src}: {err}");
+            assert_eq!(out.trim(), want, "[{engine}] {src}");
+        }
+    }
+
+    // The frame twin, on both backends. The String and Int cases are not decoration:
+    // polars' `is_nan` is UNDEFINED for `str` and raises, so a naive predicate over
+    // every column turned `drop_nan()` into an error on the default backend. A column
+    // that cannot hold a NaN answers the question statically.
+    for (src, want) in [
+        ("print(dataframe({v: [1.0, nan, 3.0]}).drop_nan().count())", "2"),
+        ("print(dataframe({v: [1.0, missing, nan]}).drop_nan().count())", "1"),
+        ("print(dataframe({v: [1.0, missing, nan]}).drop_missing().count())", "2"),
+        ("print(dataframe({v: [1, 2]}).drop_nan().count())", "2"),
+        ("print(dataframe({s: [\"a\", \"b\"]}).drop_nan().count())", "2"),
+        ("print(dataframe({s: [\"a\"]}).with({f: is_nan(@s)}).column(\"f\"))", "[false]"),
+    ] {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], &format!("fdn_{}", src.len()));
+        assert_eq!(code, Some(0), "{src}: {err}");
+        assert_eq!(out.trim(), want, "{src}");
+    }
+
+    // It takes no arguments, and says so.
+    let (_, err, code) = run_source("print([1.0].drop_nan(2))\n", &[], "dropnan_arity");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`drop_nan` takes no arguments"), "{err}");
+}

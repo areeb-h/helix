@@ -508,7 +508,20 @@ fn lower(e: &ColExpr, fields: &[(String, DataType)], line: usize, col: usize) ->
         ColExpr::IsMissing(inner) => lower(inner, fields, line, col)?.is_null(),
         // A classification, not a comparison — so no NaN guard is needed, and none
         // must be added: `is_nan(@v)` has to stay answerable ON a NaN.
+        //
+        // DTYPE-GATED, for the fourth time in this release: polars' `is_nan` is
+        // undefined for `str` and RAISES, so asking it of a String column turned
+        // `df.drop_nan()` into an error on the default backend. A column that cannot
+        // hold a NaN answers the question statically — `false` for `is_nan`, `true`
+        // for `is_finite` — which is exactly what the native engine answers for a
+        // non-numeric cell, so the two agree by construction rather than by luck.
         ColExpr::FloatPred(kind, inner) => {
+            if !may_be_float(inner, fields) {
+                return Ok(match kind {
+                    super::FloatPredKind::IsNan => lit(false),
+                    super::FloatPredKind::IsFinite => lit(true),
+                });
+            }
             let e = lower(inner, fields, line, col)?;
             match kind {
                 super::FloatPredKind::IsNan => e.is_nan(),

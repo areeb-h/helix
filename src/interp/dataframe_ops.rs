@@ -93,6 +93,36 @@ pub(crate) fn df_column_verb(
         // Desugars to the same filter `where` runs — `not c1.is_missing() and …` over
         // every column — so it is backend-agnostic and inherits filter's validation
         // and engine parity for free rather than growing a second seam.
+        // The frame twin of the Array verb, built from `FloatPred` (which C9 admitted
+            // into queries). Keeps the rows where NO column holds a NaN — the same
+            // shape `drop_missing` uses for `missing`, and deliberately NOT the same
+            // predicate: the two verbs remove different things.
+        "drop_nan" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`drop_nan` takes no arguments", line, col)
+                    .hint("it keeps the rows where no column holds a NaN; to test \
+                           one column, use `df.where(not is_nan(@col))`."));
+            }
+            use crate::backend::{ColExpr, FloatPredKind};
+            let columns = lf.column_names(line, col)?;
+            let mut pred = ColExpr::Lit(Value::Bool(true));
+            for (i, c) in columns.iter().enumerate() {
+                let keep = ColExpr::Unary(
+                    crate::ast::UnOp::Not,
+                    Box::new(ColExpr::FloatPred(
+                        FloatPredKind::IsNan,
+                        Box::new(ColExpr::Col(c.clone())),
+                    )),
+                );
+                pred = if i == 0 {
+                    keep
+                } else {
+                    ColExpr::Binary(crate::ast::BinOp::And, Box::new(pred), Box::new(keep))
+                };
+            }
+            crate::backend::validate_predicate(&pred, line, col)?;
+            Ok(Value::dataframe(lf.filter(&pred, line, col)?))
+        }
         "drop_missing" => {
             if !args.is_empty() {
                 return Err(HelixError::new("`drop_missing` takes no arguments", line, col)
@@ -200,7 +230,8 @@ impl super::Interp {
         col: usize,
     ) -> Result<Value, HelixError> {
         match name {
-            "where" | "filter" | "drop_missing" | "select" | "sort" | "group" | "with" => {
+            "where" | "filter" | "drop_missing" | "drop_nan" | "select" | "sort"
+            | "group" | "with" => {
                 // A bare name in a predicate resolves like any other name:
                 // frame locals first, then globals (`df.where(@a > threshold)`
                 // with a top-level `threshold`).

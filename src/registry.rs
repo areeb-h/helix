@@ -279,7 +279,7 @@ pub static ARRAY_METHODS: &[&str] = &[
     "index_of", "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce",
     "scan", "any",
     "all", "take", "drop", "take_while", "drop_while", "position", "zip", "enumerate", "top",
-    "frequencies", "unique", "drop_missing",
+    "frequencies", "unique", "drop_missing", "drop_nan",
     "join", "concat", "flatten", "min_by", "max_by", "argmin", "argmax", "zipmap", "sort_by", "zscores", "iqr",
     "spread", "standard_error", "coefficient_of_variation", "dot", "norm", "cumsum", "product",
     "argsort", "clamp", "softmax", "bootstrap", "contains", "mean_gc",
@@ -318,7 +318,7 @@ pub static TENSOR_METHODS: &[&str] = &[
 
 /// DataFrame methods (column verbs + value methods + serialize/write).
 pub static DF_METHODS: &[&str] = &[
-    "where", "filter", "drop_missing", "select", "sort", "group", "with", "join", "vstack", "unique", "column",
+    "where", "filter", "drop_missing", "drop_nan", "select", "sort", "group", "with", "join", "vstack", "unique", "column",
     "head", "count", "columns", "cache", "write_csv", "write_tsv", "write_json", "write_parquet",
     "to_html", "to_markdown", "to_table",
 ];

@@ -921,7 +921,7 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
         // `missing` when absent, like `Dna.find` — typed `Int`).
         "count" | "length" | "index_of" | "count_where" => Type::Int,
         "normalize" => Type::Array(Box::new(Type::Float)),
-        "sort" | "reverse" | "drop_missing" | "take" | "drop" | "unique" => {
+        "sort" | "reverse" | "drop_missing" | "drop_nan" | "take" | "drop" | "unique" => {
             Type::Array(Box::new(el.clone()))
         }
         // `enumerate` -> Array of (Int, element) tuples; `zip` -> Array of pairs
@@ -1143,7 +1143,7 @@ pub(super) fn tensor_method_type(name: &str, nargs: usize, line: usize, col: usi
 
 pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "where" | "filter" | "drop_missing" | "select" | "sort" | "head" | "cache" | "with"
+        "where" | "filter" | "drop_missing" | "drop_nan" | "select" | "sort" | "head" | "cache" | "with"
         | "join" | "vstack" | "unique" => Type::DataFrame,
         "group" => Type::GroupBy,
         "count" => Type::Int,
