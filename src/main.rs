@@ -153,6 +153,12 @@ use value::Value;
 
 fn main() -> ExitCode {
     install_robustness_hooks();
+    // Before any work: a DataFrame engine this build does not have is an error, not
+    // a silently different answer (see `backend::check_engine_selection`).
+    if let Some(msg) = backend::check_engine_selection() {
+        eprintln!("error: {msg}");
+        return ExitCode::FAILURE;
+    }
     configure_thread_pool();
     // Return freed memory to the OS promptly (mimalloc `purge_delay = 0`) instead of
     // its default ~10 ms hold. Helix processes are typically short-lived (CLI,

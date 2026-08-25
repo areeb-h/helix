@@ -1,0 +1,2 @@
+# Decided cross-backend deltas. Each line: <program>  # <ADR reference>
+# A divergence NOT listed here fails scripts/dfdiff.sh.

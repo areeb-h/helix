@@ -20,13 +20,16 @@ the kernel per column later — behind the same differential tests, Stage 3.)
 
 ## Decided policies
 
-1. **Arithmetic follows scalars** — three deltas vs the polars backend, measured
-   on v0.3.0 and visible only at the Stage-4 flip (release-noted then):
-   `%` is euclidean everywhere (`7 % -3` is `1`; polars gave `-2`); `/` is true
-   division and yields Float (`2 / 2` is `1.0`; polars kept Int); division and
-   modulo **by zero are errors** naming the row, 0-based, as a hint
-   (`division by zero` + `at row 2 of the frame.`;
-   polars gave `missing` — an unknown that was actually a known bug in the data).
+1. **Arithmetic follows scalars.** **SUPERSEDED by [ADR 0036](0036-one-semantics.md)
+   as of v0.6.0** — and the way it was superseded is the lesson. This policy recorded
+   three deltas against the polars backend and deferred closing them to the Stage-4
+   flip. Deferring turned a decision into a standing licence: the v0.5.1 sweep found
+   **twelve** divergences, five of which (`//` refused in a query, NaN sort placement,
+   NaN in a predicate, string `+` concatenating, signed zero under `Sub`) were recorded
+   in no ADR at all, because a policy that says "some deltas are expected" cannot be
+   used to detect an unexpected one. ADR 0036 closes all of them and replaces the delta
+   list with a rule: a divergence is a bug in whichever side disagrees with the
+   language.
 2. **Missing propagates per ADR 0001**, elementwise. A `where` predicate that
    evaluates to `missing` keeps the row out — the same observable outcome the
    polars backend has today.
@@ -62,8 +65,15 @@ the kernel per column later — behind the same differential tests, Stage 3.)
 
 Every policy above is exercised by dual-backend tests (both engines in one dev
 binary) plus the corpus against polars-frozen `.expected` files. A divergence is a
-bug in the native engine UNLESS it is one of the numbered deltas above — those are
-asserted AS deltas (the test proves the divergence is exactly the decided one).
+bug in **whichever engine disagrees with the language** — not, as this sentence said
+until v0.6.0, "a bug in the native engine". That asymmetry is exactly what let five
+divergences go unrecorded for a release: it framed the polars backend as the
+reference, so when polars was the one disagreeing with scalar Helix, the sentence had
+nothing to say. See [ADR 0036](0036-one-semantics.md).
+
+The tests are also only as good as the programs they run. `scripts/dfdiff.sh` now runs
+every tracked `.helix` under both engines, because at the v0.5.1 tag the entire
+arithmetic surface of the frame language was exercised by one line of one example.
 
 ## Addendum (v0.5.1) — the cross-backend sweep
 

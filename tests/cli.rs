@@ -8126,3 +8126,49 @@ fn compat_baselines_hold() {
         println!("compat: {} documented migration(s): {}", migrated.len(), migrated.join(", "));
     }
 }
+
+/// `HELIX_DF_ENGINE` naming an engine this build does not have is an ERROR, not a
+/// silently different answer.
+///
+/// It used to be read only by `backend::native_selected`, which is compiled **only**
+/// in the dual-engine configuration — so on every shipped binary (whose default
+/// features omit `native-df`) the variable was read by nothing at all. Asking for the
+/// native engine silently got you polars, with no diagnostic, and the two do not agree:
+/// `41 / 10` was `4` on one and `4.1` on the other. That is the silent-wrong class this
+/// language refuses everywhere else — an unknown request field is a hard error, a wrong
+/// `jar:` value teaches — and the engine request was the one dropped on the floor.
+///
+/// This test runs against whatever features the test binary was built with, so it
+/// asserts the *shape* of the contract rather than one build's answer: a named engine
+/// either works or is refused by name, and nonsense is always refused.
+#[test]
+fn unavailable_df_engine_is_refused_not_ignored() {
+    let src = "print(1)\n";
+
+    // Nonsense is always refused, in every configuration.
+    let (_, err, code) = run_source(src, &[("HELIX_DF_ENGINE", "bogus")], "eng_bogus");
+    assert_eq!(code, Some(1), "a nonsense engine must be refused: {err}");
+    assert!(err.contains("is not a DataFrame engine"), "{err}");
+    assert!(err.contains("this binary was built with:"), "the error must say what IS here: {err}");
+
+    // An empty value is "no preference", the shell idiom — never an error.
+    let (out, err, code) = run_source(src, &[("HELIX_DF_ENGINE", "")], "eng_empty");
+    assert_eq!(code, Some(0), "an empty setting must be ignored: {err}");
+    assert_eq!(out.trim(), "1");
+
+    // A real engine name either runs or is refused BY NAME — never silently ignored.
+    for engine in ["polars", "native"] {
+        let (out, err, code) =
+            run_source(src, &[("HELIX_DF_ENGINE", engine)], &format!("eng_{engine}"));
+        match code {
+            Some(0) => assert_eq!(out.trim(), "1", "[{engine}] ran but printed {out:?}"),
+            _ => {
+                assert!(
+                    err.contains(&format!("this build has no `{engine}` DataFrame engine")),
+                    "[{engine}] refused without naming the engine: {err}"
+                );
+                assert!(err.contains("--features native-df"), "[{engine}] no way out: {err}");
+            }
+        }
+    }
+}

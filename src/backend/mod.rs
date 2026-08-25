@@ -93,6 +93,56 @@ pub(crate) fn native_selected() -> bool {
     std::env::var("HELIX_DF_ENGINE").map(|v| v == "native").unwrap_or(false)
 }
 
+/// The DataFrame engines this binary was actually built with, in the order a
+/// diagnostic should list them.
+pub fn available_engines() -> &'static [&'static str] {
+    match (cfg!(feature = "dataframes"), cfg!(feature = "native-df")) {
+        (true, true) => &["polars", "native"],
+        (true, false) => &["polars"],
+        (false, true) => &["native"],
+        (false, false) => &[],
+    }
+}
+
+/// Validate `HELIX_DF_ENGINE` against what this build contains, once, at startup.
+///
+/// It used to be read only by `native_selected`, which exists **only** in the
+/// dual-engine configuration — so on every shipped binary (whose default features
+/// omit `native-df`) `HELIX_DF_ENGINE=native` was read by nothing at all. A user
+/// asking for the native engine silently got polars, with no diagnostic and a
+/// different answer: `41 / 10` is `4` on one engine and `4.1` on the other. That is
+/// exactly the silent-wrong class this language refuses everywhere else — an
+/// unknown request field is a hard error, a wrong `jar:` value teaches — and an
+/// unknown *engine* was the one request dropped on the floor.
+///
+/// Returns the diagnostic to print, or `None` when the setting is honourable.
+pub fn check_engine_selection() -> Option<String> {
+    let Ok(raw) = std::env::var("HELIX_DF_ENGINE") else { return None };
+    let want = raw.trim();
+    if want.is_empty() {
+        return None; // unset-by-emptiness, the shell idiom for "no preference"
+    }
+    let have = available_engines();
+    if have.contains(&want) {
+        return None;
+    }
+    let known = ["polars", "native"];
+    Some(if known.contains(&want) {
+        format!(
+            "HELIX_DF_ENGINE=`{want}` — this build has no `{want}` DataFrame engine\n\
+             help: this binary was built with: {}. Rebuild with `--features native-df` \
+                 for a dual-engine build, or unset HELIX_DF_ENGINE to use the default.",
+            if have.is_empty() { "no DataFrame engine".to_string() } else { have.join(", ") }
+        )
+    } else {
+        format!(
+            "HELIX_DF_ENGINE=`{want}` is not a DataFrame engine\n\
+             help: this binary was built with: {}.",
+            if have.is_empty() { "no DataFrame engine".to_string() } else { have.join(", ") }
+        )
+    })
+}
+
 /// The error every DataFrame constructor answers with in a build without the
 /// engine — same shape as the http feature's: name the capability, say how to
 /// get it. The verbs stay in the registry/checker/describe in every build.

@@ -1396,9 +1396,15 @@ motivates this phase.
       forces the budget down so it cannot creep back. Verified by sabotage (add a
       call → fails `+1`; remove one → fails `lower it to 0`), because a gate you
       have not watched reject something is not known to be a gate.
-- [ ] **Document NaN ordering** in the language docs (`sort` places NaN after
-      `+inf`; reductions propagate `missing`) so the behavior is a contract, not an
-      implementation detail.
+- [ ] **Document NaN ordering** in the language docs so the behavior is a contract,
+      not an implementation detail. NOTE: this entry described the behavior wrongly on
+      both halves, which is its own argument for writing it down. `sort` did NOT place
+      NaN after `+inf` — it used `f64::total_cmp`, ordering by SIGN BIT, so a negative
+      NaN sorted first and a positive one last. And reductions did not "propagate
+      `missing`" over a NaN; they LAUNDERED the NaN into `missing`, which is a
+      different and worse thing. [ADR 0036](adr/0036-one-semantics.md) decides both:
+      NaN sorts last sign-independently, and reductions propagate NaN as NaN. Close
+      this once the language docs say so.
 - [ ] **`try`-on-VM error-recovery soak** — `TryBegin`/`TryOk`/`TryErr` unwinding
       under the fuzzer, composed with JIT bailouts mid-`try`.
 

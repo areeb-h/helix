@@ -532,3 +532,27 @@ misdescribed the operator (the stabilization sweep found the runtime still
 carrying it, plus a mixed-pair variant that omitted tuples while refusing a
 tuple). The ordering-matrix pins were updated in this same commit, as this
 file requires.
+
+
+## Addendum (v0.6.0) — frames are in scope, and NaN sorts last
+
+This ADR scoped itself to arrays, and `tests/ordering_matrix.rs` followed: 247 pinned
+cells, **zero of them a DataFrame**. The cost was measurable — the two frame backends
+disagreed with each other and with array-land about where a NaN sorts, and no cell in
+the matrix could see it. [ADR 0036](0036-one-semantics.md) puts frames in scope and
+`tests/frame_ordering_matrix.rs` is the sibling this file should always have had.
+
+Two rules change here:
+
+1. **NaN sorts LAST, sign-independently**, in `sort`, `argsort`, `sort_by`, and frame
+   sort on both backends. The rule this replaces was `f64::total_cmp` — ordering by
+   sign bit — which is unobservable from Helix source and produced
+   `[3.0, sqrt(-1.0), abs(sqrt(-1.0)), 1.0].sort()` = `[NaN, 1.0, 3.0, NaN]`: the same
+   printed value at both ends of one sorted array, decided by a bit no user can see.
+
+2. **`-0.0 < 0.0` is retained** for everything that is not a NaN, and is now EXTENDED
+   to the polars frame sort, which canonicalized signed zeros to equal.
+
+The red line this file drew at :132 — that Helix does not adopt pandas' `skipna`
+default — was being crossed in the frame world by both backends, which skipped NaN in
+`group().max()`. ADR 0036 policy 4 stops that; `.drop_nan()` is the visible opt-out.
