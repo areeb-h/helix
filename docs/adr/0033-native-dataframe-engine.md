@@ -63,7 +63,7 @@
   > **Correction (v0.6.0).** `dfcheck.sh` is named here as standing evidence and was not
   > evidence: the path it ran had moved, so it diffed three copies of "no such file" and
   > reported them identical. It is deleted. `scripts/dfdiff.sh` replaces it and runs every
-  > tracked `.helix` under both backends — the first run found the fifteen divergences
+  > tracked `.helix` under both backends — the first run found the divergences
   > [ADR 0036](0036-one-semantics.md) closes. Read every "already runs in CI" claim in this
   > ADR against that. The `.expected` files ARE frozen polars output. Both
   backends can coexist in a dev binary (cross-backend join/vstack already errors
@@ -98,7 +98,7 @@ fixed or written down as a decided policy delta.
 
 > **Correction (v0.6.0).** This gate was declared met while `dfcheck` was inert (see the
 > correction above) and while "every divergence fixed or written down" was false —
-> fifteen were live, five recorded nowhere. `scripts/dfdiff.sh` is what the clause
+> sixteen were live, five recorded nowhere. `scripts/dfdiff.sh` is what the clause
 > intended and now enforces it, at 0 undeclared divergences ([ADR
 > 0036](0036-one-semantics.md)).
 

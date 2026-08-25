@@ -100,7 +100,57 @@ fn unary(op: &UnOp, v: Evaled, line: usize, col: usize) -> Result<Evaled, HelixE
     }
 }
 
+/// The first value that is not `missing`, which decides a column's type: a frame
+/// column is homogeneous, so one non-missing cell answers for all of them.
+fn representative(e: &Evaled) -> Option<&Value> {
+    match e {
+        Evaled::Scalar(v) => (!matches!(v, Value::Missing)).then_some(v),
+        Evaled::Rows(rows) => rows.iter().find(|v| !matches!(v, Value::Missing)),
+    }
+}
+
+/// Refuse arithmetic on a non-numeric operand BEFORE the row loop, so the error names
+/// no row.
+///
+/// The row suffix is right for a **cell** error — `division by zero` happened at row 7
+/// because row 7 holds a zero, and both backends say so. A **type** error is not a cell
+/// error: every row fails identically, the column is what is wrong, and "at row 0"
+/// invites you to go and look at a row whose data is blameless. The polars backend
+/// decides this from the schema and names no row (`non_numeric_operand`); deciding it
+/// here from the first non-missing value is the same conclusion by the same reasoning,
+/// and it is what keeps the two backends byte-identical on the message.
+///
+/// An all-missing column has no representative, so it falls through to the per-row
+/// path — where `missing` propagates rather than failing (ADR 0001), which is correct.
+/// A later cell of a different type also falls through, and is still caught per row
+/// WITH its row, because at that point the row genuinely is the new information.
+fn refuse_non_numeric(op: &BinOp, l: &Evaled, r: &Evaled, line: usize, col: usize) -> Result<(), HelixError> {
+    if !matches!(
+        op,
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::FloorDiv | BinOp::Pow
+    ) {
+        return Ok(());
+    }
+    for side in [l, r] {
+        if let Some(v) = representative(side) {
+            if v.as_f64().is_none() {
+                // Ask the scalar kernel for the error rather than reproducing it: one
+                // semantics means one message, and the kernel owns the wording and the
+                // `+`-on-a-String nudge.
+                return match crate::interp::ops::eval_binary(op, v.clone(), v.clone(), line, col) {
+                    Err(e) => Err(e),
+                    // Unreachable for a non-numeric operand, but a total runtime never
+                    // assumes: if the kernel accepts it, so does the frame.
+                    Ok(_) => Ok(()),
+                };
+            }
+        }
+    }
+    Ok(())
+}
+
 fn binary(op: &BinOp, l: Evaled, r: Evaled, line: usize, col: usize) -> Result<Evaled, HelixError> {
+    refuse_non_numeric(op, &l, &r, line, col)?;
     // `and`/`or`/`??` short-circuit on scalars, so the kernel refuses them; a
     // column has no evaluation order to cut short — `logic.rs` carries their
     // oracle-pinned elementwise truth tables.

@@ -26,19 +26,38 @@ Pre-1.0 semver, with the line drawn where USERS feel it:
    heading, verifies `release.yml` parses AND is listed by name (a literal
    control byte once silently degraded the workflow; a tag push would have
    built nothing), and re-checks the crate. Staged, not committed.
-2. `CARGO_BUILD_JOBS=2 bash scripts/gate.sh` — must end `GATE_RC=0`.
-3. Commit the bump, push, and run the dry run:
+2. `CARGO_BUILD_JOBS=2 bash scripts/gate.sh` — must end `GATE_RC=0`. Also run
+   `scripts/dfdiff.sh` (needs a dual-engine binary) — 0 undeclared divergences.
+3. **Write the release notes as a program, and run them BEFORE the tag.**
+   `tests/release/vX.Y.Z-claims.helix` prints one line per cell of the
+   changelog's tables; `…-claims.expected` holds what the notes SAY, authored
+   by hand; `…-errors.tsv` holds the cells whose answer is a refusal. Then:
+   `BIN=./target/gate/helix bash scripts/release-smoke.sh X.Y.Z`.
+
+   This step exists because it is the only one that can fail. Every other gate
+   compares the tree against itself — the corpus against its own `.expected`,
+   `dfdiff` between two backends, `vmparity` between three engines, `compat`
+   against an earlier release. None of them can notice that the changelog
+   promises something the binary does not do, and in v0.6.0 one did: ADR 0036
+   said String `+` was refused in a query, the polars backend concatenated with
+   exit 0, and every gate was green. The tag was already pushed when this
+   check found it (ADR 0036's addendum). Capturing the expectations from the
+   binary instead of writing them by hand would have found nothing.
+4. Commit the bump, push, and run the dry run:
    `gh workflow run release.yml -f dry_run=true`. All six platforms must be
    green **on the SHA you are about to tag**.
-4. Tag **the validated SHA** — not whatever HEAD has become:
+5. Tag **the validated SHA** — not whatever HEAD has become:
    `git tag vX.Y.Z <sha> && git push origin vX.Y.Z`. The tag push is the
-   publish (draft-until-complete; six assets + SHA256SUMS).
-5. Smoke the PUBLIC artifact: install via the public installer (checksum must
-   verify), run the release-note claims against the installed binary.
-6. Floor check: `objdump -T` on the gnu artifact — its highest `GLIBC_x.y`
-   requirement must be ≤ `GLIBC_FLOOR` in `install.sh` (the release workflow
-   also asserts this inside build-pgo). If the runner image changed, the floor
-   moves IN THE RELEASE COMMIT, never after.
+   publish (draft-until-complete; six assets + SHA256SUMS). The release is a
+   DRAFT until the last asset lands, so a tag can still be withdrawn up to
+   that point — `gh run cancel`, delete the draft, delete the tag.
+6. Smoke the PUBLIC artifact: `bash scripts/release-smoke.sh X.Y.Z` with no
+   `BIN`. It installs through the public installer (which verifies the
+   checksum), checks `--version`, re-runs the claims against the *published*
+   binary, and does the floor check: `objdump -T` on the gnu artifact — its
+   highest `GLIBC_x.y` requirement must be ≤ `GLIBC_FLOOR` in `install.sh`
+   (the release workflow also asserts this inside build-pgo). If the runner
+   image changed, the floor moves IN THE RELEASE COMMIT, never after.
 
 ## Invariants worth re-reading before any release
 

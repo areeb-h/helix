@@ -15,7 +15,7 @@ what this file exists to prevent. Reconcile after the work, not just before it.
 
 ## v0.5.1 → v0.6.0 — the semantics unification (ADR 0036)
 
-v0.6.0 makes frames, arrays and scalars answer the same question. Fifteen divergences
+v0.6.0 makes frames, arrays and scalars answer the same question. Sixteen divergences
 between the two DataFrame backends and the language were closed; five of them had never
 been recorded anywhere. The full decision list is
 [ADR 0036](../../docs/adr/0036-one-semantics.md).

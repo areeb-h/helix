@@ -216,7 +216,7 @@ declaration is the grant, the scoped case is the *default* case and the blanket 
 the one you have to ask for.
 
 **It follows this project's own repeated lesson.** ADR 0036 spent a release closing
-fifteen divergences that existed because one rule lived in many implementations. A CLI
+sixteen divergences that existed because one rule lived in many implementations. A CLI
 that is parsed in the program, documented in a README, and granted on the command line is
 that same shape — three copies of one fact, free to drift. One declaration is the fix,
 applied before the drift rather than after.

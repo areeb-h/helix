@@ -274,6 +274,54 @@ hid behind it. Its predecessor `scripts/dfcheck.sh` was worse than absent: it ra
 path that had moved, so it diffed three copies of "no such file" and reported them
 identical, while ADR 0033:60 cited it as acceptance evidence.
 
+## Addendum — the sixteenth, found by smoking the release notes
+
+The fifteen above were found by a sweep of the code. A sixteenth was found **after the
+release was tagged**, by running the CHANGELOG's own tables against the built binary,
+and it is the most instructive of the set because policy 1 had already *named* it in
+writing:
+
+> String `+` is refused in a query, as it is on scalars; polars previously concatenated.
+
+That sentence was true of the ADR and false of the binary. `guarded_arith` refuses a
+non-numeric operand for `/` `%` `//` from inside the UDF, but `+` `-` `*` `**` lowered
+straight to polars' own operators — and polars' `+` on two `str` columns concatenates.
+So `@s + "y"` answered `"xy"` with exit 0, while `"x" + "y"` was refused on scalars and
+`["x"].map(it => it + "y")` was refused on arrays. **A policy that is written and not
+implemented is worse than one that is neither**, because everything downstream — the
+ADR, the changelog, the index row — repeats it as done.
+
+**Why no gate caught it.** Not a gap in `dfdiff.sh`'s design: the native backend refused
+it correctly all along, because native evaluates every cell through the scalar kernel
+and therefore cannot disagree with scalars by construction. polars was the only
+dissenter in the binary, exactly as it was for `/`. The gate would have caught it —
+**if any tracked program added to a String column.** None does. That is the same lesson
+the section above draws about `with({…})` appearing once in the whole tree, arriving a
+second time in one release: a differential campaign covers the expression shapes
+somebody wrote down, and nothing more.
+
+**What found it** is worth naming, because it is now part of the ritual: the release
+notes were turned into a program of 19 printed claims whose expected output was
+**authored by hand from the notes**, not captured from the binary. A captured expectation
+proves a binary agrees with itself. The 19 that passed proved nothing new; the one that
+did not was the whole return on the exercise.
+
+### Clarification — a cell error names its row, a type error does not
+
+Fixing the above raised a smaller question the ADR had not answered. Native attaches
+`at row N of the frame.` to any cell-level error; polars matches it (`at_row`,
+`udf_error`). But refusing `@s + "y"` from the schema names no row, so the two backends
+would have disagreed on the hint — a fresh divergence introduced by the fix for a
+divergence.
+
+The rule, now implemented on both sides: **a cell error names its row; a type error does
+not.** `division by zero at row 7` is true and useful — row 7 holds the zero, and the
+other rows are fine. `needs numbers, but got a String at row 0` invites you to inspect a
+row whose data is blameless: every row fails, the *column* is what is wrong, and row 0 is
+merely where the loop noticed. polars decides this from the schema before lowering;
+native decides it from the first non-missing value before the row loop, which is the same
+conclusion by the same reasoning, since a frame column is homogeneous.
+
 ## Consequences
 
 - One release changes which rows some queries return. That is the cost of having

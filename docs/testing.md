@@ -114,7 +114,7 @@ Five pieces worth knowing about:
   `scripts/dfdiff-allow.txt` — currently 119 programs and **0 undeclared divergences**.
   The suite above tests the backends verb by verb; this one tests them the way a user
   meets them, through whole programs. It exists because verb-level parity was green while
-  fifteen divergences were live: the deltas hid in expression *shapes* no verb test built
+  sixteen divergences were live: the deltas hid in expression *shapes* no verb test built
   (a division by a literal, two `.where()`s in a row, a NaN reaching a grouped aggregate).
   Its predecessor, `scripts/dfcheck.sh`, was worse than absent — it ran a path that had
   moved, so it diffed three copies of "no such file" and reported them identical while

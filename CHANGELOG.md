@@ -7,9 +7,10 @@
 **This release changes answers.** ADR 0034 stated the doctrine — *a column expression
 means exactly what the same expression means on scalars* — and then recorded three
 deltas against the polars backend and deferred closing them. A release sweep found
-**fifteen**, five of which were recorded nowhere. [ADR
-0036](docs/adr/0036-one-semantics.md) closes them and replaces the delta list with a
-rule: a divergence is a bug in whichever side disagrees with the language.
+**fifteen**, five of which were recorded nowhere — and running these notes against the
+built artifact found a **sixteenth**. [ADR
+0036](docs/adr/0036-one-semantics.md) closes all of them and replaces the delta list
+with a rule: a divergence is a bug in whichever side disagrees with the language.
 
 Every change below was verified on both DataFrame backends and all three engines.
 `scripts/dfdiff.sh` runs every tracked program under both engines and reports **0
@@ -33,6 +34,14 @@ The second row is the subtlest and affected every division by a constant in ever
 query: polars rewrites division-by-a-constant into multiplication by the reciprocal,
 and `41.0 * 0.1` is not `41.0 / 10.0`. It only triggers at two rows or more, so a
 one-row test reports agreement.
+
+The **last** row is the one that got away and is worth knowing about. `+` `-` `*` `**`
+lowered straight to polars' own operators — and polars' `+` on two `str` columns
+concatenates — so `@s + "y"` answered `"xy"` with exit 0 while `"x" + "y"` was refused
+on scalars and inside `map`. Every gate in the repo was green over it, for one reason:
+no tracked program adds to a String column, so no differential run ever evaluated the
+expression. It was caught by running this table against the release binary, which is
+now part of the release ritual.
 
 **Two of these change WHICH ROWS a query returns**, not how a number prints:
 `where(@x / @y == 2)` on `x=[4,5], y=[2,2]` was 2 rows and is now 1; `where(@x / @y > 0)`

@@ -221,8 +221,10 @@ added the two axes that answer a different question:
 
 - **The backend axis** (`scripts/dfdiff.sh`): every tracked `.helix` under both DataFrame
   backends, byte-compared, divergences declared in `scripts/dfdiff-allow.txt`. Verb-level
-  parity tests were green while fifteen semantic divergences were live, because the deltas
-  hid in expression shapes no verb test built (ADR 0036).
+  parity tests were green while sixteen semantic divergences were live, because the deltas
+  hid in expression shapes no verb test built (ADR 0036). Its own limit is the same one:
+  it can only compare shapes a tracked program contains, and the sixteenth was found by
+  running the release notes against the built binary instead.
 - **The time axis** (`tests/compat/`): what a *released* version actually computed — exit,
   stdout, stderr for 119 deterministic programs, written once and never rewritten. Nothing
   else here can answer "does the program I wrote six months ago still compute the same

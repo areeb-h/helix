@@ -1,0 +1,48 @@
+# The v0.6.0 release notes, as a program. One printed line per cell of the
+# CHANGELOG's tables, in the order they appear there.
+#
+# The expected output beside this file is authored BY HAND from the notes. That is
+# the whole point: a captured expectation proves a binary agrees with itself, which
+# every other gate in this repo already proves. This one asks whether the binary
+# agrees with what the release SAYS — and the sixteenth divergence of ADR 0036 is
+# what it found the first time it was run (see the ADR's addendum).
+
+# --- ADR 0036 policy 1: true division in a frame ---
+print(dataframe({a: [41]}).with({q: @a / 10}).column("q"))
+
+# The reciprocal-multiply rewrite is invisible at one row. Two rows or more is
+# where `41.0 * 0.1` stops being `41.0 / 10.0`.
+print(dataframe({b: [41, 38]}).with({q: @b / 10}).column("q"))
+
+# --- euclidean `%` and `//` inside a query ---
+print(dataframe({a: [7]}).with({q: @a % -3}).column("q"))
+print(dataframe({a: [-7]}).with({q: @a // 2}).column("q"))
+
+# --- a query returns a different NUMBER OF ROWS than v0.5.1 did ---
+print(dataframe({x: [4, 5], y: [2, 2]}).where(@x / @y == 2).count())
+
+# --- a NaN is a failed computation, not absent data ---
+print([1.0, nan, 3.0].max())
+print([1.0, nan, 3.0].spread())
+print([1.0, nan, 3.0].argmin())
+print(dataframe({g: ["a", "a"], v: [1.0, nan]}).group(@g).max(@v).column("v"))
+
+# --- one sort order: every NaN last, sign-independently ---
+print([3.0, sqrt(-1.0), 1.0].sort())
+print([3.0, sqrt(-1.0), abs(sqrt(-1.0)), 1.0].sort())
+
+# --- keys are a separate relation from `==` ---
+print([nan, nan].unique())
+print(nan == nan)
+
+# --- the opt-out, and that the two drop verbs remove different things ---
+print([1.0, nan, 3.0].drop_nan().max())
+print([1.0, missing, 3.0].drop_missing().max())
+print([1.0, nan, 3.0].drop_missing().count())
+print([1.0, missing, 3.0].drop_nan().count())
+
+# --- is_nan works inside a query now (it was a parse-time refusal) ---
+print(dataframe({v: [1.0, nan, 3.0]}).where(not is_nan(@v)).count())
+
+# --- and `.where(a).where(b)` is sequential: the second never sees a dropped row ---
+print(dataframe({v: [1.0, nan, 3.0]}).where(not is_nan(@v)).where(@v > 2.0).count())

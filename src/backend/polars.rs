@@ -396,6 +396,61 @@ fn may_be_float(e: &ColExpr, fields: &[(String, DataType)]) -> bool {
     }
 }
 
+/// The type name of an operand that is KNOWN not to be a number, or `None` when it
+/// is numeric or cannot be decided from the schema — conservative on purpose, so this
+/// refuses only what it can prove.
+///
+/// `/` `%` `//` reject a non-numeric operand inside `guarded_arith` at run time, but
+/// `+` `-` `*` `**` lower straight to polars' own operators — and polars' `+` on two
+/// `str` columns CONCATENATES. So `@s + "y"` answered `"xy"` in a query while
+/// `"x" + "y"` was refused on scalars AND inside `map`, which is the sixteenth
+/// divergence of ADR 0036 policy 1 and the one the policy explicitly named. It
+/// survived the release sweep because no tracked program adds to a String column:
+/// `dfdiff` compares the two backends and both concatenated, so agreement was
+/// reported where neither side agreed with the language.
+///
+/// The predicate is `is_primitive_numeric`, the same one `guarded_arith` uses, so `+`
+/// and `/` refuse exactly the same operands rather than two nearly-equal sets.
+/// Deciding it here costs nothing at run time and points at the source rather than at
+/// a row.
+fn non_numeric_operand(e: &ColExpr, fields: &[(String, DataType)]) -> Option<&'static str> {
+    match e {
+        ColExpr::Lit(Value::Str(_)) => Some("String"),
+        ColExpr::Lit(Value::Bool(_)) => Some("Bool"),
+        // `missing` propagates rather than failing (ADR 0001); numeric literals are
+        // numbers; anything else a literal can hold is not reachable in a column
+        // expression.
+        ColExpr::Lit(_) => None,
+        ColExpr::Col(name) => fields
+            .iter()
+            .find(|(n, _)| n == name)
+            .and_then(|(_, d)| (!d.is_primitive_numeric()).then(|| dtype_type_name(d))),
+        // A nested arithmetic node answers for itself when IT lowers.
+        ColExpr::Binary(..) | ColExpr::Unary(..) => None,
+        ColExpr::IsMissing(_) | ColExpr::FloatPred(..) => Some("Bool"),
+    }
+}
+
+/// The scalar kernel's `needs numbers` refusal, reproduced exactly — message and the
+/// String-specific `+` nudge alike (`interp::ops::num_operand`). One semantics means
+/// one message.
+fn non_numeric_operand_error(op: &BinOp, ty: &str, line: usize, col: usize) -> HelixError {
+    let e = HelixError::new(
+        format!(
+            "operator `{}` needs numbers, but got {}",
+            op.symbol(),
+            crate::value::with_article(ty)
+        ),
+        line,
+        col,
+    );
+    if matches!(op, BinOp::Add) && ty == "String" {
+        e.hint("strings don't join with `+` — use interpolation `\"{a}{b}\"`, or `xs.join(sep)` for a list of strings.")
+    } else {
+        e
+    }
+}
+
 /// `< > <= >=` with the language's NaN rule: an unordered comparison RAISES.
 ///
 /// IEEE-754 defines signalling comparison predicates that raise on unordered
@@ -543,6 +598,18 @@ fn lower(e: &ColExpr, fields: &[(String, DataType)], line: usize, col: usize) ->
                 )
             {
                 return Err(zero_divisor_error(op, line, col));
+            }
+            // A non-numeric operand is refused where it was WRITTEN, for the four
+            // operators that lower to polars' own kernels and would otherwise do
+            // something else with it (`+` concatenates two `str` columns). The other
+            // three go through `guarded_arith`, which refuses the same operands from
+            // inside the UDF, so this must not be extended to them: it would move a
+            // shipped diagnostic from the row to the source position.
+            if let Some(ty) = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Pow)
+                .then(|| non_numeric_operand(l, fields).or_else(|| non_numeric_operand(r, fields)))
+                .flatten()
+            {
+                return Err(non_numeric_operand_error(op, ty, line, col));
             }
             let float_operands = may_be_float(l, fields) || may_be_float(r, fields);
             let l = lower(l, fields, line, col)?;

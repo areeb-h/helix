@@ -1,0 +1,16 @@
+# The v0.6.0 release notes' ERROR claims: the cells whose "now" column says the
+# program stops instead of answering. One per line:
+#
+#   <substring the diagnostic must contain>	<program>
+#
+# Tab-separated, `#` comments ignored. Each program must exit NON-ZERO and its
+# stderr must contain the substring. Both halves matter: an exit code without the
+# message is a program that failed for some other reason.
+division by zero	print(dataframe({a: [1, 2]}).with({q: @a / 0}))
+division by zero	print(dataframe({a: [1.0, 2.0]}).with({q: @a / 0.0}))
+division by zero	print(dataframe({a: [0.0, 0.0]}).with({q: @a / 0.0}))
+zero	print(1.0 % 0.0)
+needs numbers, but got a String	print(dataframe({s: ["x", "z"]}).with({q: @s + "y"}))
+interpolation	print(dataframe({s: ["x", "z"]}).with({q: @s + "y"}))
+cannot compare these values	print(nan > 2.0)
+is_nan	print(dataframe({v: [1.0, nan]}).where(@v > 2.0))

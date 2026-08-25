@@ -8430,6 +8430,101 @@ fn nan_ordering_raises_and_equality_stays_ieee() {
     }
 }
 
+/// Arithmetic on a non-numeric column is refused in a query, exactly as it is on
+/// scalars and inside `map` — the SIXTEENTH divergence of ADR 0036 policy 1, and the
+/// one the policy named in writing while the implementation did not close it.
+///
+/// `guarded_arith` refuses a non-numeric operand for `/` `%` `//` from inside the UDF,
+/// but `+` `-` `*` `**` lowered straight to polars' own operators, and polars' `+` on
+/// two `str` columns CONCATENATES. So `@s + "y"` answered `"xy"` with exit 0 while
+/// `"x" + "y"` was an error — and both ADR 0036 and the v0.6.0 release notes claimed
+/// that gap was closed.
+///
+/// It survived every gate the release built for one reason only: **no tracked program
+/// adds to a String column**, so `scripts/dfdiff.sh` — which runs whole programs — never
+/// evaluated the expression. Had one existed, dfdiff would have caught it, because the
+/// native backend refused it correctly all along: it evaluates every cell through the
+/// scalar kernel, so it cannot disagree with scalars by construction. polars was again
+/// the only dissenter in the binary, exactly as it was for `/` in ADR 0036 policy 1.
+///
+/// The lesson is about coverage, not about the gate: a differential gate can only
+/// compare expression shapes somebody wrote down, and 119 programs did not write this
+/// one. That is why this test asserts against the SCALAR kernel at three depths rather
+/// than against the other backend — agreement between two implementations is not
+/// agreement with the language, and only one of the two was ever wrong here.
+#[test]
+fn arithmetic_on_a_non_numeric_column_is_refused_as_on_scalars() {
+    // The same expression at all three depths must give the same answer. `map` is the
+    // array form of the query, so a divergence between them is the divergence.
+    let same = [
+        ("scalar", "print(\"x\" + \"y\")"),
+        ("array", "print([\"x\", \"z\"].map(it => it + \"y\"))"),
+        ("frame lit", "print(dataframe({s: [\"x\", \"z\"]}).with({q: @s + \"y\"}))"),
+        ("frame col", "print(dataframe({s: [\"x\", \"z\"]}).with({q: @s + @s}))"),
+        ("frame where", "print(dataframe({s: [\"x\"]}).where(@s + \"y\" == \"xy\").count())"),
+    ];
+    for (what, src) in same {
+        for (engine, env) in ENGINES {
+            let (out, err, code) =
+                run_source(&format!("{src}\n"), env, &format!("strplus_{}_{engine}", src.len()));
+            assert_ne!(code, Some(0), "{what}/{engine}: must refuse, got: {out}");
+            assert!(
+                err.contains("operator `+` needs numbers, but got a String"),
+                "{what}/{engine}: wrong message: {err}"
+            );
+            // The nudge is the whole reason the scalar message is worth copying: a user
+            // who wrote `+` wants to know what to write instead.
+            assert!(
+                err.contains("interpolation"),
+                "{what}/{engine}: the error must say what to write instead: {err}"
+            );
+        }
+    }
+
+    // The other three arithmetic operators refuse the same operand. `-` `*` `**`
+    // previously reached polars and produced ITS error (or, for `+`, a wrong answer);
+    // they now speak the language's.
+    for op in ["-", "*", "**"] {
+        let src = format!("print(dataframe({{s: [\"x\"]}}).with({{q: @s {op} 2}}))\n");
+        let (out, err, code) = run_source(&src, &[], &format!("strop_{}", op.len()));
+        assert_ne!(code, Some(0), "`{op}` on a String column must refuse, got: {out}");
+        assert!(
+            err.contains(&format!("operator `{op}` needs numbers")),
+            "`{op}`: wrong message: {err}"
+        );
+    }
+
+    // A Bool column is not a number either, and `is_nan(@v)` answers Bool — so both
+    // refuse, the same way `true + 1` does on scalars (`Value::as_f64` says `None`).
+    for src in [
+        "print(dataframe({b: [true, false]}).with({q: @b + 1}))",
+        "print(dataframe({v: [1.0]}).with({q: is_nan(@v) + 1}))",
+    ] {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], &format!("boolplus_{}", src.len()));
+        assert_ne!(code, Some(0), "must refuse: {src} -> {out}");
+        assert!(err.contains("needs numbers"), "{src}: {err}");
+    }
+
+    // And nothing numeric moved. This is the half that makes the refusal safe to ship:
+    // the check is static, so a column it cannot decide must still lower unchanged.
+    let unaffected = [
+        ("print(dataframe({a: [1, 2]}).with({q: @a + 1}).column(\"q\"))", "[2, 3]"),
+        ("print(dataframe({a: [1, 2]}).with({q: @a * 2}).column(\"q\"))", "[2, 4]"),
+        ("print(dataframe({a: [1.5]}).with({q: @a - 0.5}).column(\"q\"))", "[1.0]"),
+        ("print(dataframe({a: [2]}).with({q: @a ** 3}).column(\"q\"))", "[8]"),
+        // A missing propagates rather than failing (ADR 0001) — it is not a type error.
+        ("print(dataframe({a: [1, missing]}).with({q: @a + 1}).column(\"q\"))", "[2, missing]"),
+        // Strings still compare and still join with the verb that is for joining.
+        ("print(dataframe({s: [\"a\", \"b\"]}).where(@s > \"a\").count())", "1"),
+        ("print([\"a\", \"b\"].join(\"-\"))", "a-b"),
+    ];
+    for (src, want) in unaffected {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], &format!("numok_{}", src.len()));
+        assert_eq!(code, Some(0), "{src}: {err}");
+        assert_eq!(out.trim(), want, "{src}");
+    }
+}
+
 /// `.where(a).where(b)` is SEQUENTIAL — the frame you filtered is the frame you filter
 /// again — so the guard the compare error tells you to write actually works.
 ///
