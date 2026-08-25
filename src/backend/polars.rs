@@ -395,6 +395,15 @@ fn lower(e: &ColExpr, line: usize, col: usize) -> Result<Expr, HelixError> {
         }
         // Arrow's validity bitmap IS Helix's `missing`, so the null test lowers exactly.
         ColExpr::IsMissing(inner) => lower(inner, line, col)?.is_null(),
+        // A classification, not a comparison — so no NaN guard is needed, and none
+        // must be added: `is_nan(@v)` has to stay answerable ON a NaN.
+        ColExpr::FloatPred(kind, inner) => {
+            let e = lower(inner, line, col)?;
+            match kind {
+                super::FloatPredKind::IsNan => e.is_nan(),
+                super::FloatPredKind::IsFinite => e.is_finite(),
+            }
+        }
         ColExpr::Binary(op, l, r) => {
             // A LITERAL zero divisor is decidable without touching a row, so it is
             // refused where it was written, with no `at row` hint — the same shape

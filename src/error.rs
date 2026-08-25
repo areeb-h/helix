@@ -200,12 +200,10 @@ pub fn suggest(name: &str, candidates: &[&str]) -> Option<String> {
 /// trap, not the fix. An agent-written physics library hit exactly this: the natural
 /// variable name for elementary charge is `e`.
 pub fn immutable_reassign(name: &str) -> (String, String) {
-    let known = match name {
-        "e" => Some("Euler's number, 2.71828..."),
-        "pi" => Some("3.14159..."),
-        "inf" => Some("positive infinity"),
-        _ => None,
-    };
+    let known = crate::interp::SEEDED_CONSTANTS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, _, what)| *what);
     match known {
         Some(what) => (
             format!("`{name}` is a built-in constant ({what}) and cannot be reassigned"),

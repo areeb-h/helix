@@ -559,7 +559,7 @@ fn offset_expr_line(e: &mut Expr, off: usize) {
 /// `export pi = 3` silently shadowed the constant module-wide where the same
 /// line in a single-file program refuses at run time.
 fn refuse_seeded(name: &str, line: usize, col: usize) -> Result<(), HelixError> {
-    if matches!(name, "pi" | "e" | "inf" | "python") {
+    if crate::interp::seeded_names().any(|n| n == name) {
         let (msg, hint) = crate::error::immutable_reassign(name);
         return Err(HelixError::new(msg, line, col).hint(hint));
     }

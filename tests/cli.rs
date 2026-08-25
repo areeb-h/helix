@@ -4672,9 +4672,11 @@ fn unique_on_a_packed_array_does_not_abort() {
     let _ = std::fs::remove_file(&path);
 
     // The packed fast path must reproduce the general path's classes exactly.
+    // (This block used to open `INF = exp(800.0); nan = INF - INF` — a binding that
+    // stopped being legal in v0.6.0 when `nan` became a built-in constant. The literal
+    // is the better fixture anyway: `INF - INF` yields a NEGATIVE NaN on x86, so the
+    // old version was quietly testing one sign only.)
     let sem = r#"
-INF = exp(800.0)
-nan = INF - INF
 print([1.0, nan, nan, 1.0, 0.0 - 0.0, 0.0].unique().count())
 print(range(0, 10).map(i => i % 3).unique())
 print(range(0, 5).unique())
@@ -8224,5 +8226,125 @@ print(m(1.0, 0.0))
             !err.contains("integer division by zero"),
             "[{engine}] Float `//` must not claim INTEGER division: {err}"
         );
+    }
+}
+
+/// Every seeded constant exists in EVERY layer that has an opinion about names.
+///
+/// This is the mechanism pin, and it is the more valuable half of adding `nan`.
+/// The seeded constants used to be written out in SIX places — the interpreter's
+/// globals, the bytecode compiler's global table, the checker's `env`, the checker's
+/// `value_globals`, the module loader's shadow refusal, and the description table in
+/// `error.rs`. Adding one constant updated three of them, and the result was a
+/// one-line program that `helix check` called `ok` and `helix run` rejected with
+/// "`nan` is not defined".
+///
+/// They are one list now (`interp::SEEDED_CONSTANTS`), but a list can be bypassed by
+/// the next person in a hurry, so the PROPERTY is asserted here rather than the
+/// refactor: for each name, check and run must agree that it exists, all three
+/// engines must produce it, rebinding must be refused BY NAME, and `mut` must still
+/// shadow it.
+#[test]
+fn seeded_constants_agree_across_every_layer() {
+    for name in ["pi", "e", "inf", "nan"] {
+        let src = format!("print({name})\n");
+
+        // (1) `check` and `run` must agree that the name resolves. The original bug
+        //     was exactly this pair disagreeing.
+        let (_, cerr, ccode) = {
+            let path = std::env::temp_dir().join(format!("helix_seed_{name}.helix"));
+            std::fs::write(&path, &src).unwrap();
+            let r = run(&["check", path.to_str().unwrap()], &[], "");
+            let _ = std::fs::remove_file(&path);
+            r
+        };
+        assert_eq!(ccode, Some(0), "`check` does not know `{name}`: {cerr}");
+
+        // (2) every engine produces it, and they agree on what it prints.
+        let mut printed: Option<String> = None;
+        for (engine, env) in ENGINES {
+            let (out, err, code) = run_source(&src, env, &format!("seed_{name}_{engine}"));
+            assert_eq!(code, Some(0), "[{engine}] `run` does not know `{name}`: {err}");
+            match &printed {
+                None => printed = Some(out.clone()),
+                Some(first) => assert_eq!(&out, first, "[{engine}] `{name}` differs by engine"),
+            }
+        }
+
+        // (3) rebinding is refused, and the message NAMES it as a built-in constant
+        //     rather than falling back to the generic immutable wording — which is
+        //     what happens when `error.rs`'s table is the one that forgot the name.
+        let (_, err, code) =
+            run_source(&format!("{name} = 1.0\n"), &[], &format!("seed_rebind_{name}"));
+        assert_ne!(code, Some(0), "rebinding `{name}` must be refused");
+        assert!(
+            err.contains("is a built-in constant"),
+            "rebinding `{name}` gave the generic message, so `error.rs` does not know it: {err}"
+        );
+
+        // (4) `mut` still shadows it — the documented escape hatch stays open.
+        let (out, err, code) = run_source(
+            &format!("mut {name} = 1.0\nprint({name})\n"),
+            &[],
+            &format!("seed_mut_{name}"),
+        );
+        assert_eq!(code, Some(0), "`mut {name}` must stay legal: {err}");
+        assert_eq!(out.trim(), "1.0", "`mut {name}` did not shadow");
+    }
+}
+
+/// `nan` is a Float value, and the language treats it as one (ADR 0036 policies 3, 8).
+#[test]
+fn the_nan_literal_is_an_ordinary_float() {
+    let src = "print(nan)\n\
+               print(is_nan(nan), nan.is_nan())\n\
+               print(is_finite(nan))\n\
+               print(nan == nan)\n\
+               print(nan.is_missing())\n\
+               print(missing.is_nan())\n";
+    for (engine, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("nanlit_{engine}"));
+        assert_eq!(code, Some(0), "[{engine}] {err}");
+        let want = "NaN\n\
+                    true true\n\
+                    false\n\
+                    false\n\
+                    false\n\
+                    missing\n";
+        // `nan.is_missing()` is FALSE and `missing.is_nan()` is MISSING: a failed
+        // computation and an absent datum are different things and neither converts
+        // into the other (ADR 0036 policy 3).
+        assert_eq!(out, want, "[{engine}]");
+    }
+}
+
+/// `is_nan` / `is_finite` work INSIDE a DataFrame query, in both spellings.
+///
+/// Until v0.6.0 they were a parse-time refusal on a column, which made the runtime's
+/// own advice unfollowable: comparing a NaN raises and the error says "guard it first
+/// with `is_nan(x)`" — a spelling the language did not have for the one place the
+/// guard was most needed. This is a hard prerequisite for the NaN comparison error.
+#[test]
+fn float_predicates_work_inside_a_query() {
+    let cases = [
+        ("where(is_nan(@v))", "print(dataframe({v: [1.0, nan, 2.0]}).where(is_nan(@v)).count())", "1"),
+        ("where(@v.is_nan())", "print(dataframe({v: [1.0, nan, 2.0]}).where(@v.is_nan()).count())", "1"),
+        ("where(not …)", "print(dataframe({v: [1.0, nan, 2.0]}).where(not is_nan(@v)).count())", "2"),
+        (
+            "with is_finite",
+            "print(dataframe({v: [1.0, nan, inf]}).with({f: is_finite(@v)}).column(\"f\"))",
+            "[true, false, false]",
+        ),
+        (
+            "missing propagates",
+            "print(dataframe({v: [1.0, missing]}).with({f: is_nan(@v)}).column(\"f\"))",
+            "[false, missing]",
+        ),
+    ];
+    for (what, src, want) in cases {
+        let (out, err, code) =
+            run_source(&format!("{src}\n"), &[], &format!("qpred_{}", what.len()));
+        assert_eq!(code, Some(0), "{what}: {err}");
+        assert_eq!(out.trim(), want, "{what}");
     }
 }

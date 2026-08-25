@@ -328,17 +328,19 @@ pub struct Compiler {
 /// runtime receiver type instead.
 pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>) -> R<Program> {
     let mut c = Compiler {
-        // Seed the math constants and the `python` interop entry point as immutable
-        // globals so programs that use `pi`/`e`/`inf`/`python` compile (the
-        // tree-walker predefines the same bindings).
-        globals: vec!["pi".into(), "e".into(), "inf".into(), "python".into()],
-        global_mut: vec![false, false, false, false],
-        global_init: vec![
-            Value::Float(std::f64::consts::PI),
-            Value::Float(std::f64::consts::E),
-            Value::Float(f64::INFINITY),
-            Value::PyObject(std::rc::Rc::new(crate::python::PyHandle::namespace())),
-        ],
+        // Seeded from `interp::SEEDED_CONSTANTS`, the ONE list, so the compiler
+        // cannot know a different set of constants than the tree-walker does. When
+        // these were two hand-written lists, `nan` was added to one of them and
+        // `helix check` then passed a program `helix run` rejected.
+        globals: crate::interp::seeded_names().map(Into::into).collect(),
+        global_mut: crate::interp::seeded_names().map(|_| false).collect(),
+        global_init: crate::interp::SEEDED_CONSTANTS
+            .iter()
+            .map(|(_, v, _)| Value::Float(*v))
+            .chain(std::iter::once(Value::PyObject(std::rc::Rc::new(
+                crate::python::PyHandle::namespace(),
+            ))))
+            .collect(),
         func_names: vec!["<main>".into()],
         func_arity: vec![0], // main takes no params
         funcs: vec![None], // slot 0 reserved for main

@@ -159,8 +159,15 @@ recorded nowhere, and states the rule that makes a sixth impossible:
    coherently refuse to let you write one, and the error message already apologized for
    its absence and handed out a workaround. The cost is not zero: `nan` becomes a
    builtin constant, so any program binding a variable of that name now gets ADR 0027's
-   shadowing error. Two files in THIS repository did — `tests/corpus/m5_nan_sort.helix`
-   and `tests/corpus/t9_eq3_tuples.helix` — and were rewritten.
+   shadowing error. **Three** files in THIS repository did —
+   `tests/corpus/m5_nan_sort.helix`, `tests/corpus/t9_eq3_tuples.helix`, and a Helix
+   program embedded in `tests/cli.rs` — and were rewritten. The third was found by the
+   gate rather than by the survey, because a grep over `.helix` files cannot see Helix
+   source that lives inside a Rust string. Worth knowing before adding the next
+   constant: the blast radius of a new global name is larger than the file extension
+   suggests. (It was also the better fixture afterwards: it had bound
+   `nan = INF - INF`, which yields a NEGATIVE NaN on x86, so it had been testing one
+   sign only.)
 
 ## Deltas — asserted AS deltas
 

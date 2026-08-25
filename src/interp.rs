@@ -125,22 +125,43 @@ impl Default for Interp {
     }
 }
 
+/// **The** seeded numeric constants: name, value, and how the language describes
+/// the name when a program tries to rebind it.
+///
+/// This list used to be written out SIX times — the interpreter's globals, the
+/// bytecode compiler's global table, the checker's `env`, the checker's
+/// `value_globals`, the module loader's shadow refusal, and the error message's
+/// description table. Adding `nan` in v0.6.0 hit exactly the failure that shape
+/// invites: three of the six were updated, so `helix check` said `ok` and `helix
+/// run` said "`nan` is not defined" for the same one-line program. Six copies of one
+/// fact will always drift; the fix is not more care, it is one copy.
+pub const SEEDED_CONSTANTS: &[(&str, f64, &str)] = &[
+    ("pi", std::f64::consts::PI, "3.14159..."),
+    ("e", std::f64::consts::E, "Euler's number, 2.71828..."),
+    ("inf", f64::INFINITY, "positive infinity"),
+    ("nan", f64::NAN, "not-a-number"),
+];
+
+/// Every name predefined at the top level — the numeric constants plus the `python`
+/// interop handle, which is seeded the same way but is not a number.
+pub fn seeded_names() -> impl Iterator<Item = &'static str> {
+    SEEDED_CONSTANTS.iter().map(|(n, _, _)| *n).chain(std::iter::once("python"))
+}
+
 impl Interp {
     pub fn new() -> Self {
         let mut globals = FxHashMap::default();
-        // Math constants are predefined immutable bindings.
-        globals.insert(
-            "pi".to_string(),
-            Binding { value: Value::Float(std::f64::consts::PI), mutable: false },
-        );
-        globals.insert(
-            "e".to_string(),
-            Binding { value: Value::Float(std::f64::consts::E), mutable: false },
-        );
-        globals.insert(
-            "inf".to_string(),
-            Binding { value: Value::Float(f64::INFINITY), mutable: false },
-        );
+        // The math constants are predefined immutable bindings — from the one list
+        // (`SEEDED_CONSTANTS`), so this cannot drift from the compiler's or the
+        // checker's idea of what exists. `nan` joined them in v0.6.0: a doctrine
+        // whose first sentence is "NaN is an ordinary Float value" (ADR 0036 policy
+        // 3) cannot coherently refuse to let you write one.
+        for (name, value, _) in SEEDED_CONSTANTS {
+            globals.insert(
+                (*name).to_string(),
+                Binding { value: Value::Float(*value), mutable: false },
+            );
+        }
         // The `python` interop entry point — an opaque namespace handle. Always
         // present; without the `python` build feature its methods return a clean
         // "rebuild with --features python" error (see `crate::python`).

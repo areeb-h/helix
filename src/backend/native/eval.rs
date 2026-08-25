@@ -46,6 +46,33 @@ pub fn eval(frame: &NativeFrame, expr: &ColExpr, line: usize, col: usize) -> Res
             let r = eval(frame, r, line, col)?;
             binary(op, l, r, line, col)
         }
+        // Classification, never a comparison: this is the ONE float question that
+        // must stay answerable ON a NaN, since it is what the compare error tells
+        // people to reach for (ADR 0036 policy 5).
+        ColExpr::FloatPred(kind, inner) => {
+            let inner = eval(frame, inner, line, col)?;
+            let ask = |v: &Value| -> Value {
+                // `missing` PROPAGATES (ADR 0001) — `missing.is_nan()` is `missing`,
+                // not `false`, exactly as it is on scalars. `is_missing` is the one
+                // operation that looks AT absence instead of propagating it; this is
+                // not that operation. Answering `false` here would also quietly claim
+                // "this is a number, and it is fine".
+                if matches!(v, Value::Missing) {
+                    return Value::Missing;
+                }
+                let f = v.as_f64();
+                Value::Bool(match (kind, f) {
+                    (crate::backend::FloatPredKind::IsNan, Some(x)) => x.is_nan(),
+                    (crate::backend::FloatPredKind::IsFinite, Some(x)) => x.is_finite(),
+                    // A non-number is neither NaN nor finite.
+                    (_, None) => false,
+                })
+            };
+            Ok(match inner {
+                Evaled::Scalar(v) => Evaled::Scalar(ask(&v)),
+                Evaled::Rows(rows) => Evaled::Rows(rows.iter().map(ask).collect()),
+            })
+        }
         ColExpr::IsMissing(inner) => {
             // `is_missing` answers Bool for every input — the one operation that
             // looks AT missing instead of propagating it (ADR 0001).

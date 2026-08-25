@@ -169,6 +169,41 @@ pub enum ColExpr {
     /// `missing == missing` is `missing`, so that predicate selects nothing — on arrays
     /// and in queries alike, deliberately kept in agreement.
     IsMissing(Box<ColExpr>),
+    /// `is_nan(expr)` / `expr.is_nan()`, and the same for `is_finite`.
+    ///
+    /// Admitted inside queries for the same reason `is_missing` was: without them
+    /// the runtime's own advice was unfollowable. Comparing a NaN raises (ADR 0036
+    /// policy 5) and the error says "guard it first with `is_nan(x)`" — which was a
+    /// parse-time refusal on a column until v0.6.0, so the hint named a spelling the
+    /// language did not have.
+    FloatPred(FloatPredKind, Box<ColExpr>),
+}
+
+/// The float predicates a query may ask. Deliberately a closed set: these are
+/// *classification* questions about a float, which is why they are the only unary
+/// float functions that do not need a NaN guard of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatPredKind {
+    IsNan,
+    IsFinite,
+}
+
+impl FloatPredKind {
+    pub fn spelling(self) -> &'static str {
+        match self {
+            FloatPredKind::IsNan => "is_nan",
+            FloatPredKind::IsFinite => "is_finite",
+        }
+    }
+}
+
+/// Map a function name to the float predicate it asks, if it is one.
+fn float_pred_kind(name: &str) -> Option<FloatPredKind> {
+    match name {
+        "is_nan" => Some(FloatPredKind::IsNan),
+        "is_finite" => Some(FloatPredKind::IsFinite),
+        _ => None,
+    }
 }
 
 /// The engine-facing DataFrame interface. One `impl` per backend; all engine
@@ -297,6 +332,31 @@ pub fn ast_to_colexpr(
             let inner = ast_to_colexpr(recv, columns, resolve_var)?;
             Ok(ColExpr::IsMissing(Box::new(inner)))
         }
+        // `@v.is_nan()` and `is_nan(@v)` are the same question, and both spellings
+        // already work outside a query — so both are admitted here. (`is_finite`
+        // likewise.) See `ColExpr::FloatPred`.
+        Ast::Method { recv, name, args, .. }
+            if args.is_empty() && float_pred_kind(name).is_some() =>
+        {
+            let inner = ast_to_colexpr(recv, columns, resolve_var)?;
+            Ok(ColExpr::FloatPred(float_pred_kind(name).unwrap(), Box::new(inner)))
+        }
+        Ast::Call { name, args, line, col } if float_pred_kind(name).is_some() => {
+            let kind = float_pred_kind(name).unwrap();
+            // A name the query DOES know, called wrongly, deserves better than the
+            // catch-all "this expression isn't supported inside a DataFrame query
+            // yet" — which would be actively misleading here, since it is supported.
+            if args.len() != 1 {
+                return Err(HelixError::new(
+                    format!("`{}` takes exactly 1 argument, got {}", kind.spelling(), args.len()),
+                    *line,
+                    *col,
+                )
+                .hint(format!("e.g. `.where({}(@value))`.", kind.spelling())));
+            }
+            let inner = ast_to_colexpr(&args[0], columns, resolve_var)?;
+            Ok(ColExpr::FloatPred(kind, Box::new(inner)))
+        }
         Ast::Unary { op, expr, .. } => {
             let inner = ast_to_colexpr(expr, columns, resolve_var)?;
             Ok(ColExpr::Unary(*op, Box::new(inner)))
@@ -412,8 +472,9 @@ pub fn validate_predicate(pred: &ColExpr, line: usize, col: usize) -> Result<(),
             // `not` preserves its operand's verdict: `not 1` is as wrong as `1`.
             ColExpr::Unary(UnOp::Not, inner) => shape(inner),
             ColExpr::Unary(..) => Some(false),
-            // A null test is a condition whatever its operand holds.
-            ColExpr::IsMissing(_) => Some(true),
+            // A null test is a condition whatever its operand holds — and so is a
+            // float classification.
+            ColExpr::IsMissing(_) | ColExpr::FloatPred(..) => Some(true),
         }
     }
     if shape(pred) != Some(false) {
@@ -432,7 +493,9 @@ pub fn validate_predicate(pred: &ColExpr, line: usize, col: usize) -> Result<(),
         }
         ColExpr::Binary(..) => "an arithmetic expression".to_string(),
         ColExpr::Col(_) => unreachable!("a bare column is never provably non-boolean"),
-        ColExpr::IsMissing(_) => unreachable!("a null test is always a condition"),
+        ColExpr::IsMissing(_) | ColExpr::FloatPred(..) => {
+            unreachable!("a null test and a float predicate are always conditions")
+        }
     };
     Err(
         HelixError::new(format!("a filter predicate must be a condition, but this is {what}"), line, col)

@@ -384,9 +384,9 @@ impl Default for Checker {
 impl Checker {
     pub fn new() -> Self {
         let mut env = FxHashMap::default();
-        env.insert("pi".to_string(), Type::Float);
-        env.insert("e".to_string(), Type::Float);
-        env.insert("inf".to_string(), Type::Float);
+        for (name, _, _) in crate::interp::SEEDED_CONSTANTS {
+            env.insert((*name).to_string(), Type::Float);
+        }
         // The `python` interop entry point types as `Unknown`, so `python.import(...)`
         // and any method/attribute chain off a Python value never errors (Python
         // values ride the same permissive boundary as DataFrame columns).
@@ -396,7 +396,9 @@ impl Checker {
             types: FxHashMap::default(),
             mut_globals: FxHashSet::default(),
             fn_decls: FxHashSet::default(),
-            value_globals: ["pi", "e", "inf", "python"].iter().map(|s| s.to_string()).collect(),
+            value_globals: crate::interp::seeded_names()
+                .map(|s| s.to_string())
+                .collect(),
             deferred_globals: FxHashSet::default(),
         }
     }
