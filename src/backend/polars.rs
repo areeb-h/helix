@@ -131,14 +131,17 @@ fn pl<T>(r: PolarsResult<T>, ctx: &str, line: usize, col: usize) -> Result<T, He
             let hint = parts.next().unwrap_or("").to_string();
             let row = parts.next().unwrap_or("");
             let err = HelixError::new(msg, line, col);
-            // The row is the frame-sized counterpart of a position, and when there
-            // IS one it REPLACES the scalar advice — exactly as the native engine
-            // does (`backend::native::eval::at_row` overwrites the hint). Keeping
-            // both would make the two backends print different help for one error,
-            // which is the divergence class this whole release exists to remove.
-            // Without a row (a literal zero divisor, refused statically) the scalar
-            // kernel's own advice stands, which is right: there is no row to name.
-            let hint = if row.is_empty() { hint } else { format!("at row {row} of the frame.") };
+            // The row ADDS to the scalar advice rather than replacing it, matching
+            // `backend::native::eval::at_row`. Both engines print the same help for
+            // the same error, and the help survives into the frame case — which is
+            // where the compare error's "guard it first with `is_nan(x)`" is most
+            // needed and least guessable.
+            let hint = match (hint.is_empty(), row.is_empty()) {
+                (true, true) => String::new(),
+                (true, false) => format!("at row {row} of the frame."),
+                (false, true) => hint,
+                (false, false) => format!("{hint} (at row {row} of the frame.)"),
+            };
             return if hint.is_empty() { err } else { err.hint(hint) };
         }
         let (msg, hint) = tidy(&raw);
@@ -351,6 +354,114 @@ fn guarded_arith(l: Expr, r: Expr, op: BinOp) -> Expr {
     )
 }
 
+/// Does evaluating this predicate risk raising on a row a previous filter removed?
+///
+/// True exactly when an ordering comparison has a float operand — the only predicate
+/// shape that raises per-row (ADR 0036 policy 5). Everything else composes freely and
+/// keeps polars' fusion.
+fn predicate_can_raise(e: &ColExpr, fields: &[(String, DataType)]) -> bool {
+    match e {
+        ColExpr::Binary(BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge, l, r) => {
+            may_be_float(l, fields) || may_be_float(r, fields)
+        }
+        ColExpr::Binary(_, l, r) => {
+            predicate_can_raise(l, fields) || predicate_can_raise(r, fields)
+        }
+        ColExpr::Unary(_, inner) => predicate_can_raise(inner, fields),
+        _ => false,
+    }
+}
+
+/// Could this expression yield a Float, and therefore possibly a NaN?
+///
+/// Conservative: an unknown column answers `true`, because guarding something that
+/// cannot be a NaN is merely slower, while failing to guard one that can is the wrong
+/// answer. Int, String, Bool and Date columns answer `false` and keep polars' own
+/// comparison.
+fn may_be_float(e: &ColExpr, fields: &[(String, DataType)]) -> bool {
+    match e {
+        ColExpr::Lit(Value::Float(_)) => true,
+        ColExpr::Lit(_) => false,
+        ColExpr::Col(name) => fields
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, d)| d.is_float())
+            .unwrap_or(true),
+        // Any arithmetic touching a float is a float — and `/` always is.
+        ColExpr::Binary(BinOp::Div, ..) => true,
+        ColExpr::Binary(_, l, r) => may_be_float(l, fields) || may_be_float(r, fields),
+        ColExpr::Unary(_, inner) => may_be_float(inner, fields),
+        // A predicate answers Bool.
+        ColExpr::IsMissing(_) | ColExpr::FloatPred(..) => false,
+    }
+}
+
+/// `< > <= >=` with the language's NaN rule: an unordered comparison RAISES.
+///
+/// IEEE-754 defines signalling comparison predicates that raise on unordered
+/// operands, so this is a legitimate 754 option rather than an invention, and it is
+/// what the scalar kernel has always done (`interp::ops::compare`). The polars
+/// backend answered `true` for `NaN > 2.0` and silently KEPT the row: a wrong
+/// dataset, not a wrong format, on the default backend, with exit 0.
+///
+/// Integer columns cannot hold a NaN, so they take a plain comparison inside the
+/// closure and pay only the UDF's per-column overhead — measured, not assumed.
+fn guarded_compare(l: Expr, r: Expr, op: BinOp) -> Expr {
+    l.map_many(
+        move |cols: &mut [Column]| -> PolarsResult<Column> {
+            let n = cols[0].len().max(cols[1].len());
+            let bc = |c: &Column| -> Column {
+                if c.len() == n { c.clone() } else { c.new_from_index(0, n) }
+            };
+            let (a, b) = (bc(&cols[0]), bc(&cols[1]));
+            let name = cols[0].name().clone();
+            let cmp = |o: std::cmp::Ordering| -> bool {
+                use std::cmp::Ordering::*;
+                match op {
+                    BinOp::Lt => o == Less,
+                    BinOp::Gt => o == Greater,
+                    BinOp::Le => o != Greater,
+                    _ => o != Less,
+                }
+            };
+            // `may_be_float` gates installation, so this only runs where a NaN is
+            // possible. Non-float columns never reach here and keep polars' own
+            // comparison — which also keeps String ordering lexical, as the scalar
+            // kernel has it, instead of casting it to a column of nulls.
+            let (af, bf) = (a.cast(&DataType::Float64)?, b.cast(&DataType::Float64)?);
+            let (af, bf) = (af.f64()?, bf.f64()?);
+            let mut out: Vec<Option<bool>> = Vec::with_capacity(n);
+            for (i, (x, y)) in af.iter().zip(bf.iter()).enumerate() {
+                match (x, y) {
+                    (Some(x), Some(y)) => match x.partial_cmp(&y) {
+                        Some(o) => out.push(Some(cmp(o))),
+                        // Unordered: the language refuses rather than guessing, and
+                        // names the escape hatch that C9 made available on a column.
+                        None => {
+                            // Message and advice from the kernel's own constructor,
+                            // so the three engines cannot phrase one error three ways.
+                            let e = crate::interp::ops::nan_compare_error(0, 0);
+                            return Err(udf_error(
+                                &e.message,
+                                e.hint.as_deref().unwrap_or(""),
+                                i,
+                            ));
+                        }
+                    },
+                    // `missing` propagates through a comparison (ADR 0001); it is not
+                    // unordered, it is absent.
+                    _ => out.push(None),
+                }
+            }
+            Ok(Column::new(name, out))
+        },
+        &[r],
+        move |_schema: &Schema, fields: &[Field]| {
+            Ok(Field::new(fields[0].name().clone(), DataType::Boolean))
+        },
+    )
+}
+
 /// Convert a Helix scalar into a Polars literal expression. Non-scalars are
 /// rejected up front by `ast_to_colexpr`, so this stays total in practice.
 fn value_to_lit(v: &Value, line: usize, col: usize) -> Result<Expr, HelixError> {
@@ -382,23 +493,23 @@ fn value_to_lit(v: &Value, line: usize, col: usize) -> Result<Expr, HelixError> 
 /// pointing at nothing — while both callers had the real position sitting unused in
 /// `_line`/`_col`. Threading them is what lets a refusal inside a query point at the
 /// query.
-fn lower(e: &ColExpr, line: usize, col: usize) -> Result<Expr, HelixError> {
+fn lower(e: &ColExpr, fields: &[(String, DataType)], line: usize, col: usize) -> Result<Expr, HelixError> {
     Ok(match e {
         ColExpr::Col(name) => pcol(name.as_str()),
         ColExpr::Lit(v) => value_to_lit(v, line, col)?,
         ColExpr::Unary(op, inner) => {
-            let i = lower(inner, line, col)?;
+            let i = lower(inner, fields, line, col)?;
             match op {
                 UnOp::Neg => lit(0) - i,
                 UnOp::Not => i.not(),
             }
         }
         // Arrow's validity bitmap IS Helix's `missing`, so the null test lowers exactly.
-        ColExpr::IsMissing(inner) => lower(inner, line, col)?.is_null(),
+        ColExpr::IsMissing(inner) => lower(inner, fields, line, col)?.is_null(),
         // A classification, not a comparison — so no NaN guard is needed, and none
         // must be added: `is_nan(@v)` has to stay answerable ON a NaN.
         ColExpr::FloatPred(kind, inner) => {
-            let e = lower(inner, line, col)?;
+            let e = lower(inner, fields, line, col)?;
             match kind {
                 super::FloatPredKind::IsNan => e.is_nan(),
                 super::FloatPredKind::IsFinite => e.is_finite(),
@@ -420,8 +531,9 @@ fn lower(e: &ColExpr, line: usize, col: usize) -> Result<Expr, HelixError> {
             {
                 return Err(zero_divisor_error(op, line, col));
             }
-            let l = lower(l, line, col)?;
-            let r = lower(r, line, col)?;
+            let float_operands = may_be_float(l, fields) || may_be_float(r, fields);
+            let l = lower(l, fields, line, col)?;
+            let r = lower(r, fields, line, col)?;
             match op {
                 BinOp::Add => l + r,
                 BinOp::Sub => l - r,
@@ -430,12 +542,40 @@ fn lower(e: &ColExpr, line: usize, col: usize) -> Result<Expr, HelixError> {
                 BinOp::Mod => guarded_arith(l, r, BinOp::Mod),
                 BinOp::FloorDiv => guarded_arith(l, r, BinOp::FloorDiv),
                 BinOp::Pow => l.pow(r),
+                // `==`/`!=` are IEEE at every depth: a NaN is equal to nothing,
+                // INCLUDING itself. Polars reported NaN as self-equal in an
+                // expression, so `where(@v == @v)` kept the NaN row where arrays and
+                // the native engine dropped it. Pure expressions — no UDF, no guard
+                // cost — and `is_nan` answers `false` for a non-float column, so this
+                // is safe for every dtype.
+                BinOp::Eq if float_operands => {
+                    l.clone().eq(r.clone()).and(l.is_nan().not()).and(r.is_nan().not())
+                }
+                BinOp::Ne if float_operands => {
+                    l.clone().neq(r.clone()).or(l.is_nan()).or(r.is_nan())
+                }
+                // No float operand means no NaN is possible, so plain equality is
+                // already IEEE-correct — and the rewrite must NOT be applied, because
+                // polars' `is_nan` is not defined for `str` and raises. (Probing it on
+                // an Int column said "works"; String is where it does not, and the
+                // gate is what the bio examples found.)
                 BinOp::Eq => l.eq(r),
                 BinOp::Ne => l.neq(r),
-                BinOp::Lt => l.lt(r),
-                BinOp::Gt => l.gt(r),
-                BinOp::Le => l.lt_eq(r),
-                BinOp::Ge => l.gt_eq(r),
+                // Ordering RAISES on an unordered pair (ADR 0036 policy 5) — but the
+                // guard is installed only where a NaN is possible. An Int, String or
+                // Bool comparison keeps polars' own operator and pays nothing.
+                BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
+                    if float_operands {
+                        guarded_compare(l, r, *op)
+                    } else {
+                        match op {
+                            BinOp::Lt => l.lt(r),
+                            BinOp::Gt => l.gt(r),
+                            BinOp::Le => l.lt_eq(r),
+                            _ => l.gt_eq(r),
+                        }
+                    }
+                }
                 BinOp::And => l.and(r),
                 BinOp::Or => l.or(r),
                 // `col ?? default` — replace nulls with the default.
@@ -454,6 +594,20 @@ fn lower(e: &ColExpr, line: usize, col: usize) -> Result<Expr, HelixError> {
             }
         }
     })
+}
+
+/// Column names AND dtypes from a plan's schema — cheap (header/metadata only, no
+/// scan). This is what lets the NaN comparison guard be installed ONLY where a NaN is
+/// possible: an Int, String or Bool column cannot hold one, so it keeps polars' own
+/// comparison and pays nothing.
+fn schema_fields(
+    lf: &LazyFrame,
+    line: usize,
+    col: usize,
+) -> Result<Vec<(String, DataType)>, HelixError> {
+    let mut lf = lf.clone();
+    let schema = pl(lf.collect_schema(), "could not read DataFrame schema", line, col)?;
+    Ok(schema.iter().map(|(n, d)| (n.to_string(), d.clone())).collect())
 }
 
 /// Column names from a plan's schema — cheap (header/metadata only, no scan).
@@ -557,8 +711,25 @@ impl DataHandle for PolarsFrame {
     }
 
     fn filter(&self, pred: &ColExpr, line: usize, col: usize) -> Result<Df, HelixError> {
-        let e = lower(pred, line, col)?;
-        Ok(self.derive(self.lf.clone().filter(e)))
+        let fields = schema_fields(&self.lf, line, col)?;
+        let e = lower(pred, &fields, line, col)?;
+        // `.where(a).where(b)` is SEQUENTIAL: the frame you filtered is the frame you
+        // filter again. Native is eager and gets this for free; polars fuses adjacent
+        // filters into one conjunction and evaluates both over every row — which is
+        // invisible until a predicate can RAISE, and then it is very visible:
+        // `.where(not is_nan(@v)).where(@v > 2.0)` raised on the rows the first filter
+        // had already removed, so the guard the compare error tells you to write did
+        // not work on the default backend.
+        //
+        // A cache node in front of a raising predicate stops the fusion. Measured on
+        // 3M rows: 1.00x on a limited query, 1.04x on a streaming write, 1.09x on a
+        // full scan — so sequential semantics is affordable and does not need to be
+        // traded away. Pinned by `a_guarded_filter_does_not_see_removed_rows`, because
+        // this rests on polars' optimizer treating a cache node as a barrier, which is
+        // behaviour rather than contract.
+        let needs_barrier = predicate_can_raise(pred, &fields);
+        let base = if needs_barrier { self.lf.clone().cache() } else { self.lf.clone() };
+        Ok(self.derive(base.filter(e)))
     }
 
     fn select(&self, names: &[String], _line: usize, _col: usize) -> Result<Df, HelixError> {
@@ -585,9 +756,10 @@ impl DataHandle for PolarsFrame {
         line: usize,
         col: usize,
     ) -> Result<Df, HelixError> {
+        let fields = schema_fields(&self.lf, line, col)?;
         let mut exprs = Vec::with_capacity(cols.len());
         for (name, ce) in cols {
-            exprs.push(lower(ce, line, col)?.alias(name.as_str()));
+            exprs.push(lower(ce, &fields, line, col)?.alias(name.as_str()));
         }
         Ok(self.derive(self.lf.clone().with_columns(exprs)))
     }
@@ -942,7 +1114,12 @@ mod udf_contract {
         let helix: Result<(), HelixError> = pl(Err(PolarsError::ComputeError(err.into())), "ctx", 3, 9);
         let helix = helix.unwrap_err();
         assert_eq!(helix.message, "division by zero", "engine context leaked into our message");
-        assert_eq!(helix.hint.as_deref(), Some("at row 7 of the frame."));
+        // The row ADDS to the kernel's advice rather than replacing it — both halves
+        // must survive. Dropping the advice is how the frame case ended up printing a
+        // row number and nothing about how to fix the problem.
+        let hint = helix.hint.as_deref().unwrap_or("");
+        assert!(hint.contains("guard the denominator."), "the advice was dropped: {hint}");
+        assert!(hint.contains("at row 7 of the frame."), "the row was dropped: {hint}");
         assert_eq!((helix.line, helix.col), (3, 9));
     }
 

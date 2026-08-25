@@ -139,6 +139,19 @@ fn binary(op: &BinOp, l: Evaled, r: Evaled, line: usize, col: usize) -> Result<E
 
 /// A cell-level error (division by zero, a type mismatch) names the row it
 /// happened on — the frame-sized counterpart of a position.
-fn at_row(e: HelixError, i: usize) -> HelixError {
-    e.hint(format!("at row {i} of the frame."))
+///
+/// The row ADDS to whatever the scalar kernel already advised; it used to replace it.
+/// That mattered as soon as comparisons started raising: the compare error's whole
+/// value is the sentence "a NaN has no order — guard it first with `is_nan(x)`", and
+/// dropping it in the frame case removed the advice from exactly the place a user is
+/// most likely to hit the error and least likely to know the fix.
+pub(super) fn at_row(e: HelixError, i: usize) -> HelixError {
+    let row = format!("at row {i} of the frame.");
+    match &e.hint {
+        Some(h) if !h.is_empty() => {
+            let combined = format!("{h} ({row})");
+            e.hint(combined)
+        }
+        _ => e.hint(row),
+    }
 }

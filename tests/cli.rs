@@ -8348,3 +8348,93 @@ fn float_predicates_work_inside_a_query() {
         assert_eq!(out.trim(), want, "{what}");
     }
 }
+
+/// Ordering comparisons on a NaN RAISE, everywhere (ADR 0036 policy 5).
+///
+/// The polars backend answered `true` for `NaN > 2.0` and silently KEPT the row — a
+/// wrong dataset, not a wrong format, on the default backend, with exit 0. This is the
+/// change in v0.6.0 most likely to break a real program, and the one that most needs
+/// to: a filter that quietly returns extra rows is not a formatting difference.
+///
+/// `==`/`!=` are deliberately NOT part of it: they stay IEEE, so `nan == nan` is
+/// `false` at every depth. Polars reported NaN as self-equal inside an expression, so
+/// `where(@v == @v)` kept the NaN row where arrays and the native engine dropped it.
+#[test]
+fn nan_ordering_raises_and_equality_stays_ieee() {
+    let cases = [
+        // (source, expect_error, expected_output_if_ok)
+        ("print(nan > 2.0)", true, ""),
+        ("print([1.0, nan, 3.0].filter(x => x > 2.0))", true, ""),
+        ("print(dataframe({v: [1.0, nan, 3.0]}).where(@v > 2.0).count())", true, ""),
+        ("print(dataframe({v: [1.0, nan]}).with({b: @v >= 2.0}).column(\"b\"))", true, ""),
+        // equality is answerable on a NaN — it is false, not an error
+        ("print(nan == nan)", false, "false"),
+        ("print(nan != nan)", false, "true"),
+        ("print(dataframe({v: [1.0, nan, 3.0]}).where(@v == @v).count())", false, "2"),
+        ("print(dataframe({v: [1.0, nan, 3.0]}).where(@v != @v).count())", false, "1"),
+    ];
+    for (src, is_err, want) in cases {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], &format!("nanord_{}", src.len()));
+        if is_err {
+            assert_ne!(code, Some(0), "must raise: {src}");
+            assert!(
+                err.contains("cannot compare these values (NaN?)"),
+                "{src}: wrong error: {err}"
+            );
+            assert!(err.contains("is_nan"), "{src}: the error must name the guard: {err}");
+        } else {
+            assert_eq!(code, Some(0), "{src}: {err}");
+            assert_eq!(out.trim(), want, "{src}");
+        }
+    }
+
+    // Nothing that cannot hold a NaN may be affected. Int, String and Bool
+    // comparisons keep polars' own operators — and the String case is not
+    // hypothetical: gating the equality rewrite on float operands is exactly what two
+    // bio examples caught, because polars' `is_nan` is undefined for `str` and raises.
+    let unaffected = [
+        ("print(dataframe({a: [1, 2, 3]}).where(@a > 1).count())", "2"),
+        ("print(dataframe({s: [\"a\", \"b\"]}).where(@s > \"a\").count())", "1"),
+        ("print(dataframe({s: [\"a\", \"b\"]}).where(@s == \"a\").count())", "1"),
+        ("print(dataframe({b: [true, false]}).where(@b).count())", "1"),
+        // `missing` propagates through a comparison: absent is not unordered.
+        ("print(dataframe({v: [1.0, missing, 3.0]}).where(@v > 2.0).count())", "1"),
+    ];
+    for (src, want) in unaffected {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], &format!("nanun_{}", src.len()));
+        assert_eq!(code, Some(0), "{src}: {err}");
+        assert_eq!(out.trim(), want, "{src}");
+    }
+}
+
+/// `.where(a).where(b)` is SEQUENTIAL — the frame you filtered is the frame you filter
+/// again — so the guard the compare error tells you to write actually works.
+///
+/// This is the pin that matters most in C10, because it rests on polars' optimizer
+/// treating a cache node as a fusion barrier, which is BEHAVIOUR rather than contract.
+/// Without it, polars fused adjacent filters into one conjunction and evaluated both
+/// over every row, so `.where(not is_nan(@v)).where(@v > 2.0)` raised on rows the first
+/// filter had already removed. The advice in the error message was unfollowable on the
+/// default backend — the error said "guard it first with `is_nan(x)`", and guarding it
+/// first did not work.
+///
+/// If a polars upgrade stops honouring the barrier, this fails rather than users
+/// discovering that their guard silently stopped guarding.
+#[test]
+fn a_guarded_filter_does_not_see_removed_rows() {
+    let guarded = "print(dataframe({v: [1.0, nan, 3.0]}).where(not is_nan(@v)).where(@v > 2.0).count())\n";
+    for (engine, env) in ENGINES {
+        let (out, err, code) = run_source(guarded, env, &format!("seqwhere_{engine}"));
+        assert_eq!(code, Some(0), "[{engine}] guarding a NaN must work: {err}");
+        assert_eq!(out.trim(), "1", "[{engine}]");
+    }
+
+    // The honest limit, stated so nobody reads the test above as more than it is:
+    // ONE predicate evaluates both sides over every row, so an `and` does NOT guard.
+    // That is consistent across engines and matches how `and` works on scalars.
+    let anded =
+        "print(dataframe({v: [1.0, nan, 3.0]}).where(not is_nan(@v) and @v > 2.0).count())\n";
+    let (_, err, code) = run_source(anded, &[], "andwhere");
+    assert_ne!(code, Some(0), "`and` does not short-circuit per row; it must still raise");
+    assert!(err.contains("cannot compare these values (NaN?)"), "{err}");
+}

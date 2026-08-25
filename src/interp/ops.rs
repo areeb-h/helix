@@ -12,6 +12,18 @@ use crate::error::HelixError;
 use crate::tensor;
 use crate::value::Value;
 
+/// The one "these do not order" error, message and advice together.
+///
+/// It existed in three variants: this one (with the advice), the native engine's
+/// typed compare fast path (with NO advice at all), and the polars guard added in
+/// v0.6.0 (with a shortened copy of it). The advice is the entire value of the
+/// error — it names the guard, and after ADR 0036 policy 5 that guard finally works
+/// on a column — so an engine that drops it is worse than one that never had it.
+pub(crate) fn nan_compare_error(line: usize, col: usize) -> HelixError {
+    HelixError::new("cannot compare these values (NaN?)", line, col)
+        .hint("a NaN has no order — guard it first with `is_nan(x)` / `is_finite(x)`.")
+}
+
 pub(crate) fn eval_binary(
     op: &BinOp,
     mut l: Value,
@@ -918,11 +930,7 @@ fn compare(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<
                     ));
                 }
             };
-            a.partial_cmp(&b).ok_or_else(|| {
-                HelixError::new("cannot compare these values (NaN?)", line, col).hint(
-                    "a NaN has no order — guard it first with `is_nan(x)` / `is_finite(x)`.",
-                )
-            })?
+            a.partial_cmp(&b).ok_or_else(|| nan_compare_error(line, col))?
         }
     };
     use std::cmp::Ordering::*;

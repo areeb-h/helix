@@ -143,10 +143,8 @@ pub fn filter_keep(
                     col,
                 )
                 .err();
-                return Some(Err(e.unwrap_or_else(|| {
-                    HelixError::new("cannot compare these values (NaN?)", line, col)
-                })
-                .hint(format!("at row {i} of the frame."))));
+                let e = e.unwrap_or_else(|| crate::interp::ops::nan_compare_error(line, col));
+                return Some(Err(super::eval::at_row(e, i)));
             }
             let n = per_chunk.iter().map(|(c, _)| *c).sum();
             Some(Ok(super::sel::RowSel::from_mask(mask, n)))
@@ -268,11 +266,16 @@ fn fop(op: BinOp, x: f64, y: f64) -> f64 {
     }
 }
 
-/// The kernel's own error for this cell — so the typed path's failure bytes
-/// match the boxed path exactly (message and at-row hint).
+/// The kernel's own error for this cell — so the typed path's failure bytes match
+/// the boxed path exactly (message, advice AND at-row hint).
+///
+/// Through `at_row`, which APPENDS the row to the kernel's advice. This used to call
+/// `.hint(...)` directly, which replaced it — so the typed fast path silently dropped
+/// "guard the denominator, e.g. `if d != 0`" and printed only a row number. Two code
+/// paths for the same error, and the faster one said less.
 fn cell_err(op: BinOp, a: Value, b: Value, row: usize, line: usize, col: usize) -> HelixError {
     match crate::interp::ops::eval_binary(&op, a, b, line, col) {
-        Err(e) => e.hint(format!("at row {row} of the frame.")),
+        Err(e) => super::eval::at_row(e, row),
         Ok(_) => HelixError::new("internal: typed path expected a kernel error", line, col),
     }
 }
