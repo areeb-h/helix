@@ -124,15 +124,20 @@ pub(super) fn a_argmax(name: &str, args: Vec<Value>, line: usize, col: usize) ->
         let vals: Vec<f64> = match &args[0] {
             Value::Array(items) => {
                 let vs = items.to_values();
-                // Three-valued propagation (ADR 0001): a `missing` or `NaN`
-                // element makes the arg-extreme undefined, so return `missing`
-                // — matching sum/mean/min/max/median — instead of raising a
-                // type error on `missing` or silently skipping a `NaN`.
-                if vs
-                    .iter()
-                    .any(|v| matches!(v, Value::Missing) || matches!(v, Value::Float(f) if f.is_nan()))
-                {
+                // `missing` propagates (ADR 0001): the arg-extreme of unknown data
+                // is unknown.
+                if vs.iter().any(|v| matches!(v, Value::Missing)) {
                     return Ok(Value::Missing);
+                }
+                // A NaN answers with its own INDEX (ADR 0036 policy 3), the same as
+                // the METHOD spelling. `min()`/`max()` return the NaN, so the index
+                // pointing at it is the consistent answer and `xs[argmin] == min()`
+                // holds. This branch used to launder it to `missing` alongside the
+                // `missing` case — two different facts, one answer, in a function
+                // whose method twin had already been fixed. The free and method
+                // spellings of one verb must not disagree.
+                if let Some(i) = vs.iter().position(|v| matches!(v, Value::Float(f) if f.is_nan())) {
+                    return Ok(Value::Int(i as i64));
                 }
                 let mut out = Vec::with_capacity(vs.len());
                 for v in vs.iter() {
@@ -144,8 +149,9 @@ pub(super) fn a_argmax(name: &str, args: Vec<Value>, line: usize, col: usize) ->
                 out
             }
             Value::Tensor(t) => {
-                if t.iter().any(|f| f.is_nan()) {
-                    return Ok(Value::Missing);
+                // Same rule for a tensor: the NaN's flat index.
+                if let Some(i) = t.iter().position(|f| f.is_nan()) {
+                    return Ok(Value::Int(i as i64));
                 }
                 t.iter().copied().collect()
             }

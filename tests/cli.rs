@@ -8607,3 +8607,58 @@ fn grouped_aggregates_propagate_nan() {
         assert_eq!(out.trim(), want, "{src}");
     }
 }
+
+/// The `argmin`/`argmax` family answers with the NaN's INDEX, not `missing`
+/// (ADR 0036 policy 3) — completing the withdrawal of the laundering.
+///
+/// The justification is an invariant, not a preference: `min()` returns the NaN, the
+/// NaN sits at some index, so `xs[xs.argmin()] == xs.min()` requires that index. It is
+/// also exactly what numpy answers (`np.argmin([1.0, nan, 3.0])` is 1).
+///
+/// It lived in THREE places that had to agree and did not: a guard written into the
+/// parser desugar (`if xs.any(it != it) then missing`), the packed `$arg_extreme`
+/// kernel (which DECLINED on a NaN, routing to that guard), and the free `argmin`
+/// builtin (which laundered `missing` and NaN together in one condition). The method
+/// spelling was fixed first and the free spelling still disagreed — two spellings of
+/// one verb, two answers.
+#[test]
+fn the_arg_family_answers_with_the_nan_index() {
+    // The invariant that justifies the choice, asserted directly.
+    let inv = "xs = [1.0, nan, 3.0]\n\
+               print(xs[xs.argmin()].is_nan() and xs.min().is_nan())\n\
+               print(xs[xs.argmax()].is_nan() and xs.max().is_nan())\n";
+    for (engine, env) in ENGINES {
+        let (out, err, code) = run_source(inv, env, &format!("arginv_{engine}"));
+        assert_eq!(code, Some(0), "[{engine}] {err}");
+        assert_eq!(out, "true\ntrue\n", "[{engine}] xs[argmin] must be xs.min()");
+    }
+
+    // Every spelling agrees: method, free function, and the `_by` forms (which return
+    // the ELEMENT, so they answer the NaN itself).
+    for (src, want) in [
+        ("print([1.0, nan, 3.0].argmin())", "1"),
+        ("print([1.0, nan, 3.0].argmax())", "1"),
+        ("print(argmin([1.0, nan, 3.0]))", "1"),
+        ("print(argmax([1.0, nan, 3.0]))", "1"),
+        ("print([1.0, nan, 3.0].min_by(it))", "NaN"),
+        ("print([1.0, nan, 3.0].max_by(it))", "NaN"),
+        ("print([nan, 1.0, 3.0].argmin())", "0"),
+    ] {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], &format!("argfam_{}", src.len()));
+        assert_eq!(code, Some(0), "{src}: {err}");
+        assert_eq!(out.trim(), want, "{src}");
+    }
+
+    // `missing` still propagates, and everything NaN-free is untouched.
+    for (src, want) in [
+        ("print([1.0, missing, 3.0].argmin())", "missing"),
+        ("print(argmin([1.0, missing, 3.0]))", "missing"),
+        ("print([3.0, 1.0, 2.0].argmin())", "1"),
+        ("print([3, 1, 2].argmax())", "0"),
+        ("print([2.0, 2.0, 2.0].argmax())", "0"),
+    ] {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], &format!("argun_{}", src.len()));
+        assert_eq!(code, Some(0), "{src}: {err}");
+        assert_eq!(out.trim(), want, "{src}");
+    }
+}

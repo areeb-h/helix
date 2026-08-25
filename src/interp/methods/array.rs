@@ -34,11 +34,11 @@ use std::rc::Rc;
 ///   of those four shapes, silently changing results under a performance commit. Whether
 ///   that IEEE answer is the right one is a separate, recorded, open question; reproducing
 ///   it is this change's job.
-/// * ANY NaN declines. `[sqrt(-1.0)].argmax()` — one element, no comparison to make —
-///   still raises "cannot compare these values (NaN?)" today, because the reduce compares
-///   the seed against the first element. Note the opposite convention two arms above:
-///   packed `sort`/`argsort` deliberately do NOT defer on NaN, because they have NaN
-///   *placement* semantics rather than a raise.
+/// * A NaN answers with its own INDEX (ADR 0036 policy 3). It used to DECLINE, which
+///   sent the desugar to a guard that answered `missing` — the laundering. Since
+///   `min()`/`max()` now return the NaN itself, the index pointing at it is the
+///   consistent answer, it keeps `xs[xs.argmin()] == xs.min()` true, and it is what
+///   numpy gives (`np.argmin([1.0, nan, 3.0])` is 1).
 ///
 /// Ties are first-wins (`[2,2,2].argmax()` → 0), so the scan must update only on a STRICT
 /// improvement. A range needs no comparisons at all: it is strictly monotonic (a zero step
@@ -65,7 +65,14 @@ pub(crate) fn packed_arg_extreme(ad: &crate::value::ArrayData, want_max: bool) -
         } else {
             scan(xs, |a, b| a < b)
         }),
-        ArrayData::Floats(xs) if !xs.is_empty() && !xs.iter().any(|f| f.is_nan()) => {
+        ArrayData::Floats(xs) if !xs.is_empty() => {
+            // A NaN answers with its own index (ADR 0036 policy 3) — `min()`/`max()`
+            // return the NaN, so the index that points AT it is the consistent
+            // answer, and it is numpy's. This arm used to DECLINE on a NaN, which
+            // sent the desugar to a slow path that answered `missing`.
+            if let Some(i) = xs.iter().position(|f| f.is_nan()) {
+                return Some(i as i64);
+            }
             Some(if want_max { scan(xs, |a, b| a > b) } else { scan(xs, |a, b| a < b) })
         }
         ArrayData::Range { step, len, .. } if *len > 0 => {

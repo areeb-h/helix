@@ -6949,7 +6949,11 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         for (src, want) in [
             ("missing.min_by((a, b) => a)", "missing"),
             ("[1, missing, 3].min_by(it)", "missing"),
-            ("[1.0, inf - inf].min_by(it)", "missing"),
+            // A NaN is a FAILED COMPUTATION, not absent data — `min_by` returns the
+            // element, so it returns the NaN (ADR 0036 policy 3). This line pinned
+            // the two to one answer until v0.6.0.
+            ("[1.0, inf - inf].min_by(it)", "NaN"),
+            ("[1.0, missing, inf - inf].min_by(it)", "missing"),
         ] {
             let (tw, vm) = (run_tw(src), run_vm(src));
             assert_eq!(tw, vm, "engines disagree on `{src}`");

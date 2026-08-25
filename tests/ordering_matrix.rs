@@ -149,12 +149,16 @@ const CASES: &[(&str, &str, &str)] = &[
     // sort must place every value while a reduction propagates the failure.
     ("float_nan/min", "[1.0, sqrt(0.0 - 1.0), 3.0].min()", "NaN"),
     ("float_nan/max", "[1.0, sqrt(0.0 - 1.0), 3.0].max()", "NaN"),
-    ("float_nan/min_by", "[1.0, sqrt(0.0 - 1.0), 3.0].min_by(it)", "missing"),
-    ("float_nan/max_by", "[1.0, sqrt(0.0 - 1.0), 3.0].max_by(it)", "missing"),
-    ("float_nan/argmin", "[1.0, sqrt(0.0 - 1.0), 3.0].argmin()", "missing"),
-    ("float_nan/argmax", "[1.0, sqrt(0.0 - 1.0), 3.0].argmax()", "missing"),
-    ("float_nan/fn_argmin", "argmin([1.0, sqrt(0.0 - 1.0), 3.0])", "missing"),
-    ("float_nan/fn_argmax", "argmax([1.0, sqrt(0.0 - 1.0), 3.0])", "missing"),
+    // The `_by` forms return the ELEMENT, so they return the NaN; the `arg` forms
+    // return its INDEX. Both pinned `missing` until v0.6.0 — the laundering. The index
+    // is what `xs[xs.argmin()] == xs.min()` requires now that `min()` returns the NaN,
+    // and it is numpy's answer (ADR 0036 policy 3).
+    ("float_nan/min_by", "[1.0, sqrt(0.0 - 1.0), 3.0].min_by(it)", "NaN"),
+    ("float_nan/max_by", "[1.0, sqrt(0.0 - 1.0), 3.0].max_by(it)", "NaN"),
+    ("float_nan/argmin", "[1.0, sqrt(0.0 - 1.0), 3.0].argmin()", "1"),
+    ("float_nan/argmax", "[1.0, sqrt(0.0 - 1.0), 3.0].argmax()", "1"),
+    ("float_nan/fn_argmin", "argmin([1.0, sqrt(0.0 - 1.0), 3.0])", "1"),
+    ("float_nan/fn_argmax", "argmax([1.0, sqrt(0.0 - 1.0), 3.0])", "1"),
     ("float_nan/fn_min", "min([1.0, sqrt(0.0 - 1.0), 3.0])", "error: `min` takes 2 arguments, got 1"),
     ("float_nan/fn_max", "max([1.0, sqrt(0.0 - 1.0), 3.0])", "error: `max` takes 2 arguments, got 1"),
 

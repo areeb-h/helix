@@ -98,9 +98,19 @@
         assert_eq!(idx(Value::lazy_range(10, -1, 10), true), Some(0));
         assert_eq!(idx(Value::lazy_range(10, -1, 10), false), Some(9));
 
+        // A NaN ENGAGES now and answers with its own index (ADR 0036 policy 3).
+        // It used to DECLINE, which routed to a desugar guard that laundered it to
+        // `missing`; since `min()`/`max()` return the NaN itself, the index pointing
+        // at it is the consistent answer and keeps `xs[xs.argmin()] == xs.min()`.
+        assert_eq!(idx(Value::float_array(vec![1.0, f64::NAN, 3.0]), true), Some(1), "NaN index");
+        assert_eq!(idx(Value::float_array(vec![f64::NAN]), true), Some(0), "lone NaN");
+        assert_eq!(
+            idx(Value::float_array(vec![1.0, f64::NAN, f64::NAN]), false),
+            Some(1),
+            "FIRST NaN wins, like every other tie here"
+        );
+
         // DECLINES — and each decline is a shape whose error the desugar owns.
-        assert_eq!(idx(Value::float_array(vec![1.0, f64::NAN, 3.0]), true), None, "NaN");
-        assert_eq!(idx(Value::float_array(vec![f64::NAN]), true), None, "lone NaN still raises");
         assert_eq!(idx(Value::int_array(vec![]), true), None, "empty");
         assert_eq!(idx(Value::float_array(vec![]), true), None, "empty");
         assert_eq!(idx(Value::lazy_range(0, 1, 0), true), None, "empty range");
@@ -1451,13 +1461,24 @@
         assert_eq!(float("round(3.14159, 2147483648)"), 3.14159);
     }
 
-    /// `argmax`/`argmin` propagate `missing` like every other aggregation (ADR 0001),
-    /// rather than raising a type error on `missing` or silently skipping a `NaN`.
+    /// `argmax`/`argmin` propagate `missing` like every other aggregation (ADR 0001)
+    /// — and answer a NaN with its INDEX, which is a different fact (ADR 0036 policy 3).
+    ///
+    /// The third assertion pinned them to one answer until v0.6.0, which was the
+    /// laundering: absent data and a failed computation reported identically.
     #[test]
-    fn argmax_argmin_propagate_missing() {
+    fn argmax_argmin_propagate_missing_and_index_a_nan() {
         assert!(matches!(last("argmax([1, missing, 3])").unwrap(), Value::Missing));
         assert!(matches!(last("argmin([1, missing, 3])").unwrap(), Value::Missing));
-        assert!(matches!(last("argmax([3.0, sqrt(-1.0), 5.0])").unwrap(), Value::Missing));
+        // `sqrt(-1.0)` is at index 1, and `max()` on that array returns the NaN — so
+        // `argmax` must point at it for `xs[xs.argmax()] == xs.max()` to hold.
+        assert!(matches!(last("argmax([3.0, sqrt(-1.0), 5.0])").unwrap(), Value::Int(1)));
+        assert!(matches!(last("argmin([3.0, sqrt(-1.0), 5.0])").unwrap(), Value::Int(1)));
+        // `missing` still WINS when both are present: absence is the weaker claim.
+        assert!(matches!(
+            last("argmax([3.0, sqrt(-1.0), missing])").unwrap(),
+            Value::Missing
+        ));
     }
 
     /// A `reduce`/`scan` binder that reuses a name (`(a, a)` — explicitly legal,

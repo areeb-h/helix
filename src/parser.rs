@@ -667,6 +667,17 @@ fn desugar_order_by(
                     col,
                 }),
                 then_branch: Box::new(Expr::Missing),
+                // A NaN answers with its own INDEX, not `missing` (ADR 0036 policy 3).
+                //
+                // `min()` on a NaN-bearing array returns the NaN, and the NaN sits at
+                // this index — so `xs[xs.argmin()] == xs.min()` holds, which is the
+                // invariant worth keeping and is exactly what numpy does
+                // (`np.argmin([1.0, nan, 3.0])` is 1). Until v0.6.0 this branch
+                // answered `missing`, which was the laundering written into the
+                // desugar itself: a computation that FAILED reported as absent data.
+                //
+                // `it != it` is true only for a NaN, and `position` is guaranteed to
+                // find one because that is the condition guarding this branch.
                 else_branch: Box::new(Expr::If {
                     cond: Box::new(Expr::Method {
                         recv: Box::new(ident("$oba")),
@@ -682,7 +693,30 @@ fn desugar_order_by(
                         line,
                         col,
                     }),
-                    then_branch: Box::new(Expr::Missing),
+                    then_branch: Box::new(Expr::Method {
+                        recv: Box::new(ident("$oba")),
+                        name: "position".to_string(),
+                        args: vec![Expr::Lambda {
+                            params: vec!["$nanq".to_string()],
+                            // `x != x` rather than `is_nan(x)`: this desugar is
+                            // generated for EVERY receiver type, and `is_nan` on a
+                            // String is a static type error — so spelling it that way
+                            // broke `["a", "b"].min_by(it)` at check time even though
+                            // the branch can never run for strings. `!=` is defined on
+                            // every type and is true only for a NaN, which is exactly
+                            // the test the guard one level up already uses.
+                            body: Box::new(Expr::Binary {
+                                op: BinOp::Ne,
+                                left: Box::new(ident("$nanq")),
+                                right: Box::new(ident("$nanq")),
+                                line,
+                                col,
+                            }),
+                        }],
+                        named: vec![],
+                        line,
+                        col,
+                    }),
                     else_branch: Box::new(slow),
                     line,
                     col,
