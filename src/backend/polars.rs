@@ -180,22 +180,29 @@ fn value_to_lit(v: &Value, line: usize, col: usize) -> Result<Expr, HelixError> 
 
 /// Lower the backend-agnostic [`ColExpr`] into a Polars expression (the back half
 /// of the verb→engine seam; the front half is `super::ast_to_colexpr`).
-fn lower(e: &ColExpr) -> Result<Expr, HelixError> {
+/// Lower a Helix column expression to a polars expression.
+///
+/// `line`/`col` are the SOURCE position of the verb this expression came from.
+/// They used to be absent, and every error raised in here was reported at `0, 0` —
+/// pointing at nothing — while both callers had the real position sitting unused in
+/// `_line`/`_col`. Threading them is what lets a refusal inside a query point at the
+/// query.
+fn lower(e: &ColExpr, line: usize, col: usize) -> Result<Expr, HelixError> {
     Ok(match e {
         ColExpr::Col(name) => pcol(name.as_str()),
-        ColExpr::Lit(v) => value_to_lit(v, 0, 0)?,
+        ColExpr::Lit(v) => value_to_lit(v, line, col)?,
         ColExpr::Unary(op, inner) => {
-            let i = lower(inner)?;
+            let i = lower(inner, line, col)?;
             match op {
                 UnOp::Neg => lit(0) - i,
                 UnOp::Not => i.not(),
             }
         }
         // Arrow's validity bitmap IS Helix's `missing`, so the null test lowers exactly.
-        ColExpr::IsMissing(inner) => lower(inner)?.is_null(),
+        ColExpr::IsMissing(inner) => lower(inner, line, col)?.is_null(),
         ColExpr::Binary(op, l, r) => {
-            let l = lower(l)?;
-            let r = lower(r)?;
+            let l = lower(l, line, col)?;
+            let r = lower(r, line, col)?;
             match op {
                 BinOp::Add => l + r,
                 BinOp::Sub => l - r,
@@ -207,8 +214,8 @@ fn lower(e: &ColExpr) -> Result<Expr, HelixError> {
                 BinOp::FloorDiv => {
                     return Err(HelixError::new(
                         "integer division `//` isn't supported inside a DataFrame query",
-                        0,
-                        0,
+                        line,
+                        col,
                     )
                     .hint("compute `//` on arrays or scalars, then build the DataFrame."));
                 }
@@ -229,8 +236,8 @@ fn lower(e: &ColExpr) -> Result<Expr, HelixError> {
                 BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
                     return Err(HelixError::new(
                         format!("bitwise operator `{}` isn't supported inside a DataFrame query", op.symbol()),
-                        0,
-                        0,
+                        line,
+                        col,
                     )
                     .hint("compute bitwise expressions on arrays or scalars, then build the DataFrame."));
                 }
@@ -339,8 +346,8 @@ impl DataHandle for PolarsFrame {
         schema_names(&self.lf, line, col)
     }
 
-    fn filter(&self, pred: &ColExpr, _line: usize, _col: usize) -> Result<Df, HelixError> {
-        let e = lower(pred)?;
+    fn filter(&self, pred: &ColExpr, line: usize, col: usize) -> Result<Df, HelixError> {
+        let e = lower(pred, line, col)?;
         Ok(self.derive(self.lf.clone().filter(e)))
     }
 
@@ -365,12 +372,12 @@ impl DataHandle for PolarsFrame {
     fn with_columns(
         &self,
         cols: &[(String, ColExpr)],
-        _line: usize,
-        _col: usize,
+        line: usize,
+        col: usize,
     ) -> Result<Df, HelixError> {
         let mut exprs = Vec::with_capacity(cols.len());
         for (name, ce) in cols {
-            exprs.push(lower(ce)?.alias(name.as_str()));
+            exprs.push(lower(ce, line, col)?.alias(name.as_str()));
         }
         Ok(self.derive(self.lf.clone().with_columns(exprs)))
     }
