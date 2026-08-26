@@ -13,6 +13,7 @@ helix doc builtins        # every free function
 helix check file.helix    # fast type-check; never rejects a runnable program
 helix check --json f.helix # the same diagnostics as data: line, col, message, hint,
                           #   AND the rendered prose. `--lint` notes come through too
+helix jit-explain f.helix # which numeric kernels compiled, by line (`--json` too)
 helix test <dir>          # runs *_test.helix files AND every `## >>>` doc example
 helix eval "print(1 + 2)" # one-liner
 helix fmt file.helix      # token-stream formatter; provably cannot change a program
@@ -76,8 +77,11 @@ cmp a.out b.out && cmp a.out c.out
 3. **`sum()` and its `reduce` spelling diverge at the i64 edge**: `sum()` widens to
    float where the reduce wraps. Documented divergence, same doc.
 4. **Float `==` is exact**: `[0.1, 0.2].sum() == 0.3` is `false`. Use `assert_close`.
-5. **Falling off a JIT kernel is silent** — same answer, much slower (an eligibility
-   diagnostic is planned). If a hot loop is slow, suspect the shape, not the math.
+5. **Falling off a JIT kernel is silent** — same answer, much slower. If a hot loop is
+   slow, suspect the shape, not the math: `helix jit-explain prog.helix` lists every
+   kernel site the compiler offered the JIT, with its line and whether native code was
+   generated. A comprehension whose line is absent was never offered at all. It reports
+   what the JIT was asked and what it answered, **not yet why** a shape was refused.
 
 A lookup miss is *distinguishable* on request: `d.expect(k)` raises where `d.get(k)`
 and `d[k]` return `missing` (ADR 0001 keeps the propagating default).

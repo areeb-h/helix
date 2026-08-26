@@ -2486,6 +2486,116 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `helix jit-explain` — is my hot loop actually compiled?
+///
+/// AGENTS.md footgun #5: falling off a JIT kernel is SILENT. The answer stays correct
+/// and the program gets much slower, so the only symptom is a wall-clock number with
+/// nothing to compare it against, and the doc said an eligibility diagnostic was
+/// "planned" — an unimplemented promise sitting in the documentation.
+///
+/// What it must never do is blame a shape for something else. Three states are kept
+/// apart deliberately: the JIT switched off, the JIT on but with no codegen for this
+/// target (x86-64 Linux only, which excludes both aarch64 release builds and macOS), and
+/// a genuine per-site refusal. Only the third is about the loop, and only the third
+/// prints DECLINED.
+#[test]
+fn jit_explain_reports_which_kernels_compiled() {
+    let dir = std::env::temp_dir().join("helix_jitexplain");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |name: &str, src: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, src).unwrap();
+        p.to_str().unwrap().to_string()
+    };
+    // Numeric map / filter / reduce over packed arrays — the shapes the JIT exists for.
+    let hot = w(
+        "hot.helix",
+        "xs = range(1000).map(i => i * 2)\n\
+         ys = xs.filter(x => x > 10)\n\
+         total = range(1000).reduce(0, (a, b) => a + b)\n\
+         print(xs.count(), ys.count(), total)\n",
+    );
+    // Strings: nothing here is a numeric kernel, so nothing is offered.
+    let cold = w("cold.helix", "print([\"ada\", \"alan\"].map(n => n.upper()).join(\",\"))\n");
+
+    let (out, err, code) = run(&["jit-explain", "--json", &hot], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    assert_eq!(v["offered"], 3, "map, filter and reduce should each be offered: {out}");
+    let fams: Vec<&str> =
+        v["sites"].as_array().unwrap().iter().map(|s| s["family"].as_str().unwrap()).collect();
+    for want in ["map", "filter", "reduce"] {
+        assert!(fams.contains(&want), "{want} missing from {fams:?}");
+    }
+    // Every site carries a source position — a site index alone would be unusable.
+    for site in v["sites"].as_array().unwrap() {
+        assert!(site["line"].as_u64().unwrap() > 0, "no line: {site}");
+    }
+    // Sites are listed in source order, so a reader can scan for their own line.
+    let lines: Vec<u64> =
+        v["sites"].as_array().unwrap().iter().map(|s| s["line"].as_u64().unwrap()).collect();
+    let mut sorted = lines.clone();
+    sorted.sort_unstable();
+    assert_eq!(lines, sorted, "sites must be in source order: {lines:?}");
+
+    // On a machine where codegen runs, these compile; where it does not, the engine
+    // reports itself as such rather than marking the shapes declined. Both are correct
+    // answers — asserting "compiled" unconditionally would make this test a platform
+    // assertion instead of a behaviour one.
+    match v["engine"].as_str().unwrap() {
+        "live" => {
+            assert_eq!(v["compiled"], 3, "all three should compile here: {out}");
+            let (human, _, _) = run(&["jit-explain", &hot], &[], "");
+            assert!(human.contains("compiled"), "{human}");
+            assert!(!human.contains("DECLINED"), "nothing here should be refused: {human}");
+        }
+        "nothing-built" => {
+            assert_eq!(v["compiled"], 0);
+            let (human, _, _) = run(&["jit-explain", &hot], &[], "");
+            assert!(human.contains("x86-64 Linux only"), "must name the real reason: {human}");
+            assert!(!human.contains("DECLINED"), "must not blame the shapes: {human}");
+        }
+        other => panic!("unexpected engine `{other}` with the JIT enabled"),
+    }
+
+    // The switch is reported as the switch: `off`, no site marked declined.
+    let (out, _, code) = run(&["jit-explain", "--json", &hot], &[("HELIX_NOJIT", "1")], "");
+    assert_eq!(code, Some(0));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["engine"], "off");
+    assert_eq!(v["jit_available"], false);
+    assert_eq!(v["offered"], 3, "the compiler still offers them: {out}");
+    assert_eq!(v["compiled"], 0);
+    let (human, _, _) = run(&["jit-explain", &hot], &[("HELIX_NOJIT", "1")], "");
+    assert!(human.contains("that is the switch, not"), "{human}");
+    assert!(!human.contains("DECLINED"), "the switch must not read as a refusal: {human}");
+
+    // A program with no numeric kernels offers nothing — and must NOT be told the JIT
+    // is missing, which is what `jit.is_some()` alone reported before.
+    let (out, _, code) = run(&["jit-explain", "--json", &cold], &[], "");
+    assert_eq!(code, Some(0));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["offered"], 0);
+    assert_eq!(v["sites"].as_array().unwrap().len(), 0);
+    let (human, _, _) = run(&["jit-explain", &cold], &[], "");
+    assert!(human.contains("offered no kernel sites"), "{human}");
+    assert!(!human.contains("No JIT in this run"), "the JIT is fine; there was nothing to build: {human}");
+
+    // It type-checks first, so a broken program gets the real diagnostic rather than an
+    // empty report that looks like "no kernels here".
+    let bad = w("bad.helix", "x = \"a\" + \"b\"\n");
+    let (_, err, code) = run(&["jit-explain", &bad], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("needs numbers"), "{err}");
+
+    let (_, err, code) = run(&["jit-explain"], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("needs a script path"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `helix check --json` — the diagnostics as data, WITHOUT losing the prose.
 ///
 /// Agents and editors were scraping caret-annotated text with regexes to find a line

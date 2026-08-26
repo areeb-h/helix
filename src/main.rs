@@ -58,6 +58,7 @@ mod cookiejar;
 mod http;
 mod interp;
 mod jit;
+mod jitexplain;
 mod json;
 mod lattice;
 mod lexer;
@@ -337,6 +338,8 @@ fn run() -> ExitCode {
         Some("doc") => cli_doc(&args),
         // `helix describe` — the whole API as JSON (machine-readable, for LLMs/agents/tools).
         Some("describe") => cli_describe(&args),
+        // `helix jit-explain <script>` — which numeric kernels the JIT compiled.
+        Some("jit-explain") => cli_jit_explain(&args),
         // Shorthand: `helix script.helix` runs a file directly.
         Some(path) => run_file(path),
     }
@@ -715,6 +718,92 @@ fn cli_describe_one(query: &str) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `helix jit-explain <script> [--json]` — which numeric kernel sites the compiler
+/// offered to the JIT, where they are, and which of them got native code.
+///
+/// Compiles the program and builds the JIT; it does NOT run it. Answering "is my hot
+/// loop compiled?" must not require executing a program that reads files or opens
+/// sockets — and the answer is a property of compilation, not of a particular run.
+fn cli_jit_explain(args: &[String]) -> ExitCode {
+    let json = args.iter().skip(2).any(|a| a == "--json");
+    let Some(p) = args.iter().skip(2).find(|a| !a.starts_with('-')) else {
+        eprintln!("error: `helix jit-explain` needs a script path, e.g. `helix jit-explain hot.helix`");
+        return ExitCode::FAILURE;
+    };
+    if let Some(bad) = args.iter().skip(2).find(|a| a.starts_with('-') && a.as_str() != "--json") {
+        eprintln!("error: unknown option `{bad}` for `helix jit-explain` (the only flag is `--json`)");
+        return ExitCode::FAILURE;
+    }
+    let path = match resolve_script(p) {
+        Ok(path) => path,
+        Err(msg) => {
+            eprint!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let shown = path.display().to_string();
+    run_on_big_stack(move || {
+        let loaded = match module::load(&path) {
+            Ok(l) => l,
+            Err(rendered) => {
+                eprint!("{rendered}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let types = match types::check(&loaded.stmts) {
+            Ok(t) => t,
+            Err(e) => {
+                eprint!("{}", render_err(e, &loaded.spans, loaded.multi_module));
+                return ExitCode::FAILURE;
+            }
+        };
+        let Ok(prog) = bytecode::compile_with_types(&loaded.stmts, Some(types)) else {
+            eprintln!("internal error: the compiler could not lower a type-checked program (please report)");
+            return ExitCode::FAILURE;
+        };
+        // The same switch the run path honours, so this reports what a run WOULD do
+        // rather than what an unconfigured build could do.
+        let nojit = std::env::var_os("HELIX_NOJIT").is_some();
+        let jit = if nojit {
+            None
+        } else {
+            jit::build(
+                &loaded.stmts,
+                &prog.reduce_loops,
+                &prog.map_kernels,
+                &prog.filter_kernels,
+                &prog.fused_kernels,
+                &prog.scan_loops,
+            )
+        };
+        // Three states, kept apart so the report never blames a shape for something
+        // else: the switch, an absent codegen backend, and a real per-site refusal.
+        // `jit.is_some()` alone conflates all three — and would have told every reader
+        // on aarch64 or macOS that their loops are shaped wrong.
+        let engine = if !cfg!(feature = "jit") || nojit {
+            jitexplain::Engine::Off
+        } else if jit.is_none() {
+            jitexplain::Engine::NothingBuilt
+        } else {
+            jitexplain::Engine::Live
+        };
+        let sites = jitexplain::sites(&prog, jit.as_ref());
+        if json {
+            let doc = jitexplain::to_json(&shown, &sites, engine);
+            match serde_json::to_string_pretty(&doc) {
+                Ok(s) => println!("{s}"),
+                Err(e) => {
+                    eprintln!("error: could not serialize: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        } else {
+            print!("{}", jitexplain::render(&shown, &sites, engine));
+        }
+        ExitCode::SUCCESS
+    })
 }
 
 fn cli_describe(args: &[String]) -> ExitCode {
@@ -1435,6 +1524,7 @@ fn print_help() {
          helix test [path]        run *_test.helix files and report pass/fail\n    \
          helix doc [Type]         list a type's methods (Array/String/Dna/…) or `builtins`\n    \
          helix describe [what]    the API as JSON — a name, a Type, or everything\n    \
+         helix jit-explain <s>    which numeric kernels the JIT compiled, and where\n    \
          helix version            show the version\n    \
          helix help               show this help\n\n\
          The default `helix` is a self-contained binary. A build with the `python`\n\

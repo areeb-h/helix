@@ -4,6 +4,24 @@
 
 ### Added
 
+- **`helix jit-explain <script>`** — which numeric kernel sites the compiler offered the
+  JIT, where they are, and which got native code. `--json` for tools.
+
+  `AGENTS.md` has listed silent JIT fallback as a footgun since the JIT shipped, with an
+  eligibility diagnostic recorded as *planned*: the answer stays correct and the program
+  gets much slower, so the only symptom is a wall-clock number with nothing to compare it
+  against. Now a reader can ask.
+
+  It is careful about what it blames. Three states are kept apart — the JIT switched off
+  (`HELIX_NOJIT=1` or no feature), the JIT enabled but with no codegen for this target
+  (x86-64 Linux only today, which covers neither aarch64 release build nor macOS), and a
+  genuine per-site refusal. Only the last prints `DECLINED`; reporting it for the other
+  two would tell every Apple-Silicon reader their loops are shaped wrong. It compiles but
+  does **not** run the program, so asking the question never executes anything.
+
+  It does not yet say *why* a shape was refused: the eligibility predicates in
+  `jit::analysis` answer `bool`, not a reason, and a plausible-sounding guess would send
+  the reader to rewrite the wrong thing.
 - **`helix check --json`** — diagnostics as data: `{ok, checked, failed, files: [{file,
   ok, diagnostics: [{severity, file, line, col, message, hint, rendered}]}]}`. Tools
   were scraping caret-annotated text with regexes to recover a line number.
