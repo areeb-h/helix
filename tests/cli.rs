@@ -2486,6 +2486,111 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `helix check --json` — the diagnostics as data, WITHOUT losing the prose.
+///
+/// Agents and editors were scraping caret-annotated text with regexes to find a line
+/// number. The structured half fixes that; the `rendered` half is kept because it is the
+/// part that actually repairs the mistake — a 14-case sweep of what agents get wrong
+/// found eleven diagnostics whose help NAMES the fix, so a machine format that replaced
+/// prose with an error code would be a downgrade wearing an upgrade's clothes.
+///
+/// The load path is the half that mattered: parse errors are the most common failure and
+/// they used to arrive as an already-rendered `String`, so no caller could see a line or
+/// a hint (`module::Diag`).
+#[test]
+fn check_json_is_structured_and_keeps_the_prose() {
+    let dir = std::env::temp_dir().join("helix_checkjson");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    let w = |name: &str, src: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, src).unwrap();
+        p.to_str().unwrap().to_string()
+    };
+    let ok = w("ok.helix", "print(1 + 2)\n");
+    let typeerr = w("typeerr.helix", "name = \"a\" + \"b\"\nprint(name)\n");
+    // A PARSE error — the class that carried no structure at all before.
+    let parseerr = w("parseerr.helix", "use lib.util\nprint(1)\n");
+    w("lib/util.helix", "export fn double(x: Int) = x * 2\n");
+    let moderr = w("moderr.helix", "import lib.util\nprint(util.double(\"x\"))\n");
+
+    let parse = |out: &str| -> serde_json::Value {
+        serde_json::from_str(out).expect("`helix check --json` must emit valid JSON")
+    };
+
+    // A type error: every field present, and `rendered` byte-identical to the human run.
+    let (out, _, code) = run(&["check", "--json", &typeerr], &[], "");
+    assert_eq!(code, Some(1), "a failing check must still exit non-zero");
+    let v = parse(&out);
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["checked"], 1);
+    assert_eq!(v["failed"], 1);
+    let d = &v["files"][0]["diagnostics"][0];
+    assert_eq!(d["severity"], "error");
+    assert_eq!(d["line"], 1);
+    assert_eq!(d["col"], 12);
+    assert_eq!(d["message"], "operator `+` needs numbers, but got a String");
+    assert!(d["hint"].as_str().unwrap().contains("interpolation"), "the hint is the fix");
+    let (_, human_err, _) = run(&["check", &typeerr], &[], "");
+    assert_eq!(
+        d["rendered"].as_str().unwrap(),
+        human_err,
+        "`rendered` must be exactly what the human output prints"
+    );
+
+    // A parse error carries a position and a hint too — this is the point of `Diag`.
+    let (out, _, code) = run(&["check", "--json", &parseerr], &[], "");
+    assert_eq!(code, Some(1));
+    let d = parse(&out)["files"][0]["diagnostics"][0].clone();
+    assert_eq!(d["line"], 1, "a parse error must carry its line: {d}");
+    assert!(d["col"].as_u64().unwrap() > 0, "and its column: {d}");
+    assert!(d["message"].as_str().unwrap().contains("expected end of line"), "{d}");
+    assert!(d["hint"].as_str().unwrap().contains("import"), "the hint must survive: {d}");
+
+    // An error inside an IMPORTED module reports the reader's file and local line — and
+    // the structured message must be stripped of the `m<N>$` rewrite prefix exactly as
+    // the rendered one is. Two spellings of one name in one document is a bug.
+    let (out, _, _) = run(&["check", "--json", &moderr], &[], "");
+    let d = parse(&out)["files"][0]["diagnostics"][0].clone();
+    let msg = d["message"].as_str().unwrap();
+    assert!(msg.contains("`double`"), "the real name: {msg}");
+    assert!(!msg.contains("m0$"), "internal mangling leaked into the JSON: {msg}");
+    assert!(!d["rendered"].as_str().unwrap().contains("m0$"), "leaked into rendered");
+
+    // Many files: per-file results plus a summary, and a clean file has no diagnostics.
+    let (out, _, code) = run(&["check", "--json", &ok, &typeerr], &[], "");
+    assert_eq!(code, Some(1));
+    let v = parse(&out);
+    assert_eq!(v["checked"], 2);
+    assert_eq!(v["failed"], 1);
+    let clean = v["files"].as_array().unwrap().iter().find(|f| f["ok"] == true).unwrap();
+    assert_eq!(clean["diagnostics"].as_array().unwrap().len(), 0);
+
+    // All-clean is `ok: true` and exit 0.
+    let (out, _, code) = run(&["check", "--json", &ok], &[], "");
+    assert_eq!(code, Some(0));
+    assert_eq!(parse(&out)["ok"], true);
+
+    // A lint is a NOTE: it appears, and it changes neither `ok` nor the exit code —
+    // the same rule the human output follows.
+    let lintme = w("lintme.helix", "x = 5\nprint(0 - x)\n");
+    let (out, _, code) = run(&["check", "--json", "--lint", &lintme], &[], "");
+    assert_eq!(code, Some(0), "a lint must not fail the check");
+    let v = parse(&out);
+    assert_eq!(v["ok"], true);
+    let notes = v["files"][0]["diagnostics"].as_array().unwrap();
+    assert_eq!(notes.len(), 1, "the lint should be reported: {notes:?}");
+    assert_eq!(notes[0]["severity"], "note");
+    assert!(notes[0]["rendered"].as_str().unwrap().contains("unary minus"));
+
+    // An unknown flag names the real ones rather than only refusing.
+    let (_, err, code) = run(&["check", "--wat", &ok], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("--lint") && err.contains("--json"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `helix describe <Type>` answers "what can I do with a DataFrame?" in JSON.
 ///
 /// That question is the one you ask BEFORE you know any names, and it was the one shape

@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Added
+
+- **`helix check --json`** — diagnostics as data: `{ok, checked, failed, files: [{file,
+  ok, diagnostics: [{severity, file, line, col, message, hint, rendered}]}]}`. Tools
+  were scraping caret-annotated text with regexes to recover a line number.
+
+  It keeps `rendered` — byte-identical to the human output — rather than replacing prose
+  with an error code. That is deliberate and measured: putting 14 mistakes an agent
+  plausibly makes through `helix check` found **eleven whose help text names the exact
+  fix** (`to_json(x)` answers *"`to_json` is a method: `x.to_json()`"*; a C-style body
+  answers *"`fn f(x) = x + 1`"*), so the prose is the part that repairs the mistake and
+  a machine format that dropped it would be a downgrade.
+
+  The load path is what actually needed fixing: parse errors — the most common failure —
+  were rendered to a `String` inside the module loader, so no caller could recover a line,
+  a column or a hint. `module::Diag` now carries both halves, and `module::load` is a
+  thin wrapper over it, so every existing caller is unchanged. `--lint` notes come
+  through as `severity: "note"` and, as in the human output, change neither `ok` nor the
+  exit code.
+- **`helix describe <Type>`** — one receiver type's whole method table as JSON: per
+  method the signature, doc, example, expected output, notes and capability effect, plus
+  the universal methods. DataFrame's entry is ~6% of the size of the full catalog, so the
+  question you have *before* you know any names is answerable without reading 120 KB.
+  `helix doc <Type>` prints the same table for a human.
+
 ### Fixed
 
 - **A Float now survives `to_json` → `parse_json` bit-identically.** It did not:

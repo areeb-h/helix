@@ -946,13 +946,18 @@ fn run_source(code: &str, filename: &str) -> ExitCode {
 fn run_check(args: &[String]) -> ExitCode {
     let mut paths: Vec<&str> = Vec::new();
     let mut lint = false;
+    let mut json = false;
     for a in args.iter().skip(2) {
         if a == "--lint" {
             lint = true;
             continue;
         }
+        if a == "--json" {
+            json = true;
+            continue;
+        }
         if a.starts_with('-') {
-            eprintln!("error: unknown option `{a}` for `helix check`");
+            eprintln!("error: unknown option `{a}` for `helix check` (the flags are `--lint` and `--json`)");
             return ExitCode::FAILURE;
         }
         paths.push(a);
@@ -977,22 +982,67 @@ fn run_check(args: &[String]) -> ExitCode {
     // over the AST, and spawning that thread per file would dominate the run.
     run_on_big_stack(move || {
         let mut failed = 0usize;
+        let mut files_json: Vec<serde_json::Value> = Vec::new();
         for path in &resolved {
+            let shown = path.display().to_string();
+            if json {
+                let mut diags: Vec<serde_json::Value> = Vec::new();
+                let ok = match check_file_structured(path) {
+                    Ok(()) => true,
+                    Err(d) => {
+                        diags.push(diag_json("error", &shown, &d));
+                        false
+                    }
+                };
+                // A lint is a NOTE, not a failure: it never changes `ok` or the exit
+                // code, exactly as in the human output.
+                if lint && let Ok(src) = std::fs::read_to_string(path) {
+                    for note in lint_source(&shown, &src) {
+                        diags.push(serde_json::json!({
+                            "severity": "note", "file": shown, "rendered": note
+                        }));
+                    }
+                }
+                if !ok {
+                    failed += 1;
+                }
+                files_json.push(serde_json::json!({
+                    "file": shown, "ok": ok, "diagnostics": diags
+                }));
+                continue;
+            }
             match check_file_capture(path) {
                 Ok(()) => {
-                    println!("ok   {}", path.display());
+                    println!("ok   {shown}");
                     if lint && let Ok(src) = std::fs::read_to_string(path) {
-                        for note in lint_source(&path.display().to_string(), &src) {
+                        for note in lint_source(&shown, &src) {
                             println!("lint {note}");
                         }
                     }
                 }
                 Err(rendered) => {
                     failed += 1;
-                    println!("FAIL {}", path.display());
+                    println!("FAIL {shown}");
                     eprint!("{rendered}");
                 }
             }
+        }
+        if json {
+            let doc = serde_json::json!({
+                "ok": failed == 0,
+                "helix_version": env!("CARGO_PKG_VERSION"),
+                "checked": resolved.len(),
+                "failed": failed,
+                "files": files_json,
+            });
+            match serde_json::to_string_pretty(&doc) {
+                Ok(s) => println!("{s}"),
+                Err(e) => {
+                    eprintln!("error: could not serialize: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            return if failed == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE };
         }
         if resolved.len() > 1 {
             println!("checked {} files, {failed} failed", resolved.len());
@@ -1333,7 +1383,7 @@ fn print_help() {
          helix <script>           run a script (shorthand; `.helix` optional)\n    \
          helix run <script>       run a script (`.helix` optional: `helix run main`)\n    \
          helix eval \"<code>\"       run a one-liner\n    \
-         helix check <script>…    type-check without running (fast; takes many paths)\n    \
+         helix check <script>…    type-check without running (`--json` for tools)\n    \
          helix fmt <script>…      format (no options; `--check` reports instead of writing)\n    \
          helix build <script>     bundle a program into a standalone executable\n    \
          helix emit-hbc <script>  compile to a .hbc bytecode container (for ctype's hvm)\n    \
@@ -1437,6 +1487,63 @@ fn run_file_capture(path: &std::path::Path) -> Result<(), String> {
 /// loader, the same `types::check`, the same `render_err`. Writing a second front end
 /// for `helix check` would let the two drift, and a checker that disagrees with the
 /// runtime is worse than no checker.
+/// One diagnostic as JSON: the STRUCTURE to act on and the rendered prose to show.
+///
+/// Both, deliberately. The structure is what a tool needs — a line, a column, a hint it
+/// can surface next to the code. The prose is what actually repairs the mistake: a
+/// 14-case sweep of what agents get wrong found eleven diagnostics whose help NAMES the
+/// fix (`to_json(x)` answers "`to_json` is a method: `x.to_json()`"), so a machine
+/// format that dropped it in favour of a code would be a downgrade dressed as an
+/// upgrade. `rendered` is byte-identical to what the human output prints.
+///
+/// `line`/`col`/`message`/`hint` are absent when the failure has no position — a
+/// missing file, an import cycle — rather than being faked with zeroes.
+fn diag_json(severity: &str, file: &str, d: &module::Diag) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "severity": severity,
+        "file": d.filename.clone().unwrap_or_else(|| file.to_string()),
+        "rendered": d.rendered,
+    });
+    if let Some(e) = &d.err {
+        v["message"] = serde_json::Value::String(e.message.clone());
+        v["line"] = serde_json::json!(e.line);
+        v["col"] = serde_json::json!(e.col);
+        if let Some(h) = &e.hint {
+            v["hint"] = serde_json::Value::String(h.clone());
+        }
+    }
+    v
+}
+
+/// `check_file_capture`'s structured twin: the same two phases, keeping the diagnostic
+/// whole instead of rendering it. The rendering is identical because `Diag` carries the
+/// rendered text produced by the very same call.
+fn check_file_structured(path: &std::path::Path) -> Result<(), module::Diag> {
+    let loaded = module::load_diag(path)?;
+    types::check(&loaded.stmts).map(|_| ()).map_err(|e| {
+        // The checker reports a GLOBAL line across concatenated modules; map it back to
+        // the file and local line a reader can open, exactly as `render_err` does.
+        let (src, filename, local_line) = module::locate(&loaded.spans, e.line);
+        let mut e = e;
+        e.line = local_line;
+        let rendered = if loaded.multi_module {
+            // The multi-module rewrite prefixes every imported name with `m<N>$` so two
+            // modules can define `double`. That prefix is an implementation detail, and
+            // the human output has always stripped it — but the STRUCTURED fields are a
+            // second copy of the same text, and stripping only the rendered half would
+            // hand a tool `m0$double` while showing the reader `double`. Two spellings of
+            // one name in one document is exactly the kind of drift this project treats
+            // as a bug; caught by asking the JSON what it said about an imported symbol.
+            e.message = strip_mangling(&e.message);
+            e.hint = e.hint.as_deref().map(strip_mangling);
+            strip_mangling(&e.render(src, filename))
+        } else {
+            e.render(src, filename)
+        };
+        module::Diag { rendered, filename: Some(filename.to_string()), err: Some(e) }
+    })
+}
+
 fn check_file_capture(path: &std::path::Path) -> Result<(), String> {
     let loaded = module::load(path)?;
     types::check(&loaded.stmts)

@@ -11,6 +11,8 @@ helix doc <Type>          # the same table, printed for a human
 helix doc <name>          # a method or builtin by name: owners + an example receiver
 helix doc builtins        # every free function
 helix check file.helix    # fast type-check; never rejects a runnable program
+helix check --json f.helix # the same diagnostics as data: line, col, message, hint,
+                          #   AND the rendered prose. `--lint` notes come through too
 helix test <dir>          # runs *_test.helix files AND every `## >>>` doc example
 helix eval "print(1 + 2)" # one-liner
 helix fmt file.helix      # token-stream formatter; provably cannot change a program

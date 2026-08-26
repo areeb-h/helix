@@ -153,7 +153,57 @@ fn import_rel_path(segments: &[String]) -> PathBuf {
 /// statement list. A single-file program is returned unchanged (no namespacing).
 /// On a lex/parse/resolve error the message is already rendered (with the
 /// *correct* module's filename and caret).
+/// A load failure, carrying BOTH halves: the rendered text every caller has always
+/// printed, and the structured diagnostic when the failure has a position.
+///
+/// Loading used to fail with a `String` — the message already rendered — which meant a
+/// parse error, the most common failure an agent or an editor hits, arrived as prose
+/// with no line, column or hint to act on. The rendered form is kept rather than
+/// reconstructed because it is the part that TEACHES: a 14-case sweep of the mistakes
+/// agents make found eleven whose help text names the exact fix, and a machine-readable
+/// diagnostic that dropped that prose in favour of a code would be a downgrade.
+///
+/// Some failures genuinely have no position — a missing file, an import cycle — so the
+/// structured half is optional, and `From<String>` keeps those sites unchanged.
+#[derive(Debug)]
+pub struct Diag {
+    /// What `helix check` prints. Byte-identical to what it printed before this existed.
+    pub rendered: String,
+    /// Present when the failure points AT something: message, line, col, hint.
+    pub err: Option<HelixError>,
+    /// The file the line and column refer to (a load can fail inside an import).
+    pub filename: Option<String>,
+}
+
+impl From<String> for Diag {
+    fn from(rendered: String) -> Self {
+        Diag { rendered, err: None, filename: None }
+    }
+}
+
+/// `e.into_diag(&src, &fname)` — render exactly as before, and keep the structure.
+trait IntoDiag {
+    fn into_diag(self, src: &str, fname: &str) -> Diag;
+}
+
+impl IntoDiag for HelixError {
+    fn into_diag(self, src: &str, fname: &str) -> Diag {
+        Diag {
+            rendered: self.render(src, fname),
+            err: Some(self),
+            filename: Some(fname.to_string()),
+        }
+    }
+}
+
+/// Load a program, rendering any failure — the long-standing signature, and what every
+/// caller that only prints an error still uses.
 pub fn load(entry: &Path) -> Result<Loaded, String> {
+    load_diag(entry).map_err(|d| d.rendered)
+}
+
+/// Load a program, keeping the structure of a failure (`helix check --json`).
+pub fn load_diag(entry: &Path) -> Result<Loaded, Diag> {
     let (deps, project_root) = project_context(entry)?;
     // Resolution order for an import: the importing file's own directory (local siblings),
     // then the project root, then the stdlib / `HELIX_PATH` search roots.
@@ -185,7 +235,7 @@ pub fn load(entry: &Path) -> Result<Loaded, String> {
         // this module's local line and render against this module's own source.
         let stmts = rewrite_module(&loader.modules, idx, offset).map_err(|mut e| {
             e.line = e.line.saturating_sub(offset);
-            e.render(&loader.modules[idx].source, &loader.modules[idx].filename)
+            e.into_diag(&loader.modules[idx].source, &loader.modules[idx].filename)
         })?;
         out.extend(stmts);
         offset += loader.modules[idx].source.lines().count();
@@ -222,7 +272,7 @@ struct Loader {
 }
 
 impl Loader {
-    fn load_file(&mut self, path: &Path, is_entry: bool) -> Result<usize, String> {
+    fn load_file(&mut self, path: &Path, is_entry: bool) -> Result<usize, Diag> {
         let canon = path
             .canonicalize()
             .map_err(|e| format!("error: cannot read `{}`: {}\n", path.display(), e))?;
@@ -230,18 +280,18 @@ impl Loader {
             return Ok(i); // already loaded (shared dependency)
         }
         if self.in_progress.contains(&canon) {
-            return Err(format!(
+            return Err(Diag::from(format!(
                 "error: import cycle detected involving `{}`\n",
                 canon.display()
-            ));
+            )));
         }
         self.in_progress.push(canon.clone());
 
         let src = std::fs::read_to_string(&canon)
             .map_err(|e| format!("error: cannot read `{}`: {}\n", canon.display(), e))?;
         let fname = canon.to_string_lossy().into_owned();
-        let toks = crate::lexer::lex(&src).map_err(|e| e.render(&src, &fname))?;
-        let mut stmts = crate::parser::parse(toks).map_err(|e| e.render(&src, &fname))?;
+        let toks = crate::lexer::lex(&src).map_err(|e| e.into_diag(&src, &fname))?;
+        let mut stmts = crate::parser::parse(toks).map_err(|e| e.into_diag(&src, &fname))?;
 
         // Lower `import python.a.b [as alias]` into `alias = python.import("a.b")`
         // before resolving file imports — so it rides the normal pipeline (and the
@@ -257,7 +307,7 @@ impl Loader {
                             *col,
                         )
                         .hint("Python modules import as `import python.<module> [as alias]`.")
-                        .render(&src, &fname));
+                        .into_diag(&src, &fname));
                     }
                     let module = segments[1..].join(".");
                     let alias = alias.clone();
@@ -341,7 +391,7 @@ impl Loader {
                                 "expected `{}` beside this file or under the project root",
                                 rel.display()
                             ));
-                    return Err(err.render(&src, &fname));
+                    return Err(err.into_diag(&src, &fname));
                 };
                 let dep_idx = self.load_file(&dep_path, false)?;
                 match selected {
@@ -361,7 +411,7 @@ impl Loader {
                                 .hint(format!(
                                     "mark it `export {n} = …` / `export fn {n}(…)` in that module, or check the spelling."
                                 ))
-                                .render(&src, &fname));
+                                .into_diag(&src, &fname));
                             }
                             // Two modules exporting the same name, both imported
                             // selectively, silently resolved to whichever came last.
@@ -378,7 +428,7 @@ impl Loader {
                                      module itself and qualify the use (`{}.{n}`).",
                                     segments.join(".")
                                 ))
-                                .render(&src, &fname));
+                                .into_diag(&src, &fname));
                             }
                             selected_names.push((n.clone(), dep_idx));
                         }
@@ -404,7 +454,7 @@ impl Loader {
                                  — alias one of them: `import {} as <name>`.",
                                 segments.join(".")
                             ))
-                            .render(&src, &fname));
+                            .into_diag(&src, &fname));
                         }
                         imports.push((alias.clone(), dep_idx));
                     }
@@ -427,7 +477,7 @@ impl Loader {
                         c,
                     )
                     .hint("side effects belong in the entry file you run; in a module, wrap them in an `export fn` the caller invokes.")
-                    .render(&src, &fname));
+                    .into_diag(&src, &fname));
                 }
             }
         }
