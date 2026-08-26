@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A Float now survives `to_json` → `parse_json` bit-identically.** It did not:
+  `(-0.21453773034276893).to_json().parse_json()` answered `-0.2145377303427689` —
+  one ULP away, and `!=` its own source literal. A model checkpoint written and read
+  back was not the model that was saved.
+
+  Neither half of the round trip was where the fault looked like it was.
+  Serialization was always correct (`to_json` emits the shortest round-trip
+  spelling), and Helix's own parser was always correct (`to_float` on that same
+  17-digit string is exact). The loss was on the JSON *read* path: `serde_json` was
+  declared without its `float_roundtrip` feature, so it parsed with a fast
+  best-effort algorithm that is permitted to land a bit away. `0.1`, `0.2`, `0.3`,
+  `pi` and `e` all round-tripped fine, which is why a hand-picked battery of "hard"
+  values would have reported success — `src/json.rs` now proves the property over
+  **20,000 random f64 bit patterns**, including subnormals and the extremes, and
+  `tests/cli.rs` proves it survives the language surface on all three engines.
+
+  Measured cost of the exact parser: **1.04×** on 300,000 floats (5 MB of JSON),
+  26 ms → 27 ms, min-of-7.
+
 ## v0.6.0 — 2026-08-25
 
 ### Changed — one semantics: frames, arrays and scalars answer the same question (ADR 0036)

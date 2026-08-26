@@ -282,6 +282,20 @@ as the default source of the scope.
   unmeasured. This is a totality question (ADR 0024) as much as a scripting one.
 - **Repeated options** (`--include a --include b` into an `Array`) and `--` as the
   end-of-options marker: mechanical, but they must be decided once rather than per program.
+- **A bundle is one source file, and a real tool is not.** `helix build` on a program
+  with imports refuses:
+
+  > `helix build` can only bundle a single-file program yet, but `…/main.helix`
+  > imports other modules — inline the imports into one file for now.
+
+  That refusal is the *right* failure (compare the argv gap above, which is silent),
+  but it means the two capabilities interact: D1 gives a program an interface, and a
+  program worth giving an interface to is exactly the one that has grown past a single
+  file. `bundle::embedded()` carries one `(source, filename)` pair; a tool that ships
+  as one binary wants a resolved module graph — entry, canonical module names, sources
+  or bytecode, and the `helix.lock` hashes they were resolved at, so "one binary"
+  names an exact program. That is its own ADR, and it should land beside this one
+  rather than after it.
 
 ## Sources
 

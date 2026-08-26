@@ -98,7 +98,17 @@ polars = { version = "0.54", features = [
 rustc-hash = "2"
 # JSON for `parse_json`/`to_json` — consuming and producing API/data payloads.
 # Pure compute, no network, always available (a core data capability).
-serde_json = "1"
+#
+# `float_roundtrip` is NOT optional for this language. Without it serde_json parses
+# with a fast best-effort path that is allowed to land one ULP away, so
+# `x.to_json().parse_json()` was not `x`: `-0.21453773034276893` came back as
+# `-0.2145377303427689` and compared UNEQUAL, while `to_float` on the same 17-digit
+# string was exact. Serialization was never the problem — `to_json` emits the
+# shortest round-trip spelling — and Helix's own float parser was never the problem.
+# The feature exists precisely to guarantee f64 -> JSON -> f64 identity, and a
+# language that spent v0.6.0 making one expression mean one thing cannot ship a
+# checkpoint format that silently perturbs the last bit.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 # Serde derive + TOML for the package manager's manifest (`helix.toml`) and lockfile
 # (`helix.lock`). TOML is the hand-edited manifest convention (Cargo/pyproject); the
 # lockfile is machine-generated. Core: the package manager is part of the toolchain.

@@ -163,4 +163,89 @@ mod tests {
     fn non_data_values_are_rejected() {
         assert!(stringify(&Value::Unit).is_err());
     }
+
+    /// **Every finite Float survives `to_json` -> `parse_json` BIT-IDENTICALLY.**
+    ///
+    /// This is a property, not a battery, because a battery is exactly what missed it.
+    /// Until `float_roundtrip` was enabled in Cargo.toml, serde_json parsed with a fast
+    /// best-effort path allowed to land one ULP away, and
+    /// `(-0.21453773034276893).to_json().parse_json()` answered `-0.2145377303427689`
+    /// — unequal to its own source literal. `0.1`, `0.2`, `0.3`, `pi` and `e` all
+    /// round-tripped fine, so any hand-picked list of "hard" values was likely to pass.
+    ///
+    /// The direction of the bug is worth keeping written down: **serialization was
+    /// never wrong** (`to_json` emits the shortest round-trip spelling) and **Helix's
+    /// own parser was never wrong** (`to_float` on the same 17-digit string was exact).
+    /// Only the JSON read path lost the bit, which is why "the JSON layer is lossy" was
+    /// too coarse a diagnosis to act on and "serde_json parses without
+    /// `float_roundtrip`" was the actionable one.
+    #[test]
+    fn every_finite_float_survives_a_json_round_trip() {
+        // A deterministic xorshift over BIT PATTERNS, not over values: sampling
+        // `random::<f64>()` would only ever visit [0, 1), where the fast path is at its
+        // most accurate. Bit patterns reach the exponent range where it is not.
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // The values that are hard for a reason, plus the one that actually failed.
+        let corners: Vec<f64> = vec![
+            0.0,
+            -0.0,
+            0.1,
+            0.2,
+            0.3,
+            1.0 / 3.0,
+            -0.21453773034276893,
+            9007199254740993.0,
+            9007199254740992.0,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),          // smallest subnormal
+            f64::from_bits(0x000F_FFFF_FFFF_FFFF), // largest subnormal
+            std::f64::consts::PI,
+            std::f64::consts::E,
+            1.2345678901234567,
+            1e-100,
+            1e100,
+            -1e-300,
+        ];
+
+        let mut checked = 0usize;
+        let mut cases: Vec<f64> = corners;
+        while cases.len() < 20_000 {
+            let x = f64::from_bits(next());
+            // NaN and the infinities are not JSON numbers — `to_serde` answers `null`
+            // for them by design, and that is a separate decision from precision.
+            if x.is_finite() {
+                cases.push(x);
+            }
+        }
+
+        for x in cases {
+            let json = stringify(&Value::Float(x)).unwrap();
+            let back = parse(&json).unwrap();
+            let y = match back {
+                Value::Float(y) => y,
+                // A float whose shortest spelling has no fractional part parses back as
+                // an Int (`2.0` -> `2`), which is `from_serde`'s documented Int-first
+                // rule and not a precision question. Compare through f64 in that case.
+                Value::Int(i) => i as f64,
+                other => panic!("{x:?} came back as {other:?} from {json}"),
+            };
+            assert_eq!(
+                x.to_bits(),
+                y.to_bits(),
+                "round-trip changed the bits: {x:?} -> {json} -> {y:?} \
+                 (is `float_roundtrip` still enabled for serde_json in Cargo.toml?)"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 20_000, "the property ran on too few values: {checked}");
+    }
 }

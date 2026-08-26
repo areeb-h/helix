@@ -8430,6 +8430,41 @@ fn nan_ordering_raises_and_equality_stays_ieee() {
     }
 }
 
+/// A Float survives `to_json` -> `parse_json` unchanged, on every engine.
+///
+/// `src/json.rs` proves this over 20,000 random bit patterns at the Rust layer; this
+/// proves the guarantee survives the LANGUAGE surface — the methods, the three
+/// engines, and `==` itself. Both matter: the Rust property could hold while a method
+/// wrapper or an engine-specific literal path lost it.
+///
+/// The bug this pins was serde_json parsing without the `float_roundtrip` feature:
+/// `(-0.21453773034276893).to_json().parse_json()` answered `-0.2145377303427689`,
+/// one ULP away and unequal to its own source literal, while `to_float` on the very
+/// same 17-digit string was exact. A checkpoint written and read back was not the
+/// model that was saved.
+#[test]
+fn a_float_survives_a_json_round_trip_on_every_engine() {
+    // The value that failed, plus the ones a hand-picked battery would have chosen —
+    // and which all passed while the real one did not. That contrast is the reason
+    // the exhaustive property lives in src/json.rs rather than here.
+    let src = "\
+xs = [-0.21453773034276893, 0.1, 0.2, 0.3, 1.0 / 3.0, 1.2345678901234567, pi, e]\n\
+print(xs.filter(x => x.to_json().parse_json() != x).count())\n\
+print((-0.21453773034276893).to_json())\n\
+print((-0.21453773034276893).to_json().parse_json() == -0.21453773034276893)\n";
+    for (engine, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("jsonrt_{engine}"));
+        assert_eq!(code, Some(0), "{engine}: {err}");
+        let lines: Vec<&str> = out.trim().lines().collect();
+        assert_eq!(lines[0], "0", "{engine}: some float did not survive the round trip");
+        // Serialization was never the bug — the shortest round-trip spelling was
+        // always emitted. Pinning it keeps a future "fix" from being applied to the
+        // wrong half.
+        assert_eq!(lines[1], "-0.21453773034276893", "{engine}: to_json lost digits");
+        assert_eq!(lines[2], "true", "{engine}: the round trip is not the identity");
+    }
+}
+
 /// Arithmetic on a non-numeric column is refused in a query, exactly as it is on
 /// scalars and inside `map` — the SIXTEENTH divergence of ADR 0036 policy 1, and the
 /// one the policy named in writing while the implementation did not close it.
