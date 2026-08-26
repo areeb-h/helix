@@ -3,8 +3,11 @@
 Helix is self-describing — ask the binary before guessing:
 
 ```
-helix describe            # the WHOLE API as JSON (names, effects) — built for agents
-helix doc <Type>          # methods on Array / String / Dna / DataFrame / …
+helix describe <Type>     # ONE type's whole method table as JSON — sig, doc, example,
+                          #   effect. ~6% of the full dump: ask this, not the catalog
+helix describe <name>     # one builtin/method entry as JSON (every owner of the name)
+helix describe            # the WHOLE API as JSON — 120 KB, rarely what you want
+helix doc <Type>          # the same table, printed for a human
 helix doc <name>          # a method or builtin by name: owners + an example receiver
 helix doc builtins        # every free function
 helix check file.helix    # fast type-check; never rejects a runnable program
@@ -17,6 +20,13 @@ The right loop for generated code is **generate → `helix check` → run**. If 
 might not exist, `helix doc <name>` answers in one command — this project's costliest
 mistake was months of building around a "missing" `scan` that `helix doc Array` printed
 all along.
+
+Ask `helix describe <Type>` *before* writing against an unfamiliar type: it is the
+question you have before you know any names, and it costs a few KB rather than the
+120 KB catalog. And read the diagnostics — in a 14-case sweep of the mistakes agents
+actually make, **eleven named the exact fix** (`to_json(x)` answers "``to_json`` is a
+method: `x.to_json()`"; a C-style body answers ``fn f(x) = x + 1``). Reading the error
+is usually faster than reading anything else, this file included.
 
 ## The correctness model
 

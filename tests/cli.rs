@@ -2486,6 +2486,85 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `helix describe <Type>` answers "what can I do with a DataFrame?" in JSON.
+///
+/// That question is the one you ask BEFORE you know any names, and it was the one shape
+/// with no machine-readable answer: `helix describe` dumps 120 KB of everything, and
+/// `helix describe <name>` needs a name you already have. `helix doc <Type>` had the
+/// answer all along and printed it for a human. This project's costliest recorded
+/// mistake (AGENTS.md) was months of building around a "missing" `scan` that
+/// `helix doc Array` was printing the whole time — an unparseable answer is one a tool
+/// cannot relay.
+///
+/// The size is the point: DataFrame's table is ~6% of the full dump, so a caller with a
+/// small context window can afford the exact answer instead of the whole catalog.
+#[test]
+fn describe_answers_about_one_type() {
+    let (full, _, _) = run(&["describe"], &[], "");
+    let (out, _err, code) = run(&["describe", "DataFrame"], &[], "");
+    assert_eq!(code, Some(0), "`helix describe DataFrame` must succeed");
+    let v: serde_json::Value =
+        serde_json::from_str(&out).expect("`helix describe <Type>` must emit valid JSON");
+    let e = &v[0];
+    assert_eq!(e["kind"], "type");
+    assert_eq!(e["name"], "DataFrame");
+
+    // Every method carries what a caller needs to USE it, not merely to know it exists:
+    // the signature, the prose, a runnable example and its output, and the effect.
+    let methods = e["methods"].as_array().expect("methods array");
+    assert_eq!(e["method_count"].as_u64().unwrap() as usize, methods.len());
+    let w = methods.iter().find(|m| m["name"] == "where").expect("`where` listed");
+    assert_eq!(w["sig"], "where(predicate)");
+    assert_eq!(w["effect"], "pure");
+    assert!(w["doc"].as_str().unwrap().contains("rows"), "doc: {}", w["doc"]);
+    assert!(!w["example"].as_str().unwrap().is_empty(), "an example is the point");
+    // …including the effect that makes a verb authority-bearing, so a caller can see
+    // which methods touch the filesystem before it calls one.
+    let wc = methods.iter().find(|m| m["name"] == "write_csv").expect("`write_csv` listed");
+    assert_eq!(wc["effect"], "fs-write");
+
+    // Universal methods live in one place in the registry rather than in each table, so
+    // a per-type answer that omitted them would imply they are unavailable.
+    let uni = e["universal_methods"].as_array().expect("universal_methods");
+    assert!(uni.iter().any(|u| u == "to_json"), "universal methods present: {uni:?}");
+
+    // Every receiver type answers — a table added later must not silently lack one.
+    for ty in ["Array", "String", "Dna", "Tensor", "DataFrame", "GroupBy", "Dict", "Net", "Record", "Headers"] {
+        let (o, e2, c) = run(&["describe", ty], &[], "");
+        assert_eq!(c, Some(0), "`helix describe {ty}` failed: {e2}");
+        let d: serde_json::Value = serde_json::from_str(&o).unwrap_or_else(|_| panic!("{ty}: bad JSON"));
+        assert_eq!(d[0]["kind"], "type", "{ty}");
+        assert!(d[0]["method_count"].as_u64().unwrap() > 0, "{ty} has no methods");
+    }
+
+    // The answer must be much smaller than the dump, or it solves nothing.
+    assert!(
+        out.len() * 5 < full.len(),
+        "one type ({} bytes) should be a small fraction of the full dump ({} bytes)",
+        out.len(),
+        full.len()
+    );
+
+    // The name lookups this shares a command with are untouched: a builtin, a method on
+    // several receivers, and a universal method each still answer as before.
+    for (q, kind) in [("print", "builtin"), ("mean", "method"), ("to_json", "universal_method")] {
+        let (o, _, c) = run(&["describe", q], &[], "");
+        assert_eq!(c, Some(0), "`helix describe {q}`");
+        let d: serde_json::Value = serde_json::from_str(&o).unwrap();
+        assert_eq!(d[0]["kind"], kind, "{q}");
+    }
+    // `dataframe` (lowercase) is the CONSTRUCTOR builtin, not the type — the two must not
+    // be confused now that both are reachable through one command.
+    let (o, _, _) = run(&["describe", "dataframe"], &[], "");
+    let d: serde_json::Value = serde_json::from_str(&o).unwrap();
+    assert_eq!(d[0]["kind"], "builtin", "lowercase `dataframe` is the constructor");
+
+    // A near-miss on a type name says so, rather than only offering the builtin.
+    let (_, err, code) = run(&["describe", "Dataframe"], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("did you mean the type `DataFrame`"), "{err}");
+}
+
 #[test]
 fn http_post_round_trips_to_a_helix_server() {
     use std::time::Duration;

@@ -651,12 +651,58 @@ fn cli_describe_one(query: &str) -> ExitCode {
     if registry::UNIVERSAL_METHODS.contains(&query) {
         found.push(serde_json::json!({ "kind": "universal_method", "name": query }));
     }
+    // A receiver TYPE name (`DataFrame`, `Array`, `Dna`, …): the whole method table with
+    // each method's signature, doc, effect and example — the machine-readable half of
+    // `helix doc <Type>`, which prints for a human and cannot be parsed.
+    //
+    // This was the ONE shape unavailable as JSON. `helix describe` dumps everything
+    // (120 KB) and `helix describe <name>` answers about a name you already know; the
+    // question "what can I do with a DataFrame?" — the one you ask BEFORE you know any
+    // names, and the one this project's costliest mistake was months of not asking about
+    // `scan` — had a human-readable answer only.
+    //
+    // Type names are capitalised and method names are not, so a collision is not
+    // reachable today; this folds into `found` anyway, so if one ever appears the caller
+    // gets both entries instead of one silently winning.
+    if let Some((ty, ms)) = registry::type_method_tables().into_iter().find(|(t, _)| *t == query) {
+        let methods: Vec<serde_json::Value> = ms
+            .iter()
+            .map(|m| {
+                let mut e = serde_json::json!({
+                    "name": m,
+                    "effect": capability::method_effect_of(m).label(),
+                });
+                enrich(&mut e, docs::method_doc(ty, m));
+                e
+            })
+            .collect();
+        found.push(serde_json::json!({
+            "kind": "type",
+            "name": ty,
+            "method_count": methods.len(),
+            "methods": methods,
+            // Available on EVERY receiver, so they are held once rather than repeated
+            // into each table (registry.rs) — and would otherwise look absent here.
+            "universal_methods": registry::UNIVERSAL_METHODS,
+        }));
+    }
     if found.is_empty() {
-        eprintln!("error: `{query}` is not a builtin or method name.");
+        eprintln!("error: `{query}` is not a builtin, method, or type name.");
         if let Some(h) = suggest::hint(query, suggest::Site::Function, &[]) {
             eprintln!("help: {h}");
         }
-        eprintln!("help: `helix doc <Type>` lists a type's methods; `helix describe` dumps everything.");
+        // `helix describe dataframe` reaches the BUILTIN and never lands here; this
+        // catches `Dataframe`/`DATAFRAME`, where the reader clearly meant the type.
+        if let Some((ty, _)) = registry::type_method_tables()
+            .into_iter()
+            .find(|(t, _)| t.eq_ignore_ascii_case(query))
+        {
+            eprintln!("help: did you mean the type `{ty}`? `helix describe {ty}` lists its methods.");
+        }
+        eprintln!(
+            "help: `helix describe <Type>` lists a type's methods as JSON, `helix doc <Type>` prints \
+             them for a human, and `helix describe` alone dumps everything."
+        );
         return ExitCode::FAILURE;
     }
     match serde_json::to_string_pretty(&serde_json::Value::Array(found)) {
@@ -1298,7 +1344,7 @@ fn print_help() {
          helix verify             check the project matches helix.lock (no build)\n    \
          helix test [path]        run *_test.helix files and report pass/fail\n    \
          helix doc [Type]         list a type's methods (Array/String/Dna/…) or `builtins`\n    \
-         helix describe           the whole API as JSON (for LLMs/agents/tools)\n    \
+         helix describe [what]    the API as JSON — a name, a Type, or everything\n    \
          helix version            show the version\n    \
          helix help               show this help\n\n\
          The default `helix` is a self-contained binary. A build with the `python`\n\
@@ -2115,7 +2161,7 @@ fn repl() -> ExitCode {
         "Helix {} — interactive session. Type an expression and press Enter; Ctrl-D to exit.\n    \
          helix help               commands and usage\n    \
          helix doc [Type]         list a type's methods (Array/String/Dna/…) or `builtins`\n    \
-         helix describe           the whole API as JSON (for LLMs/agents/tools)",
+         helix describe [what]    the API as JSON — a name, a Type, or everything",
         env!("CARGO_PKG_VERSION")
     );
     let mut interp = Interp::new();
