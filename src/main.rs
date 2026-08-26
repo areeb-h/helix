@@ -946,25 +946,66 @@ fn run_source(code: &str, filename: &str) -> ExitCode {
 fn run_check(args: &[String]) -> ExitCode {
     let mut paths: Vec<&str> = Vec::new();
     let mut lint = false;
-    let mut json = false;
+    // Scanned BEFORE the option loop, not during it. A caller that asked for JSON must
+    // get JSON for every way the command can fail, including the failures that happen
+    // before any file is opened — otherwise a tool that parses stdout hits a decode
+    // error and learns nothing about why. Deciding it inside the loop would leave
+    // `helix check --oops --json` reporting in prose because the bad flag came first.
+    let json = args.iter().skip(2).any(|a| a == "--json");
+    // A command-level failure (bad flag, no paths, unreadable path) in the same envelope
+    // as a diagnostic, so a consumer parses ONE shape.
+    let bail = |rendered: String, file: Option<&str>| -> ExitCode {
+        if !json {
+            eprint!("{rendered}");
+            return ExitCode::FAILURE;
+        }
+        let d = serde_json::json!({
+            "severity": "error",
+            "file": file.unwrap_or(""),
+            "rendered": rendered,
+        });
+        let doc = match file {
+            Some(f) => serde_json::json!({
+                "ok": false, "helix_version": env!("CARGO_PKG_VERSION"),
+                "checked": 0, "failed": 1,
+                "files": [{ "file": f, "ok": false, "diagnostics": [d] }],
+            }),
+            // Not about any one file: `files` stays empty and the problem is reported
+            // at the top level rather than invented onto a path that was never opened.
+            None => serde_json::json!({
+                "ok": false, "helix_version": env!("CARGO_PKG_VERSION"),
+                "checked": 0, "failed": 1,
+                "files": [], "diagnostics": [d],
+            }),
+        };
+        match serde_json::to_string_pretty(&doc) {
+            Ok(s) => println!("{s}"),
+            Err(e) => eprintln!("error: could not serialize: {e}"),
+        }
+        ExitCode::FAILURE
+    };
     for a in args.iter().skip(2) {
         if a == "--lint" {
             lint = true;
             continue;
         }
         if a == "--json" {
-            json = true;
             continue;
         }
         if a.starts_with('-') {
-            eprintln!("error: unknown option `{a}` for `helix check` (the flags are `--lint` and `--json`)");
-            return ExitCode::FAILURE;
+            return bail(
+                format!("error: unknown option `{a}` for `helix check` (the flags are `--lint` and `--json`)\n"),
+                None,
+            );
         }
         paths.push(a);
     }
     if paths.is_empty() {
-        eprintln!("error: `helix check` needs at least one script path, e.g. `helix check main.helix`");
-        return ExitCode::FAILURE;
+        return bail(
+            "error: `helix check` needs at least one script path, e.g. `helix check main.helix`\n"
+                .to_string(),
+            None,
+        );
     }
     // Resolve every path BEFORE checking any of them, so a typo in the last argument is
     // reported immediately rather than after the first 148 files have been checked.
@@ -972,10 +1013,9 @@ fn run_check(args: &[String]) -> ExitCode {
     for p in paths {
         match resolve_script(p) {
             Ok(path) => resolved.push(path),
-            Err(msg) => {
-                eprint!("{msg}");
-                return ExitCode::FAILURE;
-            }
+            // No line or column: the file was never opened, so reporting one would be a
+            // fabrication. `rendered` still carries the full message and its help line.
+            Err(msg) => return bail(msg, Some(p)),
         }
     }
     // One big-stack thread for the whole batch: the loader and the checker both recurse

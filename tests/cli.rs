@@ -2588,6 +2588,36 @@ fn check_json_is_structured_and_keeps_the_prose() {
     assert_eq!(code, Some(1));
     assert!(err.contains("--lint") && err.contains("--json"), "{err}");
 
+    // EVERY way the command can fail must still be JSON. A caller that parses stdout
+    // gets a decode error and no explanation otherwise — which is what the first cut of
+    // this feature did: a missing file printed prose and emitted no document at all.
+    // The `--json` flag is therefore scanned before the option loop, so it is honoured
+    // even when a bad flag precedes it.
+    let missing = dir.join("nope.helix").to_str().unwrap().to_string();
+    let bad_paths = [
+        vec!["check", "--json", &missing],           // a file that is not there
+        vec!["check", "--json", dir.to_str().unwrap()], // a directory
+        vec!["check", "--json"],                     // no path at all
+        vec!["check", "--oops", "--json", &ok],      // a bad flag BEFORE --json
+    ];
+    for argv in bad_paths {
+        let (out, _, code) = run(&argv, &[], "");
+        assert_eq!(code, Some(1), "{argv:?} should fail");
+        let v: serde_json::Value = serde_json::from_str(&out)
+            .unwrap_or_else(|e| panic!("{argv:?} did not emit JSON ({e}): {out:?}"));
+        assert_eq!(v["ok"], false, "{argv:?}");
+        assert_eq!(v["checked"], 0, "nothing was checked: {argv:?}");
+        // The message survives whole, wherever it is attached. A failure that never
+        // opened a file carries no line or column rather than a fabricated zero.
+        let d = if v["files"].as_array().unwrap().is_empty() {
+            v["diagnostics"][0].clone()
+        } else {
+            v["files"][0]["diagnostics"][0].clone()
+        };
+        assert!(d["rendered"].as_str().unwrap().starts_with("error:"), "{argv:?}: {d}");
+        assert!(d["line"].is_null(), "{argv:?} must not invent a line: {d}");
+    }
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
