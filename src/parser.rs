@@ -122,6 +122,25 @@ fn parse_expression(
 /// would give a better message at the cost of breaking any program that uses one as a
 /// variable name; matching on them here costs nothing and breaks nothing.
 fn statement_boundary_hint(opened_with: &Tok, before: &Tok, found: &Tok) -> &'static str {
+    // The import words are checked against what the statement OPENED with, and only when
+    // a NAME follows — `use lib.util`, `from lib import util`. Unlike `for` or `lambda`,
+    // `use` and `from` are plausible variable names (`from`/`to` is a natural pair in
+    // scientific code), so matching them mid-statement or before an `=` would hand a
+    // reader an import lecture about their own perfectly good binding. That is the exact
+    // failure this function exists to prevent.
+    //
+    // Measured, not guessed: `use lib.util` and `from lib import util` both got
+    // ``each statement goes on its own line; Helix has no `;` `` — a hint about a
+    // semicolon that is not in the source, on the one mistake in a 14-case sweep that
+    // Helix could answer BEST, because the feature exists and has three spellings.
+    if let Tok::Ident(name) = opened_with
+        && matches!(found, Tok::Ident(_))
+        && matches!(name.as_str(), "use" | "from" | "using" | "require" | "include")
+    {
+        return "Helix imports by module path: `import stats`, `import lib.stats` for \
+                `lib/stats.helix`, `import lib.stats as st` to alias it, or \
+                `import lib.stats.{mean, sd}` to bring names in unqualified.";
+    }
     // The foreign word can be what the statement OPENED with (`for x in xs:`) or the last
     // thing that parsed BEFORE the failure — `f = lambda x: …` opens with `f`, and
     // `fn f(x) = return x` opens with `fn`, so in both the word sits in the middle.

@@ -41,6 +41,18 @@ cmp a.out b.out && cmp a.out c.out
 - One binding per line; `do { }` separates statements by newline, never `;`.
 - `fn` is item-level only — inside `do { }` bind a lambda: `f = (x) => …`.
 - A function value in a record field is called parenthesized: `(rec.f)(x)`.
+- Imports are `import lib.stats` (for `lib/stats.helix`), `import lib.stats as st`, or
+  `import lib.stats.{mean, sd}` to bring names in unqualified. Not `use`, not
+  `from … import …`.
+- **`mut` is top-level only, and this is a design question, not a spelling one.** A
+  function body evolves state by *rebinding* — `do { n = 0` / `n = n + 1` / `n }`, each
+  line shadowing the last — and state that crosses a sequence is *threaded*, with
+  `reduce`. Reach for `mut` only for state that must outlive a call. Deciding this after
+  writing an imperative loop means rewriting the program, which is why it is here rather
+  than left to the (very explicit) error.
+- Most things are methods on a receiver, not free functions: `x.to_json()`,
+  `s.parse_json()`, `xs.join(", ")`. `helix doc <name>` answers which in one command,
+  and calling a method as a function tells you so by name.
 
 ## Footguns — wrong answers, not errors
 

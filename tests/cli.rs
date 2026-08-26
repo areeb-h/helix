@@ -1035,6 +1035,14 @@ fn foreign_syntax_gets_the_hint_it_actually_needs() {
         ("v = [x * 2 for x in [1, 2]]\nprint(v)", "no list comprehension"),
         ("v = `hi`\nprint(v)", "no template literals"),
         ("v = $x\nprint(v)", "no `$` sigil"),
+        // The import family. Helix HAS this feature, with three spellings — which made
+        // a wrong hint here especially expensive: the compiler knew the answer and
+        // recited the semicolon line instead. Found by sweeping 14 plausible agent
+        // mistakes and asking of each whether the diagnostic NAMES the fix; eleven did,
+        // and these were the ones that did not.
+        ("use lib.util\nprint(1)", "Helix imports by module path"),
+        ("from lib import util\nprint(1)", "import lib.stats as st"),
+        ("require lib.util\nprint(1)", "to bring names in unqualified"),
     ];
     for (src, want) in cases {
         let (_, err, code) = run_source(src, &[], &format!("foreign_{}", want.len()));
@@ -1052,6 +1060,23 @@ fn foreign_syntax_gets_the_hint_it_actually_needs() {
     // The semicolon hint is still exactly right for a source that HAS one.
     let (_, err, _) = run_source("x = 1; y = 2\n", &[], "foreign_semi");
     assert!(err.contains("Helix has no `;`"), "{err}");
+
+    // …and the other half of the rule: a hint that fires on a CORRECT program is the
+    // same defect pointed the other way. `from`/`to` is an ordinary pair of names in
+    // scientific code and `use` is an ordinary noun, so unlike `for` or `lambda` these
+    // words must only be read as an import when they OPEN a statement that then fails
+    // with a name after them. Every program below is legal and must stay silent.
+    let legal = [
+        ("from = 0\nto = 10\nprint(to - from)", "10"),
+        ("use = 3\nprint(use * 2)", "6"),
+        ("r = {from: 1, to: 2}\nprint(r.to - r.from)", "1"),
+        ("fn span(from, to) = to - from\nprint(span(2, 9))", "7"),
+    ];
+    for (src, want) in legal {
+        let (out, err, code) = run_source(src, &[], &format!("notimport_{}", src.len()));
+        assert_eq!(code, Some(0), "this is a legal program: {src:?}\nstderr: {err}");
+        assert_eq!(out.trim(), want, "{src:?}");
+    }
 }
 
 /// A lone `\r` ends a line. Classic-Mac files, and anything that has been through a mangled
