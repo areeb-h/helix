@@ -2116,6 +2116,17 @@ Center by padding with spaces on both sides to the given width.
   hi  |
 ```
 
+### `char_at(i)`
+
+The character at index i as a one-character string; missing past the end.
+
+**Note:** Reads one character without building the whole char array, which `s.chars()[i]` does — that allocation made a character-at-a-time scan quadratic. O(i), not O(1): UTF-8 has no constant-time character index.
+
+```
+>>> "hello".char_at(1)
+e
+```
+
 ### `chars()`
 
 The string as an array of one-character strings, for map/filter/reduce.
@@ -2170,15 +2181,15 @@ Whether the string ends with the suffix.
 true
 ```
 
-### `index_of(needle)`
+### `index_of(needle, from?)`
 
-Where the needle FIRST starts, as a character index; missing when absent.
+Where the needle FIRST starts at or after from (default 0), as a character index; missing when absent.
 
-**Note:** A CHARACTER index, not a byte offset; it feeds take/drop/slices directly.
+**Note:** A CHARACTER index, not a byte offset; it feeds take/drop/slices directly — and feeds back in as the next `from`, so a scan over every occurrence stays linear instead of re-slicing the string each step.
 
 ```
->>> "banana".index_of("na")
-2
+>>> "banana".index_of("na", 3)
+4
 ```
 
 ### `last_index_of(needle)`

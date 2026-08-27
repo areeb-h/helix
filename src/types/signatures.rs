@@ -1025,6 +1025,9 @@ pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<
             Type::String
         }
         "take" | "drop" | "repeat" | "ljust" | "rjust" | "center" => Type::String,
+        // One character, as a String — or `missing` past the end, the shape
+        // `index_of` already uses for absent (ADR 0001).
+        "char_at" => Type::String,
         // `index_of`/`last_index_of` are the first/last match's CHARACTER index, or
         // `missing` when absent — typed `Int`, like `Array.index_of` and `Dna.find`.
         "count" | "length" | "index_of" | "last_index_of" => Type::Int,

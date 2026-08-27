@@ -157,11 +157,80 @@ pub(crate) fn string_method(
         // `take`/`drop`. `missing` when absent, exactly like an array's `index_of`.
         // An empty needle answers 0, matching its neighbour `contains("")` — the two
         // ask the same question, so they agree.
+        // `index_of(needle, from?)` — `from` RESUMES the search at a character index.
+        //
+        // Without it no search can continue past its last hit, which is the innermost
+        // loop of every parser: a field report called it "the most common operation in
+        // any parser" and had to re-slice the string on each step to work around it,
+        // turning a linear scan into a quadratic one.
+        //
+        // `from` is a CHARACTER index, like everything else this method touches — it is
+        // fed by the previous answer, so a byte offset here would silently mislocate the
+        // moment any multi-byte character appeared earlier in the string.
         "index_of" => {
-            arity(1)?;
+            if args.is_empty() || args.len() > 2 {
+                return Err(HelixError::new(
+                    format!("`{name}` expects 1 or 2 arguments, got {}", args.len()),
+                    line,
+                    col,
+                )
+                .hint("`s.index_of(needle)` searches from the start; `s.index_of(needle, from)` resumes at a character index.".to_string()));
+            }
             let needle = str_arg(args, 0, name, line, col)?;
-            Ok(match s.find(needle) {
-                Some(byte) => Value::Int(s[..byte].chars().count() as i64),
+            let from = match args.get(1) {
+                None => 0usize,
+                Some(Value::Int(i)) if *i >= 0 => *i as usize,
+                // A negative offset is a mistake, not a from-the-end convention: `take`
+                // and `drop` do not have one either, so inventing it here would make the
+                // string methods disagree with each other.
+                Some(Value::Int(_)) => {
+                    return Err(HelixError::new(
+                        format!("`{name}`'s starting index cannot be negative"),
+                        line,
+                        col,
+                    ));
+                }
+                Some(other) => return Err(type_err(name, "an Int index", other, line, col)),
+            };
+            // Character offset -> byte offset. Past the end is not an error: a search
+            // that has run off the end simply finds nothing, which is what a parser loop
+            // wants as its termination condition.
+            let Some((start_byte, _)) = s.char_indices().nth(from).or_else(|| {
+                (from == s.chars().count()).then_some((s.len(), '\0'))
+            }) else {
+                return Ok(Value::Missing);
+            };
+            Ok(match s[start_byte..].find(needle) {
+                // The answer stays an ABSOLUTE character index, so it can be fed back in
+                // as the next `from` without the caller tracking an origin.
+                Some(byte) => Value::Int(s[..start_byte + byte].chars().count() as i64),
+                None => Value::Missing,
+            })
+        }
+        // `char_at(i)` — the i-th character, without building the whole char array.
+        //
+        // `s.chars()[i]` allocates a Vec of one-character strings for the entire string
+        // to read one of them, which is what made a character-at-a-time scan quadratic in
+        // a field report. This walks to `i` instead: O(i), not O(1) — UTF-8 has no
+        // constant-time character index without a side table, and claiming O(1) here
+        // would be a lie the docs then repeat. The win is the allocation, not the walk.
+        "char_at" => {
+            arity(1)?;
+            let i = match &args[0] {
+                Value::Int(i) if *i >= 0 => *i as usize,
+                Value::Int(_) => {
+                    return Err(HelixError::new(
+                        format!("`{name}`'s index cannot be negative"),
+                        line,
+                        col,
+                    ));
+                }
+                other => return Err(type_err(name, "an Int index", other, line, col)),
+            };
+            // Past the end answers `missing`, matching every other absent-lookup in the
+            // language (ADR 0001) rather than raising.
+            Ok(match s.chars().nth(i) {
+                Some(c) => Value::Str(Rc::new(c.to_string())),
                 None => Value::Missing,
             })
         }

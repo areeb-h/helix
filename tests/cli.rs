@@ -2492,6 +2492,91 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `index_of(needle, from)` and `char_at(i)` — the two primitives a parser needs.
+///
+/// From the same field report. Neither is a convenience:
+///
+/// - **`index_of` took exactly one argument**, so no search could resume past its last
+///   hit — "the most common operation in any parser". The workaround was re-slicing the
+///   string each step, which turns a linear scan quadratic.
+/// - **reading one character meant `s.chars()[i]`**, which allocates a one-character
+///   String for EVERY character in the string to read one of them. Measured here: 20,000
+///   reads over a 200k string went **71,988 ms → 20 ms**.
+///
+/// Both answer in CHARACTER indices, the unit every other String method counts in. A byte
+/// offset would be a silent trap the moment a multi-byte character appears earlier in the
+/// string — and since `index_of`'s answer feeds back in as the next `from`, it would
+/// compound. That is what the multi-byte cases below exist to hold.
+#[test]
+fn string_search_resumes_and_char_at_does_not_allocate() {
+    let one = |src: &str| -> String {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], "strprim");
+        assert_eq!(code, Some(0), "{src}: {err}");
+        out.trim().to_string()
+    };
+
+    // Resuming: the answer is ABSOLUTE, so it feeds straight back in as the next `from`.
+    assert_eq!(one("print(\"hello\".index_of(\"l\"))"), "2");
+    assert_eq!(one("print(\"hello\".index_of(\"l\", 3))"), "3");
+    assert_eq!(one("print(\"hello\".index_of(\"l\", 4))"), "missing");
+    // At the end and past it: not an error. A scan that has run off the end simply finds
+    // nothing, which is the termination condition a parser loop wants.
+    assert_eq!(one("print(\"hello\".index_of(\"l\", 5))"), "missing");
+    assert_eq!(one("print(\"hello\".index_of(\"l\", 99))"), "missing");
+
+    // The loop it exists for, and the property that makes it linear: every occurrence,
+    // found by feeding each answer back as the next start.
+    assert_eq!(
+        one("fn go(s: String, from: Int, acc) = do {\n\
+             i = s.index_of(\"a\", from)\n\
+             if i.is_missing() then acc else go(s, i + 1, acc.concat([i]))\n\
+             }\n\
+             print(go(\"banana\", 0, []))"),
+        "[1, 3, 5]"
+    );
+
+    // CHARACTER indices, not bytes — `é` is two bytes, so a byte offset would answer 3
+    // here and then mislocate everything downstream.
+    assert_eq!(one("print(\"héllo\".index_of(\"l\"))"), "2");
+    assert_eq!(one("print(\"héllo\".index_of(\"l\", 3))"), "3");
+    assert_eq!(one("print(\"héllo\".char_at(1))"), "é");
+    assert_eq!(one("print(\"héllo\".char_at(2) == \"héllo\".chars()[2])"), "true");
+
+    // `char_at`: absent past the end (ADR 0001), negative refused rather than treated as
+    // from-the-end — `take`/`drop` have no such convention, so inventing one here would
+    // make the String methods disagree with each other.
+    assert_eq!(one("print(\"hello\".char_at(1))"), "e");
+    assert_eq!(one("print(\"hello\".char_at(99))"), "missing");
+    for (src, want) in [
+        ("print(\"hello\".char_at(-1))", "cannot be negative"),
+        ("print(\"hello\".index_of(\"l\", -1))", "cannot be negative"),
+    ] {
+        let (_, err, code) = run_source(&format!("{src}\n"), &[], "strprim_neg");
+        assert_eq!(code, Some(1), "{src}");
+        assert!(err.contains(want), "{src}: {err}");
+    }
+
+    // Identical on every engine — these are plain methods, but the report's use is a hot
+    // loop, and a hot loop is exactly where the engines are allowed to differ if anything
+    // is going to.
+    for (engine, env) in ENGINES {
+        let (out, err, code) =
+            run_source("print(\"banana\".index_of(\"na\", 3), \"banana\".char_at(4))\n", env, &format!("sp_{engine}"));
+        assert_eq!(code, Some(0), "{engine}: {err}");
+        assert_eq!(out.trim(), "4 n", "{engine}");
+    }
+
+    // The checker knows both, so a wrong call is caught before running. Method arity
+    // comes from the docs signature string, which is why `index_of(needle, from?)` had to
+    // gain its `?` — with the old sig the runtime arm was unreachable.
+    let path = std::env::temp_dir().join("helix_strprim_arity.helix");
+    std::fs::write(&path, "print(\"a\".char_at(1, 2))\n").unwrap();
+    let (_, err, code) = run(&["check", path.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("char_at"), "{err}");
+    let _ = std::fs::remove_file(&path);
+}
+
 /// `type_of` and `now` — the two things a field report could not express at all.
 ///
 /// **`type_of`**: without it, the only way to ask "is this a record?" was to attempt a
