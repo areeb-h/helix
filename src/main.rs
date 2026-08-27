@@ -58,6 +58,7 @@ mod cookiejar;
 mod http;
 mod interp;
 mod jit;
+mod apisearch;
 mod climain;
 mod subprocess;
 mod db;
@@ -343,6 +344,8 @@ fn run() -> ExitCode {
         Some("describe") => cli_describe(&args),
         // `helix jit-explain <script>` — which numeric kernels the JIT compiled.
         Some("jit-explain") => cli_jit_explain(&args),
+        // `helix search <term>` — find a capability by what it does.
+        Some("search") => cli_search(&args),
         // Shorthand: `helix script.helix [args…]` runs a file directly, arguments and all.
         Some(path) => run_file_with_args(path, &args[2..]),
     }
@@ -809,6 +812,43 @@ fn cli_jit_explain(args: &[String]) -> ExitCode {
         }
         ExitCode::SUCCESS
     })
+}
+
+/// `helix search <term> [--json]` — find a capability by what it DOES.
+///
+/// `doc` and `describe` both need a name; `describe` alone is 120 KB. So the only way to
+/// ask "is there anything here for repeated headers?" was to dump the catalog and grep —
+/// which is what two field reports did, and what this project's costliest mistake was
+/// months of not doing. This searches names, signatures, docs AND notes, because the
+/// words a reader has ("repeated header", "group by") are rarely the names they need
+/// (`get_all`, `frequencies`).
+fn cli_search(args: &[String]) -> ExitCode {
+    let json = args.iter().skip(2).any(|a| a == "--json");
+    let terms: Vec<&String> = args.iter().skip(2).filter(|a| !a.starts_with('-')).collect();
+    if let Some(bad) = args.iter().skip(2).find(|a| a.starts_with('-') && a.as_str() != "--json") {
+        eprintln!("error: unknown option `{bad}` for `helix search` (the only flag is `--json`)");
+        return ExitCode::FAILURE;
+    }
+    let Some(query) = terms.first() else {
+        eprintln!("error: `helix search` needs a term, e.g. `helix search header`");
+        eprintln!("help: it looks at names, signatures, docs and notes — a plain word works best.");
+        return ExitCode::FAILURE;
+    };
+    let hits = apisearch::search(query);
+    if json {
+        match serde_json::to_string_pretty(&apisearch::to_json(query, &hits)) {
+            Ok(s) => println!("{s}"),
+            Err(e) => {
+                eprintln!("error: could not serialize: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        print!("{}", apisearch::render(query, &hits));
+    }
+    // Finding nothing is an ANSWER, not a failure: a script asking "does this exist?"
+    // should read the count, and a shell pipeline should not abort on a negative result.
+    ExitCode::SUCCESS
 }
 
 fn cli_describe(args: &[String]) -> ExitCode {
@@ -1528,6 +1568,7 @@ fn print_help() {
          helix verify             check the project matches helix.lock (no build)\n    \
          helix test [path]        run *_test.helix files (`--engines` cross-checks all 3)\n    \
          helix doc [Type]         list a type's methods (Array/String/Dna/…) or `builtins`\n    \
+         helix search <term>      find a capability by what it does (names, docs, notes)\n    \
          helix describe [what]    the API as JSON — a name, a Type, or everything\n    \
          helix jit-explain <s>    which numeric kernels the JIT compiled, and where\n    \
          helix version            show the version\n    \

@@ -2492,6 +2492,92 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `helix search <term>` — find a capability by what it DOES, not by a name you have.
+///
+/// This closes the project's most-repeated failure. `doc` and `describe` both need the
+/// name; `describe` alone is 120 KB. So the only way to ask "is there anything here for
+/// repeated headers?" was to dump the catalog and grep it — which two separate field
+/// reports did, and which this project's costliest recorded mistake was months of NOT
+/// doing (building around a "missing" `scan` that `helix doc Array` printed all along).
+///
+/// Searching names alone would have helped neither report: the words they had were
+/// "repeated header" and "group by", while the names they needed were `get_all` and
+/// `frequencies`. So the doc text and the NOTES are searched too — the notes are where
+/// the caveats live ("wire order and repeats are kept"), and that is often the exact
+/// sentence someone is hunting.
+#[test]
+fn search_finds_a_capability_from_a_plain_word() {
+    let hits = |q: &str| -> serde_json::Value {
+        let (out, err, code) = run(&["search", q, "--json"], &[], "");
+        assert_eq!(code, Some(0), "{q}: {err}");
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("{q}: bad JSON ({e}): {out}"))
+    };
+    let names = |v: &serde_json::Value| -> Vec<String> {
+        v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| format!("{}.{}", m["owner"].as_str().unwrap(), m["name"].as_str().unwrap()))
+            .collect()
+    };
+
+    // The three searches the reports actually needed.
+    let h = hits("header");
+    assert!(names(&h).contains(&"builtin.headers".to_string()), "{:?}", names(&h));
+    let h = hits("frequen");
+    assert!(names(&h).contains(&"Array.frequencies".to_string()), "{:?}", names(&h));
+    let h = hits("scan");
+    assert!(names(&h).contains(&"Array.scan".to_string()), "the `scan` that cost months: {:?}", names(&h));
+
+    // A word that appears ONLY in prose, never in any name — the case a name-only search
+    // would miss, and the reason the doc and notes are searched.
+    let h = hits("wire order");
+    assert!(h["count"].as_u64().unwrap() > 0, "prose-only search found nothing");
+    assert!(names(&h).contains(&"Headers.items".to_string()), "{:?}", names(&h));
+
+    // `run`'s NOTES say "subprocess"; its name and doc do not. Matching there is what
+    // makes the search answer a question phrased the way a newcomer would phrase it.
+    let h = hits("subprocess");
+    assert!(names(&h).contains(&"builtin.run".to_string()), "{:?}", names(&h));
+    let m = &h["matches"][0];
+    assert_eq!(m["matched_in"], "notes", "and it says WHERE it matched: {m}");
+
+    // An authority-bearing verb announces its effect, so a reader choosing between
+    // candidates sees the cost before calling one.
+    let h = hits("sqlite");
+    assert_eq!(h["matches"][0]["effect"], "fs-read");
+    let h = hits("http");
+    assert!(
+        h["matches"].as_array().unwrap().iter().any(|m| m["effect"] == "net"),
+        "network verbs must show [net]"
+    );
+
+    // Exact name beats a prose hit, so the obvious query puts the obvious answer first.
+    let h = hits("frequencies");
+    assert_eq!(h["matches"][0]["name"], "frequencies");
+    assert_eq!(h["matches"][0]["matched_in"], "name");
+
+    // Finding nothing is an ANSWER, not a failure: a script asking "does this exist?"
+    // reads the count, and a pipeline should not abort on a negative result.
+    let (out, _, code) = run(&["search", "zzzznotathing"], &[], "");
+    assert_eq!(code, Some(0), "a miss must not be an error");
+    assert!(out.contains("no match"), "{out}");
+    assert!(out.contains("helix doc <Type>"), "a miss must say what to try instead: {out}");
+
+    // Ordering is stable between runs, or a diff of two searches is unreadable.
+    let (a, _, _) = run(&["search", "read", "--json"], &[], "");
+    let (b, _, _) = run(&["search", "read", "--json"], &[], "");
+    assert_eq!(a, b, "search order must be deterministic");
+
+    // Usage errors name the real flag.
+    let (_, err, code) = run(&["search"], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("needs a term"), "{err}");
+    let (_, err, code) = run(&["search", "x", "--wat"], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("--json"), "{err}");
+}
+
 /// `run(program, args?)` — subprocess execution, argv only (ADR 0037 D3).
 ///
 /// A field report hit this adding Tailwind support: Tailwind v4 is a CLI, the natural

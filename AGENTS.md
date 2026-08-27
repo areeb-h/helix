@@ -3,6 +3,9 @@
 Helix is self-describing — ask the binary before guessing:
 
 ```
+helix search <term>       # FIND a capability by what it does — searches names,
+                          #   signatures, docs AND notes. START HERE when you do
+                          #   not know the name; `--json` for tools
 helix describe <Type>     # ONE type's whole method table as JSON — sig, doc, example,
                           #   effect. ~6% of the full dump: ask this, not the catalog
 helix describe <name>     # one builtin/method entry as JSON (every owner of the name)
@@ -28,9 +31,13 @@ might not exist, `helix doc <name>` answers in one command — this project's co
 mistake was months of building around a "missing" `scan` that `helix doc Array` printed
 all along.
 
-Ask `helix describe <Type>` *before* writing against an unfamiliar type: it is the
-question you have before you know any names, and it costs a few KB rather than the
-120 KB catalog. And read the diagnostics — in a 14-case sweep of the mistakes agents
+Ask `helix search <word>` when you do not know the name, and `helix describe <Type>`
+before writing against an unfamiliar type. Those are the two questions you have *before*
+you know any names, and both cost a few KB rather than the 120 KB catalog. This is not a
+hypothetical: two field reports independently resorted to dumping that catalog and
+grepping it, and the words they had ("repeated header", "group by") were never the names
+they needed (`get_all`, `frequencies`) — which is why `search` reads the docs and notes,
+not just names. And read the diagnostics — in a 14-case sweep of the mistakes agents
 actually make, **eleven named the exact fix** (`to_json(x)` answers "``to_json`` is a
 method: `x.to_json()`"; a C-style body answers ``fn f(x) = x + 1``). Reading the error
 is usually faster than reading anything else, this file included.
