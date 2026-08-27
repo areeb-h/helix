@@ -1,7 +1,15 @@
 # ADR 0037 — The scripting surface: a script declares its interface
 
 - **Status:** Proposed
-- **Date:** 2026-08-25
+- **Date:** 2026-08-25, substantially revised 2026-08-27
+- **Revision:** D1's binding rule was rewritten. The first draft invented a mapping
+  (*no default ⇒ positional, default ⇒ option*) which could not express a required named
+  option; probing the v0.6.0 binary showed the language **already** binds arguments by
+  name, out of order, with trailing defaults — so the command line adopts the call-site
+  rule wholesale and the special case disappears. Added: what `main`'s return value means
+  (discarded, like every top-level value — measured), the migration cost, a verification
+  section with the four properties that must be checked, and what would show this ADR is
+  wrong.
 - **Deciders:** Areeb + Claude
 - **Related:** [ADR 0021 — Capability sandbox](0021-capability-sandbox.md),
   [ADR 0011 — Core/stdlib boundary](0011-core-stdlib-boundary.md),
@@ -57,6 +65,12 @@ The fifth row is the one this ADR turns on. The declaration a command line needs
 parameters, types, defaults, doc comments, checked before anything runs — is not a thing
 Helix must invent. It is `fn`.
 
+To be precise about the claim, because a later section does add syntax: **D1 adds none.**
+`fn main(reads: String, threads: Int = 4)` parses on the v0.6.0 binary today, is
+type-checked today, and binds named arguments out of order today. D2 introduces one new
+top-level form (`env`), and argues for it on its own merits rather than under D1's
+banner.
+
 ## Prior approaches and their documented shortcomings
 
 | language | approach | documented shortcoming |
@@ -101,7 +115,7 @@ happened repeatedly to a careful process that knew about it in advance.
 
 ## Decision
 
-### D1 — A script's command line is `fn main`. No new syntax.
+### D1 — A script's command line is `fn main`, bound by the rule Helix already uses.
 
 ```helix
 ## Score reads and write a summary.
@@ -111,16 +125,49 @@ fn main(reads: String, out: String = "scores.csv", threads: Int = 4, verbose: Bo
     ...
 ```
 
-The binding rules are derived from what the declaration already says, so there is nothing
-extra to remember:
+**The binding rule is not invented for the command line. It is the call-site rule,
+already implemented and already shipping**, measured on the v0.6.0 binary:
 
-- a parameter **without** a default is **positional and required**;
-- a parameter **with** a default is an option, `--out scores.csv`;
-- a `Bool` parameter defaulting to `false` is a **flag**, `--verbose`;
-- the **doc comment on `main`** is `--help`; the first line is the summary;
-- the **types are the checker's types** (`Int`, `Float`, `String`, `Bool`). The argv
-  string is converted once, at the boundary, and a bad conversion is an error that names
-  the option and the value — never a panic (ADR 0024), and identical on all three engines.
+| at a call site, today | on the command line |
+|---|---|
+| `go(10, 3)` | `tool 10 3` |
+| `go(a: 10, b: 3)` | `tool --a 10 --b 3` |
+| `go(b: 3, a: 10)` — out of order, works | `tool --b 3 --a 10` |
+| `go(10)` — trailing default omitted | `tool 10` |
+
+So the rules a reader has to learn number **zero**:
+
+- **every** parameter can be given by name (`--out scores.csv`) or positionally, exactly
+  as every parameter can be given as `out: …` or positionally in Helix;
+- a parameter **with** a default may be omitted; one **without** may not;
+- `Bool` defaulting to `false` also accepts the bare form `--verbose`. This is the single
+  CLI-specific affordance in the whole design, and it is a shorthand for `--verbose true`,
+  not a separate concept;
+- the **doc comment on `main`** is `--help`; its first line is the summary;
+- the **types are the checker's types**. The argv string is converted once, at the
+  boundary, and a bad conversion is an error naming the option and the value — never a
+  panic (ADR 0024), and identical on all three engines.
+
+**An earlier draft of this ADR got this wrong**, and the error is worth recording because
+it is the kind a design makes when it reasons about a command line instead of about the
+language. It said *"no default ⇒ positional; default ⇒ option"* — a clean-sounding
+mapping that **cannot express a required named option**, since "required" and "has a
+default" were made the same axis. Every real tool has one (`--input` that you must
+supply). Helix's own call-site rule has no such hole: `a` in `go(a, b)` is required *and*
+nameable. Adopting the existing rule wholesale removes the special case instead of
+patching it.
+
+**Ordering falls out of a constraint that already exists.** The parser refuses
+`fn go(a: Int = 1, b: Int)` — *"parameter `b` has no default but follows one that does"* —
+so required parameters are always a prefix, and the positional form is therefore always
+unambiguous. Nothing new had to be decided.
+
+**`main`'s return value is discarded, like every other top-level value.** Measured: a bare
+`1 + 1` at the top level of a Helix program prints nothing and exits 0. A function body is
+an expression, so `main` necessarily produces a value; making that value the exit code
+would be a second, invisible channel for something D4 gives an explicit verb. Consistency
+with the top level is the whole argument — a script is its top level, and `main` is not a
+different kind of place.
 
 If a file declares `main`, the runtime calls it after the top level, with argv bound. **If
 a file does not declare `main`, passing arguments is refused** rather than ignored. The
@@ -128,6 +175,11 @@ silence stops in the same release that makes the alternative possible.
 
 `--help` and `--version` are answered from the declaration **without running the program**,
 which is what makes them safe to answer for a script whose top level has effects.
+
+**Migration cost, stated exactly:** a program that today declares `fn main` and never
+calls it currently runs its top level and nothing else (measured). After this, `main`
+runs too. That is a real behaviour change for such a program, it is detectable
+mechanically (declares `main`, never calls it), and it is the only one D1 causes.
 
 ### D2 — The environment is declared, not read.
 
@@ -161,7 +213,9 @@ mut r = run("samtools", ["sort", "-o", out, input])
   failure and not a quietly-absent value. Python's `check=False` default is the
   counter-example: the easy spelling ignores the failure.
 - To *inspect* a failure instead of propagating it, use the mechanism the language already
-  has: `try run(...)` yields `{ok, value, error}`. No second API, no `check:` keyword.
+  has: `try run(...)` yields `{ok, value, error}`. No second API, no `check:` keyword —
+  and since v0.6.0 that record is also what `assert_error(try run(...), "no such file")`
+  reads, so a test asserting how a subprocess failed needs nothing new either.
 - `Process` authority is granted **per program name**, not as a blanket.
 
 **And the honest part.** Granting `run` is a **boundary exit, not confinement**. Deno's
@@ -204,6 +258,14 @@ in the grammar, the checker, or the type system. Compare the alternative — `ar
 [String]` — which adds one builtin and then obliges every program to grow a parser, a help
 text and a validation layer that nothing checks.
 
+**A declared interface is a discoverable one, and that is not a nicety.** A field report
+on v0.6.0 recorded *selective import* as a missing feature — it had shipped a release
+earlier — because probing for it produced a true error about the wrong thing. In the same
+report, destructuring was listed as flatly absent while the lambda form worked. Both are
+the same failure: a capability that exists but cannot be *asked about*. A program whose
+interface is a declaration can be asked (`--help`, and `helix describe`), which is the
+difference between a tool someone can pick up and one they conclude is not there.
+
 **It makes the errors early instead of deep.** The failure a scripting language actually
 inflicts is not a wrong answer; it is a program that ran for six minutes, wrote half an
 output file, and then discovered that `--threads` was `"eight"` or that `$API_KEY` was
@@ -243,6 +305,61 @@ applied before the drift rather than after.
 - **Deferring the whole surface to a package** — rejected. A CLI cannot be a library
   concern when the *runtime* is what must bind argv before the top level runs, and when
   the declaration is also a capability grant the gate has to see.
+
+## How this gets verified
+
+A proposal in this repository is not finished until it says how it can fail. **argv is an
+axis no existing gate covers**, and each of them misses it for a different reason:
+
+| gate | why it cannot see a command line |
+|---|---|
+| `tests/compat/` | freezes 119 programs invoked exactly ONE way — its record has no argv column |
+| `scripts/dfdiff.sh` | runs every tracked program under both backends, with no arguments |
+| `scripts/vmparity.sh` | same, across engines |
+| `scripts/checkall.sh` | type-checks without running, so it never binds anything |
+| the doc-example gate | runs `>>>` snippets, which have no invocation |
+
+So D1–D6 ship with an axis of their own, and it already has a working shape to copy:
+`tests/release/v0.6.0-errors.tsv` is a table of *(expected substring, program)* that
+`scripts/release-smoke.sh` executes. The CLI table is that plus an argv column —
+*(program, argv, exit, stdout, stderr)* — which is exactly the row `tests/compat/` would
+need to grow to express a tool, and is why that growth is listed under Consequences below
+rather than deferred.
+
+Four properties have to be checked, and each names its own failure:
+
+1. **Binding.** `tool 10 3`, `tool --a 10 --b 3` and `tool --b 3 --a 10` produce the same
+   result, because D1 claims they are the call-site rule. If they diverge, D1 is wrong,
+   not the test.
+2. **Refusal.** A bad conversion (`--threads eight`), a missing required parameter, an
+   unknown option, and an out-of-range `exit` code each exit non-zero **and name the
+   thing**. Exit code alone is not enough: this session watched a field report record a
+   shipped feature as missing because it read an exit code and not the message.
+3. **Engine agreement.** The argv→value conversion is new code on a hot boundary and must
+   be byte-identical on all three engines. `helix test --engines` already does exactly
+   this for a Helix program, so a CLI written in Helix tests its own binding.
+4. **The grant.** A program declaring `env API_KEY` is refused *before its first effect*
+   when the variable is absent. That is D2's whole claim, and it is the one that is
+   invisible unless something asserts the ORDER — a refusal after the output file was
+   truncated satisfies "it refused" and defeats the purpose.
+
+And the standing rule this project earned the hard way (`docs/testing.md`): **a gate has
+to be sabotaged once to prove it can fail.** Three gates here were found unable to fail —
+`dfcheck.sh` diffing three copies of "no such file", 28 `native-df` tests executed by
+nothing, and `vmparity.sh` printing `RESULT=1` without exiting on it. A CLI gate that has
+never been made to go red is a claim, not a check.
+
+### What would show this ADR is wrong
+
+- If the call-site rule turns out **not** to survive contact with real command lines —
+  say, tools routinely need a repeated option (`--include a --include b`) and Helix's
+  parameter model cannot express one — then D1's central claim (that the binding rule is
+  free) is weaker than stated and the mapping needs its own design after all.
+- If declaring the environment (D2) proves unusable because real programs read variables
+  chosen at run time, then the grant argument collapses, since an unknowable read set
+  cannot be granted. The fallback is Deno's: scoping supplied by the invoker.
+- If `--help` generated from a doc comment is materially worse than a hand-written one for
+  any real tool, the "one declaration, four artefacts" framing loses its fourth leg.
 
 ## Consequences
 
