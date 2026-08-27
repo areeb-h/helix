@@ -21,6 +21,21 @@
 
 ### Added
 
+- **`assert_error(try expr, "substring"?)`** — assert that something FAILED, and that
+  it said why. The idiom it replaces (`r = try f()` then
+  `assert(r.error.contains("…"))`) checks the right thing but, on failure, prints
+  `assertion failed` and nothing else — not the message it got, not the value it got
+  instead. This shows both:
+
+  ```
+  assertion failed: expected an error containing `overflow`, but it said: division by zero
+  assertion failed: expected an error, but it succeeded with 2
+  ```
+
+  In a language that pins error text as part of its contract, the message is the thing
+  under test, so an assertion about it has to show it. Takes the record `try` already
+  produces rather than a callback, and counts as an assertion (so a file whose only
+  check is `assert_error` does not trip the runner's "asserted nothing" rule).
 - **`helix test --engines` — every test becomes a differential test.** After a test file
   passes, it is re-run under the bytecode VM and the tree-walker, and any difference in
   exit status, stdout or stderr fails the run.
