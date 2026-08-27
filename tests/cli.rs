@@ -2571,6 +2571,35 @@ fn jit_explain_reports_which_kernels_compiled() {
     assert!(human.contains("that is the switch, not"), "{human}");
     assert!(!human.contains("DECLINED"), "the switch must not read as a refusal: {human}");
 
+    // The SECOND family: a tail-recursive numeric function is compiled whole and entered
+    // by name, never through a `TryJit*` op. Reporting only kernel sites made this
+    // command answer "0 sites, nothing compiled" for a program whose every hot
+    // instruction is native — and then list tail-recursive functions among the shapes it
+    // covers, contradicting itself in its own next paragraph. A sweep of the tracked tree
+    // found 24 compiled functions invisible that way, including `k2_mandelbrot`, whose
+    // native code is three functions and zero kernel sites.
+    let tailfn = w(
+        "tailfn.helix",
+        "fn go(n, acc) = if n == 0 then acc else go(n - 1, acc + n)\nprint(go(100000, 0))\n",
+    );
+    let (out, _, code) = run(&["jit-explain", "--json", &tailfn], &[], "");
+    assert_eq!(code, Some(0));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["offered"], 0, "a tail loop is not a kernel site: {out}");
+    if v["engine"] == "live" {
+        let fns = v["functions"].as_array().unwrap();
+        assert_eq!(fns.len(), 1, "`go` should be compiled whole: {out}");
+        assert_eq!(fns[0]["name"], "go");
+        let (human, _, _) = run(&["jit-explain", &tailfn], &[], "");
+        assert!(human.contains("functions compiled whole"), "{human}");
+        assert!(human.contains("  go"), "{human}");
+        // …and it must NOT claim nothing was compiled.
+        assert!(
+            !human.contains("Nothing in this program was compiled"),
+            "one function IS compiled: {human}"
+        );
+    }
+
     // A program with no numeric kernels offers nothing — and must NOT be told the JIT
     // is missing, which is what `jit.is_some()` alone reported before.
     let (out, _, code) = run(&["jit-explain", "--json", &cold], &[], "");
@@ -2578,8 +2607,9 @@ fn jit_explain_reports_which_kernels_compiled() {
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["offered"], 0);
     assert_eq!(v["sites"].as_array().unwrap().len(), 0);
+    assert_eq!(v["functions"].as_array().unwrap().len(), 0, "no numeric functions either");
     let (human, _, _) = run(&["jit-explain", &cold], &[], "");
-    assert!(human.contains("offered no kernel sites"), "{human}");
+    assert!(human.contains("Nothing in this program was compiled"), "{human}");
     assert!(!human.contains("No JIT in this run"), "the JIT is fine; there was nothing to build: {human}");
 
     // It type-checks first, so a broken program gets the real diagnostic rather than an

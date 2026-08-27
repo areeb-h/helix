@@ -6,8 +6,18 @@
 //! there was no way to ask whether a hot loop had been compiled at all — the language
 //! offered a large speedup, declined to give it, and said nothing.
 //!
-//! **What this reports, and what it deliberately does not.** Compilation happens in two
-//! stages, and only the second is observable here:
+//! **Two families, not one.** The JIT compiles *kernel sites* — a `map`/`filter`/
+//! `reduce`/`scan` body, reached through a `TryJit*` op — and it also compiles whole
+//! *functions*, entered by name (`Jit::lookup` / `capture_loop`), which is how a
+//! tail-recursive numeric function becomes a native loop. Reporting only the first was
+//! this module's own first bug: `bench/fib.helix`, the project's canonical JIT
+//! benchmark, answered "0 kernel sites offered" while its whole point is that `fib` is
+//! compiled — and the message went on to list tail-recursive functions among the shapes
+//! it covers. A report that contradicts itself in its own second paragraph is worse than
+//! no report.
+//!
+//! **What this reports, and what it deliberately does not.** For a kernel site,
+//! compilation happens in two stages, and only the second is observable here:
 //!
 //! 1. the **compiler** decides a comprehension's shape is eligible and emits a
 //!    `TryJit*` op for it (`Program::{reduce_loops, map_kernels, …}`);
@@ -111,6 +121,32 @@ pub fn sites(prog: &Program, jit: Option<&Jit>) -> Vec<Site> {
     out
 }
 
+/// A user function the JIT compiled whole — the family a `TryJit*` walk cannot see.
+pub struct CompiledFn {
+    pub name: String,
+    /// Compiled in the form that takes its captured globals as trailing parameters.
+    /// The VM declines this entry point when a capture is not an `Int` at call time, so
+    /// it is worth distinguishing: it is compiled, and still conditional.
+    pub captures: bool,
+}
+
+/// Every user function the JIT holds native code for.
+///
+/// Asked by name against `Program::func_names`, because the JIT's tables are keyed by
+/// name and hold no list of their own. Names carry the multi-module rewrite's `m<N>$`
+/// prefix, which is stripped for display exactly as every other diagnostic does.
+pub fn functions(prog: &Program, jit: Option<&Jit>) -> Vec<CompiledFn> {
+    let Some(j) = jit else { return Vec::new() };
+    prog.func_names
+        .iter()
+        .filter_map(|n| {
+            let captures = j.capture_loop(n).is_some();
+            (j.lookup(n).is_some() || captures)
+                .then(|| CompiledFn { name: crate::strip_mangling(n), captures })
+        })
+        .collect()
+}
+
 /// Why a site has no native code, when the reason is not about the site at all.
 ///
 /// Three states have to stay distinct or the report blames the wrong thing:
@@ -134,12 +170,14 @@ pub enum Engine {
 }
 
 /// The human report. `file` is shown as the reader typed it.
-pub fn render(file: &str, sites: &[Site], engine: Engine) -> String {
+pub fn render(file: &str, sites: &[Site], fns: &[CompiledFn], engine: Engine) -> String {
     let mut s = String::new();
     let built = sites.iter().filter(|x| x.compiled).count();
     s.push_str(&format!(
-        "{file}: {} kernel site(s) offered to the JIT, {built} compiled\n",
-        sites.len()
+        "{file}: {} kernel site(s) offered to the JIT, {built} compiled; \
+         {} function(s) compiled whole\n",
+        sites.len(),
+        fns.len()
     ));
     match engine {
         Engine::Off => s.push_str(
@@ -155,12 +193,34 @@ pub fn render(file: &str, sites: &[Site], engine: Engine) -> String {
         ),
         _ => {}
     }
+    if !fns.is_empty() {
+        s.push_str("\nfunctions compiled whole (entered by name, not through a kernel site):\n");
+        for f in fns {
+            s.push_str(&format!(
+                "  {}{}\n",
+                f.name,
+                if f.captures { "   (takes captured globals; the VM declines a non-Int capture)" } else { "" }
+            ));
+        }
+    }
     if sites.is_empty() {
-        s.push_str(
-            "\nThe compiler offered no kernel sites at all. Numeric `map`/`filter`/`reduce`/\
-             `scan` over packed arrays and tail-recursive numeric functions are the shapes \
-             it offers; a comprehension over records, strings or a DataFrame is not one.\n",
-        );
+        // Only say "nothing here" when nothing here is TRUE. `bench/fib.helix` compiles
+        // one function and offers no kernel site; claiming it offered nothing at all,
+        // then listing tail-recursive functions among the covered shapes, was this
+        // module's first bug.
+        if fns.is_empty() {
+            s.push_str(
+                "\nNothing in this program was compiled. Numeric `map`/`filter`/`reduce`/\
+                 `scan` over packed arrays and tail-recursive numeric functions are the \
+                 shapes the JIT takes; a comprehension over records, strings or a \
+                 DataFrame is not one.\n",
+            );
+        } else {
+            s.push_str(
+                "\nNo kernel sites — this program's native code is in the function(s) \
+                 above.\n",
+            );
+        }
         return s;
     }
     s.push('\n');
@@ -185,7 +245,12 @@ pub fn render(file: &str, sites: &[Site], engine: Engine) -> String {
 }
 
 /// The same report as data.
-pub fn to_json(file: &str, sites: &[Site], engine: Engine) -> serde_json::Value {
+pub fn to_json(
+    file: &str,
+    sites: &[Site],
+    fns: &[CompiledFn],
+    engine: Engine,
+) -> serde_json::Value {
     serde_json::json!({
         "file": file,
         "engine": match engine {
@@ -196,6 +261,10 @@ pub fn to_json(file: &str, sites: &[Site], engine: Engine) -> serde_json::Value 
         "jit_available": engine != Engine::Off,
         "offered": sites.len(),
         "compiled": sites.iter().filter(|x| x.compiled).count(),
+        "functions": fns.iter().map(|f| serde_json::json!({
+            "name": f.name,
+            "captures_globals": f.captures,
+        })).collect::<Vec<_>>(),
         "sites": sites.iter().map(|x| serde_json::json!({
             "family": x.family,
             "index": x.idx,

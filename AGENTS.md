@@ -80,7 +80,9 @@ cmp a.out b.out && cmp a.out c.out
 5. **Falling off a JIT kernel is silent** — same answer, much slower. If a hot loop is
    slow, suspect the shape, not the math: `helix jit-explain prog.helix` lists every
    kernel site the compiler offered the JIT, with its line and whether native code was
-   generated. A comprehension whose line is absent was never offered at all. It reports
+   generated, PLUS the functions compiled whole (a tail-recursive numeric function is
+   native but is not a kernel site). A comprehension whose line is absent was never
+   offered at all. It reports
    what the JIT was asked and what it answered, **not yet why** a shape was refused.
 
 A lookup miss is *distinguishable* on request: `d.expect(k)` raises where `d.get(k)`

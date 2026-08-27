@@ -19,6 +19,13 @@
   two would tell every Apple-Silicon reader their loops are shaped wrong. It compiles but
   does **not** run the program, so asking the question never executes anything.
 
+  Two families are reported, because the JIT has two: *kernel sites* (a `map`/`filter`/
+  `reduce`/`scan` body, reached through a `TryJit*` op) and *whole functions* entered by
+  name, which is how a tail-recursive numeric function becomes a native loop. A sweep of
+  the tracked tree found **24 compiled functions** in that second family, including
+  `bench/kernels/k2_mandelbrot.helix`, whose native code is three functions and zero
+  kernel sites.
+
   It does not yet say *why* a shape was refused: the eligibility predicates in
   `jit::analysis` answer `bool`, not a reason, and a plausible-sounding guess would send
   the reader to rewrite the wrong thing.
