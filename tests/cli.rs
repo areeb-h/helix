@@ -2486,6 +2486,66 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// Asking a module for a BUILTIN says where the name actually lives.
+///
+/// From a field report. Probing whether selective import existed at all, a user wrote
+/// `import core.{clamp}`, got *"`clamp` is not exported by module `core`"*, and recorded
+/// **the feature** as missing — when selective import had shipped in v0.5.1 and `clamp`
+/// simply needs no import, being a builtin. The diagnostic was true and still produced a
+/// false negative, because "not exported" reads as "this language cannot do that" when
+/// you are probing for a capability rather than debugging a program.
+///
+/// A message that is correct but leads a reader to the wrong conclusion is the same
+/// defect class as the wrong hint `statement_boundary_hint` exists to prevent — it costs
+/// the reader the one thing the compiler actually knew.
+#[test]
+fn importing_a_builtin_says_it_is_a_builtin() {
+    let dir = std::env::temp_dir().join("helix_bihint");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("core")).unwrap();
+    std::fs::write(
+        dir.join("core/util.helix"),
+        "export fn wrap(x: Float, lo: Float, hi: Float) = lo + (x - lo) % (hi - lo)\n",
+    )
+    .unwrap();
+    let w = |name: &str, src: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, src).unwrap();
+        p.to_str().unwrap().to_string()
+    };
+
+    // Selective import of a builtin: say it needs no import at all.
+    let a = w("a.helix", "import core.util.{clamp}\nprint(clamp(5, 0, 3))\n");
+    let (_, err, code) = run(&[&a], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("is not exported by module"), "{err}");
+    assert!(err.contains("`clamp` is a builtin"), "it must name where clamp lives: {err}");
+    assert!(err.contains("no import"), "{err}");
+
+    // The same near-miss reached through a qualified call.
+    let b = w("b.helix", "import core.util\nprint(util.clamp(5, 0, 3))\n");
+    let (_, err, code) = run(&[&b], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("`clamp` is a builtin"), "{err}");
+    assert!(err.contains("no module prefix"), "{err}");
+
+    // A GENUINE typo must keep the export/spelling advice — the builtin branch must not
+    // swallow the case it was not written for.
+    let c = w("c.helix", "import core.util.{wrapp}\nprint(1)\n");
+    let (_, err, code) = run(&[&c], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("mark it `export wrapp"), "a typo keeps the original hint: {err}");
+    assert!(!err.contains("is a builtin"), "{err}");
+
+    // And the feature itself works, which is what the field report was probing for.
+    let d = w("d.helix", "import core.util.{wrap}\nprint(wrap(370.0, 0.0, 360.0))\n");
+    let (out, err, code) = run(&[&d], &[], "");
+    assert_eq!(code, Some(0), "selective import shipped in v0.5.1: {err}");
+    assert_eq!(out.trim(), "10.0");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `assert_error` — assert that something FAILED, and that it said why.
 ///
 /// The idiom it replaces (`r = try f()` then `assert(r.error.contains("…"))`) is three

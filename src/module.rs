@@ -403,14 +403,30 @@ impl Loader {
                         for n in names {
                             if !self.modules[dep_idx].exports.contains(n) {
                                 let shown = segments.join(".");
+                                // A BUILTIN asked for by selective import is the common
+                                // near-miss, and "not exported" alone reads as "this
+                                // language cannot do that". A field report probing
+                                // whether selective import existed at all wrote
+                                // `import core.{clamp}`, got exactly that message, and
+                                // recorded the FEATURE as missing — when the feature had
+                                // shipped and `clamp` simply needs no import. The
+                                // diagnostic was true and still produced a false
+                                // negative, so it now says where the name really lives.
+                                let hint = if crate::registry::is_builtin_name(n) {
+                                    format!(
+                                        "`{n}` is a builtin — it is already available everywhere, with no import."
+                                    )
+                                } else {
+                                    format!(
+                                        "mark it `export {n} = …` / `export fn {n}(…)` in that module, or check the spelling."
+                                    )
+                                };
                                 return Err(HelixError::new(
                                     format!("`{n}` is not exported by module `{shown}`"),
                                     *line,
                                     *col,
                                 )
-                                .hint(format!(
-                                    "mark it `export {n} = …` / `export fn {n}(…)` in that module, or check the spelling."
-                                ))
+                                .hint(hint)
                                 .into_diag(&src, &fname));
                             }
                             // Two modules exporting the same name, both imported
@@ -951,14 +967,21 @@ fn check_exported(
             Expr::Ident { name, .. } => name.as_str(),
             _ => dep,
         };
+        // Same near-miss, reached the other way: `core.clamp` for a name that is a
+        // builtin and therefore needs no module at all.
+        let hint = if crate::registry::is_builtin_name(member) {
+            format!("`{member}` is a builtin — call it directly as `{member}(…)`, with no module prefix.")
+        } else {
+            format!(
+                "only `export`ed names are reachable as `{alias}.{member}`; mark it `export` in that module, or check the spelling."
+            )
+        };
         return Err(HelixError::new(
             format!("`{member}` is not exported by module `{alias}`"),
             line,
             col,
         )
-        .hint(format!(
-            "only `export`ed names are reachable as `{alias}.{member}`; mark it `export` in that module, or check the spelling."
-        )));
+        .hint(hint));
     }
     Ok(())
 }
