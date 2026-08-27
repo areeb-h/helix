@@ -7440,6 +7440,8 @@ fn a_server_can_hang_up_on_a_client_and_survive() {
             format!(
                 "fn serve(srv, left) = if left == 0 then \"survived\" else do {{\n\
                  \x20 c = srv.accept()\n\
+                 \x20 r = c.request()\n\
+                 \x20 print(\"peer={{r.peer.address}}:{{r.peer.port}} version={{r.version}}\")\n\
                  \x20 c.respond({{status: 200, text: \"ok\"}})\n\
                  \x20 c.close()\n\
                  \x20 serve(srv, left - 1)\n\
@@ -7521,6 +7523,14 @@ fn a_server_can_hang_up_on_a_client_and_survive() {
             "the server died instead of hanging up (this is the DoS)\nstdout: {so}\nstderr: {se}"
         );
         assert!(so.contains("survived"), "the accept loop did not finish: {so} / {se}");
+
+        // THE PEER AND THE VERSION. Both were dropped on the floor until now — the address
+        // literally as `_peer` at the accept — so a directly-exposed server could not tell
+        // two clients apart, and could not tell HTTP/1.0 from 1.1 to know whether to keep
+        // a connection alive. Asserted here because this test speaks real HTTP over a real
+        // socket, which is the only way either becomes observable.
+        assert!(so.contains("peer=127.0.0.1:"), "the request must carry its peer: {so}");
+        assert!(so.contains("version=1."), "the request must carry its HTTP version: {so}");
         assert_eq!(answered, REQUESTS - 1, "a request went unanswered: {so} / {se}");
         let _ = std::fs::remove_dir_all(&dir);
         return;

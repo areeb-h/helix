@@ -3279,10 +3279,10 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         DocEntry {
             name: "request",
             sig: "request()",
-            doc: "The connection's parsed request record {method, path, query, headers, body}.",
+            doc: "The parsed request: {method, path, query, headers, body, peer, version}.",
             example: "conn.request()",
             example_out: "",
-            notes: "",
+            notes: "`peer` is the OTHER END OF THE SOCKET as {address, port} — behind a reverse proxy that is the proxy, and X-Forwarded-For carries the client only when the proxy is one you run and it overwrites rather than appends. It is not called `client_ip` because that would make a lie convenient. A record rather than \"1.2.3.4:5678\" so rate limiting can group by address without re-parsing, which is where IPv6 breaks the naive split. `version` is \"1.0\"/\"1.1\"/\"2.0\", and an unrecognisable request line answers \"1.0\" on purpose: 1.0 means close unless asked otherwise, so the guess cannot leak a connection.",
         },
     ),
     (

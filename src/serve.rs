@@ -53,6 +53,13 @@ pub enum NetHandle {
         /// sends `Connection: keep-alive` instead of closing.
         open: Cell<bool>,
         event: Cell<bool>,
+        /// The other end of the socket, as the `{address, port}` record the request
+        /// carries — BUILT ONCE, here, because it cannot change while the socket is open
+        /// and a keep-alive connection serves many requests through it. Also the only
+        /// place it could live for the event-loop path, which parses its request an
+        /// arbitrary number of polls after the `SocketAddr` was available. See
+        /// `peer_value` for why it is not called "client".
+        peer: Value,
     },
     /// An open HTTP response body being read incrementally (`http_stream`) — the pull-based
     /// streaming *client*. Holds the response `status` and a buffered reader consumed
@@ -320,10 +327,10 @@ pub fn accept(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, 
     // hostile client (a header bomb, a mid-request disconnect) must never take down the
     // accept loop; only a genuine *listener* failure is returned to the program.
     loop {
-        let (stream, _peer) = listener
+        let (stream, peer) = listener
             .accept()
             .map_err(|e| HelixError::new(format!("accept failed: {e}"), line, col))?;
-        match finish_connection(stream, line, col) {
+        match finish_connection(stream, peer, line, col) {
             Ok(conn) => return Ok(conn),
             Err(_) => continue,
         }
@@ -355,7 +362,7 @@ pub fn poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, He
         // A malformed request was answered with a 400 and dropped inside `finish_connection`;
         // there's no valid connection to hand back this tick, so report `missing` (as if none
         // had arrived) — the cooperative loop just continues.
-        Ok((stream, _peer)) => match finish_connection(stream, line, col) {
+        Ok((stream, peer)) => match finish_connection(stream, peer, line, col) {
             Ok(conn) => Ok(conn),
             Err(_) => Ok(Value::Missing),
         },
@@ -476,14 +483,20 @@ pub fn stream_close(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<V
 
 /// Turn a freshly accepted stream into a connection value: apply the read timeout, read
 /// and parse the request, and wrap the stream for the reply. Shared by `accept`/`poll`.
-fn finish_connection(stream: TcpStream, line: usize, col: usize) -> Result<Value, HelixError> {
+fn finish_connection(
+    stream: TcpStream,
+    peer: std::net::SocketAddr,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    let peer = peer_value(&peer);
     stream.set_read_timeout(Some(READ_TIMEOUT)).ok();
     // Read the request from a clone so the original stream stays free for the reply
     // (both refer to the same socket; the read clone is dropped when this returns).
     let read_side = stream
         .try_clone()
         .map_err(|e| HelixError::new(format!("could not read the connection: {e}"), line, col))?;
-    match parse_request(read_side, line, col) {
+    match parse_request(read_side, &peer, line, col) {
         Ok(request) => Ok(Value::Net(Rc::new(NetHandle::Conn {
             request,
             stream: RefCell::new(Some(stream)),
@@ -492,6 +505,7 @@ fn finish_connection(stream: TcpStream, line: usize, col: usize) -> Result<Value
             inbuf: RefCell::new(Vec::new()),
             open: Cell::new(true),
             event: Cell::new(false),
+            peer,
         }))),
         Err(e) => {
             // A malformed / oversized request (a header bomb, a bad request line, a client
@@ -561,9 +575,11 @@ pub fn request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value,
 /// The five request-record keys, interned ONCE. A `Symbol` is a `u32`, so this is
 /// `Copy`; interning per request was a locked hashmap lookup times five times every
 /// request (25 at 55k req/s). Both engines already read these keys by their `Symbol`.
-fn request_keys() -> (Symbol, Symbol, Symbol, Symbol, Symbol) {
+#[allow(clippy::type_complexity)]
+fn request_keys() -> (Symbol, Symbol, Symbol, Symbol, Symbol, Symbol, Symbol) {
     use std::sync::OnceLock;
-    static KEYS: OnceLock<(Symbol, Symbol, Symbol, Symbol, Symbol)> = OnceLock::new();
+    static KEYS: OnceLock<(Symbol, Symbol, Symbol, Symbol, Symbol, Symbol, Symbol)> =
+        OnceLock::new();
     *KEYS.get_or_init(|| {
         (
             Symbol::intern("method"),
@@ -571,8 +587,49 @@ fn request_keys() -> (Symbol, Symbol, Symbol, Symbol, Symbol) {
             Symbol::intern("query"),
             Symbol::intern("headers"),
             Symbol::intern("body"),
+            Symbol::intern("peer"),
+            Symbol::intern("version"),
         )
     })
+}
+
+/// The TCP peer as `{address, port}`.
+///
+/// **`peer`, not `client` or `ip`, and the name IS the documentation.** This is the other
+/// end of the socket. Behind a reverse proxy it is the proxy, and `X-Forwarded-For` is
+/// what carries the original client — a header the peer controls, so it means something
+/// only when the proxy is one you run and it OVERWRITES rather than appends. Naming this
+/// field `client_ip` would have made a lie convenient.
+///
+/// A RECORD, not `"127.0.0.1:54321"`. Rate limiting groups by address, and splitting the
+/// string to get one is where the naive version meets IPv6 (`[::1]:8080`). Go hands over
+/// the string and every user re-parses it; this hands over the parts already separated.
+///
+/// Until now the address was accepted and dropped on the floor — literally `_peer` — so
+/// telling two clients apart was not awkward, it was INEXPRESSIBLE.
+fn peer_value(addr: &std::net::SocketAddr) -> Value {
+    use std::sync::OnceLock;
+    static KEYS: OnceLock<(Symbol, Symbol)> = OnceLock::new();
+    let k = *KEYS.get_or_init(|| (Symbol::intern("address"), Symbol::intern("port")));
+    Value::Record(Rc::new(vec![
+        (k.0, Value::Str(Rc::new(addr.ip().to_string()))),
+        (k.1, Value::Int(addr.port() as i64)),
+    ]))
+}
+
+/// The protocol version from a request line's third token: `HTTP/1.1` -> `"1.1"`.
+///
+/// **An absent or unrecognisable token answers `"1.0"`, deliberately.** A server branches
+/// on this to decide whether to keep a connection alive, and 1.0's rule is *close unless
+/// asked otherwise* where 1.1's is *keep alive unless asked otherwise*. Guessing the
+/// version that closes is the guess that cannot leak a connection.
+fn request_version(tok: Option<&str>) -> &'static str {
+    match tok.and_then(|t| t.strip_prefix("HTTP/")) {
+        Some("1.1") => "1.1",
+        Some("2.0") | Some("2") => "2.0",
+        Some("0.9") => "0.9",
+        _ => "1.0",
+    }
 }
 
 /// The six response-envelope keys, interned once — `build_response` probes them per
@@ -600,6 +657,10 @@ fn respond_keys() -> (Symbol, Symbol, Symbol, Symbol, Symbol, Symbol) {
 struct CommonStrs {
     verbs: [(&'static str, Rc<String>); 7],
     empty: Rc<String>,
+    /// The protocol version is one of four fixed strings, so it belongs here for the
+    /// same reason the verbs do: `Rc::new(version.to_string())` per request is an
+    /// allocation for a value that is drawn from a set of four.
+    versions: [(&'static str, Rc<String>); 4],
 }
 
 impl CommonStrs {
@@ -613,6 +674,14 @@ impl CommonStrs {
     fn nonempty(&self, s: String) -> Rc<String> {
         if s.is_empty() { Rc::clone(&self.empty) } else { Rc::new(s) }
     }
+
+    fn version(&self, v: &str) -> Rc<String> {
+        match self.versions.iter().find(|(k, _)| *k == v) {
+            Some((_, r)) => Rc::clone(r),
+            // Unreachable: `request_version` answers from a closed set of four.
+            None => Rc::new(v.to_string()),
+        }
+    }
 }
 
 thread_local! {
@@ -620,12 +689,18 @@ thread_local! {
         verbs: ["GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS"]
             .map(|v| (v, Rc::new(v.to_string()))),
         empty: Rc::new(String::new()),
+        versions: ["1.0", "1.1", "2.0", "0.9"].map(|v| (v, Rc::new(v.to_string()))),
     };
 }
 
 /// Parse one HTTP/1.1 request into a record `{method, path, query, headers, body}`.
 /// Headers are a `Dict` keyed by lowercased name (HTTP names are case-insensitive).
-fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, HelixError> {
+fn parse_request(
+    stream: TcpStream,
+    peer: &Value,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
     let err = |e: std::io::Error| HelixError::new(format!("reading the request failed: {e}"), line, col);
     let mut reader = BufReader::new(stream);
 
@@ -639,6 +714,9 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("/").to_string();
+    // The third token was read and discarded until now, which is why a server could not
+    // tell HTTP/1.0 from 1.1 and so could implement neither correctly.
+    let version = request_version(parts.next());
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
         None => (target, String::new()),
@@ -694,8 +772,8 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
     let body = String::from_utf8_lossy(&body).into_owned();
 
     let k = request_keys();
-    let (method, query, body) = COMMON_STRS.with(|c| {
-        (c.method(method), c.nonempty(query), c.nonempty(body))
+    let (method, query, body, version) = COMMON_STRS.with(|c| {
+        (c.method(method), c.nonempty(query), c.nonempty(body), c.version(version))
     });
     let record = vec![
         (k.0, Value::Str(method)),
@@ -703,6 +781,8 @@ fn parse_request(stream: TcpStream, line: usize, col: usize) -> Result<Value, He
         (k.2, Value::Str(query)),
         (k.3, Value::Headers(Rc::new(headers))),
         (k.4, Value::Str(body)),
+        (k.5, peer.clone()),
+        (k.6, Value::Str(version)),
     ];
     Ok(Value::Record(Rc::new(record)))
 }
@@ -810,7 +890,7 @@ fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
 /// path). Unlike [`parse_request`], it never reads/blocks — it works on what's buffered so far,
 /// returning [`BufParse::Incomplete`] until a whole request (head + `Content-Length` body) is
 /// present. The DoS caps ([`MAX_HEADER_LINE`]/[`MAX_HEADER_COUNT`]/[`MAX_BODY`]) apply here too.
-fn parse_request_buf(buf: &[u8]) -> BufParse {
+fn parse_request_buf(buf: &[u8], peer: &Value) -> BufParse {
     let Some(head_end) = find_sub(buf, b"\r\n\r\n") else {
         // No end-of-head yet. Refuse an unbounded head (slow-loris) before it grows forever.
         return if buf.len() > MAX_HEADER_LINE * 8 {
@@ -825,6 +905,9 @@ fn parse_request_buf(buf: &[u8]) -> BufParse {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("/").to_string();
+    // The third token was read and discarded until now, which is why a server could not
+    // tell HTTP/1.0 from 1.1 and so could implement neither correctly.
+    let version = request_version(parts.next());
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
         None => (target, String::new()),
@@ -859,8 +942,8 @@ fn parse_request_buf(buf: &[u8]) -> BufParse {
     }
     let body = String::from_utf8_lossy(&buf[head_end + 4..total]).into_owned();
     let k = request_keys();
-    let (method, query, body) = COMMON_STRS.with(|c| {
-        (c.method(method), c.nonempty(query), c.nonempty(body))
+    let (method, query, body, version) = COMMON_STRS.with(|c| {
+        (c.method(method), c.nonempty(query), c.nonempty(body), c.version(version))
     });
     let record = vec![
         (k.0, Value::Str(method)),
@@ -868,6 +951,8 @@ fn parse_request_buf(buf: &[u8]) -> BufParse {
         (k.2, Value::Str(query)),
         (k.3, Value::Headers(Rc::new(headers))),
         (k.4, Value::Str(body)),
+        (k.5, peer.clone()),
+        (k.6, Value::Str(version)),
     ];
     BufParse::Complete(Box::new(Value::Record(Rc::new(record))), total)
 }
@@ -892,7 +977,7 @@ pub fn accept_poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Va
     let accepted = listener.accept();
     listener.set_nonblocking(false).ok();
     match accepted {
-        Ok((stream, _peer)) => {
+        Ok((stream, peer)) => {
             stream.set_nonblocking(true).ok();
             stream.set_nodelay(true).ok();
             Ok(Value::Net(Rc::new(NetHandle::Conn {
@@ -902,6 +987,7 @@ pub fn accept_poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Va
                 inbuf: RefCell::new(Vec::new()),
                 open: Cell::new(true),
                 event: Cell::new(true),
+                peer: peer_value(&peer),
             })))
         }
         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Value::Missing),
@@ -914,8 +1000,8 @@ pub fn accept_poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Va
 /// else `missing`. `missing` means either "not ready yet" (still open — check `is_open`) or
 /// "closed" (`is_open` is now false). A malformed/oversized request closes the connection.
 pub fn poll_request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
-    let (stream, inbuf, open) = match &**handle {
-        NetHandle::Conn { stream, inbuf, open, .. } => (stream, inbuf, open),
+    let (stream, inbuf, open, peer) = match &**handle {
+        NetHandle::Conn { stream, inbuf, open, peer, .. } => (stream, inbuf, open, peer),
         _ => {
             return Err(HelixError::new(
                 "`poll_request` works on a connection from `accept_poll()`",
@@ -969,7 +1055,7 @@ pub fn poll_request(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<V
     }
     // Try to carve a complete request out of the buffer.
     let mut buf = inbuf.borrow_mut();
-    match parse_request_buf(&buf) {
+    match parse_request_buf(&buf, peer) {
         BufParse::Complete(req, consumed) => {
             buf.drain(..consumed);
             INBUF_PENDING.with(|c| c.set(c.get().saturating_sub(consumed)));
