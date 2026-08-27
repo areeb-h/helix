@@ -3414,7 +3414,9 @@ Empties the cookie jar.
 
 ### `close()`
 
-Abandons an http_stream early, closing the socket now; idempotent.
+Closes the socket now — a server connection or an http_stream; idempotent.
+
+**Note:** ON A SERVER CONNECTION this is how you hang up: honour `Connection: close`,                     shed a slow client, or drop an abusive one. `is_open()` reports false                     afterwards and any buffered SSE backlog is released. Before this existed the                     only close was releasing the last reference to the handle, and calling it on                     a connection RAISED — which took down a real server, because the raise                     unwound its accept loop. Not for a listener (it stops accepting when the                     program stops holding it) or a cookie jar (use `clear()`).
 
 ```
 >>> stream.close()

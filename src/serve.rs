@@ -424,7 +424,53 @@ pub fn stream_close(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<V
             *reader.borrow_mut() = None; // drop the reader → close the socket
             Ok(Value::Missing)
         }
-        _ => Err(HelixError::new("`close` works on an `http_stream` handle", line, col)),
+        // A SERVER CONNECTION CLOSES THE SAME WAY, and until now it could not close at
+        // all. `Net` had fifteen methods and the only `close` was the outbound client's,
+        // so the sole way to hang up on a peer was to release the last reference to the
+        // handle and hope. That is not a close: a server could not honour
+        // `Connection: close` promptly, shed a slow client, or drop an abusive one.
+        //
+        // THE COST WAS A REMOTE DENIAL OF SERVICE, found in a Helix web app. Its accept
+        // loop called `close()` on an accepted connection — the obvious spelling — this
+        // arm refused, the raise unwound the accept loop, and the process died. Three
+        // `curl --http1.0 -H 'Connection: close'` requests took down a six-shard server:
+        // no auth, no body, no volume, using a header any HTTP/1.0 client sends by
+        // default. On the sharded build it was worse than a crash — shards died one at a
+        // time while the server kept answering, so it read as healthy until it was not.
+        //
+        // The plumbing was already here: `Conn` owns its `TcpStream` behind an `Option`
+        // for exactly this, and `open` is the flag `is_open` reports. Dropping the stream
+        // closes the socket; setting `open` false makes the connection agree with what
+        // the program can already observe.
+        NetHandle::Conn { stream, open, pending, .. } => {
+            *stream.borrow_mut() = None;
+            open.set(false);
+            // Buffered SSE bytes can never be sent now, so release them from the
+            // shard-wide budget here rather than leaving it shrunk until the handle
+            // drops — the same accounting `Drop` does, and clearing keeps it from
+            // running twice.
+            let mut p = pending.borrow_mut();
+            let n = p.len();
+            if n > 0 {
+                p.clear();
+                SSE_PENDING.with(|c| c.set(c.get().saturating_sub(n)));
+            }
+            // IDEMPOTENT, like the `http_stream` arm above: closing twice is what a
+            // handler does when it also closes on the way out of an error path.
+            Ok(Value::Missing)
+        }
+        NetHandle::Listener(_) => Err(HelixError::new(
+            "`close` works on a connection or an `http_stream`, not on a listener",
+            line,
+            col,
+        )
+        .hint("a listener stops accepting when the program stops holding it.")),
+        NetHandle::CookieJar(_) => Err(HelixError::new(
+            "`close` works on a connection or an `http_stream`, not on a cookie jar",
+            line,
+            col,
+        )
+        .hint("use `clear()` to empty a jar.")),
     }
 }
 

@@ -7400,6 +7400,134 @@ fn search_answers_the_questions_a_reader_actually_asks() {
     assert!(out.contains("Every word has to match"), "{out}");
 }
 
+/// A SERVER CAN HANG UP ON A CLIENT — and this test binds a real socket, because the
+/// suite could not, and that is how the bug it pins survived a whole day of green gates.
+///
+/// `Net` had fifteen methods and the only `close()` was the outbound client's. A Helix web
+/// app's accept loop called `close()` on an accepted connection — the obvious spelling —
+/// the runtime refused it, and the raise unwound the accept loop and killed the process.
+/// **Three `curl --http1.0 -H 'Connection: close'` requests took down a six-shard server**:
+/// no auth, no body, no volume, using a header any HTTP/1.0 client sends by default. On the
+/// sharded build it was worse than a crash — shards died one at a time while the server
+/// kept answering, so it read as healthy until it was not.
+///
+/// Every other gate was green through all of it: three engines byte-identical, the corpus
+/// pinned, `dfdiff` clean, `check` and `fmt` clean. None of them binds a socket, so none of
+/// them could execute an accept loop. This one does: it runs a real server as a child
+/// process and sends the exact attack request over TCP.
+#[test]
+fn a_server_can_hang_up_on_a_client_and_survive() {
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+
+    const REQUESTS: usize = 3;
+    let dir = std::env::temp_dir().join("helix_it_srv_close");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("srv.helix");
+
+    // Three attempts, because the port is chosen by binding :0 and releasing it — a
+    // vanishingly small race, but a flaky security test is a test people learn to ignore.
+    let mut last = String::new();
+    for attempt in 0..3 {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .expect("can bind a loopback port")
+            .local_addr()
+            .unwrap()
+            .port();
+        std::fs::write(
+            &prog,
+            format!(
+                "fn serve(srv, left) = if left == 0 then \"survived\" else do {{\n\
+                 \x20 c = srv.accept()\n\
+                 \x20 c.respond({{status: 200, text: \"ok\"}})\n\
+                 \x20 c.close()\n\
+                 \x20 serve(srv, left - 1)\n\
+                 }}\n\
+                 srv = listen({port})\n\
+                 print(serve(srv, {REQUESTS}))\n"
+            ),
+        )
+        .unwrap();
+
+        let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+            .arg(prog.to_str().unwrap())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn helix");
+
+        // Wait for the listener rather than sleeping a guessed interval.
+        let addr = format!("127.0.0.1:{port}");
+        let mut up = false;
+        for _ in 0..100 {
+            if let Ok(probe) = TcpStream::connect(&addr) {
+                drop(probe); // an accepted-and-dropped probe is one of the REQUESTS
+                up = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !up {
+            let _ = child.kill();
+            last = format!("attempt {attempt}: server never bound {addr}");
+            continue;
+        }
+
+        // THE ATTACK, verbatim: HTTP/1.0 with the header that asks the server to hang up.
+        // The probe above consumed one accept, so send one fewer.
+        let mut answered = 0usize;
+        for _ in 0..(REQUESTS - 1) {
+            let Ok(mut c) = TcpStream::connect(&addr) else { break };
+            c.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+            c.set_write_timeout(Some(std::time::Duration::from_secs(5))).ok();
+            if c.write_all(b"GET / HTTP/1.0\r\nConnection: close\r\n\r\n").is_err() {
+                break;
+            }
+            let mut buf = Vec::new();
+            let _ = c.read_to_end(&mut buf);
+            if String::from_utf8_lossy(&buf).starts_with("HTTP/1.") {
+                answered += 1;
+            }
+        }
+
+        // Bounded wait: a broken server exits early, a working one exits after REQUESTS.
+        // Neither should be able to stall the suite.
+        let mut status = None;
+        for _ in 0..200 {
+            match child.try_wait() {
+                Ok(Some(st)) => {
+                    status = Some(st);
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(e) => panic!("could not wait on the server: {e}"),
+            }
+        }
+        let Some(status) = status else {
+            let _ = child.kill();
+            last = format!("attempt {attempt}: the server never exited");
+            continue;
+        };
+        let out = child.wait_with_output().expect("output");
+        let (so, se) = (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        );
+
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "the server died instead of hanging up (this is the DoS)\nstdout: {so}\nstderr: {se}"
+        );
+        assert!(so.contains("survived"), "the accept loop did not finish: {so} / {se}");
+        assert_eq!(answered, REQUESTS - 1, "a request went unanswered: {so} / {se}");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    panic!("could not run the server test in three attempts: {last}");
+}
+
 /// THE DRIFT-PROOF for the docs table: every entry `helix describe` reports
 /// with an `example_out` is EXECUTED (wrapped in `print(...)`, exactly as the
 /// doc-example runner wraps its last line) and must produce byte-for-byte that
