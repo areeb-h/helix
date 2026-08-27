@@ -74,6 +74,72 @@ fn starts_a_word(hay: &str, term: &str) -> bool {
     false
 }
 
+/// The words a reader ARRIVES with, mapped to the words this catalog uses.
+///
+/// **The instance that named this class was `regex`.** The regex entries are thorough —
+/// they explain group 0, non-participating captures, the raw-string requirement and the
+/// linear-time guarantee — and they consistently say "regular expression", which is
+/// correct. So `helix search "regular expression"` found 5, `pattern` found 8, `ReDoS`
+/// found 1, and `regex`, the word every programmer actually types, found NOTHING. Good
+/// documentation is not enough on its own: the lookup has to speak the reader's dialect.
+///
+/// Each entry is a shorthand or a near-synonym on the LEFT and text that genuinely appears
+/// in the catalog on the RIGHT. A test asserts every right-hand side still matches
+/// something, so an entry cannot quietly become dead weight when the prose is rewritten.
+/// Right-hand sides may be phrases: the boundary test handles them unchanged.
+static SYNONYMS: &[(&str, &[&str])] = &[
+    // Abbreviations a reader types instead of the formal term.
+    ("regex", &["regular expression"]),
+    ("regexp", &["regular expression"]),
+    ("df", &["dataframe"]),
+    ("db", &["database"]),
+    ("argv", &["argument"]),
+    ("args", &["argument"]),
+    ("ms", &["millisecond"]),
+    ("sd", &["standard deviation"]),
+    ("stdev", &["standard deviation"]),
+    ("stddev", &["standard deviation"]),
+    ("avg", &["mean"]),
+    // A different word for the same statistic.
+    ("percentile", &["quantile"]),
+    ("groupby", &["group"]),
+    ("dedupe", &["unique"]),
+    ("dedup", &["unique"]),
+    ("distinct", &["unique"]),
+    // The vocabulary of other languages, which is what a newcomer brings.
+    ("null", &["missing"]),
+    ("nil", &["missing"]),
+    ("none", &["missing"]),
+    ("exception", &["raise"]),
+    ("throw", &["raise"]),
+    ("catch", &["try"]),
+    ("substr", &["slice"]),
+    ("concat", &["join", "interpolat"]),
+    ("lowercase", &["lower"]),
+    ("uppercase", &["upper"]),
+    ("shuffle", &["sample"]),
+    ("histogram", &["frequencies"]),
+    ("timestamp", &["epoch", "time"]),
+];
+
+/// The catalog's words for `term`, or nothing if it is already one of them.
+fn synonyms(term: &str) -> &'static [&'static str] {
+    SYNONYMS.iter().find(|(k, _)| *k == term).map_or(&[][..], |(_, v)| v)
+}
+
+/// Every synonym this query pulled in, as `(typed, catalog)` pairs, so the listing can say
+/// so out loud. A search that silently widened itself would be the fuzzy behaviour this
+/// module refuses everywhere else.
+pub fn expansions_used(query: &str) -> Vec<(String, &'static str)> {
+    let mut out = Vec::new();
+    for t in query.to_lowercase().split_whitespace() {
+        for s in synonyms(t) {
+            out.push((t.to_string(), *s));
+        }
+    }
+    out
+}
+
 /// Does `term` match `hay`, ignoring a plural `s` on the term?
 ///
 /// The catalog writes one noun and a reader types the other — "count occurrences" against
@@ -88,7 +154,10 @@ fn matches_term(hay: &str, term: &str) -> bool {
     if term.strip_suffix("es").filter(|s| s.len() >= 4).is_some_and(|stem| starts_a_word(hay, stem)) {
         return true;
     }
-    term.strip_suffix('s').filter(|s| s.len() >= 4).is_some_and(|stem| starts_a_word(hay, stem))
+    if term.strip_suffix('s').filter(|s| s.len() >= 4).is_some_and(|stem| starts_a_word(hay, stem)) {
+        return true;
+    }
+    synonyms(term).iter().any(|alt| starts_a_word(hay, alt))
 }
 
 /// Score one catalog entry against every term, or `None` if any term is missing.
@@ -200,12 +269,17 @@ pub fn render(query: &str, hits: &[Hit]) -> String {
     if hits.is_empty() {
         return format!(
             "no match for `{query}`\n\n\
-             `helix search` looks at names, signatures, docs, notes and the language forms.\n\
+             `helix search` looks at names, signatures, docs, notes and the language forms,\n\
+             and knows some synonyms (`regex`, `avg`, `null`, `percentile`, …).\n\
              Every word has to match — try fewer words, or plainer ones (\"header\", \"group\", \"random\").\n\
              `helix doc <Type>` lists one type's methods.\n"
         );
     }
-    let mut s = format!("{} match{} for `{query}`\n\n", hits.len(), if hits.len() == 1 { "" } else { "es" });
+    let mut s = format!("{} match{} for `{query}`\n", hits.len(), if hits.len() == 1 { "" } else { "es" });
+    for (typed, catalog) in expansions_used(query) {
+        s.push_str(&format!("(also searched `{catalog}`, which is what the catalog calls `{typed}`)\n"));
+    }
+    s.push('\n');
     for h in hits {
         // The receiver is part of how you CALL it, so it leads: `Array.frequencies()` is
         // usable as printed, where a bare `frequencies()` is not. A language form has no
@@ -247,4 +321,61 @@ pub fn to_json(query: &str, hits: &[Hit]) -> serde_json::Value {
             "matched_in": h.matched,
         })).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// EVERY SYNONYM MUST EARN ITS PLACE, in both directions.
+    ///
+    /// A synonym table is the kind of thing that rots without telling anyone: the prose it
+    /// points at gets rewritten, the right-hand side stops appearing in the catalog, and
+    /// the entry sits there looking like it works. So each right-hand side must still find
+    /// something, and each left-hand side must not be a word the plain matcher already
+    /// reaches — `len` -> `length` and `str` -> `string` were both redundant, because the
+    /// prefix rule already gets there.
+    #[test]
+    fn every_synonym_earns_its_place() {
+        let mut dead = Vec::new();
+        let mut redundant = Vec::new();
+        for (typed, catalog) in SYNONYMS {
+            for alt in *catalog {
+                if search(alt).is_empty() {
+                    dead.push(format!("`{typed}` -> `{alt}` (which now matches nothing)"));
+                }
+                // If the shorthand is a prefix of the word it maps to, the boundary rule
+                // already found it and this row is maintenance for nothing.
+                if alt.starts_with(typed) {
+                    redundant.push(format!("`{typed}` -> `{alt}` (a plain prefix)"));
+                }
+            }
+        }
+        assert!(dead.is_empty(), "synonyms pointing at nothing:\n  {}", dead.join("\n  "));
+        assert!(redundant.is_empty(), "synonyms the prefix rule already covers:\n  {}", redundant.join("\n  "));
+    }
+
+    /// The instance that named the class: excellent docs, and the one word a reader types.
+    #[test]
+    fn regex_is_findable_by_the_word_people_use() {
+        let names: Vec<&str> = search("regex").iter().map(|h| h.name).collect();
+        assert!(names.contains(&"re_match"), "`regex` must find the family: {names:?}");
+        // The docs say "regular expression" throughout, which is correct and was not enough.
+        assert!(!search("regular expression").is_empty());
+        assert_eq!(expansions_used("regex"), vec![("regex".to_string(), "regular expression")]);
+        assert!(expansions_used("split").is_empty(), "a word the catalog uses needs no expansion");
+    }
+
+    /// The boundary rule, stated as the cases that drove it.
+    #[test]
+    fn a_term_matches_at_a_word_boundary_only() {
+        assert!(starts_a_word("drawn at random", "drawn"));
+        assert!(!starts_a_word("drawn at random", "raw"), "`raw` must not match inside `drawn`");
+        assert!(starts_a_word("every value for a header name", "head"), "a prefix still matches");
+        assert!(starts_a_word("re_match", "match"), "an underscore starts a word");
+        assert!(starts_a_word("headers(pairs)", "pairs"), "so does a paren");
+        // Byte-vs-character advance: the prose is full of µ, — and ×.
+        assert!(!starts_a_word("0.072 µs against the heuristic", "gainst"));
+        assert!(starts_a_word("0.072 µs against the heuristic", "against"));
+    }
 }
