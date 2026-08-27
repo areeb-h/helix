@@ -4,8 +4,13 @@
 
 ### Changed
 
-- **The toolchain floor accepts and orders a `-dev` marker**, and between releases the
-  tree will carry one (`scripts/post-release.sh`, ritual step 7).
+- **`helix --version` now reports `0.7.0-dev`, and that is the point.** Between releases
+  the tree carries a marker naming the release it is working toward, so a build from
+  `main` no longer claims to BE the last release (`scripts/post-release.sh`, ritual
+  step 7). The next release is a minor by the policy in `docs/RELEASING.md` — this
+  section carries a `### Changed` entry — so the marker names `0.7.0`.
+
+- **The toolchain floor accepts and orders a `-dev` marker.**
 
   `scripts/release.sh` bumped the version at release time and nothing moved it again, so
   between releases a build from `main` reported the version it had just SHIPPED. A field
@@ -44,11 +49,29 @@
   (`the_crate_version_is_a_version`); an unparseable own-version now simply leaves the
   floor unenforced instead of stopping everything.
 
-- **`helix new` has a test.** It had none, anywhere. It writes a manifest declaring a
-  toolchain floor, and the assertion is the round trip: the binary that wrote it must be
-  able to open it. Under the `-dev` scheme a naive scaffold would stamp `">=0.6.1-dev"` —
-  a version that has not shipped and that every released binary refuses — so it now names
-  the release the binary descends from.
+- **`helix new` has a test, and it immediately caught a bug in this work.** It had none
+  anywhere. It writes a manifest declaring a toolchain floor, and the assertion is the
+  round trip: the binary that wrote it must be able to open it.
+
+  A first draft derived a LOWER floor from the marker so older binaries could read the
+  manifest. On a `0.7.0-dev` tree that computed `0.7.0` — a version that has not shipped
+  and that the writing binary does not satisfy — because it assumed a marker is always a
+  patch marker. **Deriving was the error, not the arithmetic.** A project scaffolded by a
+  0.7.0-dev binary that declares `>=0.6.0` invites a 0.6.0 binary to open it and fail
+  later on whatever the author writes: the silent wrong answer this project treats as its
+  worst failure. The scaffold now names the version that wrote it. The cost is that a
+  pre-marker binary reports that floor as a syntax complaint rather than "your binary is
+  too old" — loud and imprecise beats quiet and wrong.
+
+- **`helix jit-explain` reports `file:line`, not a position in nothing.** The line a
+  kernel site carries is a position in the MERGED module space — every imported file
+  concatenated — so on a multi-module program it named no file the reader has open. A
+  field report measured it: `app.helix` is 298 lines and the tool reported compiled sites
+  at 1539, 2179 and 2345, real positions in a 2,443-line merged program of `app` + `ui/`
+  + `web/`. For a tool whose stated job is "which kernels compiled, **and where**", that
+  was the job half done. Sites now read `web/limit.helix:67`, and `--json` keeps the
+  merged position alongside so downstream correlation still works. Single-file programs
+  keep the bare `line:col` — the file is the argument you just typed.
 
 - **`scripts/release.sh` survives a marker.** Measured before the fix: `patch` died with
   `bash: dev: unbound variable`, and `minor` was correct only by accident (its branch

@@ -850,7 +850,8 @@ fn cli_jit_explain(args: &[String]) -> ExitCode {
         // Whole compiled functions are a SECOND family, invisible to a `TryJit*` walk.
         let fns = jitexplain::functions(&prog, jit.as_ref());
         if json {
-            let doc = jitexplain::to_json(&shown, &sites, &fns, engine);
+            let doc =
+                jitexplain::to_json(&shown, &sites, &fns, engine, &loaded.spans, loaded.multi_module);
             match serde_json::to_string_pretty(&doc) {
                 Ok(s) => println!("{s}"),
                 Err(e) => {
@@ -859,7 +860,10 @@ fn cli_jit_explain(args: &[String]) -> ExitCode {
                 }
             }
         } else {
-            print!("{}", jitexplain::render(&shown, &sites, &fns, engine));
+            print!(
+                "{}",
+                jitexplain::render(&shown, &sites, &fns, engine, &loaded.spans, loaded.multi_module)
+            );
         }
         ExitCode::SUCCESS
     })

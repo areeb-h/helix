@@ -6458,14 +6458,20 @@ fn helix_toml_carries_metadata_and_enforces_the_toolchain_floor() {
 }
 
 /// `helix new` writes a manifest THIS BINARY CAN THEN OPEN — which had no test at all,
-/// and which the `-dev` marker would have broken silently.
+/// and which the `-dev` marker did break, exactly once, before this caught it.
 ///
-/// The scaffold declares a toolchain floor from birth. If it wrote the binary's own
-/// version verbatim, a dev tree would stamp `helix = ">=0.6.1-dev"` — a version that has
-/// not shipped, which every released binary refuses outright, and which even the binary
-/// that wrote it would only accept by accident. So it names the RELEASE the binary
-/// descends from, and the round trip is the assertion: scaffold, then run a program in
-/// that directory.
+/// The scaffold declares a toolchain floor from birth, and it names the version that
+/// WROTE it. A first draft derived a LOWER floor so older binaries could read the
+/// manifest; on a `0.7.0-dev` tree that computed `0.7.0` — a version that has not shipped
+/// and that the writing binary does not satisfy — because it assumed a marker is always a
+/// patch marker. Deriving was the error, not the arithmetic: a project scaffolded by a
+/// 0.7.0-dev binary declaring `>=0.6.0` invites a 0.6.0 binary to open it and fail later
+/// on whatever the author writes, which is the silent wrong answer this project treats as
+/// its worst failure.
+///
+/// So the assertion is the ROUND TRIP rather than a formula: scaffold, then run a program
+/// in that directory. Version-independent on purpose — it runs the built binary and must
+/// not assume what the tree is carrying.
 #[test]
 fn helix_new_writes_a_manifest_this_binary_can_open() {
     let dir = std::env::temp_dir().join("helix_it_new");
@@ -6479,8 +6485,16 @@ fn helix_new_writes_a_manifest_this_binary_can_open() {
     let manifest = std::fs::read_to_string(dir.join("helix.toml")).expect("helix.toml written");
     assert!(manifest.contains("name = \"physics\""), "{manifest}");
     assert!(manifest.contains("helix = \">="), "the floor is declared from birth: {manifest}");
-    // Never a marker: a scaffold must not demand a version that has not shipped.
-    assert!(!manifest.contains("-dev"), "a scaffold must not declare a dev floor: {manifest}");
+    // The floor is THIS BINARY'S OWN VERSION — the only claim that stays true whether the
+    // tree is a release or carries a marker, and the one that cannot invite an older
+    // binary into a project built with something it does not have.
+    let (ver, _, _) = run(&["--version"], &[], "");
+    let ver =
+        ver.trim().strip_prefix("helix ").expect("`--version` prints `helix X.Y.Z`").to_string();
+    assert!(
+        manifest.contains(&format!("helix = \">={ver}\"")),
+        "the scaffold must declare the version that wrote it ({ver}): {manifest}"
+    );
 
     // THE ROUND TRIP. A manifest the writing binary cannot open is the failure this
     // whole test exists for.

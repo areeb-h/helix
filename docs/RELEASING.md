@@ -22,8 +22,18 @@ Pre-1.0 semver, with the line drawn where USERS feel it:
 
 ### Between releases the tree says `-dev`, and that is the point
 
-A tagged commit carries a clean `X.Y.Z`. Every commit after it carries
-`X.Y.(Z+1)-dev`, written by `scripts/post-release.sh` as ritual step 7.
+A tagged commit carries a clean `X.Y.Z`. Every commit after it carries a marker
+naming the release it is working toward, written by `scripts/post-release.sh`
+as ritual step 7: `post-release.sh 0.6.0 patch` arms `0.6.1-dev`, and
+`post-release.sh 0.6.0 minor` arms `0.7.0-dev`. Pick `minor` once the changelog
+carries a `### Changed` entry, since the policy above makes that a minor by
+definition. `patch` is the default because it is the conservative claim — every
+later release outranks it either way.
+
+`release.sh` reads the marker as the version it names: from `0.7.0-dev`,
+`minor` releases **0.7.0** rather than stepping to 0.8.0, and `patch` is refused
+outright because a patch release from a tree armed for the next minor line is
+not a defined thing.
 
 This exists because the tree used to keep the version it had just SHIPPED, so a
 build from `main` and the released binary reported the same string. A field
@@ -92,8 +102,8 @@ the parser ships one release ahead of the first marker.
    highest `GLIBC_x.y` requirement must be ≤ `GLIBC_FLOOR` in `install.sh`
    (the release workflow also asserts this inside build-pgo). If the runner
    image changed, the floor moves IN THE RELEASE COMMIT, never after.
-7. **Re-arm the tree**: `bash scripts/post-release.sh X.Y.Z`, then commit and
-   push. `Cargo.toml` goes to `X.Y.(Z+1)-dev` and `## Unreleased` is reopened
+7. **Re-arm the tree**: `bash scripts/post-release.sh X.Y.Z [patch|minor]`,
+   then commit and push. `Cargo.toml` takes the marker and `## Unreleased` is reopened
    (`release.sh` requires that heading and nothing used to write it back, so
    every cycle began by adding it by hand). From here `helix --version` reports
    the marker, which is TRUE: the tree is not the release any more.

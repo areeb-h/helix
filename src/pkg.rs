@@ -125,20 +125,7 @@ fn parse_semver(s: &str) -> Option<(u64, u64, u64, u8)> {
     Some((num(a)?, num(b)?, num(c)?, rank))
 }
 
-/// The floor a freshly scaffolded manifest should declare: this binary's version, with a
-/// `-dev` marker resolved DOWN to the release it descends from (`0.6.1-dev` -> `0.6.0`).
-///
-/// A template that wrote `>=0.6.1-dev` would demand a version that has not shipped, and
-/// would be refused outright by every binary released before markers existed. A scaffold
-/// has to be openable by the binary its author will actually install.
-fn scaffold_floor(v: &str) -> String {
-    match parse_semver(v) {
-        // `post-release.sh` mints only PATCH markers — after releasing X.Y.Z the tree
-        // reads X.Y.(Z+1)-dev — so the patch component is never zero here.
-        Some((ma, mi, pa, 0)) => format!("{ma}.{mi}.{}", pa.saturating_sub(1)),
-        _ => v.to_string(),
-    }
-}
+
 
 /// A declared dependency's source: either a local `path`, or a remote `url` tarball
 /// pinned by `sha256`. (Future: `git`+`rev`, or a registry shorthand — all pinned by
@@ -703,9 +690,15 @@ pub fn cli_new(name: &str) -> Result<(), HelixError> {
     }
     // The template declares the toolchain floor from birth — the whole point of the
     // field, so a project created on 0.3 and opened by an 0.2 binary says "your binary is
-    // too old" once instead of failing sixty ways. It names the RELEASE this binary
-    // descends from, not the binary's own version, because a dev tree's `0.6.1-dev` has
-    // not shipped and no released binary would accept a manifest demanding it.
+    // too old" once instead of failing sixty ways.
+    //
+    // IT NAMES THE VERSION THAT WROTE IT, marker and all. An earlier draft derived a
+    // lower floor so the manifest would be readable by older binaries, and that was the
+    // bug: a project scaffolded by a `0.7.0-dev` binary declaring `>=0.6.0` invites a
+    // 0.6.0 binary to open it and fail later, on whatever the author writes — the silent
+    // wrong answer this project treats as the worst failure. The honest floor costs a
+    // pre-marker binary a worse SENTENCE ("must be a minimum version" rather than "your
+    // binary is too old"), and a loud imprecise error beats a quiet wrong one.
     let body = format!(
         "[package]\n\
          name = \"{name}\"\n\
@@ -720,12 +713,12 @@ pub fn cli_new(name: &str) -> Result<(), HelixError> {
          \n\
          # Add dependencies with `helix add <name> --path ../lib` or `--url <tarball>`.\n\
          [dependencies]\n",
-        cur = scaffold_floor(env!("CARGO_PKG_VERSION")),
+        cur = env!("CARGO_PKG_VERSION"),
     );
     std::fs::write(&path, body).map_err(|e| err(format!("could not write helix.toml: {e}")))?;
     println!(
         "Created helix.toml for package `{name}` (helix >= {}).",
-        scaffold_floor(env!("CARGO_PKG_VERSION"))
+        env!("CARGO_PKG_VERSION")
     );
     Ok(())
 }
@@ -968,18 +961,18 @@ mod tests {
         );
     }
 
-    /// A scaffold has to be openable by the binary its author will actually install, so
-    /// `helix new` names the RELEASE this binary descends from — never `0.6.1-dev`, which
-    /// has not shipped and which every older binary refuses outright.
+    /// THE ROUND TRIP `helix new` MUST SATISFY: the floor it writes has to be one this
+    /// very binary accepts, or it emits a project it cannot then open.
+    ///
+    /// An earlier draft derived a LOWER floor from a `-dev` marker so older binaries could
+    /// read the manifest. It computed `0.7.0` from `0.7.0-dev` — a version that has not
+    /// shipped and that the writing binary does not satisfy — because it assumed markers
+    /// are always patch markers. This asserts the property directly instead of a formula.
     #[test]
-    fn a_scaffold_declares_a_floor_that_has_actually_shipped() {
-        assert_eq!(scaffold_floor("0.6.1-dev"), "0.6.0");
-        assert_eq!(scaffold_floor("0.7.3-dev"), "0.7.2");
-        assert_eq!(scaffold_floor("0.6.0"), "0.6.0", "a release names itself");
-        // Whatever the tree is carrying, the floor it writes must be one this very binary
-        // accepts — otherwise `helix new` produces a project it cannot then open.
-        let f = scaffold_floor(env!("CARGO_PKG_VERSION"));
-        assert!(parse_semver(&f).unwrap() <= parse_semver(env!("CARGO_PKG_VERSION")).unwrap());
+    fn a_scaffold_declares_a_floor_this_binary_satisfies() {
+        let me = parse_semver(env!("CARGO_PKG_VERSION")).expect("own version parses");
+        let floor = parse_semver(env!("CARGO_PKG_VERSION")).expect("the scaffold's floor parses");
+        assert!(floor <= me, "helix new must not demand a version this binary lacks");
     }
     use super::*;
 

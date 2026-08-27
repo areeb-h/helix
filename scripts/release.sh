@@ -28,9 +28,22 @@ CUR=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
 # variable` — while `minor` silently discarded the marker, being right by accident.
 BASE=${CUR%-dev}
 IFS=. read -r MA MI PA <<<"$BASE"
-if   [ "$LEVEL" = minor ];  then NEW="$MA.$((MI + 1)).0"
-elif [ "$CUR" != "$BASE" ]; then NEW="$BASE"
-else                             NEW="$MA.$MI.$((PA + 1))"
+ARMED=$([ "$CUR" != "$BASE" ] && echo 1 || echo 0)
+if [ "$LEVEL" = minor ]; then
+  # A tree armed for a MINOR (a marker whose patch is 0) already NAMES that release, so
+  # stripping is the bump. Computing MI+1 from it would skip the version the marker
+  # names: 0.7.0-dev would have released 0.8.0.
+  if [ "$ARMED" = 1 ] && [ "$PA" = 0 ]; then NEW="$BASE"; else NEW="$MA.$((MI + 1)).0"; fi
+elif [ "$ARMED" = 1 ]; then
+  if [ "$PA" = 0 ]; then
+    echo "error: the tree is armed for the MINOR $BASE, so a patch release from here is"
+    echo "       not defined — the last release was on an earlier minor line."
+    echo "       Release $BASE with 'minor', or re-arm: scripts/post-release.sh <last> patch"
+    exit 1
+  fi
+  NEW="$BASE"
+else
+  NEW="$MA.$MI.$((PA + 1))"
 fi
 echo "== version: $CUR -> $NEW ($LEVEL)"
 

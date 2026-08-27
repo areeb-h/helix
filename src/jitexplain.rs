@@ -169,8 +169,49 @@ pub enum Engine {
     Live,
 }
 
+/// Where a site actually is, in terms a reader can act on.
+///
+/// **The line a site carries is a position in the MERGED module space** — every imported
+/// file concatenated — which for a multi-module program is a position in no file anyone
+/// has open. A field report caught it exactly: `app.helix` is 298 lines and this tool
+/// reported compiled sites at 1539, 2179 and 2345. Those are real positions in the
+/// 2,443-line merged program of `app` + `ui/` + `web/`, and useless to someone trying to
+/// find the loop. For a tool whose stated job is "which kernels compiled, AND WHERE",
+/// that was the job half done.
+///
+/// A single-file program keeps the bare `line:col`: the file is the argument the reader
+/// just typed, so repeating it on every row is noise. That is the same rule error
+/// rendering already applies — `multi_module` is exactly the flag `render_err` uses to
+/// decide whether module context is worth showing.
+fn site_where(spans: &[crate::module::Span], multi: bool, line: u32, col: u32) -> String {
+    if !multi {
+        return format!("{line}:{col}");
+    }
+    let (_, filename, local) = crate::module::locate(spans, line as usize);
+    format!("{}:{local}:{col}", display_path(filename))
+}
+
+/// A loaded module's path as short as it can be without becoming ambiguous: relative to
+/// the working directory when it is under it (`ui/render.helix`), absolute otherwise. The
+/// loader canonicalizes every path, so the raw value is an absolute one that would wrap
+/// the terminal on every row.
+fn display_path(abs: &str) -> String {
+    let p = std::path::Path::new(abs);
+    std::env::current_dir()
+        .ok()
+        .and_then(|cwd| p.strip_prefix(&cwd).ok().map(|r| r.display().to_string()))
+        .unwrap_or_else(|| abs.to_string())
+}
+
 /// The human report. `file` is shown as the reader typed it.
-pub fn render(file: &str, sites: &[Site], fns: &[CompiledFn], engine: Engine) -> String {
+pub fn render(
+    file: &str,
+    sites: &[Site],
+    fns: &[CompiledFn],
+    engine: Engine,
+    spans: &[crate::module::Span],
+    multi: bool,
+) -> String {
     let mut s = String::new();
     let built = sites.iter().filter(|x| x.compiled).count();
     s.push_str(&format!(
@@ -224,7 +265,12 @@ pub fn render(file: &str, sites: &[Site], fns: &[CompiledFn], engine: Engine) ->
         return s;
     }
     s.push('\n');
-    for x in sites {
+    // One pass to size the location column, so a multi-module listing lines up instead of
+    // ragged-edging on every differently-named file.
+    let wheres: Vec<String> =
+        sites.iter().map(|x| site_where(spans, multi, x.line, x.col)).collect();
+    let w = wheres.iter().map(|t| t.len()).max().unwrap_or(0);
+    for (x, at) in sites.iter().zip(&wheres) {
         // "DECLINED" names a decision the JIT made about THIS shape. With the JIT
         // switched off it made no decision, and printing the word anyway would send a
         // reader to rewrite a loop that was never looked at.
@@ -234,7 +280,7 @@ pub fn render(file: &str, sites: &[Site], fns: &[CompiledFn], engine: Engine) ->
             (Engine::Live, true) => "compiled",
             (Engine::Live, false) => "DECLINED",
         };
-        s.push_str(&format!("  {:>4}:{:<4} {:<14} {verdict}\n", x.line, x.col, x.family));
+        s.push_str(&format!("  {at:<w$}  {:<14} {verdict}\n", x.family));
     }
     s.push_str(
         "\nA comprehension whose line is not listed was never offered to the JIT: the \
@@ -250,7 +296,17 @@ pub fn to_json(
     sites: &[Site],
     fns: &[CompiledFn],
     engine: Engine,
+    spans: &[crate::module::Span],
+    multi: bool,
 ) -> serde_json::Value {
+    let locate = |line: u32| -> (String, usize) {
+        if multi {
+            let (_, filename, local) = crate::module::locate(spans, line as usize);
+            (display_path(filename), local)
+        } else {
+            (file.to_string(), line as usize)
+        }
+    };
     serde_json::json!({
         "file": file,
         "engine": match engine {
@@ -265,12 +321,21 @@ pub fn to_json(
             "name": f.name,
             "captures_globals": f.captures,
         })).collect::<Vec<_>>(),
-        "sites": sites.iter().map(|x| serde_json::json!({
-            "family": x.family,
-            "index": x.idx,
-            "line": x.line,
-            "col": x.col,
-            "compiled": x.compiled,
-        })).collect::<Vec<_>>(),
+        "sites": sites.iter().map(|x| {
+            let (f, local) = locate(x.line);
+            serde_json::json!({
+                "family": x.family,
+                "index": x.idx,
+                // The file and the line WITHIN it — what a reader or an editor can open.
+                "file": f,
+                "line": local,
+                // The merged-module position, kept because it is what the compiler and
+                // the bytecode actually carry: dropping it would make this report
+                // impossible to correlate with anything downstream.
+                "merged_line": x.line,
+                "col": x.col,
+                "compiled": x.compiled,
+            })
+        }).collect::<Vec<_>>(),
     })
 }

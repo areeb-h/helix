@@ -25,7 +25,13 @@
 # v0.5.1 -> v0.6.0 changed what an expression COMPUTES and no name appeared or vanished.
 # That is the case only an ordering claim covers, and it is why the marker earns its keep.
 #
-#   Usage: scripts/post-release.sh <the version just tagged>
+# WHICH MARKER. The level says what the NEXT release is expected to be, because the
+# marker names it: after tagging 0.6.0, `patch` arms 0.6.1-dev and `minor` arms 0.7.0-dev.
+# Pick `minor` when the changelog already carries a `### Changed` entry, since the policy
+# in docs/RELEASING.md makes that a minor by definition. `patch` is the default because it
+# is the conservative claim — every later release outranks it either way.
+#
+#   Usage: scripts/post-release.sh <the version just tagged> [patch|minor]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -44,8 +50,13 @@ case "$VER" in
     exit 1 ;;
 esac
 
+LEVEL="${2:-patch}"
 IFS=. read -r MA MI PA <<<"$VER"
-NEXT="$MA.$MI.$((PA + 1))-dev"
+case "$LEVEL" in
+  patch) NEXT="$MA.$MI.$((PA + 1))-dev" ;;
+  minor) NEXT="$MA.$((MI + 1)).0-dev" ;;
+  *)     echo "usage: post-release.sh <version> [patch|minor]" >&2; exit 2 ;;
+esac
 
 sed -i "s/^version = \"$CUR\"/version = \"$NEXT\"/" Cargo.toml
 
