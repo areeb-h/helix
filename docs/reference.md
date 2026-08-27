@@ -30,6 +30,16 @@ Raise unless the two values are equal, showing both sides in the error.
 >>> assert_eq(2 + 2, 4)
 ```
 
+### `assert_error(try_result, substring?)`
+
+Raise unless a `try` FAILED — and, given a substring, unless its message contains it.
+
+**Note:** Shows the actual message when it does not match, and the VALUE when the expression succeeded instead — the plain `assert(r.error.contains(...))` idiom shows neither.
+
+```
+>>> assert_error(try raise("bad input"), "bad")
+```
+
 ### `raise(message, help?)`
 
 Raise an error with a message and optional help line; caught by try like any error.

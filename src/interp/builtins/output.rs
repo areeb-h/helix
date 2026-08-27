@@ -278,6 +278,81 @@ pub(super) fn a_assert_eq(name: &str, args: Vec<Value>, line: usize, col: usize)
     
 }
 
+/// `assert_error(try expr)` / `assert_error(try expr, "substring")` — the expression
+/// must have FAILED, and its message must say what you expected.
+///
+/// It takes the record `try` already produces (`{ok, value, error}`) rather than a
+/// callback, so it needs no new evaluator machinery and composes with a feature that is
+/// already there: `assert_error(try parse_it(s), "not a number")`.
+///
+/// The point is the failure message, not the check. The idiom this replaces —
+/// `r = try f()` then `assert(r.error.contains("…"))` — is only three lines, but when it
+/// fails it says `assertion failed` and NOTHING about what the error actually was, so a
+/// wrong-message failure tells you nothing you can act on. In a language that pins error
+/// text as part of its contract (`tests/compat/` freezes stderr for 119 programs), the
+/// message is the thing under test, and an assertion about it has to show it.
+pub(super) fn a_assert_error(
+    name: &str,
+    args: Vec<Value>,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(HelixError::new(
+            format!("`{name}` takes a `try` result and an optional substring, got {} arguments", args.len()),
+            line,
+            col,
+        ));
+    }
+    let Value::Record(fields) = &args[0] else {
+        return Err(type_err(name, "a `try` result", &args[0], line, col)
+            .hint("pass the whole expression: `assert_error(try risky(x), \"why\")`."));
+    };
+    let get = |k: &str| fields.iter().find(|(n, _)| n.as_str() == k).map(|(_, v)| v);
+    let (Some(ok), Some(err)) = (get("ok"), get("error")) else {
+        return Err(HelixError::new(
+            format!("`{name}` needs a `try` result — a record with `ok` and `error`"),
+            line,
+            col,
+        )
+        .hint("pass the whole expression: `assert_error(try risky(x), \"why\")`."));
+    };
+    if matches!(ok, Value::Bool(true)) {
+        // Naming the value it produced instead is what turns "this did not fail" into
+        // something you can act on without re-running it by hand.
+        let got = get("value")
+            .map(|v| crate::value::display_value(v, line, col))
+            .transpose()?
+            .unwrap_or_else(|| "nothing".to_string());
+        return Err(HelixError::new(
+            format!("assertion failed: expected an error, but it succeeded with {got}"),
+            line,
+            col,
+        ));
+    }
+    let Some(want) = args.get(1) else {
+        return Ok(Value::Unit);
+    };
+    let Value::Str(want) = want else {
+        return Err(type_err(name, "a string to look for", want, line, col));
+    };
+    let actual = match err {
+        Value::Str(s) => s.to_string(),
+        other => crate::value::display_value(other, line, col)?,
+    };
+    if actual.contains(want.as_str()) {
+        Ok(Value::Unit)
+    } else {
+        // BOTH sides, always: the expected substring is useless without the message it
+        // was not found in.
+        Err(HelixError::new(
+            format!("assertion failed: expected an error containing `{want}`, but it said: {actual}"),
+            line,
+            col,
+        ))
+    }
+}
+
 #[inline]
 pub(super) fn a_assert_close(args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
         if args.len() < 2 || args.len() > 3 {

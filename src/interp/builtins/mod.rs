@@ -28,7 +28,7 @@ impl super::Interp {
         crate::capability::gate(name, &args, line, col)?;
         // Counted before the arm runs, so a FAILING assertion counts too: the file fails
         // on the raise, and "asserted nothing" must not also be reported about it.
-        if matches!(name, "assert" | "assert_eq" | "assert_close") {
+        if matches!(name, "assert" | "assert_eq" | "assert_close" | "assert_error") {
             ASSERTIONS_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         // ONE routing decision, straight to the arm: this match is the
@@ -47,6 +47,7 @@ impl super::Interp {
             "source_path" => return output::a_source_path(name, args, line, col),
             "assert_eq" => return output::a_assert_eq(name, args, line, col),
             "assert_close" => return output::a_assert_close(args, line, col),
+            "assert_error" => return output::a_assert_error(name, args, line, col),
             "clock_monotonic" => return output::a_clock_monotonic(name, args, line, col),
             "range" => return corefns::a_range(args, line, col),
             "chr" => return corefns::a_chr(name, args, line, col),

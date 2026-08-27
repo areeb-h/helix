@@ -183,6 +183,21 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Unit)
         }
+        // `assert_error` takes whatever `try` produced plus an optional substring; the
+        // record's shape is checked at run time, where the actual fields exist.
+        "assert_error" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(HelixError::new(
+                    format!(
+                        "`assert_error` takes a `try` result and an optional substring, got {} arguments",
+                        args.len()
+                    ),
+                    line,
+                    col,
+                ));
+            }
+            Ok(Type::Unit)
+        }
         "assert_close" => {
             if args.len() < 2 || args.len() > 3 {
                 return Err(HelixError::new(

@@ -76,7 +76,7 @@ pub fn category_of(name: &str) -> &'static str {
         // Bioinformatics.
         "align" => "bio",
         // Assertions / test helpers.
-        "assert" | "assert_eq" | "assert_close" => "assert",
+        "assert" | "assert_eq" | "assert_close" | "assert_error" => "assert",
         // Raising a domain error — a guard like the asserts, minus the condition.
         "raise" => "assert",
         // Locating a module's own shipped files. `io` because that is what it exists to
@@ -254,6 +254,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     // Impure so they always run (never memoized away) — the check is the point.
     BuiltinDef { path: "assert", pure: false },
     BuiltinDef { path: "assert_eq", pure: false },
+    BuiltinDef { path: "assert_error", pure: false },
     BuiltinDef { path: "assert_close", pure: false },
     // `raise(message[, help])` — the unconditional form. A library reporting a caller's
     // mistake had only `assert`, which hard-codes "assertion failed: " and cannot carry a

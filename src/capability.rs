@@ -251,6 +251,8 @@ mod tests {
         let harmless: &[&str] = &[
             "print", "emit", "write", "elog", "read_int", "sleep", "clock_monotonic",
             "aes_keygen", "aes_encrypt", "ed25519_keygen", "assert", "assert_eq", "assert_close",
+            // Inspects a `try` record and raises on a mismatch: control flow, no authority.
+            "assert_error",
             // Raising an error is a control-flow effect, not an fs/net authority.
             "raise",
             // A fresh cookie jar is an empty in-memory value; it touches no network or

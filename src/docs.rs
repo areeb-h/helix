@@ -710,6 +710,14 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "",
     },
     DocEntry {
+        name: "assert_error",
+        sig: "assert_error(try_result, substring?)",
+        doc: "Raise unless a `try` FAILED — and, given a substring, unless its message contains it.",
+        example: "assert_error(try raise(\"bad input\"), \"bad\")",
+        example_out: "",
+        notes: "Shows the actual message when it does not match, and the VALUE when the expression succeeded instead — the plain `assert(r.error.contains(...))` idiom shows neither.",
+    },
+    DocEntry {
         name: "assert_close",
         sig: "assert_close(a, b, tol?)",
         doc: "Raise unless two numbers are within tol (default 1e-9) of each other.",

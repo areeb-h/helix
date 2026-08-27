@@ -2486,6 +2486,74 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `assert_error` — assert that something FAILED, and that it said why.
+///
+/// The idiom it replaces (`r = try f()` then `assert(r.error.contains("…"))`) is three
+/// lines and checks the right thing, but when it fails it prints `assertion failed` and
+/// nothing else: not the message it got, not the value it got instead. In a language
+/// that pins error text as part of its contract — `tests/compat/` freezes stderr for 119
+/// programs, and ADR 0036 spent a release making messages identical across backends —
+/// the message IS the thing under test, so an assertion about it has to show it.
+///
+/// It takes the record `try` already produces rather than a callback, so it adds no
+/// evaluator machinery.
+#[test]
+fn assert_error_checks_the_failure_and_shows_it() {
+    // Passing shapes: with and without a substring, and on a real language error rather
+    // than only on `raise`.
+    for src in [
+        "assert_error(try raise(\"boom\"))\n",
+        "assert_error(try raise(\"boom\"), \"oo\")\n",
+        "assert_error(try (1 / 0), \"division by zero\")\n",
+    ] {
+        for (engine, env) in ENGINES {
+            let (_, err, code) = run_source(src, env, &format!("aeok_{}_{engine}", src.len()));
+            assert_eq!(code, Some(0), "{src:?} on {engine}: {err}");
+        }
+    }
+
+    // The whole point: a mismatch shows BOTH sides. An expected substring is useless
+    // without the message it was not found in.
+    let (_, err, code) =
+        run_source("assert_error(try raise(\"division by zero\"), \"overflow\")\n", &[], "ae_miss");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("expected an error containing `overflow`"), "{err}");
+    assert!(err.contains("but it said: division by zero"), "the actual message: {err}");
+
+    // …and when it SUCCEEDED instead, the value it produced is named, so you do not have
+    // to re-run it by hand to find out what happened.
+    let (_, err, code) = run_source("assert_error(try (1 + 1), \"anything\")\n", &[], "ae_ok");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("expected an error, but it succeeded with 2"), "{err}");
+
+    // A non-`try` argument is refused by name, with the spelling that works.
+    let (_, err, code) = run_source("assert_error(42, \"x\")\n", &[], "ae_type");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("expected a `try` result"), "{err}");
+    assert!(err.contains("assert_error(try risky(x)"), "the hint must show the fix: {err}");
+
+    // Arity is checked by `helix check`, before anything runs.
+    let path = std::env::temp_dir().join("helix_ae_arity.helix");
+    std::fs::write(&path, "assert_error()\n").unwrap();
+    let (_, err, code) = run(&["check", path.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("takes a `try` result and an optional substring"), "{err}");
+    let _ = std::fs::remove_file(&path);
+
+    // It must COUNT as an assertion, or a file whose only check is `assert_error` fails
+    // the runner's own "asserted nothing" rule — green-looking suites of unrun checks
+    // are what that rule exists to catch.
+    let dir = std::env::temp_dir().join("helix_ae_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a_test.helix"), "assert_error(try raise(\"x\"), \"x\")\n").unwrap();
+    let (out, _, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("1 passed"), "{out}");
+    assert!(!out.contains("without asserting anything"), "it must count: {out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `helix test --engines` — every test becomes a differential test.
 ///
 /// **No other test runner can do this**, because no other language ships three
