@@ -26,3 +26,14 @@ for f in $(find examples/language examples/numerics examples/dataframes examples
   fi
 done
 echo "RESULT=$fail"
+# ...and EXIT with it. Printing the verdict is not reporting it: nothing anywhere parsed
+# `RESULT=` (the line above was its only occurrence in the repo), the gate piped this
+# script to `tail` without capturing a status, and CI ran it as a bare step — which
+# passes whenever the script exits 0, i.e. always. So a JIT-vs-tree-walker divergence
+# across every example would print `DIFF …`, print `RESULT=1`, and leave both the local
+# gate and CI green.
+#
+# That is the THIRD gate in this repo found unable to fail: `dfcheck.sh` diffed three
+# copies of "no such file", and 28 `native-df` tests were executed by nothing. The
+# lesson each time is the same — a gate has to be sabotaged once to prove it can fail.
+exit "$fail"

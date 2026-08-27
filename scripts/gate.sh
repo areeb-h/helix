@@ -86,9 +86,27 @@ CARGO_TARGET_DIR=target/dual cargo test "${TEST_ARGS[@]}" --features native-df -
 grep -E "test result:|FAILED|error\[|panicked" "$TLOG" | tail -5
 rm -f "$TLOG"
 
+# ...AND THEN THE WHOLE-PROGRAM DIFF, which until now ran nowhere either. ADR 0036
+# created `dfdiff.sh` precisely because the verb-level campaign above was green while
+# SIXTEEN semantic divergences were live: the deltas hid in expression shapes no verb
+# test built. docs/testing.md and docs/execution-engine.md both describe it as a gate.
+# It was not one — it ran only when a human typed it, which is the same shape as the
+# 28 tests above being "executed by nothing", one layer up.
+#
+# The test step does NOT produce the binary this needs (`cargo test --bins` builds the
+# test harness, not the plain bin), so the link is explicit. Measured on this box: 363ms
+# to link against the already-warm deps, 2.9s for 120 programs under both backends.
+log "dfdiff (every tracked program under BOTH DataFrame backends)"
+CARGO_TARGET_DIR=target/dual cargo build "${TEST_ARGS[@]}" --features native-df >/dev/null 2>&1 || rc=1
+bash scripts/dfdiff.sh 2>&1 | tail -2 || rc=1
+
 log "vmparity (BIN=$BIN)"
 if [ ! -x "$BIN" ]; then cargo build "${TEST_ARGS[@]}" >/dev/null 2>&1 || rc=1; fi
-BIN="$BIN" bash scripts/vmparity.sh 2>&1 | tail -2
+# `|| rc=1` is load-bearing and was missing: `pipefail` makes the pipeline carry
+# vmparity's status, but nothing assigned it to `rc`, so the phase could not fail the
+# gate even once the script itself started exiting non-zero. `checkall` one phase below
+# always had it; this line did not.
+BIN="$BIN" bash scripts/vmparity.sh 2>&1 | tail -2 || rc=1
 
 # Everything above RUNS its programs, so none of it covers a `bench/` program that needs
 # a generated fixture before it will start — which is how nine of them rotted against

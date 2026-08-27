@@ -212,6 +212,15 @@ jobs:
       # This is the only place the two DataFrame engines are compared at all.
       - name: dual DataFrame engines (differential campaign)
         run: cargo test --features native-df
+      # The verb-level campaign above was GREEN while sixteen semantic divergences were
+      # live (ADR 0036) — they hid in expression shapes no verb test built. This runs
+      # every tracked program under both backends and diffs the output, which is the
+      # only check that sees a divergence the way a user meets one. `--features
+      # native-df` also produces the dual binary `dfdiff.sh` requires.
+      - name: dual DataFrame engines (whole-program diff)
+        run: |
+          CARGO_TARGET_DIR=target/dual cargo build --profile gate --features native-df
+          BIN=./target/dual/gate/helix bash scripts/dfdiff.sh
 
   installer:
     name: install.sh logic
