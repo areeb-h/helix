@@ -1043,6 +1043,12 @@ fn foreign_syntax_gets_the_hint_it_actually_needs() {
         ("use lib.util\nprint(1)", "Helix imports by module path"),
         ("from lib import util\nprint(1)", "import lib.stats as st"),
         ("require lib.util\nprint(1)", "to bring names in unqualified"),
+        // Destructuring a BINDING. The feature half-exists — a lambda parameter
+        // destructures today — so the hint names the half that WORKS instead of
+        // reporting a dead end, and instead of the statement-boundary message a
+        // tuple followed by `=` used to earn. A field report listed destructuring
+        // as flatly open without noticing the lambda form.
+        ("(a, b) = (1, 2)\nprint(a + b)", "where it DOES work"),
     ];
     for (src, want) in cases {
         let (_, err, code) = run_source(src, &[], &format!("foreign_{}", want.len()));

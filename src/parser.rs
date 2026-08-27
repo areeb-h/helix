@@ -184,6 +184,19 @@ fn statement_boundary_hint(opened_with: &Tok, before: &Tok, found: &Tok) -> &'st
             }
         }
     }
+    // `(a, b) = (1, 2)` — destructuring a BINDING. The tuple parses as an expression and
+    // the `=` is the surprise, so without this the reader is told about statement
+    // boundaries: a message about a problem that is not there.
+    //
+    // What makes this worth its own arm is that the feature half-exists, so "not
+    // supported" would be as misleading as the boundary hint. Destructuring a LAMBDA
+    // parameter works today — `[(1, 2)].map((a, b) => a + b)` — and a field report listed
+    // destructuring as flatly open without noticing. Naming the half that works turns a
+    // dead end into a workaround.
+    if matches!(opened_with, Tok::LParen) && matches!(found, Tok::Eq) {
+        return "a binding takes one name — destructure by indexing (`p.0` / `p.1`), or in a \
+                lambda parameter, where it DOES work: `xs.map((a, b) => a + b)`.";
+    }
     // `x := 1` — Go's short declaration. The `x` parses as an expression and the `:` is the
     // surprise, so the statement neither opens nor ends with anything foreign-looking.
     if matches!(found, Tok::Colon) {
