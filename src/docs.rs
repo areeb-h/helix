@@ -710,6 +710,14 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "",
     },
     DocEntry {
+        name: "sqlite_query",
+        sig: "sqlite_query(path, sql, params?)",
+        doc: "Run a read-only SQL query against a SQLite file and return the rows as a DataFrame.",
+        example: "sqlite_query(\"app.db\", \"select name from users where age > ?\", [30])",
+        example_out: "",
+        notes: "Opens READ-ONLY, so the fs-read capability label is the truth and a typo in the path fails instead of creating an empty database. Parameters bind as VALUES to `?`; there is no way to splice text into the statement, which is what makes injection unrepresentable rather than merely discouraged.",
+    },
+    DocEntry {
         name: "assert_error",
         sig: "assert_error(try_result, substring?)",
         doc: "Raise unless a `try` FAILED — and, given a substring, unless its message contains it.",

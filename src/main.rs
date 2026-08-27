@@ -59,6 +59,7 @@ mod http;
 mod interp;
 mod jit;
 mod climain;
+mod db;
 mod jitexplain;
 mod json;
 mod lattice;

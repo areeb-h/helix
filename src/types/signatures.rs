@@ -185,6 +185,20 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         // `assert_error` takes whatever `try` produced plus an optional substring; the
         // record's shape is checked at run time, where the actual fields exist.
+        // `sqlite_query(path, sql, params?)` — rows out as a frame, like `read_csv`.
+        "sqlite_query" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(HelixError::new(
+                    format!(
+                        "`sqlite_query` takes a path, a SQL string and optional parameters, got {} arguments",
+                        args.len()
+                    ),
+                    line,
+                    col,
+                ));
+            }
+            Ok(Type::DataFrame)
+        }
         "assert_error" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(

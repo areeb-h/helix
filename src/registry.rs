@@ -83,6 +83,9 @@ pub fn category_of(name: &str) -> &'static str {
         // feed: the argument of a `read_*` call that must not depend on the working
         // directory. It performs no I/O itself, which is why it is `pure`.
         "source_path" => "io",
+        // Its own category: a query is neither a file reader nor a network verb, and
+        // an agent asking "how do I reach a database" should find it by name.
+        "sqlite_query" => "db",
         _ => "core",
     }
 }
@@ -97,6 +100,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "sleep", pure: false },
     BuiltinDef { path: "listen", pure: false },
     BuiltinDef { path: "read_csv", pure: false },
+    BuiltinDef { path: "sqlite_query", pure: false },
     BuiltinDef { path: "read_parquet", pure: false },
     BuiltinDef { path: "read_text", pure: false },
     BuiltinDef { path: "read_json", pure: false },

@@ -194,6 +194,12 @@ jobs:
       # And the allocator-debugging build, which is what `--no-default-features` is for.
       - name: no default features
         run: cargo check --no-default-features
+      # SQLite (ADR 0038). Gated, so it must compile BOTH ways: with the feature, and —
+      # via the default build above — without it, where the gate-the-body twin stands in.
+      - name: sqlite
+        run: cargo clippy --all-targets --features db -- -D warnings
+      - name: sqlite (tests)
+        run: cargo test --features db --test cli sqlite_query
       # ADR 0032: the appliance profile is a shipped configuration, so it gets the
       # strict treatment — clippy at -D warnings catches the cfg'd-out build's
       # dead-code/unused-import drift that nothing else compiles. The dataframes

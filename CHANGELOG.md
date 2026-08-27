@@ -21,6 +21,33 @@
 
 ### Added
 
+- **Helix can read a SQLite database, and a query is a DataFrame** (ADR 0038, Stage 1;
+  `--features db`).
+
+  ```helix
+  users = sqlite_query("app.db", "select name, age from users where age > ?", [30])
+  print(users.where(@age > 40).group(@city).mean(@age))
+  ```
+
+  Rows-of-records would land *next to* the frame surface instead of joining it; a frame
+  plugs into `where`/`group`/`sort`/`join`/`write_csv` — everything a `read_csv` result
+  can do. It is built through the ADR 0012 seam, so it works on the native backend as
+  well as polars. SQL `NULL` becomes `missing`, and a column's type is discovered from
+  its rows (SQLite types values, not columns), widening Int → Float → Str.
+
+  **Parameters bind as values, and there is no string-building form** — the same call
+  ADR 0037 made for subprocesses. A parameter carrying `x' or 1=1 --` matches a user
+  literally so named, which is to say nothing.
+
+  **It opens READ-ONLY, which is what makes the `fs-read` capability label true** rather
+  than convenient: `delete from users` is refused by SQLite itself. A typo in the path
+  also fails instead of silently creating an empty database. Writing gets its own verb
+  and its own `fs-write` label (Stage 2).
+
+  Feature-gated with the *body* gated, not the name: without `--features db` the builtin
+  still exists, type-checks and describes itself, and running it says what to rebuild
+  with. Measured cost on the appliance profile: **+1.9 MB (15%)**, from bundled SQLite C
+  source — so the binary keeps its no-system-dependency property.
 - **A Helix program can be a tool: `fn main` IS the command line** (ADR 0037 D1).
   `helix run tool.helix --threads 8` used to run the program and **discard the arguments
   in silence** — the worst of the three possible behaviours, because the command looks

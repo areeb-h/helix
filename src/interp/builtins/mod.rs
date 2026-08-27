@@ -134,6 +134,10 @@ impl super::Interp {
             "headers" => return net::a_headers(name, args, line, col),
             "dna" => return bio::a_dna(name, args, line, col),
             "read_vcf" => return bio::a_read_vcf(args, line, col),
+            "sqlite_query" => {
+                return crate::db::sqlite_query(&args, line, col)
+                    .map(|df| Value::DataFrame(std::rc::Rc::new(df)));
+            }
             "read_bcf" => return bio::a_read_bcf(name, args, line, col),
             "read_sam" => return bio::a_read_sam(name, args, line, col),
             "read_bam" => return bio::a_read_bam(args, line, col),

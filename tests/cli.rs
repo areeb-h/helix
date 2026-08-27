@@ -2492,6 +2492,132 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `sqlite_query` — a query is a DataFrame, and injection is unrepresentable.
+///
+/// Feature-gated (`--features db`), so the assertions split: the SHAPE of the surface
+/// (it exists, type-checks, describes itself, and says what to rebuild with) must hold in
+/// EVERY build, and the behaviour is checked only where the feature is on. That split is
+/// ADR 0032's gate-the-body pattern, and testing only the enabled half is how a gated
+/// verb rots in the builds that do not have it.
+#[test]
+fn sqlite_query_is_a_frame_and_binds_parameters() {
+    // Always true, feature or not: the builtin is real to the registry, the checker and
+    // `describe`. `fs-read` is the label, and it is the truth because the connection is
+    // opened read-only — a verb that could DELETE while labelled `fs-read` would make the
+    // audit log lie (ADR 0021).
+    let (out, _, code) = run(&["describe", "sqlite_query"], &[], "");
+    assert_eq!(code, Some(0));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["effect"], "fs-read");
+    assert_eq!(v[0]["category"], "db");
+    assert!(v[0]["sig"].as_str().unwrap().contains("params?"), "{out}");
+
+    let dir = std::env::temp_dir().join("helix_sqlite");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("app.db");
+    let prog = dir.join("q.helix");
+    let w = |src: &str| std::fs::write(&prog, src).unwrap();
+
+    // A call type-checks in every build — `helix check` must not need the feature.
+    w(&format!(
+        "df = sqlite_query(\"{}\", \"select 1\")\nprint(df.count())\n",
+        db.display()
+    ));
+    let (_, err, code) = run(&["check", prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "a gated builtin must still type-check: {err}");
+
+    // Arity is the checker's, so a bad call is caught before running either way.
+    w("print(sqlite_query(\"a.db\"))\n");
+    let (_, err, code) = run(&["check", prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("takes a path, a SQL string"), "{err}");
+
+    // Build a database with an OUTSIDE tool, so this is a real cross-tool read rather
+    // than a round trip through our own writer.
+    let built = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(format!(
+            "import sqlite3\nc=sqlite3.connect(r'{}')\n\
+             c.execute('create table users (name text, age integer, score real)')\n\
+             c.executemany('insert into users values (?,?,?)',[('ada',36,99.5),('grace',45,None),('alan',41,77.0)])\n\
+             c.commit()",
+            db.display()
+        ))
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    w(&format!(
+        "df = sqlite_query(\"{}\", \"select * from users\")\nprint(df.count())\n",
+        db.display()
+    ));
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    if err.contains("no SQLite support") {
+        // The gate-the-body half: no feature, but the diagnostic must say what to do.
+        assert_eq!(code, Some(1));
+        assert!(err.contains("--features db"), "it must name the rebuild: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert!(built, "python3 sqlite3 was needed to build the fixture");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "3");
+
+    // A query IS a frame: the whole DataFrame verb surface applies to the result, which
+    // is the reason for returning one rather than rows-of-records.
+    w(&format!(
+        "df = sqlite_query(\"{}\", \"select * from users\")\n\
+         print(df.where(@age > 40).select(@name).column(\"name\"))\n",
+        db.display()
+    ));
+    let (out, err, _) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(out.trim(), "[\"grace\", \"alan\"]", "{err}");
+
+    // SQL NULL becomes `missing`, and the column keeps its type rather than collapsing
+    // to text (ADR 0001: absent is not a value).
+    w(&format!(
+        "print(sqlite_query(\"{}\", \"select score from users\").column(\"score\"))\n",
+        db.display()
+    ));
+    let (out, _, _) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(out.trim(), "[99.5, missing, 77.0]");
+
+    // Parameters bind as VALUES.
+    w(&format!(
+        "print(sqlite_query(\"{}\", \"select name from users where age > ?\", [40]).count())\n",
+        db.display()
+    ));
+    let (out, _, _) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(out.trim(), "2");
+
+    // …and therefore the classic injection payload is INERT: it is compared as a name,
+    // not spliced into the statement. This is the assertion the whole API shape exists
+    // for — there is no string-building form to get wrong.
+    w(&format!(
+        "print(sqlite_query(\"{}\", \"select name from users where name = ?\", [\"x' or 1=1 --\"]).count())\n",
+        db.display()
+    ));
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "0", "an injection payload must match nothing, not everything");
+
+    // Read-only is enforced by SQLite itself, which is what makes the `fs-read` label
+    // true rather than aspirational.
+    w(&format!("print(sqlite_query(\"{}\", \"delete from users\"))\n", db.display()));
+    let (_, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("readonly"), "a write must be refused: {err}");
+
+    // A missing file fails instead of silently creating an empty database.
+    w("print(sqlite_query(\"/nonexistent/nope.db\", \"select 1\"))\n");
+    let (_, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("could not open the database"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `fn main` IS the command line (ADR 0037 D1).
 ///
 /// Before this, `helix run tool.helix --threads 8` ran the program and DISCARDED the

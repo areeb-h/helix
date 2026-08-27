@@ -359,6 +359,18 @@ The SHA-256 digest of the string's UTF-8 bytes, as 64 lowercase hex chars.
 54a85d2ae7b0a4d8005ab5cf466d4e582c6ea9aa5060b261241ec65a0ea58506
 ```
 
+## db
+
+### `sqlite_query(path, sql, params?)`
+
+Run a read-only SQL query against a SQLite file and return the rows as a DataFrame.
+
+**Note:** Opens READ-ONLY, so the fs-read capability label is the truth and a typo in the path fails instead of creating an empty database. Parameters bind as VALUES to `?`; there is no way to splice text into the statement, which is what makes injection unrepresentable rather than merely discouraged.
+
+```
+>>> sqlite_query("app.db", "select name from users where age > ?", [30])
+```
+
 ## encoding
 
 ### `base64_decode(b64)`

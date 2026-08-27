@@ -60,7 +60,12 @@ impl Effect {
 /// hold no authority).
 pub fn effect_of(name: &str) -> Effect {
     match name {
-        "read_csv" | "read_parquet" | "read_text" | "read_json" | "read_dir" | "file_exists"
+        // `sqlite_query` opens the database READ-ONLY (src/db.rs), so `fs-read` is the
+        // truth rather than a convenient label. A writing verb needs `fs-write` and its
+        // own entry: the classification and the open mode have to agree, or the audit
+        // log says one thing while the process does another.
+        "sqlite_query"
+        | "read_csv" | "read_parquet" | "read_text" | "read_json" | "read_dir" | "file_exists"
         | "read_fasta" | "read_fastq" | "read_vcf" | "read_bcf" | "read_sam" | "read_bam"
         | "read_gff" | "read_bed" => Effect::FsRead,
         "remove_file" | "mkdir" => Effect::FsWrite,
