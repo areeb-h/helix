@@ -1734,10 +1734,22 @@ fn cli_test(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
         let mut files = Vec::new();
+        let mut skipped_dirs = Vec::new();
         for root in &roots {
-            collect_root(root, &mut files);
+            collect_root(root, &mut files, &mut skipped_dirs);
         }
         dedup_by_canonical(&mut files);
+        // Say what was NOT walked. A test runner that quietly narrows its own scope is
+        // the failure this project already paid for once, so the skip is never silent —
+        // and the note names the way to override it.
+        if !skipped_dirs.is_empty() && !json {
+            skipped_dirs.sort();
+            skipped_dirs.dedup();
+            eprintln!(
+                "note: did not descend into {} — name one explicitly to run tests inside it",
+                skipped_dirs.join(", ")
+            );
+        }
         // Display paths relative to the search root when there is ONE root (its parent
         // when that root is a single file, so the file's own name still shows); with
         // several roots, paths display as given — the empty-prefix strip below is a
@@ -1763,7 +1775,11 @@ fn cli_test(args: &[String]) -> ExitCode {
 /// Collect the test files one root contributes: a directory's `*_test.helix` set, or
 /// the named file itself — except a documented, definitions-only module, which tests
 /// through its doc examples exactly as its directory run would.
-fn collect_root(root: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+fn collect_root(
+    root: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+    skipped: &mut Vec<String>,
+) {
     {
         if root.is_file() {
             // Naming a file must mean what naming its directory means. A definitions-only
@@ -1786,7 +1802,7 @@ fn collect_root(root: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
                 files.push(root.to_path_buf());
             }
         } else {
-            collect_test_files(root, files);
+            skipped.extend(collect_test_files(root, files));
         }
         files.sort();
     }
@@ -2244,15 +2260,38 @@ fn is_definitions_only(src: &str) -> bool {
     }
 }
 
+/// Directories a build tool wrote, which a *discovered* walk must not descend into.
+///
+/// `helix test` in this very repository ran four failing `*_test.helix` files out of
+/// `target/` — scratch left by earlier builds — and reported them among the results. The
+/// same shape hits any project that also holds a `node_modules` or a `__pycache__`.
+///
+/// The list is deliberately SHORT, and the asymmetry is the reason: running an extra test
+/// is visible noise, while skipping a real one is silence — and a suite that silently
+/// does not run is the exact failure this project already paid for once (the `native-df`
+/// campaign, 28 tests executed by nothing while the docs said otherwise). So only names
+/// that are unambiguously machine-generated qualify. `dist`, `build` and `venv` are NOT
+/// here: each is plausibly somebody's own directory, and a wrong skip hides their tests.
+///
+/// Two rules keep this from ever being a silent loss: a skipped directory is REPORTED,
+/// and naming one explicitly (`helix test target/`) still runs it, because the check
+/// applies when descending, never to the root the caller asked for.
+fn is_generated_dir(name: &str) -> bool {
+    matches!(name, "target" | "node_modules" | "__pycache__")
+}
+
 /// Recursively collect every `.helix` file under `dir`, skipping hidden directories.
 fn collect_helix_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    collect_by_suffix(dir, ".helix", &mut std::collections::HashSet::new(), out);
+    collect_by_suffix(dir, ".helix", &mut std::collections::HashSet::new(), out, &mut Vec::new());
 }
 
 /// Recursively collect `*_test.helix` files under `dir`, skipping hidden directories
-/// (`.git`, etc.). Unreadable directories are silently skipped.
-fn collect_test_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    collect_by_suffix(dir, "_test.helix", &mut std::collections::HashSet::new(), out);
+/// (`.git`, etc.). Unreadable directories are silently skipped. Returns the generated
+/// directories that were not descended into, so the caller can say so.
+fn collect_test_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) -> Vec<String> {
+    let mut skipped = Vec::new();
+    collect_by_suffix(dir, "_test.helix", &mut std::collections::HashSet::new(), out, &mut skipped);
+    skipped
 }
 
 /// The shared walker behind the two collectors above. `seen` holds the canonical
@@ -2267,6 +2306,7 @@ fn collect_by_suffix(
     suffix: &str,
     seen: &mut std::collections::HashSet<std::path::PathBuf>,
     out: &mut Vec<std::path::PathBuf>,
+    skipped: &mut Vec<String>,
 ) {
     let Ok(canon) = std::fs::canonicalize(dir) else { return };
     if !seen.insert(canon) {
@@ -2281,7 +2321,13 @@ fn collect_by_suffix(
         }
         let path = entry.path();
         if path.is_dir() {
-            collect_by_suffix(&path, suffix, seen, out);
+            // Applied only when DESCENDING: the root the caller named is already inside
+            // the walk, so `helix test target/` still tests `target/`.
+            if is_generated_dir(&name) {
+                skipped.push(path.display().to_string());
+                continue;
+            }
+            collect_by_suffix(&path, suffix, seen, out, skipped);
         } else if name.ends_with(suffix) {
             out.push(path);
         }

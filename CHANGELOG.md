@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`helix test` no longer wanders into build output.** In this repository it collected
+  four *failing* `*_test.helix` files out of `target/` — scratch from earlier builds —
+  and reported them among the results, so the runner's own output was untrustworthy in
+  the project that ships it. Any tree holding a `node_modules` or `__pycache__` had the
+  same shape.
+
+  Only unambiguously machine-generated names are skipped (`target`, `node_modules`,
+  `__pycache__`); `dist`, `build` and `venv` are deliberately **not**, because each is
+  plausibly somebody's own directory. The asymmetry is the reason for the short list:
+  running an extra test is visible noise, while hiding a real one is silence — the exact
+  failure this project already paid for once. So the skip is **reported** ("did not
+  descend into …, name one explicitly to run tests inside it"), and naming a directory
+  explicitly still runs it, because the check applies when *descending*, never to the
+  root you asked for.
+
 ### Added
 
 - **`helix jit-explain <script>`** — which numeric kernel sites the compiler offered the

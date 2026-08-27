@@ -2486,6 +2486,59 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `helix test` does not wander into build output — and says when it declines to.
+///
+/// It used to. In this repository, `helix test` at the root collected four FAILING
+/// `*_test.helix` files out of `target/` — scratch from earlier builds — and reported
+/// them among the results, so the runner's own output was untrustworthy in the project
+/// that ships it. Any tree holding a `node_modules` or `__pycache__` has the same shape.
+///
+/// The two rules that keep a skip from becoming a silent loss are what this pins:
+/// the skip is REPORTED, and naming the directory explicitly still runs it. A test
+/// runner that quietly narrows its own scope is the failure this project already paid
+/// for once — 28 `native-df` tests executed by nothing while the docs said they ran.
+#[test]
+fn test_runner_skips_generated_directories_but_says_so() {
+    let dir = std::env::temp_dir().join("helix_testwalk");
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in ["sub", "target/junk", "node_modules", "__pycache__", "dist"] {
+        std::fs::create_dir_all(dir.join(sub)).unwrap();
+    }
+    let pass = "assert_eq(1, 1)\n";
+    let fail = "assert_eq(1, 2)\n";
+    std::fs::write(dir.join("a_test.helix"), pass).unwrap();
+    std::fs::write(dir.join("sub/b_test.helix"), pass).unwrap();
+    std::fs::write(dir.join("target/junk/stale_test.helix"), fail).unwrap();
+    std::fs::write(dir.join("node_modules/vendor_test.helix"), fail).unwrap();
+    std::fs::write(dir.join("__pycache__/pyc_test.helix"), fail).unwrap();
+    // `dist` is deliberately NOT on the skip list: it is plausibly somebody's own
+    // directory, and hiding a real test is worse than running an extra one.
+    std::fs::write(dir.join("dist/mine_test.helix"), pass).unwrap();
+
+    let root = dir.to_str().unwrap().to_string();
+    let (out, err, code) = run(&["test", &root], &[], "");
+    assert_eq!(code, Some(0), "the generated dirs should not have failed it:\n{out}\n{err}");
+    assert!(out.contains("3 passed"), "a, b and dist/mine: {out}");
+    assert!(!out.contains("stale_test"), "target/ was walked: {out}");
+    assert!(!out.contains("vendor_test"), "node_modules was walked: {out}");
+    assert!(!out.contains("pyc_test"), "__pycache__ was walked: {out}");
+    assert!(out.contains("mine_test"), "`dist` must NOT be skipped: {out}");
+
+    // The skip is announced, and the note names the way to override it.
+    assert!(err.contains("did not descend into"), "the skip must not be silent: {err}");
+    assert!(err.contains("target"), "{err}");
+    assert!(err.contains("name one explicitly"), "the note must say how to override: {err}");
+
+    // …and naming it explicitly does run it. The check applies when DESCENDING, never
+    // to the root the caller asked for, so a skip can always be overridden.
+    let explicit = dir.join("target").to_str().unwrap().to_string();
+    let (out, _, code) = run(&["test", &explicit], &[], "");
+    assert_eq!(code, Some(1), "the stale test fails, which is the point: {out}");
+    assert!(out.contains("stale_test"), "an explicit path must be walked: {out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `helix jit-explain` — is my hot loop actually compiled?
 ///
 /// AGENTS.md footgun #5: falling off a JIT kernel is SILENT. The answer stays correct
