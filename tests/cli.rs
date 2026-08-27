@@ -2492,6 +2492,132 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `fn main` IS the command line (ADR 0037 D1).
+///
+/// Before this, `helix run tool.helix --threads 8` ran the program and DISCARDED the
+/// arguments in silence — not rejected, not warned about. The worst of the three possible
+/// behaviours, because the command looks like it worked.
+///
+/// The binding rule is not invented for the command line: it is the rule Helix already
+/// uses at a call site, measured before it was adopted. `go(10, 3)`, `go(a: 10, b: 3)` and
+/// `go(b: 3, a: 10)` all agree, so the three command lines below must too. A first draft
+/// of the ADR invented a different mapping (no-default ⇒ positional, default ⇒ option)
+/// which could not express a required NAMED option; adopting the existing rule removed
+/// the special case instead of patching it.
+#[test]
+fn fn_main_is_the_command_line() {
+    let dir = std::env::temp_dir().join("helix_climain");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let tool = dir.join("score.helix");
+    std::fs::write(
+        &tool,
+        "## Score reads and write a summary.\n\
+         fn main(reads: String, out: String = \"scores.csv\", threads: Int = 4, verbose: Bool = false) = do {\n\
+         print(reads)\n  print(out)\n  print(threads)\n  print(verbose)\n}\n",
+    )
+    .unwrap();
+    let t = tool.to_str().unwrap().to_string();
+    let four = |o: &str| o.trim().lines().map(|l| l.to_string()).collect::<Vec<_>>();
+
+    // Every spelling of the same invocation agrees — positional, named, named out of
+    // order, `--k=v`, and a bare Bool flag. This is the ADR's central claim.
+    let same = [
+        vec!["run", &t, "in.fastq", "--threads", "8"],
+        vec!["run", &t, "--threads", "8", "--reads", "in.fastq"],
+        vec!["run", &t, "--reads", "in.fastq", "--threads", "8"],
+        vec!["run", &t, "--threads=8", "--reads=in.fastq"],
+    ];
+    let mut seen: Option<Vec<String>> = None;
+    for argv in same {
+        let (out, err, code) = run(&argv, &[], "");
+        assert_eq!(code, Some(0), "{argv:?}: {err}");
+        let got = four(&out);
+        assert_eq!(got, vec!["in.fastq", "scores.csv", "8", "false"], "{argv:?}");
+        if let Some(prev) = &seen {
+            assert_eq!(&got, prev, "spellings of one invocation must agree: {argv:?}");
+        }
+        seen = Some(got);
+    }
+    // Positionals fill in order; a trailing default may be omitted; a bare flag is `true`.
+    let (out, _, code) = run(&["run", &t, "in.fastq", "out.csv"], &[], "");
+    assert_eq!(code, Some(0));
+    assert_eq!(four(&out), vec!["in.fastq", "out.csv", "4", "false"]);
+    let (out, _, _) = run(&["run", &t, "in.fastq", "--verbose"], &[], "");
+    assert_eq!(four(&out)[3], "true", "a Bool default-false takes the bare form");
+
+    // It is a DESUGAR — argv becomes literals and a `main(…)` call is appended — so all
+    // three engines must run identical code. If they ever differ, the desugar is wrong.
+    for (engine, env) in ENGINES {
+        let (out, err, code) = run(&["run", &t, "in.fastq", "--threads", "8"], env, "");
+        assert_eq!(code, Some(0), "{engine}: {err}");
+        assert_eq!(four(&out), vec!["in.fastq", "scores.csv", "8", "false"], "{engine}");
+    }
+
+    // `--help` is answered from the DECLARATION, and must NOT run the program. A script's
+    // top level is its program, so running it to print help would run the tool.
+    let sentinel = dir.join("ran.txt");
+    let effectful = dir.join("eff.helix");
+    std::fs::write(
+        &effectful,
+        format!(
+            "## Does a thing.\nfn main(n: Int = 1) = \"ran\\n\".append_to(\"{}\")\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+    let e = effectful.to_str().unwrap().to_string();
+    let (out, _, code) = run(&["run", &e, "--help"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("Does a thing."), "the doc comment is the help: {out}");
+    assert!(out.contains("usage:"), "{out}");
+    assert!(!sentinel.exists(), "--help must not RUN the program");
+
+    // Help describes the form people actually type: a flag is bare, not `<verbose>`.
+    let (out, _, _) = run(&["run", &t, "--help"], &[], "");
+    assert!(out.contains("[--verbose]"), "a Bool flag is written bare: {out}");
+    assert!(out.contains("(required)"), "{out}");
+    assert!(out.contains("(default: \"scores.csv\")"), "{out}");
+
+    // Every refusal NAMES the thing — exit code alone is not a diagnostic.
+    for (argv, want) in [
+        (vec!["run", &t], "needs `reads`"),
+        (vec!["run", &t, "in.fastq", "--threads", "eight"], "expects an Int, but got `eight`"),
+        (vec!["run", &t, "in.fastq", "--nope", "1"], "has no parameter `nope`"),
+    ] {
+        let (_, err, code) = run(&argv, &[], "");
+        assert_eq!(code, Some(1), "{argv:?} must fail");
+        assert!(err.contains(want), "{argv:?}: wanted {want:?}, got: {err}");
+    }
+    // …and the article is not doubled ("pass a an Int value" was the first output).
+    let (_, err, _) = run(&["run", &t, "in.fastq", "--threads", "eight"], &[], "");
+    assert!(!err.contains("a an "), "doubled article: {err}");
+
+    // A program with NO `main` refuses arguments instead of discarding them — the whole
+    // point — while still running fine with none.
+    let plain = dir.join("plain.helix");
+    std::fs::write(&plain, "print(\"hi\")\n").unwrap();
+    let p = plain.to_str().unwrap().to_string();
+    let (_, err, code) = run(&["run", &p, "--flag", "foo"], &[], "");
+    assert_eq!(code, Some(1), "arguments must not be silently ignored");
+    assert!(err.contains("takes no arguments"), "{err}");
+    assert!(err.contains("declare `fn main"), "it must say how to accept them: {err}");
+    let (out, _, code) = run(&["run", &p], &[], "");
+    assert_eq!(code, Some(0));
+    assert_eq!(out.trim(), "hi");
+
+    // D6: a parameter that cannot be built from a command-line string is refused by
+    // `helix check`, ahead of running — the alternative is a tool that ships and then
+    // fails on its first real invocation.
+    let bad = dir.join("bad.helix");
+    std::fs::write(&bad, "fn main(xs: Array) = print(xs.count())\n").unwrap();
+    let (_, err, code) = run(&["check", bad.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("cannot be built from a command-line argument"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Asking a module for a BUILTIN says where the name actually lives.
 ///
 /// From a field report. Probing whether selective import existed at all, a user wrote

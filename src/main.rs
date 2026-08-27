@@ -58,6 +58,7 @@ mod cookiejar;
 mod http;
 mod interp;
 mod jit;
+mod climain;
 mod jitexplain;
 mod json;
 mod lattice;
@@ -293,7 +294,7 @@ fn run() -> ExitCode {
         }
         // `helix run <script>` — the explicit form.
         Some("run") => match args.get(2) {
-            Some(path) => run_file(path),
+            Some(path) => run_file_with_args(path, &args[3..]),
             None => {
                 eprintln!("error: `helix run` needs a script path, e.g. `helix run main.helix`");
                 ExitCode::FAILURE
@@ -340,8 +341,8 @@ fn run() -> ExitCode {
         Some("describe") => cli_describe(&args),
         // `helix jit-explain <script>` — which numeric kernels the JIT compiled.
         Some("jit-explain") => cli_jit_explain(&args),
-        // Shorthand: `helix script.helix` runs a file directly.
-        Some(path) => run_file(path),
+        // Shorthand: `helix script.helix [args…]` runs a file directly, arguments and all.
+        Some(path) => run_file_with_args(path, &args[2..]),
     }
 }
 
@@ -1577,7 +1578,8 @@ fn resolve_script(path: &str) -> Result<std::path::PathBuf, String> {
     ))
 }
 
-fn run_file(path: &str) -> ExitCode {
+/// `helix run <script> [args…]` — the script's own command line is `argv` (ADR 0037 D1).
+fn run_file_with_args(path: &str, argv: &[String]) -> ExitCode {
     let path = &match resolve_script(path) {
         Ok(p) => p.to_string_lossy().into_owned(),
         Err(msg) => {
@@ -1588,9 +1590,14 @@ fn run_file(path: &str) -> ExitCode {
     // Record how to re-run this entry file, so a sharded `listen(port, shards)` can
     // launch identical worker interpreters that re-load the same program.
     serve::set_rerun(serve::Rerun::File(std::path::PathBuf::from(path)));
+    let argv: Vec<String> = argv.to_vec();
+    let tool = std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "tool".to_string());
     // The whole pipeline runs on the big stack (see `run_on_big_stack`) so the
     // front-end's AST recursion can't overflow before the depth guard fires.
-    run_on_big_stack(|| match run_file_capture(std::path::Path::new(path)) {
+    run_on_big_stack(move || match run_file_capture_args(std::path::Path::new(path), &argv, &tool) {
         Ok(()) => ExitCode::SUCCESS,
         Err(rendered) => {
             eprint!("{}", rendered);
@@ -1603,13 +1610,63 @@ fn run_file(path: &str) -> ExitCode {
 /// caret-annotated) error instead of printing it. Must be called on the big stack. The
 /// shared core of `helix run` and `helix test`.
 fn run_file_capture(path: &std::path::Path) -> Result<(), String> {
+    run_file_capture_args(path, &[], "tool")
+}
+
+/// The run pipeline, with the script's own arguments bound to its `fn main` (ADR 0037).
+///
+/// Binding is a DESUGAR: argv becomes literal expressions and a `main(…)` call is appended
+/// to the statement list, so the type checker validates the call like any other and all
+/// three engines run identical code. No new evaluator path means no new axis to keep in
+/// agreement — the failure this project keeps paying for elsewhere.
+fn run_file_capture_args(
+    path: &std::path::Path,
+    argv: &[String],
+    tool: &str,
+) -> Result<(), String> {
     // The module loader reads, lexes, parses, and namespaces the entry file plus
     // everything it imports into one statement list. (A single file passes through
     // unchanged.) Lex/parse/resolve errors come back already rendered.
     let loaded = module::load(path)?;
+    let mut stmts = loaded.stmts;
+    // The borrow of `stmts` ends with this match, so the call it produces can be pushed
+    // afterwards. (`drop(sig)` to release it early is what clippy's `drop_non_drop`
+    // catches, correctly: `MainSig` has no destructor and dropping it means nothing.)
+    let appended = match climain::find(&stmts) {
+        Some(sig) => {
+            // `--help` is answered from the DECLARATION, without running anything. A
+            // script's top level is its program, so running it to print help would run
+            // the tool — which is exactly what someone asking for help has not asked for.
+            if argv.iter().any(|a| a == "--help" || a == "-h") {
+                let src = std::fs::read_to_string(path).unwrap_or_default();
+                print!("{}", climain::help(&sig, &src, tool));
+                return Ok(());
+            }
+
+            let args = climain::bind(&sig, argv)
+                .map_err(|e| render_err(e, &loaded.spans, loaded.multi_module))?;
+            Some(climain::call(args, sig.line, sig.col))
+        }
+        // No `fn main`: arguments are REFUSED rather than discarded. Silently ignoring
+        // them is what this whole change exists to end, and a program that cannot accept
+        // an argument must say so instead of appearing to have accepted it.
+        None if !argv.is_empty() => {
+            return Err(format!(
+                "error: this program takes no arguments, but {} {} given\n\
+                 help: declare `fn main(…)` to accept a command line; its parameters \
+                 become the arguments (ADR 0037).\n",
+                argv.len(),
+                if argv.len() == 1 { "was" } else { "were" }
+            ));
+        }
+        None => None,
+    };
+    if let Some(call) = appended {
+        stmts.push(call);
+    }
     // Errors render against the spans the loader produced, so a cross-module error
     // points at the dependency's own source and line (not the entry file).
-    run_program(&loaded.stmts, &loaded.spans, loaded.multi_module)
+    run_program(&stmts, &loaded.spans, loaded.multi_module)
 }
 
 /// Load, namespace-resolve and type-check a file WITHOUT running it, returning the
@@ -1652,6 +1709,13 @@ fn diag_json(severity: &str, file: &str, d: &module::Diag) -> serde_json::Value 
 /// rendered text produced by the very same call.
 fn check_file_structured(path: &std::path::Path) -> Result<(), module::Diag> {
     let loaded = module::load_diag(path)?;
+    if let Some(e) = climain_violation(&loaded.stmts) {
+        let (src, filename, local) = module::locate(&loaded.spans, e.line);
+        let mut e = e;
+        e.line = local;
+        let rendered = e.render(src, filename);
+        return Err(module::Diag { rendered, filename: Some(filename.to_string()), err: Some(e) });
+    }
     types::check(&loaded.stmts).map(|_| ()).map_err(|e| {
         // The checker reports a GLOBAL line across concatenated modules; map it back to
         // the file and local line a reader can open, exactly as `render_err` does.
@@ -1678,9 +1742,35 @@ fn check_file_structured(path: &std::path::Path) -> Result<(), module::Diag> {
 
 fn check_file_capture(path: &std::path::Path) -> Result<(), String> {
     let loaded = module::load(path)?;
+    if let Some(e) = climain_violation(&loaded.stmts) {
+        return Err(render_err(e, &loaded.spans, loaded.multi_module));
+    }
     types::check(&loaded.stmts)
         .map(|_| ())
         .map_err(|e| render_err(e, &loaded.spans, loaded.multi_module))
+}
+
+/// ADR 0037 D6: a `fn main` parameter that cannot be built from a command-line string is
+/// refused AHEAD OF RUNNING, by `helix check` and by the run path alike.
+///
+/// The alternative is a tool that builds, installs, ships, and fails on its first real
+/// invocation — the argument is the same one that puts `helix check` in front of every
+/// run in the first place.
+fn climain_violation(stmts: &[ast::Stmt]) -> Option<crate::error::HelixError> {
+    let sig = climain::find(stmts)?;
+    let bad = climain::unbindable_param(&sig)?;
+    Some(
+        crate::error::HelixError::new(
+            format!("`main`'s parameter `{bad}` cannot be built from a command-line argument"),
+            sig.line,
+            sig.col,
+        )
+        .hint(
+            "a command line carries text: `main` takes `Int`, `Float`, `String` or `Bool`. \
+             Take a path and read the data inside `main`."
+                .to_string(),
+        ),
+    )
 }
 
 /// `helix test [path]` — discover and run test files (any file named `*_test.helix`

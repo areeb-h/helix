@@ -21,6 +21,30 @@
 
 ### Added
 
+- **A Helix program can be a tool: `fn main` IS the command line** (ADR 0037 D1).
+  `helix run tool.helix --threads 8` used to run the program and **discard the arguments
+  in silence** — the worst of the three possible behaviours, because the command looks
+  like it worked.
+
+  The binding rule is not new. It is the rule Helix already uses at a call site, so
+  `tool 10 3`, `tool --a 10 --b 3` and `tool --b 3 --a 10` agree exactly as `go(10, 3)`,
+  `go(a: 10, b: 3)` and `go(b: 3, a: 10)` do. Every parameter is nameable or positional,
+  a parameter with a default may be omitted, and a `Bool` defaulting to `false` also takes
+  the bare `--verbose`. `--name=value` works too.
+
+  `--help` is generated from the declaration and the `##` doc comment above `main`, and is
+  answered **without running the program** — a script's top level is its program, so
+  running it to print help would run the tool.
+
+  Every refusal names the thing: a missing required parameter, an unknown option, and a
+  bad conversion (`--threads eight` → *"`--threads` expects an Int, but got `eight`"*). A
+  program that declares no `main` now **refuses** arguments instead of ignoring them.
+  `helix check` refuses a `main` whose parameter cannot come from a string (`Array`,
+  `Tensor`, `DataFrame`, `Dna`) before it ever runs.
+
+  It is implemented as a **desugar**: argv becomes literal expressions and a `main(…)`
+  call is appended to the program, so the type checker validates the call like any other
+  and all three engines run identical code — no new evaluator path to keep in agreement.
 - **`assert_error(try expr, "substring"?)`** — assert that something FAILED, and that
   it said why. The idiom it replaces (`r = try f()` then
   `assert(r.error.contains("…"))`) checks the right thing but, on failure, prints

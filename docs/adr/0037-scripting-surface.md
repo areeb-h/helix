@@ -1,7 +1,8 @@
 # ADR 0037 — The scripting surface: a script declares its interface
 
-- **Status:** Proposed
-- **Date:** 2026-08-25, substantially revised 2026-08-27
+- **Status:** **D1 accepted and implemented** (`src/climain.rs`); D2–D6 proposed, with D6's
+  check-time refusal of an unbindable `main` parameter implemented alongside D1
+- **Date:** 2026-08-25, substantially revised 2026-08-27, D1 implemented 2026-08-27
 - **Revision:** D1's binding rule was rewritten. The first draft invented a mapping
   (*no default ⇒ positional, default ⇒ option*) which could not express a required named
   option; probing the v0.6.0 binary showed the language **already** binds arguments by
