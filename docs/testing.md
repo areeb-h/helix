@@ -130,6 +130,19 @@ Five pieces worth knowing about:
   [`tests/compat/README.md`](../tests/compat/README.md).
 - **Cross-engine example byte-diffs** (`scripts/vmparity.sh`): every runnable example
   must produce byte-identical output on the default engine and under `HELIX_NOVM=1`.
+
+  Until 2026-08-27 this one **could not fail**. It ended with `echo "RESULT=$fail"` and
+  no `exit`; nothing in the repo parsed `RESULT=` (that echo was its only occurrence);
+  `gate.sh` piped it to `tail` without `|| rc=1`; and CI ran it as a bare step, which
+  passes whenever a script exits 0. A divergence across every example would have printed
+  `DIFF …`, printed `RESULT=1`, and left both green — while this document listed it as a
+  gate.
+
+  That was the **third** gate here found unable to fail, after `dfcheck.sh` (diffed three
+  copies of "no such file") and the 28 `native-df` tests (executed by nothing). Three
+  times is a pattern, so it is written down as a rule: **a gate has to be sabotaged once
+  to prove it can fail.** Add the check, then break the thing it watches and confirm the
+  build goes red. An untested gate is a claim, not a check.
 - **Whole-tree type-check** (`scripts/checkall.sh`): `helix check` plus `helix fmt
   --check` over every tracked `.helix` outside `tests/corpus/`, covering programs the
   running gates cannot start (they need generated fixtures).
