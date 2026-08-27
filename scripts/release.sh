@@ -21,8 +21,17 @@ if [ "$LEVEL" != minor ] && [ "$LEVEL" != patch ]; then
 fi
 
 CUR=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-IFS=. read -r MA MI PA <<<"$CUR"
-if [ "$LEVEL" = minor ]; then NEW="$MA.$((MI + 1)).0"; else NEW="$MA.$MI.$((PA + 1))"; fi
+# BETWEEN RELEASES THE TREE CARRIES THE NEXT PATCH WITH A `-dev` MARKER (scripts/
+# post-release.sh), so the marker ALREADY NAMES the version a patch release becomes:
+# stripping it is the bump, and incrementing as well would skip a version. Without this,
+# `IFS=. read` put "1-dev" in PA and `$((PA + 1))` died with `bash: dev: unbound
+# variable` — while `minor` silently discarded the marker, being right by accident.
+BASE=${CUR%-dev}
+IFS=. read -r MA MI PA <<<"$BASE"
+if   [ "$LEVEL" = minor ];  then NEW="$MA.$((MI + 1)).0"
+elif [ "$CUR" != "$BASE" ]; then NEW="$BASE"
+else                             NEW="$MA.$MI.$((PA + 1))"
+fi
 echo "== version: $CUR -> $NEW ($LEVEL)"
 
 grep -q '^## Unreleased' CHANGELOG.md || {

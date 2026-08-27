@@ -61,6 +61,30 @@ jobs:
     permissions:
       contents: write
     steps:
+      # THE TAG AND THE TREE MUST AGREE, and this is the only place to check it: this job
+      # is the single writer and it runs before any build. Without it, forgetting to run
+      # `scripts/post-release.sh` in reverse — i.e. tagging a tree that still carries a
+      # `-dev` marker — publishes six green platform assets that all report
+      # `helix 0.6.1-dev`. The only existing check that would notice is
+      # `scripts/release-smoke.sh`, which runs at ritual step 6, AFTER the publish.
+      - uses: actions/checkout@v4
+      - name: The tag must match Cargo.toml, with no `-dev` marker
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VER=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$VER" != "$TAG" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $VER"
+            echo "a release must be tagged on the commit that bumped the version"
+            exit 1
+          fi
+          case "$VER" in
+            *-dev)
+              echo "::error::Cargo.toml carries the dev marker ($VER) — this tree is not a release"
+              echo "run scripts/release.sh to strip it, and tag THAT commit"
+              exit 1 ;;
+          esac
+          echo "== tag $GITHUB_REF_NAME matches Cargo.toml $VER, no marker"
       - name: Dry run — nothing is created
         if: env.DRY_RUN == 'true'
         run: echo "dry run - skipping release creation"

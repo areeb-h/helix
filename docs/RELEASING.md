@@ -20,6 +20,40 @@ Pre-1.0 semver, with the line drawn where USERS feel it:
   release-notes voice as it merges, and the release commit only renames that
   heading. `release.sh` refuses a patch whose Unreleased carries `### Changed`.
 
+### Between releases the tree says `-dev`, and that is the point
+
+A tagged commit carries a clean `X.Y.Z`. Every commit after it carries
+`X.Y.(Z+1)-dev`, written by `scripts/post-release.sh` as ritual step 7.
+
+This exists because the tree used to keep the version it had just SHIPPED, so a
+build from `main` and the released binary reported the same string. A field
+report found the consequence exactly: `now()` landed eight commits after the
+v0.6.0 tag, both binaries said `helix 0.6.0`, and a project needing `now()` had
+no way to say so — `helix = ">=0.6.0"` is satisfied by the very binary that
+lacks it, so the user met `` `now` is not a known function `` at run time
+instead of one clear sentence at the manifest check whose whole purpose is to
+replace that.
+
+`pkg::parse_semver` orders the marker BELOW the release it names —
+`0.6.0 < 0.6.1-dev < 0.6.1` — so a manifest can say `">=0.6.1-dev"` and mean
+"newer than the 0.6.0 release". `-dev` is the ONLY pre-release spelling
+accepted: `-rc1` and `-alpha.2` order against each other by convention alone,
+and a version that cannot be compared is not a version.
+
+**What it does not buy.** It is a monotone counter, not a feature probe. Every
+commit in a release window reports the same string, so the floor says "newer
+than the last release", never "has `now`". For an ADDITION the precise
+instrument already exists — `helix describe now` exits non-zero for a name this
+build does not have. The marker earns its keep on the case nothing can probe: a
+SEMANTICS change, where `tests/compat/MIGRATIONS.md` records v0.5.1 → v0.6.0
+altering what an expression computes while no name appeared or vanished.
+
+**The transitional wart.** A manifest cannot usefully declare a `-dev` floor
+until the release that taught the toolchain to parse one is adopted. An older
+binary meeting `">=0.6.1-dev"` says *"must be a minimum version"* — a syntax
+complaint — rather than *"your binary is too old"*. Unavoidable, and the reason
+the parser ships one release ahead of the first marker.
+
 ## The ritual
 
 1. `scripts/release.sh minor|patch` — bumps `Cargo.toml`, rolls the changelog
@@ -58,6 +92,17 @@ Pre-1.0 semver, with the line drawn where USERS feel it:
    highest `GLIBC_x.y` requirement must be ≤ `GLIBC_FLOOR` in `install.sh`
    (the release workflow also asserts this inside build-pgo). If the runner
    image changed, the floor moves IN THE RELEASE COMMIT, never after.
+7. **Re-arm the tree**: `bash scripts/post-release.sh X.Y.Z`, then commit and
+   push. `Cargo.toml` goes to `X.Y.(Z+1)-dev` and `## Unreleased` is reopened
+   (`release.sh` requires that heading and nothing used to write it back, so
+   every cycle began by adding it by hand). From here `helix --version` reports
+   the marker, which is TRUE: the tree is not the release any more.
+
+   Forgetting the reverse — tagging a tree that still carries a marker — is
+   caught by `create-release` in `release.yml`, which asserts the tag matches
+   `Cargo.toml` and carries no `-dev` **before any asset is published**. That
+   guard is the only pre-publish check of the version string; step 6's
+   `release-smoke.sh` is the only other one and it runs after.
 
 ## Invariants worth re-reading before any release
 

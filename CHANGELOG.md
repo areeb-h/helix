@@ -2,6 +2,66 @@
 
 ## Unreleased
 
+### Changed
+
+- **The toolchain floor accepts and orders a `-dev` marker**, and between releases the
+  tree will carry one (`scripts/post-release.sh`, ritual step 7).
+
+  `scripts/release.sh` bumped the version at release time and nothing moved it again, so
+  between releases a build from `main` reported the version it had just SHIPPED. A field
+  report found the consequence precisely: `now()` landed eight commits after the v0.6.0
+  tag, both the released binary and a main build reported `helix 0.6.0`, and a project
+  needing `now()` could not say so. `helix = ">=0.6.0"` is satisfied by the very binary
+  that lacks it — so the user met "`now` is not a known function" at run time instead of
+  the one clear sentence the manifest check exists to give.
+
+  `0.6.0 < 0.6.1-dev < 0.6.1`, so a manifest can now say `">=0.6.1-dev"` and mean "newer
+  than the 0.6.0 release". The rank is a fourth component rather than a stripped suffix:
+  stripping alone would make a dev build compare EQUAL to the release it has not become,
+  and so claim to satisfy `>=0.6.1`.
+
+  `-dev` is the only pre-release spelling accepted. `-rc1` and `-alpha.2` order against
+  each other by convention alone, and a version that cannot be compared is not a version.
+
+  **What it does not buy**, stated plainly: it is a monotone counter, not a feature probe.
+  Every commit in a release window reports the same string, so the floor says "newer than
+  the last release", never "has `now`". For an addition, `helix describe now` is the
+  precise instrument and already exits non-zero for a name this build lacks. The marker
+  earns its keep on what nothing can probe — a semantics change, which
+  `tests/compat/MIGRATIONS.md` records this project already shipping once.
+
+  **Transitional wart**: an older binary meeting `">=0.6.1-dev"` complains that it "must
+  be a minimum version" — a syntax error — rather than "your binary is too old". That is
+  why the parser ships one release ahead of the first marker.
+
+### Fixed
+
+- **A malformed version in Helix's own `Cargo.toml` could abort a user's program.** The
+  toolchain-floor check carried `parse_semver(...).expect(...)` on the hot path, and under
+  `panic = "abort"` that meant an invariant about THIS crate's build was asserted at run
+  time inside every user's binary — on every `helix run` in a project declaring a floor.
+  ADR 0024 says a total runtime never aborts the host. The invariant moved to the gate
+  (`the_crate_version_is_a_version`); an unparseable own-version now simply leaves the
+  floor unenforced instead of stopping everything.
+
+- **`helix new` has a test.** It had none, anywhere. It writes a manifest declaring a
+  toolchain floor, and the assertion is the round trip: the binary that wrote it must be
+  able to open it. Under the `-dev` scheme a naive scaffold would stamp `">=0.6.1-dev"` —
+  a version that has not shipped and that every released binary refuses — so it now names
+  the release the binary descends from.
+
+- **`scripts/release.sh` survives a marker.** Measured before the fix: `patch` died with
+  `bash: dev: unbound variable`, and `minor` was correct only by accident (its branch
+  never reads the patch component, so the marker was silently discarded). `0.6.1-dev` +
+  `patch` is now `0.6.1` — stripping the marker IS the bump; incrementing as well would
+  skip a version.
+
+- **A tag that disagrees with `Cargo.toml` is refused before anything is published.**
+  `release.yml` never read the version, and its per-platform smoke steps run
+  `helix version` while asserting nothing, so a forgotten marker would have published six
+  green assets all reporting `0.6.1-dev`. The only check that would have noticed runs at
+  ritual step 6 — after the publish.
+
 ### Added
 
 - **A DataFrame query can ask String questions** (ADR 0039): `starts_with`, `ends_with`,

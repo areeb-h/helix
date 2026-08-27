@@ -35,6 +35,34 @@ fn run(args: &[&str], env: &[(&str, &str)], stdin: &str) -> (String, String, Opt
     )
 }
 
+/// `run`, but from a chosen working directory — for the commands whose whole job is to
+/// act on the current directory (`helix new` writes `./helix.toml`), which `run` cannot
+/// exercise because it always sits in the manifest dir.
+fn run_in(
+    cwd: &std::path::Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    stdin: &str,
+) -> (String, String, Option<i32>) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_helix"));
+    cmd.current_dir(cwd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("failed to spawn helix");
+    child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+    let out = child.wait_with_output().expect("failed to wait on helix");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
+}
+
 /// Run a source string by writing it to a unique temp file (tests run in
 /// parallel, so the name is tagged).
 fn run_source(src: &str, env: &[(&str, &str)], tag: &str) -> (String, String, Option<i32>) {
@@ -6401,6 +6429,70 @@ fn helix_toml_carries_metadata_and_enforces_the_toolchain_floor() {
         run("[package]\nname = \"physics\"\nhelix = \"banana\"\n[dependencies]\n");
     assert_eq!(code, Some(1));
     assert!(err.contains("must be a minimum version"), "{err}");
+
+    // A `-dev` FLOOR IS A FLOOR, not a syntax error. Between releases the tree carries
+    // `X.Y.(Z+1)-dev`, which is the only way a manifest can say "newer than the last
+    // release" — `>=0.6.0` is satisfied by the 0.6.0 binary that lacks whatever landed
+    // after the tag. The test is version-independent on purpose: it runs the built
+    // binary, so it must not assume what this tree is carrying.
+    let (_, err, code) =
+        run("[package]\nname = \"physics\"\nhelix = \">=9.0.0-dev\"\n[dependencies]\n");
+    assert_eq!(code, Some(1));
+    assert!(
+        err.contains("requires Helix >= 9.0.0-dev") && err.contains("this binary is"),
+        "a `-dev` floor must be COMPARED, not refused as malformed: {err}"
+    );
+
+    // …and a satisfied one runs: every real version outranks 0.0.1-dev.
+    let (out, err, code) =
+        run("[package]\nname = \"physics\"\nhelix = \">=0.0.1-dev\"\n[dependencies]\n");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "2\n");
+
+    // An unorderable pre-release stays refused. One spelling, or none.
+    let (_, err, code) =
+        run("[package]\nname = \"physics\"\nhelix = \">=0.6.1-rc1\"\n[dependencies]\n");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("must be a minimum version"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `helix new` writes a manifest THIS BINARY CAN THEN OPEN — which had no test at all,
+/// and which the `-dev` marker would have broken silently.
+///
+/// The scaffold declares a toolchain floor from birth. If it wrote the binary's own
+/// version verbatim, a dev tree would stamp `helix = ">=0.6.1-dev"` — a version that has
+/// not shipped, which every released binary refuses outright, and which even the binary
+/// that wrote it would only accept by accident. So it names the RELEASE the binary
+/// descends from, and the round trip is the assertion: scaffold, then run a program in
+/// that directory.
+#[test]
+fn helix_new_writes_a_manifest_this_binary_can_open() {
+    let dir = std::env::temp_dir().join("helix_it_new");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let (out, err, code) = run_in(&dir, &["new", "physics"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("physics"), "{out}");
+
+    let manifest = std::fs::read_to_string(dir.join("helix.toml")).expect("helix.toml written");
+    assert!(manifest.contains("name = \"physics\""), "{manifest}");
+    assert!(manifest.contains("helix = \">="), "the floor is declared from birth: {manifest}");
+    // Never a marker: a scaffold must not demand a version that has not shipped.
+    assert!(!manifest.contains("-dev"), "a scaffold must not declare a dev floor: {manifest}");
+
+    // THE ROUND TRIP. A manifest the writing binary cannot open is the failure this
+    // whole test exists for.
+    std::fs::write(dir.join("m.helix"), "print(1 + 1)\n").unwrap();
+    let (out, err, code) = run(&[dir.join("m.helix").to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "the binary refused the manifest it just wrote: {err}");
+    assert_eq!(out, "2\n");
+
+    // A second `new` in the same directory refuses rather than overwriting.
+    let (_, err, code) = run_in(&dir, &["new", "other"], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("already exists"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

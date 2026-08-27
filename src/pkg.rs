@@ -86,11 +86,34 @@ fn default_version() -> String {
     "0.1.0".to_string()
 }
 
-/// Parse `MAJOR.MINOR.PATCH` into a comparable triple. Deliberately strict — no
-/// pre-release tags, no build metadata, no partial versions. A package version is an
-/// ordering claim, and claims that cannot be compared are not versions.
-fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
-    let mut it = s.split('.');
+/// Parse `MAJOR.MINOR.PATCH`, optionally carrying the `-dev` marker, into a comparable
+/// tuple. Still deliberately strict — no build metadata, no partial versions, and exactly
+/// ONE pre-release spelling. A version is an ordering claim, and claims that cannot be
+/// compared are not versions; `-dev` is admitted precisely because it CAN be compared.
+///
+/// **What the marker is for.** `scripts/release.sh` bumps this crate's version at release
+/// time, so between releases the tree carried the version it had just SHIPPED — a build
+/// from `main` reported `0.6.0` and so did the released binary. A project needing
+/// something that landed after the tag had no way to say so: `helix = ">=0.6.0"` is
+/// satisfied by the very binary that lacks it, and the user found out at run time with
+/// `` `now` is not a known function `` instead of at the manifest check that exists to
+/// prevent exactly that. With the marker, the tree after v0.6.0 reads `0.6.1-dev` and the
+/// manifest can say `">=0.6.1-dev"`.
+///
+/// The marker ranks BELOW the release it names — `0.6.0 < 0.6.1-dev < 0.6.1` — which is
+/// the whole point, and is why this returns a fourth component rather than just stripping
+/// the suffix: stripping alone would make a dev build compare EQUAL to the release it has
+/// not become, so it would claim to satisfy `>=0.6.1`.
+///
+/// Arbitrary tags (`-alpha.2`, `-rc1`) stay refused: they order against each other only by
+/// convention, and one unorderable spelling is one too many.
+fn parse_semver(s: &str) -> Option<(u64, u64, u64, u8)> {
+    // Rank: a release sorts ABOVE its own pre-release.
+    let (triple, rank) = match s.strip_suffix("-dev") {
+        Some(t) => (t, 0u8),
+        None => (s, 1u8),
+    };
+    let mut it = triple.split('.');
     let (a, b, c) = (it.next()?, it.next()?, it.next()?);
     if it.next().is_some() {
         return None;
@@ -99,7 +122,22 @@ fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
         (!p.is_empty() && p.len() <= 10 && p.bytes().all(|b| b.is_ascii_digit()))
             .then(|| p.parse().ok())?
     };
-    Some((num(a)?, num(b)?, num(c)?))
+    Some((num(a)?, num(b)?, num(c)?, rank))
+}
+
+/// The floor a freshly scaffolded manifest should declare: this binary's version, with a
+/// `-dev` marker resolved DOWN to the release it descends from (`0.6.1-dev` -> `0.6.0`).
+///
+/// A template that wrote `>=0.6.1-dev` would demand a version that has not shipped, and
+/// would be refused outright by every binary released before markers existed. A scaffold
+/// has to be openable by the binary its author will actually install.
+fn scaffold_floor(v: &str) -> String {
+    match parse_semver(v) {
+        // `post-release.sh` mints only PATCH markers — after releasing X.Y.Z the tree
+        // reads X.Y.(Z+1)-dev — so the patch component is never zero here.
+        Some((ma, mi, pa, 0)) => format!("{ma}.{mi}.{}", pa.saturating_sub(1)),
+        _ => v.to_string(),
+    }
 }
 
 /// A declared dependency's source: either a local `path`, or a remote `url` tarball
@@ -160,7 +198,8 @@ impl Manifest {
     fn validate(&self, path: &Path) -> Result<(), HelixError> {
         if parse_semver(&self.package.version).is_none() {
             return Err(err(format!(
-                "`version` in `{}` must be MAJOR.MINOR.PATCH (e.g. \"0.1.0\"), got \"{}\"",
+                "`version` in `{}` must be MAJOR.MINOR.PATCH, optionally with the \
+                 `-dev` marker (e.g. \"0.1.0\", \"0.2.0-dev\"), got \"{}\"",
                 path.display(),
                 self.package.version
             )));
@@ -170,14 +209,20 @@ impl Manifest {
             let Some(min) = parse_semver(want) else {
                 return Err(err(format!(
                     "`helix` in `{}` must be a minimum version, `\">=X.Y.Z\"` or \
-                     `\"X.Y.Z\"`, got \"{req}\"",
+                     `\"X.Y.Z\"` (optionally `X.Y.Z-dev`), got \"{req}\"",
                     path.display()
                 )));
             };
+            // THE CRATE'S OWN VERSION IS A BUILD-TIME FACT, NOT USER INPUT. This was an
+            // `.expect()`, which under `panic = "abort"` meant a malformed `version` in
+            // THIS crate's Cargo.toml aborted the host mid-run — in every user's binary,
+            // on every `helix run` inside a project that declares a floor. ADR 0024 says a
+            // total runtime never aborts; an invariant about our own build belongs to the
+            // gate (`the_crate_version_is_a_version`), not to a running program. Declining
+            // to compare is the safe half: an unparseable own-version means the floor
+            // simply is not enforced, rather than nothing running at all.
             let cur_str = env!("CARGO_PKG_VERSION");
-            let cur = parse_semver(cur_str)
-                .expect("CARGO_PKG_VERSION is MAJOR.MINOR.PATCH by construction");
-            if cur < min {
+            if parse_semver(cur_str).is_some_and(|cur| cur < min) {
                 return Err(err(format!(
                     "this project requires Helix >= {want}, and this binary is {cur_str} \
                      (declared in `{}`)",
@@ -656,9 +701,11 @@ pub fn cli_new(name: &str) -> Result<(), HelixError> {
     if path.exists() {
         return Err(err("`helix.toml` already exists in this directory".to_string()));
     }
-    // The template declares the toolchain floor from birth: this binary's own version.
-    // That is the whole point of the field — a project created on 0.3 opened by an 0.2
-    // binary should say "your binary is too old" once, not fail sixty ways.
+    // The template declares the toolchain floor from birth — the whole point of the
+    // field, so a project created on 0.3 and opened by an 0.2 binary says "your binary is
+    // too old" once instead of failing sixty ways. It names the RELEASE this binary
+    // descends from, not the binary's own version, because a dev tree's `0.6.1-dev` has
+    // not shipped and no released binary would accept a manifest demanding it.
     let body = format!(
         "[package]\n\
          name = \"{name}\"\n\
@@ -673,10 +720,13 @@ pub fn cli_new(name: &str) -> Result<(), HelixError> {
          \n\
          # Add dependencies with `helix add <name> --path ../lib` or `--url <tarball>`.\n\
          [dependencies]\n",
-        cur = env!("CARGO_PKG_VERSION"),
+        cur = scaffold_floor(env!("CARGO_PKG_VERSION")),
     );
     std::fs::write(&path, body).map_err(|e| err(format!("could not write helix.toml: {e}")))?;
-    println!("Created helix.toml for package `{name}` (helix >= {}).", env!("CARGO_PKG_VERSION"));
+    println!(
+        "Created helix.toml for package `{name}` (helix >= {}).",
+        scaffold_floor(env!("CARGO_PKG_VERSION"))
+    );
     Ok(())
 }
 
@@ -879,6 +929,58 @@ fn cwd() -> Result<PathBuf, HelixError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// THE ORDERING CLAIM, which is the entire reason a marker is admitted at all.
+    ///
+    /// A dev tree must sort ABOVE the release it descends from and BELOW the one it is
+    /// becoming. Getting only the first half — by stripping the suffix and comparing the
+    /// triple — would make a dev build compare EQUAL to a release it has not become, so
+    /// it would claim to satisfy `>=0.6.1` while missing everything 0.6.1 will contain.
+    #[test]
+    fn a_dev_marker_orders_below_the_release_it_names() {
+        let v = |s: &str| parse_semver(s).expect(s);
+        assert!(v("0.6.0") < v("0.6.1-dev"), "a dev tree is newer than the release it followed");
+        assert!(v("0.6.1-dev") < v("0.6.1"), "and older than the one it is becoming");
+        assert!(v("0.6.1") < v("0.7.0-dev"));
+        assert!(v("0.6.1-dev") < v("0.7.0-dev"));
+        // ONE spelling, or none. `-alpha.2` and `-rc1` order against each other only by
+        // convention, and a version that cannot be compared is not a version.
+        assert_eq!(parse_semver("0.6.1-alpha"), None);
+        assert_eq!(parse_semver("0.6.1-rc1"), None);
+        assert_eq!(parse_semver("0.6.1+build"), None);
+        assert_eq!(parse_semver("-dev"), None);
+        assert_eq!(parse_semver("1.0"), None);
+        assert_eq!(parse_semver("1.0.0.0"), None);
+        // The overflow guard the original had, still in place behind the new suffix strip.
+        assert_eq!(parse_semver("1.0.99999999999-dev"), None);
+    }
+
+    /// The invariant that used to live as an `.expect()` INSIDE EVERY USER'S BINARY
+    /// (`Manifest::validate`), where under `panic = "abort"` it would have aborted a
+    /// running program to report a mistake in this crate's own Cargo.toml. It is a
+    /// build-time fact, so it belongs to the gate. ADR 0024.
+    #[test]
+    fn the_crate_version_is_a_version() {
+        assert!(
+            parse_semver(env!("CARGO_PKG_VERSION")).is_some(),
+            "this crate's own version is unparseable: {}",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    /// A scaffold has to be openable by the binary its author will actually install, so
+    /// `helix new` names the RELEASE this binary descends from — never `0.6.1-dev`, which
+    /// has not shipped and which every older binary refuses outright.
+    #[test]
+    fn a_scaffold_declares_a_floor_that_has_actually_shipped() {
+        assert_eq!(scaffold_floor("0.6.1-dev"), "0.6.0");
+        assert_eq!(scaffold_floor("0.7.3-dev"), "0.7.2");
+        assert_eq!(scaffold_floor("0.6.0"), "0.6.0", "a release names itself");
+        // Whatever the tree is carrying, the floor it writes must be one this very binary
+        // accepts — otherwise `helix new` produces a project it cannot then open.
+        let f = scaffold_floor(env!("CARGO_PKG_VERSION"));
+        assert!(parse_semver(&f).unwrap() <= parse_semver(env!("CARGO_PKG_VERSION")).unwrap());
+    }
     use super::*;
 
     #[test]
