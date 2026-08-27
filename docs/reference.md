@@ -484,6 +484,19 @@ Read one integer from stdin (a line holding a number).
 >>> read_int()
 ```
 
+## inspect
+
+### `type_of(value)`
+
+The value's type name as a String — the same names every diagnostic uses.
+
+**Note:** Ask this instead of provoking an error to find out: a caught `try` was measured at 36x a plain lookup, so a type TEST should never cost an exception.
+
+```
+>>> type_of("hi")
+String
+```
+
 ## io
 
 ### `file_exists(path)`
@@ -1296,6 +1309,17 @@ Monotonic seconds (Float) since process start; only differences are meaningful.
 
 ```
 >>> clock_monotonic() - t0
+```
+
+### `now()`
+
+Seconds since the Unix epoch, as a Float — the wall clock.
+
+**Note:** For elapsed time inside one run use clock_monotonic(), which is unaffected by the machine's clock being changed. This is the one that survives a restart, so it is what expiry, TTLs and timestamps need.
+
+```
+>>> now() > 1700000000.0
+true
 ```
 
 ### `sleep(ms)`

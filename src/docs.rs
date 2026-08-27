@@ -718,6 +718,22 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "Opens READ-ONLY, so the fs-read capability label is the truth and a typo in the path fails instead of creating an empty database. Parameters bind as VALUES to `?`; there is no way to splice text into the statement, which is what makes injection unrepresentable rather than merely discouraged.",
     },
     DocEntry {
+        name: "type_of",
+        sig: "type_of(value)",
+        doc: "The value's type name as a String — the same names every diagnostic uses.",
+        example: "type_of(\"hi\")",
+        example_out: "String",
+        notes: "Ask this instead of provoking an error to find out: a caught `try` was measured at 36x a plain lookup, so a type TEST should never cost an exception.",
+    },
+    DocEntry {
+        name: "now",
+        sig: "now()",
+        doc: "Seconds since the Unix epoch, as a Float — the wall clock.",
+        example: "now() > 1700000000.0",
+        example_out: "true",
+        notes: "For elapsed time inside one run use clock_monotonic(), which is unaffected by the machine's clock being changed. This is the one that survives a restart, so it is what expiry, TTLs and timestamps need.",
+    },
+    DocEntry {
         name: "assert_error",
         sig: "assert_error(try_result, substring?)",
         doc: "Raise unless a `try` FAILED — and, given a substring, unless its message contains it.",

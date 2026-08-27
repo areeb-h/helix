@@ -388,6 +388,56 @@ pub(super) fn a_assert_close(args: Vec<Value>, line: usize, col: usize) -> Resul
 }
 
 #[inline]
+/// `type_of(v)` — the value's type name, as a String.
+///
+/// The vocabulary is `Value::type_name()`, which is ALREADY the vocabulary of every
+/// diagnostic in the language ("found a value of type String"). A second set of names
+/// for one concept is the drift this project keeps removing, so there is no second set.
+///
+/// **Why this is not a nit.** Without it, the only way to ask "is this a record?" is to
+/// attempt a field access and catch the failure — and a field report measured that at
+/// **3.801 µs against 0.104 µs for a plain lookup, 36×**. Run once per interpolated hole
+/// in a template renderer, it was 5.8× the cost of the entire render. `type_of(v) ==
+/// "Record"` is one comparison. A language that can only discover a type by provoking an
+/// error charges an exception for a question.
+pub(super) fn a_type_of(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
+    arity(name, &args, 1, line, col)?;
+    Ok(Value::Str(std::rc::Rc::new(args[0].type_name().to_string())))
+}
+
+/// `now()` — seconds since the Unix epoch, as a Float.
+///
+/// `clock_monotonic` measures elapsed time within ONE process, which is the right
+/// primitive for a benchmark or a token bucket and useless for anything that must
+/// outlive the process. Before this, **no absolute instant was expressible anywhere in
+/// Helix**: not an expiry, not a timestamp in a log line, not a cache TTL that survives a
+/// restart, not "rows since Monday". A field report hit it building sessions — a stolen
+/// cookie could not be expired server-side across a restart, and every workaround was
+/// worse.
+///
+/// A timestamp is DATA for a language that reads VCFs, serves HTTP and writes CSVs: a
+/// pipeline that cannot record when it ran cannot be audited. Kept as a Float of epoch
+/// seconds rather than waiting for a date TYPE (ADR 0030), because the float is what
+/// removes the blocker and a type can wrap it later without changing this answer.
+///
+/// Effect: reading a clock is not fs/net authority, so it sits beside `clock_monotonic`
+/// in the known-harmless set. It is `pure: false` because it is not referentially
+/// transparent — two calls differ, which is the whole point.
+pub(super) fn a_now(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
+    arity(name, &args, 0, line, col)?;
+    // A clock before 1970 is a misconfigured machine, not a Helix condition; report it
+    // rather than panicking or silently answering 0 (ADR 0024: never abort the host).
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => Ok(Value::Float(d.as_secs_f64())),
+        Err(_) => Err(HelixError::new(
+            "the system clock is set before 1970, so `now()` has no answer",
+            line,
+            col,
+        )
+        .hint("check the machine's clock; `clock_monotonic()` measures elapsed time and is unaffected.")),
+    }
+}
+
 pub(super) fn a_clock_monotonic(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
         arity(name, &args, 0, line, col)?;
         use std::sync::OnceLock;

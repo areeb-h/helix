@@ -255,6 +255,10 @@ mod tests {
         // `CAP_GETKEY`, see ctype ADR 0011.)
         let harmless: &[&str] = &[
             "print", "emit", "write", "elog", "read_int", "sleep", "clock_monotonic",
+            // Reading a clock is an effect, not an fs/net authority — the same call
+            // `clock_monotonic` already made. `now()` reads the wall clock instead of
+            // process-elapsed time; neither touches a file or a socket.
+            "now",
             "aes_keygen", "aes_encrypt", "ed25519_keygen", "assert", "assert_eq", "assert_close",
             // Inspects a `try` record and raises on a mismatch: control flow, no authority.
             "assert_error",

@@ -2492,6 +2492,103 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `type_of` and `now` — the two things a field report could not express at all.
+///
+/// **`type_of`**: without it, the only way to ask "is this a record?" was to attempt a
+/// field access and catch the failure. A field report measured that at 3.801 µs against
+/// 0.104 µs for a plain lookup — **36×** — and, run once per interpolated hole in a
+/// template renderer, at 5.8× the cost of the entire render. Measured here after the fix:
+/// 200,000 type tests went 951 ms → 44 ms, **21.6×**. A language that can only discover a
+/// type by provoking an error charges an exception for a question.
+///
+/// **`now`**: `clock_monotonic` measures elapsed time inside ONE process, so before this
+/// **no absolute instant was expressible anywhere in Helix** — no expiry, no timestamp in
+/// a log line, no TTL surviving a restart. The report hit it building sessions: a stolen
+/// cookie could not be expired server-side across a restart, and every workaround was
+/// worse.
+#[test]
+fn type_of_names_the_type_and_now_is_an_absolute_instant() {
+    // The vocabulary is `Value::type_name()` — the SAME names every diagnostic uses.
+    // A second set of names for one concept is the drift this project keeps removing.
+    for (expr, want) in [
+        ("1", "Int"),
+        ("1.5", "Float"),
+        ("\"a\"", "String"),
+        ("true", "Bool"),
+        ("[1]", "Array"),
+        ("{a: 1}", "Record"),
+        ("(1, 2)", "Tuple"),
+        ("missing", "Missing"),
+        ("x => x", "Function"),
+        ("dna(\"ATG\")", "Dna"),
+    ] {
+        for (engine, env) in ENGINES {
+            let src = format!("print(type_of({expr}))\n");
+            let (out, err, code) = run_source(&src, env, &format!("typeof_{}_{engine}", want.len()));
+            assert_eq!(code, Some(0), "{expr} on {engine}: {err}");
+            assert_eq!(out.trim(), want, "{expr} on {engine}");
+        }
+    }
+
+    // The name `type_of` returns is the name the ERROR uses, so a reader who saw one can
+    // write the other without a translation table.
+    let (_, err, _) = run_source("print(1 + \"x\")\n", &[], "typeof_vocab");
+    assert!(err.contains("got a String"), "{err}");
+
+    // The field report's actual use case, and the reason this is not a nit.
+    let (out, _, code) = run_source(
+        "fn is_raw(v) = type_of(v) == \"Record\"\nprint(is_raw({kind: \"raw\"}), is_raw(\"plain\"))\n",
+        &[],
+        "typeof_use",
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(out.trim(), "true false");
+
+    // `now()` is an ABSOLUTE instant: past a date already gone, and sane.
+    let (out, err, code) = run_source(
+        "t = now()\nprint(t > 1700000000.0 and t < 4000000000.0)\n",
+        &[],
+        "now_abs",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "true", "now() must be epoch seconds");
+
+    // …and it is the one that SURVIVES A RESTART, which is the whole distinction from
+    // `clock_monotonic`. Two separate processes must see it advance; monotonic restarts
+    // near zero every time, which is exactly why sessions could not expire.
+    let (a, _, _) = run_source("print(now())\n", &[], "now_p1");
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let (b, _, _) = run_source("print(now())\n", &[], "now_p2");
+    let (a, b) = (a.trim().parse::<f64>().unwrap(), b.trim().parse::<f64>().unwrap());
+    assert!(b > a, "now() must advance across processes: {a} then {b}");
+    assert!(b - a >= 1.0, "it must advance by real elapsed time: {a} then {b}");
+
+    let (m1, _, _) = run_source("print(clock_monotonic())\n", &[], "mono_p1");
+    let (m2, _, _) = run_source("print(clock_monotonic())\n", &[], "mono_p2");
+    let (m1, m2) = (m1.trim().parse::<f64>().unwrap(), m2.trim().parse::<f64>().unwrap());
+    assert!(m1 < 1.0 && m2 < 1.0, "monotonic is process-relative: {m1}, {m2}");
+
+    // Effects: reading a clock is not fs/net authority, the call `clock_monotonic`
+    // already made. `now` is impure (two calls differ — the point); `type_of` is pure.
+    let (out, _, _) = run(&["describe", "now"], &[], "");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["effect"], "pure", "a clock read holds no fs/net authority");
+    assert_eq!(v[0]["pure"], false, "not referentially transparent");
+    let (out, _, _) = run(&["describe", "type_of"], &[], "");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["pure"], true);
+
+    // Arity is the checker's, so both are caught before anything runs.
+    for (src, want) in [("print(type_of())\n", "1 argument"), ("print(now(1))\n", "0 argument")] {
+        let path = std::env::temp_dir().join("helix_arity_tn.helix");
+        std::fs::write(&path, src).unwrap();
+        let (_, err, code) = run(&["check", path.to_str().unwrap()], &[], "");
+        assert_eq!(code, Some(1), "{src}");
+        assert!(err.contains(want), "{src}: {err}");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 /// `sqlite_query` — a query is a DataFrame, and injection is unrepresentable.
 ///
 /// Feature-gated (`--features db`), so the assertions split: the SHAPE of the surface

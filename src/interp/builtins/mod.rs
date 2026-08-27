@@ -49,6 +49,8 @@ impl super::Interp {
             "assert_close" => return output::a_assert_close(args, line, col),
             "assert_error" => return output::a_assert_error(name, args, line, col),
             "clock_monotonic" => return output::a_clock_monotonic(name, args, line, col),
+            "now" => return output::a_now(name, args, line, col),
+            "type_of" => return output::a_type_of(name, args, line, col),
             "range" => return corefns::a_range(args, line, col),
             "chr" => return corefns::a_chr(name, args, line, col),
             "ord" => return corefns::a_ord(name, args, line, col),

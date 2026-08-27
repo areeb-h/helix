@@ -199,6 +199,19 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::DataFrame)
         }
+        // `type_of(v)` accepts ANY value — that is the point of asking.
+        "type_of" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            Ok(Type::String)
+        }
+        "now" => {
+            if !args.is_empty() {
+                return Err(arity_err(name, 0, args.len(), line, col));
+            }
+            Ok(Type::Float)
+        }
         "assert_error" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(

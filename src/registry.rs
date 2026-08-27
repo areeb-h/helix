@@ -40,6 +40,10 @@ pub fn category_of(name: &str) -> &'static str {
         "print" | "emit" | "write" | "elog" => "output",
         // Console input.
         "read_int" => "input",
+        "now" => "time",
+        // Its own category: asking WHAT a value is, rather than converting or producing
+        // one.  is the fallback the drift guard rejects, and rightly.
+        "type_of" => "inspect",
         // Time / pacing.
         "sleep" | "clock_monotonic" => "time",
         // Constructors — make a value of a given type.
@@ -172,6 +176,9 @@ pub static BUILTINS: &[BuiltinDef] = &[
     // Read one integer from stdin (a line). Impure (non-deterministic input), so it
     // never appears in a computed/memoized result.
     BuiltinDef { path: "read_int", pure: false },
+    // Not referentially transparent — two calls differ, which is the point.
+    BuiltinDef { path: "now", pure: false },
+    BuiltinDef { path: "type_of", pure: true },
     BuiltinDef { path: "degrees", pure: true },
     BuiltinDef { path: "radians", pure: true },
     BuiltinDef { path: "hypot", pure: true },
