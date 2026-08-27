@@ -90,10 +90,18 @@ fn parse_expression(
     p.skip_newlines();
     if !p.at_end() {
         let (l, c) = p.pos();
+        // `{2,}` is the overwhelmingly common case here and it is not an interpolation
+        // at all — it is a regex quantifier in an ordinary string, which Helix reads as
+        // `{…}`. Naming the raw-string form turns a confusing parse error into the fix.
+        // (The SILENT version of the same collision — `{4}`, a valid integer expression
+        // that quietly becomes the digit 4 — is caught by the checker instead.)
         return Err(HelixError::new(
             format!("unexpected {} in interpolation `{{...}}`", p.peek().describe()),
             l,
             c,
+        )
+        .hint(
+            "if this is a regex quantifier or a literal brace, use a RAW string (`\"\"\"[a-z]{2,}\"\"\"` interpolates nothing), or double the brace as `{{`.",
         ));
     }
     Ok((e, p.do_bindings))

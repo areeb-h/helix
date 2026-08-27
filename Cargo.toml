@@ -95,6 +95,11 @@ polars = { version = "0.54", features = [
     "performant",
 ], optional = true }
 # Fast, deterministic hashing for the interpreter environment.
+# Regular expressions. The crate is finite-automata based, so matching is LINEAR in the
+# input and no pattern can blow up exponentially (no ReDoS) — which is what lets ADR
+# 0024 hold for a server taking user-supplied patterns. Already in the tree via
+# polars-core for a default build; only `--no-default-features` builds pay for it.
+regex = { version = "1", optional = true }
 rustc-hash = "2"
 # JSON for `parse_json`/`to_json` — consuming and producing API/data payloads.
 # Pure compute, no network, always available (a core data capability).
@@ -201,7 +206,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
 [features]
 # HTTP data-fetching and the fast allocator are on by default; build with
 # `--no-default-features` for a network-free / system-allocator binary.
-default = ["http", "mimalloc", "dataframes", "bio", "jit"]
+default = ["http", "mimalloc", "dataframes", "bio", "jit", "regex"]
 # Swap in the mimalloc global allocator (a pure runtime win; see src/main.rs).
 mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 # `http_get` — fetch data over HTTP(S) from a Helix program.
@@ -247,6 +252,8 @@ managed = ["http"]
 # dependency" property (no libsqlite3 to install, as with no BLAS and no OpenSSL).
 # Implies `dataframes` because a query RETURNS a frame — the same reason `bio` does.
 db = ["dep:rusqlite"]
+# `re_match` and friends on String.
+regex = ["dep:regex"]
 
 [dev-dependencies]
 # Used only by the ignored `generate_*_index_fixture` tests to build the

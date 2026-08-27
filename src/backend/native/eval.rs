@@ -132,8 +132,8 @@ fn refuse_non_numeric(op: &BinOp, l: &Evaled, r: &Evaled, line: usize, col: usiz
         return Ok(());
     }
     for side in [l, r] {
-        if let Some(v) = representative(side) {
-            if v.as_f64().is_none() {
+        if let Some(v) = representative(side).filter(|v| v.as_f64().is_none()) {
+            {
                 // Ask the scalar kernel for the error rather than reproducing it: one
                 // semantics means one message, and the kernel owns the wording and the
                 // `+`-on-a-String nudge.

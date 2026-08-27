@@ -318,6 +318,7 @@ impl super::Checker {
                 tensor_method_type(name, args.len(), line, col)
             }
             Type::String => {
+                mangled_quantifier(name, args, line, col)?;
                 self.synth_simple_args(args)?;
                 string_method_type(name, line, col)
             }
@@ -568,4 +569,55 @@ impl super::Checker {
         }
         result
     }
+}
+
+/// Catch a regex quantifier that Helix's string interpolation silently ate.
+///
+/// `"([0-9]{4})"` is not the pattern it looks like: `{4}` is an interpolation hole holding
+/// the integer 4, so the string becomes `([0-9]4)` and the match quietly fails. The
+/// `{2,}` form at least raises a parse error; `{4}` and `{4,6}` do not — and a silent
+/// wrong answer is the failure this project treats as worst.
+///
+/// The signal is precise: an interpolation whose expression is a bare INTEGER LITERAL, in
+/// the pattern position of a regex method. Nobody writes `{4}` meaning "the number four"
+/// — they would write `4` — so this shape is a mangled quantifier essentially every time.
+/// A pattern genuinely built from a variable (`"^{prefix}-"`) interpolates a NAME, not a
+/// literal, and is deliberately left alone.
+fn mangled_quantifier(
+    name: &str,
+    args: &[crate::ast::Expr],
+    line: usize,
+    col: usize,
+) -> Result<(), HelixError> {
+    use crate::ast::{Expr, InterpPart};
+    if !crate::regexes::is_regex_method(name) {
+        return Ok(());
+    }
+    let Some(Expr::Interp(parts)) = args.first() else {
+        return Ok(());
+    };
+    let digits: Vec<String> = parts
+        .iter()
+        .filter_map(|p| match p {
+            InterpPart::Expr(e, _) => match &**e {
+                Expr::Int(n) => Some(n.to_string()),
+                _ => None,
+            },
+            InterpPart::Lit(_) => None,
+        })
+        .collect();
+    if digits.is_empty() {
+        return Ok(());
+    }
+    let shown = digits.iter().map(|d| format!("{{{d}}}")).collect::<Vec<_>>().join(", ");
+    Err(HelixError::new(
+        format!("`{shown}` here is string interpolation, not a regex quantifier"),
+        line,
+        col,
+    )
+    .hint(
+        "an ordinary string reads `{4}` as the number 4, so the pattern silently loses the \
+         quantifier. Use a RAW string, which interpolates nothing: `\"\"\"[0-9]{4}\"\"\"`."
+            .to_string(),
+    ))
 }

@@ -2492,6 +2492,98 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// Regular expressions — and the two traps that come with them in THIS language.
+///
+/// A field report called regex "the largest missing piece of the stdlib for a data
+/// language"; every validation path in its web layer was hand-rolled character classes.
+///
+/// Two properties are asserted rather than described:
+///
+/// 1. **A regex cannot hang the program.** The engine is finite-automata based, so
+///    matching is linear in the input and no pattern/input pair blows up. The classic
+///    catastrophic-backtracking case finishes in under a millisecond here and hangs
+///    Python. ADR 0024 says user input never aborts the host; a backtracking engine
+///    would contradict that exactly where it matters most, so this is a requirement, not
+///    a preference. The price is backreferences and lookaround, which are what make
+///    backtracking necessary.
+/// 2. **A quantifier eaten by string interpolation is caught.** `"([0-9]{4})"` is not the
+///    pattern it looks like — `{4}` is an interpolation hole holding the integer 4, so
+///    the string becomes `([0-9]4)` and the match quietly fails. `{2,}` at least raises;
+///    `{4}` did not, and a silent wrong answer is the failure this project treats as
+///    worst.
+#[test]
+fn regex_is_linear_time_and_a_mangled_quantifier_is_caught() {
+    let one = |src: &str| -> String {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], "rx");
+        assert_eq!(code, Some(0), "{src}: {err}");
+        out.trim().to_string()
+    };
+
+    // A build without the feature still type-checks and describes the methods; only
+    // running says what to rebuild with (ADR 0032). Detect that and stop.
+    let (_, err, _) = run_source("print(\"a1\".re_match(\"[0-9]\"))\n", &[], "rx_probe");
+    if err.contains("no regex support") {
+        assert!(err.contains("--features regex"), "the gate must name the rebuild: {err}");
+        return;
+    }
+
+    // Validation, extraction, splitting, replacement.
+    assert_eq!(one("print(\"abc123\".re_match(\"[0-9]+\"))"), "true");
+    assert_eq!(one("print(\"abc\".re_match(\"[0-9]+\"))"), "false");
+    assert_eq!(one("print(\"order 42 of 99\".re_find(\"[0-9]+\"))"), "42");
+    // Absent is `missing`, the shape `index_of` and `split_once` already use (ADR 0001).
+    assert_eq!(one("print(\"none\".re_find(\"[0-9]+\"))"), "missing");
+    assert_eq!(one("print(\"a1 b22\".re_find_all(\"[0-9]+\"))"), "[\"1\", \"22\"]");
+    assert_eq!(one("print(\"a1b22c\".re_split(\"[0-9]+\"))"), "[\"a\", \"b\", \"c\"]");
+    assert_eq!(one("print(\"a1b2\".re_replace(\"[0-9]\", \"#\"))"), "a#b#");
+
+    // Captures: group 0 is the whole match, and a group that did not participate is
+    // `missing` rather than "" — an empty capture and an absent one are different answers.
+    assert_eq!(one("print(\"ab\".re_captures(\"(a)(x)?(b)\"))"), "[\"ab\", \"a\", missing, \"b\"]");
+    assert_eq!(one("print(\"nope\".re_captures(\"([0-9]+)\"))"), "missing");
+
+    // The literal family is untouched: `.` still means a dot to `replace`, and that
+    // distinction is exactly why the regex family is named `re_`.
+    assert_eq!(one("print(\"a.b\".replace(\".\", \"-\"))"), "a-b");
+    assert_eq!(one("print(\"a.b\".re_replace(\".\", \"-\"))"), "---");
+
+    // THE GUARANTEE. On a backtracking engine this pair is exponential; here it is
+    // linear. The assertion is on the CLOCK, because that is the property.
+    let out = one(
+        "s = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!\"\n\
+         t0 = clock_monotonic()\n\
+         r = s.re_match(\"^(a+)+$\")\n\
+         print(r, (clock_monotonic() - t0) < 0.05)",
+    );
+    assert_eq!(out, "false true", "a catastrophic-backtracking pattern must stay linear");
+
+    // Backreferences are refused BY DESIGN — they are what would make the above possible.
+    let (_, err, code) = run_source("print(\"aa\".re_match(\"(a)\\\\1\"))\n", &[], "rx_backref");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("invalid regular expression"), "{err}");
+
+    // The interpolation trap, caught at CHECK time, before anything runs.
+    let path = std::env::temp_dir().join("helix_rx_quant.helix");
+    std::fs::write(&path, "print(\"2026\".re_captures(\"([0-9]{4})\"))\n").unwrap();
+    let (_, err, code) = run(&["check", path.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "a mangled quantifier must not run");
+    assert!(err.contains("not a regex quantifier"), "{err}");
+    assert!(err.contains("RAW string"), "it must name the fix: {err}");
+
+    // …and the raw form is correct.
+    assert_eq!(
+        one("print(\"2026-08-27\".re_captures(\"\"\"([0-9]{4})-([0-9]{2})-([0-9]{2})\"\"\"))"),
+        "[\"2026-08-27\", \"2026\", \"08\", \"27\"]"
+    );
+
+    // The check must NOT fire on a pattern genuinely built from a variable: that
+    // interpolates a NAME, not a literal, and is a legitimate dynamic pattern.
+    assert_eq!(one("p = \"foo\"\nprint(\"foobar\".re_match(\"^{p}\"))"), "true");
+    // Nor on a non-regex method that happens to interpolate a number.
+    assert_eq!(one("print(\"a4b\".contains(\"{4}\"))"), "true");
+    let _ = std::fs::remove_file(&path);
+}
+
 /// `helix search <term>` — find a capability by what it DOES, not by a name you have.
 ///
 /// This closes the project's most-repeated failure. `doc` and `describe` both need the

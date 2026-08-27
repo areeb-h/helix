@@ -2261,6 +2261,72 @@ Decode a Phred+33 quality string to per-base integer quality scores.
 [40, 40, 0]
 ```
 
+### `re_captures(pattern)`
+
+The capture groups of the first match: [whole, group1, ...]; missing when it does not match.
+
+**Note:** Group 0 is the whole match, so the array reads like the pattern. A group that did not participate is `missing`, not an empty string. Patterns with `{n}` quantifiers need a RAW string (`"""[0-9]{4}"""`): an ordinary string reads `{4}` as interpolation and silently loses the quantifier. `helix check` catches that. 
+
+```
+>>> "ab".re_captures("(a)(b)")
+["ab", "a", "b"]
+```
+
+### `re_find(pattern)`
+
+The FIRST match of the regular expression; missing when it does not match.
+
+**Note:** Patterns with `{n}` quantifiers need a RAW string (`"""[0-9]{4}"""`): an ordinary string reads `{4}` as interpolation and silently loses the quantifier. `helix check` catches that. Absent is `missing`, as with index_of and split_once.
+
+```
+>>> "order 42".re_find("[0-9]+")
+42
+```
+
+### `re_find_all(pattern)`
+
+Every match of the regular expression, in order, as an array of strings.
+
+**Note:** Patterns with `{n}` quantifiers need a RAW string (`"""[0-9]{4}"""`): an ordinary string reads `{4}` as interpolation and silently loses the quantifier. `helix check` catches that. 
+
+```
+>>> "a1 b22".re_find_all("[0-9]+")
+["1", "22"]
+```
+
+### `re_match(pattern)`
+
+Whether the regular expression matches anywhere in the string.
+
+**Note:** Patterns with `{n}` quantifiers need a RAW string (`"""[0-9]{4}"""`): an ordinary string reads `{4}` as interpolation and silently loses the quantifier. `helix check` catches that. The engine is finite-automata based, so matching is LINEAR in the input and no pattern can blow up (no ReDoS) — the price is that backreferences and lookaround are unsupported.
+
+```
+>>> "abc123".re_match("[0-9]+")
+true
+```
+
+### `re_replace(pattern, to)`
+
+The string with EVERY match of the regular expression replaced.
+
+**Note:** Group references in the replacement are `$1`, `$2`, …; `$$` is a literal dollar. Patterns with `{n}` quantifiers need a RAW string (`"""[0-9]{4}"""`): an ordinary string reads `{4}` as interpolation and silently loses the quantifier. `helix check` catches that. 
+
+```
+>>> "a1b2".re_replace("[0-9]", "#")
+a#b#
+```
+
+### `re_split(pattern)`
+
+Split the string on every match of the regular expression.
+
+**Note:** Patterns with `{n}` quantifiers need a RAW string (`"""[0-9]{4}"""`): an ordinary string reads `{4}` as interpolation and silently loses the quantifier. `helix check` catches that. 
+
+```
+>>> "a1b2c".re_split("[0-9]")
+["a", "b", "c"]
+```
+
 ### `repeat(n)`
 
 The string repeated n times end to end.

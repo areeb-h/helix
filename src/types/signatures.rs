@@ -1040,6 +1040,11 @@ pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<
         // One character, as a String — or `missing` past the end, the shape
         // `index_of` already uses for absent (ADR 0001).
         "char_at" => Type::String,
+        // The regex family. `re_match` answers Bool; the finders answer a String or
+        // `missing`; `re_find_all`/`re_split`/`re_captures` answer an Array of String.
+        "re_match" => Type::Bool,
+        "re_find" | "re_replace" => Type::String,
+        "re_find_all" | "re_split" | "re_captures" => Type::Array(Box::new(Type::String)),
         // `index_of`/`last_index_of` are the first/last match's CHARACTER index, or
         // `missing` when absent — typed `Int`, like `Array.index_of` and `Dna.find`.
         "count" | "length" | "index_of" | "last_index_of" => Type::Int,

@@ -59,6 +59,7 @@ mod http;
 mod interp;
 mod jit;
 mod apisearch;
+mod regexes;
 mod climain;
 mod subprocess;
 mod db;

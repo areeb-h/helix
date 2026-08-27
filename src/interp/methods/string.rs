@@ -167,6 +167,10 @@ pub(crate) fn string_method(
         // `from` is a CHARACTER index, like everything else this method touches — it is
         // fed by the previous answer, so a byte offset here would silently mislocate the
         // moment any multi-byte character appeared earlier in the string.
+        // The regex family lives in its own module: a different pattern LANGUAGE, and
+        // keeping it separate is what stops a literal method and a regex one from ever
+        // sharing a name.
+        n if crate::regexes::is_regex_method(n) => crate::regexes::method(s, n, args, line, col),
         "index_of" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(

@@ -309,6 +309,9 @@ pub static STRING_METHODS: &[&str] = &[
     "starts_with", "ends_with", "take", "drop", "repeat", "ljust", "rjust", "center", "phred",
     "parse_json", "to_float", "to_int", "write_to", "append_to", "index_of", "split_once",
     "concat", "replace_first", "last_index_of", "char_at",
+    // The regex family (src/regexes.rs) — named `re_` because whether `.` means "any
+    // character" or "a dot" must be visible at the call site.
+    "re_match", "re_find", "re_find_all", "re_replace", "re_captures", "re_split",
 ];
 
 /// HTTP-header methods (the `Headers` value): case-insensitive reads, wire order.
