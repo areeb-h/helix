@@ -50,6 +50,7 @@ impl super::Interp {
             "assert_error" => return output::a_assert_error(name, args, line, col),
             "clock_monotonic" => return output::a_clock_monotonic(name, args, line, col),
             "now" => return output::a_now(name, args, line, col),
+            "run" => return crate::subprocess::run(&args, line, col),
             "type_of" => return output::a_type_of(name, args, line, col),
             "range" => return corefns::a_range(args, line, col),
             "chr" => return corefns::a_chr(name, args, line, col),

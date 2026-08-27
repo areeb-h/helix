@@ -200,6 +200,18 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             Ok(Type::DataFrame)
         }
         // `type_of(v)` accepts ANY value — that is the point of asking.
+        // `run(program, args?)` — `{status, stdout, stderr}`, whose shape is not
+        // expressible in the checker's record type, so `Unknown` (as `parse_json` does).
+        "run" => {
+            if args.is_empty() || args.len() > 2 {
+                return Err(HelixError::new(
+                    format!("`run` takes a program and an optional array of arguments, got {} arguments", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            Ok(Type::Unknown)
+        }
         "type_of" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));

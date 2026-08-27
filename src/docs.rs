@@ -718,6 +718,14 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "Opens READ-ONLY, so the fs-read capability label is the truth and a typo in the path fails instead of creating an empty database. Parameters bind as VALUES to `?`; there is no way to splice text into the statement, which is what makes injection unrepresentable rather than merely discouraged.",
     },
     DocEntry {
+        name: "run",
+        sig: "run(program, args?)",
+        doc: "Run a program with an argv list; returns {status, stdout, stderr}, raising if it fails.",
+        example: "run(\"echo\", [\"hello\"]).stdout.trim()",
+        example_out: "hello",
+        notes: "argv only — there is no shell form, so a metacharacter in ordinary data cannot become a command. A non-zero exit RAISES (unlike subprocess.run's check=False default); inspect it with `try run(...)` instead. Granting this is a boundary exit, not confinement: the child runs with its own permissions.",
+    },
+    DocEntry {
         name: "type_of",
         sig: "type_of(value)",
         doc: "The value's type name as a String — the same names every diagnostic uses.",

@@ -2492,6 +2492,112 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `run(program, args?)` — subprocess execution, argv only (ADR 0037 D3).
+///
+/// A field report hit this adding Tailwind support: Tailwind v4 is a CLI, the natural
+/// integration is for the dev server to invoke it on change, and **Helix could not invoke
+/// it at all** — so the build had to run beside the server, supervised by something that
+/// was not Helix. The same wall stands in front of orchestrating `git`, `ffmpeg`,
+/// `samtools` or a compiler.
+///
+/// Two properties carry the design, and both are asserted rather than described:
+/// a shell metacharacter in ordinary data stays DATA, and a failed child RAISES instead
+/// of being a value you must remember to inspect (`subprocess.run`'s `check=False`
+/// default is the counter-example ADR 0037 cites).
+///
+/// Unix-only: the test drives `echo`/`true`/`false`/`cat`. The builtin itself is
+/// portable — `std::process::Command` is — but a portable assertion about a program that
+/// exists on every platform is not worth inventing for this.
+#[cfg(unix)]
+#[test]
+fn run_executes_argv_and_a_failed_child_raises() {
+    let one = |src: &str| -> String {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], "subproc");
+        assert_eq!(code, Some(0), "{src}: {err}");
+        out.trim().to_string()
+    };
+
+    // Each element is exactly ONE argv entry, whatever it contains.
+    assert_eq!(one("print(run(\"echo\", [\"hello\"]).stdout.trim())"), "hello");
+    assert_eq!(one("print(run(\"true\").status)"), "0");
+    assert_eq!(one("print(run(\"printf\", [\"%s-%s\", \"a\", \"b\"]).stdout)"), "a-b");
+    // Numbers reach the child as text, because an argument IS text.
+    assert_eq!(one("print(run(\"echo\", [1, 2.5, true]).stdout.trim())"), "1 2.5 true");
+
+    // THE POINT. Through a shell this would delete a directory; as argv it is a string
+    // that happens to contain punctuation. There is no string form to get wrong.
+    let sentinel = "/tmp/helix_run_injection_sentinel";
+    let _ = std::fs::remove_file(sentinel);
+    assert_eq!(
+        one(&format!("print(run(\"echo\", [\"hi; touch {sentinel}\"]).stdout.trim())")),
+        format!("hi; touch {sentinel}")
+    );
+    assert!(!std::path::Path::new(sentinel).exists(), "a metacharacter must stay data");
+
+    // A non-zero exit RAISES.
+    let (_, err, code) = run_source("print(run(\"false\").status)\n", &[], "subproc_fail");
+    assert_eq!(code, Some(1), "a failed child must not be a value you can ignore");
+    assert!(err.contains("exited with status 1"), "{err}");
+
+    // …and `try` inspects it instead of propagating, using the mechanism the language
+    // already had — no second API, and `assert_error` reads the same record.
+    assert_eq!(one("r = try run(\"false\")\nprint(r.ok)"), "false");
+    let (_, err, code) = run_source(
+        "assert_error(try run(\"false\"), \"exited with status 1\")\nprint(\"ok\")\n",
+        &[],
+        "subproc_asserr",
+    );
+    assert_eq!(code, Some(0), "{err}");
+
+    // Three failures a caller reading only an exit code would conflate: the child failed,
+    // the program could not be started, and the call was malformed.
+    for (src, want) in [
+        ("print(run(\"definitely-not-a-program-xyz\").status)", "could not run"),
+        ("print(run(\"echo\", \"hello\").status)", "must be an array"),
+        ("print(run(\"echo\", [\"a\"], [\"b\"]).status)", "takes a program and an optional"),
+    ] {
+        let (_, err, code) = run_source(&format!("{src}\n"), &[], "subproc_bad");
+        assert_eq!(code, Some(1), "{src}");
+        assert!(err.contains(want), "{src}: wanted {want:?}, got {err}");
+    }
+
+    // The child must NOT inherit our stdin: a program that decides to prompt would
+    // otherwise eat the Helix program's own input, or hang forever in a pipeline.
+    let dir = std::env::temp_dir();
+    let p = dir.join("helix_run_stdin.helix");
+    std::fs::write(&p, "print(run(\"cat\").stdout.count())\n").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_helix"))
+        .arg(p.to_str().unwrap())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write;
+            c.stdin.as_mut().unwrap().write_all(b"some input\n")?;
+            c.wait_with_output()
+        })
+        .expect("spawn helix");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "0",
+        "the child read our stdin — it must be null"
+    );
+    let _ = std::fs::remove_file(&p);
+
+    // The FIRST use of the `Process` capability category, reserved since ADR 0021 with
+    // the gate and `Authority` already written for it. ADR 0037 D3 is explicit that this
+    // grant is a boundary exit rather than confinement, and the docs say so too.
+    let (out, _, _) = run(&["describe", "run"], &[], "");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["effect"], "process");
+    assert_eq!(v[0]["pure"], false);
+    assert!(
+        v[0]["notes"].as_str().unwrap().contains("boundary exit"),
+        "the docs must state the ceiling: {}",
+        v[0]["notes"]
+    );
+}
+
 /// `index_of(needle, from)` and `char_at(i)` — the two primitives a parser needs.
 ///
 /// From the same field report. Neither is a convenience:

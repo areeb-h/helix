@@ -59,6 +59,7 @@ mod http;
 mod interp;
 mod jit;
 mod climain;
+mod subprocess;
 mod db;
 mod jitexplain;
 mod json;

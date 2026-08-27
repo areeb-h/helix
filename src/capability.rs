@@ -27,10 +27,9 @@ pub enum Effect {
     FsRead,
     FsWrite,
     Net,
-    // Reserved: Helix has no subprocess or env-var builtin yet, so `effect_of` never returns
-    // these — but the category set is part of the design (ADR 0021), and the `Authority` /
-    // gate already handle them, so a future `spawn`/`getenv` is one `effect_of` arm away.
-    #[allow(dead_code)]
+    /// Granted to `run` (ADR 0037 D3). Note what this grant CANNOT promise: the child
+    /// runs as a separate program with its own permissions, so it is a boundary exit
+    /// rather than confinement.
     Process,
     #[allow(dead_code)]
     Env,
@@ -70,6 +69,12 @@ pub fn effect_of(name: &str) -> Effect {
         | "read_gff" | "read_bed" => Effect::FsRead,
         "remove_file" | "mkdir" => Effect::FsWrite,
         "listen" | "http_get" | "http_post" | "http_request" | "http_stream" => Effect::Net,
+        // The first `Process` grant. ADR 0021 reserved the category and ADR 0037 D3
+        // states its ceiling: a subprocess is a BOUNDARY EXIT, not confinement — it
+        // runs with its own permissions, so granting `run` on a shell or on `helix`
+        // itself is granting everything. The label is honest about that rather than
+        // implying a guarantee the process model cannot keep.
+        "run" => Effect::Process,
         _ => Effect::Pure,
     }
 }

@@ -1098,6 +1098,19 @@ Print a value WITHOUT a trailing newline (print's no-newline twin).
 >>> write("a")
 ```
 
+## process
+
+### `run(program, args?)`
+
+Run a program with an argv list; returns {status, stdout, stderr}, raising if it fails.
+
+**Note:** argv only — there is no shell form, so a metacharacter in ordinary data cannot become a command. A non-zero exit RAISES (unlike subprocess.run's check=False default); inspect it with `try run(...)` instead. Granting this is a boundary exit, not confinement: the child runs with its own permissions.
+
+```
+>>> run("echo", ["hello"]).stdout.trim()
+hello
+```
+
 ## random
 
 ### `randn(n, seed)`
