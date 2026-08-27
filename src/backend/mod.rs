@@ -284,7 +284,7 @@ pub fn probe_str_call(
     line: usize,
     col: usize,
 ) -> Result<(), HelixError> {
-    crate::interp::call_method(probe, f.spelling(), args.to_vec(), line, col).map(|_| ())
+    crate::interp::call_method(probe, f.spelling(), args, line, col).map(|_| ())
 }
 
 /// Map a function name to the float predicate it asks, if it is one.

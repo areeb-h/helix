@@ -695,7 +695,7 @@ impl Interp {
                     && ufcs_fallback_applies(&recv_v, name)
                 {
                     let saved = vals.clone();
-                    return match call_method(&recv_v, name, vals, *line, *col) {
+                    return match call_method(&recv_v, name, &vals, *line, *col) {
                         Ok(v) => Ok(v),
                         Err(_) => {
                             let mut bargs = Vec::with_capacity(saved.len() + 1);
@@ -705,7 +705,7 @@ impl Interp {
                         }
                     };
                 }
-                call_method(&recv_v, name, vals, *line, *col)
+                call_method(&recv_v, name, &vals, *line, *col)
             }
             Expr::Index {
                 recv,

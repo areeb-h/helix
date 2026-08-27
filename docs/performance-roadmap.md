@@ -47,6 +47,88 @@ approximate at these small times, though the ranking is firm.)
 auto-memoization later moved `fib(40)` to ~0.006 s — see
 [jit-benchmarks.md](jit-benchmarks.md) §5.1 and `bench/kernels/RESULTS.md`.)*
 
+## The non-numeric floor — measured 2026-08-27, and what is NOT the cause
+
+A field report ran `jit-explain` across a real templating project and found the
+two halves of Helix have opposite stories:
+
+| | kernel sites |
+|---|---|
+| `nn_demo.helix` (autodiff) | **16 offered, 16 compiled** |
+| the whole TSX render pipeline | **0 offered, 0 compiled** |
+
+Autodiff is within 13% of hand-written NumPy. Templating is 2.5× slower than
+Jinja2. The tool's explanation — "a comprehension over records, strings or a
+DataFrame is not one" — reads as *strings are the problem*. **It is not strings.**
+
+Measured on this box, 200k elements over a pre-built array, min of 5–9, load
+below 0.4, `target/gate`:
+
+| body | ns/element |
+|---|--:|
+| `ints.where(it > 0)` — JIT compiles it | **3.7** |
+| `xs.map(0)` — no method call at all | **39–41** |
+| `strs.where(true)` | 59 |
+| `strs.where(it == "zz")` | 49 |
+| `xs.map(it.length())` — 0 args | 69–72 |
+| `xs.map(it.contains("@"))` — 1 arg | 85 |
+| `xs.map(it.re_match("@"))` | 105 |
+| `records.where(r.a > 0)` | **111** |
+
+Three conclusions, each of which kills a plausible line of work:
+
+1. **The regex is free.** `re_match` and `starts_with` differ by ~1 ns. The
+   finite-automata engine was the right call and is not a cost.
+2. **Records are as slow as regexes** (111 ns). Whatever this is, it is not a
+   String problem — it is charged to every comprehension the JIT declines.
+3. **`xs.map(0)` costs 39 ns.** A body that does *nothing* pays the same floor.
+   Against the JIT's 3.7 ns on the numeric case, **the floor is the whole story
+   and everything above it is decoration.**
+
+### Two hypotheses tested and REJECTED — do not re-run these
+
+**The name chain is not the cost.** `contains` sits at match arm 28 in
+`string.rs` and `char_at` at arm ~15; `contains` measured *faster* (84.8 vs
+103.7 ns). LLVM has already bucketed the match. An inline cache or interned
+method names buys nothing — the delta they would remove is negative.
+
+**The per-call `Vec` allocation is not the cost.** `Op::Method` mints a
+`Vec<Value>` with `stack.split_off` that `call_method` only ever borrows, which
+looks exactly like the allocation `Op::Interp` removed six arms above it in
+`vm.rs`. Reading the operands in place instead was implemented and A/B'd against
+a rebuilt baseline on the same box at settled load, min of 7:
+
+| | with the fix | baseline |
+|---|--:|--:|
+| `xs.map(it.contains("@"))` | 83.0 ns | 84.9 ns |
+| `df.where(@gene.re_match(…))`, 200k rows | 21.65 ms | 21.59 ms |
+
+Nothing. glibc's tcache serves a 16-byte alloc/free in ~2 ns. `Op::Interp`'s win
+was real for a different reason: it allocated per *string built* in a 5M map,
+with a capacity proportional to the output, not a fixed 16 bytes. **The
+restructure was reverted; only the `&[Value]` signature was kept, on the grounds
+that the function borrows and three callers were allocating to satisfy it.**
+
+### Where the work actually is
+
+The 39 ns floor is the `CompInit`/`CompNext`/`CompMapPush` opcode loop — roughly
+five VM dispatches per element at ~8 ns each, where a bytecode loop should be
+1–3 ns. Two candidate attacks, neither yet costed:
+
+- **Widen JIT eligibility.** `Expr::Method` appears **zero times** in
+  `src/jit/analysis.rs` and `src/jit/codegen.rs` — a method call is not refused
+  by a String rule, it falls into `value_eligible`'s catch-all. "0 offered" is a
+  hole in the eligibility walk, not a JIT decision. A string kernel additionally
+  needs compiled code to call back into Rust per element, which the JIT does not
+  do today.
+- **Fuse the comprehension loop itself**, so a declined body costs one dispatch
+  per element rather than five. This helps records, strings, closures and every
+  declined numeric shape at once, and needs no new JIT capability.
+
+Note which workload each serves: the render pipeline is dominated by string
+*building*, and no JIT makes allocation free. Before either, measure how much of
+the 9 µs/row render is construction rather than dispatch.
+
 ## Track D — compute less (purity-enabled)
 
 The principal way a managed language can outperform hand-written C is by **not

@@ -93,10 +93,21 @@ pub(crate) fn df_is_missing(args_empty: bool, line: usize, col: usize) -> Result
     }
 }
 
+/// **`args` is BORROWED, and that is load-bearing.** It used to be a `Vec<Value>` that
+/// `Op::Method` minted with `stack.split_off` — one malloc/free per method call, per
+/// element of every comprehension — for a buffer every consumer immediately re-borrowed:
+/// every terminal dispatch below takes `&[Value]`, and so do `string_method`,
+/// `regexes::method`, `tensor::method` and the rest. The allocation existed only to be
+/// dereferenced.
+///
+/// `Op::Interp` six lines above `Op::Method` in `vm.rs` had already found this, fixed it,
+/// and written down why leaving the operands on the stack through the fallible middle is
+/// safe. The fix was never carried across to the op that a templating workload runs ~30
+/// times a row.
 pub(crate) fn call_method(
     recv: &Value,
     name: &str,
-    args: Vec<Value>,
+    args: &[Value],
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
@@ -152,12 +163,18 @@ pub(crate) fn call_method(
     // names: an un-gated lift hijacked every method a tracked argument touched
     // (`tensor(..).solve(variable(..))` reported "no differentiable method
     // `solve`" instead of solve's own error — the dx-plan's name-blind-lift item).
-    if !matches!(recv, Value::Node(_))
+    //
+    // ORDER IS BY SELECTIVITY, NOT BY THE SENTENCE ABOVE. All four conjuncts are pure, so
+    // the cheapest and most discriminating goes first: "does any argument hold a tape
+    // node" is one discriminant check and is trivially false for a zero-argument call,
+    // where `is_tape_method` is a `matches!` over twenty literals that used to run on
+    // every method call in the language.
+    if args.iter().any(|a| matches!(a, Value::Node(_)))
+        && !matches!(recv, Value::Node(_))
         && crate::autodiff::is_tape_method(name)
-        && args.iter().any(|a| matches!(a, Value::Node(_)))
         && let Some(n) = crate::autodiff::lift(recv)
     {
-        return crate::autodiff::method(&n, name, &args, line, col);
+        return crate::autodiff::method(&n, name, args, line, col);
     }
     match recv {
         Value::Array(items) => {
@@ -188,7 +205,7 @@ pub(crate) fn call_method(
             // identical message and hint the eager arm produces. Firing only when
             // `args.len() == 1` would swallow the arity error.
             if name == "zip" {
-                arity("zip", &args, 1, line, col)?;
+                arity("zip", args, 1, line, col)?;
                 let b = match &args[0] {
                     Value::Array(b) => b.clone(),
                     v => {
@@ -232,7 +249,7 @@ pub(crate) fn call_method(
             if name == "concat" && !args.is_empty() {
                 if let Some(head) = items.to_ints() {
                     let mut tails = Vec::with_capacity(args.len());
-                    for a in &args {
+                    for a in args {
                         match a {
                             Value::Array(arr) => match arr.to_ints() {
                                 Some(t) => tails.push(t),
@@ -263,7 +280,7 @@ pub(crate) fn call_method(
                 }
                 if let crate::value::ArrayData::Floats(head) = &**items {
                     let mut tails: Vec<&Vec<f64>> = Vec::with_capacity(args.len());
-                    for a in &args {
+                    for a in args {
                         match a {
                             Value::Array(arr) => match &**arr {
                                 crate::value::ArrayData::Floats(t) => tails.push(t),
@@ -392,22 +409,22 @@ pub(crate) fn call_method(
                     _ => {}
                 }
             }
-            match array_numeric_fast(items, name, &args, line, col)? {
+            match array_numeric_fast(items, name, args, line, col)? {
                 // A typed array's numeric reduction reads the packed buffer directly.
                 Some(v) => Ok(v),
                 // Everything else materializes to `Value`s and runs the general path.
-                None => array_method(&items.to_values(), name, &args, line, col),
+                None => array_method(&items.to_values(), name, args, line, col),
             }
         }
-        Value::Str(s) => string_method(s, name, &args, line, col),
-        Value::Dna(s) => dna_method(s, name, &args, line, col),
-        Value::Node(n) => crate::autodiff::method(n, name, &args, line, col),
-        Value::Tensor(t) => crate::tensor::method(t, name, &args, line, col),
-        Value::PyObject(h) => crate::python::method(h, name, &args, line, col),
-        Value::Dict(map) => dict_method(map, name, &args, line, col),
-        Value::Net(h) => net_method(h, name, &args, line, col),
-        Value::Headers(hs) => headers_method(hs, name, &args, line, col),
-        Value::Record(fields) => record_method(fields, name, &args, line, col),
+        Value::Str(s) => string_method(s, name, args, line, col),
+        Value::Dna(s) => dna_method(s, name, args, line, col),
+        Value::Node(n) => crate::autodiff::method(n, name, args, line, col),
+        Value::Tensor(t) => crate::tensor::method(t, name, args, line, col),
+        Value::PyObject(h) => crate::python::method(h, name, args, line, col),
+        Value::Dict(map) => dict_method(map, name, args, line, col),
+        Value::Net(h) => net_method(h, name, args, line, col),
+        Value::Headers(hs) => headers_method(hs, name, args, line, col),
+        Value::Record(fields) => record_method(fields, name, args, line, col),
         other => Err(HelixError::new(
             format!("{} has no method `{}`", crate::value::with_article(other.type_name()), name),
             line,

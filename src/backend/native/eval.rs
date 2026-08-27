@@ -105,7 +105,7 @@ pub fn eval(frame: &NativeFrame, expr: &ColExpr, line: usize, col: usize) -> Res
                 if matches!(v, Value::Missing) {
                     return Ok(Value::Missing);
                 }
-                crate::interp::call_method(v, f.spelling(), args.to_vec(), line, col)
+                crate::interp::call_method(v, f.spelling(), args, line, col)
             };
             Ok(match evaled {
                 Evaled::Scalar(v) => Evaled::Scalar(ask(&v)?),

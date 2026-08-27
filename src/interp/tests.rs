@@ -63,7 +63,7 @@
     #[test]
     fn arg_extreme_kernel_engages_and_declines_exactly() {
         let k = |v: Value, want_max: bool| {
-            call_method(&v, "$arg_extreme", vec![Value::Bool(want_max)], 0, 0).expect("no error")
+            call_method(&v, "$arg_extreme", &[Value::Bool(want_max)], 0, 0).expect("no error")
         };
         let idx = |v: Value, want_max: bool| match k(v, want_max) {
             Value::Int(i) => Some(i),

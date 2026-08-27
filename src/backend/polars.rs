@@ -526,7 +526,7 @@ fn str_udf(recv: Expr, f: super::StrFn, needle: String) -> Expr {
                     None => out.push(None),
                     Some(s) => {
                         let r = Value::Str(Rc::new(s.to_string()));
-                        match crate::interp::call_method(&r, f.spelling(), arg.clone(), 0, 0) {
+                        match crate::interp::call_method(&r, f.spelling(), &arg, 0, 0) {
                             Ok(Value::Bool(b)) => out.push(Some(b)),
                             Ok(Value::Missing) => out.push(None),
                             // `StrFn` is Bool-only, so this cannot happen — and says so
