@@ -2486,6 +2486,95 @@ fn describe_emits_machine_readable_catalog() {
     assert_eq!(http_post.expect("http_post listed")["effect"], "net");
 }
 
+/// `helix test --engines` — every test becomes a differential test.
+///
+/// **No other test runner can do this**, because no other language ships three
+/// implementations of itself that must agree byte-for-byte. `pytest`, `jest` and
+/// `cargo test` can tell you a test passed; none can tell you it passes *the same way*
+/// under three independent evaluators. That agreement is Helix's whole correctness story
+/// — and until now only the compiler's own suite could reach it. A user's tests ran on
+/// one engine, which is the same shape ADR 0036 spent a release paying for on the
+/// DataFrame backends: an axis the tests could not see.
+///
+/// Two properties are pinned here because both can rot silently. The check must actually
+/// RUN all three engines (a differential gate that quietly declines proves nothing —
+/// `native_call_count() > 0` exists in the JIT suite for the same reason), and it must
+/// actually FAIL when the runs differ.
+#[test]
+fn test_engines_flag_cross_checks_all_three() {
+    let dir = std::env::temp_dir().join("helix_engines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let trace = dir.join("trace.txt");
+    let ctr = dir.join("ctr.txt");
+
+    // 1. A deterministic test passes, and says the engines agreed.
+    let good = dir.join("good_test.helix");
+    std::fs::write(&good, "assert_eq([1, 2, 3].map(x => x * 2).sum(), 12)\n").unwrap();
+    let g = good.to_str().unwrap().to_string();
+    let (out, err, code) = run(&["test", "--engines", &g], &[], "");
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains("3 engines agree"), "{out}");
+
+    // 2. …and all three were really run. Counting executions is the only way to know:
+    // the flag would look identical if it silently checked nothing.
+    let counted = dir.join("count_test.helix");
+    std::fs::write(
+        &counted,
+        format!("\"x\\n\".append_to(\"{}\")\nassert_eq(1, 1)\n", trace.display()),
+    )
+    .unwrap();
+    let c = counted.to_str().unwrap().to_string();
+    let (_, _, code) = run(&["test", "--engines", &c], &[], "");
+    assert_eq!(code, Some(0));
+    let runs = std::fs::read_to_string(&trace).unwrap_or_default().lines().count();
+    assert_eq!(runs, 4, "one in-process run plus three engine children, got {runs}");
+
+    // 3. A file that disagrees with itself is caught — and the report must NOT accuse
+    // the engines, because a test that is not a pure function of its input looks exactly
+    // the same from here. Claiming "this is a Helix bug" was wrong the first time this
+    // fired, on precisely this kind of test.
+    let flaky = dir.join("flaky_test.helix");
+    std::fs::write(
+        &flaky,
+        format!(
+            "\"x\\n\".append_to(\"{}\")\nn = read_text(\"{}\").trim().split(\"\\n\").count()\nprint(n)\nassert(n > 0)\n",
+            ctr.display(),
+            ctr.display()
+        ),
+    )
+    .unwrap();
+    let f = flaky.to_str().unwrap().to_string();
+    // Without the flag it passes — which is the gap this closes.
+    let (out, _, code) = run(&["test", &f], &[], "");
+    assert_eq!(code, Some(0), "non-determinism is invisible without --engines: {out}");
+    let _ = std::fs::remove_file(&ctr);
+    let (out, _, code) = run(&["test", "--engines", &f], &[], "");
+    assert_eq!(code, Some(1), "a divergence must fail the run: {out}");
+    assert!(out.contains("different output under different engines"), "{out}");
+    assert!(out.contains("not a pure"), "it must offer the other cause too: {out}");
+    assert!(!out.contains("this is a Helix bug, not a test bug"), "must not accuse: {out}");
+
+    // 4. The JSON carries it, so CI can act on the distinction.
+    let (out, _, _) = run(&["test", "--json", "--engines", &g], &[], "");
+    let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+    let e = &v["events"][0];
+    assert_eq!(e["status"], "ok");
+    assert_eq!(e["engines_agree"], true, "{out}");
+
+    // 5. Without the flag, nothing changes — the cost is opt-in.
+    let (out, _, code) = run(&["test", &g], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(!out.contains("engines agree"), "no cross-check unless asked: {out}");
+
+    // 6. The unknown-flag error names both real flags.
+    let (_, err, code) = run(&["test", "--wat", &g], &[], "");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("--json") && err.contains("--engines"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `helix test` does not wander into build output — and says when it declines to.
 ///
 /// It used to. In this repository, `helix test` at the root collected four FAILING

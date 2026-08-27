@@ -15,6 +15,8 @@ helix check --json f.helix # the same diagnostics as data: line, col, message, h
                           #   AND the rendered prose. `--lint` notes come through too
 helix jit-explain f.helix # which numeric kernels compiled, by line (`--json` too)
 helix test <dir>          # runs *_test.helix files AND every `## >>>` doc example
+helix test --engines <dir> # …and re-runs each on all three engines, failing on any
+                          #   disagreement. Nothing else can check this; use it in CI
 helix eval "print(1 + 2)" # one-liner
 helix fmt file.helix      # token-stream formatter; provably cannot change a program
 ```

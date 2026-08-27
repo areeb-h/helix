@@ -1523,7 +1523,7 @@ fn print_help() {
          helix add <name> ...     add a dependency (--path <dir> | --url <tarball>)\n    \
          helix sync               resolve dependencies and write helix.lock\n    \
          helix verify             check the project matches helix.lock (no build)\n    \
-         helix test [path]        run *_test.helix files and report pass/fail\n    \
+         helix test [path]        run *_test.helix files (`--engines` cross-checks all 3)\n    \
          helix doc [Type]         list a type's methods (Array/String/Dna/…) or `builtins`\n    \
          helix describe [what]    the API as JSON — a name, a Type, or everything\n    \
          helix jit-explain <s>    which numeric kernels the JIT compiled, and where\n    \
@@ -1700,12 +1700,22 @@ fn cli_test(args: &[String]) -> ExitCode {
     // agents were scraping `"N passed"` with a regex, which is fragile and
     // loses per-example detail (field review §3.5).
     let json = args[2..].iter().any(|a| a == "--json");
-    if let Some(bad) = args[2..].iter().find(|a| a.starts_with('-') && a.as_str() != "--json") {
-        eprintln!("error: unknown option `{bad}` for `helix test` (the only flag is `--json`)");
+    // `--engines`: after a file passes, run it again under the bytecode VM and the
+    // tree-walker and require byte-identical output. Opt-in because it costs two extra
+    // child processes per file; worth it in CI, where a divergence is the most expensive
+    // class of bug this language can have.
+    let engines = args[2..].iter().any(|a| a == "--engines");
+    const FLAGS: [&str; 2] = ["--json", "--engines"];
+    if let Some(bad) =
+        args[2..].iter().find(|a| a.starts_with('-') && !FLAGS.contains(&a.as_str()))
+    {
+        eprintln!(
+            "error: unknown option `{bad}` for `helix test` (the flags are `--json` and `--engines`)"
+        );
         return ExitCode::FAILURE;
     }
     let explicit: Vec<PathBuf> =
-        args[2..].iter().filter(|a| a.as_str() != "--json").map(PathBuf::from).collect();
+        args[2..].iter().filter(|a| !FLAGS.contains(&a.as_str())).map(PathBuf::from).collect();
     let roots: Vec<PathBuf> = if explicit.is_empty() {
         vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))]
     } else {
@@ -1768,7 +1778,7 @@ fn cli_test(args: &[String]) -> ExitCode {
             .map(|r| r.display().to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        run_test_roots(roots, files, base, root_shown, json)
+        run_test_roots(roots, files, base, root_shown, json, engines)
     })
 }
 
@@ -1815,6 +1825,7 @@ fn run_test_roots(
     base: std::path::PathBuf,
     root_shown: String,
     json: bool,
+    engines: bool,
 ) -> ExitCode {
     {
         let base = base.as_path();
@@ -1896,16 +1907,50 @@ fn run_test_roots(
                     }
                 }
                 Ok(()) => {
-                    if json {
-                        let mut e = serde_json::json!({
-                            "kind": "file", "file": shown.to_string(), "status": "ok",
-                        });
-                        if !file_output.is_empty() {
-                            e["output"] = serde_json::Value::String(file_output.clone());
+                    // A test that passes on one engine has proved less than it looks
+                    // like it has. Only a file that already PASSED is cross-checked:
+                    // a failing test disagrees with itself before it can disagree
+                    // across engines, and re-running it three times would bury the
+                    // real failure under a diff.
+                    let divergence = if engines { engine_divergence(f) } else { None };
+                    match divergence {
+                        Some(report) => {
+                            failed += 1;
+                            if json {
+                                let mut e = serde_json::json!({
+                                    "kind": "file", "file": shown.to_string(),
+                                    "status": "fail", "detail": report,
+                                    "engine_divergence": true,
+                                });
+                                if !file_output.is_empty() {
+                                    e["output"] = serde_json::Value::String(file_output.clone());
+                                }
+                                ev.push(e);
+                            } else {
+                                println!("  FAIL  {shown}");
+                                for line in report.lines() {
+                                    println!("        {line}");
+                                }
+                            }
                         }
-                        ev.push(e);
-                    } else {
-                        println!("  ok    {shown}");
+                        None => {
+                            if json {
+                                let mut e = serde_json::json!({
+                                    "kind": "file", "file": shown.to_string(), "status": "ok",
+                                });
+                                if engines {
+                                    e["engines_agree"] = serde_json::Value::Bool(true);
+                                }
+                                if !file_output.is_empty() {
+                                    e["output"] = serde_json::Value::String(file_output.clone());
+                                }
+                                ev.push(e);
+                            } else if engines {
+                                println!("  ok    {shown}   (3 engines agree)");
+                            } else {
+                                println!("  ok    {shown}");
+                            }
+                        }
                     }
                 }
                 Err(rendered) => {
@@ -2224,6 +2269,76 @@ fn run_doc_examples(
     }
     (ok, failed, skipped)
 }
+
+/// Run `path` under every engine and report the first disagreement, or `None`.
+///
+/// **This is the capability no other test runner can offer**, because no other language
+/// ships three implementations of itself that must agree byte-for-byte. `pytest`,
+/// `jest` and `cargo test` can each tell you a test passed; none can tell you it passes
+/// *the same way* under three independent evaluators. Helix's whole correctness story is
+/// that agreement (`docs/execution-engine.md`), and until now only the compiler's own
+/// suite could reach it — a user's tests ran on one engine and the axis was invisible to
+/// them, which is exactly the shape ADR 0036 spent a release paying for on the DataFrame
+/// backends.
+///
+/// Each engine runs in a CHILD process. Running three times in-process would share the
+/// JIT, the memo tables, the module line map and the capability authority, so the second
+/// run would not be a clean one — and a differential oracle that contaminates its own
+/// control column proves nothing.
+fn engine_divergence(path: &std::path::Path) -> Option<String> {
+    let mut runs: Vec<(&str, std::process::Output)> = Vec::new();
+    for (name, env) in TEST_ENGINES {
+        let exe = std::env::current_exe().ok()?;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("run").arg(path).stdin(std::process::Stdio::null());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        runs.push((name, cmd.output().ok()?));
+    }
+    let (base_name, base) = &runs[0];
+    for (name, out) in &runs[1..] {
+        // Exit status, stdout AND stderr: an engine that reaches the same value by a
+        // different error text has still diverged, and error text is half of what this
+        // language pins.
+        let same = out.status.code() == base.status.code()
+            && out.stdout == base.stdout
+            && out.stderr == base.stderr;
+        if !same {
+            let show = |o: &std::process::Output| {
+                format!(
+                    "exit {:?}\n{}{}",
+                    o.status.code(),
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+            };
+            // TWO causes, and this cannot tell them apart, so it must not pretend to.
+            // An engine bug is the one worth reporting; a test that is not a pure
+            // function of its input (reads a clock, a file it also writes, unseeded
+            // randomness) disagrees with ITSELF and would look identical here. Naming
+            // only the first was wrong the first time this fired — on a deliberately
+            // non-deterministic test, where "this is a Helix bug" was a false accusation.
+            return Some(format!(
+                "the same file produced different output under different engines.\n\
+                 Either an engine is wrong — a Helix bug, please report it — or this test \
+                 is not a pure\nfunction of its input (a clock, a file it also writes, \
+                 unseeded randomness).\nRun it twice on ONE engine to tell which.\n\
+                 --- {base_name} ---\n{}\n--- {name} ---\n{}",
+                show(base).trim_end(),
+                show(out).trim_end()
+            ));
+        }
+    }
+    None
+}
+
+/// The engines a test can be cross-checked on, default first.
+const TEST_ENGINES: [(&str, &[(&str, &str)]); 3] = [
+    ("jit", &[]),
+    ("vm", &[("HELIX_NOJIT", "1")]),
+    ("walker", &[("HELIX_NOVM", "1")]),
+];
 
 /// Run one synthesized example file in a child `helix` and return what it produced:
 /// stdout, or — when stdout is empty and it failed — the first line of stderr, so an

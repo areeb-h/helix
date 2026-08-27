@@ -21,6 +21,28 @@
 
 ### Added
 
+- **`helix test --engines` — every test becomes a differential test.** After a test file
+  passes, it is re-run under the bytecode VM and the tree-walker, and any difference in
+  exit status, stdout or stderr fails the run.
+
+  No other test runner can offer this, because no other language ships three
+  implementations of itself that must agree byte-for-byte. `pytest`, `jest` and
+  `cargo test` can each tell you a test passed; none can tell you it passes *the same
+  way* under three independent evaluators. That agreement is Helix's entire correctness
+  story — and until now only the compiler's own suite could reach it, while a user's
+  tests ran on one engine. That is the same shape ADR 0036 spent a release paying for on
+  the DataFrame backends: an axis the tests could not see.
+
+  It also catches a **non-deterministic test** for free, because a test that is not a
+  pure function of its input disagrees with itself across runs. The report says so
+  rather than blaming the engines: it cannot tell the two causes apart, so it names both
+  and tells you how to (run it twice on one engine).
+
+  Opt-in: it costs two extra child processes per file (measured 7 ms → 37 ms for a
+  one-file suite), which is cheap in CI and not worth paying on every local save. Each
+  engine runs in a CHILD process — three in-process runs would share the JIT, the memo
+  tables and the module line map, and a differential oracle that contaminates its own
+  control column proves nothing.
 - **`helix jit-explain <script>`** — which numeric kernel sites the compiler offered the
   JIT, where they are, and which got native code. `--json` for tools.
 
