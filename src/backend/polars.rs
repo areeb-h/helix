@@ -368,6 +368,14 @@ fn predicate_can_raise(e: &ColExpr, fields: &[(String, DataType)]) -> bool {
             predicate_can_raise(l, fields) || predicate_can_raise(r, fields)
         }
         ColExpr::Unary(_, inner) => predicate_can_raise(inner, fields),
+        // WRITTEN OUT, not left to the `_`, because this match is the one table in this
+        // file that rustc does NOT check: a new variant falling into `_ => false` is a
+        // silent answer, and this decides whether `.cache()` goes in as a fusion barrier.
+        // A string test cannot raise per row — arity, argument type and the pattern were
+        // all settled by `probe_str_call` before any row was read, and a non-String
+        // column is refused from the schema — so `false` is right, and now it is right on
+        // purpose.
+        ColExpr::StrMethod(..) => false,
         _ => false,
     }
 }
@@ -392,7 +400,7 @@ fn may_be_float(e: &ColExpr, fields: &[(String, DataType)]) -> bool {
         ColExpr::Binary(_, l, r) => may_be_float(l, fields) || may_be_float(r, fields),
         ColExpr::Unary(_, inner) => may_be_float(inner, fields),
         // A predicate answers Bool.
-        ColExpr::IsMissing(_) | ColExpr::FloatPred(..) => false,
+        ColExpr::IsMissing(_) | ColExpr::FloatPred(..) | ColExpr::StrMethod(..) => false,
     }
 }
 
@@ -427,7 +435,11 @@ fn non_numeric_operand(e: &ColExpr, fields: &[(String, DataType)]) -> Option<&'s
             .and_then(|(_, d)| (!d.is_primitive_numeric()).then(|| dtype_type_name(d))),
         // A nested arithmetic node answers for itself when IT lowers.
         ColExpr::Binary(..) | ColExpr::Unary(..) => None,
-        ColExpr::IsMissing(_) | ColExpr::FloatPred(..) => Some("Bool"),
+        // `StrFn` is Bool-only, so this answers Bool like the other two predicates. It
+        // matters more than it looks: answering `None` here is exactly how a string
+        // test would reach polars' own `+`, which CONCATENATES two `str` columns — the
+        // sixteenth divergence of ADR 0036, re-entering through a new node.
+        ColExpr::IsMissing(_) | ColExpr::FloatPred(..) | ColExpr::StrMethod(..) => Some("Bool"),
     }
 }
 
@@ -461,6 +473,95 @@ fn non_numeric_operand_error(op: &BinOp, ty: &str, line: usize, col: usize) -> H
 ///
 /// Integer columns cannot hold a NaN, so they take a plain comparison inside the
 /// closure and pay only the UDF's per-column overhead — measured, not assumed.
+/// A stand-in Helix value of the type this column holds, for `probe_str_call`.
+///
+/// `None` for `String` (the case that is fine) and for a dtype Helix has no scalar for —
+/// there the rows answer instead of the schema.
+fn dtype_probe(dt: &DataType) -> Option<Value> {
+    match dt {
+        DataType::String => None,
+        DataType::Boolean => Some(Value::Bool(false)),
+        d if d.is_integer() => Some(Value::Int(0)),
+        d if d.is_float() => Some(Value::Float(0.0)),
+        _ => None,
+    }
+}
+
+/// A String test down a column, evaluated **through Helix's own scalar kernel**.
+///
+/// Not `.str().starts_with()`, and the reason is the whole point of ADR 0036. Polars'
+/// `contains` is a REGEX by default while Helix's `contains` is literal text; its
+/// non-strict form answers an all-null column for a bad pattern instead of raising; its
+/// null rules are its own. Every one of those is a place where the frame could come to
+/// mean something the language does not, silently, and proving all three match is work
+/// that has to be redone at every polars upgrade. Calling `call_method` costs an
+/// allocation per cell and buys the guarantee outright — the same trade `guarded_arith`
+/// and `guarded_compare` already made in this file.
+///
+/// The closure must be `Send + Sync` and a Helix `Value` holds an `Rc`, so the needle
+/// crosses as a plain `String` and the `Value` is rebuilt inside — once per column
+/// invocation for the argument, once per cell for the receiver.
+fn str_udf(recv: Expr, f: super::StrFn, needle: String) -> Expr {
+    recv.map_many(
+        move |cols: &mut [Column]| -> PolarsResult<Column> {
+            let c = &cols[0];
+            let name = c.name().clone();
+            let arg = vec![Value::Str(Rc::new(needle.clone()))];
+            // A receiver that was not a bare column reaches the type question here
+            // instead of in `lower`. Same sentence, same absence of a row number
+            // (`usize::MAX`), so which path found it is not observable.
+            if let Some(Err(e)) =
+                dtype_probe(c.dtype()).map(|p| super::probe_str_call(&p, f, &arg, 0, 0))
+            {
+                return Err(udf_error(&e.message, e.hint.as_deref().unwrap_or(""), usize::MAX));
+            }
+            let ca = c.str()?;
+            let mut out: Vec<Option<bool>> = Vec::with_capacity(ca.len());
+            for (i, cell) in ca.iter().enumerate() {
+                match cell {
+                    // `missing` PROPAGATES (ADR 0001): `missing.starts_with("h")` is
+                    // `missing`, not `false`. `where` drops the row either way, which is
+                    // exactly why this is dangerous — the divergence would appear only in
+                    // `with({flag: …})`, as a wrong COLUMN at exit 0.
+                    None => out.push(None),
+                    Some(s) => {
+                        let r = Value::Str(Rc::new(s.to_string()));
+                        match crate::interp::call_method(&r, f.spelling(), arg.clone(), 0, 0) {
+                            Ok(Value::Bool(b)) => out.push(Some(b)),
+                            Ok(Value::Missing) => out.push(None),
+                            // `StrFn` is Bool-only, so this cannot happen — and says so
+                            // loudly rather than silently writing a null.
+                            Ok(other) => {
+                                return Err(udf_error(
+                                    &format!(
+                                        "`{}` answered {} inside a query",
+                                        f.spelling(),
+                                        crate::value::with_article(other.type_name())
+                                    ),
+                                    "",
+                                    usize::MAX,
+                                ))
+                            }
+                            Err(e) => {
+                                return Err(udf_error(
+                                    &e.message,
+                                    e.hint.as_deref().unwrap_or(""),
+                                    i,
+                                ))
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Column::new(name, out))
+        },
+        &[],
+        |_schema: &Schema, fields: &[Field]| {
+            Ok(Field::new(fields[0].name().clone(), DataType::Boolean))
+        },
+    )
+}
+
 fn guarded_compare(l: Expr, r: Expr, op: BinOp) -> Expr {
     l.map_many(
         move |cols: &mut [Column]| -> PolarsResult<Column> {
@@ -582,6 +683,37 @@ fn lower(e: &ColExpr, fields: &[(String, DataType)], line: usize, col: usize) ->
                 super::FloatPredKind::IsNan => e.is_nan(),
                 super::FloatPredKind::IsFinite => e.is_finite(),
             }
+        }
+        ColExpr::StrMethod(f, recv, args) => {
+            // THE TYPE QUESTION IS SETTLED FROM THE SCHEMA — once, before a row, naming
+            // no row. The native engine decides it from its own column kind, which is
+            // the same information; deciding it from a VALUE instead would disagree on
+            // an EMPTY frame, where there is no value to learn from and the column is
+            // still wrong.
+            let schema_probe = match &**recv {
+                ColExpr::Col(name) => {
+                    fields.iter().find(|(n, _)| n == name).and_then(|(_, d)| dtype_probe(d))
+                }
+                // Anything else has no schema entry here; `str_udf` asks the column
+                // itself, and answers with the same sentence.
+                _ => None,
+            };
+            if let Some(p) = schema_probe {
+                super::probe_str_call(&p, *f, args, line, col)?;
+            }
+            let Some(Value::Str(needle)) = args.first() else {
+                // Unreachable: `ast_to_colexpr` already probed this call against the
+                // scalar kernel, which refuses a non-String argument for every `StrFn`.
+                // Ask the kernel again rather than inventing a sentence — a total
+                // runtime never assumes (ADR 0024).
+                super::probe_str_call(&Value::Str(Rc::new(String::new())), *f, args, line, col)?;
+                return Err(HelixError::new(
+                    format!("`{}` needs a string argument", f.spelling()),
+                    line,
+                    col,
+                ));
+            };
+            str_udf(lower(recv, fields, line, col)?, *f, needle.as_str().to_string())
         }
         ColExpr::Binary(op, l, r) => {
             // A LITERAL zero divisor is decidable without touching a row, so it is

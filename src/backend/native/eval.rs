@@ -73,6 +73,53 @@ pub fn eval(frame: &NativeFrame, expr: &ColExpr, line: usize, col: usize) -> Res
                 Evaled::Rows(rows) => Evaled::Rows(rows.iter().map(ask).collect()),
             })
         }
+        // A String test down a column — the mirror of the polars `str_udf`, and like it
+        // routed through `call_method` so the two cannot mean different things.
+        ColExpr::StrMethod(f, recv, args) => {
+            // The type question from the COLUMN'S KIND when the receiver is a bare
+            // column: the same schema decision polars makes, which is what keeps the two
+            // agreeing on an EMPTY frame — there is no row there to learn from, and the
+            // column is still the wrong type.
+            let schema_probe = match &**recv {
+                ColExpr::Col(name) => col_probe(frame.col(name, line, col)?),
+                _ => None,
+            };
+            if let Some(p) = schema_probe {
+                crate::backend::probe_str_call(&p, *f, args, line, col)?;
+            }
+            let evaled = eval(frame, recv, line, col)?;
+            // Anything else has no schema entry, so its first non-missing value answers —
+            // the same fallback, and the same reasoning, as `refuse_non_numeric`.
+            let value_probe = match &**recv {
+                // A bare column already answered from its kind, above.
+                ColExpr::Col(_) => None,
+                _ => representative(&evaled).filter(|v| !matches!(v, Value::Str(_))),
+            };
+            if let Some(v) = value_probe {
+                crate::backend::probe_str_call(v, *f, args, line, col)?;
+            }
+            let ask = |v: &Value| -> Result<Value, HelixError> {
+                // `missing` PROPAGATES (ADR 0001), exactly as it does for `FloatPred`
+                // above and for `missing.starts_with("h")` on a scalar. Answering
+                // `false` would also quietly claim "this is text, and it does not match".
+                if matches!(v, Value::Missing) {
+                    return Ok(Value::Missing);
+                }
+                crate::interp::call_method(v, f.spelling(), args.to_vec(), line, col)
+            };
+            Ok(match evaled {
+                Evaled::Scalar(v) => Evaled::Scalar(ask(&v)?),
+                Evaled::Rows(rows) => {
+                    let mut out = Vec::with_capacity(rows.len());
+                    for (i, v) in rows.iter().enumerate() {
+                        // A cell of an unexpected type keeps its row: at that point the
+                        // row genuinely IS the new information.
+                        out.push(ask(v).map_err(|e| at_row(e, i))?);
+                    }
+                    Evaled::Rows(out)
+                }
+            })
+        }
         ColExpr::IsMissing(inner) => {
             // `is_missing` answers Bool for every input — the one operation that
             // looks AT missing instead of propagating it (ADR 0001).
@@ -97,6 +144,21 @@ fn unary(op: &UnOp, v: Evaled, line: usize, col: usize) -> Result<Evaled, HelixE
             }
             Ok(Evaled::Rows(out))
         }
+    }
+}
+
+/// A stand-in Helix value of the type this column holds, for `probe_str_call`.
+///
+/// `None` for a String column (the case that is fine) and for an all-missing one, whose
+/// dtype is unknowable — polars answers `None` for its `Null` dtype for the same reason,
+/// so the two agree without either knowing about the other.
+fn col_probe(c: &super::columns::Col) -> Option<Value> {
+    use super::columns::Col;
+    match c {
+        Col::I64 { .. } => Some(Value::Int(0)),
+        Col::F64 { .. } => Some(Value::Float(0.0)),
+        Col::Bool { .. } => Some(Value::Bool(false)),
+        Col::Str { .. } | Col::Null { .. } => None,
     }
 }
 

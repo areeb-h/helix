@@ -1,0 +1,7 @@
+# THE EMPTY-FRAME CASE, which is why both backends decide the type question from the
+# SCHEMA rather than from the first value they see. There is no row here to learn
+# from, and the column is still the wrong type — a backend reasoning from values
+# would answer "fine, zero rows" while the other refused.
+df = dataframe({n: [1, 2, 3]}).where(@n > 99)
+print(df.count())
+print(df.where(@n.starts_with("a")).count())

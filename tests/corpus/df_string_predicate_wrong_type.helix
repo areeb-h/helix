@@ -1,0 +1,5 @@
+# A string test asked of a column that holds numbers. The error is the SCALAR
+# KERNEL'S OWN sentence, and it names no row: every row fails identically, so the
+# column is what is wrong and "at row 0" would send you to look at blameless data.
+df = dataframe({n: [1, 2, 3]})
+print(df.where(@n.starts_with("a")).count())

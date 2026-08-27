@@ -1,0 +1,5 @@
+# Comparing two columns of text is refused, and refused BY SHAPE: an argument that
+# could vary per row would mean recompiling the pattern per row, so "compiled once
+# per query" is a property of the IR rather than a promise in a comment.
+df = dataframe({a: ["xy"], b: ["x"]})
+print(df.where(@a.starts_with(@b)).count())

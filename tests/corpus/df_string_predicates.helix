@@ -1,0 +1,33 @@
+# String predicates inside a DataFrame query (ADR 0039).
+#
+# The shape a field report typed the day regex shipped: a frame of genes, and the
+# first thing anyone would ask of it. Before this, every one of these was
+# "this expression isn't supported inside a DataFrame query yet".
+df = dataframe({
+  gene: ["BRCA1", "TP53", "BRCA2", missing],
+  tissue: ["breast", "lung", "breast", "skin"],
+  n: [11, 22, 33, 44],
+})
+
+print(df.where(@gene.re_match("""^BRCA""")).count())
+print(df.where(@tissue.starts_with("b")).count())
+print(df.where(@tissue.ends_with("ng")).count())
+print(df.where(@tissue.contains("rea")).count())
+
+# `contains` is LITERAL text, exactly as it is on a scalar String — a `.` is a dot.
+print(df.where(@tissue.contains(".")).count())
+print(df.where(@tissue.re_match(".")).count())
+
+# A pattern held in a variable is fine: it has to be constant per query, not literal.
+pat = "^T"
+print(df.where(@gene.re_match(pat)).count())
+
+# Composes with everything a query already had.
+print(df.where(@tissue.starts_with("b") and @n > 20).count())
+print(df.where(not @tissue.starts_with("b")).count())
+
+# `missing` PROPAGATES (ADR 0001). This is the case that only `with` can show:
+# `where` drops a missing row either way, so a backend answering `false` instead of
+# `missing` would agree there and write a DIFFERENT COLUMN here.
+print(df.with({hit: @gene.re_match("""^BRCA""")}).column("hit"))
+print(df.with({b: @tissue.starts_with("b")}).column("b"))

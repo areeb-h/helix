@@ -2754,7 +2754,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Keep the rows where the predicate over @columns is true.",
             example: "dataframe({a: [1, 2], b: [3.0, 4.5]}).where(@a > 1).count()",
             example_out: "1",
-            notes: "Comparing with missing yields missing: where(@v == missing) selects NO rows — use drop_missing.",
+            notes: "Comparing with missing yields missing: where(@v == missing) selects NO rows — use drop_missing. A query can also ask STRING questions of a text column: starts_with, ends_with and contains (all literal text), and re_match for a regular expression — `where(@gene.re_match(\"\"\"^BRCA\"\"\"))`. The pattern has to be constant for the query, so a literal or a variable, not another column. A missing cell answers missing and the row is dropped.",
         },
     ),
     (
@@ -2765,7 +2765,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Alias of where: keep the rows where the predicate is true.",
             example: "dataframe({a: [1, 2], b: [3.0, 4.5]}).filter(@b < 4.0).count()",
             example_out: "1",
-            notes: "",
+            notes: " A query can also ask STRING questions of a text column: starts_with, ends_with and contains (all literal text), and re_match for a regular expression — `where(@gene.re_match(\"\"\"^BRCA\"\"\"))`. The pattern has to be constant for the query, so a literal or a variable, not another column. A missing cell answers missing and the row is dropped.",
         },
     ),
     (
@@ -2831,7 +2831,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Add or replace columns computed from expressions over existing columns.",
             example: "dataframe({a: [1, 2], b: [3.0, 4.5]}).with({c: a + b}).columns()",
             example_out: "[\"a\", \"b\", \"c\"]",
-            notes: "",
+            notes: " String tests work here too, and this is where their missing rule is visible: `with({hit: @gene.re_match(\"\"\"^BRCA\"\"\")})` writes missing for a missing cell, not false — `where` would have dropped that row either way.",
         },
     ),
     (

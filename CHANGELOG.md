@@ -2,7 +2,47 @@
 
 ## Unreleased
 
+### Added
+
+- **A DataFrame query can ask String questions** (ADR 0039): `starts_with`, `ends_with`,
+  `contains` — all literal text — and `re_match` for a regular expression.
+
+  ```helix
+  df.where(@gene.re_match("""^BRCA"""))
+  df.with({hit: @tissue.starts_with("b")})
+  ```
+
+  For a language whose ground is VCF, FASTQ, GFF and CSV, this is the first query anyone
+  types, and until now every one of them answered *"this expression isn't supported inside
+  a DataFrame query yet"* — while pointing at line 1 of the program, because that arm alone
+  hardcoded its position.
+
+  It was never *impossible*: `to_json().parse_json()` -> filter -> `to_dataframe()` closes
+  the loop. It cost **2,174 ms** on 200k rows where the same regex over one column costs
+  **57 ms**, the difference being a whole frame serialized to JSON text and rebuilt.
+
+  Both backends evaluate these through **Helix's own scalar kernel**, not polars' string
+  namespace — polars' `contains` is a regex where Helix's is literal text, and its
+  non-strict form answers an all-null column for a bad pattern instead of raising. One
+  probe of that kernel, before any row, settles arity, argument type, an invalid pattern
+  and the no-regex build, identically on both sides and with no row number, because a type
+  error is not a cell error.
+
+  `missing` propagates, as everywhere: `missing.starts_with("h")` is `missing`, not
+  `false`. That rule is only *visible* under `with` — `where` drops the row either way —
+  which is exactly why a corpus program pins the column and not just the count.
+
+  The pattern must be constant for the query (a literal or a variable, not another
+  column), which is what makes "compiled once per query, never per row" a property of the
+  shape rather than a promise.
+
 ### Fixed
+
+- **An unsupported expression in a DataFrame query now points at itself.** The refusal
+  hardcoded position `0, 0`, alone among its sibling arms, so the error a reader is most
+  likely to meet in a query underlined line 1 — in the one place they most need to be told
+  where. It also now names the String tests among what a query supports.
+
 
 - **`helix test` no longer wanders into build output.** In this repository it collected
   four *failing* `*_test.helix` files out of `target/` — scratch from earlier builds —

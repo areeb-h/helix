@@ -169,6 +169,24 @@ pub enum ColExpr {
     /// `missing == missing` is `missing`, so that predicate selects nothing — on arrays
     /// and in queries alike, deliberately kept in agreement.
     IsMissing(Box<ColExpr>),
+    /// `@name.starts_with("a")`, `@gene.re_match("^BRCA")` — a String method applied
+    /// down a column.
+    ///
+    /// Admitted for the third time on the argument that already admitted `IsMissing` and
+    /// `FloatPred`: **the language already spells this, and a query that could not was
+    /// refusing what the rest of Helix does.** A field report reached it the direct way —
+    /// it had just been given a linear-time regex, typed the first thing anyone would type
+    /// on a frame of genes, and got "this expression isn't supported inside a DataFrame
+    /// query yet". A string filter on a frame WAS reachable (`to_json` → `parse_json` →
+    /// filter → `to_dataframe`), so this was never a capability gap; on 200k rows that
+    /// route cost 2,174 ms against 57 ms for the same regex over one column, because the
+    /// 2,117 ms is a whole frame serialized to JSON text and rebuilt.
+    ///
+    /// The arguments are `Value`s, not `ColExpr`s, and that is load-bearing: a pattern
+    /// that could vary per row would have to be recompiled per row. `ast_to_colexpr`
+    /// resolves them first, so a Helix variable still works (ADR 0028) — it just has to
+    /// hold still for the length of the query.
+    StrMethod(StrFn, Box<ColExpr>, Vec<Value>),
     /// `is_nan(expr)` / `expr.is_nan()`, and the same for `is_finite`.
     ///
     /// Admitted inside queries for the same reason `is_missing` was: without them
@@ -195,6 +213,78 @@ impl FloatPredKind {
             FloatPredKind::IsFinite => "is_finite",
         }
     }
+}
+
+/// The String methods a query may ask of a column. **Closed, and Bool-only.**
+///
+/// Closed for the reason `FloatPredKind` is: three separate functions over `ColExpr` have
+/// to answer for every variant, and an open name set makes all three lie. `may_be_float`
+/// would have to answer "maybe" and install a NaN guard on text; `non_numeric_operand`
+/// would have to answer "don't know", which is exactly how `@s.re_find("x") + 1` would
+/// reach polars' `+` and CONCATENATE — the sixteenth divergence of ADR 0036, re-entering
+/// through a new door. An open set would also admit `.split(",")`, whose Array result one
+/// backend can store and the other cannot.
+///
+/// Bool-only is a smaller claim than it looks: it is the whole of `where`/`filter` and it
+/// is what `with` needs for a flag column. The String-returning half (`re_find`,
+/// `re_replace`, `upper`) is a strictly larger change — it is the first time
+/// `validate_predicate` would have to say "this is a String, not a condition", and the
+/// first time `non_numeric_operand` has to answer something other than `Bool` — so it
+/// gets its own increment rather than riding along.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrFn {
+    StartsWith,
+    EndsWith,
+    Contains,
+    ReMatch,
+}
+
+impl StrFn {
+    /// The Helix spelling — deliberately the SAME name the method carries on a scalar
+    /// String (ADR 0003). No `str_contains`, no frame-only alias: one concept, one name,
+    /// and `@s.contains("x")` means inside a query exactly what `s.contains("x")` means
+    /// outside one, including that it is LITERAL text while `re_match` is a pattern.
+    pub fn spelling(self) -> &'static str {
+        match self {
+            StrFn::StartsWith => "starts_with",
+            StrFn::EndsWith => "ends_with",
+            StrFn::Contains => "contains",
+            StrFn::ReMatch => "re_match",
+        }
+    }
+}
+
+/// Map a method name to the string function it asks, if it is one.
+fn str_fn(name: &str) -> Option<StrFn> {
+    match name {
+        "starts_with" => Some(StrFn::StartsWith),
+        "ends_with" => Some(StrFn::EndsWith),
+        "contains" => Some(StrFn::Contains),
+        "re_match" => Some(StrFn::ReMatch),
+        _ => None,
+    }
+}
+
+/// Ask the SCALAR KERNEL whether this call is legal, standing `probe` in for the column.
+///
+/// **One call, four error classes, both backends.** With an empty String as the probe it
+/// answers for arity (`` `starts_with` expects 1 argument, got 2 ``), argument type
+/// (`` `starts_with` needs a string ``), an invalid pattern (`invalid regular expression:
+/// …`, with the backreference hint), and a build with no `regex` feature (ADR 0032's
+/// gate-the-body twin, which the `appliance` profile is). With a non-String probe it
+/// answers the receiver question instead: `` an Int has no method `starts_with` ``.
+///
+/// Both backends call THIS, before touching a row, so none of those five sentences can
+/// drift between them — and none of them carries a row number, because a type error is
+/// not a cell error (the distinction `refuse_non_numeric` records on the native side).
+pub fn probe_str_call(
+    probe: &Value,
+    f: StrFn,
+    args: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<(), HelixError> {
+    crate::interp::call_method(probe, f.spelling(), args.to_vec(), line, col).map(|_| ())
 }
 
 /// Map a function name to the float predicate it asks, if it is one.
@@ -368,12 +458,57 @@ pub fn ast_to_colexpr(
             let r = ast_to_colexpr(right, columns, resolve_var)?;
             Ok(ColExpr::Binary(*op, Box::new(l), Box::new(r)))
         }
-        _ => Err(HelixError::new(
-            "this expression isn't supported inside a DataFrame query yet",
-            0,
-            0,
-        )
-        .hint("DataFrame queries support column names, literals, arithmetic, and comparisons.")),
+        // A STRING METHOD on a column. See `ColExpr::StrMethod`.
+        Ast::Method { recv, name, args, line, col, .. } if str_fn(name).is_some() => {
+            let f = str_fn(name).expect("guarded by the arm");
+            let inner = ast_to_colexpr(recv, columns, resolve_var)?;
+            // Every argument must resolve to a CONSTANT. A Helix variable does (ADR 0028
+            // resolves it to a literal above), a column does not — and refusing a column
+            // argument is what keeps "the pattern is compiled once per query" a property
+            // of the shape rather than a promise in a comment.
+            let mut vals: Vec<Value> = Vec::with_capacity(args.len());
+            for a in args {
+                match ast_to_colexpr(a, columns, resolve_var)? {
+                    ColExpr::Lit(v) => vals.push(v),
+                    _ => {
+                        let (l, c) = a.position();
+                        return Err(HelixError::new(
+                            format!(
+                                "`{}` inside a DataFrame query needs a fixed argument, not one that varies by row",
+                                f.spelling()
+                            ),
+                            if l == 0 { *line } else { l },
+                            if l == 0 { *col } else { c },
+                        )
+                        .hint(
+                            "pass a literal or a variable — comparing two columns of text is not supported yet."
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            // Arity, argument types and the pattern are settled HERE — once, before a row
+            // is read, at the source position, and identically for both backends.
+            probe_str_call(&Value::Str(Rc::new(String::new())), f, &vals, *line, *col)?;
+            Ok(ColExpr::StrMethod(f, Box::new(inner), vals))
+        }
+        // THE POSITION IS THE NODE'S OWN. It was hardcoded `0, 0`, alone among the arms
+        // here, so the one error a reader is most likely to meet in a query underlined
+        // line 1 of their program — pointing at nothing, in the exact place they need to
+        // be told WHERE. `lower` on the polars side carries a comment about having fixed
+        // the same bug on its own errors; this is the front half of it.
+        other => {
+            let (line, col) = other.position();
+            Err(HelixError::new(
+                "this expression isn't supported inside a DataFrame query yet",
+                line,
+                col,
+            )
+            .hint(
+                "DataFrame queries support column names, literals, arithmetic, comparisons, \
+                 and the String tests `starts_with`, `ends_with`, `contains` and `re_match`.",
+            ))
+        }
     }
 }
 
@@ -473,8 +608,10 @@ pub fn validate_predicate(pred: &ColExpr, line: usize, col: usize) -> Result<(),
             ColExpr::Unary(UnOp::Not, inner) => shape(inner),
             ColExpr::Unary(..) => Some(false),
             // A null test is a condition whatever its operand holds — and so is a
-            // float classification.
-            ColExpr::IsMissing(_) | ColExpr::FloatPred(..) => Some(true),
+            // float classification, and so is every string test in `StrFn` (the set is
+            // Bool-only, which is what lets this stay a `Some(true)` rather than a
+            // per-function question).
+            ColExpr::IsMissing(_) | ColExpr::FloatPred(..) | ColExpr::StrMethod(..) => Some(true),
         }
     }
     if shape(pred) != Some(false) {
@@ -493,8 +630,8 @@ pub fn validate_predicate(pred: &ColExpr, line: usize, col: usize) -> Result<(),
         }
         ColExpr::Binary(..) => "an arithmetic expression".to_string(),
         ColExpr::Col(_) => unreachable!("a bare column is never provably non-boolean"),
-        ColExpr::IsMissing(_) | ColExpr::FloatPred(..) => {
-            unreachable!("a null test and a float predicate are always conditions")
+        ColExpr::IsMissing(_) | ColExpr::FloatPred(..) | ColExpr::StrMethod(..) => {
+            unreachable!("a null test, a float predicate and a string test are always conditions")
         }
     };
     Err(

@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `starts_with` inside a DataFrame query needs a fixed argument, not one that varies by row
+  --> <src>:5:31
+  |
+5 | print(df.where(@a.starts_with(@b)).count())
+  |                               ^
+help: pass a literal or a variable — comparing two columns of text is not supported yet.

@@ -1488,7 +1488,7 @@ The current element inside a comprehension — no parameter to name.
 
 `df.where(@name > 1)`
 
-**Note:** A bare `name` would be an ordinary binding, so the `@` is what makes a column reference visible at the call site. Keywords: dataframe, column, field, select, filter, expression, reference, table.
+**Note:** A bare `name` would be an ordinary binding, so the `@` is what makes a column reference visible at the call site. A column takes the String tests too — starts_with, ends_with, contains and re_match — so a text filter is a query rather than a round trip through JSON. Keywords: dataframe, column, field, select, filter, expression, reference, table, regex, text, string.
 
 ```
 >>> print(dataframe({a: [1, 2, 3]}).where(@a > 1).count())
@@ -3065,6 +3065,8 @@ Keep the rows where no column holds a NaN.
 
 Alias of where: keep the rows where the predicate is true.
 
+**Note:**  A query can also ask STRING questions of a text column: starts_with, ends_with and contains (all literal text), and re_match for a regular expression — `where(@gene.re_match("""^BRCA"""))`. The pattern has to be constant for the query, so a literal or a variable, not another column. A missing cell answers missing and the row is dropped.
+
 ```
 >>> dataframe({a: [1, 2], b: [3.0, 4.5]}).filter(@b < 4.0).count()
 1
@@ -3173,7 +3175,7 @@ Append another frame's rows below this one (same columns).
 
 Keep the rows where the predicate over @columns is true.
 
-**Note:** Comparing with missing yields missing: where(@v == missing) selects NO rows — use drop_missing.
+**Note:** Comparing with missing yields missing: where(@v == missing) selects NO rows — use drop_missing. A query can also ask STRING questions of a text column: starts_with, ends_with and contains (all literal text), and re_match for a regular expression — `where(@gene.re_match("""^BRCA"""))`. The pattern has to be constant for the query, so a literal or a variable, not another column. A missing cell answers missing and the row is dropped.
 
 ```
 >>> dataframe({a: [1, 2], b: [3.0, 4.5]}).where(@a > 1).count()
@@ -3183,6 +3185,8 @@ Keep the rows where the predicate over @columns is true.
 ### `with({name: expr, ...})`
 
 Add or replace columns computed from expressions over existing columns.
+
+**Note:**  String tests work here too, and this is where their missing rule is visible: `with({hit: @gene.re_match("""^BRCA""")})` writes missing for a missing cell, not false — `where` would have dropped that row either way.
 
 ```
 >>> dataframe({a: [1, 2], b: [3.0, 4.5]}).with({c: a + b}).columns()

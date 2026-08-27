@@ -141,7 +141,7 @@ pub static SYNTAX: &[SyntaxDoc] = &[
         example_out: "2",
         notes: "A bare `name` would be an ordinary binding, so the `@` is what makes a column \
                 reference visible at the call site. \
-                Keywords: dataframe, column, field, select, filter, expression, reference, table.",
+                A column takes the String tests too — starts_with, ends_with, contains and re_match — so a text filter is a query rather than a round trip through JSON. Keywords: dataframe, column, field, select, filter, expression, reference, table, regex, text, string.",
     },
     SyntaxDoc {
         name: "try",

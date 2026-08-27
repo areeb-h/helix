@@ -81,6 +81,23 @@ grep -E "test result:|FAILED|error\[|panicked" "$TLOG" | tail -25
 # from the main build, so sharing a target dir would make the two invocations evict
 # each other's cache on every gate run. ~47s warm, nearly all of it the crate
 # recompile; the tests themselves are 0.02s.
+# CLIPPY ON THE OTHER FEATURE SET. `src/backend/native/` is `#[cfg]`-ed out of a default
+# build, so the lint step above never sees a line of it — and a lint error there is a CI
+# failure that a green local gate cannot predict. That happened TWICE in one day (a
+# collapsible `if`, both times), which is the definition of a gate that does not gate.
+# `target/dual` is the same directory the two steps below use, so this is a link, not a
+# rebuild.
+#
+# `--no-default-features --features appliance` is deliberately NOT here: it shares no
+# build artifacts with either target dir, so it would mean a third full compile of the
+# crate on every gate run. It stays a CI-only check; this catches the overlapping
+# majority, which is every line of the native backend.
+log "clippy (--features native-df -D warnings)"
+CLOG=$(mktemp)
+CARGO_TARGET_DIR=target/dual cargo clippy --all-targets --features native-df -- -D warnings >"$CLOG" 2>&1 || rc=1
+grep -E "^error|^warning:" "$CLOG" | tail -5 || true
+rm -f "$CLOG"
+
 log "native-df differential (the dual-engine campaign)"
 CARGO_TARGET_DIR=target/dual cargo test "${TEST_ARGS[@]}" --features native-df --bins backend::native >"$TLOG" 2>&1 || rc=1
 grep -E "test result:|FAILED|error\[|panicked" "$TLOG" | tail -5

@@ -1,0 +1,9 @@
+exit: 1
+--- stdout ---
+0
+--- stderr ---
+error: an Int has no method `starts_with`
+  --> <src>:7:9
+  |
+7 | print(df.where(@n.starts_with("a")).count())
+  |         ^
