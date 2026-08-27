@@ -171,7 +171,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "Verify a signature (public key first); answers a Bool, never raises on a bad one.",
         example: "ed25519_verify(kp.public, \"msg\", sig)",
         example_out: "",
-        notes: "",
+        notes: "Public-key signatures, so the verifier needs no secret — the difference from hmac_sha256, where both sides share one. Use for a token another service must check, a webhook, or a signed release.",
     },
     DocEntry {
         name: "random",
@@ -931,7 +931,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "The SHA-256 digest of the string's UTF-8 bytes, as 64 lowercase hex chars.",
         example: "sha256(\"helix\")",
         example_out: "54a85d2ae7b0a4d8005ab5cf466d4e582c6ea9aa5060b261241ec65a0ea58506",
-        notes: "",
+        notes: "A digest, not an encryption and not a password hash — it cannot be reversed and it is fast, which is the wrong property for storing a login credential. To sign a session cookie use hmac_sha256; for the integrity of a file, this.",
     },
     DocEntry {
         name: "hmac_sha256",
@@ -939,7 +939,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "HMAC-SHA256 of the message under the key (UTF-8 bytes), as lowercase hex.",
         example: "hmac_sha256(\"key\", \"message\")",
         example_out: "6e9ef29b75fffc5b7abae527d58fdadb2fe42e7219011976917343065f58ed4a",
-        notes: "",
+        notes: "The signing half of a session or auth token: sign a cookie payload here and verify it on the next request, so the client cannot forge one.",
     },
     DocEntry {
         name: "aes_keygen",
@@ -947,7 +947,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "A fresh random AES-256 key, as 64 hex chars.",
         example: "aes_keygen()",
         example_out: "",
-        notes: "",
+        notes: "The key for aes_encrypt/aes_decrypt. Encrypting a session payload keeps its CONTENTS from the client, where signing with hmac_sha256 only stops them changing it.",
     },
     DocEntry {
         name: "aes_encrypt",
@@ -965,7 +965,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
                    \"413811a542a07328643c662446279e7d265bd2211b88a687b254adfb15479396\", \
                    \"dJITnntJq8pZkeHmuxcFMD/HMls5dZWj4pftlbzx\")",
         example_out: "hi",
-        notes: "",
+        notes: "Authenticated: a payload altered in transit fails to decrypt rather than returning wrong plaintext, which is what makes it safe for a session cookie or a stored token.",
     },
     DocEntry {
         name: "clock_monotonic",
@@ -1504,7 +1504,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Every (value, count) pair, count descending then value ascending.",
             example: "[\"a\", \"b\", \"a\"].frequencies()",
             example_out: "[(\"a\", 2), (\"b\", 1)]",
-            notes: "",
+            notes: "This is the group-by-and-count: how many times each value occurs, a count of occurrences, a tally, a histogram of a categorical column. Doing it by hand with a nested scan is O(n*k), which is the shape a field report found in its own /stats route.",
         },
     ),
     (
@@ -2193,7 +2193,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         doc: "The string with EVERY occurrence of from swapped for to.",
         example: "\"aaa\".replace(\"a\", \"b\")",
         example_out: "bbb",
-        notes: "",
+        notes: " Takes LITERAL text, not a pattern: `.` means a dot. The regex family is re_replace and friends, and a pattern with braces needs a raw string.",
     }),
     ("String", DocEntry {
         name: "contains",
@@ -3436,7 +3436,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Every value for a header name (ignoring case), in arrival order.",
             example: "headers([(\"X-Tag\", \"a\"), (\"x-tag\", \"b\")]).get_all(\"x-tag\")",
             example_out: "[\"a\", \"b\"]",
-            notes: "",
+            notes: "The one to reach for when a name is REPEATED — several Set-Cookie lines, a duplicated X-Forwarded-For. `get` answers with the first only and to_dict discards the rest, so this is the only view that keeps every occurrence.",
         },
     ),
     (

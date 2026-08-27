@@ -7177,6 +7177,123 @@ fn test_json_and_check_lint() {
     assert!(lout.contains("no `>>>` doc example"), "{lout}");
 }
 
+/// THE SAME DRIFT-PROOF for the LANGUAGE FORMS. Syntax notes are what a reader
+/// trusts without checking, so a rotted one is worse than none: every example in
+/// `syntaxdocs::SYNTAX` is run AS WRITTEN (not wrapped in `print` — most of these
+/// are statements) on all three engines and must print exactly `example_out`.
+#[test]
+fn syntax_table_examples_all_run() {
+    let (out, err, code) = run(&["describe"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("describe emits JSON");
+    let forms = doc["syntax"].as_array().expect("describe carries the syntax catalog");
+    assert!(forms.len() >= 12, "the syntax table shrank: {}", forms.len());
+
+    let mut failures: Vec<String> = Vec::new();
+    for f in forms {
+        let name = f["name"].as_str().unwrap_or("?");
+        let ex = f["example"].as_str().expect("every form has an example");
+        let want = f["example_out"].as_str().expect("every form has an expected output");
+        for (engine, env) in ENGINES {
+            let (got, rerr, rcode) = run_source(&format!("{ex}\n"), env, "syn");
+            if rcode != Some(0) {
+                failures.push(format!(
+                    "{name} [{engine}]: errored: {}",
+                    rerr.lines().next().unwrap_or("")
+                ));
+            } else if got.trim_end() != want {
+                failures.push(format!("{name} [{engine}]: expected {want:?}, got {:?}", got.trim_end()));
+            }
+        }
+        // A form is only discoverable if `helix describe` answers for it — `match`,
+        // `try` and `missing` all used to reply "is not a builtin, method, or type
+        // name", which tells a reader who typed what they SAW that it does not exist.
+        let (dout, derr, dcode) = run(&["describe", name], &[], "");
+        assert_eq!(dcode, Some(0), "`helix describe {name}` must answer: {derr}");
+        assert!(dout.contains("\"kind\": \"syntax\""), "{name}: {dout}");
+    }
+    assert!(failures.is_empty(), "syntax-table drift ({}):\n  {}", failures.len(), failures.join("\n  "));
+}
+
+/// `helix search` — the queries a field report ran against the FIRST version of it,
+/// every one of which failed. They are pinned here because each stands for a rule.
+///
+/// The report's two findings, in its own words: the match was "a substring of the
+/// whole query", so `repeated` found 2 and `header` found 15 but `repeated header`
+/// found nothing; and it fired INSIDE words, so `helix search raw` returned four
+/// rows, all of them `d`raw`n at random`, while the raw-string form the reader
+/// actually wanted was not in the corpus at all.
+#[test]
+fn search_answers_the_questions_a_reader_actually_asks() {
+    let hits = |q: &str| -> Vec<(String, String)> {
+        let (out, err, code) = run(&["search", "--json", q], &[], "");
+        assert_eq!(code, Some(0), "{q}: {err}");
+        let v: serde_json::Value = serde_json::from_str(&out).expect("--json is JSON");
+        v["matches"]
+            .as_array()
+            .expect("matches array")
+            .iter()
+            .map(|m| {
+                (
+                    m["name"].as_str().unwrap_or("?").to_string(),
+                    m["owner"].as_str().unwrap_or("?").to_string(),
+                )
+            })
+            .collect()
+    };
+    let names = |q: &str| -> Vec<String> { hits(q).into_iter().map(|(n, _)| n).collect() };
+    let has = |q: &str, want: &str| {
+        let got = names(q);
+        assert!(got.iter().any(|n| n == want), "`search {q}` must find `{want}`, got {got:?}");
+    };
+
+    // 1. SYNTAX IS IN THE CORPUS. This is the report's sharpest example: the form it
+    //    was about was the one thing search could not find.
+    assert_eq!(hits("raw")[0], ("raw-string".to_string(), "syntax".to_string()));
+    has("interpolation", "interpolation");
+    has("switch", "match");
+    has("null", "missing");
+    has("command line", "main");
+
+    // 2. NO MATCHES INSIDE WORDS. `drawn` must no longer answer for `raw`.
+    for (n, _) in hits("raw") {
+        assert!(
+            !["choice", "sample", "randn", "random_int"].contains(&n.as_str()),
+            "`raw` matched inside `drawn at random`: {n}"
+        );
+    }
+    // …while the prefix search that makes the tool useful still works.
+    has("head", "headers");
+    assert!(names("re_").len() >= 6, "`re_` must list the regex family: {:?}", names("re_"));
+
+    // 3. EVERY TERM MUST MATCH, so more words narrow instead of emptying.
+    has("repeated header", "get_all");
+    has("count occurrences", "frequencies");
+    has("wall clock", "now");
+    assert!(
+        names("repeated header").len() < names("header").len(),
+        "a second word must narrow the result"
+    );
+    // A word that is genuinely absent still gives nothing — the AND is real.
+    assert!(names("header xyzzy").is_empty());
+
+    // 4. THE VOCABULARY GAP. The report's most expensive mistake was concluding Helix
+    //    had no session primitives while hmac_sha256, AES-GCM, Ed25519 and
+    //    parse_cookies were all present — none of them saying what job they do.
+    has("session", "hmac_sha256");
+    has("group by", "frequencies");
+
+    // 5. A plural in the query still matches the singular in the catalog.
+    has("occurrences", "frequencies");
+
+    // The no-match message names all three corpora and the AND rule, because that is
+    // now the likeliest reason a query came back empty.
+    let (out, _, code) = run(&["search", "definitely not a helix thing"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("language forms"), "{out}");
+    assert!(out.contains("Every word has to match"), "{out}");
+}
+
 /// THE DRIFT-PROOF for the docs table: every entry `helix describe` reports
 /// with an `example_out` is EXECUTED (wrapped in `print(...)`, exactly as the
 /// doc-example runner wraps its last line) and must produce byte-for-byte that

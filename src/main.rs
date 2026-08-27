@@ -59,6 +59,7 @@ mod http;
 mod interp;
 mod jit;
 mod apisearch;
+mod syntaxdocs;
 mod regexes;
 mod climain;
 mod subprocess;
@@ -596,6 +597,31 @@ fn reference_markdown() -> String {
             }
         }
     }
+    // LANGUAGE FORMS lead, because they are what a reader needs before any API: the
+    // reference documented every callable and none of the syntax.
+    let _ = writeln!(s, "## Language forms");
+    let _ = writeln!(s);
+    for f in syntaxdocs::SYNTAX {
+        let _ = writeln!(s, "### `{}`", f.name);
+        let _ = writeln!(s);
+        let _ = writeln!(s, "{}", f.doc);
+        let _ = writeln!(s);
+        let _ = writeln!(s, "`{}`", f.form);
+        if !f.notes.is_empty() {
+            let _ = writeln!(s);
+            let _ = writeln!(s, "**Note:** {}", f.notes);
+        }
+        let _ = writeln!(s);
+        let _ = writeln!(s, "```");
+        for l in f.example.split('\n') {
+            let _ = writeln!(s, ">>> {l}");
+        }
+        for l in f.example_out.split('\n') {
+            let _ = writeln!(s, "{l}");
+        }
+        let _ = writeln!(s, "```");
+        let _ = writeln!(s);
+    }
     for (ty, ms) in registry::type_method_tables() {
         let mut names: Vec<&str> = ms.to_vec();
         names.sort_unstable();
@@ -608,6 +634,24 @@ fn reference_markdown() -> String {
         }
     }
     s
+}
+
+/// One language form as JSON. Kept beside `enrich` because the two shapes deliberately
+/// share field names (`doc`, `example`, `example_out`, `notes`): a consumer that already
+/// renders an API entry renders a form with no new code, and only `form` is new.
+fn syntax_json(s: &syntaxdocs::SyntaxDoc) -> serde_json::Value {
+    let mut e = serde_json::json!({
+        "kind": "syntax",
+        "name": s.name,
+        "form": s.form,
+        "doc": s.doc,
+        "example": s.example,
+        "example_out": s.example_out,
+    });
+    if !s.notes.is_empty() {
+        e["notes"] = serde_json::Value::String(s.notes.to_string());
+    }
+    e
 }
 
 /// Fold a docs-table entry into a describe JSON object (absent fields stay
@@ -661,6 +705,12 @@ fn cli_describe_one(query: &str) -> ExitCode {
     if registry::UNIVERSAL_METHODS.contains(&query) {
         found.push(serde_json::json!({ "kind": "universal_method", "name": query }));
     }
+    // A LANGUAGE FORM. `match`, `try` and `missing` are not builtins, so every one of
+    // them answered "is not a builtin, method, or type name" — the reader who typed the
+    // thing they saw in a program got told it does not exist.
+    if let Some(s) = syntaxdocs::syntax_doc(query) {
+        found.push(syntax_json(s));
+    }
     // A receiver TYPE name (`DataFrame`, `Array`, `Dna`, …): the whole method table with
     // each method's signature, doc, effect and example — the machine-readable half of
     // `helix doc <Type>`, which prints for a human and cannot be parsed.
@@ -697,7 +747,7 @@ fn cli_describe_one(query: &str) -> ExitCode {
         }));
     }
     if found.is_empty() {
-        eprintln!("error: `{query}` is not a builtin, method, or type name.");
+        eprintln!("error: `{query}` is not a builtin, method, type name, or language form.");
         if let Some(h) = suggest::hint(query, suggest::Site::Function, &[]) {
             eprintln!("help: {h}");
         }
@@ -924,6 +974,9 @@ fn cli_describe(args: &[String]) -> ExitCode {
         "builtins": builtins,
         "methods": methods,
         "universal_methods": registry::UNIVERSAL_METHODS,
+        // The language FORMS, which have no name in any registry and were therefore absent
+        // from every machine-readable view of Helix until now.
+        "syntax": syntaxdocs::SYNTAX.iter().map(syntax_json).collect::<Vec<_>>(),
         // Effect categories a consumer may see; the gated ones require a capability grant.
         "effects": ["pure", "fs-read", "fs-write", "net", "process", "env"],
     });

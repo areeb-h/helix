@@ -59,6 +59,12 @@ cmp a.out b.out && cmp a.out c.out
 
 - Function bodies use `=`: `fn double(x) = x * 2`. Multi-statement bodies use `do { }`.
 - `if c then a else b` is the expression form — no ternary, no parenthesized `if (c)`.
+- **`match` exists** and is what a long `else if` ladder on one value should be:
+  `match n { 0 => "none", x if x > 10 => "big", _ => "small" }` — literal arms, an
+  optional `name if cond` guard, `_` for the rest, commas between.
+- **`"""raw strings"""` do not interpolate and have no escapes.** THE form for a regex
+  (`{4}` in an ordinary string is interpolation and silently becomes the number 4 —
+  `helix check` refuses that), a Windows path, or any text with braces or backslashes.
 - Strings have no `+`: use interpolation `"{a}{b}"` or `parts.join("")`. Both are linear.
 - `{ }` in a string is interpolation; a literal brace is `{{`.
 - `try` binds tighter than operators: `try (a + b)`, never `try a + b`.
@@ -77,6 +83,14 @@ cmp a.out b.out && cmp a.out c.out
 - Most things are methods on a receiver, not free functions: `x.to_json()`,
   `s.parse_json()`, `xs.join(", ")`. `helix doc <name>` answers which in one command,
   and calling a method as a function tells you so by name.
+- **Three ways to find something, in the order to try them.** `helix search <words>` when
+  you know the JOB but not the name ("repeated header", "count occurrences", "session") —
+  it covers builtins, methods AND the language forms above, every word has to match, and
+  each row says which field it matched. `helix doc <Type>` for everything one receiver can
+  do. `helix describe <name>` for one full entry, syntax included (`helix describe match`).
+  Not finding something here is worth one more query before concluding it is absent: this
+  project's costliest recorded mistake was months of building around a `scan` that
+  `helix doc Array` printed all along.
 
 ## Footguns — wrong answers, not errors
 

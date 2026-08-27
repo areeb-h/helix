@@ -290,6 +290,8 @@ Parse a string as an Int (an error names the offending text).
 
 Decrypt aes_encrypt output; a wrong key or tampered ciphertext raises.
 
+**Note:** Authenticated: a payload altered in transit fails to decrypt rather than returning wrong plaintext, which is what makes it safe for a session cookie or a stored token.
+
 ```
 >>> aes_decrypt("413811a542a07328643c662446279e7d265bd2211b88a687b254adfb15479396", "dJITnntJq8pZkeHmuxcFMD/HMls5dZWj4pftlbzx")
 hi
@@ -308,6 +310,8 @@ AES-256-GCM encrypt under a 64-hex key — base64 of nonce + ciphertext + tag.
 ### `aes_keygen()`
 
 A fresh random AES-256 key, as 64 hex chars.
+
+**Note:** The key for aes_encrypt/aes_decrypt. Encrypting a session payload keeps its CONTENTS from the client, where signing with hmac_sha256 only stops them changing it.
 
 ```
 >>> aes_keygen()
@@ -337,6 +341,8 @@ Sign a message with the PRIVATE key (key first); the signature is hex.
 
 Verify a signature (public key first); answers a Bool, never raises on a bad one.
 
+**Note:** Public-key signatures, so the verifier needs no secret — the difference from hmac_sha256, where both sides share one. Use for a token another service must check, a webhook, or a signed release.
+
 ```
 >>> ed25519_verify(kp.public, "msg", sig)
 ```
@@ -344,6 +350,8 @@ Verify a signature (public key first); answers a Bool, never raises on a bad one
 ### `hmac_sha256(key, message)`
 
 HMAC-SHA256 of the message under the key (UTF-8 bytes), as lowercase hex.
+
+**Note:** The signing half of a session or auth token: sign a cookie payload here and verify it on the next request, so the client cannot forge one.
 
 ```
 >>> hmac_sha256("key", "message")
@@ -353,6 +361,8 @@ HMAC-SHA256 of the message under the key (UTF-8 bytes), as lowercase hex.
 ### `sha256(text)`
 
 The SHA-256 digest of the string's UTF-8 bytes, as 64 lowercase hex chars.
+
+**Note:** A digest, not an encryption and not a password hash — it cannot be reversed and it is fast, which is the wrong property for storing a login credential. To sign a session cookie use hmac_sha256; for the integrity of a file, this.
 
 ```
 >>> sha256("helix")
@@ -1343,6 +1353,203 @@ Pause the program for ms milliseconds (wall clock; fractional ms honoured).
 >>> sleep(250)
 ```
 
+## Language forms
+
+### `match`
+
+Dispatch on a value: literal arms, an optional guard, and `_` for the rest.
+
+`match x { literal => expr, name if cond => expr, _ => expr }`
+
+**Note:** The switch/case form. A long `else if` ladder on one value is what this replaces. Arms are separated by commas and `_` is the default; a guard is `name if cond`. Keywords a reader might arrive with: switch, case, pattern, dispatch, cond, ladder.
+
+```
+>>> fn size(n) = match n { 0 => "none", x if x > 10 => "big", _ => "small" }
+>>> print(size(0), size(20), size(3))
+none big small
+```
+
+### `raw-string`
+
+A string with NO interpolation and no escapes — every character is literal.
+
+`"""text"""`
+
+**Note:** THE form for regex patterns, because `{4}` in an ordinary string is interpolation and silently becomes the number 4 (helix check refuses that). Also for Windows paths, JSON templates, and any text with braces or backslashes. Keywords: raw, verbatim, literal, escape, backslash, regex, pattern, template, heredoc, triple quote.
+
+```
+>>> print("""[0-9]{4} and a \n stay literal""")
+[0-9]{4} and a \n stay literal
+```
+
+### `interpolation`
+
+Embed any expression in a string; `{{` and `}}` are literal braces.
+
+`"text {expr} more"`
+
+**Note:** Strings have no `+`. This and `join` are the two ways to build one, and both are linear. A `{` you mean literally must be doubled, or use a raw string. Keywords: format, template, concatenate, concat, plus, append, f-string, sprintf, building.
+
+```
+>>> n = 3
+>>> print("n={n} sum={n + 1} brace={{lit}}")
+n=3 sum=4 brace={lit}
+```
+
+### `missing`
+
+The absent value. It PROPAGATES: any operation on it answers missing.
+
+`missing`
+
+**Note:** Because `missing == missing` is missing, filtering with `== missing` finds NOTHING silently; the keep-non-missing idiom is `where(@v == @v)` and the explicit form is `drop_missing`. `d.get(k)` answers missing where `d.expect(k)` raises. Keywords: null, none, nil, NA, NaN, absent, undefined, optional, empty, nothing.
+
+```
+>>> print([1, missing, 3].drop_missing(), missing + 1, missing == missing)
+[1, 3] missing missing
+```
+
+### `do`
+
+A multi-statement body; the last expression is the value. Newlines separate, never `;`.
+
+`fn f() = do { stmt\n stmt\n result }`
+
+**Note:** `fn` is item-level only — inside a `do` bind a lambda instead. Rebinding a name shadows the previous one, which is how a body evolves state without `mut`. Keywords: block, braces, statements, sequence, multiline, body, begin.
+
+```
+>>> fn f(x) = do {
+>>>   a = x + 1
+>>>   a = a * 2
+>>>   a
+>>> }
+>>> print(f(3))
+8
+```
+
+### `where`
+
+Bindings written AFTER the expression that uses them.
+
+`fn f(x) = expr where a = ..., b = ...`
+
+**Note:** Lets the answer lead and the scaffolding follow, so a one-line function stays one line. Bindings may refer to earlier ones. Keywords: let, local, helper, binding, temporary, intermediate, subexpression.
+
+```
+>>> fn hyp(a, b) = root where sq = a * a + b * b, root = sq.sqrt()
+>>> print(hyp(3.0, 4.0))
+5.0
+```
+
+### `if`
+
+The conditional EXPRESSION — it has a value, and `else` is required.
+
+`if cond then a else b`
+
+**Note:** There is no ternary `?:` and no parenthesized `if (c)`. For dispatch on one value with several outcomes, `match` reads better. Keywords: ternary, conditional, else, elif, branch, question mark.
+
+```
+>>> x = 5
+>>> print(if x > 3 then "big" else "small")
+big
+```
+
+### `lambda`
+
+An anonymous function value, bindable to a name or passed to a method.
+
+`(x) => expr`
+
+**Note:** The form to use inside `do { }`, where `fn` is not allowed. A function stored in a record field is called parenthesized: `(rec.f)(x)`. Keywords: closure, anonymous, arrow, callback, function value, higher order.
+
+```
+>>> double = (x) => x * 2
+>>> print([1, 2, 3].map(double(it)), [1,2,3].reduce(0, (acc, x) => acc + x))
+[2, 4, 6] 6
+```
+
+### `it`
+
+The current element inside a comprehension — no parameter to name.
+
+`xs.map(it * 2)`
+
+**Note:** These chains are the loop: Helix has no `for`. A numeric chain over packed arrays is also what the JIT compiles — `helix jit-explain` says whether yours was. Keywords: loop, for, each, iterate, element, current, implicit, placeholder, underscore.
+
+```
+>>> print([1, 2, 3].map(it * 2).where(it > 2).sum())
+10
+```
+
+### `column`
+
+`@name` refers to a DataFrame column inside a frame verb.
+
+`df.where(@name > 1)`
+
+**Note:** A bare `name` would be an ordinary binding, so the `@` is what makes a column reference visible at the call site. Keywords: dataframe, column, field, select, filter, expression, reference, table.
+
+```
+>>> print(dataframe({a: [1, 2, 3]}).where(@a > 1).count())
+2
+```
+
+### `try`
+
+Run an expression that may raise, answering {ok, value, error} instead.
+
+`try (expr)`
+
+**Note:** It binds TIGHTER than operators, so write `try (a + b)` — never `try a + b`. Do not use it as a type test: it is far more expensive than `type_of`. Keywords: error, exception, catch, rescue, result, fallible, handle, recover, panic.
+
+```
+>>> r = try (1 / 0)
+>>> print(r.ok, r.error)
+false division by zero
+```
+
+### `mut`
+
+A rebindable top-level binding — the only mutable state in the language.
+
+`mut n = 0`
+
+**Note:** TOP-LEVEL ONLY, and that is a design question rather than a spelling one: a function body evolves state by rebinding inside `do { }`, and state crossing a sequence is threaded with `reduce`. Reach for `mut` only for state that must outlive a call. Keywords: mutable, variable, assign, reassign, update, counter, accumulator, global, state.
+
+```
+>>> mut n = 0
+>>> n = n + 1
+>>> print(n)
+1
+```
+
+### `import`
+
+Bring in another module: whole, aliased, or specific names.
+
+`import lib.stats as st`
+
+**Note:** `import lib.stats` for `lib/stats.helix`, `as st` to alias, or `import lib.stats.{mean, sd}` to bring names in unqualified. Not `use`, not `from … import …`. Keywords: module, use, require, include, package, library, namespace, dependency.
+
+```
+>>> print(1)
+1
+```
+
+### `main`
+
+If a program defines `fn main`, its parameters ARE the command line.
+
+`fn main(seq: String, threads: Int = 1) = ...`
+
+**Note:** Arguments bind by the ordinary call-site rule — positional, `--named value`, `--named=value`, out of order — and a Bool parameter is a bare flag. A doc comment above `main` becomes `--help`. Keywords: command line, argv, cli, arguments, flags, options, parse args, entry point, script, tool.
+
+```
+>>> print(1)
+1
+```
+
 ## Array methods
 
 ### `all(pred)`
@@ -1583,6 +1790,8 @@ Spread each array element one level; non-array elements pass through.
 ### `frequencies()`
 
 Every (value, count) pair, count descending then value ascending.
+
+**Note:** This is the group-by-and-count: how many times each value occurs, a count of occurrences, a tally, a histogram of a categorical column. Doing it by hand with a nested scan is O(n*k), which is the shape a field report found in its own /stats route.
 
 ```
 >>> ["a", "b", "a"].frequencies()
@@ -2339,6 +2548,8 @@ ababab
 ### `replace(from, to)`
 
 The string with EVERY occurrence of from swapped for to.
+
+**Note:**  Takes LITERAL text, not a pattern: `.` means a dot. The regex family is re_replace and friends, and a pattern with braces needs a raw string.
 
 ```
 >>> "aaa".replace("a", "b")
@@ -3381,6 +3592,8 @@ text/html
 ### `get_all(name)`
 
 Every value for a header name (ignoring case), in arrival order.
+
+**Note:** The one to reach for when a name is REPEATED — several Set-Cookie lines, a duplicated X-Forwarded-For. `get` answers with the first only and to_dict discards the rest, so this is the only view that keeps every occurrence.
 
 ```
 >>> headers([("X-Tag", "a"), ("x-tag", "b")]).get_all("x-tag")
