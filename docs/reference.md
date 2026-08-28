@@ -1353,6 +1353,143 @@ Pause the program for ms milliseconds (wall clock; fractional ms honoured).
 >>> sleep(250)
 ```
 
+## Environment
+
+### `HELIX_CAP`
+
+The capability sandbox's mode: whether authority-bearing operations are checked at all.
+
+- **Values:** off | audit | enforce
+- **Unset:** off — no checks, byte-identical to a build without the sandbox
+
+**Note:** THE SECURITY ONE, and the reason this catalog exists — it was discoverable only by grepping the compiler. `audit` computes the deny-by-default decision and LOGS a would-be denial to stderr while still allowing it, so a program's real authority footprint can be harvested before anything is enforced; `enforce` denies. An UNRECOGNISED VALUE IS REFUSED with exit 2, not treated as `off` — a typo in a Dockerfile or a systemd unit used to disable the sandbox silently, which is a control that fails open on a misspelling. `HELIX_CAP=` (empty) is still `off`, because that is how a shell unsets an inherited variable. Keywords: sandbox, capability, permission, deny, grant, confine, isolate, security, authority, untrusted. Case-sensitive and untrimmed, so `Enforce` and `enforce ` are refused too. A denial is a CATCHABLE error, not a fatal stop — a program can `try` it and degrade — which is what makes `audit` an exact zero-risk preview of what `enforce` would break.
+
+### `HELIX_ALLOW_FS`
+
+Grants filesystem authority under `HELIX_CAP=audit|enforce`.
+
+- **Values:** read | write | all
+- **Unset:** deny — when a mode is set, nothing is granted
+
+**Note:** `write` grants writing ONLY — it does not imply read; use `all` for both. Ungranted, `read_text`, `read_csv`, `read_dir`, `file_exists`, `mkdir`, `remove_file` and the `write_to`/`write_csv` family are refused by name: `capability denied: `write_to` needs `fs-write` authority, which is not granted`. Phase 1 is coarse on/off; path scoping arrives with cap-std (ADR 0021). Keywords: sandbox, filesystem, permission, grant, read only. It is UNSCOPED: `read` grants read_text("~/.ssh/id_rsa") exactly as much as a data file, and covers read_dir and file_exists (reconnaissance) plus sqlite_query. A value that does not parse is REFUSED at startup rather than silently granting nothing.
+
+### `HELIX_ALLOW_NET`
+
+Grants network authority under `HELIX_CAP=audit|enforce`.
+
+- **Values:** on | all
+- **Unset:** deny — when a mode is set, nothing is granted
+
+**Note:** Covers `listen`, `http_get`, `http_post`, `http_request`, `http_stream` AND the connection methods `accept`/`poll`/`respond`/`sse`/`send`, so a server is gated end to end rather than only at the door. Coarse: any host, any port. Keywords: sandbox, network, permission, grant, offline, egress. All-or-nothing across every host and port, INBOUND AND OUTBOUND ON ONE SWITCH — `on` permits http_get to anywhere and listen on any port. ADR 0021 describes a host:port allowlist; that is the eventual design, so a hostname here is REFUSED at startup rather than silently denying.
+
+### `HELIX_ALLOW_PROCESS`
+
+Grants subprocess authority (`run`) under `HELIX_CAP=audit|enforce`.
+
+- **Values:** on | all
+- **Unset:** deny — when a mode is set, nothing is granted
+
+**Note:** Until 2026-08-28 this could not be granted AT ALL — the env path hardcoded process authority to false, so turning the sandbox on broke every program that shells out and the only remedy was turning it back off. Note what the grant cannot promise: the child is a separate program with its own permissions, so this is a boundary EXIT rather than confinement (ADR 0037 D3). Keywords: sandbox, subprocess, spawn, shell, exec, grant. Granting it is closer to granting everything than it looks: run("sh", …) reaches whatever the child may reach, including the fs and net you just declined.
+
+### `HELIX_NOJIT`
+
+Turns the Cranelift JIT off, so the bytecode VM executes everything.
+
+- **Values:** any value (presence is what counts)
+- **Unset:** unset — the JIT runs where the build supports it
+
+**Note:** A DIFFERENTIAL SWITCH, not a tuning knob: the three engines are held byte-identical, so this changes speed and never answers. That is what makes it the oracle's lever — `helix test` and the gate run the suite three ways with this and HELIX_NOVM. `helix jit-explain` reports what the JIT was asked and answered. Keywords: jit, disable, engine, oracle, differential, debug, compile.
+
+### `HELIX_NOVM`
+
+Turns the bytecode VM off, so the tree-walking interpreter executes everything.
+
+- **Values:** any value (presence is what counts)
+- **Unset:** unset — the bytecode VM runs
+
+**Note:** The slowest engine and the semantic reference the other two are held to. Same rule as HELIX_NOJIT: speed changes, answers do not. Keywords: interpreter, tree walker, disable, engine, oracle, differential, debug.
+
+### `HELIX_DF_ENGINE`
+
+Selects the DataFrame backend in a build that carries more than one.
+
+- **Values:** polars | native
+- **Unset:** the build's default (polars when present)
+
+**Note:** A build without the requested engine REFUSES rather than silently answering with the other one — which is what lets `scripts/dfdiff.sh` trust that it is really comparing two engines. An empty value means no preference. The two are held byte-identical across every tracked program, so this is a performance and coverage choice, not a semantic one. Keywords: dataframe, backend, polars, native, engine, differential.
+
+### `HELIX_PATH`
+
+Extra roots searched for a non-local import.
+
+- **Values:** a list of directories, OS-separated (`:` on unix, `;` on Windows)
+- **Unset:** unset — only the entry's project and the install-relative stdlib are searched
+
+**Note:** Searched BEFORE the install-relative standard-library locations, so a directory here shadows a stdlib module of the same path — which is how a local copy is tested, and how one is shadowed by accident. Keywords: import, module, search, library, include, resolve.
+
+### `HELIX_THREADS`
+
+Caps the worker threads used for parallel array work.
+
+- **Values:** a positive integer; `1` runs fully serial
+- **Unset:** unset — one worker per core
+
+**Note:** RESULTS DO NOT DEPEND ON IT, and that is a guarantee rather than an observation: parallel map/filter are elementwise, float reductions are never reassociated (that would change the last bits and break the three-engine oracle), and the nested reduce partitions over independent outer indices and collects in order. So this is a pure CPU-versus-latency control — measured on a 50M dot product, the default spends about 2x the CPU to finish 1.44x sooner, which is the wrong trade on a shared box. An invalid value leaves the default. Keywords: parallel, threads, cores, serial, rayon, cpu, contention.
+
+### `HELIX_STACK_MB`
+
+The stack given to the evaluation thread.
+
+- **Values:** a positive integer, in MiB
+- **Unset:** 128 MiB in a release build, 1 GiB in a debug build
+
+**Note:** For the rare program that recurses deep with large frames. A value that does not parse, or is zero, leaves the default rather than refusing — the parse is a filter, not a validator. Keywords: stack, recursion, overflow, depth, memory.
+
+### `HELIX_CACHE`
+
+Where fetched package tarballs are cached.
+
+- **Values:** a directory path
+- **Unset:** the platform cache directory
+
+**Note:** An EMPTY value is ignored rather than meaning "the current directory", which is the shell idiom this and HELIX_DF_ENGINE both honour. Keywords: package, cache, download, tarball, dependency, offline.
+
+### `HELIX_RICH`
+
+Forces rich output on or off, overriding TTY detection.
+
+- **Values:** 1 | always | 0 | never
+- **Unset:** auto — rich only when stdout is a terminal
+
+**Note:** The switch to reach for when piping to a file or a CI log and you still want (or still do not want) tables and colour. Colour additionally requires that NO_COLOR is unset and HELIX_COLOR is not `never`, so plain output has three independent ways to be requested. Keywords: tty, terminal, plain, pretty, format, output, ci, pipe.
+
+### `HELIX_COLOR`
+
+Suppresses ANSI colour while leaving rich layout intact.
+
+- **Values:** never (anything else is ignored)
+- **Unset:** unset — colour follows rich output
+
+**Note:** `NO_COLOR` (the cross-tool convention) does the same thing and is honoured too. Only `never` is meaningful; there is no value that forces colour on — use HELIX_RICH for that. Keywords: color, colour, ansi, no_color, plain, accessibility.
+
+### `HELIX_THEME`
+
+The colour palette for rich output.
+
+- **Values:** default | vivid | ocean | warm | mono
+- **Unset:** default
+
+**Note:** An unknown name falls back to `default` rather than refusing. `mono` is the one to reach for when colour is wanted but hue is not meaningful. Keywords: theme, palette, colour, style, appearance, dark, light.
+
+### `HELIX_BOX`
+
+The box-drawing style for tables.
+
+- **Values:** rounded | square | ascii | none
+- **Unset:** rounded
+
+**Note:** `ascii` is the one that survives a terminal or a log pipeline without Unicode box characters; `none` drops the borders entirely and keeps the alignment. An unknown name falls back to `rounded`. Keywords: table, border, box, unicode, ascii, frame, layout.
+
 ## Language forms
 
 ### `match`

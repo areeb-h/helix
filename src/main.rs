@@ -60,6 +60,7 @@ mod interp;
 mod jit;
 mod apisearch;
 mod syntaxdocs;
+mod envdocs;
 mod regexes;
 mod climain;
 mod subprocess;
@@ -276,7 +277,13 @@ fn run() -> ExitCode {
     // Install the capability authority before anything runs (ADR 0021). Phase 1 defaults to
     // `Off` (no checks) unless `HELIX_CAP=audit|enforce` is set, so this is a no-op for every
     // existing program; a bundled exe will later carry its baked grant here instead of env.
-    capability::install_from_env();
+    // A malformed `HELIX_CAP` is refused here rather than silently meaning `off` — see
+    // `install_from_env`. Exit 2 is "the invocation is wrong", matching the CLI's other
+    // usage failures.
+    if let Err(msg) = capability::install_from_env() {
+        eprint!("{msg}");
+        return ExitCode::from(2);
+    }
     // A standalone executable built with `helix build` carries its program appended to
     // this binary. If we are such an artifact, run the embedded program and ignore the
     // command line entirely (the args belong to the user's program, not to `helix`).
@@ -597,6 +604,24 @@ fn reference_markdown() -> String {
             }
         }
     }
+    // THE ENVIRONMENT first of all, because the capability sandbox lives here and a
+    // security feature that can only be found by grepping the compiler is one nobody uses.
+    let _ = writeln!(s, "## Environment");
+    let _ = writeln!(s);
+    for e in envdocs::ENV {
+        let _ = writeln!(s, "### `{}`", e.name);
+        let _ = writeln!(s);
+        let _ = writeln!(s, "{}", e.doc);
+        let _ = writeln!(s);
+        let _ = writeln!(s, "- **Values:** {}", e.values);
+        let _ = writeln!(s, "- **Unset:** {}", e.default);
+        if !e.notes.is_empty() {
+            let _ = writeln!(s);
+            let _ = writeln!(s, "**Note:** {}", e.notes);
+        }
+        let _ = writeln!(s);
+    }
+
     // LANGUAGE FORMS lead, because they are what a reader needs before any API: the
     // reference documented every callable and none of the syntax.
     let _ = writeln!(s, "## Language forms");
@@ -711,6 +736,18 @@ fn cli_describe_one(query: &str) -> ExitCode {
     if let Some(s) = syntaxdocs::syntax_doc(query) {
         found.push(syntax_json(s));
     }
+    // AN ENVIRONMENT VARIABLE. Same reason: a reader who has seen `HELIX_CAP` in a
+    // deployment script and asks about it should not be told it does not exist.
+    if let Some(e) = envdocs::env_doc(query) {
+        found.push(serde_json::json!({
+            "kind": "env",
+            "name": e.name,
+            "values": e.values,
+            "default": e.default,
+            "doc": e.doc,
+            "notes": e.notes,
+        }));
+    }
     // A receiver TYPE name (`DataFrame`, `Array`, `Dna`, …): the whole method table with
     // each method's signature, doc, effect and example — the machine-readable half of
     // `helix doc <Type>`, which prints for a human and cannot be parsed.
@@ -747,7 +784,9 @@ fn cli_describe_one(query: &str) -> ExitCode {
         }));
     }
     if found.is_empty() {
-        eprintln!("error: `{query}` is not a builtin, method, type name, or language form.");
+        eprintln!(
+            "error: `{query}` is not a builtin, method, type name, language form, or              environment variable."
+        );
         if let Some(h) = suggest::hint(query, suggest::Site::Function, &[]) {
             eprintln!("help: {h}");
         }
@@ -981,6 +1020,22 @@ fn cli_describe(args: &[String]) -> ExitCode {
         // The language FORMS, which have no name in any registry and were therefore absent
         // from every machine-readable view of Helix until now.
         "syntax": syntaxdocs::SYNTAX.iter().map(syntax_json).collect::<Vec<_>>(),
+        // The ENVIRONMENT, including the capability sandbox — a complete security feature
+        // that could previously be discovered only by grepping the compiler.
+        "environment": envdocs::ENV.iter().map(|e| serde_json::json!({
+            "kind": "env",
+            "name": e.name,
+            "values": e.values,
+            "default": e.default,
+            "doc": e.doc,
+            "notes": e.notes,
+        })).collect::<Vec<_>>(),
+        // Read by the source but deliberately NOT configuration. Listed so the drift
+        // guard can tell "decided" from "forgotten".
+        "environment_internal": envdocs::INTERNAL.iter().map(|(n, why)| serde_json::json!({
+            "name": n,
+            "reason": why,
+        })).collect::<Vec<_>>(),
         // Effect categories a consumer may see; the gated ones require a capability grant.
         "effects": ["pure", "fs-read", "fs-write", "net", "process", "env"],
     });

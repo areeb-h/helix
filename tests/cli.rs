@@ -7670,6 +7670,190 @@ fn a_nested_string_in_a_hole_keeps_its_own_escapes() {
     assert!(err.contains("unknown string escape"), "{err}");
 }
 
+/// THE CAPABILITY ENVIRONMENT FAILS CLOSED **AND LOUDLY**, and a granted category works.
+///
+/// Both halves were broken. `HELIX_CAP` fell into a `_ => Mode::Off` arm, so
+/// `HELIX_CAP=enfroce` in a Dockerfile silently ran the program fully authorised — a
+/// security control that fails OPEN on a misspelling, and fails open quietly enough that
+/// nothing ever prompts a second look. And `process` authority was hardcoded false on the
+/// environment path while `unconfined()` set it true, so `run` was unconditionally denied
+/// under every active mode with no way to allow it: turning the sandbox on broke every
+/// program that shells out, and the only remedy was turning it back off.
+///
+/// A GRANT THAT DOES NOT PARSE IS ALSO REFUSED, which is the less obvious half. Denying it
+/// fails closed, but silently — and ADR 0021 describes net authority as "a host:port
+/// allowlist checked before the socket", the eventual design rather than what phase 1
+/// parses. A reader following it writes `HELIX_ALLOW_NET=example.com:443`, believes they
+/// granted access, and meets "capability denied" from a program they authorised with
+/// nothing pointing at the variable.
+#[test]
+fn the_capability_environment_fails_closed_and_says_so() {
+    let dir = std::env::temp_dir().join("helix_it_cap_env");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let read = dir.join("r.helix");
+    std::fs::write(&read, "print(read_text(\"Cargo.toml\").length() > 0)\n").unwrap();
+    let shell = dir.join("s.helix");
+    std::fs::write(&shell, "print(run(\"echo\", [\"hi\"]).status)\n").unwrap();
+    let caught = dir.join("t.helix");
+    std::fs::write(&caught, "r = try (read_text(\"Cargo.toml\"))\nprint(r.ok)\n").unwrap();
+
+    let go = |prog: &std::path::Path, env: &[(&str, &str)]| run(&[prog.to_str().unwrap()], env, "");
+
+    // A MISSPELLED MODE IS REFUSED, exit 2, before anything runs.
+    let (_, err, code) = go(&read, &[("HELIX_CAP", "enfroce")]);
+    assert_eq!(code, Some(2), "a typo'd mode must not run: {err}");
+    assert!(err.contains("is not a mode"), "{err}");
+
+    // Case matters, and refusing is right: `Enforce` is a typo like any other.
+    let (_, _, code) = go(&read, &[("HELIX_CAP", "Enforce")]);
+    assert_eq!(code, Some(2));
+
+    // An empty value is a shell UNSETTING an inherited variable, so it means `off`.
+    let (out, err, code) = go(&read, &[("HELIX_CAP", "")]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "true");
+
+    // A GRANT THAT DOES NOT PARSE IS REFUSED — the ADR-0021 trap.
+    for (k, v) in [
+        ("HELIX_ALLOW_NET", "example.com:443"),
+        ("HELIX_ALLOW_FS", "./data"),
+        ("HELIX_ALLOW_FS", "rw"),
+        ("HELIX_ALLOW_PROCESS", "yes"),
+    ] {
+        let (_, err, code) = go(&read, &[("HELIX_CAP", "enforce"), (k, v)]);
+        assert_eq!(code, Some(2), "{k}={v} must be refused, not silently denied: {err}");
+        assert!(err.contains("is not a grant"), "{k}={v}: {err}");
+    }
+
+    // The real grants still grant, and their absence still denies.
+    let (out, err, code) = go(&read, &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_FS", "all")]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "true");
+    let (_, err, code) = go(&read, &[("HELIX_CAP", "enforce")]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("`read_text` needs `fs-read`"), "{err}");
+
+    // `write` DOES NOT IMPLY READ — the one grant whose name invites the wrong guess.
+    let (_, err, code) = go(&read, &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_FS", "write")]);
+    assert_eq!(code, Some(1), "write must not grant read: {err}");
+
+    // PROCESS AUTHORITY, which had no test at all when it was added.
+    let (_, err, code) = go(&shell, &[("HELIX_CAP", "enforce")]);
+    assert_eq!(code, Some(1));
+    assert!(err.contains("`run` needs `process`"), "{err}");
+    let (out, err, code) =
+        go(&shell, &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_PROCESS", "on")]);
+    assert_eq!(code, Some(0), "process must be grantable: {err}");
+    assert_eq!(out.trim(), "0");
+
+    // A DENIAL IS A CATCHABLE ERROR, not a fatal stop — so a program can degrade rather
+    // than die, which is what makes `audit` a preview and not a threat.
+    let (out, err, code) = go(&caught, &[("HELIX_CAP", "enforce")]);
+    assert_eq!(code, Some(0), "a denial must be catchable: {err}");
+    assert_eq!(out.trim(), "false");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// EVERY `HELIX_*` THE SOURCE READS HAS A CATALOG ENTRY, AND EVERY ENTRY NAMES A REAL
+/// VARIABLE. Both directions, scanned from `src/` rather than trusted.
+///
+/// A field report found the capability sandbox — `HELIX_CAP`, `HELIX_ALLOW_FS`,
+/// `HELIX_ALLOW_NET` — complete and enforcing, and discoverable only by grepping the
+/// compiler: `helix search sandbox`, `search HELIX_CAP` and `search environment` all
+/// answered nothing. A security feature nobody can find is a security feature nobody
+/// uses, and that is worse than the two discoverability failures this project has already
+/// paid for, because the cost of not finding this one is an UNGATED program rather than a
+/// slow one.
+///
+/// So the catalog is complete by construction. A new `HELIX_*` read in `src/` fails this
+/// test until it is either documented in `envdocs::ENV` or listed in `envdocs::INTERNAL`
+/// with a reason — the one option removed is saying nothing.
+#[test]
+fn every_env_var_is_documented_or_declared_internal() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    // Every `HELIX_*` literal the source reads, by walking the tree — not a hand-list,
+    // which is the thing that goes stale.
+    fn scan(dir: &std::path::Path, found: &mut std::collections::BTreeSet<String>) {
+        for e in std::fs::read_dir(dir).expect("src/ is readable").flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                scan(&p, found);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let src = std::fs::read_to_string(&p).unwrap_or_default();
+                // Test modules configure the harness, not the language (that is where
+                // `HELIX_SOAK_*` lives, and a soak knob is not user configuration).
+                if p.file_name().is_some_and(|f| f == "tests.rs") {
+                    continue;
+                }
+                // THE CATALOG ITSELF IS NOT A READER. Every entry stores its name as a
+                // literal, so scanning this file would make the orphan direction circular:
+                // a catalogued variable that nothing actually reads would find itself and
+                // pass. Excluding it is what keeps that half of the check honest.
+                if p.file_name().is_some_and(|f| f == "envdocs.rs") {
+                    continue;
+                }
+                let b = src.as_bytes();
+                let mut i = 0;
+                while let Some(k) = src[i..].find("HELIX_") {
+                    let start = i + k;
+                    let mut end = start + "HELIX_".len();
+                    while end < b.len() && (b[end].is_ascii_uppercase() || b[end] == b'_') {
+                        end += 1;
+                    }
+                    // A bare `HELIX_` is prose (`HELIX_*` in a doc comment), not a read.
+                    if end > start + "HELIX_".len() {
+                        found.insert(src[start..end].to_string());
+                    }
+                    i = end;
+                }
+            }
+        }
+    }
+    let mut found = std::collections::BTreeSet::new();
+    scan(&root, &mut found);
+    assert!(found.len() >= 15, "the scan found only {} — it is broken", found.len());
+
+    let (out, err, code) = run(&["describe"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("describe emits JSON");
+    let documented: std::collections::BTreeSet<String> = doc["environment"]
+        .as_array()
+        .expect("describe carries the environment catalog")
+        .iter()
+        .map(|e| e["name"].as_str().unwrap_or("?").to_string())
+        .collect();
+    let internal: std::collections::BTreeSet<String> = doc["environment_internal"]
+        .as_array()
+        .expect("describe carries the internal list")
+        .iter()
+        .map(|e| e["name"].as_str().unwrap_or("?").to_string())
+        .collect();
+
+    let undocumented: Vec<&String> =
+        found.iter().filter(|v| !documented.contains(*v) && !internal.contains(*v)).collect();
+    assert!(
+        undocumented.is_empty(),
+        "these `HELIX_*` variables are read by src/ but appear in neither \
+         `envdocs::ENV` nor `envdocs::INTERNAL`:\n  {}\n\
+         Document them, or declare them internal WITH A REASON.",
+        undocumented.iter().map(|v| v.as_str()).collect::<Vec<_>>().join("\n  ")
+    );
+
+    let orphans: Vec<&String> = documented
+        .iter()
+        .chain(internal.iter())
+        .filter(|v| !found.contains(*v))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "these are catalogued but nothing in src/ reads them — a doc entry for a variable \
+         that does nothing is worse than none:\n  {}",
+        orphans.iter().map(|v| v.as_str()).collect::<Vec<_>>().join("\n  ")
+    );
+}
+
 /// THE DRIFT-PROOF for the docs table: every entry `helix describe` reports
 /// with an `example_out` is EXECUTED (wrapped in `print(...)`, exactly as the
 /// doc-example runner wraps its last line) and must produce byte-for-byte that

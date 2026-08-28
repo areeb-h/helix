@@ -35,7 +35,7 @@
 //! which beats the signature, which beats the prose. Nothing is fuzzy — a row can always
 //! say why it is there, and `--json` names the field.
 
-use crate::{docs, registry, syntaxdocs};
+use crate::{docs, envdocs, registry, syntaxdocs};
 
 /// One catalog entry that matched, with why.
 pub struct Hit {
@@ -258,6 +258,28 @@ pub fn search(query: &str) -> Vec<Hit> {
         }
     }
 
+    // The ENVIRONMENT, last to build and ranked like everything else. `helix search
+    // sandbox` finding nothing is what put this corpus here: the capability sandbox is
+    // complete and enforcing, and the only way to discover it was to grep the compiler.
+    for e in envdocs::ENV {
+        // Scored against WHAT IT IS as well as what it accepts, because the category has
+        // no word inside any entry: `helix search environment` found nothing while
+        // `sandbox` found four, since "[environment]" is a display tag and display tags
+        // are not a corpus. The name stays the displayed signature.
+        let what = format!("{} environment variable setting", e.values);
+        if let Some((score, matched)) = score(&terms, &q, e.name, &what, e.doc, e.notes) {
+            hits.push(Hit {
+                owner: "env",
+                name: e.name,
+                sig: e.name.to_string(),
+                doc: e.doc.to_string(),
+                effect: "pure",
+                matched,
+                score,
+            });
+        }
+    }
+
     // Best first; ties by owner then name so the order is stable between runs — an
     // unstable listing makes a diff of two searches unreadable.
     hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.owner.cmp(b.owner)).then(a.name.cmp(b.name)));
@@ -285,11 +307,12 @@ pub fn render(query: &str, hits: &[Hit]) -> String {
         // usable as printed, where a bare `frequencies()` is not. A language form has no
         // receiver and is shown as written.
         let call = match h.owner {
-            "builtin" | "syntax" => h.sig.clone(),
+            "builtin" | "syntax" | "env" => h.sig.clone(),
             ty => format!("{ty}.{}", h.sig),
         };
         let tag = match h.owner {
             "syntax" => "  [syntax]".to_string(),
+            "env" => "  [environment]".to_string(),
             _ if h.effect == "pure" => String::new(),
             _ => format!("  [{}]", h.effect),
         };

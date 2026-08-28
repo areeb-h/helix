@@ -155,30 +155,82 @@ pub fn current() -> Authority {
     AUTHORITY.get().cloned().unwrap_or_else(Authority::unconfined)
 }
 
-/// Build the authority from the environment (phase 1 bootstrap; the manifest `[capabilities]`
-/// block and `--allow-*` flags supersede this in phase 1b) and install it. `HELIX_CAP=
-/// off|audit|enforce` (default `off`); when a mode is set, `HELIX_ALLOW_FS=read|write|all`
-/// and `HELIX_ALLOW_NET=on` grant coarse categories (default deny).
-pub fn install_from_env() {
-    let mode = match std::env::var("HELIX_CAP").ok().as_deref() {
+/// Build the authority from the environment (phase 1 bootstrap; the manifest
+/// `[capabilities]` block and `--allow-*` flags supersede this in phase 1b) and install it.
+/// `HELIX_CAP=off|audit|enforce` (default `off`); when a mode is set,
+/// `HELIX_ALLOW_FS=read|write|all`, `HELIX_ALLOW_NET=on|all` and
+/// `HELIX_ALLOW_PROCESS=on|all` grant coarse categories (default deny).
+///
+/// **An unrecognised `HELIX_CAP` is REFUSED, not treated as `off`.** It used to fall into
+/// a `_ => Mode::Off` arm, so `HELIX_CAP=enfroce` — a typo in a deployment script, a
+/// Dockerfile, a systemd unit — silently disabled the sandbox and ran the program fully
+/// authorised. That is a security control that FAILS OPEN on a misspelling, and it fails
+/// open silently: the program works, so nothing ever prompts a second look. An empty value
+/// is still `off`, because `HELIX_CAP=` is how a shell unsets a variable it inherited.
+///
+/// Returns the message to print when the environment is malformed; the caller exits. This
+/// is configuration read once at startup, not user program input, so refusing is the
+/// fail-closed answer rather than an ADR 0024 abort.
+pub fn install_from_env() -> Result<(), String> {
+    let raw = std::env::var("HELIX_CAP").ok();
+    let mode = match raw.as_deref() {
         Some("audit") => Mode::Audit,
         Some("enforce") => Mode::Enforce,
-        _ => Mode::Off,
+        None | Some("off") | Some("") => Mode::Off,
+        Some(other) => {
+            return Err(format!(
+                "error: HELIX_CAP is `{other}`, which is not a mode
+                 help: the modes are `off`, `audit` and `enforce`. Refusing rather than                  defaulting to `off`, because a typo here would silently run unsandboxed.
+"
+            ))
+        }
     };
     if mode == Mode::Off {
         install(Authority::unconfined());
-        return;
+        return Ok(());
     }
-    let fs = std::env::var("HELIX_ALLOW_FS").ok().unwrap_or_default();
-    let net = matches!(std::env::var("HELIX_ALLOW_NET").ok().as_deref(), Some("on") | Some("all"));
+    // A GRANT THAT DOES NOT PARSE IS REFUSED, not silently denied. Denying is the safe
+    // half — it fails closed — but it fails closed WITHOUT SAYING SO, and the shape that
+    // makes that dangerous is already in the tree: ADR 0021 describes net authority as "a
+    // host:port allowlist checked before the socket", which is the eventual design and not
+    // what phase 1 parses. A reader who follows it and writes
+    // `HELIX_ALLOW_NET=example.com:443` believes they granted network access, gets
+    // "capability denied" from a program they authorised, and has nothing pointing at the
+    // variable. Refusing at startup turns a confusing runtime denial into one sentence.
+    let grant = |name: &str, allowed: &[&str]| -> Result<Option<String>, String> {
+        match std::env::var(name).ok().as_deref() {
+            // Absent, or emptied — `VAR=` is how a shell unsets one it inherited.
+            None | Some("") => Ok(None),
+            Some(v) if allowed.contains(&v) => Ok(Some(v.to_string())),
+            Some(other) => Err(format!(
+                "error: {name} is `{other}`, which is not a grant\n\
+                 help: the values are {}. Phase 1 grants are coarse on/off; scoped paths \
+                 and host:port arrive with cap-std (ADR 0021), so a path or a hostname \
+                 here is refused rather than silently granting nothing.\n",
+                allowed.iter().map(|a| format!("`{a}`")).collect::<Vec<_>>().join(" or ")
+            )),
+        }
+    };
+    let fs = grant("HELIX_ALLOW_FS", &["read", "write", "all"])?.unwrap_or_default();
+    let on = |v: Option<String>| v.is_some();
     install(Authority {
         mode,
         fs_read: fs == "read" || fs == "all",
         fs_write: fs == "write" || fs == "all",
-        net,
-        process: false,
+        net: on(grant("HELIX_ALLOW_NET", &["on", "all"])?),
+        // PROCESS AUTHORITY IS GRANTABLE. It was hardcoded `false` here while
+        // `unconfined()` set it `true`, so `run` (ADR 0037 D3, the only `Process`
+        // builtin) was unconditionally denied under `audit` and `enforce` with no way to
+        // allow it — turning the sandbox on broke every program that shells out, and the
+        // only remedy was to turn it back off. A category you cannot grant is not a
+        // sandbox, it is a wall.
+        process: on(grant("HELIX_ALLOW_PROCESS", &["on", "all"])?),
+        // `Effect::Env` is classified but no builtin carries it yet (ADR 0037 D2 leaves
+        // `env` with zero builtins), so there is nothing to grant and no variable for it.
+        // It gains one in the same change that gives `env` a builtin.
         env: false,
     });
+    Ok(())
 }
 
 /// A human-readable target (first string argument) for the audit log, if any — e.g. the path
