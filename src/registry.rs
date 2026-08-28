@@ -358,7 +358,8 @@ pub static RECORD_METHODS: &[&str] = &["get", "expect", "has", "keys", "values",
 /// listener (from `listen(port)`) has `accept`; a connection (from `accept()`) has
 /// `respond`. Effects, dispatched at runtime like the other opaque types.
 pub static NET_METHODS: &[&str] = &[
-    "accept", "poll", "request", "respond", "sse", "send", "next", "status", "close",
+    "accept", "poll", "request", "respond", "sse", "stream", "send", "next", "status",
+    "close",
     // Cooperative event-loop server (keep-alive, one thread serves many connections):
     "accept_poll", "poll_request", "is_open", "wait",
     // Cookie jar (the `Net` value also carries a jar): inspect and clear.

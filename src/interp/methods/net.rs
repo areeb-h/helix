@@ -124,6 +124,16 @@ pub(crate) fn net_method(
             }
             crate::serve::respond(h, &args[0], line, col)
         }
+        "stream" => {
+            if args.len() != 1 {
+                return Err(HelixError::new(
+                    format!("`stream` takes 1 argument (the response), got {}", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            crate::serve::stream_begin(h, &args[0], line, col)
+        }
         "sse" => {
             if !args.is_empty() {
                 return Err(HelixError::new("`sse` takes no arguments", line, col));

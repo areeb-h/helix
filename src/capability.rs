@@ -88,7 +88,10 @@ pub fn method_effect_of(name: &str) -> Effect {
     match name {
         "write_to" | "append_to" | "write_csv" | "write_tsv" | "write_json" | "write_parquet"
         | "write_fasta" | "write_fastq" => Effect::FsWrite,
-        "accept" | "poll" | "respond" | "sse" | "send" => Effect::Net,
+        // `stream` opens a response on the socket exactly as `sse` does, so it carries
+        // the same authority. Missing a name here is not a slow path, it is an UNGATED
+        // one — the gate keys on the name alone.
+        "accept" | "poll" | "respond" | "sse" | "stream" | "send" => Effect::Net,
         _ => Effect::Pure,
     }
 }

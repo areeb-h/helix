@@ -5340,7 +5340,16 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // `regexes` its compilation memo. Entered at today's numbers, which is what a
         // ratchet is for — the point is that they cannot grow unreviewed, not that 17 is
         // a good number.
-        ("src/serve.rs", 15),
+        // 21: +6 for the streaming response (`stream`/`send`/`close`). Every one is a
+        // `RefCell` borrow, and a borrow can only panic if something RE-ENTERS and borrows
+        // the same cell while a guard is live. Nothing on this path can: `stream` and
+        // `pending` are distinct cells, so holding one while taking the other is not a
+        // conflict; each is borrowed at most once at a time; and `push_and_flush` /
+        // `push_chunk` are leaves that touch only the socket and the buffer handed to
+        // them, never calling back into the interpreter. `close` was rewritten to take one
+        // guard instead of two for exactly this reason — not because two was a bug, but
+        // because each extra borrow is somewhere a later edit can nest one.
+        ("src/serve.rs", 21),
         ("src/cookiejar.rs", 9),
         ("src/autodiff.rs", 12),
         ("src/regexes.rs", 2),
@@ -7668,6 +7677,95 @@ fn a_nested_string_in_a_hole_keeps_its_own_escapes() {
     let (_, err, code) = run_source("print(\"x{\"a\\qb\"}y\")\n", &[], "hole_bad");
     assert_eq!(code, Some(1));
     assert!(err.contains("unknown string escape"), "{err}");
+}
+
+/// A RESPONSE BODY CAN BE SENT IN PIECES, and the framing follows the client's HTTP
+/// version rather than an assumption.
+///
+/// `Net` streamed exactly one way: `sse()` opens an `text/event-stream`, and `respond`
+/// sends a complete reply. So a document slow to produce could not be flushed as it was
+/// produced — the first byte waited for the last. A field report building a server-rendered
+/// UI reached this trying to match streaming SSR and identified the opening correctly: the
+/// socket already stays open and takes incremental writes, because `sse` does exactly that.
+///
+/// Asserted ON THE WIRE, byte for byte, because chunked framing is the kind of thing that
+/// looks right in a browser while being subtly wrong — a missing terminator presents as a
+/// hang, and a chunk header sent to an HTTP/1.0 client presents as garbage in the document.
+#[test]
+fn a_response_body_can_be_streamed_in_pieces() {
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
+
+    let dir = std::env::temp_dir().join("helix_it_stream");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("s.helix");
+
+    let mut last = String::new();
+    for attempt in 0..3 {
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        std::fs::write(
+            &prog,
+            format!(
+                "fn serve(srv, left) = if left == 0 then \"done\" else do {{\n\
+                 \x20 c = srv.accept()\n\
+                 \x20 a = c.stream({{status: 200, html: \"<h1>shell</h1>\"}})\n\
+                 \x20 b = c.send(\"<p>rest</p>\")\n\
+                 \x20 c.close()\n\
+                 \x20 serve(srv, left - 1)\n\
+                 }}\n\
+                 srv = listen({port})\n\
+                 print(serve(srv, 2))\n"
+            ),
+        )
+        .unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_helix"))
+            .arg(prog.to_str().unwrap())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn helix");
+
+        let addr = format!("127.0.0.1:{port}");
+        let mut up = false;
+        for _ in 0..100 {
+            if TcpStream::connect(&addr).is_ok() {
+                up = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // The probe consumed one accept; two remain for the two requests below… so ask
+        // for one fewer than the program serves.
+        if !up {
+            let _ = child.kill();
+            last = format!("attempt {attempt}: never bound");
+            continue;
+        }
+
+        let speak = |req: &str| -> String {
+            let mut c = TcpStream::connect(&addr).expect("connect");
+            c.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+            c.write_all(req.as_bytes()).expect("write");
+            let mut buf = Vec::new();
+            let _ = c.read_to_end(&mut buf);
+            String::from_utf8_lossy(&buf).into_owned()
+        };
+
+        // HTTP/1.1 — chunked, with the length of each piece in hex and a terminator.
+        let r = speak("GET / HTTP/1.1\r\nHost: h\r\n\r\n");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(r.contains("Transfer-Encoding: chunked"), "1.1 must be chunked: {r:?}");
+        assert!(!r.contains("Content-Length"), "a stream has no length: {r:?}");
+        // `<h1>shell</h1>` is 14 bytes (0xe), `<p>rest</p>` is 11 (0xb).
+        assert!(r.contains("e\r\n<h1>shell</h1>\r\n"), "first piece framed: {r:?}");
+        assert!(r.contains("b\r\n<p>rest</p>\r\n"), "second piece framed: {r:?}");
+        assert!(r.ends_with("0\r\n\r\n"), "close must terminate the body: {r:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    panic!("could not run the streaming test: {last}");
 }
 
 /// THE CAPABILITY ENVIRONMENT FAILS CLOSED **AND LOUDLY**, and a granted category works.

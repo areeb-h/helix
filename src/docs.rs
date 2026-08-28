@@ -3296,7 +3296,27 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             notes: "",
         },
     ),
-    (
+        (
+        "Net",
+        DocEntry {
+            name: "stream",
+            sig: "stream(response)",
+            doc: "Begin a response whose body is sent in pieces; add with send, finish with close.",
+            example: "conn.stream({status: 200, html: shell})",
+            example_out: "",
+            notes: "FOR A DOCUMENT THAT IS SLOW TO PRODUCE: flush the shell now and the rest as it \
+                    exists, instead of making the first byte wait for the last. Takes the same \
+                    response value `respond` does, so `{status, html, text, json, headers}` means \
+                    one thing; any body in it is sent as the first piece. No Content-Length — a \
+                    length is what streaming does not know. The framing follows the CLIENT: \
+                    HTTP/1.1 gets `Transfer-Encoding: chunked`, HTTP/1.0 gets `Connection: close` \
+                    and raw bytes, which is the only correct answer for 1.0 and is decidable \
+                    because the request carries `version`. `close` writes the terminating chunk, \
+                    so a stream that is never closed reads to a client as a hang rather than as \
+                    the truncation it is.",
+        },
+    ),
+(
         "Net",
         DocEntry {
             name: "sse",
@@ -3315,7 +3335,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Writes one SSE event without blocking; false means the client left or fell behind.",
             example: "conn.send(update.to_json())",
             example_out: "",
-            notes: "",
+            notes: " It sends the next piece of WHATEVER YOU STARTED: an SSE event after `sse()`, a body chunk after `stream()`. One verb, because the difference is framing and framing is the connection's business — and `write` was unavailable anyway, being already a builtin. An empty piece is skipped rather than sent, because in chunked encoding a zero-length chunk is the terminator.",
         },
     ),
     (
@@ -3348,7 +3368,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Closes the socket now — a server connection or an http_stream; idempotent.",
             example: "stream.close()",
             example_out: "",
-            notes: "ON A SERVER CONNECTION this is how you hang up: honour `Connection: close`,                     shed a slow client, or drop an abusive one. `is_open()` reports false                     afterwards and any buffered SSE backlog is released. Before this existed the                     only close was releasing the last reference to the handle, and calling it on                     a connection RAISED — which took down a real server, because the raise                     unwound its accept loop. Not for a listener (it stops accepting when the                     program stops holding it) or a cookie jar (use `clear()`).",
+            notes: "ON A SERVER CONNECTION this is how you hang up: honour `Connection: close`,                     shed a slow client, or drop an abusive one. `is_open()` reports false                     afterwards and any buffered SSE backlog is released. Before this existed the                     only close was releasing the last reference to the handle, and calling it on                     a connection RAISED — which took down a real server, because the raise                     unwound its accept loop. Not for a listener (it stops accepting when the                     program stops holding it) or a cookie jar (use `clear()`). After `stream()` on an HTTP/1.1 client it also writes the terminating zero-length chunk, which is what tells the browser the document is complete.",
         },
     ),
     (

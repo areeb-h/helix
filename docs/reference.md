@@ -3555,7 +3555,7 @@ Empties the cookie jar.
 
 Closes the socket now — a server connection or an http_stream; idempotent.
 
-**Note:** ON A SERVER CONNECTION this is how you hang up: honour `Connection: close`,                     shed a slow client, or drop an abusive one. `is_open()` reports false                     afterwards and any buffered SSE backlog is released. Before this existed the                     only close was releasing the last reference to the handle, and calling it on                     a connection RAISED — which took down a real server, because the raise                     unwound its accept loop. Not for a listener (it stops accepting when the                     program stops holding it) or a cookie jar (use `clear()`).
+**Note:** ON A SERVER CONNECTION this is how you hang up: honour `Connection: close`,                     shed a slow client, or drop an abusive one. `is_open()` reports false                     afterwards and any buffered SSE backlog is released. Before this existed the                     only close was releasing the last reference to the handle, and calling it on                     a connection RAISED — which took down a real server, because the raise                     unwound its accept loop. Not for a listener (it stops accepting when the                     program stops holding it) or a cookie jar (use `clear()`). After `stream()` on an HTTP/1.1 client it also writes the terminating zero-length chunk, which is what tells the browser the document is complete.
 
 ```
 >>> stream.close()
@@ -3623,6 +3623,8 @@ Sends the reply: a record with {status, json, html, text}, a string, or JSON.
 
 Writes one SSE event without blocking; false means the client left or fell behind.
 
+**Note:**  It sends the next piece of WHATEVER YOU STARTED: an SSE event after `sse()`, a body chunk after `stream()`. One verb, because the difference is framing and framing is the connection's business — and `write` was unavailable anyway, being already a builtin. An empty piece is skipped rather than sent, because in chunked encoding a zero-length chunk is the terminator.
+
 ```
 >>> conn.send(update.to_json())
 ```
@@ -3641,6 +3643,16 @@ The HTTP status code of an http_stream response (e.g. 200).
 
 ```
 >>> stream.status()
+```
+
+### `stream(response)`
+
+Begin a response whose body is sent in pieces; add with send, finish with close.
+
+**Note:** FOR A DOCUMENT THAT IS SLOW TO PRODUCE: flush the shell now and the rest as it exists, instead of making the first byte wait for the last. Takes the same response value `respond` does, so `{status, html, text, json, headers}` means one thing; any body in it is sent as the first piece. No Content-Length — a length is what streaming does not know. The framing follows the CLIENT: HTTP/1.1 gets `Transfer-Encoding: chunked`, HTTP/1.0 gets `Connection: close` and raw bytes, which is the only correct answer for 1.0 and is decidable because the request carries `version`. `close` writes the terminating chunk, so a stream that is never closed reads to a client as a hang rather than as the truncation it is.
+
+```
+>>> conn.stream({status: 200, html: shell})
 ```
 
 ### `wait(conns, timeout_ms)`

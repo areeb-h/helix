@@ -34,6 +34,28 @@ use crate::value::{DictKey, Value};
 /// carries the already-parsed `request` record plus its writable `stream`; the stream
 /// is taken out of the `Option` when responded to, so a second `respond` on the same
 /// connection is a clean error rather than a double write.
+/// How an open streaming response is framed.
+///
+/// `send` writes "the next piece of whatever you started", and what a piece looks like on
+/// the wire is exactly this. Keeping it on the connection is what lets ONE verb serve both
+/// an SSE event stream and a chunked document, instead of a second write-verb whose only
+/// difference is framing — and `write` was not available for that anyway: it is already a
+/// builtin (`print`/`emit`/`write`), so a `conn.write` would have been a second meaning
+/// for a word the language already spends.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Streaming {
+    /// No streaming response open; `send` frames as SSE, which is what it always did.
+    No,
+    /// `sse()` — `data: …\n\n` events.
+    Sse,
+    /// `stream()` on an HTTP/1.1 client — `<hex len>\r\n<bytes>\r\n`, ended by a
+    /// zero-length chunk that `close` writes.
+    Chunked,
+    /// `stream()` on an HTTP/1.0 client — raw bytes, framed by the close itself, because
+    /// 1.0 has no chunked encoding. Decidable only because the request carries `version`.
+    Raw,
+}
+
 pub enum NetHandle {
     Listener(TcpListener),
     Conn {
@@ -53,6 +75,11 @@ pub enum NetHandle {
         /// sends `Connection: keep-alive` instead of closing.
         open: Cell<bool>,
         event: Cell<bool>,
+        /// WHICH KIND of streaming response is open, which decides how `send` frames the
+        /// next piece and whether `close` owes a terminator. A bool could not express it:
+        /// an SSE stream and an HTTP/1.0 chunkless stream are both "not chunked" and are
+        /// framed completely differently.
+        stream_mode: Cell<Streaming>,
         /// The other end of the socket, as the `{address, port}` record the request
         /// carries — BUILT ONCE, here, because it cannot change while the socket is open
         /// and a keep-alive connection serves many requests through it. Also the only
@@ -449,8 +476,23 @@ pub fn stream_close(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<V
         // for exactly this, and `open` is the flag `is_open` reports. Dropping the stream
         // closes the socket; setting `open` false makes the connection agree with what
         // the program can already observe.
-        NetHandle::Conn { stream, open, pending, .. } => {
-            *stream.borrow_mut() = None;
+        NetHandle::Conn { stream, open, pending, stream_mode, .. } => {
+            // A CHUNKED RESPONSE ENDS WITH A ZERO-LENGTH CHUNK. Dropping the socket
+            // without it leaves the client waiting for an end that never arrives, which
+            // presents as a hang rather than as the truncation it is.
+            // ONE GUARD for both the terminator and the drop. Taking `borrow_mut`
+            // twice in sequence works, but every extra borrow is a place a later edit
+            // can nest one inside another, and a nested borrow is a host abort
+            // (ADR 0024) reachable from a client's traffic.
+            let mut g = stream.borrow_mut();
+            if stream_mode.replace(Streaming::No) == Streaming::Chunked
+                && let Some(st) = g.as_mut()
+            {
+                // `pending` is a DIFFERENT cell, so this cannot conflict with `g`.
+                    let _ = push_and_flush(st, &mut pending.borrow_mut(), b"0\r\n\r\n");
+            }
+            *g = None;
+            drop(g);
             open.set(false);
             // Buffered SSE bytes can never be sent now, so release them from the
             // shard-wide budget here rather than leaving it shrunk until the handle
@@ -505,6 +547,7 @@ fn finish_connection(
             inbuf: RefCell::new(Vec::new()),
             open: Cell::new(true),
             event: Cell::new(false),
+            stream_mode: Cell::new(Streaming::No),
             peer,
         }))),
         Err(e) => {
@@ -987,6 +1030,7 @@ pub fn accept_poll(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Va
                 inbuf: RefCell::new(Vec::new()),
                 open: Cell::new(true),
                 event: Cell::new(true),
+                stream_mode: Cell::new(Streaming::No),
                 peer: peer_value(&peer),
             })))
         }
@@ -1308,8 +1352,8 @@ fn merge_headers(
 /// `conn.sse()` — begin a Server-Sent-Events response: status `200`, `text/event-stream`,
 /// no `Content-Length`, the socket kept open. Drive it with `conn.send(value)` per event.
 pub fn sse(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, HelixError> {
-    let (cell, pending) = match &**handle {
-        NetHandle::Conn { stream, pending, .. } => (stream, pending),
+    let (cell, pending, mode) = match &**handle {
+        NetHandle::Conn { stream, pending, stream_mode, .. } => (stream, pending, stream_mode),
         _ => {
             return Err(HelixError::new("`sse` works on a connection from `accept()`", line, col));
         }
@@ -1324,10 +1368,110 @@ pub fn sse(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, Hel
     // already gone, the next `send` reports it.
     stream.set_nonblocking(true).ok();
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
-    if !push_and_flush(stream, &mut pending.borrow_mut(), head.as_bytes()) {
+    if push_and_flush(stream, &mut pending.borrow_mut(), head.as_bytes()) {
+        mode.set(Streaming::Sse);
+    } else {
         *guard = None; // client already gone
     }
     Ok(Value::Unit)
+}
+
+/// `conn.stream(response)` — begin a response whose body is written INCREMENTALLY.
+///
+/// **The gap this closes.** `Net` streamed exactly one way: `sse()` opens an
+/// `text/event-stream`, and `respond` sends a complete reply. So a document that is slow
+/// to produce could not be flushed as it was produced — the first paint had to wait for
+/// the last byte. A field report building a server-rendered UI reached this trying to
+/// match streaming SSR, and correctly identified that the socket already stays open and
+/// accepts incremental writes: `sse` proves it. This is that mechanism with the framing
+/// generalized and the content type left to the caller.
+///
+/// Takes the SAME response value `respond` does — `{status, html, text, json, headers}` —
+/// so "what a response is" has one spelling. Any body in it is sent as the FIRST chunk,
+/// which makes `stream({status: 200, html: shell})` the natural way to flush a page shell
+/// before the slow part exists.
+///
+/// **The framing depends on the client's HTTP version, and that is now decidable.**
+/// HTTP/1.1 gets `Transfer-Encoding: chunked`. HTTP/1.0 has no chunked encoding, so it
+/// gets `Connection: close` and the raw bytes, framed by the close itself — the one
+/// correct answer for 1.0, and unavailable until the request record started carrying
+/// `version`.
+///
+/// `Content-Length` is deliberately absent: a length is what streaming does not know.
+pub fn stream_begin(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
+    let (cell, pending, mode, request) = match &**handle {
+        NetHandle::Conn { stream, pending, stream_mode, request, .. } => {
+            (stream, pending, stream_mode, request)
+        }
+        _ => {
+            return Err(HelixError::new(
+                "`stream` works on a connection from `accept()`, not a listener",
+                line,
+                col,
+            ))
+        }
+    };
+    if mode.get() != Streaming::No {
+        return Err(HelixError::new("this connection is already streaming", line, col)
+            .hint("`stream` (or `sse`) begins a response once; add to it with `send`, finish with `close`."));
+    }
+    let (status, headers, body) = build_response(value, line, col)?;
+
+    // HTTP/1.0 has no chunked transfer encoding. Reading the version rather than assuming
+    // 1.1 is what keeps a 1.0 client from being sent hex chunk lengths as document text.
+    let one_zero = matches!(request, Value::Record(f)
+        if f.iter().any(|(k, v)| k.as_str() == "version"
+            && matches!(v, Value::Str(s) if s.as_str() == "1.0")));
+
+    let mut guard = cell.borrow_mut();
+    let st = match guard.as_mut() {
+        Some(s) => s,
+        None => return Err(HelixError::new("this connection is already closed", line, col)),
+    };
+    st.set_nonblocking(true).ok();
+
+    use std::fmt::Write as _;
+    let mut head = String::with_capacity(128 + body.len());
+    let _ = write!(head, "HTTP/1.1 {status} {reason}\r\n", reason = reason_phrase(status));
+    for (k, v) in &headers {
+        head.push_str(k);
+        head.push_str(": ");
+        head.push_str(v);
+        head.push_str("\r\n");
+    }
+    head.push_str(if one_zero {
+        "Connection: close\r\n\r\n"
+    } else {
+        "Transfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n"
+    });
+
+    let mut buf = pending.borrow_mut();
+    let mut alive = push_and_flush(st, &mut buf, head.as_bytes());
+    if alive && !body.is_empty() {
+        alive = push_chunk(st, &mut buf, &body, !one_zero);
+    }
+    drop(buf);
+    if alive {
+        mode.set(if one_zero { Streaming::Raw } else { Streaming::Chunked });
+    } else {
+        *guard = None;
+    }
+    Ok(Value::Bool(alive))
+}
+
+/// One body chunk, framed for the transfer encoding in use.
+fn push_chunk(stream: &mut TcpStream, pending: &mut Vec<u8>, body: &str, chunked: bool) -> bool {
+    if !chunked {
+        return push_and_flush(stream, pending, body.as_bytes());
+    }
+    // `<hex len>\r\n<bytes>\r\n`, built in one buffer so a chunk is never split across
+    // two pushes — a half-written chunk header is a protocol error, and `push_and_flush`
+    // may legitimately buffer a partial write for a slow client.
+    let mut framed = Vec::with_capacity(body.len() + 16);
+    framed.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
+    framed.extend_from_slice(body.as_bytes());
+    framed.extend_from_slice(b"\r\n");
+    push_and_flush(stream, pending, &framed)
 }
 
 /// `conn.send(value)` — write one SSE event (`data: …\n\n`) on a streaming connection,
@@ -1335,8 +1479,8 @@ pub fn sse(handle: &Rc<NetHandle>, line: usize, col: usize) -> Result<Value, Hel
 /// was sent or buffered), `false` the client is gone or too far behind to keep up (so the
 /// producer loop drops it). A string/`Dna` is sent verbatim; any other value as JSON.
 pub fn send(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
-    let (cell, pending) = match &**handle {
-        NetHandle::Conn { stream, pending, .. } => (stream, pending),
+    let (cell, pending, mode) = match &**handle {
+        NetHandle::Conn { stream, pending, stream_mode, .. } => (stream, pending, stream_mode),
         _ => {
             return Err(HelixError::new("`send` works on a connection from `accept()`", line, col));
         }
@@ -1358,6 +1502,31 @@ pub fn send(handle: &Rc<NetHandle>, value: &Value, line: usize, col: usize) -> R
             }
         },
     };
+    // A CHUNKED OR RAW RESPONSE takes the payload as a body chunk, not an SSE event —
+    // `send` means "the next piece of whatever you started", and what a piece looks like
+    // on the wire is the mode's business rather than the caller's. Returning early keeps
+    // the SSE framing below exactly as it was for every existing program.
+    //
+    // An empty piece is skipped: in chunked encoding a zero-length chunk is the
+    // TERMINATOR, so writing one would end the document mid-stream, and `close` owns that.
+    let m = mode.get();
+    if matches!(m, Streaming::Chunked | Streaming::Raw) {
+        if payload.is_empty() {
+            return Ok(Value::Bool(true));
+        }
+        let mut guard = cell.borrow_mut();
+        let alive = match guard.as_mut() {
+            Some(st) => {
+                push_chunk(st, &mut pending.borrow_mut(), payload, m == Streaming::Chunked)
+            }
+            None => false,
+        };
+        if !alive {
+            *guard = None;
+        }
+        return Ok(Value::Bool(alive));
+    }
+
     // SSE framing: each line of the payload is its own `data:` field; a blank line ends
     // the event (so a multi-line body is delivered as one event, per the spec). Pre-size
     // the frame: "data: " + line + '\n' per line (7 bytes of framing), plus a trailing '\n'.
