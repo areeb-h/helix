@@ -2251,6 +2251,34 @@ fn lint_source(shown: &str, src: &str) -> Vec<String> {
                     // `xs.reduce(dict(), …)` — the fold that stands in for
                     // `to_dict()`, with the last-wins rule attached so a
                     // mechanical migration cannot invert a first-wins fold.
+                    // A COLLECTION ACCUMULATED INSIDE A RECORD, which ADR 0029's
+                    // amortized-linear guarantee does not reach — and which is the shape
+                    // AGENTS.md teaches, because `mut` is top-level only and a fold
+                    // carrying two values has to carry them in a record.
+                    //
+                    // `Op::ConcatIntoLocal` is a take-append-store in ONE instruction, and
+                    // its own doc says why that is what makes it safe: the slot is never
+                    // observably empty, so there is nothing to prove. Through a record
+                    // field there is no such slot — reading `a.xs` clones the `Rc` while
+                    // the record still holds one, so the append copies. Silence here would
+                    // be the performance cliff ADR 0026 forbids.
+                    Expr::Method { name, args, line, .. }
+                        if name == "reduce"
+                            && matches!(args.first(), Some(Expr::Record(fs))
+                                if fs.iter().any(|(_, v)| matches!(v, Expr::Array(xs) if xs.is_empty())
+                                    || matches!(v, Expr::Call { name: n, args: a, .. } if n == "dict" && a.is_empty()))) =>
+                    {
+                        notes.push((*line, format!(
+                            "{shown}:{line}: this fold accumulates a collection INSIDE a \
+                             record, which ADR 0029's amortized-linear guarantee does not \
+                             cover — the take-append-store that makes `acc = acc.concat(…)` \
+                             linear only fires when the accumulator IS the local, so through \
+                             a field every step copies and the fold is O(n^2). Measured over \
+                             8x the input: 3.8x for a bare accumulator, 22.8x for a record \
+                             field. Fine for tens or hundreds of steps; for thousands, fold \
+                             the collection on its own and carry the rest beside it."
+                        )));
+                    }
                     Expr::Method { name, args, line, .. } if name == "reduce" => {
                         if matches!(args.first(),
                             Some(Expr::Call { name: n, args: a, .. }) if n == "dict" && a.is_empty())

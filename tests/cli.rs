@@ -7279,6 +7279,45 @@ fn test_json_and_check_lint() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(lcode, Some(0), "lints never change the exit code");
     assert!(lout.contains("LAST-wins"), "{lout}");
+
+    // ADR 0029's guarantee stops at a record field, and the lint is what makes that
+    // audible. `mut` is top-level only, so a fold carrying two values carries them in a
+    // record — the shape AGENTS.md teaches — and through a field the take-append-store
+    // cannot fire, so the fold is quadratic with nothing to say so.
+    // The block above removes `dir` before asserting, so re-make it.
+    std::fs::create_dir_all(&dir).unwrap();
+    let acc = dir.join("acc.helix");
+    std::fs::write(
+        &acc,
+        "r = range(0, 4).reduce({xs: [], k: 0}, (a, i) => {xs: a.xs.concat([i]), k: a.k + 1})
+print(r.k)
+",
+    )
+    .unwrap();
+    let (aout, _, acode) = run(&["check", "--lint", acc.to_str().unwrap()], &[], "");
+    assert_eq!(acode, Some(0), "lints never change the exit code");
+    assert!(aout.contains("ADR 0029"), "the record-field fold must be named: {aout}");
+    assert!(aout.contains("O(n^2)"), "and its class stated: {aout}");
+
+    // A BARE accumulator is the covered case and must stay silent, or the lint teaches
+    // people to avoid the spelling that actually works.
+    let bare = dir.join("bare.helix");
+    std::fs::write(&bare, "print(range(0, 4).reduce([], (a, i) => a.concat([i])).count())
+").unwrap();
+    let (bout, _, _) = run(&["check", "--lint", bare.to_str().unwrap()], &[], "");
+    assert!(!bout.contains("ADR 0029"), "a bare accumulator is linear: {bout}");
+
+    // …and so must a record accumulator carrying no collection at all.
+    let scalar = dir.join("scalar.helix");
+    std::fs::write(
+        &scalar,
+        "print(range(0, 4).reduce({sum: 0, k: 0}, (a, i) => {sum: a.sum + i, k: a.k + 1}).sum)
+",
+    )
+    .unwrap();
+    let (sout, _, _) = run(&["check", "--lint", scalar.to_str().unwrap()], &[], "");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!sout.contains("ADR 0029"), "no collection, no cliff: {sout}");
     assert!(lout.contains("unary minus"), "{lout}");
     assert!(lout.contains("no `>>>` doc example"), "{lout}");
 }

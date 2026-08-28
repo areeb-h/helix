@@ -1986,6 +1986,8 @@ The p-th quantile (p in [0, 1]) of the values, linearly interpolated.
 
 Fold left-to-right: the accumulator starts at init, f(acc, x) per element.
 
+**Note:** Building a collection here is amortized LINEAR when the accumulator IS the collection (ADR 0029), and QUADRATIC when it is a field of a record — the take-append-store only fires on a local, so through a field every step copies. That matters because `mut` is top-level only, so a fold carrying two values carries them in a record; `helix check --lint` names the shape when you write it.
+
 ```
 >>> [1, 2, 3].reduce(0, (acc, x) => acc + x)
 6

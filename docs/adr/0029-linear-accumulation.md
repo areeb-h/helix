@@ -17,6 +17,56 @@
   [ADR 0026 — Library performance boundary](0026-library-performance-boundary.md) (a
   performance cliff is a diagnostic or a fix, never silence).
 
+## Amendment (2026-08-28) — the guarantee stops at a record field
+
+**Reported from the field, reproduced here.** The guarantee holds for a bare
+accumulator and does **not** hold when the collection is a field of a record:
+
+| accumulator | 8x the input | class |
+|---|--:|---|
+| `reduce([], (a, i) => a.concat([i]))` | **3.8x** | linear |
+| `reduce({xs: [], k: 0}, (a, i) => {xs: a.xs.concat([i]), k: a.k + 1})` | **22.8x** | quadratic |
+
+*(min of 3, load 0.21, n from 2,000 to 16,000.)*
+
+**Why.** `Op::ConcatIntoLocal` is a take-append-store in ONE instruction, and its own
+doc records that this is what makes it safe: the slot is never observably empty, so
+there is nothing for a liveness analysis to get wrong. Through a record field there is
+no such slot — evaluating `a.xs` clones the `Rc` while the record still holds one, so
+`concat` sees a shared array and copies it.
+
+**Why this is not a niche shape.** `mut` is top-level only, so a fold carrying more
+than one value *must* carry them in a record — which is what `AGENTS.md` teaches:
+*"state that crosses a sequence is threaded, with `reduce`"*. **The recommended idiom
+for multi-value accumulation defeats the accumulation guarantee**, with no diagnostic
+and nothing in `describe` to warn a reader who is doing exactly what the guide says.
+
+**What changed now.** `helix check --lint` names the shape, with the measured ratios
+and what to do instead. ADR 0026 says a performance cliff is a diagnostic or a fix and
+never silence; until the fix exists this is the diagnostic. `Array.reduce`'s catalog
+entry carries the same boundary, so `helix describe reduce` shows it.
+
+**What a real fix would be, and why neither is in this change.** Two candidates, both
+larger than a lint and both needing their own ADR:
+
+1. *Teach the take-append-store through a field.* Recognise
+   `acc = {f: acc.f.concat(e), …}` and mutate `acc`'s field in place when both `Rc`s are
+   unique, falling back to the copy otherwise — the refcount guard makes the "someone
+   else captured it" case safe for free. The hazard is a later initializer in the same
+   record literal reading `acc.f` and seeing the appended value; excluding that needs a
+   syntactic uniqueness check, and a syntactic check is exactly how an optimization
+   grows a cliff at its own edge — the thing ADR 0026 forbids.
+2. *A lazy append node in `ArrayData`.* `concat` on a shared array returns
+   `Concat { head, tail }` in O(1) and materialises once on first flat read.
+   General, no pattern-matching, no cliff, and `ArrayData::Enumerate` is precedent for a
+   lazy variant — but it touches every consumer of a core type, where a bug is a wrong
+   answer rather than a slow one.
+
+**The three instances found in the field are all latent, and that was checked rather
+than assumed**: a server event loop flat from 10 to 320 connections, a training loop
+whose per-batch float append is noise against a forward/backward pass, and a template
+compiler whose real inputs are 6-8 instructions against an adversarial 800.
+
 ## Context
 
 Building a collection one element at a time is how programs are written:
