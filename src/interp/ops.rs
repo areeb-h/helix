@@ -97,8 +97,8 @@ pub(crate) fn eval_binary(
         // below match `ArrayData::Ints` specifically (an unmatched `Range` would fall to the f64
         // path and wrongly promote to `Float`), so materialize a range operand to `Ints` first.
         // Arithmetic consumes every element anyway, so laziness buys nothing here.
-        densify_range(&mut l);
-        densify_range(&mut r);
+        densify_lazy(&mut l);
+        densify_lazy(&mut r);
         // Memory fast path: when an array operand is a unique temporary (`Rc` count 1, as
         // every intermediate in a chain like `(a+b)*c` is), reuse its buffer in place
         // instead of allocating a new one. Falls through untouched (`l`/`r` intact) when
@@ -521,7 +521,10 @@ fn try_inplace_broadcast(op: &BinOp, l: &mut Value, r: &mut Value) -> Option<Val
 /// Materialize a lazy `range` value into its packed `Ints` array so it behaves IDENTICALLY to the
 /// equivalent `Int` array in the typed arithmetic fast paths (which match `ArrayData::Ints`). A
 /// no-op for every non-range value.
-fn densify_range(v: &mut Value) {
+/// Materialize a LAZY array in place — `vm::densify_lazy_top`'s tree-walker twin, and the
+/// other half of the one door. See that function for why both exist rather than a fallback
+/// per consumer.
+fn densify_lazy(v: &mut Value) {
     let ints = match v {
         Value::Array(a) if matches!(&**a, crate::value::ArrayData::Range { .. }) => {
             Some(a.to_ints().expect("Range → Ints").into_owned())

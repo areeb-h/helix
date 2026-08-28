@@ -5300,6 +5300,13 @@ fn fasta_enforces_the_dna_invariant_at_the_boundary() {
 /// Rust's sort panic). Each was found by a human hunt months apart, which does
 /// not scale.
 ///
+/// A PANICKING CALL HERE MEANS `.unwrap()`, `.expect(…)`, **or a `RefCell` borrow** —
+/// `borrow()` and `borrow_mut()` abort the process on a conflicting borrow just as surely,
+/// and for a value payload that is interior-mutable the conflict is reachable from a Helix
+/// program (an array operation re-entered while a borrow is live). They were invisible to
+/// this filter until 2026-08-28; no budgeted file used one at the time, so closing it was
+/// free.
+///
 /// This is a RATCHET, not a ban. The ~90 existing calls are proven-by-
 /// construction, not sloppiness: 38 of vm.rs's are `stack.pop().unwrap()`, sound
 /// because the compiler emits balanced code; the rest are guarded (a
@@ -5327,6 +5334,16 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         ("src/interp/methods/net.rs", 0),
         ("src/interp/methods/string.rs", 0),
         ("src/interp/ops.rs", 3),
+        // NOT AUDITED UNTIL NOW, and the first of them takes bytes from strangers. Their
+        // counts are `RefCell` borrows, not unwraps: `serve.rs` holds its socket, backlog
+        // and inbound buffer behind cells, `cookiejar` its jar, `autodiff` its tape, and
+        // `regexes` its compilation memo. Entered at today's numbers, which is what a
+        // ratchet is for — the point is that they cannot grow unreviewed, not that 17 is
+        // a good number.
+        ("src/serve.rs", 15),
+        ("src/cookiejar.rs", 9),
+        ("src/autodiff.rs", 12),
+        ("src/regexes.rs", 2),
         ("src/interp/access.rs", 1),
         ("src/interp/builtins/autodiff_fns.rs", 0),
         ("src/interp/builtins/bio.rs", 0),
@@ -5400,7 +5417,17 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
                 let t = l.trim_start();
                 !(t.starts_with("//") || t.starts_with("/*") || t.starts_with('*'))
             })
-            .filter(|l| l.contains(".unwrap()") || l.contains(".expect("))
+            .filter(|l| {
+                l.contains(".unwrap()")
+                    || l.contains(".expect(")
+                    // A `RefCell` BORROW PANICS on conflict, which is the same host abort
+                    // ADR 0024 forbids and this ratchet exists to bound — and it was
+                    // invisible here. Nothing in the budget used one when this was added,
+                    // so counting them cost nothing and closed the hole before the first
+                    // interior-mutable value payload arrived rather than after.
+                    || l.contains(".borrow()")
+                    || l.contains(".borrow_mut()")
+            })
             .count();
         if n > *budget {
             over.push(format!(

@@ -202,7 +202,16 @@ enum CompSource {
 /// never reach these ops, so they stay lazy). No-op unless the top is a `Range`; the resulting
 /// `Ints` array is bit-identical to the elements the range represents, so both the native and the
 /// bytecode fall-through paths see the same values.
-fn densify_range_top(stack: &mut [Value]) {
+/// Materialize a LAZY array on the top of the stack into a packed one, so a consumer
+/// that needs a real buffer (a JIT kernel's pointer, a typed fast path) sees the dense
+/// twin instead of declining.
+///
+/// **This is the one door.** Every lazy `ArrayData` variant that a packed consumer cannot
+/// read directly is materialized here and at `interp::ops::densify_lazy`, rather than each
+/// consumer growing its own arm — which is how `Range` and `Enumerate` ended up with
+/// different fallbacks the first time. A new lazy variant joins the `matches!` below and
+/// inherits every call site at once.
+fn densify_lazy_top(stack: &mut [Value]) {
     use crate::value::ArrayData;
     let ints = match stack.last() {
         Some(Value::Array(a)) if matches!(&**a, ArrayData::Range { .. }) => {
@@ -2024,7 +2033,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 } else {
                     // A lazy `range` source has no buffer for the native map kernel; materialize it so
                     // the JIT engages (as before ranges were lazy). The receiver is now the stack top.
-                    densify_range_top(&mut stack);
+                    densify_lazy_top(&mut stack);
                     enum Pick {
                         I64(*const u8, Vec<i64>),
                         F64(*const u8, Vec<f64>),
@@ -2252,7 +2261,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     false
                 };
                 if !range_taken {
-                    densify_range_top(&mut stack); // materialize so the native filter engages
+                    densify_lazy_top(&mut stack); // materialize so the native filter engages
                     let ptr = match (jit, stack.last(), fcaps.as_deref()) {
                         (Some(j), Some(Value::Array(a)), Some(_))
                             if matches!(&**a, crate::value::ArrayData::Ints(_)) =>

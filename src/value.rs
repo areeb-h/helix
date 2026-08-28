@@ -182,7 +182,7 @@ pub enum ArrayData {
     /// materialization pain: `range(20M).first()` no longer allocates 160 MB). Behaviourally
     /// IDENTICAL to the equivalent `Ints` array — `get`/`len`/`to_values` produce the same
     /// elements — so any consumer without a lazy fast path reads it element-wise or materializes
-    /// via [`ArrayData::to_ints`]/[`ArrayData::densify`], staying bit-identical across all three
+    /// via [`ArrayData::to_ints`] or the engines' `densify_lazy`, staying bit-identical across all three
     /// engines. Invariant (upheld by `int_range`/`int_range_step`): `start + step*(len-1)` fits
     /// `i64`, so no element computation overflows.
     Range { start: i64, step: i64, len: usize },

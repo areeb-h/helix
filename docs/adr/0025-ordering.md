@@ -377,7 +377,7 @@ checks the substance against the code rather than the wording.
 **Partly true, and misleading in the part that matters.**
 
 - **True for `sort` alone.** Tuples live in `ArrayData::Values` (`src/value.rs:164-166`;
-  the packed variants are `Ints`/`Floats`/`Range`/lazy-`enumerate` only), so a tuple
+  the packed variants are `Ints`/`Floats`/`Range`/lazy-`enumerate`/lazy-`zip` only), so a tuple
   array cannot reach the packed `"sort" | "reverse"` arm at `methods.rs:889`. The single
   gate is the `else if` chain in `array_method`'s `"sort"` arm at **`methods.rs:1375`**,
   which ends in "`sort` needs an array of all numbers, all strings, or all DNA". Adding

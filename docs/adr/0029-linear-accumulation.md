@@ -52,10 +52,23 @@ larger than a lint and both needing their own ADR:
 1. *Teach the take-append-store through a field.* Recognise
    `acc = {f: acc.f.concat(e), …}` and mutate `acc`'s field in place when both `Rc`s are
    unique, falling back to the copy otherwise — the refcount guard makes the "someone
-   else captured it" case safe for free. The hazard is a later initializer in the same
-   record literal reading `acc.f` and seeing the appended value; excluding that needs a
-   syntactic uniqueness check, and a syntactic check is exactly how an optimization
-   grows a cliff at its own edge — the thing ADR 0026 forbids.
+   else captured it" case safe for free.
+
+   **Correction (2026-08-28): the hazard first written here was not real.** It said a
+   later initializer in the same record literal could read `acc.f` and see the appended
+   value, and that excluding it needed a syntactic uniqueness check. Deferring the *take*
+   until after every field initializer has been evaluated makes that structurally
+   impossible — a later field reads `acc.f` **before** the append, which is what the
+   source says — and it is the same trick `Op::ConcatIntoLocal` already uses one level up
+   ("the argument is evaluated BEFORE the take").
+
+   **It is still the wrong option, for three reasons that survive the repair.** It needs
+   the validation split from the take, so `{xs: a.xs.concat(e), k: 1 // 0}` still raises
+   the right error first; it is a RECOGNIZER, so `a.b.xs.concat(e)`, `a.d["k"].concat(e)`,
+   `{...a, xs: a.xs.concat(e)}` and `step(a, i).concat(e)` are each a new arm or a new
+   silent cliff — which is what ADR 0026 forbids; and it puts one policy in two
+   implementations, compiler and walker, which is the ADR 0036 failure mode. Option 2
+   lives in `ArrayData`, which all three engines share through one `call_method`.
 2. *A lazy append node in `ArrayData`.* `concat` on a shared array returns
    `Concat { head, tail }` in O(1) and materialises once on first flat read.
    General, no pattern-matching, no cliff, and `ArrayData::Enumerate` is precedent for a
