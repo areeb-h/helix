@@ -2963,7 +2963,18 @@ fn type_of_names_the_type_and_now_is_an_absolute_instant() {
     let (m1, _, _) = run_source("print(clock_monotonic())\n", &[], "mono_p1");
     let (m2, _, _) = run_source("print(clock_monotonic())\n", &[], "mono_p2");
     let (m1, m2) = (m1.trim().parse::<f64>().unwrap(), m2.trim().parse::<f64>().unwrap());
-    assert!(m1 < 1.0 && m2 < 1.0, "monotonic is process-relative: {m1}, {m2}");
+    // THE BUDGET IS 60 SECONDS, NOT ONE, AND THAT IS THE POINT OF THE ASSERTION.
+    // `clock_monotonic` is seconds since THIS PROCESS started, so a fresh one reads near
+    // zero — but "near zero" is not a wall-clock promise. Under a loaded parallel suite a
+    // spawn plus a JIT build can take more than a second, and a one-second budget then
+    // fails a correct runtime. That happened: this test went red in a full gate run and
+    // green in isolation, which is the signature of a gate that lies.
+    //
+    // The invariant worth pinning is process-relative VERSUS absolute, and those differ by
+    // nine orders of magnitude — `now()` reads ~1.7e9. Sixty seconds is loose enough that
+    // no scheduler can break it and tight enough that a monotonic gone absolute is caught
+    // instantly.
+    assert!(m1 < 60.0 && m2 < 60.0, "monotonic is process-relative, not epoch: {m1}, {m2}");
 
     // Effects: reading a clock is not fs/net authority, the call `clock_monotonic`
     // already made. `now` is impure (two calls differ — the point); `type_of` is pure.
@@ -7575,6 +7586,61 @@ fn a_server_can_hang_up_on_a_client_and_survive() {
         return;
     }
     panic!("could not run the server test in three attempts: {last}");
+}
+
+/// A NESTED STRING INSIDE AN INTERPOLATION HOLE OWNS ITS OWN ESCAPES.
+///
+/// A hole admits two spellings of the same nested string, and `\"` meant opposite things
+/// in them. The scanner tracked only WHICH quote was open, not how it was opened, so `\"`
+/// was a delimiter toggle in both — and a bare-opened string containing an escaped quote
+/// closed at the escape, re-opened at the real close, and ran to end of input:
+///
+///     "x{"a\"b"}y"   ->  error: unterminated `{` interpolation
+///     "q: {"he said \"hi\""}"  ->  error: unexpected `hi` in interpolation `{...}`
+///
+/// A field report hit this repeatedly across sessions, most recently while writing a test
+/// fixture about something else. Both spellings work now, and the controls matter as much
+/// as the fix: the hole scanner also has to find its closing brace past a `}` inside a
+/// nested string, keep format specs, and keep refusing an unknown escape.
+#[test]
+fn a_nested_string_in_a_hole_keeps_its_own_escapes() {
+    let one = |src: &str| -> String {
+        let (out, err, code) = run_source(&format!("{src}\n"), &[], "hole");
+        assert_eq!(code, Some(0), "{src}: {err}");
+        out.trim_end().to_string()
+    };
+
+    // THE BUG: a bare-opened nested string whose content escapes a quote.
+    assert_eq!(one(r#"print("x{"a\"b"}y")"#), "xa\"by");
+    assert_eq!(one(r#"print("q: {"he said \"hi\""}")"#), "q: he said \"hi\"");
+
+    // The OTHER spelling — the nested string opened with escaped quotes — is what worked
+    // before, and it has to keep working: there `\"` really is the delimiter.
+    assert_eq!(one(r#"print("x{\"ab\"}y")"#), "xaby");
+
+    // The escape belongs to the nested string, so the SUB-LEXER resolves it: this is a
+    // three-character string, not a raw newline spliced into the expression text.
+    assert_eq!(one(r#"print("x{"a\nb".count()}y")"#), "x3y");
+
+    // Controls the scanner must not lose while finding its closing brace.
+    assert_eq!(one(r#"print("x{"ab"}y")"#), "xaby");
+    assert_eq!(one(r#"print("x{"ab".upper()}y")"#), "xABy");
+    // A `}` INSIDE a nested string does not end the hole.
+    assert_eq!(one(r#"print("x{["}"].count()}y")"#), "x1y");
+    // …nor does one inside a single-quoted string, which is why the delimiter is tracked
+    // rather than a bare "am I in a string" flag.
+    assert_eq!(one(r#"print("x{['}'].count()}y")"#), "x1y");
+    assert_eq!(one("r = {a: 1}\nprint(\"x{r.a}y\")"), "x1y");
+    assert_eq!(one("xs = [1,2,3]\nprint(\"x{xs[0:2].count()}y\")"), "x2y");
+    assert_eq!(one(r#"print("{3.14159:.2f}")"#), "3.14");
+    assert_eq!(one(r#"print("{{lit}}")"#), "{lit}");
+
+    // An unknown escape inside the nested string is still refused — passing the backslash
+    // through must not mean swallowing a typo, which is the trap the escape table was
+    // tightened to close.
+    let (_, err, code) = run_source("print(\"x{\"a\\qb\"}y\")\n", &[], "hole_bad");
+    assert_eq!(code, Some(1));
+    assert!(err.contains("unknown string escape"), "{err}");
 }
 
 /// THE DRIFT-PROOF for the docs table: every entry `helix describe` reports

@@ -754,7 +754,19 @@ fn lex_string(
                 // WHICH quote opened the nested string, not merely whether one is open:
                 // with two delimiters a `bool` would treat `'` as ordinary inside a hole,
                 // so `"{f('}')}"` would end the hole at the `}` inside the sub-string.
-                let mut in_str: Option<char> = None;
+                //
+                // …AND HOW IT WAS OPENED, because a hole admits two spellings of the same
+                // nested string and `\"` means opposite things in them:
+                //
+                //     "x{"a"}y"      the quote is BARE     — its escapes are its own
+                //     "x{\"a\"}y"    the quote is ESCAPED  — `\"` is the delimiter
+                //
+                // Tracking only the delimiter made `\"` a toggle in both, so a bare-opened
+                // string containing an escaped quote — `"x{"a\"b"}y"` — closed at the
+                // escape, re-opened at the real close, and ran to end of input as
+                // "unterminated `{` interpolation". A field report hit it repeatedly,
+                // most recently while writing a test fixture ABOUT something else.
+                let mut in_str: Option<(char, bool)> = None;
                 // Push a char into the spec buffer if we're past the `:`, else the expr.
                 macro_rules! push_char {
                     ($ch:expr) => {
@@ -770,6 +782,18 @@ fn lex_string(
                             .hint("close the hole with `}` (e.g. `\"hi {name}\"`), or write `{{` for a literal `{` (e.g. `\"{{\"`)."));
                     }
                     let e = chars[j];
+                    // INSIDE A BARE-OPENED NESTED STRING the backslash is that string's
+                    // own, so it is passed through UNTOUCHED for the sub-lexer to handle —
+                    // which is the lexer that owns the escape table for it. Un-escaping
+                    // here would also destroy the quote it protects: `"a\"b"` became
+                    // `"a"b"`, three tokens where the writer meant one string.
+                    if e == '\\' && j + 1 < n && matches!(in_str, Some((_, false))) {
+                        push_char!(e);
+                        push_char!(chars[j + 1]);
+                        j += 2;
+                        end_col += 2;
+                        continue;
+                    }
                     // An outer-string escape: un-escape into the expression. `\"`
                     // is both an un-escaped quote and a nested-string delimiter.
                     if e == '\\' && j + 1 < n {
@@ -796,8 +820,9 @@ fn lex_string(
                         };
                         if nx == '"' || nx == '\'' {
                             in_str = match in_str {
-                                None => Some(nx),
-                                Some(q) if q == nx => None,
+                                // Opened by an ESCAPED quote, so an escaped quote closes it.
+                                None => Some((nx, true)),
+                                Some((q, _)) if q == nx => None,
                                 open => open,
                             };
                         }
@@ -808,7 +833,7 @@ fn lex_string(
                     }
                     if in_str.is_none() {
                         match e {
-                            '"' | '\'' => in_str = Some(e),
+                            '"' | '\'' => in_str = Some((e, false)),
                             '(' | '[' | '{' => depth += 1,
                             ')' | ']' => depth -= 1,
                             '}' if depth == 0 => break,
@@ -825,7 +850,7 @@ fn lex_string(
                             }
                             _ => {}
                         }
-                    } else if Some(e) == in_str {
+                    } else if in_str.is_some_and(|(q, _)| q == e) {
                         in_str = None;
                     }
                     push_char!(e);
