@@ -115,28 +115,126 @@ fn search_roots() -> Vec<PathBuf> {
 /// single, stable import path (`import lib.geometry` means `<root>/lib/geometry.helix`
 /// no matter which file imports it), so a file in a subdirectory can reach a module in
 /// another — which a purely relative-to-the-importer scheme cannot express.
-fn project_context(entry: &Path) -> Result<(BTreeMap<String, PathBuf>, PathBuf), String> {
+fn project_context(entry: &Path) -> Result<ProjectContext, String> {
     let canon = entry
         .canonicalize()
         .map_err(|e| format!("error: cannot read `{}`: {}\n", entry.display(), e))?;
     let entry_dir = canon.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+
+    // The NEAREST manifest walking up — the anchor as it has always been chosen.
+    let mut near = None;
     let mut dir = Some(entry_dir.as_path());
     while let Some(d) = dir {
         if d.join("helix.toml").is_file() {
-            // Resolve, and (if locked) verify the sources still match `helix.lock`.
-            let dirs = crate::pkg::resolve_for_run(d).map_err(|e| {
-                let mut s = format!("error: {}\n", e.message);
-                if let Some(h) = &e.hint {
-                    s.push_str(&format!("  {h}\n"));
-                }
-                s
-            })?;
-            return Ok((dirs, d.to_path_buf()));
+            near = Some(d.to_path_buf());
+            break;
         }
         dir = d.parent();
     }
-    // No manifest: the entry file's directory is the project root.
-    Ok((BTreeMap::new(), entry_dir))
+    let Some(near) = near else {
+        // No manifest: the entry file's directory is the project root.
+        return Ok(ProjectContext { deps: BTreeMap::new(), root: entry_dir, from_manifest: false });
+    };
+
+    // …then one further question: is this package a MEMBER of a workspace above it? If so
+    // the workspace root anchors, and the member's manifest goes on meaning only "this is
+    // a package" (ADR 0040).
+    let root = workspace_root_for(&near)?.unwrap_or(near);
+
+    // Resolve, and (if locked) verify the sources still match `helix.lock`.
+    let dirs = crate::pkg::resolve_for_run(&root).map_err(manifest_err)?;
+    Ok(ProjectContext { deps: dirs, root, from_manifest: true })
+}
+
+/// Render a manifest failure the way `project_context`'s caller expects.
+fn manifest_err(e: crate::error::HelixError) -> String {
+    let mut s = format!("error: {}\n", e.message);
+    if let Some(h) = &e.hint {
+        s.push_str(&format!("  {h}\n"));
+    }
+    s
+}
+
+/// The workspace root that claims `member`, or `None` when it anchors at itself.
+///
+/// Walks up looking for the first ancestor manifest carrying a `[workspace]` table. If it
+/// lists `member`, that ancestor is the module root. If it does not, `member` anchors at
+/// itself — a package vendored inside an unrelated workspace is not that workspace's
+/// business, and the failed-import diagnostic names whichever root won, so the quiet case
+/// is still legible.
+fn workspace_root_for(member: &Path) -> Result<Option<PathBuf>, String> {
+    let own = crate::pkg::Manifest::load(member).map_err(manifest_err)?;
+    // A workspace root anchors at itself; nesting is one level by decision, so it never
+    // looks further up.
+    if own.as_ref().is_some_and(|m| m.workspace.is_some()) {
+        return Ok(None);
+    }
+    let mut dir = member.parent();
+    while let Some(d) = dir {
+        if d.join("helix.toml").is_file()
+            && let Some(m) = crate::pkg::Manifest::load(d).map_err(manifest_err)?
+            && let Some(ws) = &m.workspace
+        {
+            // EVERY LISTED MEMBER MUST EXIST, checked here rather than only for the one
+            // being loaded. A typo in `members` would otherwise leave that package
+            // silently self-anchored — the exact failure this table exists to end — and
+            // it would present as a confusing import error inside the package, far from
+            // the line that caused it.
+            for name in &ws.members {
+                if !d.join(name).join("helix.toml").is_file() {
+                    return Err(format!(
+                        "error: the workspace at `{}` lists the member `{name}`, but there \
+                         is no `helix.toml` in `{}`\n  a member is a package directory; \
+                         remove the entry or add its manifest\n",
+                        d.join("helix.toml").display(),
+                        d.join(name).display()
+                    ));
+                }
+            }
+            let claimed = ws
+                .members
+                .iter()
+                .any(|name| d.join(name).canonicalize().is_ok_and(|p| p == member));
+            if !claimed {
+                return Ok(None);
+            }
+            // A member's own `[dependencies]` would resolve against a manifest that is no
+            // longer the project root, so it would declare something and do nothing.
+            // Refuse rather than ignore; per-member resolution is a real feature and a
+            // separate decision.
+            if own.as_ref().is_some_and(|m| !m.dependencies.is_empty()) {
+                return Err(format!(
+                    "error: `{}` is a member of the workspace at `{}`, so its \
+                     `[dependencies]` are not resolved\n  declare them in the workspace \
+                     root's manifest instead\n",
+                    member.join("helix.toml").display(),
+                    d.join("helix.toml").display()
+                ));
+            }
+            return Ok(Some(d.to_path_buf()));
+        }
+        dir = d.parent();
+    }
+    Ok(None)
+}
+
+/// What `project_context` found. `from_manifest` exists ONLY so a failed import can say
+/// where the anchor came from.
+///
+/// A field report spent three experiments establishing that a `helix.toml` one directory
+/// down had silently become the module root: a repo of several packages put a manifest in
+/// each (which is what `helix add <name> --path <dir>` consumes), and checking a file
+/// inside one anchored imports at that package instead of the repo. `cannot find module
+/// `ui.parse`` was true and useless — the anchor is the whole answer and nothing printed
+/// it. Naming the directory AND the file that chose it turns that investigation into one
+/// command.
+struct ProjectContext {
+    deps: BTreeMap<String, PathBuf>,
+    /// The directory in-project imports are anchored at.
+    root: PathBuf,
+    /// True when a `helix.toml` in `root` set it; false when `root` is just the entry
+    /// file's own directory because no manifest was found above it.
+    from_manifest: bool,
 }
 
 /// Build the relative file path an import resolves to: `import a.b.c` → `a/b/c.helix`.
@@ -204,12 +302,13 @@ pub fn load(entry: &Path) -> Result<Loaded, String> {
 
 /// Load a program, keeping the structure of a failure (`helix check --json`).
 pub fn load_diag(entry: &Path) -> Result<Loaded, Diag> {
-    let (deps, project_root) = project_context(entry)?;
+    let ProjectContext { deps, root: project_root, from_manifest } = project_context(entry)?;
     // Resolution order for an import: the importing file's own directory (local siblings),
     // then the project root, then the stdlib / `HELIX_PATH` search roots.
-    let mut roots = vec![project_root];
+    let mut roots = vec![project_root.clone()];
     roots.extend(search_roots());
-    let mut loader = Loader { roots, deps, ..Loader::default() };
+    let mut loader =
+        Loader { roots, deps, project_root, anchored_by_manifest: from_manifest, ..Loader::default() };
     loader.load_file(entry, true)?;
     // Single file, no imports: hand back the unmodified AST so nothing is mangled
     // and error messages stay pristine — the overwhelmingly common case.
@@ -269,6 +368,11 @@ struct Loader {
     /// Declared package dependencies (`name -> source directory`), resolved from the
     /// project's `helix.toml`. An `import name.module` resolves within `name`'s dir.
     deps: BTreeMap<String, PathBuf>,
+    /// The directory in-project imports are anchored at (`roots[0]`), kept by name so a
+    /// diagnostic can print it without depending on the ordering of `roots`.
+    project_root: PathBuf,
+    /// Whether a `helix.toml` chose `project_root` — see [`ProjectContext`].
+    anchored_by_manifest: bool,
 }
 
 impl Loader {
@@ -385,12 +489,45 @@ impl Loader {
                     found
                 } else {
                     let shown = segments.join(".");
-                    let err =
-                        HelixError::new(format!("cannot find module `{shown}`"), *line, *col)
-                            .hint(format!(
-                                "expected `{}` beside this file or under the project root",
-                                rel.display()
-                            ));
+                    // NAME THE ANCHOR. "under the project root" was true and unusable: the
+                    // root is the whole answer to why an import failed, and a reader has
+                    // no way to see it. It is `helix.toml`'s location when there is one,
+                    // which is the case that surprises people, because a manifest is also
+                    // how a directory declares itself a package.
+                    let anchor = if self.anchored_by_manifest {
+                        format!(
+                            "the project root is `{}`, set by the `helix.toml` there",
+                            self.project_root.display()
+                        )
+                    } else {
+                        format!(
+                            "the project root is `{}` — the entry file's own directory, as no \
+                             `helix.toml` was found above it",
+                            self.project_root.display()
+                        )
+                    };
+                    let mut hint = format!(
+                        "expected `{}` beside this file or under the project root; {anchor}",
+                        rel.display()
+                    );
+                    // THE DOUBLED-SEGMENT CASE, which is the one a multi-package repo hits.
+                    // With a manifest in `ui/`, `import ui.parse` written inside `ui/`
+                    // resolves to `ui/ui/parse.helix`. The first segment matching the root's
+                    // own name is a precise signal, so it is worth saying outright rather
+                    // than leaving to be deduced from the two facts above.
+                    if self.anchored_by_manifest
+                        && let Some(first) = segments.first()
+                        && self.project_root.file_name().is_some_and(|n| n == first.as_str())
+                    {
+                        hint.push_str(&format!(
+                            ".\nnote: `{first}` is also the name of that root directory, so this \
+                             import looks for `{}` inside it. If `{first}` is a package within a \
+                             larger project, its `helix.toml` is what anchors imports here",
+                            rel.display()
+                        ));
+                    }
+                    let err = HelixError::new(format!("cannot find module `{shown}`"), *line, *col)
+                        .hint(hint);
                     return Err(err.into_diag(&src, &fname));
                 };
                 let dep_idx = self.load_file(&dep_path, false)?;

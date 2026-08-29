@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+### Added
+
+- **`[workspace]` in `helix.toml` — a directory can be a package without being the module
+  root.** `helix.toml` was carrying two meanings at once: *this is a distributable package*
+  (what `helix add <name> --path <dir>` consumes) and *in-project imports are anchored
+  here*. Import resolution stops at the NEAREST manifest walking up, so a repo with a
+  manifest per package made each package its own module root, and `import ui.parse`
+  written inside `ui/` resolved to `ui/ui/parse.helix`. A manifest at the repo root did not
+  help, because the nested one still won.
+
+  ```toml
+  [workspace]
+  members = ["ui", "web", "nn"]
+  ```
+
+  The root anchors; the members stay packages. Nothing changes for a project that does not
+  opt in, and a package a workspace does not list is untouched — one vendored inside an
+  unrelated workspace is not that workspace's business. Two refusals rather than silence: a
+  member that does not exist is named (left quiet it would self-anchor that package, which
+  is the failure this ends), and a member's own `[dependencies]` is refused rather than
+  resolved against a manifest that is no longer the root.
+
+  Reported from the field with a three-way measured table, after a fix from this side that
+  did not work. See ADR 0040.
+
+- **`helix check --lint` examines everything the entry point imports.** It read only the
+  file it was handed, so in any project with a library — which is every project with a
+  library — `helix check --lint app.helix` printed `ok` and said nothing about the code the
+  app is mostly made of. A field report measured what that cost: an O(n^2) accumulation
+  lived in an imported training loop for a whole release cycle, found only by copying the
+  tree and linting the copy file by file. The loader already holds every module's source —
+  it must, to render an error against the right file — so the traversal was there for the
+  taking. Notes name the module they came from, and a module reached twice is reported
+  once.
+
+### Fixed
+
+- **A failed import now says where imports are anchored, and what chose that anchor.**
+  `cannot find module `ui.parse`` with *expected … under the project root* was true and
+  unusable: the root is the entire answer and nothing printed it. It now names the
+  directory and whether a `helix.toml` set it or the entry file's own directory did, and
+  calls out the doubled-segment case by name — `ui` being both the first segment and the
+  root's own name is a precise signal, not something to leave to deduction. This replaces a
+  three-experiment investigation with one command.
+
+- **`sum`, `mean`, `var` and `std` now say they use compensated summation.** The Float
+  paths are Kahan-Babuska-Neumaier, which makes them a DIFFERENT operation from adding the
+  elements left to right rather than merely a faster one — and that was documented nowhere,
+  in a language whose point is numerical work. The consequence is not theoretical: a field
+  report replaced a collected array plus `.mean()` with a hand-rolled running sum to make an
+  accumulation linear, and concluded it was bit-identical. Measured across six realistic
+  training-loss shapes, five differ in the last bits, including a 313-step decaying loss.
+  `sum() / count()` IS `mean()` exactly; `reduce(0.0, (a, x) => a + x)` is the naive sum and
+  is not.
+
+- **An unknown key in `helix.toml` now names the running build's version.** Unknown keys are
+  refused rather than ignored — a silently discarded section looks like it took effect,
+  which is how a `[capabilities]` block once appeared to restrict authority and did
+  nothing. But *unknown field* reads as "your manifest is malformed" when the cause is
+  often "your manifest is newer than your binary", and there was no way to tell those
+  apart. `[workspace]` is the first key with that problem: it is refused by 0.7.0.
+
 ## v0.7.0 — 2026-08-28
 
 ### Added

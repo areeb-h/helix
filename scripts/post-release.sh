@@ -66,4 +66,8 @@ grep -q '^## Unreleased' CHANGELOG.md || sed -i "0,/^## v/s//## Unreleased\n\n##
 
 echo "== tree re-armed: $CUR -> $NEXT"
 echo "   Cargo.toml bumped and CHANGELOG reopened — commit and push both."
-echo "   From here `helix --version` reports $NEXT, which is TRUE: this is not $VER."
+# SINGLE quotes around the backticked part: in double quotes `helix --version` is a
+# COMMAND SUBSTITUTION, so this line ran whatever `helix` was on PATH and printed its
+# version instead of the literal text — "From here helix 0.2.1 reports 0.7.1-dev", naming
+# a stale binary in the one message whose subject is version identity.
+echo '   From here `helix --version` reports '"$NEXT, which is TRUE: this is not $VER."

@@ -49,6 +49,35 @@ pub struct Manifest {
     /// Declared dependencies, by the name they are imported under.
     #[serde(default)]
     pub dependencies: BTreeMap<String, Dependency>,
+    /// Present when this directory is a WORKSPACE ROOT: it is the module anchor for the
+    /// packages it lists, which keep their own manifests and stay separately
+    /// distributable. See [`Workspace`] and ADR 0040.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<Workspace>,
+}
+
+/// A `[workspace]` table. Its whole job is to separate the two meanings `helix.toml` had
+/// been carrying at once: "this directory is a distributable package" and "in-project
+/// imports are anchored here".
+///
+/// A repo of several packages needs both and could have only one. `project_context` stops
+/// at the NEAREST manifest walking up, so putting a manifest in each package — which is
+/// what `helix add <name> --path <dir>` consumes — made each package its own module root:
+/// `import ui.parse` written inside `ui/` resolved to `ui/ui/parse.helix`. Adding a
+/// manifest at the repo root did not help, because the nested one still won. A field
+/// report established that with a three-way table before either of us had the mechanism
+/// right.
+///
+/// With a `[workspace]`, the root anchors and the members stay packages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Workspace {
+    /// Member directories, relative to this manifest.
+    ///
+    /// EXACT PATHS, not globs. A glob that matches nothing would move the anchor with no
+    /// diagnostic — the silent failure this table exists to end — so the general form
+    /// waits for a rule about what an empty match means.
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,8 +201,23 @@ impl Manifest {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(err(format!("could not read `{}`: {e}", path.display()))),
         };
-        let m: Manifest = toml::from_str(&text)
-            .map_err(|e| err(format!("invalid `helix.toml`: {e}")))?;
+        let m: Manifest = toml::from_str(&text).map_err(|e| {
+            let d = err(format!("invalid `helix.toml`: {e}"));
+            // An unknown key is REFUSED, never ignored (see the type's own note), but the
+            // refusal reads as "your manifest is malformed" when the real cause is often
+            // "your manifest is newer than this binary". Say so, since the version is
+            // right here and the reader has no other way to tell the two apart.
+            if e.to_string().contains("unknown field") {
+                return d.hint(format!(
+                    "if that key comes from a newer Helix, this build is {}; check the \
+                     project's `helix` requirement. Unknown keys are refused rather than \
+                     ignored, because a silently discarded section looks like it took \
+                     effect.",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+            d
+        })?;
         m.validate(&path)?;
         Ok(Some(m))
     }

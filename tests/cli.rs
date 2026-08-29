@@ -11091,3 +11091,242 @@ fn drop_nan_is_the_opt_out_and_removes_only_nan() {
     assert_ne!(code, Some(0));
     assert!(err.contains("`drop_nan` takes no arguments"), "{err}");
 }
+
+/// `--lint` must examine the modules an entry point IMPORTS, not only the file named.
+///
+/// It used to read exactly one file, so in any project with a library — which is every
+/// project with a library — `helix check --lint app.helix` printed `ok` and said nothing
+/// about the code that app is mostly made of. A field report measured what that costs:
+/// an O(n^2) accumulation sat in an imported training loop for a whole release cycle,
+/// and was found only by copying the tree and linting the copy file by file.
+///
+/// The lint lives in `lib.helix` and NOT in the entry, so this test can only pass if the
+/// traversal really happened — with the old one-file behaviour the output is `ok` alone.
+#[test]
+fn check_lint_walks_the_import_graph() {
+    let dir = std::env::temp_dir().join(format!("hx_lintwalk_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // The quadratic shape lives HERE, in the imported module.
+    std::fs::write(
+        dir.join("lib.helix"),
+        "export fn build(n) = range(0, n).reduce({xs: [], k: 0}, (a, i) => {xs: a.xs.concat([i]), k: a.k + 1}).k\n",
+    )
+    .unwrap();
+    // The entry is clean — it has nothing to lint of its own.
+    let app = dir.join("app.helix");
+    std::fs::write(&app, "import lib\nprint(lib.build(4))\n").unwrap();
+
+    let (out, _, code) = run(&["check", "--lint", app.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "lints never change the exit code: {out}");
+    assert!(out.contains("ok   "), "the entry still reports ok: {out}");
+    assert!(
+        out.contains("ADR 0029"),
+        "the imported module's quadratic fold must be reported: {out}"
+    );
+    assert!(
+        out.contains("lib.helix"),
+        "and the note must name the file to open, not the entry: {out}"
+    );
+
+    // DEDUPLICATED ACROSS THE INVOCATION. `lib.helix` is both an argument and an import
+    // of the second argument; reporting it twice would train a reader to skim.
+    let (dout, _, _) = run(
+        &["check", "--lint", dir.join("lib.helix").to_str().unwrap(), app.to_str().unwrap()],
+        &[],
+        "",
+    );
+    assert_eq!(
+        dout.matches("ADR 0029").count(),
+        1,
+        "a module reached twice is linted once: {dout}"
+    );
+
+    // The JSON mode carries the same traversal, and attributes each note to the module
+    // it came from rather than to the entry — a tool that opened `file` would otherwise
+    // be sent to the wrong source.
+    let (jout, jerr, _) = run(&["check", "--lint", "--json", app.to_str().unwrap()], &[], "");
+    let doc: serde_json::Value = match serde_json::from_str(&jout) {
+        Ok(d) => d,
+        Err(e) => panic!("expected valid JSON ({e}): {jerr}\n{jout}"),
+    };
+    let notes: Vec<&serde_json::Value> = doc["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|f| f["diagnostics"].as_array().unwrap())
+        .filter(|d| d["severity"] == "note")
+        .collect();
+    assert!(
+        notes.iter().any(|n| n["file"].as_str().unwrap_or("").contains("lib.helix")
+            && n["rendered"].as_str().unwrap_or("").contains("ADR 0029")),
+        "the note names the imported module: {jout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A failed import must say WHERE imports are anchored, and what chose that anchor.
+///
+/// `cannot find module `ui.parse`` with `expected … under the project root` was true and
+/// unusable: the root is the entire answer and nothing printed it. A field report needed
+/// three separate experiments — add a root manifest, remove the nested one, compare — to
+/// establish that a `helix.toml` one directory down had silently become the module root.
+/// That manifest was not a mistake: it is how a directory declares itself a distributable
+/// package, which is what `helix add <name> --path <dir>` consumes. So the two meanings
+/// collide, and the diagnostic is what makes the collision visible.
+#[test]
+fn failed_import_names_the_anchor() {
+    let dir = std::env::temp_dir().join(format!("hx_anchor_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("ui")).unwrap();
+
+    // A package manifest one level down — the shape a multi-package repo has.
+    std::fs::write(dir.join("ui/helix.toml"), "[package]\nname = \"ui\"\nversion = \"0.1.0\"\n")
+        .unwrap();
+    std::fs::write(dir.join("ui/parse.helix"), "export fn p(x) = x\n").unwrap();
+    let render = dir.join("ui/render.helix");
+    std::fs::write(&render, "import ui.parse\nprint(ui.parse.p(1))\n").unwrap();
+
+    let (_, err, code) = run(&["check", render.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0), "the import genuinely does not resolve: {err}");
+    assert!(err.contains("cannot find module `ui.parse`"), "{err}");
+    // The anchor, by name, and the file that set it.
+    assert!(
+        err.contains("the project root is") && err.contains("set by the `helix.toml` there"),
+        "the anchor and its cause must be named: {err}"
+    );
+    assert!(err.contains("ui"), "and the root directory itself: {err}");
+    // The doubled-segment note: `ui` is both the first segment and the root's own name.
+    assert!(
+        err.contains("is also the name of that root directory"),
+        "the doubled-segment case must be called out: {err}"
+    );
+
+    // WITHOUT a manifest the wording must change rather than lie — the root is then the
+    // entry's own directory, and saying a `helix.toml` chose it would send a reader
+    // looking for a file that does not exist.
+    std::fs::remove_file(dir.join("ui/helix.toml")).unwrap();
+    let (_, err2, _) = run(&["check", render.to_str().unwrap()], &[], "");
+    assert!(
+        err2.contains("the entry file's own directory") && !err2.contains("set by the `helix.toml`"),
+        "with no manifest the anchor is explained differently: {err2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `[workspace]` root anchors imports for the packages it lists, so a repo can have
+/// both meanings `helix.toml` was carrying at once: "this is a distributable package"
+/// and "imports are anchored here" (ADR 0040).
+///
+/// Without it a multi-package repo must choose. A field report proved that with a
+/// three-way table: a root manifest does not help, because `project_context` stops at the
+/// NEAREST manifest walking up, so `import ui.parse` written inside `ui/` looked for
+/// `ui/ui/parse.helix`. Removing the nested manifest fixed the import and un-made the
+/// package.
+#[test]
+fn workspace_members_anchor_at_the_root() {
+    let dir = std::env::temp_dir().join(format!("hx_ws_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("ui")).unwrap();
+    std::fs::create_dir_all(dir.join("web")).unwrap();
+
+    let pkg = |name: &str, deps: &str| {
+        std::fs::write(
+            dir.join(name).join("helix.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n\n[dependencies]\n{deps}"),
+        )
+        .unwrap();
+    };
+    pkg("ui", "");
+    pkg("web", "");
+    std::fs::write(dir.join("ui/parse.helix"), "export fn p(x) = x + 1\n").unwrap();
+    let render = dir.join("ui/render.helix");
+    std::fs::write(&render, "import ui.parse\nexport fn r(x) = parse.p(x)\n").unwrap();
+
+    let root = |extra: &str| {
+        std::fs::write(
+            dir.join("helix.toml"),
+            format!("[package]\nname = \"top\"\nversion = \"0.1.0\"\n{extra}\n\n[dependencies]\n"),
+        )
+        .unwrap();
+    };
+
+    // WITHOUT the table: the nested manifest wins and the import cannot resolve. This is
+    // the behaviour that must NOT change for anyone not opting in.
+    root("");
+    let (_, err, code) = run(&["check", render.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0), "unchanged without a workspace: {err}");
+    assert!(err.contains("cannot find module `ui.parse`"), "{err}");
+
+    // WITH the table: the member file checks directly — the case that was impossible.
+    root("\n[workspace]\nmembers = [\"ui\", \"web\"]");
+    let (out, err, code) = run(&["check", render.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "a member file must check on its own: {err}{out}");
+
+    // …and the program runs, so this is real resolution and not just a passing check.
+    let app = dir.join("app.helix");
+    std::fs::write(&app, "import ui.render\nprint(render.r(41))\n").unwrap();
+    let (rout, rerr, rcode) = run(&["run", app.to_str().unwrap()], &[], "");
+    assert_eq!(rcode, Some(0), "{rerr}");
+    assert_eq!(rout.trim(), "42", "{rout}");
+
+    // A member the workspace does NOT list keeps anchoring at itself. A package vendored
+    // inside an unrelated workspace is not that workspace's business, and silently
+    // adopting it would be the same class of surprise being fixed.
+    root("\n[workspace]\nmembers = [\"web\"]");
+    let (_, err, code) = run(&["check", render.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0), "an unlisted package is untouched");
+    assert!(err.contains("cannot find module `ui.parse`"), "{err}");
+
+    // A TYPO in `members` is refused by name. Left silent it would self-anchor that
+    // package — exactly the failure this table exists to end — and surface far away as a
+    // confusing import error inside it.
+    root("\n[workspace]\nmembers = [\"ui\", \"wibble\"]");
+    let (_, err, code) = run(&["check", render.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0), "a missing member is refused");
+    assert!(err.contains("wibble"), "the bad member is named: {err}");
+
+    // A member's own `[dependencies]` would resolve against a manifest that is no longer
+    // the project root, so it would declare something and do nothing. Refuse, don't ignore.
+    root("\n[workspace]\nmembers = [\"ui\", \"web\"]");
+    pkg("ui", "web = { path = \"../web\" }\n");
+    let (_, err, code) = run(&["check", render.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0), "a member's dependencies are refused");
+    assert!(
+        err.contains("not resolved") && err.contains("workspace root"),
+        "and the message says where they go: {err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An unknown manifest key is refused (never ignored — a silently discarded section looks
+/// like it took effect), and the refusal names THIS build's version, because "unknown
+/// field" reads as "your manifest is malformed" when the real cause is often "your
+/// manifest is newer than your binary". `[workspace]` is the first key to have that
+/// problem: it is refused by 0.7.0 and earlier.
+#[test]
+fn an_unknown_manifest_key_names_the_build_version() {
+    let dir = std::env::temp_dir().join(format!("hx_unk_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("helix.toml"),
+        "[package]\nname = \"t\"\nversion = \"0.1.0\"\n\n[nonsense]\nx = 1\n",
+    )
+    .unwrap();
+    let app = dir.join("app.helix");
+    std::fs::write(&app, "print(1)\n").unwrap();
+
+    let (_, err, code) = run(&["check", app.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0), "an unknown key is refused: {err}");
+    assert!(err.contains("unknown field `nonsense`"), "{err}");
+    assert!(
+        err.contains(env!("CARGO_PKG_VERSION")),
+        "the refusal names this build's version: {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1270,24 +1270,34 @@ fn run_check(args: &[String]) -> ExitCode {
     run_on_big_stack(move || {
         let mut failed = 0usize;
         let mut files_json: Vec<serde_json::Value> = Vec::new();
+        // Every file linted in this invocation, canonical path, so a module imported by
+        // two entries is reported once.
+        let mut linted: std::collections::HashSet<String> = std::collections::HashSet::new();
         for path in &resolved {
             let shown = path.display().to_string();
             if json {
                 let mut diags: Vec<serde_json::Value> = Vec::new();
+                let mut graph = None;
                 let ok = match check_file_structured(path) {
-                    Ok(()) => true,
+                    Ok(loaded) => {
+                        graph = Some(loaded);
+                        true
+                    }
                     Err(d) => {
                         diags.push(diag_json("error", &shown, &d));
                         false
                     }
                 };
                 // A lint is a NOTE, not a failure: it never changes `ok` or the exit
-                // code, exactly as in the human output.
-                if lint && let Ok(src) = std::fs::read_to_string(path) {
-                    for note in lint_source(&shown, &src) {
-                        diags.push(serde_json::json!({
-                            "severity": "note", "file": shown, "rendered": note
-                        }));
+                // code, exactly as in the human output. `file` is per-NOTE now, not the
+                // entry: a note about an imported module names that module.
+                if lint && let Some(loaded) = &graph {
+                    for (file, src) in lint_units(loaded, &shown, &mut linted) {
+                        for note in lint_source(&file, &src) {
+                            diags.push(serde_json::json!({
+                                "severity": "note", "file": file, "rendered": note
+                            }));
+                        }
                     }
                 }
                 if !ok {
@@ -1299,11 +1309,13 @@ fn run_check(args: &[String]) -> ExitCode {
                 continue;
             }
             match check_file_capture(path) {
-                Ok(()) => {
+                Ok(loaded) => {
                     println!("ok   {shown}");
-                    if lint && let Ok(src) = std::fs::read_to_string(path) {
-                        for note in lint_source(&shown, &src) {
-                            println!("lint {note}");
+                    if lint {
+                        for (file, src) in lint_units(&loaded, &shown, &mut linted) {
+                            for note in lint_source(&file, &src) {
+                                println!("lint {note}");
+                            }
                         }
                     }
                 }
@@ -1863,7 +1875,7 @@ fn diag_json(severity: &str, file: &str, d: &module::Diag) -> serde_json::Value 
 /// `check_file_capture`'s structured twin: the same two phases, keeping the diagnostic
 /// whole instead of rendering it. The rendering is identical because `Diag` carries the
 /// rendered text produced by the very same call.
-fn check_file_structured(path: &std::path::Path) -> Result<(), module::Diag> {
+fn check_file_structured(path: &std::path::Path) -> Result<module::Loaded, module::Diag> {
     let loaded = module::load_diag(path)?;
     if let Some(e) = climain_violation(&loaded.stmts) {
         let (src, filename, local) = module::locate(&loaded.spans, e.line);
@@ -1872,7 +1884,10 @@ fn check_file_structured(path: &std::path::Path) -> Result<(), module::Diag> {
         let rendered = e.render(src, filename);
         return Err(module::Diag { rendered, filename: Some(filename.to_string()), err: Some(e) });
     }
-    types::check(&loaded.stmts).map(|_| ()).map_err(|e| {
+    // The loaded graph is handed back so `--lint` can walk the imports (`lint_units`);
+    // the combinator form could not, because the error arm borrows `loaded` while the ok
+    // arm has to move it.
+    if let Err(e) = types::check(&loaded.stmts) {
         // The checker reports a GLOBAL line across concatenated modules; map it back to
         // the file and local line a reader can open, exactly as `render_err` does.
         let (src, filename, local_line) = module::locate(&loaded.spans, e.line);
@@ -1892,18 +1907,72 @@ fn check_file_structured(path: &std::path::Path) -> Result<(), module::Diag> {
         } else {
             e.render(src, filename)
         };
-        module::Diag { rendered, filename: Some(filename.to_string()), err: Some(e) }
-    })
+        return Err(module::Diag { rendered, filename: Some(filename.to_string()), err: Some(e) });
+    }
+    Ok(loaded)
 }
 
-fn check_file_capture(path: &std::path::Path) -> Result<(), String> {
+fn check_file_capture(path: &std::path::Path) -> Result<module::Loaded, String> {
     let loaded = module::load(path)?;
     if let Some(e) = climain_violation(&loaded.stmts) {
         return Err(render_err(e, &loaded.spans, loaded.multi_module));
     }
-    types::check(&loaded.stmts)
-        .map(|_| ())
-        .map_err(|e| render_err(e, &loaded.spans, loaded.multi_module))
+    if let Err(e) = types::check(&loaded.stmts) {
+        return Err(render_err(e, &loaded.spans, loaded.multi_module));
+    }
+    // Handed back for `--lint`'s import traversal — see `lint_units`.
+    Ok(loaded)
+}
+
+/// The (display name, source) of every file `--lint` should examine for one entry: the
+/// entry itself and every module it transitively imports, in dependency order.
+///
+/// WHY THE IMPORTS. `--lint` read only the file it was handed. In a project whose entry
+/// point imports a library — which is every project with a library — the library was
+/// never linted by any command that exists, and `helix check --lint app.helix` printing
+/// `ok` read as "the project is clean" while saying nothing about most of it. A field
+/// report measured the cost: an O(n^2) accumulation lived in an imported training loop
+/// for a whole release cycle, found only by copying the tree and linting the copy file
+/// by file. The loader already holds every module's source — it must, to render an error
+/// against the right file — so this traversal was there for the taking.
+///
+/// THE ENTRY KEEPS THE NAME THE USER TYPED. Inside the loader a module's filename is the
+/// canonicalized absolute path, but a lint note is read by a human looking for a file to
+/// open, and `app.helix` has always been what this printed. Imported modules are shown
+/// relative to the working directory when they are under it, absolute when they are not
+/// (the stdlib, a `HELIX_PATH` root), which is the honest answer in both cases.
+///
+/// `seen` deduplicates across the whole invocation, keyed by the canonical path rather
+/// than the display name: `helix check --lint a.helix b.helix` where both import
+/// `lib.helix` reports that library's notes once, not twice.
+fn lint_units(
+    loaded: &module::Loaded,
+    shown: &str,
+    seen: &mut std::collections::HashSet<String>,
+) -> Vec<(String, String)> {
+    let cwd = std::env::current_dir().ok();
+    // The loader emits spans in post-order with the entry LAST (see `load_diag`), which
+    // is also the order a reader wants: a library's notes before the file that imports it.
+    let entry = loaded.spans.len().saturating_sub(1);
+    let mut out = Vec::new();
+    for (i, sp) in loaded.spans.iter().enumerate() {
+        if !seen.insert(sp.filename.clone()) {
+            continue;
+        }
+        let name = if i == entry {
+            shown.to_string()
+        } else {
+            match &cwd {
+                Some(c) => std::path::Path::new(&sp.filename)
+                    .strip_prefix(c)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| sp.filename.clone()),
+                None => sp.filename.clone(),
+            }
+        };
+        out.push((name, sp.source.clone()));
+    }
+    out
 }
 
 /// ADR 0037 D6: a `fn main` parameter that cannot be built from a command-line string is

@@ -2029,6 +2029,8 @@ The element whose key is largest (first wins on ties).
 
 The arithmetic mean as a Float; missing propagates.
 
+**Note:** Exactly `sum() / count()`, using the same COMPENSATED summation - so those two spellings agree to the last bit, while a hand-rolled `reduce(0.0, (a, x) => a + x) / count()` is the NAIVE sum and can differ. If a fold is replacing a collected array to make an accumulation linear, that substitution changes the value; see `sum()`. Keywords: average, kahan, neumaier, compensated, precision, roundoff.
+
 ```
 >>> [1, 2, 3].mean()
 2.0
@@ -2232,7 +2234,7 @@ The standard error of the mean: population std divided by sqrt(n).
 
 The population standard deviation of the numeric values.
 
-**Note:** POPULATION std (divide by n), not the sample std (n-1) most stats libraries default to.
+**Note:** POPULATION std (divide by n), not the sample std (n-1) most stats libraries default to. The underlying summation is COMPENSATED, as in `sum()`.
 
 ```
 >>> [2, 4, 4, 4, 5, 5, 7, 9].std()
@@ -2242,6 +2244,8 @@ The population standard deviation of the numeric values.
 ### `sum()`
 
 The sum; an all-Int array stays Int (promoted to Float only on overflow).
+
+**Note:** The Float sum is COMPENSATED (Kahan-Babuska-Neumaier), which makes it a DIFFERENT operation from adding the elements left to right, not merely a faster one: `[1.0, 1e100, 1.0, -1e100].sum()` is 2.0 where a naive fold gives 0.0. That matters because `reduce(0.0, (a, x) => a + x)` IS the naive fold, so it is not a drop-in replacement for this method - and the gap is not confined to adversarial input: over 313 steps of an ordinary decaying training loss the two already differ in the last bits. Prefer `sum()`, which is both more accurate and faster. An all-Int array sums exactly in Int and promotes only on overflow, so none of this applies to it. Keywords: kahan, neumaier, compensated, precision, accuracy, roundoff, floating point, error.
 
 ```
 >>> [1, 2, 3].sum()
@@ -2365,6 +2369,8 @@ The distinct values, in first-seen order.
 ### `var()`
 
 The population variance (divide by n) of the numeric values.
+
+**Note:** POPULATION variance (divide by n), matching `Array.std()` and unlike the DataFrame aggregates, which use n-1. Both passes use the same COMPENSATED summation as `sum()`, so this is not the naive two-pass formula.
 
 ```
 >>> [2, 4, 4, 4, 5, 5, 7, 9].var()
