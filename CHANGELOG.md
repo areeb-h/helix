@@ -1,91 +1,91 @@
 # Changelog
 
-## Unreleased
-
-### Changed
-
-- **`helix --version` now reports `0.7.0-dev`, and that is the point.** Between releases
-  the tree carries a marker naming the release it is working toward, so a build from
-  `main` no longer claims to BE the last release (`scripts/post-release.sh`, ritual
-  step 7). The next release is a minor by the policy in `docs/RELEASING.md` — this
-  section carries a `### Changed` entry — so the marker names `0.7.0`.
-
-- **The toolchain floor accepts and orders a `-dev` marker.**
-
-  `scripts/release.sh` bumped the version at release time and nothing moved it again, so
-  between releases a build from `main` reported the version it had just SHIPPED. A field
-  report found the consequence precisely: `now()` landed eight commits after the v0.6.0
-  tag, both the released binary and a main build reported `helix 0.6.0`, and a project
-  needing `now()` could not say so. `helix = ">=0.6.0"` is satisfied by the very binary
-  that lacks it — so the user met "`now` is not a known function" at run time instead of
-  the one clear sentence the manifest check exists to give.
-
-  `0.6.0 < 0.6.1-dev < 0.6.1`, so a manifest can now say `">=0.6.1-dev"` and mean "newer
-  than the 0.6.0 release". The rank is a fourth component rather than a stripped suffix:
-  stripping alone would make a dev build compare EQUAL to the release it has not become,
-  and so claim to satisfy `>=0.6.1`.
-
-  `-dev` is the only pre-release spelling accepted. `-rc1` and `-alpha.2` order against
-  each other by convention alone, and a version that cannot be compared is not a version.
-
-  **What it does not buy**, stated plainly: it is a monotone counter, not a feature probe.
-  Every commit in a release window reports the same string, so the floor says "newer than
-  the last release", never "has `now`". For an addition, `helix describe now` is the
-  precise instrument and already exits non-zero for a name this build lacks. The marker
-  earns its keep on what nothing can probe — a semantics change, which
-  `tests/compat/MIGRATIONS.md` records this project already shipping once.
-
-  **Transitional wart**: an older binary meeting `">=0.6.1-dev"` complains that it "must
-  be a minimum version" — a syntax error — rather than "your binary is too old". That is
-  why the parser ships one release ahead of the first marker.
-
-### Fixed
-
-- **A malformed version in Helix's own `Cargo.toml` could abort a user's program.** The
-  toolchain-floor check carried `parse_semver(...).expect(...)` on the hot path, and under
-  `panic = "abort"` that meant an invariant about THIS crate's build was asserted at run
-  time inside every user's binary — on every `helix run` in a project declaring a floor.
-  ADR 0024 says a total runtime never aborts the host. The invariant moved to the gate
-  (`the_crate_version_is_a_version`); an unparseable own-version now simply leaves the
-  floor unenforced instead of stopping everything.
-
-- **`helix new` has a test, and it immediately caught a bug in this work.** It had none
-  anywhere. It writes a manifest declaring a toolchain floor, and the assertion is the
-  round trip: the binary that wrote it must be able to open it.
-
-  A first draft derived a LOWER floor from the marker so older binaries could read the
-  manifest. On a `0.7.0-dev` tree that computed `0.7.0` — a version that has not shipped
-  and that the writing binary does not satisfy — because it assumed a marker is always a
-  patch marker. **Deriving was the error, not the arithmetic.** A project scaffolded by a
-  0.7.0-dev binary that declares `>=0.6.0` invites a 0.6.0 binary to open it and fail
-  later on whatever the author writes: the silent wrong answer this project treats as its
-  worst failure. The scaffold now names the version that wrote it. The cost is that a
-  pre-marker binary reports that floor as a syntax complaint rather than "your binary is
-  too old" — loud and imprecise beats quiet and wrong.
-
-- **`helix jit-explain` reports `file:line`, not a position in nothing.** The line a
-  kernel site carries is a position in the MERGED module space — every imported file
-  concatenated — so on a multi-module program it named no file the reader has open. A
-  field report measured it: `app.helix` is 298 lines and the tool reported compiled sites
-  at 1539, 2179 and 2345, real positions in a 2,443-line merged program of `app` + `ui/`
-  + `web/`. For a tool whose stated job is "which kernels compiled, **and where**", that
-  was the job half done. Sites now read `web/limit.helix:67`, and `--json` keeps the
-  merged position alongside so downstream correlation still works. Single-file programs
-  keep the bare `line:col` — the file is the argument you just typed.
-
-- **`scripts/release.sh` survives a marker.** Measured before the fix: `patch` died with
-  `bash: dev: unbound variable`, and `minor` was correct only by accident (its branch
-  never reads the patch component, so the marker was silently discarded). `0.6.1-dev` +
-  `patch` is now `0.6.1` — stripping the marker IS the bump; incrementing as well would
-  skip a version.
-
-- **A tag that disagrees with `Cargo.toml` is refused before anything is published.**
-  `release.yml` never read the version, and its per-platform smoke steps run
-  `helix version` while asserting nothing, so a forgotten marker would have published six
-  green assets all reporting `0.6.1-dev`. The only check that would have noticed runs at
-  ritual step 6 — after the publish.
+## v0.7.0 — 2026-08-28
 
 ### Added
+
+- **Regular expressions on String** — `re_match`, `re_find`, `re_find_all`, `re_replace`,
+  `re_captures`, `re_split`.
+
+  **A regex cannot hang your program, and that is the reason for the engine rather than a
+  side effect of it.** The engine is finite-automata based, so matching is linear in the
+  input and no pattern/input pair blows up. The classic catastrophic-backtracking case
+  finishes here in under a millisecond and hangs Python. ADR 0024 says user input must
+  never abort the host; a backtracking engine would contradict that exactly where it
+  matters most, for a language that serves HTTP. The price is backreferences and
+  lookaround — which are what make backtracking necessary — and the error says so.
+
+  The names say `re_` because `contains`, `replace`, `split` and `index_of` already exist
+  and take LITERAL text. Whether `.` means "any character" or "a dot" should not be
+  something a reader infers from which overload they picked.
+
+  One trap this surfaced is caught rather than documented: Helix strings interpolate
+  `{...}`, so `"([0-9]{4})"` silently becomes `([0-9]4)`. `helix check` refuses it and
+  names raw strings as the fix.
+
+- **`helix search <words>` — find a capability by what it DOES**, not by a name you
+  already have. It searches names, signatures, docs and notes, plus the LANGUAGE FORMS and
+  the ENVIRONMENT, because neither has a name to look up.
+
+  Every word must match, so saying more narrows rather than empties; a term matches at a
+  word boundary, so `raw` no longer answers with `d`raw`n at random`; and a small synonym
+  table maps the word a reader arrives with to the word the catalog uses — `regex` finds
+  entries that say "regular expression", and the listing says out loud when it widened a
+  query. `helix describe match` and `helix describe HELIX_CAP` now answer too.
+
+- **The environment is documented and discoverable** — fifteen `HELIX_*` variables in
+  `helix search`, `helix describe` and the reference, including the CAPABILITY SANDBOX.
+
+  A field report established the sandbox is complete and enforcing, and that the only way
+  to discover it was to grep the compiler: `helix search sandbox` answered nothing. A
+  security feature nobody can find is one nobody uses. A test walks `src/` for every
+  `HELIX_*` the source reads and fails unless each is documented or declared internal with
+  a reason, so the catalog is complete by construction rather than by diligence.
+
+- **`HELIX_ALLOW_PROCESS=on|all`** grants subprocess authority under the sandbox. Until
+  now `process` was hardcoded ungrantable, so `run` was denied under every active mode
+  with no way to allow it — turning the sandbox on broke every program that shells out.
+
+- **A server can close a connection**: `conn.close()` now works on an accepted
+  connection, not only on an `http_stream`. See Fixed for why this was urgent.
+
+- **A request knows who sent it and which HTTP it is** — `request()` carries `peer` and
+  `version` alongside `method`, `path`, `query`, `headers` and `body`.
+
+  `peer` is `{address, port}`, a record rather than `"1.2.3.4:5678"` so rate limiting can
+  group by address without re-parsing — which is where the naive split meets IPv6. It is
+  called `peer` and not `client_ip` because behind a reverse proxy it IS the proxy, and
+  `X-Forwarded-For` means something only when the proxy is one you run. Both were present
+  in the socket and discarded; the address was literally bound to `_peer`.
+
+  `version` is `"1.0"`/`"1.1"`/`"2.0"`, and an unrecognisable request line answers `"1.0"`
+  deliberately: 1.0 means close unless asked otherwise, so the guess cannot leak a
+  connection.
+
+- **A response body can be sent in pieces** — `conn.stream(response)`, then `send` for
+  each piece, then `close`.
+
+  ```helix
+  c.stream({status: 200, html: shell})
+  c.send(slow_part)
+  c.close()
+  ```
+
+  A document slow to produce could not be flushed as it was produced: the first byte
+  waited for the last. `send` frames the next piece by what you opened — an SSE event
+  after `sse()`, a body chunk after `stream()` — so there is one write verb rather than
+  two differing only in framing. The framing follows the CLIENT: HTTP/1.1 gets
+  `Transfer-Encoding: chunked`, HTTP/1.0 gets `Connection: close` and raw bytes, which is
+  the only correct answer for 1.0 and is decidable only because the request now carries
+  `version`. `close` writes the terminating chunk — without it a client waits for an end
+  that never comes, which presents as a hang rather than as truncation.
+
+- **`helix check --lint` names a quadratic accumulation.** ADR 0029 guarantees
+  amortized-linear accumulation, and the guarantee stops at a record field: measured over
+  8x the input, a bare accumulator is 3.8x and `reduce({xs: [], k: 0}, …)` is 22.8x. That
+  shape is not niche — `mut` is top-level only, so a fold carrying two values carries them
+  in a record, which is what AGENTS.md teaches. The lint states the class and the measured
+  ratios; ADR 0026 says a performance cliff is a diagnostic or a fix and never silence.
 
 - **A DataFrame query can ask String questions** (ADR 0039): `starts_with`, `ends_with`,
   `contains` — all literal text — and `re_match` for a regular expression.
@@ -118,31 +118,6 @@
   The pattern must be constant for the query (a literal or a variable, not another
   column), which is what makes "compiled once per query, never per row" a property of the
   shape rather than a promise.
-
-### Fixed
-
-- **An unsupported expression in a DataFrame query now points at itself.** The refusal
-  hardcoded position `0, 0`, alone among its sibling arms, so the error a reader is most
-  likely to meet in a query underlined line 1 — in the one place they most need to be told
-  where. It also now names the String tests among what a query supports.
-
-
-- **`helix test` no longer wanders into build output.** In this repository it collected
-  four *failing* `*_test.helix` files out of `target/` — scratch from earlier builds —
-  and reported them among the results, so the runner's own output was untrustworthy in
-  the project that ships it. Any tree holding a `node_modules` or `__pycache__` had the
-  same shape.
-
-  Only unambiguously machine-generated names are skipped (`target`, `node_modules`,
-  `__pycache__`); `dist`, `build` and `venv` are deliberately **not**, because each is
-  plausibly somebody's own directory. The asymmetry is the reason for the short list:
-  running an extra test is visible noise, while hiding a real one is silence — the exact
-  failure this project already paid for once. So the skip is **reported** ("did not
-  descend into …, name one explicitly to run tests inside it"), and naming a directory
-  explicitly still runs it, because the check applies when *descending*, never to the
-  root you asked for.
-
-### Added
 
 - **Helix can read a SQLite database, and a query is a DataFrame** (ADR 0038, Stage 1;
   `--features db`).
@@ -280,7 +255,141 @@
   question you have *before* you know any names is answerable without reading 120 KB.
   `helix doc <Type>` prints the same table for a human.
 
+### Changed
+
+- **A build between releases no longer claims to BE the last release.** The tree now
+  carries a marker naming the release it is working toward, so `helix --version` on a
+  `main` build reads `0.7.1-dev` rather than the version that shipped (`scripts/post-release.sh`, ritual
+  step 7). The next release is a minor by the policy in `docs/RELEASING.md` — this
+  section carries a `### Changed` entry — so the marker names `0.7.0`.
+
+- **The toolchain floor accepts and orders a `-dev` marker.**
+
+  `scripts/release.sh` bumped the version at release time and nothing moved it again, so
+  between releases a build from `main` reported the version it had just SHIPPED. A field
+  report found the consequence precisely: `now()` landed eight commits after the v0.6.0
+  tag, both the released binary and a main build reported `helix 0.6.0`, and a project
+  needing `now()` could not say so. `helix = ">=0.6.0"` is satisfied by the very binary
+  that lacks it — so the user met "`now` is not a known function" at run time instead of
+  the one clear sentence the manifest check exists to give.
+
+  `0.6.0 < 0.6.1-dev < 0.6.1`, so a manifest can now say `">=0.6.1-dev"` and mean "newer
+  than the 0.6.0 release". The rank is a fourth component rather than a stripped suffix:
+  stripping alone would make a dev build compare EQUAL to the release it has not become,
+  and so claim to satisfy `>=0.6.1`.
+
+  `-dev` is the only pre-release spelling accepted. `-rc1` and `-alpha.2` order against
+  each other by convention alone, and a version that cannot be compared is not a version.
+
+  **What it does not buy**, stated plainly: it is a monotone counter, not a feature probe.
+  Every commit in a release window reports the same string, so the floor says "newer than
+  the last release", never "has `now`". For an addition, `helix describe now` is the
+  precise instrument and already exits non-zero for a name this build lacks. The marker
+  earns its keep on what nothing can probe — a semantics change, which
+  `tests/compat/MIGRATIONS.md` records this project already shipping once.
+
+  **Transitional wart**: an older binary meeting `">=0.6.1-dev"` complains that it "must
+  be a minimum version" — a syntax error — rather than "your binary is too old". That is
+  why the parser ships one release ahead of the first marker.
+
 ### Fixed
+
+- **SECURITY: three requests could kill a server.** `curl --http1.0 -H 'Connection: close'`
+  — no auth, no body, no volume, using a header any HTTP/1.0 client sends by default.
+
+  `Net` had fifteen methods and the only `close()` was the outbound client's, so a server
+  had no way to hang up at all. An accept loop calling `close()` on an accepted connection
+  — the obvious spelling, and the only one — was refused, the raise unwound the loop, and
+  the process died. On a sharded server it was worse than a crash: shards died one at a
+  time while the server kept answering, so it read as healthy until it was not.
+
+  Found by a field report typing one curl on a hunch. The regression test binds a real
+  socket and sends the exact attack over TCP, because no gate that never opens a socket
+  can execute an accept loop.
+
+- **SECURITY: the capability sandbox failed open on a typo.** `HELIX_CAP` fell into a
+  catch-all meaning `off`, so `HELIX_CAP=enfroce` in a Dockerfile or a systemd unit
+  silently ran the program fully authorised. A control that fails open on a misspelling is
+  bad; one that does it quietly is worse, because the program works and nothing prompts a
+  second look. An unrecognised mode is now refused with exit 2. `HELIX_CAP=` stays `off`,
+  because that is how a shell unsets an inherited variable.
+
+- **A capability grant that did not parse was silently denied.** Silent is the problem,
+  not the denial: ADR 0021 describes net authority as a host:port allowlist, which is the
+  eventual design and not what phase 1 parses — so a reader following it writes
+  `HELIX_ALLOW_NET=example.com:443`, believes they granted access, and meets "capability
+  denied" from a program they authorised with nothing pointing at the variable. `./data`,
+  `rw` and `yes` were the same trap. All refused at startup now.
+
+- **`\"` inside an interpolation hole.** A hole admits two spellings of the same nested
+  string and `\"` meant opposite things in them, so `"x{"a\"b"}y"` closed the string at
+  the escape, re-opened it at the real close, and ran to end of input as *"unterminated
+  `{` interpolation"*. A nested string now owns its own escapes; both spellings work.
+
+- **A malformed version in Helix's own `Cargo.toml` could abort a user's program.** The
+  toolchain-floor check carried `parse_semver(...).expect(...)` on the hot path, and under
+  `panic = "abort"` that meant an invariant about THIS crate's build was asserted at run
+  time inside every user's binary — on every `helix run` in a project declaring a floor.
+  ADR 0024 says a total runtime never aborts the host. The invariant moved to the gate
+  (`the_crate_version_is_a_version`); an unparseable own-version now simply leaves the
+  floor unenforced instead of stopping everything.
+
+- **`helix new` has a test, and it immediately caught a bug in this work.** It had none
+  anywhere. It writes a manifest declaring a toolchain floor, and the assertion is the
+  round trip: the binary that wrote it must be able to open it.
+
+  A first draft derived a LOWER floor from the marker so older binaries could read the
+  manifest. On a `0.7.0-dev` tree that computed `0.7.0` — a version that has not shipped
+  and that the writing binary does not satisfy — because it assumed a marker is always a
+  patch marker. **Deriving was the error, not the arithmetic.** A project scaffolded by a
+  0.7.0-dev binary that declares `>=0.6.0` invites a 0.6.0 binary to open it and fail
+  later on whatever the author writes: the silent wrong answer this project treats as its
+  worst failure. The scaffold now names the version that wrote it. The cost is that a
+  pre-marker binary reports that floor as a syntax complaint rather than "your binary is
+  too old" — loud and imprecise beats quiet and wrong.
+
+- **`helix jit-explain` reports `file:line`, not a position in nothing.** The line a
+  kernel site carries is a position in the MERGED module space — every imported file
+  concatenated — so on a multi-module program it named no file the reader has open. A
+  field report measured it: `app.helix` is 298 lines and the tool reported compiled sites
+  at 1539, 2179 and 2345, real positions in a 2,443-line merged program of `app` + `ui/`
+  + `web/`. For a tool whose stated job is "which kernels compiled, **and where**", that
+  was the job half done. Sites now read `web/limit.helix:67`, and `--json` keeps the
+  merged position alongside so downstream correlation still works. Single-file programs
+  keep the bare `line:col` — the file is the argument you just typed.
+
+- **`scripts/release.sh` survives a marker.** Measured before the fix: `patch` died with
+  `bash: dev: unbound variable`, and `minor` was correct only by accident (its branch
+  never reads the patch component, so the marker was silently discarded). `0.6.1-dev` +
+  `patch` is now `0.6.1` — stripping the marker IS the bump; incrementing as well would
+  skip a version.
+
+- **A tag that disagrees with `Cargo.toml` is refused before anything is published.**
+  `release.yml` never read the version, and its per-platform smoke steps run
+  `helix version` while asserting nothing, so a forgotten marker would have published six
+  green assets all reporting `0.6.1-dev`. The only check that would have noticed runs at
+  ritual step 6 — after the publish.
+
+- **An unsupported expression in a DataFrame query now points at itself.** The refusal
+  hardcoded position `0, 0`, alone among its sibling arms, so the error a reader is most
+  likely to meet in a query underlined line 1 — in the one place they most need to be told
+  where. It also now names the String tests among what a query supports.
+
+
+- **`helix test` no longer wanders into build output.** In this repository it collected
+  four *failing* `*_test.helix` files out of `target/` — scratch from earlier builds —
+  and reported them among the results, so the runner's own output was untrustworthy in
+  the project that ships it. Any tree holding a `node_modules` or `__pycache__` had the
+  same shape.
+
+  Only unambiguously machine-generated names are skipped (`target`, `node_modules`,
+  `__pycache__`); `dist`, `build` and `venv` are deliberately **not**, because each is
+  plausibly somebody's own directory. The asymmetry is the reason for the short list:
+  running an extra test is visible noise, while hiding a real one is silence — the exact
+  failure this project already paid for once. So the skip is **reported** ("did not
+  descend into …, name one explicitly to run tests inside it"), and naming a directory
+  explicitly still runs it, because the check applies when *descending*, never to the
+  root you asked for.
 
 - **A Float now survives `to_json` → `parse_json` bit-identically.** It did not:
   `(-0.21453773034276893).to_json().parse_json()` answered `-0.2145377303427689` —

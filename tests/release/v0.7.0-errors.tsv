@@ -1,0 +1,15 @@
+# The v0.7.0 release notes' ERROR claims: the cells whose "now" column says the
+# program stops instead of answering. One per line:
+#
+#   <substring the diagnostic must contain>	<program>
+#
+# Tab-separated, `#` comments ignored. Each program must exit NON-ZERO and its
+# stderr must contain the substring. Both halves matter: an exit code without the
+# message is a program that failed for some other reason.
+not a regex quantifier	print("2026".re_captures("([0-9]{4})"))
+RAW string	print("2026".re_captures("([0-9]{4})"))
+invalid regular expression	print("aa".re_match("""(a)\1"""))
+backreferences	print("aa".re_match("""(a)\1"""))
+has no method `starts_with`	print(dataframe({n: [1, 2]}).where(@n.starts_with("a")).count())
+needs a fixed argument	print(dataframe({a: ["xy"], b: ["x"]}).where(@a.starts_with(@b)).count())
+not supported yet	print(dataframe({a: ["xy"], b: ["x"]}).where(@a.starts_with(@b)).count())

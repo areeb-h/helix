@@ -1,0 +1,63 @@
+# The v0.7.0 release notes, as a program.
+#
+# Every line below is a cell of the changelog's tables. The expectations in
+# `v0.7.0-claims.expected` are authored BY HAND from the notes — capturing them from a
+# binary would prove only that the binary agrees with itself, which every other gate
+# already covers. This is the one check that can notice the notes promising something the
+# binary does not do, and in v0.6.0 exactly that happened.
+
+# --- regular expressions: validation, extraction, splitting, replacement ---
+print("abc123".re_match("[0-9]+"))
+print("order 42 of 99".re_find("[0-9]+"))
+print("none".re_find("[0-9]+"))
+print("a1 b22".re_find_all("[0-9]+"))
+print("a1b22c".re_split("[0-9]+"))
+print("a1b2".re_replace("[0-9]", "#"))
+
+# --- captures: group 0 is the whole match, a non-participating group is `missing` ---
+print("ab".re_captures("(a)(x)?(b)"))
+print("nope".re_captures("([0-9]+)"))
+
+# --- the literal family is untouched, which is why the regex family is named `re_` ---
+print("a.b".replace(".", "-"))
+print("a.b".re_replace(".", "-"))
+
+# --- a raw string is how a quantifier survives interpolation ---
+print("2026-08-27".re_captures("""([0-9]{4})-([0-9]{2})-([0-9]{2})"""))
+
+# --- A REGEX CANNOT HANG THE PROGRAM: the classic catastrophic pair, in bounded time ---
+print("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!".re_match("^(a+)+$"))
+
+# --- string predicates inside a DataFrame query ---
+df = dataframe({
+  gene: ["BRCA1", "TP53", "BRCA2", missing],
+  tissue: ["breast", "lung", "breast", "skin"],
+  n: [11, 22, 33, 44],
+})
+print(df.where(@gene.re_match("""^BRCA""")).count())
+print(df.where(@tissue.starts_with("b")).count())
+print(df.where(@tissue.ends_with("ng")).count())
+print(df.where(@tissue.contains("rea")).count())
+
+# --- `contains` is LITERAL and `re_match` is a PATTERN, inside a query too ---
+print(df.where(@tissue.contains(".")).count())
+print(df.where(@tissue.re_match(".")).count())
+
+# --- composes with what a query already had ---
+print(df.where(@tissue.starts_with("b") and @n > 20).count())
+print(df.where(not @tissue.starts_with("b")).count())
+
+# --- `missing` PROPAGATES, which only `with` can show: `where` drops the row either way ---
+print(df.with({hit: @gene.re_match("""^BRCA""")}).column("hit"))
+
+# --- a nested string inside an interpolation hole keeps its own escapes ---
+print("q: {"he said \"hi\""}")
+print("x{"a\"b"}y")
+
+# --- resumable string search, and one character by index ---
+print("a,b,c".index_of(",", 2))
+print("hello".char_at(1))
+
+# --- an absolute instant, and a type name without a raising `try` ---
+print(now() > 1700000000.0)
+print(type_of("s"), type_of(1), type_of([1]), type_of({a: 1}))

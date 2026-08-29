@@ -1,0 +1,27 @@
+true
+42
+missing
+["1", "22"]
+["a", "b", "c"]
+a#b#
+["ab", "a", missing, "b"]
+missing
+a-b
+---
+["2026-08-27", "2026", "08", "27"]
+false
+2
+2
+1
+2
+0
+4
+1
+2
+[true, false, true, missing]
+q: he said "hi"
+xa"by
+3
+e
+true
+String Int Array Record
