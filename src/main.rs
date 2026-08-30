@@ -163,6 +163,27 @@ use value::Value;
 use std::io::IsTerminal;
 
 fn main() -> ExitCode {
+    let code = run_cli();
+    // THE LAST LINE A PROGRAM PRINTS MUST REACH THE DEVICE, OR THE PROGRAM FAILED.
+    //
+    // Rust flushes stdout as the process exits and DISCARDS the result, so a program
+    // whose output never landed still exited 0. `helix run prog.helix > /dev/full`
+    // printing one line reported success while writing nothing: the line sat in the
+    // line buffer, the exit-time flush failed, and nobody asked. Enough output to
+    // overflow the buffer DID fail correctly, which is the worst shape for a bug --
+    // it works on the big case and lies on the small one.
+    //
+    // Flushing here, rather than in `print`, keeps `print` free of a per-call flush:
+    // stdout is line-buffered, so the flush is usually a no-op, and a sink that must
+    // stream (`emit`, `write`) still flushes on its own for latency, not correctness.
+    if let Err(e) = std::io::Write::flush(&mut std::io::stdout()) {
+        eprintln!("error: could not write to stdout: {e}");
+        return ExitCode::from(1);
+    }
+    code
+}
+
+fn run_cli() -> ExitCode {
     install_robustness_hooks();
     // Before any work: a DataFrame engine this build does not have is an error, not
     // a silently different answer (see `backend::check_engine_selection`).

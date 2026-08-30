@@ -2,6 +2,67 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A write that fails is an error, not a bug report — and not silence.** The four output
+  sinks disagreed about what a failed write means, and both answers were wrong.
+
+  `print` used `println!`, which **panics** on a failed write. `helix run prog.helix >
+  /dev/full` reached the user as
+
+  ```text
+  error: internal error (.../stdio.rs:1166): failed printing to stdout:
+         No space left on device (os error 28)
+  help: this is a bug in Helix; please report it with the program that triggered it.
+  ```
+
+  with exit 134 and a core dump — telling the author of a correct program to file a Helix
+  bug because a disk filled up. ADR 0024 says user input never aborts the host.
+
+  `emit` / `write` / `elog` went the other way and discarded the error, on the stated
+  grounds that "errors writing to a closed pipe are the consumer's business". That was true
+  when written and **expired when `main.rs` restored `SIGPIPE` to `SIG_DFL`**: a closed pipe
+  now kills the process by signal, like any other Unix tool, and never surfaces as an
+  `Err`. So that arm could only ever swallow a *genuine* failure — reporting success for
+  output that never landed.
+
+  All four now report `could not write to stdout: <cause>` and exit non-zero.
+
+- **The last line a program prints must reach the device.** Rust flushes stdout as the
+  process exits and **discards the result**, so a program whose output never landed still
+  exited 0. A single `print` to a full device reported success while writing nothing, while
+  enough output to overflow the line buffer failed correctly — the worst shape a bug can
+  take, working on the big case and lying on the small one. `main` now flushes stdout
+  itself and makes a failure there the exit code.
+
+  The flush is on the exit path rather than in `print` deliberately: putting it in `print`
+  would buy correctness with a syscall per line forever.
+
+### Changed
+
+- **`print` costs 2.5x less.** Measured on 200,000 lines piped to `/dev/null`, minimum of
+  five runs, same binary configuration before and after:
+
+  | | before | after |
+  |---|--:|--:|
+  | wall time | 0.25 s | **0.10 s** |
+  | overhead per call | 1.20 us | **0.45 us** |
+
+  Three removals, no behaviour change:
+
+  - **`RenderOpts::auto()` now detects the environment once.** It ran per `print`: an
+    `isatty`, a `TIOCGWINSZ` ioctl, six `env::var` lookups and three string matches — two
+    syscalls for every line a program ever wrote. Nothing can change the answer under a
+    running program, since no builtin sets an environment variable. Terminal *width* stays
+    live, because a terminal can be resized and rich output is human-paced; the piped path,
+    which is where a program writes a million lines, never asks.
+  - **The capture copy is no longer built when capture is off.**
+    `captured(&format!("{s}\n"))` allocated a second copy of every line printed, purely to
+    pass it to a function whose first act is to return `false` unless `helix check` armed
+    the sink.
+  - **One argument takes a direct path.** `join` on a one-element `Vec` allocates a second
+    `String` to copy the first into; `print(x)` now hands the rendered value straight back.
+
 ### Added
 
 - **`helix build --runtime <path>` — a bundle that does not carry its own interpreter.**

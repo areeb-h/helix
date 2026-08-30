@@ -12482,3 +12482,66 @@ fn helix_plot_offers_a_glyph_set_the_font_certainly_has() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A write that fails is the ENVIRONMENT's condition, not a defect to report.
+///
+/// `print` used `println!`, which panics on a failed write, and the panic reached the
+/// user as "internal error (.../stdio.rs): failed printing to stdout: No space left on
+/// device / help: this is a bug in Helix; please report it" -- exit 134 and a core dump,
+/// for `helix run prog.helix > /dev/full`. `emit`/`write`/`elog` went the other way and
+/// discarded the error entirely, on the stated grounds that a closed pipe is the
+/// consumer's business; that reason expired when `main.rs` restored SIGPIPE to SIG_DFL,
+/// since a closed pipe now kills the process by signal and never surfaces as an `Err`.
+///
+/// `/dev/full` accepts `open` and fails every `write` with ENOSPC, which is exactly the
+/// shape of a full disk without needing one.
+#[test]
+#[cfg(unix)]
+fn a_failed_write_is_an_error_not_a_bug_report() {
+    if !std::path::Path::new("/dev/full").exists() {
+        return; // Linux-specific device; nothing to assert without it.
+    }
+    let dir = std::env::temp_dir().join(format!("hx_wfail_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("t.helix");
+
+    for (what, src) in [
+        ("print", "print(\"hello\")\n"),
+        ("emit", "emit(\"hello\")\n"),
+        ("write", "write(\"hello\")\n"),
+    ] {
+        std::fs::write(&f, src).unwrap();
+        let full = std::fs::OpenOptions::new().write(true).open("/dev/full").unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_helix"))
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args(["run", f.to_str().unwrap()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(full))
+            .stderr(Stdio::piped())
+            .output()
+            .expect("failed to spawn helix");
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+
+        // Not a crash: a signal death leaves `code()` as None, and 134 is SIGABRT.
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{what} on a full device should fail cleanly, got {:?}:\n{err}",
+            out.status
+        );
+        // Not an accusation.
+        assert!(
+            !err.contains("internal error") && !err.contains("bug in Helix"),
+            "{what} blamed the runtime for a full disk:\n{err}"
+        );
+        // And it says what actually happened.
+        assert!(
+            err.contains("could not write to stdout"),
+            "{what} did not name the failure:\n{err}"
+        );
+        assert!(err.contains("No space left"), "{what} dropped the cause:\n{err}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

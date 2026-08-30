@@ -195,9 +195,35 @@ pub struct RenderOpts {
 }
 
 impl RenderOpts {
+    /// The environment as this process sees it, detected ONCE.
+    ///
+    /// This used to run per `print`: an `isatty`, a `TIOCGWINSZ` ioctl, six `env::var`
+    /// lookups and three string matches, for every line a program ever wrote. Measured on
+    /// a 200k-line program at 1.20 us of overhead per call, against 0.01 s for the same
+    /// 200k iterations doing no I/O at all.
+    ///
+    /// Detecting once is safe because nothing can change the answer under a running
+    /// program: no Helix builtin sets an environment variable, and the only `env::set_var`
+    /// in the tree writes `HELIX_CACHE` from the package manager, which no render path
+    /// reads. A test that needs different options constructs `RenderOpts` directly, which
+    /// is what the field docs already say it is for.
+    pub fn auto() -> Self {
+        static BASE: std::sync::OnceLock<RenderOpts> = std::sync::OnceLock::new();
+        let base = BASE.get_or_init(Self::detect);
+        if base.rich {
+            // Width is the one answer that CAN change under a running program -- a
+            // terminal gets resized -- and asking costs an ioctl. Rich output is
+            // human-paced, so that is affordable. The piped path, which is where a
+            // program writes a million lines, never asks.
+            RenderOpts { width: term_width(), ..base.clone() }
+        } else {
+            base.clone()
+        }
+    }
+
     /// Detect from the environment: rich only on a TTY (or `HELIX_RICH=1`), color
     /// only when rich and not suppressed by `NO_COLOR`/`HELIX_COLOR=never`.
-    pub fn auto() -> Self {
+    fn detect() -> Self {
         let tty = std::io::stdout().is_terminal();
         let rich = match std::env::var("HELIX_RICH").ok().as_deref() {
             Some("1") | Some("always") => true,
@@ -260,6 +286,12 @@ fn env_cols() -> Option<usize> {
 pub fn render_print(args: &[Value], line: usize, col: usize) -> Result<String, HelixError> {
     let opts = RenderOpts::auto();
     if !opts.rich {
+        // ONE argument is the overwhelmingly common call, and `join` on a one-element Vec
+        // allocates a second String purely to copy the first into it. Hand the rendered
+        // value straight back: identical bytes, one allocation instead of three.
+        if let [v] = args {
+            return display_value(v, line, col);
+        }
         let mut parts = Vec::with_capacity(args.len());
         for v in args {
             parts.push(display_value(v, line, col)?);

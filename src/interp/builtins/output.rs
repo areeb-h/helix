@@ -49,6 +49,56 @@ fn captured(s: &str) -> bool {
     }
 }
 
+/// Capture one line: `s`, then a newline.
+///
+/// Split out from [`captured`] because the old spelling -- `captured(&format!("{s}\n"))`
+/// -- built a whole second copy of EVERY line a program printed, purely to hand it to a
+/// function whose first act is to return `false` when capture is off. Capture is off for
+/// every run except `helix check`'s, so that allocation was pure waste on the only path
+/// that is ever hot. Appending the newline separately also drops the copy on the capturing
+/// path, where the old form allocated too.
+fn captured_line(s: &str) -> bool {
+    if !CAPTURING.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    if let Ok(mut b) = CAPTURE.lock() {
+        b.push_str(s);
+        b.push('\n');
+        true
+    } else {
+        false
+    }
+}
+
+/// Report a failed write to a standard stream.
+///
+/// A write that fails is a condition of the ENVIRONMENT -- a full disk, an exceeded
+/// quota, an I/O error -- not a defect in the program and not a defect in the runtime.
+/// The two spellings this replaces were both wrong, in opposite directions.
+///
+/// `print` used `println!`, which PANICS on a failed write. `helix run prog.helix >
+/// /dev/full` reached the user as
+///
+/// ```text
+/// error: internal error (.../stdio.rs:1166): failed printing to stdout:
+///        No space left on device (os error 28)
+/// help: this is a bug in Helix; please report it with the program that triggered it.
+/// ```
+///
+/// with exit 134 and a core dump. ADR 0024 says user input never aborts the host, and a
+/// disk that filled up under a correct program is exactly that; the help text also sent
+/// its author to a bug tracker that cannot help them.
+///
+/// `emit` / `write` / `elog` did `let _ = ...` instead, on the stated grounds that
+/// "errors writing to a closed pipe are the consumer's business". That was true when it
+/// was written and is obsolete now: `main.rs` restores SIGPIPE to `SIG_DFL`, so a closed
+/// pipe kills the process by signal like any other Unix tool and never returns an `Err`
+/// here. That arm could therefore only ever swallow a REAL failure -- reporting success
+/// for output that never landed.
+fn wrote(r: std::io::Result<()>, stream: &str, line: usize, col: usize) -> Result<(), HelixError> {
+    r.map_err(|e| HelixError::new(format!("could not write to {stream}: {e}"), line, col))
+}
+
 #[inline]
 pub(super) fn a_print(args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
         // Rich rendering on a terminal (tables, color, elision, grouped
@@ -57,8 +107,17 @@ pub(super) fn a_print(args: Vec<Value>, line: usize, col: usize) -> Result<Value
         // a failed query is a real error (non-zero exit), never a swallowed
         // placeholder printed as if the program succeeded.
         let s = crate::render::render_print(&args, line, col)?;
-        if !captured(&format!("{s}\n")) {
-            println!("{s}");
+        if !captured_line(&s) {
+            use std::io::Write;
+            // Not `println!` -- see `wrote`. Taking the lock once for both writes also
+            // skips the `format_args!` machinery a `println!` would run per call.
+            let mut out = std::io::stdout().lock();
+            wrote(
+                out.write_all(s.as_bytes()).and_then(|()| out.write_all(b"\n")),
+                "stdout",
+                line,
+                col,
+            )?;
         }
         Ok(Value::Unit)
     
@@ -74,14 +133,11 @@ pub(super) fn a_emit(name: &str, args: Vec<Value>, line: usize, col: usize) -> R
         arity(name, &args, 1, line, col)?;
         use std::io::Write;
         let s = crate::value::display_value(&args[0], line, col)?;
-        if captured(&format!("{s}\n")) {
+        if captured_line(&s) {
             return Ok(Value::Unit);
         }
         let mut out = std::io::stdout().lock();
-        // Errors writing to a closed pipe are the consumer's business, not a Helix
-        // runtime error (a piped reader exiting first is normal); ignore them.
-        let _ = writeln!(out, "{s}");
-        let _ = out.flush();
+        wrote(writeln!(out, "{s}").and_then(|()| out.flush()), "stdout", line, col)?;
         Ok(Value::Unit)
     
 }
@@ -100,8 +156,7 @@ pub(super) fn a_write(name: &str, args: Vec<Value>, line: usize, col: usize) -> 
             return Ok(Value::Unit);
         }
         let mut out = std::io::stdout().lock();
-        let _ = write!(out, "{s}");
-        let _ = out.flush();
+        wrote(write!(out, "{s}").and_then(|()| out.flush()), "stdout", line, col)?;
         Ok(Value::Unit)
     
 }
@@ -116,8 +171,7 @@ pub(super) fn a_elog(name: &str, args: Vec<Value>, line: usize, col: usize) -> R
         use std::io::Write;
         let s = crate::value::display_value(&args[0], line, col)?;
         let mut err = std::io::stderr().lock();
-        let _ = writeln!(err, "{s}");
-        let _ = err.flush();
+        wrote(writeln!(err, "{s}").and_then(|()| err.flush()), "stderr", line, col)?;
         Ok(Value::Unit)
     
 }
