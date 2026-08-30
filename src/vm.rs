@@ -221,6 +221,8 @@ fn densify_lazy_top(stack: &mut [Value]) {
     if let Some(Value::Array(a)) = stack.last()
         && let Some(d) = a.densified()
     {
+        // CANNOT PANIC: the `if let Some(..) = stack.last()` above proves a top exists,
+        // and nothing between the two touches the stack.
         *stack.last_mut().expect("stack top present") = Value::Array(std::rc::Rc::new(d));
         return;
     }
@@ -939,6 +941,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::AndCheck(end) => {
                 let ta = tri(stack.last().unwrap(), line, col)?;
                 if ta == Some(false) {
+                    // CANNOT PANIC: `stack.last().unwrap()` on the line above already
+                    // succeeded, and `tri` does not pop.
                     *stack.last_mut().unwrap() = Value::Bool(false);
                     frames[fi].ip = *end as usize;
                 }

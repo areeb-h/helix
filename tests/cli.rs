@@ -5327,9 +5327,20 @@ fn fasta_enforces_the_dna_invariant_at_the_boundary() {
 fn no_new_panicking_calls_on_user_reachable_paths() {
     // Files user input flows through. (Test modules live in their own files and
     // are excluded — a panicking assert in a test is the point of a test.)
+    // FOUR OF THESE NUMBERS MOVED WITHOUT ANY NEW CODE. The line filter skipped every
+    // line starting with `*`, meaning to skip block-comment continuations and also skipping
+    // dereferences — so `*stack.last_mut().expect(…) = …` and `*xs.iter().min().unwrap()`
+    // were never counted. Closing that hole revealed nine existing calls: `vm.rs` +4,
+    // `array.rs` +2, `autodiff.rs` +2, `serve.rs` +1.
+    //
+    // Each was checked and each is provably safe, with the proof now written at its site:
+    // the two in `array.rs` sit under an `empty_guard` that returns first, the four in
+    // `vm.rs` under a `stack.last()` that already succeeded, and the three in `serve.rs` /
+    // `autodiff.rs` are `RefCell` borrows on the same socket and tape those files already
+    // budget. Nothing was silenced; the count is simply now the true one.
     const BUDGET: &[(&str, usize)] = &[
         ("src/interp.rs", 7),
-        ("src/interp/methods/array.rs", 1),
+        ("src/interp/methods/array.rs", 3),
         ("src/interp/methods/dictrec.rs", 0),
         ("src/interp/methods/dna.rs", 0),
         ("src/interp/methods/headers.rs", 0),
@@ -5352,9 +5363,9 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // them, never calling back into the interpreter. `close` was rewritten to take one
         // guard instead of two for exactly this reason — not because two was a bug, but
         // because each extra borrow is somewhere a later edit can nest one.
-        ("src/serve.rs", 21),
+        ("src/serve.rs", 22),
         ("src/cookiejar.rs", 9),
-        ("src/autodiff.rs", 12),
+        ("src/autodiff.rs", 14),
         ("src/regexes.rs", 2),
         ("src/interp/access.rs", 1),
         ("src/interp/builtins/autodiff_fns.rs", 0),
@@ -5388,7 +5399,7 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // 60: the argument pops of `Op::ConcatIntoLocal` (1) and `Op::InsertIntoLocal` (2),
         // proved at each site — the compiler emits those argument expressions immediately
         // before the op, the same stack-shape invariant the other 57 rely on.
-        ("src/vm.rs", 60),
+        ("src/vm.rs", 64),
         ("src/bytecode.rs", 1),
         ("src/bytecode/comprehensions.rs", 0),
         ("src/bytecode/ops.rs", 0),
@@ -5434,7 +5445,18 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
             .lines()
             .filter(|l| {
                 let t = l.trim_start();
-                !(t.starts_with("//") || t.starts_with("/*") || t.starts_with('*'))
+                // `*` OPENS A DEREFERENCE AS WELL AS CONTINUING A BLOCK COMMENT, and
+                // skipping every line that starts with one made the ratchet blind to real
+                // code: `*stack.last_mut().expect("stack top present") = …` in `vm.rs`, and
+                // `*xs.iter().min().unwrap()` in `array.rs`, were never counted. A guard
+                // with a hole is worse than a smaller guard, because the number it reports
+                // is trusted.
+                //
+                // A comment continuation is `*` followed by a space, a `/`, or nothing; a
+                // dereference is `*` followed by the thing being dereferenced. rustfmt
+                // never emits `* x` for a deref, so the two do not overlap in this tree.
+                let comment_star = t == "*" || t.starts_with("* ") || t.starts_with("*/");
+                !(t.starts_with("//") || t.starts_with("/*") || comment_star)
             })
             .filter(|l| {
                 l.contains(".unwrap()")
@@ -12935,7 +12957,32 @@ fn installing_a_package_executes_no_code() {
     const SPAWNS: &[&str] =
         &["Command::new", "process::Command", "libc::system", "libc::exec", "libc::fork"];
 
+    /// The guard names FILES, so it stops guarding anything the moment resolution moves
+    /// out of them — silently, while still passing. That is the same shape as the hole this
+    /// suite just closed in the panic ratchet, where a filter meant for comments was
+    /// quietly skipping real code.
+    ///
+    /// So the anchors are checked too: if `resolve` or `prepare_url_dep` are no longer in
+    /// `pkg.rs`, resolution has been refactored and this list needs revisiting. That turns
+    /// "the guard covers nothing" from silent into loud.
+    const ANCHORS: &[(&str, &str)] = &[
+        ("src/pkg.rs", "pub fn resolve("),
+        ("src/pkg.rs", "fn prepare_url_dep("),
+        ("src/pkg.rs", "pub fn add_dependency("),
+        ("src/module.rs", "fn load_file("),
+    ];
+
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (rel, anchor) in ANCHORS {
+        let src = std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|e| panic!("{rel} is guarded but unreadable: {e}"));
+        assert!(
+            src.contains(anchor),
+            "`{anchor}` is no longer in {rel}, so this guard may be watching the wrong \
+             files. Point RESOLUTION at wherever dependency resolution lives now."
+        );
+    }
+
     let mut found: Vec<String> = Vec::new();
     for rel in RESOLUTION {
         let src = std::fs::read_to_string(root.join(rel))

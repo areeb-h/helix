@@ -467,6 +467,8 @@ pub(crate) fn array_int_reduce(xs: &[i64], name: &str, line: usize, col: usize) 
             if xs.is_empty() {
                 empty_guard(&Vec::<f64>::new(), name, line, col)?;
             }
+            // CANNOT PANIC: `empty_guard` two lines up returns on an empty `xs`, so the
+            // iterator has at least one element by the time `min`/`max` is asked.
             let best = if name == "min" {
                 *xs.iter().min().unwrap()
             } else {

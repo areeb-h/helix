@@ -58,6 +58,38 @@ if [ "$LEVEL" = patch ] && echo "$UNREL" | grep -q '^### Changed'; then
   exit 1
 fi
 
+# A LANGUAGE-SURFACE ADDITION IS ALSO A MINOR, and reading the CHANGELOG cannot see it.
+#
+# The check above asks the PROSE whether anything changed. In the v0.8.0 cycle it did fire,
+# but only by luck: `html_escape` happened to alter `to_html`'s bytes, which supplied the one
+# `### Changed` heading. Without that entry a release adding a `[workspace]` table, seventeen
+# builtins and a new `Value` type would have gone out as a patch, because every other line
+# sat under `### Added`.
+#
+# The surface is in the source, so ask the source. `registry.rs` holds `BUILTINS` and every
+# `*_METHODS` table — the names a program can actually write — so comparing the set of names
+# against the last tag answers "did the language grow" mechanically, with no dependence on
+# how the notes were worded.
+#
+# A pure RENAME keeps the count level. That is a breaking change rather than an addition, and
+# it cannot avoid a `### Changed` entry, so the check above is the one that catches it.
+surface() { awk '/pub static (BUILTINS|[A-Z_]*METHODS)/,/^\];/' | grep -o '"[a-z_0-9]*"' | sort -u | wc -l; }
+LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+if [ "$LEVEL" = patch ] && [ -n "$LAST_TAG" ]; then
+  OLD_SURFACE=$(git show "$LAST_TAG:src/registry.rs" 2>/dev/null | surface || echo 0)
+  NEW_SURFACE=$(surface < src/registry.rs)
+  if [ "$OLD_SURFACE" -gt 0 ] && [ "$NEW_SURFACE" -gt "$OLD_SURFACE" ]; then
+    echo "error: the language surface grew since $LAST_TAG ($OLD_SURFACE -> $NEW_SURFACE names)."
+    echo "       A builtin or method that did not exist in the last release is an ADDITION,"
+    echo "       which is a MINOR by policy (docs/RELEASING.md) — rerun with 'minor'."
+    echo "       Added:"
+    diff <(git show "$LAST_TAG:src/registry.rs" | awk '/pub static (BUILTINS|[A-Z_]*METHODS)/,/^\];/' | grep -o '"[a-z_0-9]*"' | sort -u) \
+         <(awk '/pub static (BUILTINS|[A-Z_]*METHODS)/,/^\];/' src/registry.rs | grep -o '"[a-z_0-9]*"' | sort -u) \
+      | grep '^>' | sed 's/^> /         /' | head -20
+    exit 1
+  fi
+fi
+
 sed -i "s/^version = \"$CUR\"/version = \"$NEW\"/" Cargo.toml
 sed -i "s/^## Unreleased/## v$NEW — $(date +%F)/" CHANGELOG.md
 echo "== Cargo.toml and CHANGELOG.md staged for v$NEW"

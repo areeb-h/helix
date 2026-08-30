@@ -565,6 +565,31 @@ mod tests {
     /// hand them an artifact that dies on its first frame.
     #[test]
     fn every_builtin_declares_its_feature() {
+        // A NEW BUILTIN MUST FORCE A DECISION, which comparing the gated set alone does not
+        // make it do: a builtin added with a feature gate but left out of `feature_of`
+        // returns `None`, contributes nothing to `gated`, and this test still passes. The
+        // failure that hides behind that is the dangerous one — `helix build` reporting
+        // "needs no optional feature" for a program that needs one, and handing someone an
+        // artifact that dies on its first call.
+        //
+        // `every_builtin_has_a_category` avoids this by being exhaustive over `BUILTINS`;
+        // it can be, because "core" is a detectable fall-through. `None` here is a real
+        // answer ("every build has this"), so the same trick does not work — hence a count,
+        // which is the panic budget's discipline: a number that only moves deliberately.
+        //
+        // Adding a builtin? Decide whether it needs a feature, put it in `feature_of` if so,
+        // and bump this. The bump is the point.
+        assert_eq!(
+            BUILTINS.len(),
+            159,
+            "a builtin was added or removed — decide whether it needs a Cargo feature, add it \
+             to `feature_of` if it does, and update this count in the same change"
+        );
+
+        // NOTE ON SCOPE: this covers builtins. Methods reach `feature_of` only through
+        // `is_regex_method`; frame methods are covered transitively, because a frame cannot
+        // be CONSTRUCTED without `dataframes`. A feature-gated method on some other receiver
+        // would slip past this, and would need its own arm here.
         let mut gated: Vec<(&str, &str)> =
             BUILTINS.iter().filter_map(|b| feature_of(b.path).map(|f| (b.path, f))).collect();
         gated.sort_unstable();

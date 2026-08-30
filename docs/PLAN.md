@@ -517,6 +517,50 @@ Design and its trap are written up in `docs/STATE.md`; the short version is that
 that wrong is a wrong answer, not a slow one, so `dfdiff` + `vmparity` + the corpus must be
 pointed at it.
 
+#### Reproduced, with both shapes asserted
+
+| shape | n=2,000 | n=8,000 | n=32,000 | per 4x |
+|---|--:|--:|--:|--:|
+| accumulator IS the dict | 0.00 s | 0.00 s | 0.00 s | flat |
+| dict in a **record field** | 0.02 s | 0.31 s | 4.79 s | **x15.5** |
+
+x15.5 against the 16 of a true quadratic, extrapolating to ~74 s at n=128,000 — the
+lint's own figure. Both rows assert the printed `count()` before timing: the first attempt
+at the flat row measured a program with a **syntax error**, which times at 0.00 s and reads
+as a triumph.
+
+The lint fires on the quadratic shape today and names the measurement and the workaround, so
+ADR 0026 is satisfied on the diagnostic side; what is missing is the fix.
+
+#### A second trap, beside `count()`
+
+The sketch above says reads "merge base + adds once and cache". `count()` is the trap it
+names; **`get(k)` is a second one**, and it is not the same shape.
+
+`get` needs the LAST occurrence of `k` in `adds[..len]`, not the first. A `key -> first
+index` side table — the obvious way to make `count()` O(1), since a key's first index never
+changes under append-only — answers the wrong question here, and scanning `adds[..len]`
+backwards is O(len), which restores the cliff on any fold that reads as it goes.
+
+The resolution is that caching cannot be per-chain, because each value has its own `len`:
+one shared cache would answer for the wrong prefix. It can be per-TIP, which is enough,
+because the fold pattern only ever reads the tip; a read of an older view materialises
+without caching, and those are rare by construction.
+
+#### A third candidate, narrower than both
+
+`Op::InsertIntoLocal` already rescues `acc.insert(k, v)` when the accumulator IS the
+receiver. The record-field shape could be rescued the same way — take the record out of the
+accumulator slot, take the field out of the record so its `Rc` is unique, insert in place,
+rebuild.
+
+That is much smaller than either general design and much easier to get subtly wrong. The
+guard directly above the existing pattern documents what that costs: matching the receiver
+by name alone made `[[1], [2]].reduce([], (a, a) => a.concat([9]))` answer `[9, 9]` on VM and
+JIT against the walker's `[2, 9]` — a silent three-engine divergence at exit 0. A record-field
+version needs the same care about which fields may observe the old value, and it rescues one
+syntactic spelling rather than the operation.
+
 ### 4.2 String accumulation in a record field
 
 10.1× per 4×, 243 ms at n=128,000. Same shape, milder. No lint names it — there is no
@@ -572,14 +616,32 @@ immutable for the lifetime of a content-addressed store, which is the same reaso
 
 ## Phase 6 — guards that let something through
 
-- **`release.sh`** refuses a patch only when `Unreleased` carries `### Changed`. In v0.8.0 it
-  did fire — but only because `html_escape` happened to alter `to_html` bytes. Without that
-  one entry, a release adding a manifest table, seventeen builtins and a new `Value` type
-  could have shipped as a patch. The guard is right about `### Changed` and blind to
-  "language-surface addition", which is the other half of the same policy.
-- **The panic ratchet** skips lines starting with `*`, to ignore doc-comment continuations —
-  which also skips `*stack.last_mut().expect(...) = …`. `vm.rs` has two uncounted. Tightening
-  it will shift budgets across several files, so it is its own change.
+- **`release.sh`** ✅ now asks the SOURCE whether the language grew, not the prose. The
+  `### Changed` check reads the notes; a language-surface addition is invisible to it, and in
+  v0.8.0 it fired only because `html_escape` happened to alter `to_html`'s bytes and supply
+  the one heading. Without that entry, a release adding a `[workspace]` table, seventeen
+  builtins and a new `Value` type would have shipped as a patch.
+
+  `registry.rs` holds `BUILTINS` and every `*_METHODS` table — the names a program can write
+  — so the set is compared against the last tag. Verified against real history rather than a
+  synthetic case: **v0.7.0 exposed 307 names and v0.8.0 exposed 331**, so a patch would have
+  been refused on the merits, naming all 22 additions. HEAD is also 331, which is right: this
+  cycle added a manifest table and changed behaviour but no builtins, so `### Changed` is the
+  guard that makes it a minor. The two agree.
+
+  A pure rename keeps the count level, which is correct here — that is a breaking change
+  rather than an addition, and it cannot avoid a `### Changed` entry.
+
+- **The panic ratchet** ✅ fixed. It skipped every line starting with `*` to ignore comment
+  continuations, and `*` also opens a DEREFERENCE, so `*stack.last_mut().expect(…) = …` was
+  never counted.
+
+  **This note said `vm.rs` has two uncounted. It had four, and the tree had nine**: `vm.rs`
+  +4, `array.rs` +2, `autodiff.rs` +2, `serve.rs` +1. Each was checked and each is provably
+  safe, with the proof now at its site — `empty_guard` returns first, `stack.last()` already
+  succeeded, and the rest are `RefCell` borrows on cells those files already budget. Budgets
+  raised to the true count, with the reason on the list so the diff does not read as nine new
+  panics.
 
 ---
 
