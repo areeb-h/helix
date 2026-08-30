@@ -1564,8 +1564,38 @@ fn run_build(args: &[String]) -> ExitCode {
             out.as_deref().map(std::path::Path::new),
             runtime.as_deref().map(std::path::Path::new),
         ) {
-            Ok(path) => {
-                println!("built standalone executable: {}", path.display());
+            Ok(built) => {
+                println!(
+                    "built standalone executable: {} ({:.1} MB)",
+                    built.path.display(),
+                    built.bytes as f64 / 1_048_576.0
+                );
+                // WHICH RUNTIME DOES THIS PROGRAM NEED? `--runtime` made the size a
+                // choice; without this it was not an INFORMED one -- the only way to find
+                // out whether a program touches a DataFrame, a genomics reader or the
+                // HTTP client was to build against a smaller runtime and see what failed
+                // at run time, on someone else's machine.
+                //
+                // This does NOT pick a runtime. The build has one binary to copy and
+                // cannot produce a smaller one; substituting a guess would be worse than
+                // saying nothing.
+                if built.features.is_empty() {
+                    // NAME WHAT ELSE THAT FLAG DROPS. `--no-default-features` also
+                    // removes `jit` and `mimalloc`, which change speed rather than
+                    // answers -- so "would serve this program" is true and, left alone,
+                    // reads as "costs nothing". Someone shipping a hot loop deserves to
+                    // know before they find out from a benchmark.
+                    println!(
+                        "needs no optional feature — a runtime built \
+                         `--no-default-features` would serve this program"
+                    );
+                    println!(
+                        "  (that also drops {}, which change speed, not answers)",
+                        registry::PERFORMANCE_FEATURES.join(" and ")
+                    );
+                } else {
+                    println!("needs: {}", built.features.join(", "));
+                }
                 ExitCode::SUCCESS
             }
             Err(e) => {

@@ -101,6 +101,51 @@ pub fn category_of(name: &str) -> &'static str {
 }
 
 /// Every built-in function, keyed by a flat name (no namespace prefixes — ADR 0017).
+/// Which Cargo feature a name needs, or `None` if every build has it.
+///
+/// **This table was measured, not reasoned about.** Each name was run against a
+/// `--no-default-features` runtime and classified by whether it answered "this build has
+/// no ... support". Guessing produced four wrong answers on the first pass:
+///
+///   - `read_bed`, `dna` and `align` live in the genomics module but need no feature;
+///   - `read_json` returns Helix values, not a frame, so it is not a `dataframes` name;
+///   - `listen` is UNGATED -- `http` gates the client (ureq), not the server, which is
+///     why a `--no-default-features` runtime still serves HTTP;
+///   - and `re_replace` looked ungated only because the probe called it with the wrong
+///     arity, so an arity error masked the gate.
+///
+/// The last one is the shape to watch for when re-deriving this: a name that fails for
+/// its own reasons before it reaches the gate reads as "available".
+///
+/// [`tests::every_builtin_declares_its_feature`] keeps it total, so a new builtin cannot
+/// be added without deciding which runtime it needs.
+pub fn feature_of(name: &str) -> Option<&'static str> {
+    match name {
+        // The DataFrame engine. A frame cannot be CONSTRUCTED without these, so every
+        // frame method is transitively covered by them.
+        "dataframe" | "read_csv" | "read_parquet" => Some("dataframes"),
+        // Bundled SQLite. Returns a frame, hence also `dataframes` in Cargo.toml.
+        "sqlite_query" => Some("db"),
+        // The spec-compliant genomics readers. `read_bed` is hand-rolled, and `dna` /
+        // `align` are pure computation, so none of those three appear here.
+        "read_vcf" | "read_bcf" | "read_sam" | "read_bam" | "read_gff" | "read_fasta"
+        | "read_fastq" => Some("bio"),
+        // The HTTP CLIENT. `listen`, `cookie_jar`, `headers` and the cookie parsers are
+        // not gated: a server needs no client.
+        "http_get" | "http_post" | "http_request" | "http_stream" => Some("http"),
+        _ if crate::regexes::is_regex_method(name) => Some("regex"),
+        _ => None,
+    }
+}
+
+/// Features that change SPEED rather than answers, so a program never "needs" one.
+///
+/// `jit` off means the VM runs every guard's bytecode fallback -- identical output, by
+/// the `HELIX_NOJIT` contract -- and `mimalloc` swaps the allocator. Reporting these
+/// beside `dataframes` would invite someone to read "unused" as "safe to drop" for one
+/// and "will break" for the other, when only the second is a semantic choice.
+pub const PERFORMANCE_FEATURES: &[&str] = &["jit", "mimalloc"];
+
 pub static BUILTINS: &[BuiltinDef] = &[
     // --- effectful / non-reproducible (I/O, output, network) -> not memoizable ---
     BuiltinDef { path: "print", pure: false },
@@ -508,6 +553,47 @@ mod tests {
                 b.path
             );
         }
+    }
+
+    /// Every builtin declares which runtime it needs.
+    ///
+    /// `feature_of` returning `None` is a real answer ("every build has this"), not a
+    /// fall-through, so it cannot be asserted against directly the way `category_of`'s
+    /// `"core"` can. Instead this pins the exact set of GATED names: adding a builtin
+    /// that needs a feature, or removing a gate, fails here until the table is updated.
+    /// A wrong table would tell someone their program does not need `dataframes` and
+    /// hand them an artifact that dies on its first frame.
+    #[test]
+    fn every_builtin_declares_its_feature() {
+        let mut gated: Vec<(&str, &str)> =
+            BUILTINS.iter().filter_map(|b| feature_of(b.path).map(|f| (b.path, f))).collect();
+        gated.sort_unstable();
+        let want: Vec<(&str, &str)> = vec![
+            ("dataframe", "dataframes"),
+            ("http_get", "http"),
+            ("http_post", "http"),
+            ("http_request", "http"),
+            ("http_stream", "http"),
+            ("read_bam", "bio"),
+            ("read_bcf", "bio"),
+            ("read_csv", "dataframes"),
+            ("read_fasta", "bio"),
+            ("read_fastq", "bio"),
+            ("read_gff", "bio"),
+            ("read_parquet", "dataframes"),
+            ("read_sam", "bio"),
+            ("read_vcf", "bio"),
+            ("sqlite_query", "db"),
+        ];
+        assert_eq!(gated, want, "the feature table drifted from the builtin catalog");
+
+        // The three that LOOK like they belong to a feature and do not. Each was
+        // measured against a `--no-default-features` runtime.
+        for ungated in ["read_bed", "dna", "align", "read_json", "listen", "cookie_jar"] {
+            assert_eq!(feature_of(ungated), None, "`{ungated}` is not feature-gated");
+        }
+        // Regex is carried by method name, not by the builtin catalog.
+        assert_eq!(feature_of("re_replace"), Some("regex"));
     }
 
     /// No method name may be repeated within a receiver's table, and no per-type table

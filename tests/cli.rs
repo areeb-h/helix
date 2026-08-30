@@ -12699,3 +12699,80 @@ fn two_modules_claiming_one_bundle_name_is_refused() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `helix build` reports which optional features the program actually reaches.
+///
+/// `--runtime` made the artifact's size a choice; it did not make it an informed one.
+/// Without this, the only way to learn whether a program touches a DataFrame, a genomics
+/// reader or the HTTP client was to build against a smaller runtime and see what failed
+/// at run time -- on someone else's machine.
+///
+/// The classification behind this was MEASURED against a `--no-default-features` runtime,
+/// not reasoned about; `registry::feature_of` records the four cases that guessing got
+/// wrong. Two of them are asserted here, because they are the ones that look wrong:
+/// `listen` needs nothing (`http` gates the client, not the server), and a plain file
+/// read needs nothing either.
+#[test]
+fn build_says_which_runtime_the_program_needs() {
+    let dir = std::env::temp_dir().join(format!("hx_needs_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("p.helix");
+    let out = dir.join("prog");
+
+    // BUILD AGAINST A STUB RUNTIME. What is under test is the REPORT, not the artifact,
+    // and copying the real runtime five times costs 272 seconds in a debug build -- which
+    // would roughly double the gate to pin one line of output. `--runtime` takes whatever
+    // file it is given, so a few bytes stand in for the interpreter here.
+    //
+    // The artifact this produces cannot run, and nothing below tries to run it; the
+    // multi-module tests cover execution with the real runtime.
+    let stub = dir.join("stub-runtime");
+    std::fs::write(&stub, b"not a real runtime, and never executed").unwrap();
+
+    let build = |src: &str| {
+        std::fs::write(&f, src).unwrap();
+        let _ = std::fs::remove_file(&out);
+        let (o, e, c) = run(
+            &[
+                "build",
+                f.to_str().unwrap(),
+                "-o",
+                out.to_str().unwrap(),
+                "--runtime",
+                stub.to_str().unwrap(),
+            ],
+            &[],
+            "",
+        );
+        assert_eq!(c, Some(0), "build failed:\n{e}");
+        o
+    };
+
+    // A frame is the clearest case: it cannot even be CONSTRUCTED without the feature.
+    let o = build("print(dataframe({a: [1, 2]}).count())\n");
+    assert!(o.contains("needs: dataframes"), "expected dataframes:\n{o}");
+
+    // Two at once, sorted, so the line is stable to read and to diff.
+    let o = build("print(\"abc\".re_match(\"b\"), http_get(\"http://x/\"))\n");
+    assert!(o.contains("needs: http, regex"), "expected both, sorted:\n{o}");
+
+    let o = build("print(read_vcf(\"v.vcf\").count())\n");
+    assert!(o.contains("needs: bio"), "expected bio:\n{o}");
+
+    // THE TWO THAT LOOK WRONG AND ARE NOT.
+    // A server needs no optional feature -- `http` is the client (ureq).
+    let o = build("listen(8080)\n");
+    assert!(o.contains("needs no optional feature"), "a server needs no feature:\n{o}");
+    // ...and neither does reading a file.
+    let o = build("print(read_text(\"x.txt\"))\n");
+    assert!(o.contains("needs no optional feature"), "a file read needs no feature:\n{o}");
+
+    // The suggestion must name what ELSE `--no-default-features` costs, or "would serve
+    // this program" reads as "costs nothing".
+    assert!(o.contains("--no-default-features"), "expected the suggestion:\n{o}");
+    assert!(o.contains("speed, not answers"), "expected the performance caveat:\n{o}");
+    assert!(o.contains("jit"), "the caveat should name the features it drops:\n{o}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

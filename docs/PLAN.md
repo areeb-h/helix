@@ -277,6 +277,51 @@ Note what it must NOT do: pick the runtime automatically. The build has one bina
 and cannot produce a smaller one; guessing and silently substituting would be worse than
 saying nothing.
 
+#### Landed
+
+`helix build` now prints what a program reaches:
+
+    built standalone executable: prog (6.7 MB)
+    needs: http, regex
+
+or, when nothing optional is touched:
+
+    needs no optional feature — a runtime built `--no-default-features` would serve this program
+      (that also drops jit and mimalloc, which change speed, not answers)
+
+The second line exists because the first is true and, alone, reads as "costs nothing".
+
+**The classification was measured, not reasoned about** — each name run against a
+`--no-default-features` runtime and classified by whether it answered "this build has
+no …". Guessing got four wrong, recorded in `registry::feature_of`:
+
+| looks like | actually |
+|---|---|
+| `read_bed`, `dna`, `align` are genomics | need no feature |
+| `read_json` is a DataFrame reader | returns Helix values |
+| `listen` needs `http` | **`http` gates the CLIENT** — a server needs nothing, which is why the 6.7 MB runtime serves HTTP |
+| `re_replace` is ungated | the probe called it with the wrong arity, and the arity error masked the gate |
+
+That last row is the shape to watch when re-deriving the table: a name that fails for its
+own reasons before reaching the gate reads as "available".
+
+`every_builtin_declares_its_feature` pins the exact gated set, so a new builtin cannot be
+added without deciding which runtime it needs. The pass itself walks `visit::walk_stmt`,
+whose exhaustive match fails compilation when an `Expr` variant is added, rather than
+silently skipping it. It can over-report (a user function named `read_csv` counts), which
+is the safe direction: over-reporting leaves someone on a runtime that works.
+
+### 1.4 `--runtime` takes any file, and says nothing
+
+Found while making 1.2's test fast: `--runtime` copies whatever it is handed. A stub of
+39 bytes builds "successfully" and produces an artifact that cannot run — which is what
+makes the test 0.11s instead of 272s, and is also a trap for anyone who mistypes a path.
+
+The check has an obvious shape: a real runtime contains the overlay magic as a constant
+in its own `.rodata`, since it carries the reader. Grepping the candidate for `HLXBND0`
+distinguishes a helix binary from `/etc/passwd` without executing it. Not done yet, and
+the test above would need its stub to carry those bytes.
+
 ### 1.3 `build` does not build, and the name says otherwise
 
 187,282 bytes marginal against a 187,293-byte bundle — **eleven bytes apart**, with this

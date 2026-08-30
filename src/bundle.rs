@@ -161,11 +161,46 @@ pub fn embedded() -> Option<Embedded> {
 /// path.
 ///
 /// Must run on the big stack — `module::load` and `types::check` recurse over the AST.
+/// What a built program needs from its runtime.
+pub struct Built {
+    pub path: PathBuf,
+    /// The optional Cargo features this program's code actually reaches, sorted.
+    pub features: Vec<&'static str>,
+    pub bytes: u64,
+}
+
+/// The optional features a program's own code requires.
+///
+/// This walks the loaded program with [`crate::visit::walk_stmt`], whose exhaustive match
+/// means a new `Expr` variant fails compilation there rather than being silently skipped
+/// here.
+///
+/// It can OVER-report: a user function named `read_csv` shadows the builtin, and this
+/// counts the name either way. That is the safe direction -- over-reporting leaves
+/// someone on a larger runtime that works, where under-reporting hands them an artifact
+/// that dies on its first frame.
+fn features_used(stmts: &[crate::ast::Stmt]) -> Vec<&'static str> {
+    use crate::ast::Expr;
+    let mut set = std::collections::BTreeSet::new();
+    for s in stmts {
+        crate::visit::walk_stmt(s, &mut |e| {
+            let name = match e {
+                Expr::Call { name, .. } | Expr::Method { name, .. } => name.as_str(),
+                _ => return,
+            };
+            if let Some(f) = crate::registry::feature_of(name) {
+                set.insert(f);
+            }
+        });
+    }
+    set.into_iter().collect()
+}
+
 pub fn build(
     entry: &Path,
     out: Option<&Path>,
     runtime: Option<&Path>,
-) -> Result<PathBuf, HelixError> {
+) -> Result<Built, HelixError> {
     let mkerr = |m: String| HelixError::new(m, 0, 0);
 
     // Load the import graph. A single file comes back un-mangled; more than one is
@@ -278,5 +313,9 @@ pub fn build(
             let _ = std::fs::set_permissions(&out_path, perm);
         }
     }
-    Ok(out_path)
+    Ok(Built {
+        features: features_used(&loaded.stmts),
+        bytes: image.len() as u64,
+        path: out_path,
+    })
 }
