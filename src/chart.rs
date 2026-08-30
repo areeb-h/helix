@@ -7,6 +7,10 @@
 //! These delegate *rendering*, not statistics: binning and scaling are done here,
 //! but coloring/width all come from `render::RenderOpts::auto()`, so a chart honors
 //! `HELIX_THEME`, `NO_COLOR`, and the terminal width exactly like a table does.
+//!
+//! The drawing characters themselves are a [`PlotGlyphs`] set chosen by `HELIX_PLOT`,
+//! for the same reason `HELIX_BOX` exists: resolution is worth nothing in a font that
+//! does not have the glyph.
 
 use std::rc::Rc;
 
@@ -136,25 +140,24 @@ fn bar_chart(values: &[f64], labels: Option<&[String]>, unit_label: Option<&str>
         }
         out.push_str(&paint_dim(opts, "│"));
         out.push(' ');
-        out.push_str(&paint_bar(opts, &bar_glyphs(v, maxv, barw)));
-        // pad to bar width so values line up
-        let used = bar_cells(v, maxv, barw);
-        out.push_str(&" ".repeat(barw.saturating_sub(used)));
+        out.push_str(&paint_bar(opts, &bar_glyphs(v, maxv, barw, opts.plot)));
+        // THE VALUE SITS AT ITS BAR'S END, not at a shared right margin.
+        //
+        // Right-aligning them bought a comparison the chart already makes — length IS the
+        // comparison in a bar chart — and paid for it by stranding each number up to
+        // `barw` columns from the bar it belongs to. On `[1, 5, 2, 8]` at a wide terminal
+        // the `1` sat about a hundred columns from its own bar, which is where the
+        // association between the two is lost.
+        //
+        // Adjacent, the numbers trace the bars' own profile, so they stay readable as a
+        // column AND belong to their row.
         out.push(' ');
         out.push_str(&paint_num(opts, &valstrs[i]));
     }
     out
 }
 
-/// Number of (possibly fractional) cells a bar occupies, rounded up for padding.
-fn bar_cells(v: f64, maxv: f64, barw: usize) -> usize {
-    if maxv <= 0.0 || v <= 0.0 {
-        return 0;
-    }
-    ((v / maxv) * barw as f64).ceil() as usize
-}
-
-fn bar_glyphs(v: f64, maxv: f64, barw: usize) -> String {
+fn bar_glyphs(v: f64, maxv: f64, barw: usize, g: PlotGlyphs) -> String {
     if maxv <= 0.0 || v <= 0.0 {
         return String::new();
     }
@@ -166,9 +169,9 @@ fn bar_glyphs(v: f64, maxv: f64, barw: usize) -> String {
         rem = 0;
     }
     full = full.min(barw);
-    let mut s = "█".repeat(full);
-    if rem > 0 && full < barw {
-        s.push(EIGHTHS[rem]);
+    let mut s = g.bar_full().to_string().repeat(full);
+    if rem > 0 && full < barw && let Some(c) = g.bar_partial(rem) {
+        s.push(c);
     }
     s
 }
@@ -202,6 +205,108 @@ fn histogram_bins(values: &[f64], bins: usize) -> (Vec<usize>, Vec<String>) {
 // ---- sparkline ----
 
 const SPARKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+const SPARKS_ASCII: [char; 8] = ['_', '.', '-', '+', '=', '*', '#', '@'];
+
+/// The glyph set a chart draws with, selected via `HELIX_PLOT`
+/// (`braille` default, `blocks`, or `ascii`).
+///
+/// This exists for the same reason `HELIX_BOX=ascii` does: what makes a plot readable is
+/// the characters the reader's FONT actually has. Braille packs 2x4 dots into one cell,
+/// the most resolution a character grid can hold, but a font missing that range falls
+/// back per glyph -- and a fallback whose advance width differs from the braille blank
+/// U+2800 shears the plot into scattered dots.
+///
+/// The rows this module emits are column-exact by construction, which
+/// `plot_rows_are_column_exact` pins. So a sheared plot is not a bug here to hunt: it is
+/// the font disagreeing about how wide a braille cell is, and nothing on this side can
+/// repair that. What this side CAN do is offer a coarser set the font certainly has.
+#[derive(Clone, Copy, PartialEq)]
+pub enum PlotGlyphs {
+    /// 2x4 dots per cell. Highest resolution; needs U+2800-U+28FF.
+    Braille,
+    /// 2x2 quadrant blocks. Half the resolution; needs only U+2580-U+259F.
+    Blocks,
+    /// Pure ASCII, 1 wide x 4 tall per cell, from a ramp that keeps vertical position.
+    Ascii,
+}
+
+impl PlotGlyphs {
+    /// An unknown name falls back to the default, matching `BoxStyle::named`: a mistyped
+    /// glyph set costs you a different-looking chart, which is self-announcing, so it
+    /// does not warrant the hard failure a mistyped CAPABILITY does.
+    pub fn named(name: &str) -> PlotGlyphs {
+        match name {
+            "blocks" => PlotGlyphs::Blocks,
+            "ascii" => PlotGlyphs::Ascii,
+            _ => PlotGlyphs::Braille,
+        }
+    }
+
+    fn bar_full(self) -> char {
+        match self {
+            PlotGlyphs::Ascii => '#',
+            _ => '█',
+        }
+    }
+
+    /// The partial cell that ends a bar, in eighths. ASCII has no eighths, so a bar
+    /// rounds to whole cells and shows `-` only once it is at least half full --
+    /// claiming more precision than the glyph set has would be a lie about the data.
+    fn bar_partial(self, rem: usize) -> Option<char> {
+        match self {
+            PlotGlyphs::Ascii => (rem >= 4).then_some('-'),
+            _ => Some(EIGHTHS[rem]),
+        }
+    }
+
+    fn sparks(self) -> &'static [char; 8] {
+        match self {
+            PlotGlyphs::Ascii => &SPARKS_ASCII,
+            _ => &SPARKS,
+        }
+    }
+
+    /// One canvas cell, from the braille dot bitmask the rasteriser filled in.
+    fn cell(self, d: u8) -> char {
+        match self {
+            PlotGlyphs::Braille => char::from_u32(0x2800 + d as u32).unwrap_or(' '),
+            PlotGlyphs::Blocks => {
+                // Fold the 2x4 dot grid onto a 2x2 quadrant: a quadrant is lit when
+                // either of the two dot rows it covers is.
+                let mut q = 0usize;
+                for (bit, (r, c)) in [(0usize, 0usize), (0, 1), (1, 0), (1, 1)].iter().enumerate() {
+                    if d & (DOTS[r * 2][*c] | DOTS[r * 2 + 1][*c]) != 0 {
+                        q |= 1 << bit;
+                    }
+                }
+                const Q: [char; 16] = [
+                    ' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛',
+                    '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█',
+                ];
+                Q[q]
+            }
+            PlotGlyphs::Ascii => {
+                // Keep the vertical position the braille dots encoded: the ramp picks by
+                // the mean row of the lit dots, so a rising curve still rises.
+                let (mut sum, mut n) = (0usize, 0usize);
+                for (py, row) in DOTS.iter().enumerate() {
+                    for bit in row {
+                        if d & bit != 0 {
+                            sum += py;
+                            n += 1;
+                        }
+                    }
+                }
+                const RAMP: [char; 4] = ['\'', '-', '.', '_'];
+                // No lit dots is no glyph -- a plot is mostly empty space.
+                match sum.checked_div(n) {
+                    None => ' ',
+                    Some(mean_row) => RAMP[mean_row.min(3)],
+                }
+            }
+        }
+    }
+}
 
 fn spark(values: &[f64], opts: &RenderOpts) -> String {
     if values.is_empty() {
@@ -214,7 +319,7 @@ fn spark(values: &[f64], opts: &RenderOpts) -> String {
         .iter()
         .map(|&v| {
             let t = if span > 0.0 { (v - min) / span } else { 0.0 };
-            SPARKS[((t * 7.0).round() as usize).min(7)]
+            opts.plot.sparks()[((t * 7.0).round() as usize).min(7)]
         })
         .collect();
     paint_bar(opts, &s)
@@ -272,13 +377,9 @@ impl Braille {
         }
     }
 
-    fn rows(&self) -> Vec<String> {
+    fn rows(&self, g: PlotGlyphs) -> Vec<String> {
         (0..self.h)
-            .map(|r| {
-                (0..self.w)
-                    .map(|c| char::from_u32(0x2800 + self.dots[r * self.w + c] as u32).unwrap())
-                    .collect()
-            })
+            .map(|r| (0..self.w).map(|c| g.cell(self.dots[r * self.w + c])).collect())
             .collect()
     }
 }
@@ -293,8 +394,8 @@ fn plot(xs: &[f64], ys: &[f64], connect: bool, opts: &RenderOpts) -> String {
     let xmax = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
     // y-axis gutter sized to the longest of the two edge labels.
-    let (lo_lbl, hi_lbl) = (fmt_num(ymin), fmt_num(ymax));
-    let gutter = dw(&lo_lbl).max(dw(&hi_lbl)).max(dw(&fmt_num((ymin + ymax) / 2.0)));
+    let (lo_lbl, hi_lbl) = (fmt_axis(ymin), fmt_axis(ymax));
+    let gutter = dw(&lo_lbl).max(dw(&hi_lbl)).max(dw(&fmt_axis((ymin + ymax) / 2.0)));
     let h = 15usize;
     let w = opts.width.saturating_sub(gutter + 2).clamp(12, 90);
 
@@ -324,7 +425,7 @@ fn plot(xs: &[f64], ys: &[f64], connect: bool, opts: &RenderOpts) -> String {
 
     // Compose: y labels on the left, a vertical axis, then the braille rows; a
     // bottom axis with the x range.
-    let rows = canvas.rows();
+    let rows = canvas.rows(opts.plot);
     let mut out = String::new();
     for (r, row) in rows.iter().enumerate() {
         let label = if r == 0 {
@@ -343,8 +444,8 @@ fn plot(xs: &[f64], ys: &[f64], connect: bool, opts: &RenderOpts) -> String {
     out.push_str(&paint_axis(opts, &format!("{:>gutter$} ", "")));
     out.push_str(&paint_dim(opts, &format!("╰{}", "─".repeat(w))));
     out.push('\n');
-    let xlo = fmt_num(xmin);
-    let xhi = fmt_num(xmax);
+    let xlo = fmt_axis(xmin);
+    let xhi = fmt_axis(xmax);
     let span = w.saturating_sub(dw(&xlo) + dw(&xhi)).max(1);
     out.push_str(&paint_axis(
         opts,
@@ -354,6 +455,40 @@ fn plot(xs: &[f64], ys: &[f64], connect: bool, opts: &RenderOpts) -> String {
 }
 
 // ---- shared helpers ----
+
+/// A number for an AXIS TICK, which is a different job from a number for a value.
+///
+/// `fmt_num` is the value formatter: it preserves what a reader needs to round-trip a
+/// result, which is right for a printed value and wrong for a label. Reusing it made a sine
+/// plot's top tick read `9.974949866040545` — seventeen significant digits to say "about
+/// ten", in a gutter that then has to be that wide on every row.
+///
+/// An axis label answers "roughly where am I", so three significant figures is the whole
+/// requirement. Whole numbers stay whole (an axis from 0 to 10 should say `10`, not `10.0`),
+/// and anything outside a readable range falls back to exponent form rather than growing the
+/// gutter without bound.
+fn fmt_axis(x: f64) -> String {
+    if !x.is_finite() {
+        return fmt_num(x);
+    }
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    // A whole number is already its own shortest label.
+    if x.fract() == 0.0 && x.abs() < 1e15 {
+        return fmt_num(x);
+    }
+    let a = x.abs();
+    if !(1e-3..1e6).contains(&a) {
+        return format!("{x:.1e}");
+    }
+    // Three significant figures: one before the point at `a >= 1`, more as `a` shrinks.
+    let decimals = (2 - a.log10().floor() as i32).clamp(0, 6) as usize;
+    let s = format!("{x:.decimals$}");
+    // `1.50` reads no better than `1.5`, and the gutter is shared by every row.
+    let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
+    if s == "-0" { "0".to_string() } else { s }
+}
 
 fn fmt_num(x: f64) -> String {
     if x.is_finite() && x.fract() == 0.0 && x.abs() < 9e18 {
@@ -482,6 +617,49 @@ mod tests {
         let out = text(line(&[arr(&[1, 3, 2, 5, 4, 6])], 0, 0).unwrap());
         assert!(out.contains('╰'), "expected a bottom axis:\n{out}");
         assert!(out.chars().any(|c| ('\u{2800}'..='\u{28FF}').contains(&c)), "braille:\n{out}");
+    }
+
+    /// Named in `PlotGlyphs`' own documentation, which claims a sheared plot is the font's
+    /// doing rather than this code's. That claim is only worth making if it is pinned.
+    #[test]
+    fn plot_rows_are_column_exact() {
+        let mut c = Braille::new(20, 6);
+        for x in 0..40 {
+            c.set(x, (x * 3) % 24);
+        }
+        for g in [PlotGlyphs::Braille, PlotGlyphs::Blocks, PlotGlyphs::Ascii] {
+            let rows = c.rows(g);
+            assert_eq!(rows.len(), 6);
+            let mut widths: Vec<usize> = rows.iter().map(|r| dw(r)).collect();
+            widths.sort_unstable();
+            widths.dedup();
+            assert_eq!(widths, vec![20], "rows are not one width: {widths:?}");
+        }
+    }
+
+    /// The fallbacks exist to stay READABLE, not merely to render. A dot at the top of a
+    /// cell and one at its bottom must not collapse to the same character, or a rising
+    /// curve stops rising and the coarser set is worse than useless.
+    #[test]
+    fn a_coarser_glyph_set_still_keeps_vertical_position() {
+        let (mut top, mut bottom) = (Braille::new(1, 1), Braille::new(1, 1));
+        top.set(0, 0);
+        bottom.set(0, 3);
+        for g in [PlotGlyphs::Blocks, PlotGlyphs::Ascii] {
+            assert_ne!(
+                top.rows(g)[0],
+                bottom.rows(g)[0],
+                "top and bottom of a cell render alike, so the plot is flat"
+            );
+        }
+        // And an empty cell is blank in every set — a plot is mostly empty space.
+        assert_eq!(Braille::new(1, 1).rows(PlotGlyphs::Ascii)[0], " ");
+    }
+
+    #[test]
+    fn an_unknown_glyph_set_falls_back_like_an_unknown_box_style() {
+        assert!(PlotGlyphs::named("nonsense") == PlotGlyphs::Braille);
+        assert!(PlotGlyphs::named("blocks") == PlotGlyphs::Blocks);
     }
 
     #[test]

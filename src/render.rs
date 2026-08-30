@@ -10,7 +10,8 @@
 //! [`crate::value::display_value`] path — scripts stay scriptable and every test
 //! and `vmparity` snapshot stays stable. Color is additionally gated on `NO_COLOR`
 //! and `HELIX_COLOR`. The palette ([`Theme`]) and table frame ([`BoxStyle`]) are
-//! customizable via `HELIX_THEME` / `HELIX_BOX`. None of this is on a hot path.
+//! customizable via `HELIX_THEME` / `HELIX_BOX`, and the glyphs a chart draws with
+//! via `HELIX_PLOT`. None of this is on a hot path.
 
 use std::io::IsTerminal;
 
@@ -190,6 +191,7 @@ pub struct RenderOpts {
     pub(crate) max_rows: usize,
     pub(crate) theme: Theme,
     pub(crate) boxes: BoxStyle,
+    pub(crate) plot: crate::chart::PlotGlyphs,
 }
 
 impl RenderOpts {
@@ -207,7 +209,10 @@ impl RenderOpts {
             && std::env::var("HELIX_COLOR").ok().as_deref() != Some("never");
         let theme = Theme::named(std::env::var("HELIX_THEME").as_deref().unwrap_or("default"));
         let boxes = BoxStyle::named(std::env::var("HELIX_BOX").as_deref().unwrap_or("rounded"));
-        RenderOpts { rich, color, width: term_width(), max_rows: 20, theme, boxes }
+        let plot = crate::chart::PlotGlyphs::named(
+            std::env::var("HELIX_PLOT").as_deref().unwrap_or("braille"),
+        );
+        RenderOpts { rich, color, width: term_width(), max_rows: 20, theme, boxes, plot }
     }
 
     fn as_plain(&self) -> Self {
@@ -420,12 +425,22 @@ fn render_record(fields: &[(Symbol, Value)], opts: &RenderOpts) -> String {
     if plain_w <= opts.width || fields.len() <= 1 {
         return inline;
     }
+    // Values start at a COMMON COLUMN. The multi-line form is only reached when a record
+    // is too wide to inline, which is exactly the case where a reader scans DOWN the
+    // values rather than reading across one pair. Ragged starts (`count: 7` above
+    // `median: 3.0` above `min: 1.5`) make that scan do work for nothing.
+    //
+    // The pad is measured from the PLAIN key: `paint` may have wrapped it in escapes
+    // that occupy no columns, and padding by the painted width would misalign exactly
+    // when colour is on.
+    let keyw = fields.iter().map(|(k, _)| dw(k.as_str())).max().unwrap_or(0);
     let mut s = opts.paint(Role::Dim, "{");
     s.push('\n');
     for (k, val) in sorted_fields(fields) {
         s.push_str("  ");
         s.push_str(&opts.paint(Role::Key, k.as_str()));
-        s.push_str(": ");
+        s.push(':');
+        s.push_str(&" ".repeat(keyw - dw(k.as_str()) + 1));
         s.push_str(&render_compact(val, opts));
         s.push_str(",\n");
     }
@@ -805,6 +820,7 @@ mod tests {
             max_rows: 20,
             theme: Theme::named("default"),
             boxes: BoxStyle::named("rounded"),
+            plot: crate::chart::PlotGlyphs::Braille,
         }
     }
 

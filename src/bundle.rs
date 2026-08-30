@@ -79,7 +79,11 @@ pub fn embedded() -> Option<(String, String)> {
 /// overlay to `out` (default: the entry's filename stem). Returns the output path.
 ///
 /// Must run on the big stack — `module::load` and `types::check` recurse over the AST.
-pub fn build(entry: &Path, out: Option<&Path>) -> Result<PathBuf, HelixError> {
+pub fn build(
+    entry: &Path,
+    out: Option<&Path>,
+    runtime: Option<&Path>,
+) -> Result<PathBuf, HelixError> {
     let mkerr = |m: String| HelixError::new(m, 0, 0);
 
     // Load the import graph. A single file comes back un-mangled; >1 module means the
@@ -110,12 +114,37 @@ pub fn build(entry: &Path, out: Option<&Path>) -> Result<PathBuf, HelixError> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "program.helix".to_string());
 
-    // The running interpreter is the stub we copy. (When `helix build` is invoked, the
-    // current exe is a plain `helix` with no overlay — exactly the clean runtime we want.)
-    let me = std::env::current_exe()
-        .map_err(|e| mkerr(format!("cannot locate the running `helix` binary: {e}")))?;
+    // WHICH RUNTIME GETS EMBEDDED. By default the running interpreter — when `helix build`
+    // is invoked, the current exe is a plain `helix` with no overlay, exactly the clean
+    // runtime we want.
+    //
+    // `--runtime` exists because that default is a size decision made by accident. A field
+    // report shipped a 120 MB web server: the invoking binary was the GATE build, so the
+    // artifact carried polars, six genomics crates, the Cranelift backend and debug symbols
+    // for a program that calls none of them. The same program on a `--no-default-features`
+    // release runtime is 6.7 MB — smaller than the equivalent Go binary, and it still serves
+    // HTTP, renders templates and reads files. The size was always a choice; there was no
+    // way to make it.
+    //
+    // A runtime that is itself a bundle is REFUSED rather than nested: the result would carry
+    // two payloads and run the inner one, which is a confusing way to ship the wrong program.
+    let me = match runtime {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_exe()
+            .map_err(|e| mkerr(format!("cannot locate the running `helix` binary: {e}")))?,
+    };
     let mut image = std::fs::read(&me)
         .map_err(|e| mkerr(format!("cannot read the `helix` binary at `{}`: {e}", me.display())))?;
+    if image.len() >= MAGIC.len() && &image[image.len() - MAGIC.len()..] == MAGIC {
+        return Err(mkerr(format!(
+            "`{}` is already a built program, not a runtime",
+            me.display()
+        ))
+        .hint(
+            "point `--runtime` at a plain `helix` binary. Embedding one bundle inside another \
+             would carry two programs and run the inner one.",
+        ));
+    }
 
     // Append the overlay: [name][source][name_len u32][src_len u64][MAGIC].
     image.extend_from_slice(filename.as_bytes());

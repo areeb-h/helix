@@ -1655,6 +1655,15 @@ The box-drawing style for tables.
 
 **Note:** `ascii` is the one that survives a terminal or a log pipeline without Unicode box characters; `none` drops the borders entirely and keeps the alignment. An unknown name falls back to `rounded`. Keywords: table, border, box, unicode, ascii, frame, layout.
 
+### `HELIX_PLOT`
+
+The glyphs a chart draws with.
+
+- **Values:** braille | blocks | ascii
+- **Unset:** braille
+
+**Note:** Reach for this when a plot looks sheared or scattered: the rows a chart emits are always the same width, so a ragged plot means the terminal FONT renders braille at a different width from the braille blank it is padded with. `blocks` needs only the quarter-block characters, which far more fonts have; `ascii` needs nothing at all and still keeps the vertical position, so a rising curve still rises. Resolution falls 2x4, then 2x2, then 1x4 per cell. An unknown name falls back to `braille`. Keywords: chart, plot, braille, sparkline, glyph, font, sheared, misaligned, unicode, ascii.
+
 ## Language forms
 
 ### `match`

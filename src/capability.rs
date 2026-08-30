@@ -293,7 +293,32 @@ fn gate_effect(eff: Effect, name: &str, args: &[Value], line: usize, col: usize)
             line,
             col,
         )
-        .hint("grant it in `[capabilities]` in helix.toml, or run with the matching `--allow-…` (ADR 0021)")),
+        // NAME THE MECHANISM THAT EXISTS. This hint used to offer two ways to grant
+        // authority and NEITHER WAS REAL: `[capabilities]` is refused by the manifest parser
+        // (deliberately — see `pkg::Manifest` — so that writing it could not *look* like it
+        // restricted a program while doing nothing), and no `--allow-*` flag has ever been
+        // implemented. The one mechanism that works — `HELIX_ALLOW_FS`, `HELIX_ALLOW_NET`
+        // and `HELIX_ALLOW_PROCESS` — went
+        // unmentioned.
+        //
+        // So a reader who turned the sandbox on and hit a denial had no way forward from the
+        // message: both roads it offered were walls. On a security surface that is the worst
+        // possible dead end, because the reachable exit is to turn the sandbox off — which
+        // is the one outcome this whole subsystem exists to avoid.
+        .hint(match eff {
+            Effect::FsRead => "grant it for this run with `HELIX_ALLOW_FS=read` (or `all`).",
+            Effect::FsWrite => "grant it for this run with `HELIX_ALLOW_FS=write` (or `all`).",
+            Effect::Net => "grant it for this run with `HELIX_ALLOW_NET=on`.",
+            Effect::Process => {
+                "grant it for this run with `HELIX_ALLOW_PROCESS=on` — but note a subprocess \
+                 reaches whatever ITS permissions allow, including the filesystem and network \
+                 you declined here (ADR 0037 D3)."
+            }
+            // No builtin carries `Env` yet, and `Pure` never reaches a denial.
+            Effect::Env | Effect::Pure => {
+                "this effect has no grant variable yet; it is classified but ungranted."
+            }
+        })),
         Mode::Off => Ok(()),
     }
 }

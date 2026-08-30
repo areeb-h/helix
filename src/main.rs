@@ -160,6 +160,8 @@ use error::HelixError;
 use interp::Interp;
 use value::Value;
 
+use std::io::IsTerminal;
+
 fn main() -> ExitCode {
     install_robustness_hooks();
     // Before any work: a DataFrame engine this build does not have is an error, not
@@ -294,6 +296,35 @@ fn run() -> ExitCode {
     }
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
+        // NO ARGS WITH NO TERMINAL IS NOT A REPL REQUEST. A session with nothing to read
+        // from cannot do anything, and starting one has two costs a user actually paid: a
+        // pipeline or a script invocation HANGS waiting on a terminal that will never
+        // arrive, and — the case that prompted this — a `helix build` artifact that has been
+        // `strip`ped silently becomes an interactive session with EXIT CODE 0.
+        //
+        // That last one is the important half. The program is appended after the executable
+        // image with a magic trailer, and `strip` rewrites the file and discards everything
+        // past it, so the bundle loses its payload and falls back to plain `helix`. Exiting
+        // 0 from a REPL nobody asked for turns "your program is gone" into "your program
+        // printed nothing", which is the harder failure to diagnose by an order of magnitude.
+        //
+        // EXPLICIT `helix repl` STILL WORKS WITHOUT A TERMINAL, because feeding it lines is
+        // a real thing to do. Only the implicit form refuses.
+        None if !std::io::stdin().is_terminal() => {
+            eprintln!(
+                "error: `helix` with no arguments starts an interactive session, and there \
+                 is no terminal here.\n\
+                 \n\
+                 help: to run a program, name it: `helix run <script>`.\n\
+                 help: to read lines from a pipe deliberately, ask for it: `helix repl`.\n\
+                 help: to find your way around: `helix help`, `helix doc [Type]`, \
+                 `helix describe <name>`.\n\
+                 help: IF THIS BINARY WAS BUILT WITH `helix build`, it has been stripped — \
+                 the program is appended after the executable image and `strip` discards it. \
+                 Rebuild and do not strip.\n"
+            );
+            ExitCode::from(2)
+        }
         // No args (or `repl`) → interactive session. The REPL drives the
         // tree-walker line by line, so give it the big stack.
         None | Some("repl") => run_on_big_stack(repl),
@@ -1459,8 +1490,9 @@ fn run_build(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Optional `-o <name>` / `--output <name>`.
+    // Optional `-o <name>` / `--output <name>`, and `--runtime <path>`.
     let mut out: Option<String> = None;
+    let mut runtime: Option<String> = None;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
@@ -1474,6 +1506,27 @@ fn run_build(args: &[String]) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
+            // WHICH RUNTIME TO EMBED. Without this the artifact is a copy of whatever
+            // `helix` you happened to invoke — and a field report shipped a 120 MB web
+            // server because that binary was the GATE build: every feature linked in plus
+            // debug symbols, for a program that touches no DataFrame, no genomics reader
+            // and no JIT kernel. The same program on a `--no-default-features` release
+            // runtime is 6.7 MB, which is smaller than the equivalent Go binary.
+            //
+            // The size was always a choice; there was simply no way to make it.
+            "--runtime" => match args.get(i + 1) {
+                Some(p) => {
+                    runtime = Some(p.clone());
+                    i += 2;
+                }
+                None => {
+                    eprintln!(
+                        "error: `--runtime` needs a path to a `helix` binary to embed the \
+                         program into"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            },
             other => {
                 eprintln!("error: unknown option `{other}` for `helix build`");
                 return ExitCode::FAILURE;
@@ -1481,7 +1534,11 @@ fn run_build(args: &[String]) -> ExitCode {
         }
     }
     run_on_big_stack(move || {
-        match bundle::build(std::path::Path::new(&entry), out.as_deref().map(std::path::Path::new)) {
+        match bundle::build(
+            std::path::Path::new(&entry),
+            out.as_deref().map(std::path::Path::new),
+            runtime.as_deref().map(std::path::Path::new),
+        ) {
             Ok(path) => {
                 println!("built standalone executable: {}", path.display());
                 ExitCode::SUCCESS

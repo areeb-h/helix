@@ -2,6 +2,77 @@
 
 ## Unreleased
 
+### Added
+
+- **`helix build --runtime <path>` — a bundle that does not carry its own interpreter.**
+  `helix build` produced a self-contained executable by embedding the runtime, which is the
+  right default and the wrong only option: a directory of twenty tools shipped twenty copies
+  of the same interpreter. Pointing a bundle at a runtime already on the machine takes it
+  from **2.4 GB to 6.7 MB, byte-identical in behaviour**.
+
+  A bundle is refused as a runtime. Nesting one inside another would produce a file that
+  looks like a program, runs like a program, and re-enters the loader a second time.
+
+- **`HELIX_PLOT=braille | blocks | ascii` — the glyphs a chart draws with.**
+
+  This exists for the reason `HELIX_BOX=ascii` does, and the measurement came first: every
+  row a plot emits is *exactly* the same width, in every glyph set, pinned by
+  `plot_rows_are_column_exact`. So a plot that arrives sheared into scattered dots is not a
+  bug on this side to hunt — it is the terminal's FONT rendering the braille dots at a
+  different advance width from the braille blank (U+2800) they are padded with, and nothing
+  here can repair a font. What this side can do is offer a set the font certainly has.
+
+  Resolution falls `2x4` → `2x2` → `1x4` dots per cell. The ASCII ramp picks by the mean row
+  of the lit dots rather than collapsing the cell, so a rising curve still rises — a
+  fallback that renders but cannot be read would be worse than none.
+
+### Changed
+
+- **An axis tick is a POSITION, and stopped being formatted as a value.** `fmt_num`
+  preserves what a reader needs to round-trip a result. That is correct for a printed value
+  and wrong for a label, and reusing it made a sine plot's top tick read
+  `9.974949866040545` — seventeen significant digits to say "about ten", in a gutter that
+  then had to be that wide on **every row of the plot**. Three significant figures is the
+  whole requirement: **the gutter went from 21 columns to 8.**
+
+  Whole numbers stay whole (an axis from 0 to 10 says `10`, not `10.0`) and anything outside
+  a readable range falls back to an exponent rather than growing the gutter without bound.
+
+  Histogram bucket bounds are deliberately **unchanged**: `1.5–4` describes the data's own
+  boundaries, which a reader may need exactly. That is a value, not an axis.
+
+- **A multi-line record starts every value at one column.** The multi-line form is only
+  reached when a record is too wide to inline, which is exactly the case where a reader
+  scans *down* the values rather than reading across one pair — and `count: 7` above
+  `median: 3.0` above `min: 1.5` started them at three different columns for no reason.
+  `summary()` is the surface where this showed most, being the most-called introspection in
+  the language.
+
+  The pad is measured from the plain key, not the painted one: colouring may have wrapped it
+  in escapes that occupy no columns, and padding by the painted width would misalign exactly
+  when colour is on.
+
+- **A bar carries its value at its own end, not at a shared right margin.** Right-aligning
+  the numbers bought a comparison the chart already makes — length IS the comparison in a
+  bar chart — and paid for it by stranding each number up to a bar-width from the bar it
+  belongs to. On `[1, 5, 2, 8]` at a wide terminal the `1` sat about a hundred columns from
+  its own bar, which is where the association between the two is lost. Adjacent, the numbers
+  trace the bars' own profile, so the comparison survives *and* the association returns.
+
+- **A denied capability names a grant that exists.** The refusal pointed at a single
+  variable regardless of which effect was denied, so following it verbatim did not lift the
+  denial. Each effect now names its own: `HELIX_ALLOW_FS=read`, `=write`, `HELIX_ALLOW_NET`,
+  `HELIX_ALLOW_PROCESS`. The process hint additionally says what granting it means — a
+  subprocess reaches whatever ITS permissions allow, including the filesystem and network
+  you just declined (ADR 0037 D3).
+
+- **`helix` with no arguments and no terminal refuses instead of hanging.** It started an
+  interactive session and then waited forever on a pipe that would never carry a keystroke.
+  It now exits 2 and names the likeliest cause — a binary built by `helix build`, which is
+  stripped and cannot find its entry — while keeping the discovery map (`helix help`,
+  `helix doc [Type]`, `helix describe <name>`) that made bare `helix` the place a new user
+  lands.
+
 ## v0.8.0 — 2026-08-30
 
 ### Added

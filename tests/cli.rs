@@ -816,8 +816,11 @@ fn immutable_reassignment_errors_on_the_vm() {
 
 #[test]
 fn repl_evaluates_and_exits_on_eof() {
-    // No file arg => REPL. Feed one expression, then EOF (closed stdin).
-    let (stdout, _, code) = run(&[], &[], "21 + 21\n");
+    // ASK FOR THE REPL EXPLICITLY. A bare `helix` with no terminal now refuses rather than
+    // opening a session that can read nothing — see
+    // `no_args_without_a_terminal_refuses_instead_of_hanging`. Feeding a pipe deliberately
+    // is still legal and is what this test is about.
+    let (stdout, _, code) = run(&["repl"], &[], "21 + 21\n");
     assert_eq!(code, Some(0), "REPL should exit cleanly on EOF");
     assert!(stdout.contains("42"), "REPL did not echo the result: {stdout:?}");
 }
@@ -6194,7 +6197,7 @@ print(range(0, 5).map(i => b[i - 5]).sum())
 /// of designing around a "missing" `scan` that `helix doc Array` printed all along.
 #[test]
 fn repl_banner_points_at_help_doc_and_describe() {
-    let (out, _, code) = run(&[], &[], "");
+    let (out, _, code) = run(&["repl"], &[], "");
     assert_eq!(code, Some(0));
     for needle in ["helix help", "helix doc [Type]", "helix describe"] {
         assert!(out.contains(needle), "banner lost `{needle}`:\n{out}");
@@ -12045,6 +12048,437 @@ fn a_column_verb_does_not_deny_it_exists() {
     let (_, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
     assert_ne!(code, Some(0));
     assert!(err.contains("has no method `nope`"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A capability denial must offer a way forward that WORKS.
+///
+/// It used to name two: `[capabilities]` in `helix.toml`, which the manifest parser refuses
+/// (deliberately — writing it must not *look* like it restricts a program while doing
+/// nothing), and `--allow-…`, which has never existed. The one mechanism that does work,
+/// `HELIX_ALLOW_*`, went unmentioned.
+///
+/// So a reader who turned the sandbox on had no path forward from the message. On a security
+/// surface that is the worst possible dead end, because the reachable exit is to turn the
+/// sandbox off — the one outcome the subsystem exists to prevent.
+///
+/// This test asserts the hint is FOLLOWABLE, not merely present: it takes what the message
+/// says and checks the program then runs.
+#[test]
+fn a_capability_denial_names_a_grant_that_exists() {
+    let dir = std::env::temp_dir().join(format!("hx_hint_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = dir.to_str().unwrap().replace('\\', "/");
+    let f = dir.join("t.helix");
+    std::fs::write(dir.join("data"), "hello").unwrap();
+
+    // Each effect names its OWN variable and value — a single generic hint would send a
+    // reader granting the wrong category.
+    let cases: &[(&str, &str, &str, &str)] = &[
+        ("read", &format!("print(read_text(\"{d}/data\"))"), "fs-read", "HELIX_ALLOW_FS=read"),
+        ("write", &format!("\"x\".write_to(\"{d}/out\")\nprint(1)"), "fs-write", "HELIX_ALLOW_FS=write"),
+    ];
+    for (label, src, effect, grant) in cases {
+        std::fs::write(&f, format!("{src}\n")).unwrap();
+        let (_, err, code) = run(&["run", f.to_str().unwrap()], &[("HELIX_CAP", "enforce")], "");
+        assert_ne!(code, Some(0), "{label} must be denied");
+        assert!(err.contains(effect), "the denial names the effect: {err}");
+        assert!(err.contains(grant), "the hint names the working grant: {err}");
+        // The mechanisms that DO NOT exist must not be offered.
+        assert!(
+            !err.contains("[capabilities]") && !err.contains("--allow-"),
+            "the hint must not offer a mechanism that does not exist: {err}"
+        );
+
+        // FOLLOW IT. A hint that is present but wrong is worse than none.
+        let (k, v) = grant.split_once('=').expect("grant is VAR=value");
+        let (_, err2, code2) = run(
+            &["run", f.to_str().unwrap()],
+            &[("HELIX_CAP", "enforce"), (k, v)],
+            "",
+        );
+        assert_eq!(code2, Some(0), "following the hint must work for {label}: {err2}");
+    }
+
+    // `write` does not imply `read` — a grant that quietly widened would make the hint a lie
+    // in the other direction.
+    std::fs::write(&f, format!("print(read_text(\"{d}/data\"))\n")).unwrap();
+    let (_, err, code) = run(
+        &["run", f.to_str().unwrap()],
+        &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_FS", "write")],
+        "",
+    );
+    assert_ne!(code, Some(0), "write must not grant read");
+    assert!(err.contains("fs-read"), "{err}");
+
+    // `process` says what granting it actually means. A subprocess reaches whatever ITS
+    // permissions allow, so this grant is a boundary EXIT, not confinement (ADR 0037 D3) —
+    // and a reader who is not told that will grant it believing otherwise.
+    std::fs::write(&f, "print(run(\"echo\", [\"hi\"]).stdout)\n").unwrap();
+    let (_, err, code) = run(&["run", f.to_str().unwrap()], &[("HELIX_CAP", "enforce")], "");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("HELIX_ALLOW_PROCESS=on"), "{err}");
+    assert!(
+        err.contains("filesystem and network you declined"),
+        "granting process must not read as confinement: {err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `helix` with no arguments and no terminal must refuse, not open a session.
+///
+/// A REPL with nothing to read from cannot do anything, and starting one cost a user twice:
+/// a scripted invocation HUNG waiting on a terminal that never arrives, and — the case that
+/// prompted this — a `helix build` artifact that had been `strip`ped became an interactive
+/// session with EXIT CODE 0.
+///
+/// That second half is the dangerous one. The program is appended after the executable image
+/// with a magic trailer; `strip` rewrites the file and discards everything past it, so the
+/// bundle loses its payload and falls back to plain `helix`. Exiting 0 from a session nobody
+/// asked for turns "your program is gone" into "your program printed nothing".
+#[test]
+fn no_args_without_a_terminal_refuses_instead_of_hanging() {
+    // The test harness never attaches a terminal, so a bare invocation here is exactly the
+    // case in question.
+    let (_, err, code) = run(&[], &[], "");
+    assert_eq!(code, Some(2), "a bare invocation with no terminal must fail: {err}");
+    assert!(err.contains("no terminal here"), "{err}");
+    // It must name the way to run a program, and the stripped-bundle cause — the whole point
+    // is that the reader can tell which of the two situations they are in.
+    assert!(err.contains("helix run"), "the fix for the common case: {err}");
+    assert!(
+        err.contains("strip") && err.contains("helix build"),
+        "the stripped-bundle cause must be named: {err}"
+    );
+    // AND IT KEEPS THE DISCOVERY MAP. `repl_banner_points_at_help_doc_and_describe` exists
+    // because bare `helix` is where a new reader lands, and this project's history prices a
+    // missing pointer at months spent designing around a `scan` that `helix doc Array` had
+    // been printing all along. Refusing the piped case must not trade a hang for a dead end.
+    for needle in ["helix help", "helix doc", "helix describe"] {
+        assert!(err.contains(needle), "the refusal lost `{needle}`:\n{err}");
+    }
+
+    // AND THE DELIBERATE USES MUST STILL WORK. A refusal that catches these would trade one
+    // broken workflow for several.
+    let (out, err, code) = run(&["eval", "print(2 + 2)"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "4");
+
+    let (out, err, code) = run(&["--version"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.starts_with("helix "), "{out}");
+
+    let (out, _, code) = run(&["help"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("USAGE"), "{out}");
+
+    // Explicit `repl` fed from a pipe is a real thing to do and is NOT refused: only the
+    // implicit form is.
+    let (out, _, code) = run(&["repl"], &[], "1 + 1\n");
+    assert_eq!(code, Some(0), "explicit `repl` must still accept piped input");
+    assert!(out.contains('2'), "it must evaluate what it was fed: {out}");
+
+    // A script still runs, by both spellings.
+    let dir = std::env::temp_dir().join(format!("hx_repl_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("p.helix");
+    std::fs::write(&f, "print(\"ran\")\n").unwrap();
+    for args in [vec!["run", f.to_str().unwrap()], vec![f.to_str().unwrap()]] {
+        let (out, err, code) = run(&args, &[], "");
+        assert_eq!(code, Some(0), "{args:?}: {err}");
+        assert_eq!(out.trim(), "ran", "{args:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `helix build` must let the caller choose the runtime it embeds.
+///
+/// Without `--runtime` the artifact is a copy of whatever `helix` was invoked, which makes
+/// the binary's size an accident rather than a decision. A field report shipped a **120 MB**
+/// web server for a 187 KB program because the invoking binary was the gate build — every
+/// feature linked in plus debug symbols, carrying polars, six genomics crates and the
+/// Cranelift backend for a program that calls none of them. The same program on a
+/// `--no-default-features` release runtime is **6.7 MB**, smaller than the equivalent Go
+/// binary, and it still serves HTTP and renders templates.
+///
+/// This test does not assert a size — that depends on which profiles happen to be built. It
+/// asserts the two things that must hold for the choice to be usable at all: a different
+/// runtime is actually used, and the program it runs is unchanged by the swap.
+#[test]
+fn build_can_choose_which_runtime_it_embeds() {
+    let dir = std::env::temp_dir().join(format!("hx_rt_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("p.helix");
+    std::fs::write(&src, "print(\"embedded and run\")\n").unwrap();
+
+    let exe = std::path::Path::new(env!("CARGO_BIN_EXE_helix"));
+
+    // Default: the running binary is the stub.
+    let a = dir.join("a");
+    let (_, err, code) = run(&["build", src.to_str().unwrap(), "-o", a.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let (out, err, code) = run_bin(&a, &[]);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "embedded and run");
+
+    // Explicit `--runtime` pointing at that same binary must behave identically — this is
+    // the control that says the flag is wired, not merely accepted.
+    let b = dir.join("b");
+    let (_, err, code) = run(
+        &[
+            "build",
+            src.to_str().unwrap(),
+            "-o",
+            b.to_str().unwrap(),
+            "--runtime",
+            exe.to_str().unwrap(),
+        ],
+        &[],
+        "",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    let (out2, _, code2) = run_bin(&b, &[]);
+    assert_eq!(code2, Some(0));
+    assert_eq!(out2, out, "the runtime swap must not change the program's output");
+
+    // A BUNDLE IS NOT A RUNTIME. Nesting would carry two payloads and run the inner one,
+    // which is a confusing way to ship the wrong program.
+    let c = dir.join("c");
+    let (_, err, code) = run(
+        &[
+            "build",
+            src.to_str().unwrap(),
+            "-o",
+            c.to_str().unwrap(),
+            "--runtime",
+            a.to_str().unwrap(),
+        ],
+        &[],
+        "",
+    );
+    assert_ne!(code, Some(0), "a built program must be refused as a runtime");
+    assert!(err.contains("already a built program"), "{err}");
+
+    // A missing runtime is a clear error, not a panic.
+    let (_, err, code) = run(
+        &[
+            "build",
+            src.to_str().unwrap(),
+            "-o",
+            dir.join("d").to_str().unwrap(),
+            "--runtime",
+            dir.join("nope").to_str().unwrap(),
+        ],
+        &[],
+        "",
+    );
+    assert_ne!(code, Some(0));
+    assert!(err.contains("cannot read"), "{err}");
+
+    // And the flag needs its argument.
+    let (_, err, code) = run(&["build", src.to_str().unwrap(), "--runtime"], &[], "");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("needs a path"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Run a built artifact directly (not through the `helix` CLI), with stdin closed.
+fn run_bin(path: &std::path::Path, env: &[(&str, &str)]) -> (String, String, Option<i32>) {
+    let mut cmd = std::process::Command::new(path);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the built artifact runs");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code(),
+    )
+}
+
+/// An axis tick and a printed value are different jobs, and reusing one formatter for both
+/// made a sine plot's top label read `9.974949866040545`.
+///
+/// The value formatter is right for a result: a reader may need to round-trip it. An axis
+/// label answers "roughly where am I", so three significant figures is the whole
+/// requirement — and the gutter it sits in is repeated on EVERY row of the plot, so
+/// seventeen digits cost twenty-one columns of every line to say "about ten".
+#[test]
+fn an_axis_label_labels_a_position_not_a_value() {
+    let dir = std::env::temp_dir().join(format!("hx_axis_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("t.helix");
+    let rich = [("HELIX_RICH", "1"), ("HELIX_COLOR", "never")];
+
+    // The case that prompted this: a sine scaled by ten has an irrational-looking maximum.
+    std::fs::write(&f, "print(range(0, 30).map(sin(it / 4.0) * 10.0).line_chart())\n").unwrap();
+    let (out, err, code) = run(&["run", f.to_str().unwrap()], &rich, "");
+    assert_eq!(code, Some(0), "{err}");
+    let first = out.lines().next().unwrap_or_default();
+    assert!(
+        !first.contains("9.974949866040545"),
+        "the axis is still printing a value, not a label:\n{first}"
+    );
+    assert!(first.contains("9.97"), "three significant figures:\n{first}");
+
+    // A whole-numbered axis says `10`, not `10.0` — the shortest true label.
+    std::fs::write(&f, "print([0, 5, 10, 5, 0].line_chart())\n").unwrap();
+    let (out, _, code) = run(&["run", f.to_str().unwrap()], &rich, "");
+    assert_eq!(code, Some(0));
+    let first = out.lines().next().unwrap_or_default();
+    assert!(first.trim_start().starts_with("10 "), "whole numbers stay whole:\n{first}");
+
+    // Out of readable range, an exponent keeps the gutter bounded rather than growing it.
+    std::fs::write(
+        &f,
+        "print(range(0, 20).map(sin(it / 3.0) * 0.001).line_chart())\n",
+    )
+    .unwrap();
+    let (out, _, _) = run(&["run", f.to_str().unwrap()], &rich, "");
+    let first = out.lines().next().unwrap_or_default();
+    assert!(first.contains('e'), "tiny magnitudes use an exponent:\n{first}");
+
+    // THE GUTTER IS THE POINT. It is repeated on every row, so its width is the real cost.
+    std::fs::write(&f, "print(range(0, 30).map(sin(it / 4.0) * 10.0).line_chart())\n").unwrap();
+    let (out, _, _) = run(&["run", f.to_str().unwrap()], &rich, "");
+    let gutter = out
+        .lines()
+        .next()
+        .and_then(|l| l.find('\u{2502}'))
+        .expect("the chart has a vertical axis");
+    assert!(gutter < 12, "the axis gutter is {gutter} columns wide, on every row");
+
+    // A HISTOGRAM BUCKET IS A VALUE, NOT AN AXIS, and must be unchanged: `1.5–4` describes
+    // the data's own boundaries, which a reader may need exactly.
+    std::fs::write(&f, "print([1.5, 2.25, 3.75, 9.0].histogram(3))\n").unwrap();
+    let (out, _, code) = run(&["run", f.to_str().unwrap()], &rich, "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("1.5"), "bucket bounds stay exact:\n{out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A multi-line record starts every value at ONE column.
+///
+/// The multi-line form is only reached when a record is too wide to inline, which is
+/// exactly when a reader scans down the values instead of reading across one pair.
+/// `summary()` is the case that showed it: `count: 7` above `median: 3.0` above
+/// `min: 1.5` put the values at three different columns, for no reason.
+#[test]
+fn a_multiline_record_starts_its_values_at_one_column() {
+    let dir = std::env::temp_dir().join(format!("hx_recalign_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("t.helix");
+    let rich = [("HELIX_RICH", "1"), ("HELIX_COLOR", "never")];
+
+    std::fs::write(&f, "print([3.0, 1.5, 4.0, 1.5, 9.0, 2.5, 6.0].summary())\n").unwrap();
+    let (out, err, code) = run(&["run", f.to_str().unwrap()], &rich, "");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("median"), "expected the multi-line form:\n{out}");
+
+    let mut cols: Vec<usize> = out
+        .lines()
+        .filter(|l| l.starts_with("  "))
+        .filter_map(|l| {
+            let c = l.find(':')?;
+            let rest = &l[c + 1..];
+            Some(c + 1 + (rest.len() - rest.trim_start().len()))
+        })
+        .collect();
+    assert!(cols.len() >= 5, "expected a field per line:\n{out}");
+    cols.sort_unstable();
+    cols.dedup();
+    assert_eq!(cols.len(), 1, "values start at {cols:?}, not one column:\n{out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A bar carries its value at its OWN end, not at a shared right margin.
+///
+/// Right-aligning the numbers bought a comparison the chart already makes — length IS
+/// the comparison in a bar chart — and paid for it by stranding each number up to a
+/// bar-width away from the bar it belongs to.
+#[test]
+fn a_bar_carries_its_value_at_its_own_end() {
+    let dir = std::env::temp_dir().join(format!("hx_baralign_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("t.helix");
+    let rich = [("HELIX_RICH", "1"), ("HELIX_COLOR", "never")];
+
+    std::fs::write(&f, "print([1, 5, 2, 8].bar_chart())\n").unwrap();
+    let (out, err, code) = run(&["run", f.to_str().unwrap()], &rich, "");
+    assert_eq!(code, Some(0), "{err}");
+
+    // The value for the SHORTEST bar is the one that used to be stranded.
+    let row = out
+        .lines()
+        .find(|l| l.trim_end().ends_with(" 1"))
+        .unwrap_or_else(|| panic!("no row for the value 1:\n{out}"));
+    let trimmed = row.trim_end();
+    let before = trimmed.chars().rev().nth(2).unwrap();
+    assert!(
+        ('\u{2580}'..='\u{259F}').contains(&before),
+        "the value should sit one space past its bar, found {before:?}:\n{row}"
+    );
+
+    // Ragged row lengths ARE the property: equal lengths would mean the values were
+    // padded back out to a shared margin.
+    let mut lens: Vec<usize> =
+        out.lines().filter(|l| l.contains('\u{2502}')).map(|l| l.chars().count()).collect();
+    lens.sort_unstable();
+    lens.dedup();
+    assert!(lens.len() > 1, "every bar row is the same width, so values are still right-aligned:\n{out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `HELIX_PLOT` is the way out of a font that cannot draw braille, exactly as
+/// `HELIX_BOX=ascii` is the way out of one that cannot draw box corners.
+#[test]
+fn helix_plot_offers_a_glyph_set_the_font_certainly_has() {
+    let dir = std::env::temp_dir().join(format!("hx_plotset_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("t.helix");
+    std::fs::write(&f, "print(range(0, 30).map(sin(it / 4.0) * 10.0).line_chart())\n").unwrap();
+
+    let braille = |c: char| ('\u{2800}'..='\u{28FF}').contains(&c);
+    let base = [("HELIX_RICH", "1"), ("HELIX_COLOR", "never")];
+
+    let (def, _, code) = run(&["run", f.to_str().unwrap()], &base, "");
+    assert_eq!(code, Some(0));
+    assert!(def.chars().any(braille), "braille is still the default:\n{def}");
+
+    for (mode, why) in [("blocks", "quarter blocks"), ("ascii", "plain ASCII")] {
+        let env = [base[0], base[1], ("HELIX_PLOT", mode)];
+        let (out, err, code) = run(&["run", f.to_str().unwrap()], &env, "");
+        assert_eq!(code, Some(0), "{err}");
+        assert!(!out.chars().any(braille), "{mode} still emitted braille ({why}):\n{out}");
+        // Still a plot: an axis, and something drawn against it.
+        assert!(out.contains('\u{2502}'), "{mode} lost its axis:\n{out}");
+        assert!(out.lines().count() > 5, "{mode} lost its body:\n{out}");
+    }
+
+    // Pure ASCII must be exactly that, once the axis chrome is set aside.
+    let env = [base[0], base[1], ("HELIX_PLOT", "ascii")];
+    let (out, _, _) = run(&["run", f.to_str().unwrap()], &env, "");
+    let stray: Vec<char> = out
+        .chars()
+        .filter(|c| !c.is_ascii() && !"\u{2502}\u{2500}\u{2570}\u{256F}\u{2534}\u{251C}".contains(*c))
+        .collect();
+    assert!(stray.is_empty(), "ascii mode emitted non-ASCII beyond the axis: {stray:?}\n{out}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

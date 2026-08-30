@@ -10,28 +10,70 @@ Last updated: 2026-08-30.
 
 ## Released
 
+- **v0.8.0** — tag on `289eb3d`, published 2026-08-30. The `[workspace]` manifest table
+  (ADR 0040), the durable-storage substrate (ADR 0041) with kernel-held locks, `Bytes`
+  (ADR 0042), row windows and runtime schemas (ADR 0043), `html_escape`, and the
+  accumulation amendment to ADR 0029.
 - **v0.7.0** — tag on `4363df6`, published 2026-08-29. Regex that cannot hang the program,
   String predicates in a query (ADR 0039), a server that can hang up (a remote DoS three
   requests could trigger), peer + HTTP version on a request, a body sent in pieces, the
   capability sandbox findable and no longer failing open on a typo.
 
+**A guard `release.sh` still lacks.** It refuses a patch when it sees a `### Changed`
+heading, and in the 0.8.0 cycle that heading existed only by luck — `html_escape` happened
+to alter `to_html`'s bytes. Every other addition that cycle sat under `### Added`, so a
+`release.sh patch` would have shipped a `[workspace]` table, seventeen builtins, a new
+`Value` type and three DataFrame verbs as a patch. The guard is right about `### Changed`
+and blind to "language-surface addition", which is the other half of the same policy.
+Still open — see the queue.
+
 ## In flight for the next release
 
-Everything below is on `main` and **not** in v0.7.0.
+Everything below is on `main` and **not** in v0.8.0.
 
-**The next release is a MINOR (0.8.0), not a patch.** `docs/RELEASING.md` makes a
-language-surface addition a minor by definition, and this cycle adds a `[workspace]` manifest
-table, seventeen builtins, a new `Value` type and three DataFrame verbs.
+### Terminal output that reads as carefully as it is computed
 
-`release.sh` WOULD have refused a patch here, but only by luck: it checks for a `### Changed`
-heading, and `html_escape` happening to alter `to_html` bytes supplied one. Without that
-single entry every other addition sits under `### Added` and would have slipped through. The
-guard is right about `### Changed` and blind to "language-surface addition", which is the
-other half of the same policy — see the queue.
+A field report arrived as two screenshots with the note *"looks a bit unaligned and weird"*,
+which turned out to be three separate defects and one thing that is not a defect at all.
+
+- **An axis tick is a POSITION, not a value.** `fmt_num` preserves what a reader needs to
+  round-trip a result — correct for a printed value, wrong for a label. Reusing it made a
+  sine plot's top tick read `9.974949866040545`: seventeen significant digits to say "about
+  ten", in a gutter repeated on every row of the plot. `fmt_axis` gives three significant
+  figures, keeps whole numbers whole (`10`, not `10.0`), and falls back to an exponent
+  rather than growing without bound. **Gutter 21 columns → 8.** Histogram bucket bounds are
+  deliberately untouched: `1.5–4` describes the data's own boundaries, which is a value.
+- **A multi-line record starts every value at one column.** The multi-line form is only
+  reached when a record is too wide to inline, which is exactly when a reader scans down the
+  values rather than across one pair — and `count: 7` above `median: 3.0` above `min: 1.5`
+  put them at three different columns. The pad is measured from the PLAIN key, since
+  painting may have wrapped it in escapes that occupy no columns.
+- **A bar carries its value at its own end.** Right-aligning the numbers bought a comparison
+  the chart already makes — length IS the comparison in a bar chart — and paid for it by
+  stranding each number up to a bar-width from its own bar. On `[1, 5, 2, 8]` at a wide
+  terminal the `1` sat about a hundred columns away. Adjacent, the numbers trace the bars'
+  own profile, so the comparison survives and the association returns.
+- **`HELIX_PLOT=braille | blocks | ascii`,** for the reason `HELIX_BOX=ascii` exists.
+  Measured first: every row a plot emits is *exactly* the same width in every glyph set
+  (pinned by `plot_rows_are_column_exact`). So a sheared plot is the FONT rendering braille
+  dots at a different width from the braille blank U+2800 they are padded with, and nothing
+  on this side can repair that. What this side can do is offer a set the font certainly has.
+  Resolution falls 2x4 → 2x2 → 1x4 per cell; the ASCII ramp keeps vertical position, so a
+  rising curve still rises.
+
+**What was NOT wrong**, and was nearly "fixed" three times: `HELIX_BOX=heavy` (invented —
+the styles are rounded/square/ascii/none), the documented silent fallback on a mistyped box
+style (a wrong border is self-announcing; a wrong CAPABILITY is not, which is why that one
+fails hard instead), and `frequencies()` printing `[("a", 3), ("b", 2)]` — an array of
+tuples is a value, its literal form is copy-pasteable, and it fits on one line.
+
+Also on `main`: the capability denial names a grant that exists and carries the discovery
+map, bare `helix` with no terminal refuses instead of hanging, and `helix build --runtime`
+takes a bundle from 2.4 GB to 6.7 MB byte-identically.
 
 ---
 
-## What landed since v0.7.0
+## What landed in v0.8.0
 
 ### The module story (ADR 0040)
 
