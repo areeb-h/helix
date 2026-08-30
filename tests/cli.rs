@@ -12592,19 +12592,46 @@ fn a_program_with_imports_bundles_and_runs_without_its_sources() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let got = Command::new(&moved)
-        .current_dir(&away)
-        .stdin(Stdio::null())
-        .output()
-        .expect("failed to run the artifact");
-    let got_out = String::from_utf8_lossy(&got.stdout).into_owned();
-    assert_eq!(
-        got.status.code(),
-        Some(0),
-        "the artifact failed:\n{}",
-        String::from_utf8_lossy(&got.stderr)
-    );
-    assert_eq!(got_out, want, "the bundle and the interpreter disagree");
+
+    // THE DIFFERENTIAL ORACLE, APPLIED TO THE BUNDLER.
+    //
+    // Bundling changes how a program is LOADED, not how it runs, so the three engines must
+    // still agree with each other and with the interpreted program. Checking one engine
+    // would have left the interesting half untested: the archive feeds the same statement
+    // list to the same evaluator, and a divergence here would mean the namespacing done at
+    // load time depends on where the source came from.
+    //
+    // PATH is emptied because "self-contained" is the artifact's whole promise: it must not
+    // be quietly finding a `helix` next door.
+    for engine in [&[][..], &[("HELIX_NOVM", "1")][..], &[("HELIX_NOJIT", "1")][..]] {
+        let mut cmd = Command::new(&moved);
+        cmd.current_dir(&away).stdin(Stdio::null()).env("PATH", "");
+        for (k, v) in engine {
+            cmd.env(k, v);
+        }
+        let got = cmd.output().expect("failed to run the artifact");
+        let label = engine.first().map(|(k, _)| *k).unwrap_or("jit (default)");
+        assert_eq!(
+            got.status.code(),
+            Some(0),
+            "the artifact failed under {label}:\n{}",
+            String::from_utf8_lossy(&got.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&got.stdout),
+            want,
+            "the bundle and the interpreter disagree under {label}"
+        );
+    }
+
+    // ...and the interpreted program agrees with itself across engines, so the comparison
+    // above is against a stable answer rather than one engine's opinion.
+    for (k, v) in [("HELIX_NOVM", "1"), ("HELIX_NOJIT", "1")] {
+        let (o, e, c) =
+            run(&["run", dir.join("main.helix").to_str().unwrap()], &[(k, v)], "");
+        assert_eq!(c, Some(0), "interpreted run failed under {k}:\n{e}");
+        assert_eq!(o, want, "the interpreter disagrees with itself under {k}");
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -12788,6 +12815,97 @@ fn build_says_which_runtime_the_program_needs() {
     // the value formatter.
     assert!(o.contains(" B)"), "a small artifact should be sized in bytes:\n{o}");
     assert!(!o.contains("0.0 MB"), "a size must not round away to nothing:\n{o}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A package name is validated at AUTHORING time, not on the consumer's side.
+///
+/// `validate_dep_name` enforced the identifier rule on a consumer's dependency key and
+/// nothing checked a package's own `name`, which was read only by tests. So a package
+/// could call itself `my-package`, publish happily, and hand the failure to whoever tried
+/// to depend on it — the one person who could not fix it.
+#[test]
+fn a_package_name_is_validated_where_its_author_can_fix_it() {
+    let dir = std::env::temp_dir().join(format!("hx_pkgname_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("m.helix"), "print(1)\n").unwrap();
+
+    for bad in ["my-package", "2fast", "has space", "dots.here"] {
+        std::fs::write(
+            dir.join("helix.toml"),
+            format!("[package]\nname = \"{bad}\"\nversion = \"0.1.0\"\n"),
+        )
+        .unwrap();
+        let (_, err, code) = run(&["run", dir.join("m.helix").to_str().unwrap()], &[], "");
+        assert_ne!(code, Some(0), "`{bad}` should be refused as a package name");
+        assert!(err.contains("must be a Helix identifier"), "for `{bad}`:\n{err}");
+        // The message must say WHY it matters, not just that a rule exists.
+        assert!(err.contains("import"), "the reason should be named, for `{bad}`:\n{err}");
+    }
+
+    // A legal name still runs.
+    std::fs::write(dir.join("helix.toml"), "[package]\nname = \"ok_name\"\nversion = \"0.1.0\"\n")
+        .unwrap();
+    let (out, err, code) = run(&["run", dir.join("m.helix").to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "1");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A dependency key must agree with what the target calls itself.
+///
+/// `helix add ui --path ./web` wrote a key `ui` pointing at a package named `web`, and
+/// nothing connected the two. Since `import ui.x` resolves THROUGH the key, the program
+/// then imported a package under a name its author never chose, with no error anywhere.
+#[test]
+fn a_dependency_key_must_match_the_package_it_points_at() {
+    let dir = std::env::temp_dir().join(format!("hx_depkey_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("app")).unwrap();
+    std::fs::create_dir_all(dir.join("web")).unwrap();
+    std::fs::write(dir.join("web/helix.toml"), "[package]\nname = \"web\"\nversion = \"0.1.0\"\n")
+        .unwrap();
+    std::fs::write(dir.join("web/web.helix"), "export fn go() = 1\n").unwrap();
+    let app = dir.join("app");
+    std::fs::write(
+        app.join("helix.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\n",
+    )
+    .unwrap();
+
+    let add = |key: &str, path: &str| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_helix"));
+        cmd.current_dir(&app).args(["add", key, "--path", path]).stdin(Stdio::null());
+        let o = cmd.output().expect("failed to spawn helix");
+        (
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+            o.status.code(),
+        )
+    };
+
+    let (_, err, code) = add("ui", "../web");
+    assert_ne!(code, Some(0), "a mismatched key should be refused");
+    // BOTH names, because the reader has to know which one to change.
+    assert!(err.contains("calls itself `web`"), "should name the target:\n{err}");
+    assert!(err.contains("`ui`") || err.contains("as `ui`"), "should name the key:\n{err}");
+    assert!(err.contains("helix add web"), "the hint should spell the fix:\n{err}");
+
+    // The agreeing key is accepted.
+    let (out, err, code) = add("web", "../web");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("web"), "{out}");
+
+    // A target with NO manifest declares no name, so it cannot disagree — that stays
+    // allowed, because refusing it would break every loose-directory dependency for a
+    // guarantee it was never able to give.
+    std::fs::create_dir_all(dir.join("loose")).unwrap();
+    std::fs::write(dir.join("loose/loose.helix"), "export fn go() = 1\n").unwrap();
+    let (_, err, code) = add("loose", "../loose");
+    assert_eq!(code, Some(0), "a manifest-less dependency must still work:\n{err}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

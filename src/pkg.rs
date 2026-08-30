@@ -227,6 +227,20 @@ impl Manifest {
     /// at the one seam every consumer (`run`, `test`, `sync`, and every dependency's
     /// own manifest) already goes through.
     fn validate(&self, path: &Path) -> Result<(), HelixError> {
+        // A PACKAGE NAME IS AN IMPORT PATH, so it must be an identifier -- checked here,
+        // where the author can still fix it, rather than on the consumer's side where
+        // `validate_dep_name` would refuse it and blame the wrong person.
+        if !is_helix_identifier(&self.package.name) {
+            return Err(err(format!(
+                "`name` in `{}` must be a Helix identifier, got \"{}\"",
+                path.display(),
+                self.package.name
+            ))
+            .hint(
+                "a package name is what an `import` writes: letters, digits and \
+                 underscores, not starting with a digit. `my-package` cannot be imported.",
+            ));
+        }
         if parse_semver(&self.package.version).is_none() {
             return Err(err(format!(
                 "`version` in `{}` must be MAJOR.MINOR.PATCH, optionally with the \
@@ -831,9 +845,33 @@ pub fn add_dependency(
     let mut item = toml_edit::InlineTable::new();
     match source {
         AddSource::Path(p) => {
-            root.join(&p)
+            let target = root
+                .join(&p)
                 .canonicalize()
                 .map_err(|e| err(format!("path `{p}` not found: {e}")))?;
+            // THE KEY IS WHAT `import` RESOLVES THROUGH, so it must be what the target
+            // calls itself. Nothing connected the two: `helix add ui --path ./web` wrote a
+            // key `ui` pointing at a package named `web`, and `import ui.x` then resolved
+            // through the key -- so the program imported a package under a name its author
+            // never chose, with no error anywhere.
+            //
+            // A target with no manifest declares no name and so cannot disagree; that stays
+            // allowed, because refusing it would break every loose-directory dependency for
+            // a guarantee it was never able to give.
+            if let Some(m) = Manifest::load(&target)?
+                && m.package.name != name
+            {
+                return Err(err(format!(
+                    "`{}` calls itself `{}`, but it is being added as `{name}`",
+                    target.display(),
+                    m.package.name
+                ))
+                .hint(format!(
+                    "an import resolves through the key, so `import {name}.x` would load \
+                     `{}`. Add it as `helix add {} --path {p}`, or rename the package.",
+                    m.package.name, m.package.name
+                )));
+            }
             item.insert("path", p.into());
         }
         AddSource::Url { url, sha256 } => {
@@ -900,15 +938,24 @@ fn prepare_url_dep(_url: &str, _expected: Option<&str>) -> Result<String, HelixE
 }
 
 /// A dependency name must be a Helix identifier — it becomes the `import <name>` segment.
-fn validate_dep_name(name: &str) -> Result<(), HelixError> {
+/// The rule a package name and a dependency key both have to satisfy: a Helix identifier,
+/// because that is what an `import` writes.
+///
+/// Shared deliberately. It was applied to the CONSUMER's dependency key and not to the
+/// package's own `name`, so a package could call itself `my-package`, publish happily, and
+/// hand the error to whoever tried to depend on it -- the one person who could not fix it.
+fn is_helix_identifier(name: &str) -> bool {
     let mut chars = name.chars();
-    let valid = match chars.next() {
+    match chars.next() {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {
             chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
         }
         _ => false,
-    };
-    if valid {
+    }
+}
+
+fn validate_dep_name(name: &str) -> Result<(), HelixError> {
+    if is_helix_identifier(name) {
         Ok(())
     } else {
         Err(err(format!("`{name}` is not a valid dependency name")).hint(

@@ -311,6 +311,29 @@ whose exhaustive match fails compilation when an `Expr` variant is added, rather
 silently skipping it. It can over-report (a user function named `read_csv` counts), which
 is the safe direction: over-reporting leaves someone on a runtime that works.
 
+#### Startup, measured — and `--runtime` is a latency argument too
+
+Min of 20 runs, both runtimes built at the same commit so only features differ:
+
+| | |
+|---|--:|
+| `/bin/true` (bare process spawn) | 1 ms |
+| **helix, minimal runtime (6.7 MB)** | **2 ms** |
+| **helix, full runtime (62.5 MB)** | **4 ms** |
+| `python3 -c 'print("hi")'` | 12 ms |
+| `node -e 'console.log(1)'` | 20 ms |
+
+Two things follow.
+
+**There is nothing left to win on startup.** 2 ms is one millisecond above a bare process
+spawn, and 6x faster than CPython. Any future "make Helix start faster" work would be
+optimising the kernel's `execve`.
+
+**The big runtime costs 2 ms more to start — double.** `--runtime` was justified on disk
+size; it is also a latency argument, and that is the one that matters for a tool invoked in
+a loop from a shell script. Worth saying in the docs beside the size number, which is the
+one everybody quotes.
+
 ### 1.4 `--runtime` takes any file, and says nothing
 
 Found while making 1.2's test fast: `--runtime` copies whatever it is handed. A stub of

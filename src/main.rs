@@ -1818,7 +1818,7 @@ fn print_help() {
          helix eval \"<code>\"       run a one-liner\n    \
          helix check <script>…    type-check without running (`--json` for tools)\n    \
          helix fmt <script>…      format (no options; `--check` reports instead of writing)\n    \
-         helix build <script>     bundle a program into a standalone executable\n    \
+         helix build <script>     bundle a program + its runtime into one executable\n    \
          helix emit-hbc <script>  compile to a .hbc bytecode container (for ctype's hvm)\n    \
          helix repl               start an interactive session\n    \
          helix new <name>         create a helix.toml in the current directory\n    \
@@ -1833,7 +1833,11 @@ fn print_help() {
          helix version            show the version\n    \
          helix help               show this help\n\n\
          The default `helix` is a self-contained binary. A build with the `python`\n\
-         feature adds CPython interop (see docs/python-interop.md).",
+         feature adds CPython interop (see docs/python-interop.md).\n\n\
+         `helix build` EMBEDS YOUR SOURCE beside the interpreter; it does not compile it\n\
+         and does not obfuscate it, so `strings` recovers the program from the artifact.\n\
+         That is what makes it one file to copy with nothing installed, and it is worth\n\
+         knowing before shipping one to someone. `helix emit-hbc` is the compiling path.",
         env!("CARGO_PKG_VERSION")
     );
 }

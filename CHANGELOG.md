@@ -4,6 +4,55 @@
 
 ### Added
 
+- **`helix build` says which runtime a program needs.** `--runtime` made the artifact's
+  size a choice; it did not make it an informed one. The only way to learn whether a
+  program touched a DataFrame, a genomics reader or the HTTP client was to build against a
+  smaller runtime and watch it fail at run time.
+
+  ```
+  built standalone executable: prog (6.7 MB)
+  needs: http, regex
+  ```
+
+  or, when nothing optional is reached, the suggestion **and what else it costs** — because
+  the first line alone reads as "costs nothing":
+
+  ```
+  needs: no optional feature
+    `--no-default-features` would serve this program; that also drops jit and mimalloc,
+    which change speed, not answers
+  ```
+
+  **The classification was measured, not reasoned about** — every candidate run against a
+  `--no-default-features` runtime. Guessing got four wrong: `read_bed` / `dna` / `align`
+  need nothing despite living in the genomics module; `read_json` returns Helix values, not
+  a frame; **`listen` is ungated, because `http` gates the client, not the server** — which
+  is exactly why a minimal runtime still serves HTTP; and `re_replace` looked ungated only
+  because the probe called it with the wrong arity, so an arity error masked the gate.
+
+  Getting it backwards matters in one direction: telling someone they do not need
+  `dataframes` hands them an artifact that dies on its first frame. So the pass walks the
+  exhaustive `visit::walk_stmt` (a new `Expr` variant fails compilation rather than being
+  skipped), `every_builtin_declares_its_feature` pins the gated set, and the pass
+  over-reports rather than under-reports.
+
+### Changed
+
+- **`build`, `new`, `add`, `sync` and `verify` print one report structure.** Five
+  hand-rolled `println!` blocks is five chances to drift; one structure renders a terminal
+  an aligned, coloured block and a pipe flat `label: value` lines, from the same rows in
+  the same order.
+
+  The plain form's *shape* is part of the contract — one fact per line, no alignment
+  padding to strip, and no multi-byte separator in a line a script splits. Rendering it
+  found three defects: a 212-byte artifact reported as `0.0 MB` (the same category error as
+  an axis tick printed with the value formatter), the rich middle dot leaking into piped
+  output, and notes running off the terminal to wrap mid-word under the value column.
+
+  `helix sync` now shows each package beside its hash prefix, since the hash is the point of
+  a lockfile.
+
+
 - **`helix build` bundles a program AND everything it imports.** Any program with an
   `import` was refused outright, so a Helix program with a library could not be shipped at
   all. Nothing in the design required that: the overlay held one source string, while the
