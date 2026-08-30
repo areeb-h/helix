@@ -1676,7 +1676,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.push(result);
             }
             Op::GroupByAgg(d) => {
-                let (name, args) = (&d.name, &d.args);
+                let (name, args, lbind) = (&d.name, &d.args, &d.locals);
                 let recv = stack.pop().unwrap();
                 let (handle, keys) = match &recv {
                     Value::GroupBy(g) => (g.handle.clone(), g.keys.clone()),
@@ -1688,11 +1688,25 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         ))
                     }
                 };
+                let base = frames[fi].base;
+                let resolve = |nm: &str| -> Option<Value> {
+                    for (lname, slot) in lbind.iter().rev() {
+                        if lname == nm {
+                            return Some(locals[base + *slot as usize].clone());
+                        }
+                    }
+                    program
+                        .global_names
+                        .iter()
+                        .position(|g| g == nm)
+                        .map(|i| globals[i].clone())
+                };
                 let result = crate::interp::groupby_agg(
                     &handle,
                     &keys,
                     name.as_str(),
                     args.as_slice(),
+                    &resolve,
                     line,
                     col,
                 )?;

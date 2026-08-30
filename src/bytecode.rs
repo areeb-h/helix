@@ -598,6 +598,7 @@ impl Compiler {
                 Op::GroupByAgg(std::rc::Rc::new(GroupByAggData {
                     name: std::rc::Rc::new(name.to_string()),
                     args: std::rc::Rc::new(args.to_vec()),
+                    locals: std::rc::Rc::new(b.in_scope_locals()),
                 })),
                 line,
                 col,

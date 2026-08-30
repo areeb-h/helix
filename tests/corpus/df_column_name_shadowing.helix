@@ -1,41 +1,48 @@
-# A bare name in a COLUMN-NAME position (`sort`/`select`/`group`) is taken LITERALLY, and a
-# binding of the same name does not win.
+# A bare name in a COLUMN-NAME position (`sort`/`select`/`group`, and an aggregation's value
+# column) resolves to a BINDING IN SCOPE when there is one, and that binding's String value
+# names the column. `@name` still pins the column literally.
 #
-# ADR 0028 decided the opposite for `where`/`filter`/`with` — a binding in scope wins there,
-# because otherwise a library author's parameter names become reserved words in data they
-# have never seen. It did not cover these three positions, and this program pins what they
-# actually do today, INCLUDING THE SILENT CASE.
+# THIS IS THE CHANGE THE PREVIOUS VERSION OF THIS FILE PREDICTED. It used to pin the opposite
+# — a bare name taken literally, with a same-named column winning SILENTLY over the binding —
+# and said the golden was expected to move when ADR 0028's decision was extended to these
+# positions. It has been.
 #
-# THIS GOLDEN IS EXPECTED TO CHANGE when that decision is extended (docs/STATE.md item 2).
-# It is here so the change shows up as an explicit, reviewable diff rather than as a silent
-# shift in what a program means.
+# Why it mattered: a library author's parameter names were reserved words in data they had
+# never seen. `fn top(frame, key) = frame.select(key)` returned the frame's own `key` column
+# and ignored the argument entirely, on any frame that happened to have one — same function,
+# same argument, different answer, exit 0, and all three engines agreeing because all three
+# were equally wrong.
 
 w = "v"
 D = dataframe({v: [2, 1, 0], w: [10, 20, 30]})
 
-# THE SILENT CASE. `w` is bound to "v", and the frame also has a column called `w`.
-# The column wins, with no error: this sorts by `w`, not by `v`.
+# THE CASE THAT USED TO BE SILENTLY WRONG. `w` is bound to "v", and the frame also has a
+# column called `w`. The binding wins now, so this sorts by `v` and matches `sort(@v)` below.
 print(D.sort(w).column("v"))
-# For comparison, both explicit spellings:
 print(D.sort(@v).column("v"))
+# `@w` still pins the COLUMN called `w`, which is what the sigil is for.
 print(D.sort(@w).column("v"))
 
-# Same shape in `select` — the answer is the `w` column, not the `v` the binding named.
+# Same in `select`: the answer is the `v` the binding named, not the `w` column.
 print(D.select(w).columns())
+# A String literal names a column too — a binding resolves to exactly this.
+print(D.select("v").columns())
 
-# And in `group`, which needs an aggregation to reach: grouping by `w` gives three groups,
-# grouping by `g` would give two.
+# THE LIBRARY CASE, which is the whole reason for the rule.
+fn top(frame, key) = frame.select(key).columns()
+print(top(D, "v"))
+
+# A BINDING NAMING A COLUMN THAT DOES NOT EXIST NOW FAILS LOUDLY, where before it silently
+# used the same-named column instead. This is the shape that used to hide the bug.
 G = dataframe({g: ["a", "a", "b"], w: ["x", "y", "z"], n: [1, 2, 3]})
-print(G.group(w).sum(@n).count())
+r = try(G.group(w).sum(@n).count())
+print(r.ok)
 print(G.group(@g).sum(@n).count())
 
-# THE CONTRAST: `with` IS covered by ADR 0028, so there the binding wins over the column.
+# An aggregation's VALUE column resolves the same way — one rule, not a fourth one.
+vcol = "n"
+print(G.group(@g).sum(vcol).columns())
+
+# THE CONTRAST that was already true: `with` is covered by ADR 0028, and always was.
 k = 100
 print(D.with({out: k}).column("out"))
-
-# The LOUD case: a binding with NO same-named column errors instead, which is how this is
-# usually discovered — and why the silent case above is the worse of the two.
-# (`try` binds tighter than `.ok`, so the result has to be bound first.)
-k2 = "v"
-r = try(D.sort(k2))
-print(r.ok)

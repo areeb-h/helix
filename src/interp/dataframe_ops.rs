@@ -7,9 +7,50 @@ use super::*;
 
 /// A DataFrame column argument is the `@name` sigil (`select(@name, @age)`) or a
 /// bare identifier (`select(name, age)` — the legacy spelling, still accepted).
-fn arg_as_column_name(e: &Expr, line: usize, col: usize) -> Result<String, HelixError> {
+fn arg_as_column_name(
+    e: &Expr,
+    resolve_var: &dyn Fn(&str) -> Option<Value>,
+    line: usize,
+    col: usize,
+) -> Result<String, HelixError> {
     match e {
-        Expr::Column { name, .. } | Expr::Ident { name, .. } => Ok(name.clone()),
+        // `@name` PINS THE COLUMN, always. It is the spelling for "the column literally
+        // called this", and it has to keep meaning that whatever is in scope.
+        Expr::Column { name, .. } => Ok(name.clone()),
+        // A BINDING IN SCOPE WINS OVER A COLUMN OF THE SAME NAME (ADR 0028), and its value
+        // names the column. This position was the last one where it did not, and the shape
+        // of the bug is the one ADR 0028 already argued about:
+        //
+        //     fn top(frame, key) = frame.select(key)
+        //
+        // returned the column `key` on any frame that happened to have one, ignoring the
+        // caller's argument entirely — so a library's PARAMETER NAMES were reserved words
+        // in data it has never seen. Same function, same argument, different answer, exit 0,
+        // and all three engines agreed because all three were equally wrong.
+        //
+        // Making this rule uniform also supplies the thing the docs called missing: a column
+        // named at RUN TIME. `k = "price"` then `df.sort(k)` sorts by `price`, where before
+        // there was no way to express it in this position at all.
+        Expr::Ident { name, .. } => match resolve_var(name) {
+            None => Ok(name.clone()),
+            Some(Value::Str(s)) => Ok((*s).clone()),
+            Some(other) => Err(HelixError::new(
+                format!(
+                    "`{name}` is a {} in scope, and a column name must be a String",
+                    other.type_name()
+                ),
+                line,
+                col,
+            )
+            .hint(format!(
+                "write `@{name}` for the column called `{name}`, or bind a String naming \
+                 the column you want."
+            ))),
+        },
+        // A STRING NAMES A COLUMN TOO. `df.column("v")` already takes one, and a binding
+        // resolves to exactly this, so refusing the literal spelling of the thing bindings
+        // produce would be a rule with no reason behind it.
+        Expr::Str(s) => Ok(s.clone()),
         _ => Err(
             HelixError::new("expected a column name", line, col)
                 .hint("write a column with the `@` sigil, e.g. `df.select(@name, @age)`."),
@@ -20,6 +61,7 @@ fn arg_as_column_name(e: &Expr, line: usize, col: usize) -> Result<String, Helix
 /// Column-name arguments for `select`/`sort`/`group` (each must be a bare ident).
 pub(crate) fn column_name_args(
     args: &[Expr],
+    resolve_var: &dyn Fn(&str) -> Option<Value>,
     line: usize,
     col: usize,
 ) -> Result<Vec<String>, HelixError> {
@@ -27,7 +69,7 @@ pub(crate) fn column_name_args(
         return Err(HelixError::new("expected at least one column name", line, col)
             .hint("e.g. `df.select(name, age)`."));
     }
-    args.iter().map(|a| arg_as_column_name(a, line, col)).collect()
+    args.iter().map(|a| arg_as_column_name(a, resolve_var, line, col)).collect()
 }
 
 /// Parse the trailing arguments of `a.join(b, key.., [how])`: the key columns are
@@ -147,17 +189,17 @@ pub(crate) fn df_column_verb(
             Ok(Value::dataframe(lf.filter(&pred, line, col)?))
         }
         "select" => {
-            let names = column_name_args(args, line, col)?;
+            let names = column_name_args(args, resolve_var, line, col)?;
             crate::backend::validate_columns_exist(lf, &names, line, col)?;
             Ok(Value::dataframe(lf.select(&names, line, col)?))
         }
         "sort" => {
-            let names = column_name_args(args, line, col)?;
+            let names = column_name_args(args, resolve_var, line, col)?;
             crate::backend::validate_columns_exist(lf, &names, line, col)?;
             Ok(Value::dataframe(lf.sort(&names, line, col)?))
         }
         "group" => {
-            let names = column_name_args(args, line, col)?;
+            let names = column_name_args(args, resolve_var, line, col)?;
             crate::backend::validate_columns_exist(lf, &names, line, col)?;
             Ok(Value::GroupBy(Rc::new(crate::value::GroupByData {
                 handle: lf.clone(),
@@ -193,6 +235,7 @@ pub(crate) fn groupby_agg(
     keys: &Rc<Vec<String>>,
     name: &str,
     args: &[Expr],
+    resolve_var: &dyn Fn(&str) -> Option<Value>,
     line: usize,
     col: usize,
 ) -> Result<Value, HelixError> {
@@ -202,7 +245,7 @@ pub(crate) fn groupby_agg(
                 return Err(HelixError::new(format!("grouped `{}` takes one column", name), line, col)
                     .hint("e.g. `genes.group(species).mean(expression)`."));
             }
-            let value_col = arg_as_column_name(&args[0], line, col)?;
+            let value_col = arg_as_column_name(&args[0], resolve_var, line, col)?;
             crate::backend::validate_columns_exist(
                 handle,
                 std::slice::from_ref(&value_col),
@@ -289,6 +332,10 @@ impl super::Interp {
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
-        groupby_agg(&handle, &keys, name, args, line, col)
+        // The same resolution a column verb gets: an aggregation's VALUE column is a column
+        // name in exactly the same sense, so `group(@k).mean(v)` with `v` bound must mean
+        // the column `v` names, not a column literally called `v`.
+        let resolve = |n: &str| self.lookup(n).map(|b| b.value.clone());
+        groupby_agg(&handle, &keys, name, args, &resolve, line, col)
     }
 }

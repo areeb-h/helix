@@ -3046,7 +3046,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "A frame with only the named columns, in the given order.",
             example: "dataframe({a: [1, 2], b: [3.0, 4.5]}).select(@a).columns()",
             example_out: "[\"a\"]",
-            notes: "A BARE NAME HERE IS TAKEN LITERALLY AS A COLUMN, and a binding of the same name does NOT win — unlike `where`/`filter`/`with`, which ADR 0028 fixed. So `k = \"price\"` then `df.select(k)` looks for a column called `k`, and if the frame HAS one it is used SILENTLY and the binding is ignored. There is currently no way to name a column at run time in this position: build the permutation yourself and rebuild with `dataframe(dict)`. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.",
+            notes: "A BINDING IN SCOPE WINS OVER A COLUMN OF THE SAME NAME (ADR 0028), and its String value names the column: `k = \"price\"` then `df.select(k)` uses `price`. That is also how a column is named at RUN TIME, which this position had no way to express before. Write `@k` for the column literally called `k`; a String literal works too (`df.select(\"price\")`). Until 0.8.1 a bare name here was taken literally, so a library's own parameter names were reserved words in data it had never seen — `fn top(frame, key) = frame.select(key)` returned the frame's `key` column and ignored the argument, with no error. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.",
         },
     ),
     (
@@ -3057,7 +3057,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Rows sorted ascending by the named column(s).",
             example: "dataframe({a: [2, 1], b: [3.0, 4.5]}).sort(@a).column(\"a\")",
             example_out: "[1, 2]",
-            notes: "Missing rows sort FIRST here — unlike Array sort, which refuses missing. A BARE NAME HERE IS TAKEN LITERALLY AS A COLUMN, and a binding of the same name does NOT win — unlike `where`/`filter`/`with`, which ADR 0028 fixed. So `k = \"price\"` then `df.sort(k)` looks for a column called `k`, and if the frame HAS one it is used SILENTLY and the binding is ignored. There is currently no way to name a column at run time in this position: build the permutation yourself and rebuild with `dataframe(dict)`. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.",
+            notes: "Missing rows sort FIRST here — unlike Array sort, which refuses missing. A BINDING IN SCOPE WINS OVER A COLUMN OF THE SAME NAME (ADR 0028), and its String value names the column: `k = \"price\"` then `df.sort(k)` uses `price`. That is also how a column is named at RUN TIME, which this position had no way to express before. Write `@k` for the column literally called `k`; a String literal works too (`df.sort(\"price\")`). Until 0.8.1 a bare name here was taken literally, so a library's own parameter names were reserved words in data it had never seen — `fn top(frame, key) = frame.select(key)` returned the frame's `key` column and ignored the argument, with no error. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.",
         },
     ),
     (
@@ -3068,7 +3068,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "Group rows by key column(s) for mean/sum/min/max/count/std aggregation.",
             example: "dataframe({k: [\"a\",\"a\",\"b\"], v: [1,2,3]}).group(@k).sum(@v).count()",
             example_out: "2",
-            notes: "A BARE NAME HERE IS TAKEN LITERALLY AS A COLUMN, and a binding of the same name does NOT win — unlike `where`/`filter`/`with`, which ADR 0028 fixed. So `k = \"price\"` then `df.group(k)` looks for a column called `k`, and if the frame HAS one it is used SILENTLY and the binding is ignored. There is currently no way to name a column at run time in this position: build the permutation yourself and rebuild with `dataframe(dict)`. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.",
+            notes: "A BINDING IN SCOPE WINS OVER A COLUMN OF THE SAME NAME (ADR 0028), and its String value names the column: `k = \"price\"` then `df.group(k)` uses `price`. That is also how a column is named at RUN TIME, which this position had no way to express before. Write `@k` for the column literally called `k`; a String literal works too (`df.group(\"price\")`). Until 0.8.1 a bare name here was taken literally, so a library's own parameter names were reserved words in data it had never seen — `fn top(frame, key) = frame.select(key)` returned the frame's `key` column and ignored the argument, with no error. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.",
         },
     ),
     (

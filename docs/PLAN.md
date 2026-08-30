@@ -76,6 +76,37 @@ feature is saying nothing. Where a feature *does* have engine-specific paths (a 
 fast path, a JIT kernel), the oracle is the point and should be cited. Do not let the phrase
 "gate green" flatten those two cases into one.
 
+#### A second, worse case: SHARED code, fully exercised, still unseeable
+
+Vacuity is the easy half — nothing runs, so nothing is compared. The harder half is a path
+that all three engines *do* execute and the oracle still cannot check, because they execute
+**the same function**.
+
+The `select` / `sort` / `group` shadowing bug was exactly this. `arg_as_column_name` lives in
+`dataframe_ops.rs`, which the walker and the VM share **deliberately**, so that they cannot
+diverge. Three engines running one wrong function agree perfectly, at exit 0, and the bug
+survived every differential run this project has. The codebase had already written the
+epitaph for the earlier instance of it, in `backend/mod.rs`: *"exit 0, `helix check` ok, and
+all three engines agree because all three are equally wrong."*
+
+So the oracle's strength is not one property but three, and only the third is real coverage:
+
+| shape | what agreement proves |
+|---|---|
+| shared implementation (most builtins, all column verbs) | **nothing** — it is one function |
+| interpreted-only, no JIT sites (storage, `Bytes`) | determinism, not correctness |
+| genuinely engine-specific (JIT kernels, packed fast paths) | the property the oracle exists for |
+
+Sharing the implementation is still the right design — two hand-written column resolvers
+would drift — but the safety it buys is *no divergence*, not *no bug*, and those are
+different claims. For shared code the load-bearing check is a corpus golden that pins the
+ANSWER, which is why `df_column_name_shadowing.helix` was written to pin behaviour its own
+comment called wrong, and predicted the change that fixed it.
+
+**Worth building:** `vmparity` could report which of the three shapes each program fell into,
+so "gate green" stops flattening them. `jit-explain` already knows the kernel-site count, so
+the second row is mechanically detectable today; the first would need a note per verb.
+
 ### `Type::Unknown` grows every time a type is added
 
 `Dict`, `Net`, `Bytes`, `Lock` are all `Unknown` to the checker. Each addition makes the

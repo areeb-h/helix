@@ -364,6 +364,11 @@ pub struct MakeClosureData {
 pub struct GroupByAggData {
     pub name: std::rc::Rc<String>,
     pub args: std::rc::Rc<Vec<Expr>>,
+    /// The locals in scope at the call site, so the VM can resolve a bound name the same
+    /// way `DfColumnVerbData` does. An aggregation's VALUE column is a column name in
+    /// exactly the same sense as `select`'s, and a rule that held for one and not the other
+    /// would be a fourth rule nobody could predict.
+    pub locals: std::rc::Rc<Vec<(String, u32)>>,
 }
 
 /// Payload of [`Op::Raise`] — a deferred error's message and hint, boxed to keep
