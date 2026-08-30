@@ -407,10 +407,21 @@ that makes a tool unusable gets turned off wholesale.
 
 ### 2.3 Two guarantees that are currently accidents
 
-- **Installing a package executes no code.** Zero `Command::new` in package resolution — no
-  `setup.py`, no `postinstall`, no `build.rs`. This is a real structural advantage over pip,
-  npm and cargo, and nothing stops a future change from adding a hook. Guard it, the way the
-  panic ratchet guards aborts.
+- **Installing a package executes no code.** ✅ Guarded by
+  `installing_a_package_executes_no_code`, which scans `pkg.rs` and `module.rs` — the files
+  a dependency travels through — for every way Rust starts a process.
+
+  Unlike the unwrap budget it models, this one has **no raise path**: there is no version of
+  "installing a package runs a little code" that keeps the property. The change that would
+  have broken it ("shell out to `tar`, it is faster") is the kind that looks entirely
+  reasonable in review, which is the whole reason it needed a guard rather than a comment.
+
+  Verified to FAIL, not just to pass: injecting a `Command::new` into `pkg.rs` makes it
+  report `src/pkg.rs:1568: Command::new`. A guard that cannot fail is worth nothing, and
+  this session already produced one of those.
+
+  The scan is textual and so defeatable by someone determined. That is the right target —
+  it is aimed at the accident, not the adversary, the same job `#[deny]` does.
 - **The bundle carries the declared capabilities** (needs 2.1 and Phase 1). A shipped binary
   should enforce what its manifest declared, or "ship to production" and "declared authority"
   remain two features instead of one.

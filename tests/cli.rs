@@ -12909,3 +12909,55 @@ fn a_dependency_key_must_match_the_package_it_points_at() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// INSTALLING A PACKAGE EXECUTES NO CODE — guarded, because today it is an accident.
+///
+/// Resolving and fetching a dependency reads bytes, verifies a hash and unpacks an
+/// archive. There is no `setup.py`, no `postinstall`, no `build.rs`: adding a dependency
+/// cannot run anything, so a compromised package cannot act until a program actually
+/// imports and calls it. That is a real structural advantage over pip, npm and cargo, and
+/// nothing whatsoever enforced it — the change that broke it ("shell out to `tar`, it is
+/// faster") would look entirely reasonable in review.
+///
+/// So it is guarded the way the unwrap budget guards aborts: a count over the files that
+/// turn a manifest or an import into loaded code, which may only be zero. Unlike that
+/// budget this one has no raise path, because there is no version of "installing a package
+/// runs a little code" that keeps the property.
+///
+/// The scan is textual and therefore defeatable by someone determined; that is fine. It is
+/// aimed at the accident, not the adversary — the same job `#[deny]` does.
+#[test]
+fn installing_a_package_executes_no_code() {
+    /// The files a dependency travels through: the manifest/lockfile/fetch path, and the
+    /// loader that turns an import into source.
+    const RESOLUTION: &[&str] = &["src/pkg.rs", "src/module.rs"];
+    /// Every way Rust starts a process.
+    const SPAWNS: &[&str] =
+        &["Command::new", "process::Command", "libc::system", "libc::exec", "libc::fork"];
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut found: Vec<String> = Vec::new();
+    for rel in RESOLUTION {
+        let src = std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|e| panic!("{rel} is guarded but unreadable: {e}"));
+        for (i, line) in src.lines().enumerate() {
+            let t = line.trim_start();
+            // Comments discuss these constructs on purpose — this very guard is described
+            // in prose in `pkg.rs`. Counting a comment would make the guard unwritable.
+            if t.starts_with("//") || t.starts_with("/*") || t.starts_with('*') {
+                continue;
+            }
+            if let Some(hit) = SPAWNS.iter().find(|s| line.contains(**s)) {
+                found.push(format!("{rel}:{}: {hit}", i + 1));
+            }
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "package resolution must execute no code, but found:\n  {}\n\n\
+         Adding a dependency runs nothing today, which is why a compromised package cannot \
+         act until a program imports and calls it. If this needs to change, it needs an ADR \
+         and a threat model, not a passing test.",
+        found.join("\n  ")
+    );
+}
