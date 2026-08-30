@@ -118,21 +118,70 @@ pub(super) fn a_dataframe(name: &str, args: Vec<Value>, line: usize, col: usize)
         // name: ["a", "b"]})`. Each record field is a column (its array); the
         // backend seam (`build_frame`) checks equal lengths / duplicate names.
         arity(name, &args, 1, line, col)?;
-        let fields = match &args[0] {
-            Value::Record(f) => f,
-            other => {
-                return Err(type_err("dataframe", "a record of columns", other, line, col)
-                    .hint("e.g. `dataframe({age: [30, 41], name: [\"a\", \"b\"]})`."))
+        // A DICT IS ACCEPTED AS WELL AS A RECORD, and that is not a convenience — it is the
+        // only way to build a frame whose SCHEMA IS KNOWN AT RUN TIME. A record's fields are
+        // syntax, so `dataframe({...})` can only ever produce columns the source text names.
+        // A storage engine's chunk takes its schema from the data, so it could not build a
+        // frame at all; reported from the field as a blocker, having already forced a
+        // caller-supplied closure in two other places.
+        //
+        // COLUMN ORDER DIFFERS BETWEEN THE TWO, deliberately and visibly: a record keeps the
+        // order written, a Dict is sorted by key (it is a BTreeMap), so `dataframe(dict)`
+        // yields columns in sorted name order. Deterministic either way; `select` fixes an
+        // order that matters. Sorting is the honest choice — a Dict has no insertion order
+        // to preserve, so inventing one would be a lie about where it came from.
+        let mut columns: Vec<(String, _)> = Vec::new();
+        match &args[0] {
+            Value::Record(fields) => {
+                if fields.is_empty() {
+                    return Err(HelixError::new("`dataframe` needs at least one column", line, col)
+                        .hint("e.g. `dataframe({age: [30, 41], name: [\"a\", \"b\"]})`."));
+                }
+                columns.reserve(fields.len());
+                for (sym, val) in fields.iter() {
+                    let cname = sym.as_str();
+                    columns.push((cname.to_string(), array_to_coldata(cname, val, line, col)?));
+                }
             }
-        };
-        if fields.is_empty() {
-            return Err(HelixError::new("`dataframe` needs at least one column", line, col)
-                .hint("e.g. `dataframe({age: [30, 41], name: [\"a\", \"b\"]})`."));
-        }
-        let mut columns = Vec::with_capacity(fields.len());
-        for (sym, val) in fields.iter() {
-            let cname = sym.as_str();
-            columns.push((cname.to_string(), array_to_coldata(cname, val, line, col)?));
+            Value::Dict(d) => {
+                if d.is_empty() {
+                    return Err(HelixError::new("`dataframe` needs at least one column", line, col)
+                        .hint("an empty dict has no columns to build from."));
+                }
+                columns.reserve(d.len());
+                for (k, val) in d.iter() {
+                    // A COLUMN NAME IS A STRING. Every other key kind is refused by name
+                    // rather than stringified: `1` and `"1"` would become the same column,
+                    // and silently merging two columns is a wrong answer.
+                    let crate::value::DictKey::Str(cname) = k else {
+                        return Err(HelixError::new(
+                            format!(
+                                "`dataframe` needs string column names, but this dict has a {} key",
+                                match k {
+                                    crate::value::DictKey::Int(_) => "Int",
+                                    crate::value::DictKey::Bool(_) => "Bool",
+                                    crate::value::DictKey::Dna(_) => "Dna",
+                                    crate::value::DictKey::Str(_) => "String",
+                                }
+                            ),
+                            line,
+                            col,
+                        )
+                        .hint("build the dict with string keys: `dict().insert(\"age\", [30, 41])`."));
+                    };
+                    columns.push((
+                        cname.to_string(),
+                        array_to_coldata(cname, val, line, col)?,
+                    ));
+                }
+            }
+            other => {
+                return Err(type_err("dataframe", "a record or dict of columns", other, line, col)
+                    .hint(
+                        "e.g. `dataframe({age: [30, 41], name: [\"a\", \"b\"]})`, or a dict of \
+                         string names to columns when the schema is only known at run time.",
+                    ))
+            }
         }
         Ok(Value::dataframe(crate::backend::build_frame(columns, line, col)?))
     

@@ -1310,7 +1310,8 @@ pub(super) fn tensor_method_type(name: &str, nargs: usize, line: usize, col: usi
 
 pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "where" | "filter" | "drop_missing" | "drop_nan" | "select" | "sort" | "head" | "cache" | "with"
+        "where" | "filter" | "drop_missing" | "drop_nan" | "select" | "sort" | "head" | "tail"
+        | "slice" | "cache" | "with"
         | "join" | "vstack" | "unique" => Type::DataFrame,
         "group" => Type::GroupBy,
         "count" => Type::Int,

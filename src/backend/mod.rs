@@ -324,6 +324,13 @@ pub trait DataHandle {
         col: usize,
     ) -> Result<Df, HelixError>;
     fn head(&self, n: usize) -> Df;
+    /// The last `n` rows. NOT expressible as `slice` without knowing the row count, which
+    /// a lazy frame does not cheaply have — so it is its own verb rather than sugar.
+    fn tail(&self, n: usize) -> Df;
+    /// `len` rows starting at `offset`, clamped: an offset past the end is an EMPTY frame
+    /// and a length past the end is short, both of which are how a final partial chunk
+    /// reads. Neither is an error, for the same reason `read_at` returns a short slice.
+    fn slice(&self, offset: usize, len: usize) -> Df;
     /// Vertically concatenate `bottom`'s rows under `self` (row append). Both frames
     /// must have the same columns (names and order); a schema mismatch is a clean
     /// error, never a silent null-fill.

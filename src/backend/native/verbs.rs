@@ -90,6 +90,23 @@ pub fn head(frame: &NativeFrame, n: usize) -> NativeFrame {
     frame.take(take)
 }
 
+pub fn tail(frame: &NativeFrame, n: usize) -> NativeFrame {
+    let rows = frame.len();
+    // `rows - n` would underflow when asking for more rows than exist; taking them all is
+    // the same answer polars gives, and the answer a reader expects.
+    let start = rows.saturating_sub(n);
+    frame.take((start..rows).collect())
+}
+
+pub fn slice(frame: &NativeFrame, offset: usize, len: usize) -> NativeFrame {
+    let rows = frame.len();
+    let start = offset.min(rows);
+    // `saturating_add` because `offset + len` can overflow `usize` on a hostile argument;
+    // the clamp to `rows` then makes the window empty rather than wrapping to a huge one.
+    let end = start.saturating_add(len).min(rows);
+    frame.take((start..end).collect())
+}
+
 pub fn vstack(
     top: &NativeFrame,
     bottom: &NativeFrame,

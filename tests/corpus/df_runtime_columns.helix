@@ -1,0 +1,23 @@
+# A frame built from a DICT, so the schema can come from the data rather than the source
+# text. A record's fields are syntax; this is the only way to name a column at run time.
+d = dict().insert("age", [30, 41]).insert("name", ["ada", "bob"])
+df = dataframe(d)
+print(df.columns())
+print(df.column("age"))
+print(df.column("name"))
+print(df.count())
+
+# COLUMN ORDER IS SORTED BY NAME, because a Dict is sorted and has no insertion order to
+# preserve. A record keeps the order written. Both are deterministic; they differ, and that
+# difference is visible here rather than surprising later.
+print(dataframe(dict().insert("z", [1]).insert("a", [2])).columns())
+print(dataframe({z: [1], a: [2]}).columns())
+
+# Built from a dict, queried like any other frame.
+print(df.where(@age > 35).column("name"))
+print(df.sort(@age).column("name"))
+
+# Names computed at run time, which is the case that could not be written before.
+names = ["c1", "c2"]
+built = dataframe(names.reduce(dict(), (acc, n) => acc.insert(n, [1, 2])))
+print(built.columns(), built.count())

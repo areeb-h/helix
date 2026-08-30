@@ -256,13 +256,37 @@ pub(crate) fn df_value_method(
             }
             Ok(Value::dataframe(lf.cache(line, col)?))
         }
-        "head" => {
+        "head" | "tail" => {
             if args.len() != 1 {
-                return Err(HelixError::new("`head` takes a row count", line, col)
+                return Err(HelixError::new(format!("`{name}` takes a row count"), line, col)
                     .hint("e.g. `df.head(5)`."));
             }
-            let n = as_int(&args[0], "head", line, col)?.max(0) as usize;
-            Ok(Value::dataframe(lf.head(n)))
+            let n = as_int(&args[0], name, line, col)?.max(0) as usize;
+            Ok(Value::dataframe(if name == "head" { lf.head(n) } else { lf.tail(n) }))
+        }
+        // A ROW WINDOW, which a chunked store needs and `head` alone cannot express: to cut
+        // a sorted frame into chunks you must be able to start somewhere other than row 0.
+        // Reported from the field as a blocker for exactly that.
+        "slice" => {
+            if args.len() != 2 {
+                return Err(HelixError::new("`slice` takes an offset and a row count", line, col)
+                    .hint("e.g. `df.slice(1000, 500)` for rows 1000..1500."));
+            }
+            let offset = as_int(&args[0], "slice", line, col)?;
+            let len = as_int(&args[1], "slice", line, col)?;
+            if offset < 0 || len < 0 {
+                return Err(HelixError::new(
+                    format!("`slice` needs a non-negative offset and count, got {offset} and {len}"),
+                    line,
+                    col,
+                )
+                .hint("counting back from the end is `tail(n)`."));
+            }
+            // CLAMPED, NOT REFUSED: an offset past the end is an empty frame and a count
+            // past the end is short. That is how the last chunk of a scan reads, and
+            // erroring would make the caller compute the row count first — which on a lazy
+            // frame means materializing it.
+            Ok(Value::dataframe(lf.slice(offset as usize, len as usize)))
         }
         "vstack" => {
             if args.len() != 1 {
@@ -301,6 +325,26 @@ pub(crate) fn df_value_method(
         | "to_table" => {
             crate::interp::export_method(Value::dataframe(lf.clone()), name, &args, line, col)
         }
+        // A COLUMN VERB REACHING HERE MEANS ITS ARGUMENTS WERE ALREADY EVALUATED, which
+        // happens when the receiver's type was not known statically — inside
+        // `fn f(d, k) = d.sort(k)`, for instance. These verbs take UNEVALUATED asts because
+        // their arguments are column references rather than values, so they are deliberately
+        // absent from this table.
+        //
+        // Falling through to the catch-all produced "a DataFrame has no method `sort` — did
+        // you mean `sort`?": a message that contradicts itself and sends the reader looking
+        // for a typo that is not there. The method exists; it cannot be reached THIS way.
+        "where" | "filter" | "select" | "sort" | "group" | "with" => Err(HelixError::new(
+            format!("`{name}` needs its columns named at the call site, not passed as values"),
+            line,
+            col,
+        )
+        .hint(
+            "write the column with the `@` sigil — `df.sort(@price)`. A column name held in a \
+             VARIABLE is not supported: `df.sort(k)` reads `k` as a column literally named \
+             \"k\". To order by a name chosen at run time, build the permutation yourself \
+             (`range(0, n).sort_by(...)`) and rebuild with `dataframe(dict)`.",
+        )),
         _ => {
             let methods = crate::registry::methods_of(crate::registry::DF_METHODS);
             let err =

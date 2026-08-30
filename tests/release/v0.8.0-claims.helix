@@ -1,0 +1,84 @@
+# The v0.8.0 release notes, as a program.
+#
+# Every line below is a cell of the changelog's tables. The expectations in
+# `v0.8.0-claims.expected` are authored BY HAND from the notes — capturing them from a
+# binary would prove only that the binary agrees with itself, which every other gate
+# already covers. This is the one check that can notice the notes promising something the
+# binary does not do, and in v0.6.0 exactly that happened.
+#
+# It writes under /tmp and CLEARS ITS OWN FILES FIRST, because `create_new` and `mkdir`
+# answer differently the second time — a claims program that only passes on a clean machine
+# is not a check.
+
+d = "/tmp/helix-v080-claims"
+mkdir(d)
+remove_file("{d}/head")
+remove_file("{d}/head.part")
+remove_file("{d}/lock")
+remove_file("{d}/pg")
+remove_file("{d}/l")
+remove_file("{d}/bin")
+
+# --- the durable commit: write, fsync, rename, sync_dir ---
+tmp = "{d}/head.part"
+"seq=1".write_to(tmp)
+print(fsync(tmp))
+print(rename(tmp, "{d}/head"), not file_exists(tmp))
+print(sync_dir(d))
+print(read_text("{d}/head"))
+
+# --- create_new is atomic: exactly one winner, and the loser writes nothing ---
+print(create_new("{d}/lock", "first"), create_new("{d}/lock", "second"))
+print(read_text("{d}/lock"))
+
+# --- random access: O(page), not O(file) ---
+"AAAABBBB".write_to("{d}/pg")
+print(file_size("{d}/pg"))
+print(write_at("{d}/pg", 4, "CCCC"))
+print(read_at("{d}/pg", 0, 8))
+print(read_at("{d}/pg", 4, 999))
+print(truncate("{d}/pg", 4), file_size("{d}/pg"))
+
+# --- remove_dir is idempotent and empty-only ---
+print(remove_dir("{d}/never-existed"))
+
+# --- a lock the kernel holds; release says whether THIS call released it ---
+l = lock_file("{d}/l")
+print(l.held(), l.release(), l.release(), l.held())
+
+# --- Bytes: what a String cannot hold ---
+print(from_hex("48656c6c6f"), from_base64("SGVsbG8="))
+print("Hi".to_bytes(), from_hex("00ff").to_hex(), from_hex("4869").to_string())
+print(from_hex("00ff10").length(), from_hex("00ff").byte_at(1), from_hex("00ff").byte_at(9))
+print(from_hex("00ff10").take(2), from_hex("00ff10").drop(1), from_hex("00ff10").slice(1, 3))
+
+# --- ordered lexicographically by byte, and `to_hex` preserves that order ---
+print(from_hex("00") < from_hex("01"), from_hex("ff") < from_hex("0000"))
+print([from_hex("02"), from_hex("00"), from_hex("01")].sort())
+a = from_hex("00ff")
+b = from_hex("0100")
+print(a < b, a.to_hex() < b.to_hex())
+
+# --- binary that is NOT text survives a round trip; read_at must refuse it ---
+from_hex("00010203fffe").write_to("{d}/bin")
+print(read_bytes("{d}/bin").to_hex())
+print(read_bytes_at("{d}/bin", 2, 3))
+
+# --- html_escape, all five characters, apostrophe included ---
+print(html_escape("<a href='x' title=\"y\">a&b</a>"))
+print(html_escape("nothing to do"))
+
+# --- the row window a chunked store needs ---
+df = dataframe({i: [0, 1, 2, 3, 4], s: ["a", "b", "c", "d", "e"]})
+print(df.head(2).column("s"), df.tail(2).column("s"), df.slice(1, 3).column("s"))
+print(df.slice(3, 99).column("s"), df.slice(99, 3).count())
+# `.where(p).slice(0,n)` and `.slice(0,n).where(p)` are DIFFERENT questions.
+print(df.where(@i > 1).slice(0, 2).column("s"), df.slice(0, 2).where(@i > 1).count())
+
+# --- a schema that is not syntax, and its sorted column order ---
+print(dataframe(dict().insert("z", [1]).insert("a", [2])).columns())
+print(dataframe({z: [1], a: [2]}).columns())
+
+# --- an array accumulated in a record field: the ANSWER, which the fix must not change ---
+r = range(0, 500).reduce({xs: [], k: 0}, (a, i) => {xs: a.xs.concat([i]), k: a.k + 1})
+print(r.xs.count(), r.k, r.xs.sum())

@@ -1,0 +1,12 @@
+exit: 0
+--- stdout ---
+["age", "name"]
+[30, 41]
+["ada", "bob"]
+2
+["a", "z"]
+["z", "a"]
+["bob"]
+["ada", "bob"]
+["c1", "c2"] 2
+--- stderr ---

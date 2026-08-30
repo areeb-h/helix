@@ -1053,11 +1053,27 @@
             int("dataframe({g: [\"x\", \"x\", \"y\"], v: [1, 3, 10]}).group(@g).mean(@v).count()"),
             2
         );
+        // A DICT builds one too — the only way to name a column at RUN TIME, since a
+        // record's fields are syntax (ADR 0043).
+        assert_eq!(int("dataframe(dict().insert(\"a\", [1, 2, 3])).count()"), 3);
+        // …with columns in SORTED name order, where the record form keeps the order
+        // written. Both deterministic, and they differ.
+        assert_eq!(
+            last("dataframe(dict().insert(\"z\", [1]).insert(\"a\", [2])).columns().first()")
+                .expect("a dict builds a frame")
+                .to_string(),
+            "a"
+        );
         // clear errors for misuse
         assert!(last("dataframe([1, 2, 3])")
             .unwrap_err()
             .message
-            .contains("record of columns"));
+            .contains("record or dict of columns"));
+        // A column name is a string; `1` and "1" must not merge into one column.
+        assert!(last("dataframe(dict().insert(1, [1, 2]))")
+            .unwrap_err()
+            .message
+            .contains("string column names"));
         assert!(last("dataframe({a: [1, \"x\"]})").unwrap_err().message.contains("mixes types"));
     }
 

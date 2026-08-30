@@ -1098,6 +1098,20 @@ impl DataHandle for PolarsFrame {
         self.derive(self.lf.clone().limit(n.min(u32::MAX as usize) as u32))
     }
 
+    fn tail(&self, n: usize) -> Df {
+        self.derive(self.lf.clone().tail(n.min(u32::MAX as usize) as u32))
+    }
+
+    fn slice(&self, offset: usize, len: usize) -> Df {
+        // Same clamping reason as `head`: a count that does not fit `u32` must saturate,
+        // never wrap into a small number and silently return the wrong rows.
+        self.derive(
+            self.lf
+                .clone()
+                .slice(offset.min(i64::MAX as usize) as i64, len.min(u32::MAX as usize) as u32),
+        )
+    }
+
     fn vstack(&self, bottom: &Df, line: usize, col: usize) -> Result<Df, HelixError> {
         let bf = match bottom.as_any().downcast_ref::<PolarsFrame>() {
             Some(pf) => pf,

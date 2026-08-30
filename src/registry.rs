@@ -365,7 +365,7 @@ pub static TENSOR_METHODS: &[&str] = &[
 /// DataFrame methods (column verbs + value methods + serialize/write).
 pub static DF_METHODS: &[&str] = &[
     "where", "filter", "drop_missing", "drop_nan", "select", "sort", "group", "with", "join", "vstack", "unique", "column",
-    "head", "count", "columns", "cache", "write_csv", "write_tsv", "write_json", "write_parquet",
+    "head", "tail", "slice", "count", "columns", "cache", "write_csv", "write_tsv", "write_json", "write_parquet",
     "to_html", "to_markdown", "to_table",
 ];
 

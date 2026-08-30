@@ -13,6 +13,37 @@
   sequential `replace` passes and allocated four times per cell regardless. And it escapes
   the fifth character (see Changed).
 
+- **`DataFrame.tail(n)` and `DataFrame.slice(offset, len)` — the row window.** A frame had
+  `head(n)` and nothing else, so a sorted frame could not be cut into chunks: reclustering a
+  store means starting somewhere other than row 0.
+
+  `tail` is **not** sugar over `slice` — expressing it as one needs the row count, which a
+  lazy frame does not cheaply have, so `df.tail(5)` would silently materialize a frame you
+  were careful to keep lazy.
+
+  Both **clamp rather than refuse**: an offset past the end is an empty frame and a length
+  past the end is short. Same rule as `read_at`, for the same reason — that is how a final
+  partial chunk reads, and erroring would force the caller to compute the row count first. A
+  NEGATIVE offset is refused, because that question already has an answer (`tail`).
+
+  Note `.where(p).slice(0, n)` and `.slice(0, n).where(p)` are different questions — the
+  first n matching rows, versus the matching rows among the first n. Both are pinned.
+
+- **`dataframe(dict)` — a schema that is not syntax.** `dataframe()` took a RECORD, and
+  record fields are source text, so a column could not be named at run time. A store whose
+  chunk schema comes from the data could not build a frame at all.
+
+  ```helix
+  dataframe(names.reduce(dict(), (acc, n) => acc.insert(n, column_for(n))))
+  ```
+
+  **Column order differs from the record form, deliberately:** a record keeps the order
+  written, a dict is sorted, so `dataframe(d)` yields columns in sorted name order. A Dict
+  has no insertion order, so inventing one would be a claim about where the frame came from
+  that nothing supports. Both are deterministic; `select` fixes an order that matters. A
+  non-string key is refused by name rather than stringified, since `1` and `"1"` would
+  otherwise merge into one column. See ADR 0043.
+
 - **`Bytes` — a value that holds what a `String` cannot.** ADR 0041's storage substrate named
   its own ceiling: a Helix `Str` is UTF-8 by definition, so `read_at` had to refuse a slice
   that splits a character, and a packed integer, a bitmap, a compressed block or a hash

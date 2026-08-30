@@ -381,6 +381,14 @@ impl DataHandle for NativeFrame {
         Rc::new(verbs::head(self, n)) as Df
     }
 
+    fn tail(&self, n: usize) -> Df {
+        Rc::new(verbs::tail(self, n)) as Df
+    }
+
+    fn slice(&self, offset: usize, len: usize) -> Df {
+        Rc::new(verbs::slice(self, offset, len)) as Df
+    }
+
     fn vstack(&self, bottom: &Df, line: usize, col: usize) -> Result<Df, HelixError> {
         let Some(b) = bottom.as_any().downcast_ref::<NativeFrame>() else {
             return Err(HelixError::new(

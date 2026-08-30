@@ -1,0 +1,41 @@
+# A bare name in a COLUMN-NAME position (`sort`/`select`/`group`) is taken LITERALLY, and a
+# binding of the same name does not win.
+#
+# ADR 0028 decided the opposite for `where`/`filter`/`with` — a binding in scope wins there,
+# because otherwise a library author's parameter names become reserved words in data they
+# have never seen. It did not cover these three positions, and this program pins what they
+# actually do today, INCLUDING THE SILENT CASE.
+#
+# THIS GOLDEN IS EXPECTED TO CHANGE when that decision is extended (docs/STATE.md item 2).
+# It is here so the change shows up as an explicit, reviewable diff rather than as a silent
+# shift in what a program means.
+
+w = "v"
+D = dataframe({v: [2, 1, 0], w: [10, 20, 30]})
+
+# THE SILENT CASE. `w` is bound to "v", and the frame also has a column called `w`.
+# The column wins, with no error: this sorts by `w`, not by `v`.
+print(D.sort(w).column("v"))
+# For comparison, both explicit spellings:
+print(D.sort(@v).column("v"))
+print(D.sort(@w).column("v"))
+
+# Same shape in `select` — the answer is the `w` column, not the `v` the binding named.
+print(D.select(w).columns())
+
+# And in `group`, which needs an aggregation to reach: grouping by `w` gives three groups,
+# grouping by `g` would give two.
+G = dataframe({g: ["a", "a", "b"], w: ["x", "y", "z"], n: [1, 2, 3]})
+print(G.group(w).sum(@n).count())
+print(G.group(@g).sum(@n).count())
+
+# THE CONTRAST: `with` IS covered by ADR 0028, so there the binding wins over the column.
+k = 100
+print(D.with({out: k}).column("out"))
+
+# The LOUD case: a binding with NO same-named column errors instead, which is how this is
+# usually discovered — and why the silent case above is the worse of the two.
+# (`try` binds tighter than `.ok`, so the result has to be bound first.)
+k2 = "v"
+r = try(D.sort(k2))
+print(r.ok)

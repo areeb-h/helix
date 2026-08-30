@@ -1,0 +1,30 @@
+true
+true true
+true
+seq=1
+true false
+first
+8
+4
+AAAACCCC
+CCCC
+true 4
+false
+true true false false
+b"48656c6c6f" b"48656c6c6f"
+b"4869" 00ff Hi
+3 255 missing
+b"00ff" b"ff10" b"ff10"
+true false
+[b"00", b"01", b"02"]
+true true
+00010203fffe
+b"0203ff"
+&lt;a href=&#39;x&#39; title=&quot;y&quot;&gt;a&amp;b&lt;/a&gt;
+nothing to do
+["a", "b"] ["d", "e"] ["b", "c", "d"]
+["d", "e"] 0
+["c", "d"] 0
+["a", "z"]
+["z", "a"]
+500 500 124750

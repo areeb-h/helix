@@ -72,6 +72,25 @@ Nine verbs: `rename`, `fsync`, `sync_dir`, `create_new`, `file_size`, `read_at`,
 crashes; these do, because the kernel hangs them on an open descriptor. Measured both ways:
 after `kill -9`, the kernel lock is free and the lock file still reports busy.
 
+### Row windows and runtime schemas (ADR 0043)
+
+`DataFrame.tail(n)` and `DataFrame.slice(offset, len)`, and `dataframe(dict)`.
+
+Two field-reported blockers that were the same defect twice: the language had no verb, so
+the caller had to supply a closure. `tail` is NOT sugar over `slice` — expressing it as one
+needs the row count, which a lazy frame does not cheaply have. Both windows CLAMP rather
+than refuse (a window off the end is how a final partial chunk reads), so the clamping rule
+now reads the same in `read_at`, `read_bytes_at` and the frame window. A negative offset IS
+refused, because that question is `tail`'s.
+
+`dataframe(dict)` yields columns in SORTED name order where a record keeps the written
+order — a Dict has no insertion order, so inventing one would be a claim nothing supports.
+
+Pinned by two corpus programs, which get `dfdiff` (both backends), `vmparity` (three
+engines) and a golden at once. Both backends and all three engines were verified to agree
+BEFORE the golden was pinned — pinning first would have recorded one backend's answer as
+the language's.
+
 ### `html_escape`
 
 One implementation, shared by the builtin and `to_html`. Scans before allocating, so text
@@ -122,30 +141,73 @@ Do NOT rush this into a release. It is the one remaining item where the failure 
 silently wrong dictionary, and `dfdiff` + `vmparity` + the corpus need to be the net. The
 ADR 0029 amendment records the measurement to beat; the lint narrows again when it lands.
 
-### 2. String accumulation in a record field
+### 2. ADR 0028's bug survives in `select` / `sort` / `group` — needs an ADR
+
+ADR 0028 fixed "a bare name means the COLUMN, not your binding" for `where` / `filter` /
+`with`, on the grounds that otherwise a library author's parameter names become reserved
+words in data they have never seen. It did not cover the COLUMN-NAME positions, and the same
+bug is there. Measured:
+
+A bare name here is taken LITERALLY. It is not resolved and then compared — so
+`df.sort(v)` "working" at top level is a coincidence: the identifier happened to match a
+column. It is not a parameter-only problem either; a top-level binding hits it too.
+
+**The loud form** — a binding with no same-named column:
+
+| written | result |
+|---|---|
+| `df.sort(@v)` | works |
+| `df.sort(v)` at top level | works, BY COINCIDENCE — the ident matched a column |
+| `df.sort("v")` | error: expected a column name |
+| `k2 = "v"` then `df.sort(k2)` | error: no column `k2` |
+| `d.sort(k)` inside a `fn` | error: `sort` needs its columns named at the call site |
+| `d.select(k)` / `d.group(k)` | error: no column `k` |
+
+**The silent form, which is the dangerous one.** When a column of the binding's own name
+exists, the column wins with NO error — measured with `w = "v"` over
+`{v: [2,1,0], w: [10,20,30]}`:
+
+| written | answers | should be |
+|---|---|---|
+| `D.sort(w)` | `[2,1,0]` — sorted by **w** | `[0,1,2]` |
+| `D.select(w)` | `["w"]` | `["v"]` |
+| `G.group(w).sum(@n)` | **3 groups** — by w | 2 groups |
+| `D.with({out: w})` | binding won ✓ | ADR 0028 working, the contrast |
+
+`group` DOES have the silent form; it just needs an aggregation that takes a column
+(`sum(@n)`) to reach — an arity check fires first otherwise.
+
+So `fn top(frame, key) = frame.select(key)` does not merely fail on a caller's schema: on any
+frame that happens to have a column called `key` — a plausible name in real data — it
+silently returns the wrong column. The loud form costs a confused hour; the silent one costs
+correctness.
+
+Pinned by `tests/corpus/df_column_name_shadowing.helix`, whose golden is EXPECTED to change
+when this is fixed, so the change arrives as a reviewable diff rather than a silent shift.
+
+There is no way to name a column at run time in these positions at all; the field report's
+store had to build a permutation with `sort_by` and rebuild through `dataframe(dict)`.
+
+Three things are tangled and should be decided together, not patched apart:
+
+1. Does a binding win in a column-name position, as ADR 0028 decided it does in an
+   expression position? Consistency says yes; it is **breaking**, exactly as 0028 was.
+2. Should a String be accepted there — `df.sort("v")` — given `df.column("v")` already takes
+   one? That is the least surprising half and is NOT breaking.
+3. Why does a bare ident resolve differently at top level than inside a function? That looks
+   like a plain inconsistency rather than a decision.
+
+**Already fixed, and separately:** reaching a column verb with evaluated arguments used to
+report *"a DataFrame has no method `sort` — did you mean `sort`?"* — a message that
+contradicts itself. It now says the verb needs its columns named at the call site, and that a
+name held in a variable is not supported. That is the diagnostic; the decision above is the
+fix.
+
+### 3. String accumulation in a record field
 
 10.1× per 4×, 243 ms at n=128,000. Same shape as the dict case and milder. Node rendering IS
 string building, so it matters for the UI library specifically. No lint names it yet — it has
 no `dict()`-like literal to key on, so detecting it needs its own rule.
-
-### 3. Two DataFrame blockers a storage engine hits immediately
-
-Both reported from the field while building a chunked, reclusterable store. Both are
-structural rather than cosmetic: they force a caller-supplied closure where the language
-should have a verb.
-
-**No row-offset slice.** A DataFrame has `head(n)` and nothing else — no `tail`, no
-`slice(start, len)`. So a sorted frame cannot be cut into chunks, which is the whole of
-"recluster by a column". `recluster` currently takes a caller-supplied `slicer` closure to
-work around it.
-
-**A DataFrame cannot be built with runtime column names.** `dataframe()` takes a RECORD, and
-record fields are static syntax; `to_dataframe()` refuses an array of dicts. So there is no
-generic way to construct a frame whose schema is known only at run time — which every
-storage engine needs, because a chunk's schema comes from the data, not from the source
-text. `dataframe(dict)` accepting string keys is the obvious shape.
-
-Both need the polars and native backends to agree, so `dfdiff` is the net.
 
 ### 4. Tighten two guards that let something through
 

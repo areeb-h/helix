@@ -1,0 +1,38 @@
+# The v0.8.0 release notes' ERROR claims: the cells whose "now" column says the
+# program stops instead of answering. One per line:
+#
+#   <substring the diagnostic must contain>	<program>
+#
+# Tab-separated, `#` comments ignored. Each program must exit NON-ZERO and its
+# stderr must contain the substring. Both halves matter: an exit code without the
+# message is a program that failed for some other reason.
+#
+# Every path below is one the CLAIMS PROGRAM created, so these run after it and depend on
+# nothing about the host. `/etc/hostname` would not exist everywhere these are run.
+
+# --- the storage substrate refuses rather than guessing ---
+non-negative	print(read_at("/tmp/helix-v080-claims/pg", 0 - 1, 4))
+non-negative	print(truncate("/tmp/helix-v080-claims/pg", 0 - 1))
+is not a directory	print(sync_dir("/tmp/helix-v080-claims/pg"))
+never recursive	print(remove_dir("/tmp/helix-v080-claims"))
+could not rename	print(rename("/tmp/helix-v080-claims/nope", "/tmp/helix-v080-claims/x"))
+
+# --- `read_at` must refuse bytes that are not text; that refusal is why Bytes exists ---
+not valid UTF-8	print(read_at("/tmp/helix-v080-claims/bin", 4, 1))
+
+# --- Bytes: the conversions that can fail say so instead of substituting ---
+not valid UTF-8	print(from_hex("ff").to_string())
+even number of digits	print(from_hex("0").to_hex())
+not a hex byte	print(from_hex("zz").to_hex())
+has no method	print(from_hex("00").nope())
+not a Bytes	print(dict().insert(from_hex("00"), 1))
+expects Bytes	print(from_hex("00").concat("x"))
+
+# --- the row window: a negative offset is `tail`'s question, not a clamp ---
+non-negative offset and count	print(dataframe({a: [1, 2]}).slice(0 - 1, 2).count())
+
+# --- a column name is a string; `1` and "1" must not merge into one column ---
+string column names	print(dataframe(dict().insert(1, [1, 2])).columns())
+
+# --- html_escape refuses a non-string rather than stringifying it ---
+expected a string	print(html_escape(1))

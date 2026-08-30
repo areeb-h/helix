@@ -93,7 +93,9 @@ Pairwise alignment of two arrays; returns score, matches, and gap-padded copies.
 
 ### `dataframe(columns)`
 
-Build a DataFrame from a record of equal-length column arrays.
+Build a DataFrame from a record — or a dict — of equal-length column arrays.
+
+**Note:** A DICT WORKS TOO, and it is the only way to name a column at RUN TIME: a record's fields are syntax, so `dataframe({...})` can only produce columns the source text names. A store whose chunk schema comes from the data needs the dict form. COLUMN ORDER DIFFERS BETWEEN THEM: a record keeps the order written, a dict is sorted by key (it is a sorted map), so `dataframe(d)` yields columns in sorted name order. Both deterministic; `select` fixes an order that matters. A non-string dict key is refused by name rather than stringified, because `1` and "1" would silently merge into one column. Keywords: build, construct, columns, schema, runtime, dynamic, dict, record.
 
 ```
 >>> dataframe({age: [30, 41], name: ["ana", "bo"]})
@@ -3544,6 +3546,8 @@ Alias of where: keep the rows where the predicate is true.
 
 Group rows by key column(s) for mean/sum/min/max/count/std aggregation.
 
+**Note:** A BARE NAME HERE IS TAKEN LITERALLY AS A COLUMN, and a binding of the same name does NOT win — unlike `where`/`filter`/`with`, which ADR 0028 fixed. So `k = "price"` then `df.group(k)` looks for a column called `k`, and if the frame HAS one it is used SILENTLY and the binding is ignored. There is currently no way to name a column at run time in this position: build the permutation yourself and rebuild with `dataframe(dict)`. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.
+
 ```
 >>> dataframe({k: ["a","a","b"], v: [1,2,3]}).group(@k).sum(@v).count()
 2
@@ -3552,6 +3556,8 @@ Group rows by key column(s) for mean/sum/min/max/count/std aggregation.
 ### `head(n)`
 
 The first n rows.
+
+**Note:** Asking for more rows than exist gives the whole frame, never an error — the same clamping `tail` and `slice` use. Keywords: first, limit, top, preview, truncate.
 
 ```
 >>> dataframe({a: [1, 2], b: [3.0, 4.5]}).head(1).count()
@@ -3571,20 +3577,44 @@ Join with another frame on key column(s); a trailing string picks the type.
 
 A frame with only the named columns, in the given order.
 
+**Note:** A BARE NAME HERE IS TAKEN LITERALLY AS A COLUMN, and a binding of the same name does NOT win — unlike `where`/`filter`/`with`, which ADR 0028 fixed. So `k = "price"` then `df.select(k)` looks for a column called `k`, and if the frame HAS one it is used SILENTLY and the binding is ignored. There is currently no way to name a column at run time in this position: build the permutation yourself and rebuild with `dataframe(dict)`. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.
+
 ```
 >>> dataframe({a: [1, 2], b: [3.0, 4.5]}).select(@a).columns()
 ["a"]
+```
+
+### `slice(offset, len)`
+
+At most len rows starting at row offset.
+
+**Note:** THE ROW WINDOW, and what `head` alone cannot express: cutting a sorted frame into chunks means starting somewhere other than row 0, which is the whole of reclustering a store. CLAMPED AT BOTH ENDS rather than refused — an offset past the end is an empty frame and a length past the end is short — because that is how a final partial chunk reads, and erroring would force the caller to materialize the row count first. Order matters against a query: `.where(p).slice(0, n)` and `.slice(0, n).where(p)` are different questions. Counting back from the end is `tail`. Keywords: window, offset, page, chunk, range, rows, paginate, skip, limit.
+
+```
+>>> dataframe({a: [1, 2, 3, 4]}).slice(1, 2).column("a")
+[2, 3]
 ```
 
 ### `sort(@col, ...)`
 
 Rows sorted ascending by the named column(s).
 
-**Note:** Missing rows sort FIRST here — unlike Array sort, which refuses missing.
+**Note:** Missing rows sort FIRST here — unlike Array sort, which refuses missing. A BARE NAME HERE IS TAKEN LITERALLY AS A COLUMN, and a binding of the same name does NOT win — unlike `where`/`filter`/`with`, which ADR 0028 fixed. So `k = "price"` then `df.sort(k)` looks for a column called `k`, and if the frame HAS one it is used SILENTLY and the binding is ignored. There is currently no way to name a column at run time in this position: build the permutation yourself and rebuild with `dataframe(dict)`. Keywords: column name, binding, shadow, runtime, dynamic, scope, ADR 0028.
 
 ```
 >>> dataframe({a: [2, 1], b: [3.0, 4.5]}).sort(@a).column("a")
 [1, 2]
+```
+
+### `tail(n)`
+
+The last n rows.
+
+**Note:** NOT sugar over `slice`: expressing it as one needs the row count, which a lazy frame does not cheaply have — so asking for the last n rows would otherwise force a materialization. Asking for more than exist gives the whole frame. Keywords: last, end, bottom, final, rows.
+
+```
+>>> dataframe({a: [1, 2, 3]}).tail(2).column("a")
+[2, 3]
 ```
 
 ### `to_html()`

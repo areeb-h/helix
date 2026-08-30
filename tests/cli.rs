@@ -11992,3 +11992,59 @@ fn html_escape_handles_the_fifth_character() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A column verb reached with evaluated arguments must say what is actually wrong.
+///
+/// `where`/`filter`/`select`/`sort`/`group`/`with` take UNEVALUATED asts, because their
+/// arguments are column references rather than values. When the receiver's type is not known
+/// statically — `fn f(d, k) = d.sort(k)` — the arguments get evaluated first, and the verb
+/// arrived at the value-method table it is deliberately absent from.
+///
+/// It then fell through to the catch-all and reported **"a DataFrame has no method `sort` —
+/// did you mean `sort`?"**: a message that contradicts itself and sends the reader hunting a
+/// typo that is not there. The method exists; it cannot be reached that way.
+#[test]
+fn a_column_verb_does_not_deny_it_exists() {
+    let dir = std::env::temp_dir().join(format!("hx_colverb_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("t.helix");
+
+    std::fs::write(
+        &f,
+        "fn first_by(d, k) = d.sort(k).column(\"v\")\nprint(first_by(dataframe({v: [3, 1, 2]}), \"v\"))\n",
+    )
+    .unwrap();
+    let (_, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0));
+    assert!(
+        err.contains("needs its columns named at the call site"),
+        "the verb must explain itself: {err}"
+    );
+    // The self-contradiction specifically must not come back.
+    assert!(
+        !err.contains("has no method `sort`"),
+        "`sort` exists — saying otherwise while suggesting it is the bug: {err}"
+    );
+    // And it says what to do instead, including that a name in a variable is not supported.
+    assert!(err.contains("@"), "the sigil is the fix: {err}");
+
+    // The spelling that works is unaffected, at top level and inside a function.
+    for src in [
+        "print(dataframe({v: [3, 1, 2]}).sort(@v).column(\"v\"))",
+        "fn f(d) = d.sort(@v).column(\"v\")\nprint(f(dataframe({v: [3, 1, 2]})))",
+    ] {
+        std::fs::write(&f, format!("{src}\n")).unwrap();
+        let (out, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+        assert_eq!(code, Some(0), "{src}\n{err}");
+        assert_eq!(out.trim(), "[1, 2, 3]", "{src}");
+    }
+
+    // A genuinely unknown method still gets the ordinary message and the did-you-mean.
+    std::fs::write(&f, "print(dataframe({v: [1]}).nope())\n").unwrap();
+    let (_, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("has no method `nope`"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
