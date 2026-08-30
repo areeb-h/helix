@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Added
+
+- **`helix build` bundles a program AND everything it imports.** Any program with an
+  `import` was refused outright, so a Helix program with a library could not be shipped at
+  all. Nothing in the design required that: the overlay held one source string, while the
+  module loader had already collected every module's source. The workaround — inlining by
+  hand — pushed a field user into reimplementing Helix's lexer, where they got the `{{`
+  doubling convention wrong and desynchronised 15 KB into one token.
+
+  **A bundled program is loaded by the same resolver an interpreted one uses.** `load_file`
+  and the whole import ladder are untouched; only the three questions they ask of the world
+  — does this path exist, what is its canonical form, what does it contain — are answered
+  from the bundle's archive instead of the filesystem. So an import cannot resolve one way
+  from source and another way from a bundle, which is a stronger property than two
+  implementations that agree today.
+
+  Modules are keyed by their path **relative to the project root**, recorded at the moment
+  of resolution rather than derived afterwards from a canonical path — only the resolver
+  knows which rung of the ladder matched. Two consequences fall out:
+
+  - Errors inside a bundled dependency name the module (`util.helix:1:32`), not the build
+    machine's directory layout, which storing canonical paths would ship inside every
+    artifact.
+  - **Two files claiming one key is refused, naming both.** A package dependency outranks
+    the project root in the ladder, so a dep's `mathlib/go.helix` and a project file reached
+    as a sibling at that path are distinct files with one key. The pinned case *interprets
+    correctly* — both modules load, printing `2 1` — so silently archiving one of them
+    would have shipped an artifact that answers differently from the program it was built
+    from.
+
+  `listen(port, shards)` works in a bundle: a shard cannot re-read a path, because a bundled
+  program has none, so it re-enters through the archive.
+
+  The overlay is versioned `HLXBND02` and **`HLXBND01` is still read** — `--runtime` means
+  the binary that writes an overlay and the one that reads it need not be the same version.
+
 ### Fixed
 
 - **A write that fails is an error, not a bug report — and not silence.** The four output

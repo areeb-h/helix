@@ -28,6 +28,14 @@ pub struct Span {
     pub start_line: usize,
     pub source: String,
     pub filename: String,
+    /// This module's path relative to the project root, `/`-separated -- the name it
+    /// answers to inside a built program's archive (`helix build`).
+    ///
+    /// It is recorded HERE, at the moment of resolution, rather than derived afterwards
+    /// from the canonical path, because only the resolver knows which rung of the ladder
+    /// matched: a sibling, a package dependency, or a search root. Deriving it later
+    /// would mean guessing, and guessing wrong is how two files end up sharing one key.
+    pub key: String,
 }
 
 /// The result of loading an entry file and its import graph.
@@ -238,6 +246,19 @@ struct ProjectContext {
 }
 
 /// Build the relative file path an import resolves to: `import a.b.c` → `a/b/c.helix`.
+/// Join a `/`-separated key's directory with a relative path, yielding another key.
+///
+/// Keys are always `/`-separated regardless of host, because a bundle built on one
+/// platform must resolve identically on another.
+fn key_join(parent_key: &str, rel: &Path) -> String {
+    let dir = match parent_key.rfind('/') {
+        Some(i) => &parent_key[..i],
+        None => "",
+    };
+    let rel = rel.to_string_lossy().replace('\\', "/");
+    if dir.is_empty() { rel } else { format!("{dir}/{rel}") }
+}
+
 fn import_rel_path(segments: &[String]) -> PathBuf {
     let mut rel = PathBuf::new();
     for seg in &segments[..segments.len() - 1] {
@@ -309,12 +330,55 @@ pub fn load_diag(entry: &Path) -> Result<Loaded, Diag> {
     roots.extend(search_roots());
     let mut loader =
         Loader { roots, deps, project_root, anchored_by_manifest: from_manifest, ..Loader::default() };
-    loader.load_file(entry, true)?;
+    // THE ENTRY'S KEY ANCHORS EVERY OTHER ONE. It is the entry's path relative to the
+    // project root, so a program whose entry sits in a subdirectory keeps that structure:
+    // `sub/main.helix` importing a sibling `util` becomes `sub/util.helix`, which stays
+    // distinct from a root-level `util.helix`. Flattening to a bare file name would
+    // silently merge those two.
+    let entry_key = entry
+        .canonicalize()
+        .ok()
+        .and_then(|c| {
+            let root = loader.project_root.canonicalize().unwrap_or_else(|_| loader.project_root.clone());
+            c.strip_prefix(&root).ok().map(|r| r.to_string_lossy().replace('\\', "/"))
+        })
+        .unwrap_or_else(|| {
+            entry.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| "main.helix".into())
+        });
+    loader.load_file(entry, entry_key, true)?;
+    assemble(loader)
+}
+
+/// Load a program whose modules come from a built program's archive, not the filesystem.
+///
+/// The virtual project root is `""`, so every join the resolver performs reproduces the
+/// key the build recorded: an entry of `sub/main.helix` importing a sibling `util` asks
+/// for `sub/util.helix`, and a search-root import asks for `std/json.helix`. There are no
+/// package dependencies, because a bundle has no manifest to consult -- the build already
+/// followed them and stored what it found under the path a plain root import reproduces.
+pub fn load_archive(modules: Vec<(String, String)>, entry: usize) -> Result<Loaded, Diag> {
+    if entry >= modules.len() {
+        return Err(Diag::from("error: this program's archive names no entry module\n".to_string()));
+    }
+    let entry_key = modules[entry].0.clone();
+    let map: HashMap<PathBuf, String> =
+        modules.into_iter().map(|(k, v)| (normalize(Path::new(&k)), v)).collect();
+    let mut loader = Loader {
+        roots: vec![PathBuf::new()],
+        project_root: PathBuf::new(),
+        store: Store::Archive(map),
+        ..Loader::default()
+    };
+    loader.load_file(Path::new(&entry_key), entry_key.clone(), true)?;
+    assemble(loader)
+}
+
+fn assemble(loader: Loader) -> Result<Loaded, Diag> {
     // Single file, no imports: hand back the unmodified AST so nothing is mangled
     // and error messages stay pristine — the overwhelmingly common case.
     if loader.modules.len() == 1 {
         let m = loader.modules.into_iter().next().unwrap();
-        let span = Span { start_line: 1, source: m.source, filename: m.filename };
+        let span = Span { start_line: 1, source: m.source, filename: m.filename, key: m.key };
         return Ok(Loaded { stmts: m.stmts, spans: vec![span], multi_module: false });
     }
     // Modules are in post-order (each dependency before the module that imports it,
@@ -329,6 +393,7 @@ pub fn load_diag(entry: &Path) -> Result<Loaded, Diag> {
             start_line: offset + 1,
             source: loader.modules[idx].source.clone(),
             filename: loader.modules[idx].filename.clone(),
+            key: loader.modules[idx].key.clone(),
         });
         // A visibility error from the rewrite carries a *global* line; map it back to
         // this module's local line and render against this module's own source.
@@ -355,10 +420,76 @@ struct Module {
     /// the erroring code actually came from (not the entry file).
     source: String,
     filename: String,
+    /// See [`Span::key`].
+    key: String,
+}
+
+/// Where module sources come from.
+///
+/// The filesystem for an interpreted run; a built program's own archive for a bundled
+/// one. The point is that there is ONE resolver: `load_file` and the whole import ladder
+/// run unchanged over either store, and only the three questions they ask of the world --
+/// does this path exist, what is its canonical form, what does it contain -- are answered
+/// differently. A bundled program and an interpreted one therefore cannot disagree about
+/// what `import a.b` means, which is a stronger property than two implementations that
+/// happen to agree today.
+#[derive(Default)]
+enum Store {
+    #[default]
+    Fs,
+    /// Key -> source, keyed exactly as [`Span::key`] records: project-root-relative and
+    /// `/`-separated. The build already resolved every import against the real root list
+    /// and kept the winner, so this map needs no root list of its own.
+    Archive(HashMap<PathBuf, String>),
+}
+
+/// Resolve `.` and `..` lexically. An archive has no symlinks and no working directory,
+/// so this IS canonicalisation there -- and unlike the filesystem call it cannot fail,
+/// which matters because a missing module must surface as the resolver's own "cannot
+/// find" diagnostic rather than as an I/O error from a path that never existed.
+fn normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+impl Store {
+    fn is_file(&self, p: &Path) -> bool {
+        match self {
+            Store::Fs => p.is_file(),
+            Store::Archive(m) => m.contains_key(&normalize(p)),
+        }
+    }
+
+    fn canonicalize(&self, p: &Path) -> std::io::Result<PathBuf> {
+        match self {
+            Store::Fs => p.canonicalize(),
+            Store::Archive(_) => Ok(normalize(p)),
+        }
+    }
+
+    fn read_to_string(&self, p: &Path) -> std::io::Result<String> {
+        match self {
+            Store::Fs => std::fs::read_to_string(p),
+            Store::Archive(m) => m.get(&normalize(p)).cloned().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "not in this program's archive")
+            }),
+        }
+    }
 }
 
 #[derive(Default)]
 struct Loader {
+    /// See [`Store`].
+    store: Store,
     modules: Vec<Module>,
     by_path: HashMap<PathBuf, usize>,
     /// Canonical paths currently being loaded — for cycle detection.
@@ -376,9 +507,10 @@ struct Loader {
 }
 
 impl Loader {
-    fn load_file(&mut self, path: &Path, is_entry: bool) -> Result<usize, Diag> {
-        let canon = path
-            .canonicalize()
+    fn load_file(&mut self, path: &Path, key: String, is_entry: bool) -> Result<usize, Diag> {
+        let canon = self
+            .store
+            .canonicalize(path)
             .map_err(|e| format!("error: cannot read `{}`: {}\n", path.display(), e))?;
         if let Some(&i) = self.by_path.get(&canon) {
             return Ok(i); // already loaded (shared dependency)
@@ -391,7 +523,9 @@ impl Loader {
         }
         self.in_progress.push(canon.clone());
 
-        let src = std::fs::read_to_string(&canon)
+        let src = self
+            .store
+            .read_to_string(&canon)
             .map_err(|e| format!("error: cannot read `{}`: {}\n", canon.display(), e))?;
         let fname = canon.to_string_lossy().into_owned();
         let toks = crate::lexer::lex(&src).map_err(|e| e.into_diag(&src, &fname))?;
@@ -479,14 +613,18 @@ impl Loader {
                 // broken standalone, which is far less dangerous, and closing it properly
                 // means resolving each package against ITS OWN manifest — a semantics change
                 // that needs an ADR of its own.
-                let dep_path = if local.is_file() {
-                    local
-                } else if let Some(p) = dep_file.filter(|p| p.is_file()) {
-                    p
+                // The KEY follows the rung, not the path. A sibling is named relative to
+                // the importing module's own key; a dependency or a search-root hit is
+                // named by the import itself, which is exactly what a virtual root
+                // reproduces when the program runs from an archive.
+                let (dep_path, dep_key) = if self.store.is_file(&local) {
+                    (local, key_join(&key, &rel))
+                } else if let Some(p) = dep_file.filter(|p| self.store.is_file(p)) {
+                    (p, key_join("", &rel))
                 } else if let Some(found) =
-                    self.roots.iter().map(|r| r.join(&rel)).find(|p| p.is_file())
+                    self.roots.iter().map(|r| r.join(&rel)).find(|p| self.store.is_file(p))
                 {
-                    found
+                    (found, key_join("", &rel))
                 } else {
                     let shown = segments.join(".");
                     // NAME THE ANCHOR. "under the project root" was true and unusable: the
@@ -530,7 +668,7 @@ impl Loader {
                         .hint(hint);
                     return Err(err.into_diag(&src, &fname));
                 };
-                let dep_idx = self.load_file(&dep_path, false)?;
+                let dep_idx = self.load_file(&dep_path, dep_key, false)?;
                 match selected {
                     // Selective: each chosen name resolves to the dependency directly —
                     // but only if that module actually `export`s it (ADR 0019). Validate
@@ -645,6 +783,7 @@ impl Loader {
             exports,
             source: src,
             filename: fname,
+            key,
         });
         self.by_path.insert(canon, idx);
         Ok(idx)

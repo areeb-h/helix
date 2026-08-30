@@ -12545,3 +12545,157 @@ fn a_failed_write_is_an_error_not_a_bug_report() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `helix build` bundles a program AND everything it imports.
+///
+/// v1 of the overlay held exactly one source string, so any program with an import was
+/// refused. Nothing in the design required that -- the loader already collected every
+/// module's source -- but the refusal is what pushed a field user into inlining modules
+/// by hand, where they reimplemented Helix's lexer and desynchronised on `{{`.
+///
+/// The artifact is run from a directory containing NO sources, which is the whole point:
+/// the modules must travel inside the executable, not be found beside it.
+#[test]
+fn a_program_with_imports_bundles_and_runs_without_its_sources() {
+    let dir = std::env::temp_dir().join(format!("hx_bundle_multi_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("util.helix"), "export fn shout(s) = \"{s.upper()}!\"\n").unwrap();
+    std::fs::write(dir.join("sub/helper.helix"), "export fn twice(n) = n * 2\n").unwrap();
+    std::fs::write(
+        dir.join("main.helix"),
+        "import util\nimport sub.helper\n\nprint(util.shout(\"hi\"))\nprint(helper.twice(21))\n",
+    )
+    .unwrap();
+
+    // Interpreted first: this is the answer the bundle must reproduce exactly.
+    let (want, err, code) = run(&["run", dir.join("main.helix").to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(want.contains("HI!") && want.contains("42"), "unexpected: {want}");
+
+    let out = dir.join("app");
+    let (_, err, code) = run(
+        &["build", dir.join("main.helix").to_str().unwrap(), "-o", out.to_str().unwrap()],
+        &[],
+        "",
+    );
+    assert_eq!(code, Some(0), "multi-module build failed:\n{err}");
+    assert!(out.exists(), "no artifact produced");
+
+    // Somewhere with no .helix files at all.
+    let away = dir.join("away");
+    std::fs::create_dir_all(&away).unwrap();
+    let moved = away.join("app");
+    std::fs::rename(&out, &moved).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let got = Command::new(&moved)
+        .current_dir(&away)
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to run the artifact");
+    let got_out = String::from_utf8_lossy(&got.stdout).into_owned();
+    assert_eq!(
+        got.status.code(),
+        Some(0),
+        "the artifact failed:\n{}",
+        String::from_utf8_lossy(&got.stderr)
+    );
+    assert_eq!(got_out, want, "the bundle and the interpreter disagree");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An error inside a bundled dependency names the MODULE, not a build-machine path.
+///
+/// The archive keys modules by their path relative to the project root, and those keys
+/// are what error rendering sees. Storing the canonical path instead would ship the
+/// build machine's directory layout inside every artifact.
+#[test]
+fn a_bundled_error_names_the_module_not_the_build_machine() {
+    let dir = std::env::temp_dir().join(format!("hx_bundle_err_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("boom.helix"), "export fn go() = raise(\"from the module\")\n").unwrap();
+    std::fs::write(dir.join("main.helix"), "import boom\nboom.go()\n").unwrap();
+
+    let out = dir.join("app");
+    let (_, err, code) = run(
+        &["build", dir.join("main.helix").to_str().unwrap(), "-o", out.to_str().unwrap()],
+        &[],
+        "",
+    );
+    assert_eq!(code, Some(0), "{err}");
+
+    let got = Command::new(&out).current_dir(&dir).stdin(Stdio::null()).output().unwrap();
+    let stderr = String::from_utf8_lossy(&got.stderr).into_owned();
+    assert!(stderr.contains("boom.helix"), "expected the module name:\n{stderr}");
+    assert!(
+        !stderr.contains(dir.to_str().unwrap()),
+        "the artifact leaked its build directory:\n{stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two different files claiming one name in the archive is REFUSED, not resolved by
+/// arrival order.
+///
+/// A package dependency outranks the project root in the resolution ladder, so a dep's
+/// `mathlib/go.helix` and a project file reached as a sibling at that same path are two
+/// distinct files with one key. Keeping whichever landed last would be the same shape as
+/// the supply-chain hazard `module.rs` documents: exit 0, `helix check` ok, all three
+/// engines agreeing because all three are equally wrong.
+///
+/// This is contrived on purpose -- it is rare, which is exactly why it must fail loudly
+/// rather than be reasoned away.
+#[test]
+fn two_modules_claiming_one_bundle_name_is_refused() {
+    // The collision needs the ENTRY to sit inside a directory sharing the dependency's
+    // name. A sibling import then produces the key `mathlib/go.helix` from the project's
+    // own file, while `import mathlib.go` -- whose local candidate would be
+    // `mathlib/mathlib/go.helix`, which does not exist -- falls through to the package and
+    // produces that same key from a DIFFERENT file.
+    let dir = std::env::temp_dir().join(format!("hx_bundle_dup_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("proj/mathlib")).unwrap();
+    std::fs::create_dir_all(dir.join("pkg")).unwrap();
+
+    std::fs::write(dir.join("pkg/helix.toml"), "[package]\nname = \"mathlib\"\n").unwrap();
+    std::fs::write(dir.join("pkg/go.helix"), "export fn go() = 1\n").unwrap();
+
+    std::fs::write(
+        dir.join("proj/helix.toml"),
+        "[package]\nname = \"proj\"\n\n[dependencies]\nmathlib = { path = \"../pkg\" }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("proj/mathlib/go.helix"), "export fn go() = 2\n").unwrap();
+    std::fs::write(
+        dir.join("proj/mathlib/main.helix"),
+        "import go\nimport mathlib.go as pkg\nprint(go.go(), pkg.go())\n",
+    )
+    .unwrap();
+
+    let entry = dir.join("proj/mathlib/main.helix");
+    let out = dir.join("proj/prog");
+    let (_, err, code) =
+        run(&["build", entry.to_str().unwrap(), "-o", out.to_str().unwrap()], &[], "");
+
+    // The program RUNS correctly when interpreted -- both files load, as distinct modules
+    // -- so this is a genuine interpreted-vs-bundled divergence. Shipping an artifact that
+    // contained only one of them is exactly the silent wrong answer being avoided here.
+    let (ok_out, _, ok_code) = run(&["run", entry.to_str().unwrap()], &[], "");
+    assert_eq!(ok_code, Some(0), "the fixture should interpret cleanly");
+    assert_eq!(ok_out.trim(), "2 1", "both modules load when interpreted");
+
+    assert_ne!(code, Some(0), "built an artifact despite two modules claiming one name:\n{err}");
+    assert!(!out.exists(), "a refused build left an artifact behind");
+    assert!(err.contains("same name"), "expected the duplicate-key refusal:\n{err}");
+    assert!(err.contains("mathlib/go.helix"), "the refusal should name the key:\n{err}");
+    assert!(err.contains("pkg/go.helix"), "the refusal should name both real files:\n{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

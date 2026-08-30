@@ -156,6 +156,10 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum Rerun {
     File(PathBuf),
     Source(String, String),
+    /// A program built into this executable: `(modules, entry index)`. A shard cannot
+    /// re-read a path, because a bundled program has no path -- its source lives in the
+    /// overlay appended to this binary.
+    Archive(Vec<(String, String)>, usize),
 }
 
 static RERUN: OnceLock<Rerun> = OnceLock::new();
@@ -326,6 +330,11 @@ fn spawn_shards(total: usize, line: usize, col: usize) -> Result<(), HelixError>
                     }
                     Rerun::Source(code, name) => {
                         crate::run_source(&code, &name);
+                    }
+                    Rerun::Archive(modules, entry) => {
+                        if let Err(e) = crate::run_archive_capture(modules, entry) {
+                            eprint!("shard {k}: {e}");
+                        }
                     }
                 }
             })

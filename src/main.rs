@@ -312,8 +312,8 @@ fn run() -> ExitCode {
     // this binary. If we are such an artifact, run the embedded program and ignore the
     // command line entirely (the args belong to the user's program, not to `helix`).
     // A plain `helix` binary has no overlay, so this returns `None` and the CLI runs.
-    if let Some((source, filename)) = bundle::embedded() {
-        return run_on_big_stack(move || run_source(&source, &filename));
+    if let Some(emb) = bundle::embedded() {
+        return run_on_big_stack(move || run_embedded(emb));
     }
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
@@ -1212,6 +1212,10 @@ fn run_source(code: &str, filename: &str) -> ExitCode {
         start_line: 1,
         source: code.to_string(),
         filename: filename.to_string(),
+        // `helix eval` has no file and no project, so it has no place in an archive
+        // either -- this program is never bundled. The name is what a bundle WOULD call
+        // it, kept honest rather than left blank.
+        key: filename.to_string(),
     }];
     match run_program(&program, &spans, false) {
         Ok(()) => ExitCode::SUCCESS,
@@ -1493,8 +1497,8 @@ fn run_fmt(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `helix build <script> [-o name]` — bundle a single-file program into a standalone
-/// executable (see `src/bundle.rs`). Runs on the big stack: the build path loads and
+/// `helix build <script> [-o name]` — bundle a program and everything it imports into a
+/// standalone executable (see `src/bundle.rs`). Runs on the big stack: the build path loads and
 /// type-checks the program, both of which recurse over the AST.
 fn run_build(args: &[String]) -> ExitCode {
     let entry = match args.get(2) {
@@ -1844,7 +1848,7 @@ fn run_file_with_args(path: &str, argv: &[String]) -> ExitCode {
         .unwrap_or_else(|| "tool".to_string());
     // The whole pipeline runs on the big stack (see `run_on_big_stack`) so the
     // front-end's AST recursion can't overflow before the depth guard fires.
-    run_on_big_stack(move || match run_file_capture_args(std::path::Path::new(path), &argv, &tool) {
+    run_on_big_stack(move || match run_file_capture_args(Entry::File(std::path::Path::new(path)), &argv, &tool) {
         Ok(()) => ExitCode::SUCCESS,
         Err(rendered) => {
             eprint!("{}", rendered);
@@ -1857,7 +1861,39 @@ fn run_file_with_args(path: &str, argv: &[String]) -> ExitCode {
 /// caret-annotated) error instead of printing it. Must be called on the big stack. The
 /// shared core of `helix run` and `helix test`.
 fn run_file_capture(path: &std::path::Path) -> Result<(), String> {
-    run_file_capture_args(path, &[], "tool")
+    run_file_capture_args(Entry::File(path), &[], "tool")
+}
+
+/// What the run pipeline was handed. See `run_file_capture_args`.
+pub(crate) enum Entry<'a> {
+    File(&'a std::path::Path),
+    /// `(modules, entry index)`, as read from this executable's own overlay.
+    Archive(Vec<(String, String)>, usize),
+}
+
+/// Run a program built into this executable.
+///
+/// A shard worker re-enters here rather than re-reading a file, because a bundled
+/// program has no file to re-read.
+pub(crate) fn run_archive_capture(modules: Vec<(String, String)>, entry: usize) -> Result<(), String> {
+    run_file_capture_args(Entry::Archive(modules, entry), &[], "tool")
+}
+
+fn run_embedded(emb: bundle::Embedded) -> ExitCode {
+    // The program's own arguments, not `helix`'s: argv[0] is this artifact's name.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let tool = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "tool".to_string());
+    serve::set_rerun(serve::Rerun::Archive(emb.modules.clone(), emb.entry));
+    match run_file_capture_args(Entry::Archive(emb.modules, emb.entry), &argv, &tool) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(rendered) => {
+            eprint!("{rendered}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// The run pipeline, with the script's own arguments bound to its `fn main` (ADR 0037).
@@ -1867,14 +1903,28 @@ fn run_file_capture(path: &std::path::Path) -> Result<(), String> {
 /// three engines run identical code. No new evaluator path means no new axis to keep in
 /// agreement — the failure this project keeps paying for elsewhere.
 fn run_file_capture_args(
-    path: &std::path::Path,
+    entry: Entry<'_>,
     argv: &[String],
     tool: &str,
 ) -> Result<(), String> {
     // The module loader reads, lexes, parses, and namespaces the entry file plus
     // everything it imports into one statement list. (A single file passes through
     // unchanged.) Lex/parse/resolve errors come back already rendered.
-    let loaded = module::load(path)?;
+    // A file on disk and a built program's archive go through the SAME pipeline from
+    // here: the same loader, the same `fn main` binding, the same `--help` answered from
+    // the declaration, the same `run_program`. A bundled program with its own front end
+    // would be free to drift from the one every test exercises.
+    let file_path = match &entry {
+        Entry::File(p) => Some(p.to_path_buf()),
+        Entry::Archive(..) => None,
+    };
+    let (loaded, archive_src) = match entry {
+        Entry::File(p) => (module::load(p)?, None),
+        Entry::Archive(modules, i) => {
+            let src = modules[i].1.clone();
+            (module::load_archive(modules, i).map_err(|d| d.rendered)?, Some(src))
+        }
+    };
     let mut stmts = loaded.stmts;
     // The borrow of `stmts` ends with this match, so the call it produces can be pushed
     // afterwards. (`drop(sig)` to release it early is what clippy's `drop_non_drop`
@@ -1885,7 +1935,11 @@ fn run_file_capture_args(
             // script's top level is its program, so running it to print help would run
             // the tool — which is exactly what someone asking for help has not asked for.
             if argv.iter().any(|a| a == "--help" || a == "-h") {
-                let src = std::fs::read_to_string(path).unwrap_or_default();
+                let src = match (&archive_src, &file_path) {
+                    (Some(s), _) => s.clone(),
+                    (None, Some(p)) => std::fs::read_to_string(p).unwrap_or_default(),
+                    (None, None) => String::new(),
+                };
                 print!("{}", climain::help(&sig, &src, tool));
                 return Ok(());
             }

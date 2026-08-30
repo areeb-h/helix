@@ -218,6 +218,40 @@ the loader a source provider that resolves imports from that map instead of the 
 Same resolution rules, different backing store — so a bundled program and an interpreted one
 cannot diverge on how imports resolve.
 
+#### The design, settled: a flat relative-path archive
+
+The open question was the KEY. `load_file` touches the filesystem in exactly two places --
+`path.canonicalize()` and `fs::read_to_string(&canon)` -- so the seam is clean, but canonical
+paths are absolute on the BUILD machine and meaningless on the target.
+
+Resolution tries the importing file's own directory, then package dependencies, then the
+project root and `HELIX_PATH` / `<exe_dir>`, and takes the first hit. So the key must be a
+path **relative to the project root, preserving directory structure** -- not a flat name.
+At run time the virtual project root is `""`, so every join reproduces the same key:
+
+    archive: { "sub/main.helix": …, "sub/util.helix": …, "util.helix": …, "std/json.helix": … }
+
+Sibling imports then fall out for free: `sub/main.helix` importing `util` joins its own
+virtual directory to `sub/util.helix`, distinct from a root-level `util.helix`. A bundled
+program and an interpreted one run the SAME resolver over a different backing store, which is
+the property worth having -- not "two implementations that agree today".
+
+**Collisions are possible, and must be refused rather than reasoned away.** An earlier draft
+of this note claimed the build "already resolved them, so they cannot collide". That is true
+of any single import and false of the key space: a package dependency beats the project root
+in the ladder, so a dep module resolving `mathlib/go.helix` and a project file at
+`<root>/mathlib/go.helix` reached from elsewhere are two different files with one key. Rare,
+but silently shipping whichever landed last is exactly the class of bug this project refuses.
+`helix build` detects a duplicate key and fails, naming both real paths.
+
+**Overlay v2.** `[payload][payload_len u64][MAGIC]`, payload being a length-prefixed list of
+`(path, source)` plus the entry index. The reader keeps accepting `HLXBND01` (one source, no
+imports): `--runtime` lets a bundle be built against a DIFFERENT helix binary, so a v1
+runtime can be handed a v2 overlay and should say so rather than misparse it.
+
+**What this deletes.** The `multi_module` refusal in `bundle::build`, and with it the reason
+a field user reimplemented Helix's lexer to inline modules by hand.
+
 ### 1.2 `helix build` should say which runtime a program needs
 
 `--runtime` makes the size a choice; it does not make it an INFORMED one. Today you must

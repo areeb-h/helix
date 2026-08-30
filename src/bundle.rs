@@ -14,9 +14,15 @@
 //! attached program instead of parsing the command line. No compiler or toolchain is
 //! needed at build time — the runtime *is* the stub.
 //!
-//! v1 bundles **single-file** programs. A program that imports other modules is
-//! rejected with a clear error (multi-module embedding is a planned follow-on);
-//! gating on the module loader means that check is exact, not a source-text guess.
+//! The overlay is an ARCHIVE of `(key, source)` pairs, so a program and everything it
+//! imports travel together. v1 held exactly one source string, which is the only reason
+//! `helix build` used to refuse any program with an import -- and that refusal is what
+//! pushed a field user into inlining modules by hand, where they reimplemented Helix's
+//! lexer and got the `{{` doubling convention wrong.
+//!
+//! A bundled program is loaded by the SAME resolver an interpreted one uses
+//! ([`crate::module::load_archive`]); only the store beneath it changes. So an import
+//! cannot resolve one way from source and another way from a bundle.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -28,8 +34,62 @@ use crate::error::HelixError;
 /// and treats the file as un-bundled rather than misparsing it).
 const MAGIC: &[u8; 8] = b"HLXBND01";
 
-/// The fixed-size tail of the overlay: `[name_len: u32][src_len: u64][MAGIC: 8]`.
+/// The fixed-size tail of a v1 overlay: `[name_len: u32][src_len: u64][MAGIC: 8]`.
 const TRAILER_LEN: u64 = 4 + 8 + 8;
+
+/// v2: the payload is an ARCHIVE of modules rather than a single source string.
+///
+/// v1 could hold exactly one file, which is the only reason `helix build` refused any
+/// program with an import -- and that refusal is what pushed a field user into inlining
+/// modules by hand, where they reimplemented Helix's lexer and got the `{{` doubling
+/// convention wrong. Nothing about the design required one file.
+///
+/// v1 is still READ. `--runtime` lets a bundle be built against a different `helix`
+/// binary, so the reader and the writer are not always the same version, and an old
+/// runtime handed a new overlay must recognise it rather than misparse it.
+const MAGIC_V2: &[u8; 8] = b"HLXBND02";
+
+/// `[payload_len: u64][MAGIC_V2: 8]`.
+const TRAILER_V2_LEN: u64 = 8 + 8;
+
+/// A built program's embedded source: every module it needs, and which one to run.
+pub struct Embedded {
+    /// `key -> source`, keys being project-root-relative and `/`-separated, exactly as
+    /// [`crate::module::Span::key`] recorded them at resolution time.
+    pub modules: Vec<(String, String)>,
+    /// Index into `modules` of the entry file.
+    pub entry: usize,
+}
+
+fn read_u32(b: &[u8], at: usize) -> Option<usize> {
+    Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?) as usize)
+}
+
+fn read_u64(b: &[u8], at: usize) -> Option<usize> {
+    Some(u64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?) as usize)
+}
+
+/// Parse a v2 payload: `[n u32][entry u32]` then `n` x `[key_len u32][src_len u64][key][src]`.
+fn parse_v2(b: &[u8]) -> Option<Embedded> {
+    let n = read_u32(b, 0)?;
+    let entry = read_u32(b, 4)?;
+    let mut at = 8;
+    let mut modules = Vec::with_capacity(n);
+    for _ in 0..n {
+        let key_len = read_u32(b, at)?;
+        let src_len = read_u64(b, at + 4)?;
+        at += 12;
+        let key = String::from_utf8(b.get(at..at.checked_add(key_len)?)?.to_vec()).ok()?;
+        at += key_len;
+        let src = String::from_utf8(b.get(at..at.checked_add(src_len)?)?.to_vec()).ok()?;
+        at += src_len;
+        modules.push((key, src));
+    }
+    if entry >= modules.len() {
+        return None;
+    }
+    Some(Embedded { modules, entry })
+}
 
 /// If the running executable carries an embedded program (it was produced by
 /// `helix build`), return its `(source, filename)`. A plain `helix` binary — whose
@@ -38,18 +98,35 @@ const TRAILER_LEN: u64 = 4 + 8 + 8;
 /// This is checked once at process start, before argument parsing, so it must be
 /// cheap and infallible-by-falling-back: any I/O hiccup or malformed tail yields
 /// `None` (run as the ordinary interpreter) rather than an error.
-pub fn embedded() -> Option<(String, String)> {
+pub fn embedded() -> Option<Embedded> {
     let exe = std::env::current_exe().ok()?;
     let mut f = std::fs::File::open(&exe).ok()?;
     let total = f.metadata().ok()?.len();
-    if total < TRAILER_LEN {
+    if total < TRAILER_V2_LEN {
         return None;
     }
     // Magic occupies the final 8 bytes.
     f.seek(SeekFrom::End(-8)).ok()?;
     let mut magic = [0u8; 8];
     f.read_exact(&mut magic).ok()?;
+    if &magic == MAGIC_V2 {
+        f.seek(SeekFrom::End(-(TRAILER_V2_LEN as i64))).ok()?;
+        let mut len_bytes = [0u8; 8];
+        f.read_exact(&mut len_bytes).ok()?;
+        let payload_len = u64::from_le_bytes(len_bytes);
+        let whole = payload_len.checked_add(TRAILER_V2_LEN)?;
+        if whole > total {
+            return None;
+        }
+        f.seek(SeekFrom::Start(total - whole)).ok()?;
+        let mut body = vec![0u8; payload_len as usize];
+        f.read_exact(&mut body).ok()?;
+        return parse_v2(&body);
+    }
     if &magic != MAGIC {
+        return None;
+    }
+    if total < TRAILER_LEN {
         return None;
     }
     // The two length words precede the magic.
@@ -70,13 +147,18 @@ pub fn embedded() -> Option<(String, String)> {
     f.read_exact(&mut name).ok()?;
     let mut src = vec![0u8; src_len as usize];
     f.read_exact(&mut src).ok()?;
-    Some((String::from_utf8(src).ok()?, String::from_utf8(name).ok()?))
+    // v1 held exactly one module and no import graph.
+    Some(Embedded {
+        modules: vec![(String::from_utf8(name).ok()?, String::from_utf8(src).ok()?)],
+        entry: 0,
+    })
 }
 
-/// `helix build <entry> [-o out]` — bundle a single-file program into a standalone
-/// executable. Validates that the program loads and type-checks (so a broken program
-/// fails the *build*, not every later run of the artifact), then writes the runtime +
-/// overlay to `out` (default: the entry's filename stem). Returns the output path.
+/// `helix build <entry> [-o out]` — bundle a program and every module it imports into a
+/// standalone executable. Validates that the program loads and type-checks (so a broken
+/// program fails the *build*, not every later run of the artifact), then writes the
+/// runtime + overlay to `out` (default: the entry's filename stem). Returns the output
+/// path.
 ///
 /// Must run on the big stack — `module::load` and `types::check` recurse over the AST.
 pub fn build(
@@ -86,20 +168,13 @@ pub fn build(
 ) -> Result<PathBuf, HelixError> {
     let mkerr = |m: String| HelixError::new(m, 0, 0);
 
-    // Load the import graph. A single file comes back un-mangled; >1 module means the
-    // program imports, which v1 can't yet embed.
+    // Load the import graph. A single file comes back un-mangled; more than one is
+    // namespaced into one statement list, and every module's source is kept in `spans`.
     let loaded = crate::module::load(entry).map_err(|rendered| {
         // `module::load` returns an already-rendered (caret-annotated) error string;
         // surface it as the message so the user sees exactly what failed.
         mkerr(rendered.trim_end().to_string())
     })?;
-    if loaded.multi_module {
-        return Err(mkerr(format!(
-            "`helix build` can only bundle a single-file program yet, but `{}` imports other modules",
-            entry.display()
-        ))
-        .hint("inline the imports into one file for now — multi-module bundling is coming."));
-    }
 
     // Type-check up front: a standalone exe that only fails when run would be a trap.
     crate::types::check(&loaded.stmts).map_err(|mut e| {
@@ -108,11 +183,35 @@ pub fn build(
         mkerr(format!("the program does not type-check:\n{}", e.render(src, filename)))
     })?;
 
-    let source = &loaded.spans[0].source;
-    let filename = entry
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "program.helix".to_string());
+    // THE ARCHIVE. `module::load` already collected every module's source, and each span
+    // carries the project-root-relative key the resolver assigned it, so a bundled program
+    // and an interpreted one name their modules identically.
+    //
+    // A DUPLICATE KEY IS REFUSED, not resolved by arrival order. Two different files CAN
+    // claim one key -- a package dependency outranks the project root in the resolution
+    // ladder, so a dep's `mathlib/go.helix` and a project file of that path reached from
+    // elsewhere collide -- and silently keeping whichever landed last is the same shape of
+    // bug as the supply-chain hazard `module.rs` documents at length: exit 0, `helix check`
+    // ok, all three engines agreeing because all three are equally wrong.
+    let mut archive: Vec<(String, String)> = Vec::with_capacity(loaded.spans.len());
+    let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for sp in &loaded.spans {
+        if let Some(prev) = seen.insert(sp.key.as_str(), sp.filename.as_str()) {
+            return Err(mkerr(format!(
+                "two modules would be stored under the same name `{}` in the bundle:\n  {}\n  {}",
+                sp.key, prev, sp.filename
+            ))
+            .hint(
+                "a package dependency and a project file resolved to the same import path. \
+                 Rename one, or move it, so each module has a distinct path relative to the \
+                 project root.",
+            ));
+        }
+        archive.push((sp.key.clone(), sp.source.clone()));
+    }
+    // Modules come back in post-order with the entry LAST (see `module::load_diag`); a
+    // single-file program has exactly one span, so this is index 0 there.
+    let entry_idx = archive.len().saturating_sub(1);
 
     // WHICH RUNTIME GETS EMBEDDED. By default the running interpreter — when `helix build`
     // is invoked, the current exe is a plain `helix` with no overlay, exactly the clean
@@ -135,7 +234,8 @@ pub fn build(
     };
     let mut image = std::fs::read(&me)
         .map_err(|e| mkerr(format!("cannot read the `helix` binary at `{}`: {e}", me.display())))?;
-    if image.len() >= MAGIC.len() && &image[image.len() - MAGIC.len()..] == MAGIC {
+    let tail = |m: &[u8; 8]| image.len() >= 8 && &image[image.len() - 8..] == m;
+    if tail(MAGIC) || tail(MAGIC_V2) {
         return Err(mkerr(format!(
             "`{}` is already a built program, not a runtime",
             me.display()
@@ -146,12 +246,21 @@ pub fn build(
         ));
     }
 
-    // Append the overlay: [name][source][name_len u32][src_len u64][MAGIC].
-    image.extend_from_slice(filename.as_bytes());
-    image.extend_from_slice(source.as_bytes());
-    image.extend_from_slice(&(filename.len() as u32).to_le_bytes());
-    image.extend_from_slice(&(source.len() as u64).to_le_bytes());
-    image.extend_from_slice(MAGIC);
+    // Append the v2 overlay: [payload][payload_len u64][MAGIC_V2], the payload being
+    // [n u32][entry u32] then n x [key_len u32][src_len u64][key][src].
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&(archive.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&(entry_idx as u32).to_le_bytes());
+    for (k, src) in &archive {
+        payload.extend_from_slice(&(k.len() as u32).to_le_bytes());
+        payload.extend_from_slice(&(src.len() as u64).to_le_bytes());
+        payload.extend_from_slice(k.as_bytes());
+        payload.extend_from_slice(src.as_bytes());
+    }
+    let payload_len = payload.len() as u64;
+    image.extend_from_slice(&payload);
+    image.extend_from_slice(&payload_len.to_le_bytes());
+    image.extend_from_slice(MAGIC_V2);
 
     let out_path = out.map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(entry.file_stem().map(|s| s.to_os_string()).unwrap_or_else(|| "program".into()))
