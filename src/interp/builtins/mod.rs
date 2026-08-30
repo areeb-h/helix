@@ -105,6 +105,7 @@ impl super::Interp {
             "dataframe" => return frames::a_dataframe(name, args, line, col),
             "sha256" => return encoding::a_sha256(name, args, line, col),
             "hmac_sha256" => return encoding::a_hmac_sha256(name, args, line, col),
+            "html_escape" => return encoding::a_html_escape(name, args, line, col),
             "url_encode" => return encoding::a_url_encode(args, line, col),
             "url_decode" => return encoding::a_url_decode(name, args, line, col),
             "url_decode_lenient" => return encoding::a_url_decode_lenient(name, args, line, col),
@@ -135,6 +136,9 @@ impl super::Interp {
             "truncate" => return io::a_truncate(name, args, line, col),
             "remove_dir" => return io::a_remove_dir(name, args, line, col),
             "lock_file" | "try_lock_file" => return io::a_lock_file(name, args, line, col),
+            "read_bytes" => return io::a_read_bytes(name, args, line, col),
+            "read_bytes_at" => return io::a_read_bytes_at(name, args, line, col),
+            "from_hex" | "from_base64" => return io::a_from_hex(name, args, line, col),
             "read_parquet" => return io::a_read_parquet(name, args, line, col),
             "listen" => return net::a_listen(args, line, col),
             "http_get" => return net::a_http_get(name, args, line, col),
@@ -179,7 +183,7 @@ mod stats;
 mod autodiff_fns;
 mod tensors;
 mod frames;
-mod encoding;
+pub(crate) mod encoding;
 mod io;
 mod net;
 mod bio;

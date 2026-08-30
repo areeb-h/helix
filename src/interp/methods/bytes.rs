@@ -13,18 +13,6 @@ use crate::value::Value;
 
 use super::arity;
 
-/// Lowercase hex, the form `Bytes` prints and `to_hex` returns.
-pub(crate) fn to_hex(b: &[u8]) -> String {
-    let mut s = String::with_capacity(b.len() * 2);
-    for byte in b {
-        // `write!` to a String cannot fail, but it returns a Result the ratchet would count.
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        s.push(HEX[(byte >> 4) as usize] as char);
-        s.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    s
-}
-
 fn type_err(who: &str, expected: &str, got: &Value, line: usize, col: usize) -> HelixError {
     HelixError::new(
         format!("`{who}` expects {expected}, but got {}", crate::value::with_article(got.type_name())),
@@ -100,7 +88,7 @@ pub(crate) fn bytes_method(
         }
         "to_hex" => {
             arity(name, args, 0, line, col)?;
-            Ok(Value::Str(Rc::new(to_hex(b))))
+            Ok(Value::Str(Rc::new(crate::value::bytes_to_hex(b))))
         }
         "to_base64" => {
             arity(name, args, 0, line, col)?;

@@ -314,30 +314,7 @@ pub(super) fn a_read_at(name: &str, args: Vec<Value>, line: usize, col: usize) -
             col,
         ));
     }
-    use std::io::{Read, Seek};
-    let mut f = std::fs::File::open(path.as_str()).map_err(|e| {
-        HelixError::new(format!("could not open `{path}`: {e}"), line, col)
-    })?;
-    f.seek(std::io::SeekFrom::Start(off as u64)).map_err(|e| {
-        HelixError::new(format!("could not seek `{path}` to {off}: {e}"), line, col)
-    })?;
-    let mut buf = vec![0u8; len as usize];
-    let mut filled = 0usize;
-    // `read` may return short without being at EOF, so loop until it returns 0.
-    while filled < buf.len() {
-        match f.read(&mut buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(e) => {
-                return Err(HelixError::new(
-                    format!("could not read `{path}`: {e}"),
-                    line,
-                    col,
-                ))
-            }
-        }
-    }
-    buf.truncate(filled);
+    let buf = read_slice(path.as_str(), off, len, line, col)?;
     match String::from_utf8(buf) {
         Ok(t) => Ok(Value::Str(Rc::new(t))),
         Err(e) => Err(HelixError::new(
@@ -481,6 +458,127 @@ pub(super) fn a_lock_file(name: &str, args: Vec<Value>, line: usize, col: usize)
             col,
         )),
     }
+}
+
+/// Read at most `len` bytes from `offset`. THE ONE READ both `read_at` and `read_bytes_at`
+/// go through, so the two cannot drift on short reads, seeks or error text — only on what
+/// they do with the bytes afterwards.
+fn read_slice(
+    path: &str,
+    off: i64,
+    len: i64,
+    line: usize,
+    col: usize,
+) -> Result<Vec<u8>, HelixError> {
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::open(path)
+        .map_err(|e| HelixError::new(format!("could not open `{path}`: {e}"), line, col))?;
+    f.seek(std::io::SeekFrom::Start(off as u64)).map_err(|e| {
+        HelixError::new(format!("could not seek `{path}` to {off}: {e}"), line, col)
+    })?;
+    let mut buf = vec![0u8; len as usize];
+    let mut filled = 0usize;
+    // `read` may return short without being at EOF, so loop until it returns 0.
+    while filled < buf.len() {
+        match f.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) => {
+                return Err(HelixError::new(format!("could not read `{path}`: {e}"), line, col))
+            }
+        }
+    }
+    buf.truncate(filled);
+    Ok(buf)
+}
+
+/// `read_bytes(path)` — the whole file as `Bytes`.
+///
+/// `read_text` refuses a file that is not UTF-8, which is correct for text and useless for a
+/// store: a page of packed integers is not text and never will be.
+#[inline]
+pub(super) fn a_read_bytes(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
+    arity(name, &args, 1, line, col)?;
+    match &args[0] {
+        Value::Str(s) => {
+            let b = std::fs::read(s.as_str()).map_err(|e| {
+                HelixError::new(format!("could not read `{s}`: {e}"), line, col)
+            })?;
+            Ok(Value::Bytes(Rc::new(b)))
+        }
+        other => Err(type_err("read_bytes", "a string path", other, line, col)),
+    }
+}
+
+/// `read_bytes_at(path, offset, len)` — `read_at` without the UTF-8 obligation.
+///
+/// This is the one that makes a page-oriented BINARY store possible: `read_at` must refuse a
+/// slice that splits a character, so a page boundary that lands mid-character is unreadable
+/// as text and perfectly readable as bytes.
+#[inline]
+pub(super) fn a_read_bytes_at(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
+    arity(name, &args, 3, line, col)?;
+    let path = match &args[0] {
+        Value::Str(s) => s,
+        other => return Err(type_err("read_bytes_at", "a string path", other, line, col)),
+    };
+    let off = int_arg(&args[1], "read_bytes_at", "an offset", line, col)?;
+    let len = int_arg(&args[2], "read_bytes_at", "a length", line, col)?;
+    if off < 0 || len < 0 {
+        return Err(HelixError::new(
+            format!("`read_bytes_at` needs a non-negative offset and length, got {off} and {len}"),
+            line,
+            col,
+        ));
+    }
+    Ok(Value::Bytes(Rc::new(read_slice(path.as_str(), off, len, line, col)?)))
+}
+
+/// `from_hex(s)` / `from_base64(s)` — the inverses of `Bytes.to_hex()` / `.to_base64()`.
+///
+/// Without these the type is one-way: bytes could be shown but never reconstructed, so a hex
+/// digest read back from a file could not become the key it names.
+#[inline]
+pub(super) fn a_from_hex(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
+    arity(name, &args, 1, line, col)?;
+    let s = match &args[0] {
+        Value::Str(s) => s,
+        other => return Err(type_err(name, "a string", other, line, col)),
+    };
+    if name == "from_base64" {
+        use base64::Engine;
+        return base64::engine::general_purpose::STANDARD
+            .decode(s.as_str())
+            .map(|b| Value::Bytes(Rc::new(b)))
+            .map_err(|e| HelixError::new(format!("invalid base64: {e}"), line, col));
+    }
+    let t = s.as_str();
+    if !t.len().is_multiple_of(2) {
+        return Err(HelixError::new(
+            format!("hex needs an even number of digits, got {}", t.len()),
+            line,
+            col,
+        )
+        .hint("every byte is exactly two hex digits."));
+    }
+    let mut out = Vec::with_capacity(t.len() / 2);
+    let d = t.as_bytes();
+    for pair in d.chunks(2) {
+        let hi = (pair[0] as char).to_digit(16);
+        let lo = (pair[1] as char).to_digit(16);
+        match (hi, lo) {
+            (Some(h), Some(l)) => out.push((h * 16 + l) as u8),
+            _ => {
+                return Err(HelixError::new(
+                    format!("`{}` is not a hex byte", &t[..2.min(t.len())]),
+                    line,
+                    col,
+                )
+                .hint("hex digits are 0-9 and a-f (upper case accepted)."))
+            }
+        }
+    }
+    Ok(Value::Bytes(Rc::new(out)))
 }
 
 /// An `Int` argument, or the type error the other verbs produce.

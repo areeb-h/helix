@@ -328,6 +328,42 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // ADR 0041's storage substrate, the arities that are not one path.
         // Runtime-only handle, like `Value::Net`: the checker sees `Unknown`, so
         // `.release()` on the result is permitted and checked at run time.
+        // `Bytes` is RUNTIME-TYPED, like `Dict` and `Net`: the checker sees `Unknown`, so
+        // its methods are resolved when they run. Arity and argument types are still
+        // checked here, which is where most mistakes actually are.
+        "html_escape" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            if !compatible(&args[0], &Type::String) {
+                return Err(type_err(name, "a string", &args[0], line, col));
+            }
+            Ok(Type::String)
+        }
+        "read_bytes" | "from_hex" | "from_base64" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            if !compatible(&args[0], &Type::String) {
+                let what = if name == "read_bytes" { "a string path" } else { "a string" };
+                return Err(type_err(name, what, &args[0], line, col));
+            }
+            Ok(Type::Unknown)
+        }
+        "read_bytes_at" => {
+            if args.len() != 3 {
+                return Err(arity_err(name, 3, args.len(), line, col));
+            }
+            if !compatible(&args[0], &Type::String) {
+                return Err(type_err(name, "a string path", &args[0], line, col));
+            }
+            for a in args.iter().skip(1).take(2) {
+                if !compatible(a, &Type::Int) {
+                    return Err(type_err(name, "an Int", a, line, col));
+                }
+            }
+            Ok(Type::Unknown)
+        }
         "lock_file" | "try_lock_file" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
@@ -1104,6 +1140,11 @@ pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<
         // One character, as a String — or `missing` past the end, the shape
         // `index_of` already uses for absent (ADR 0001).
         "char_at" => Type::String,
+        // `Bytes` is RUNTIME-TYPED (like Dict and Net), so the checker sees `Unknown` and
+        // resolves its methods when they run. The arm still has to exist: the registry
+        // knowing a method and the checker not is how you get "type String has no method
+        // `to_bytes` — did you mean `to_bytes`?", which is what this omission produced.
+        "to_bytes" => Type::Unknown,
         // The regex family. `re_match` answers Bool; the finders answer a String or
         // `missing`; `re_find_all`/`re_split`/`re_captures` answer an Array of String.
         "re_match" => Type::Bool,

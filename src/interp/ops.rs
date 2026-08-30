@@ -885,6 +885,7 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
         }
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Dna(a), Value::Dna(b)) => a == b,
+        (Value::Bytes(a), Value::Bytes(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Rational(a), Value::Rational(b)) => a == b,
         (Value::Rational(a), Value::Int(b)) | (Value::Int(b), Value::Rational(a)) => {
@@ -945,6 +946,9 @@ fn compare(op: &BinOp, l: &Value, r: &Value, line: usize, col: usize) -> Result<
         // DNA orders lexicographically like a string — enables canonical-k-mer /
         // sorting-by-sequence code (`dna(a) < dna(b)`).
         (Value::Dna(a), Value::Dna(b)) => a.cmp(b),
+        // LEXICOGRAPHIC BY BYTE — the order a key index needs, and the same order
+        // `to_hex()` produces, so the two never disagree about which key sorts first.
+        (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
         // Compare integers exactly as i64 — a prior `as f64` cast lost precision
         // above 2^53 and disagreed with the JIT. Now all engines agree.
         (Value::Int(a), Value::Int(b)) => a.cmp(b),

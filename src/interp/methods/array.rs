@@ -807,12 +807,18 @@ pub(crate) fn array_method(
                     (Value::Dna(x), Value::Dna(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 }))
+            } else if items.iter().all(|v| matches!(v, Value::Bytes(_))) {
+                // Ordered lexicographically by byte, exactly as `sort` orders them.
+                Ok(pick(&|a, b| match (a, b) {
+                    (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
+                }))
             } else {
                 // `sort`'s domain wording, with this method's name — one concept, one
                 // message (the old text named numbers only and pointed at the first
                 // offending element, which is now often a legal type in the wrong mix).
                 Err(HelixError::new(
-                    format!("`{name}` needs an array of all numbers, all strings, or all DNA"),
+                    format!("`{name}` needs an array of all numbers, all strings, all DNA, or all Bytes"),
                     line,
                     col,
                 ))
@@ -887,6 +893,15 @@ pub(crate) fn array_method(
                     (Value::Dna(x), Value::Dna(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 });
+            } else if items.iter().all(|v| matches!(v, Value::Bytes(_))) {
+                // Bytes ORDER LEXICOGRAPHICALLY BY BYTE, so they sort. Leaving them out
+                // would be a checker/runtime split of the kind this project treats as a
+                // bug: `a < b` already answers, so `[a, b].sort()` must too. This is also
+                // the operation a key index is built on.
+                sorted.sort_by(|a, b| match (a, b) {
+                    (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
+                });
             } else if items.iter().any(|v| matches!(v, Value::Missing)) {
                 // Name the actual blocker: every present value may well be
                 // sortable — it's the `missing` that has no order (ADR 0001
@@ -899,7 +914,7 @@ pub(crate) fn array_method(
                 .hint("drop them explicitly first: `xs.drop_missing().sort()`."));
             } else {
                 return Err(HelixError::new(
-                    "`sort` needs an array of all numbers, all strings, or all DNA",
+                    "`sort` needs an array of all numbers, all strings, all DNA, or all Bytes",
                     line,
                     col,
                 ));
@@ -1447,6 +1462,14 @@ pub(crate) fn array_method(
                     (Value::Dna(x), Value::Dna(y)) => x.cmp(y),
                     _ => std::cmp::Ordering::Equal,
                 });
+            } else if items.iter().all(|v| matches!(v, Value::Bytes(_))) {
+                // Same reasoning one type later: `<` orders Bytes lexicographically, so
+                // `sort`, `min`, `max` and `argsort` must all accept them or the family
+                // disagrees with the operator and with itself.
+                idx.sort_by(|&a, &b| match (&items[a as usize], &items[b as usize]) {
+                    (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
+                });
             } else if items.iter().any(|v| matches!(v, Value::Missing)) {
                 // `sort`'s wording and hint verbatim — one concept, one message.
                 return Err(HelixError::new(
@@ -1457,7 +1480,7 @@ pub(crate) fn array_method(
                 .hint("drop them explicitly first: `xs.drop_missing().sort()`."));
             } else {
                 return Err(HelixError::new(
-                    "`argsort` needs an array of all numbers, all strings, or all DNA",
+                    "`argsort` needs an array of all numbers, all strings, all DNA, or all Bytes",
                     line,
                     col,
                 ));

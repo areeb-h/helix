@@ -75,7 +75,7 @@ pub fn effect_of(name: &str) -> Effect {
         | "write_at" | "truncate" | "remove_dir"
         // A lock is taken to WRITE; a reader has nothing to exclude anyone from.
         | "lock_file" | "try_lock_file" => Effect::FsWrite,
-        "file_size" | "read_at" => Effect::FsRead,
+        "file_size" | "read_at" | "read_bytes" | "read_bytes_at" => Effect::FsRead,
         "listen" | "http_get" | "http_post" | "http_request" | "http_stream" => Effect::Net,
         // The first `Process` grant. ADR 0021 reserved the category and ADR 0037 D3
         // states its ceiling: a subprocess is a BOUNDARY EXIT, not confinement — it
@@ -357,6 +357,7 @@ mod tests {
             "file_exists", "remove_file", "mkdir", "listen", "http_get",
             "rename", "fsync", "sync_dir", "create_new", "file_size", "read_at",
             "write_at", "truncate", "remove_dir", "lock_file", "try_lock_file",
+            "read_bytes", "read_bytes_at",
         ] {
             assert!(effect_of(n).gated(), "`{n}` must remain capability-gated (ADR 0021)");
         }

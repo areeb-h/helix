@@ -14,6 +14,7 @@ use crate::value::Value;
 mod array;
 mod string;
 mod dna;
+mod bytes;
 mod net;
 mod dictrec;
 mod headers;
@@ -464,6 +465,7 @@ pub(crate) fn call_method(
         }
         Value::Str(s) => string_method(s, name, args, line, col),
         Value::Dna(s) => dna_method(s, name, args, line, col),
+        Value::Bytes(b) => bytes::bytes_method(b, name, args, line, col),
         Value::Node(n) => crate::autodiff::method(n, name, args, line, col),
         Value::Tensor(t) => crate::tensor::method(t, name, args, line, col),
         Value::PyObject(h) => crate::python::method(h, name, args, line, col),

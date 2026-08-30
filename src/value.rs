@@ -26,6 +26,19 @@ pub enum Value {
     /// word) to keep `Value` at 16 bytes; never overflows (BigInt-backed).
     Rational(Rc<num_rational::BigRational>),
     Str(Rc<String>),
+    /// An immutable byte string — arbitrary binary, which a [`Str`](Value::Str) cannot be.
+    ///
+    /// **WHY IT IS A SEPARATE TYPE.** A Helix `Str` is UTF-8 by definition, so it cannot hold
+    /// a packed integer, a bitmap, a compressed block or a hash digest. ADR 0041 gave the
+    /// storage substrate `read_at`, which had to REFUSE a slice splitting a multi-byte
+    /// character — correct, and also the ceiling on what could be stored. Widening `Str` to
+    /// hold arbitrary bytes was never the alternative: every string operation would then have
+    /// to answer "what if this is not text", and somewhere the answer would be wrong.
+    ///
+    /// Ordered LEXICOGRAPHICALLY by byte, which is what a key needs — and what makes
+    /// `to_hex()` an honest stand-in for the dict-key form this does not yet have, since hex
+    /// preserves that same ordering.
+    Bytes(Rc<Vec<u8>>),
     Bool(bool),
     /// An immutable array. Held behind [`ArrayData`], which stores a homogeneous
     /// numeric array as a packed `Vec<i64>`/`Vec<f64>` (half the memory of boxed
@@ -258,6 +271,18 @@ pub enum ArrayData {
     /// this variant is materialized THROUGH `array_sniff` by [`ArrayData::densified`], and
     /// nothing but `concat` is allowed to observe it (see `call_method`).
     Shared { buf: std::rc::Rc<std::cell::RefCell<Vec<Value>>>, len: usize },
+}
+
+/// Lowercase hex — how `Bytes` prints, and what `Bytes.to_hex()` returns. ONE
+/// implementation, so the printed form and the method can never disagree.
+pub fn bytes_to_hex(b: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(b.len() * 2);
+    for byte in b {
+        s.push(HEX[(byte >> 4) as usize] as char);
+        s.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    s
 }
 
 impl ArrayData {
@@ -806,6 +831,7 @@ impl Value {
             Value::VmFunc { .. } => "Function",
             Value::Closure(_) => "Function",
             Value::Dna(_) => "Dna",
+            Value::Bytes(_) => "Bytes",
             Value::Missing => "Missing",
             Value::Unit => "Unit",
             Value::PyObject(_) => "PyObject",
@@ -896,6 +922,13 @@ impl fmt::Display for Value {
                 } else {
                     write!(f, "<lock: {}>", h.path)
                 }
+            }
+            // HEX, IN FULL AND NEVER TRUNCATED. An elision would hide exactly the byte a
+            // reader is hunting, and this project treats printed output as a FROZEN format —
+            // so a "…" would be a lie that could never be removed without a versioned event.
+            // Large values print large, which is already true of a large array.
+            Value::Bytes(b) => {
+                write!(f, "b\"{}\"", bytes_to_hex(b))
             }
             Value::PyObject(h) => write!(f, "{}", h.repr()),
             // A tracked value prints as its forward value (the graph stays hidden).

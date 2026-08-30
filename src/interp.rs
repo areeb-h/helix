@@ -1905,7 +1905,7 @@ pub(crate) use methods::*;
 #[cfg(test)]
 mod tests;
 
-mod builtins;
+pub(crate) mod builtins;
 /// Re-exported for `helix test`, which fails a file that asserted nothing.
 pub(crate) use builtins::ASSERTIONS_RUN;
 pub(crate) use builtins::{capture_begin, capture_take};

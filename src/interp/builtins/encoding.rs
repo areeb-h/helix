@@ -58,6 +58,63 @@ pub(super) fn a_hmac_sha256(name: &str, args: Vec<Value>, line: usize, col: usiz
 // A fresh, empty cookie jar (ADR 0031). Explicit state the program holds
 // and threads into `http_request({… , jar: jar})`.
 
+/// HTML-escape, allocating ONLY when something actually needs escaping.
+///
+/// **SCAN FIRST.** The old private copy in `src/writers.rs` ran four sequential
+/// `String::replace` passes, so it allocated four times for every cell whether or not the
+/// text contained anything to escape — and almost none of it does. Measured in the field at
+/// 1.39x against the unconditional form; here the untouched case is a borrow and costs
+/// nothing at all.
+///
+/// **IT ESCAPES `'`, WHICH THE OLD ONE DID NOT.** That is not pedantry: inside a
+/// single-quoted attribute (`<a title='...'>`) an unescaped apostrophe closes the attribute
+/// and everything after it is markup. An escaper that handles four of the five characters is
+/// an escaper you cannot rely on, which is worse than none because it is trusted.
+///
+/// `&#39;` rather than `&apos;`: the named form is XML and HTML5 only, and is not defined in
+/// HTML4, so the numeric one is the one that is always right.
+pub(crate) fn html_escape(s: &str) -> std::borrow::Cow<'_, str> {
+    let Some(first) = s
+        .as_bytes()
+        .iter()
+        .position(|b| matches!(b, b'&' | b'<' | b'>' | b'"' | b'\''))
+    else {
+        // The common case: nothing to do, nothing allocated.
+        return std::borrow::Cow::Borrowed(s);
+    };
+    let mut out = String::with_capacity(s.len() + 16);
+    out.push_str(&s[..first]);
+    for c in s[first..].chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// `html_escape(s)` — the builtin. Every server-rendering program needs this and every one
+/// of them was hand-rolling it, which is how a four-of-five escaper spreads.
+#[inline]
+pub(super) fn a_html_escape(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
+    arity(name, &args, 1, line, col)?;
+    match &args[0] {
+        // `missing` propagates rather than becoming the text "missing" in a page (ADR 0001).
+        Value::Missing => Ok(Value::Missing),
+        Value::Str(s) => match html_escape(s) {
+            // Borrowed means nothing needed escaping, so hand back the SAME `Rc` rather
+            // than a copy of it.
+            std::borrow::Cow::Borrowed(_) => Ok(Value::Str(Rc::clone(s))),
+            std::borrow::Cow::Owned(t) => Ok(Value::Str(Rc::new(t))),
+        },
+        other => Err(type_err("html_escape", "a string", other, line, col)),
+    }
+}
+
 #[inline]
 pub(super) fn a_url_encode(args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
         if args.is_empty() || args.len() > 2 {

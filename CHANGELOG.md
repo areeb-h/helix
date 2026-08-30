@@ -4,6 +4,51 @@
 
 ### Added
 
+- **`html_escape(s)` — the escaper every server-rendering program was hand-rolling.** There
+  was one inside the compiler for `to_html` and no way to reach it, so every program wrote
+  its own — which is how a four-of-five escaper spreads.
+
+  One implementation now backs both. It **scans before allocating**: text with nothing to
+  escape is returned unchanged, sharing the original string, where the old form ran four
+  sequential `replace` passes and allocated four times per cell regardless. And it escapes
+  the fifth character (see Changed).
+
+- **`Bytes` — a value that holds what a `String` cannot.** ADR 0041's storage substrate named
+  its own ceiling: a Helix `Str` is UTF-8 by definition, so `read_at` had to refuse a slice
+  that splits a character, and a packed integer, a bitmap, a compressed block or a hash
+  digest had no representation at all.
+
+  ```helix
+  b = read_bytes_at("db/pages", 4096, 4096)   # a page `read_at` must refuse
+  print(b.byte_at(0), b.to_hex(), b.length())
+  b.write_at("db/pages", 8192)                # update one page in place
+  ```
+
+  **Widening `String` was never the alternative.** If a `Str` could hold arbitrary bytes,
+  every string operation would have to answer "what if this is not text" — `upper`, `chars`,
+  `split`, every regex verb — and somewhere the answer would be wrong, silently. Two types
+  means each one's operations are total.
+
+  The surface mirrors `String` where the operation means the same thing (`length`/`count`,
+  `is_empty`, `take`/`drop`, `slice`, `concat`, `write_to`/`append_to`). Where they differ,
+  they differ for a reason: `byte_at` is O(1) and answers an `Int` where `char_at` is O(i)
+  and answers a string, and **`to_string()` can fail** — it refuses by name rather than
+  substituting U+FFFD, which would silently change the data on the way out. In:
+  `read_bytes`, `read_bytes_at`, `from_hex`, `from_base64`, `"…".to_bytes()`.
+
+  **Ordered lexicographically by byte** — the order a key index is built on, and the same
+  order `to_hex()` produces, so `a < b` and `a.to_hex() < b.to_hex()` always agree. `sort`,
+  `min` and `max` accept them, because a type that compares with `<` but cannot be sorted is
+  a split of the kind this project treats as a bug.
+
+  **Prints as hex, in full, never truncated.** An elision would hide exactly the byte a
+  reader is hunting, and printed output is a frozen format here — a `…` could not be removed
+  later without a versioned event.
+
+  Out of the first cut and refused BY NAME rather than silently accepted: a dict key (use
+  `to_hex()`, which preserves the ordering), JSON (use `to_base64()` — base64 in JSON would
+  not round-trip, since it would come back a `Str`), and DataFrame columns. See ADR 0042.
+
 - **`lock_file` / `try_lock_file` — a lock the KERNEL holds, so it releases when its holder
   dies.** `create_new` is atomic and is the right answer for a content-addressed write, but
   as a lock it has the one flaw that matters: the file is still there after the holder
@@ -94,6 +139,17 @@
   it must, to render an error against the right file — so the traversal was there for the
   taking. Notes name the module they came from, and a module reached twice is reported
   once.
+
+### Changed
+
+- **`to_html` now escapes the apostrophe.** The internal escaper handled `&`, `<`, `>` and
+  `"` and left `'` alone — and inside a single-quoted attribute (`<a title='...'>`) an
+  unescaped apostrophe closes the attribute, so everything after it is markup. Output
+  containing `'` changes: it is now `&#39;`. If you diff generated HTML, that is the
+  difference.
+
+  `&#39;` rather than `&apos;` because the named form is XML and HTML5 only and is undefined
+  in HTML4.
 
 ### Fixed
 

@@ -11790,3 +11790,205 @@ fn a_kernel_lock_releases_when_its_holder_is_killed() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `Bytes` exists because a `Str` is UTF-8 by definition and a store is not.
+///
+/// ADR 0041 gave the storage substrate `read_at`, which had to REFUSE a slice that splits a
+/// multi-byte character — correct, and also the ceiling on what could be stored: a packed
+/// integer, a bitmap, a compressed block and a hash digest are all "not text". Widening
+/// `Str` was never the alternative, because then every string operation would have to answer
+/// "what if this is not text" and somewhere the answer would be wrong.
+#[test]
+fn bytes_hold_what_a_string_cannot() {
+    let dir = std::env::temp_dir().join(format!("hx_bytes_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = dir.to_str().unwrap().replace('\\', "/");
+    let f = dir.join("t.helix");
+
+    let cases: &[(&str, &str)] = &[
+        // Construction and the printed form: HEX, never truncated.
+        (r#"print(from_hex("48656c6c6f"))"#, r#"b"48656c6c6f""#),
+        (r#"print(from_base64("SGVsbG8="))"#, r#"b"48656c6c6f""#),
+        (r#"print(from_hex(""), type_of(from_hex("00")))"#, r#"b"" Bytes"#),
+        (r#"print("Hi".to_bytes())"#, r#"b"4869""#),
+        // The method surface, mirroring String where the operation means the same thing.
+        (r#"b = from_hex("00ff10")
+print(b.length(), b.count(), b.is_empty())"#, "3 3 false"),
+        // `byte_at` is O(1) and answers `missing` past the end — an out-of-range read has
+        // no honest answer, and ADR 0001 propagates the absence rather than inventing a 0.
+        (r#"b = from_hex("00ff")
+print(b.byte_at(0), b.byte_at(1), b.byte_at(9))"#, "0 255 missing"),
+        // take/drop/slice SATURATE, because a read that runs off the end is how a final
+        // partial page reads — not an error.
+        (r#"b = from_hex("00ff10")
+print(b.take(2), b.drop(1), b.take(99), b.drop(99))"#, r#"b"00ff" b"ff10" b"00ff10" b"""#),
+        (r#"print(from_hex("00ff10aa").slice(1, 3))"#, r#"b"ff10""#),
+        (r#"print(from_hex("00ff").concat(from_hex("10")))"#, r#"b"00ff10""#),
+        (r#"b = from_hex("48656c6c6f")
+print(b.to_hex(), b.to_base64(), b.to_string())"#, "48656c6c6f SGVsbG8= Hello"),
+        // EQUALITY and LEXICOGRAPHIC ORDERING — a key index needs both.
+        (r#"print(from_hex("00ff") == from_hex("00ff"), from_hex("00") == from_hex("01"))"#,
+         "true false"),
+        (r#"print(from_hex("00") < from_hex("01"), from_hex("ff") < from_hex("0000"))"#,
+         "true false"),
+        // Sorting must agree with `<`. A type that compares but cannot sort is a
+        // checker/runtime split of exactly the kind this project treats as a bug.
+        (r#"print([from_hex("02"), from_hex("00"), from_hex("01")].sort())"#,
+         r#"[b"00", b"01", b"02"]"#),
+        // `to_hex` PRESERVES that ordering, which is what makes it an honest stand-in
+        // wherever Bytes is not accepted yet (a dict key, for instance).
+        (r#"a = from_hex("00ff")
+b = from_hex("0100")
+print(a < b, a.to_hex() < b.to_hex())"#, "true true"),
+        (r#"print([from_hex("00ff"), from_hex("10")], {k: from_hex("00ff")})"#,
+         r#"[b"00ff", b"10"] {k: b"00ff"}"#),
+    ];
+    for (src, want) in cases {
+        std::fs::write(&f, format!("{src}\n")).unwrap();
+        let (out, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+        assert_eq!(code, Some(0), "{src}\n{err}");
+        assert_eq!(out.trim(), *want, "{src}");
+        // ALL THREE ENGINES: a new Value variant is exactly the kind of thing one engine
+        // can handle and another can fall through a catch-all on.
+        let (vm, _, _) = run(&["run", f.to_str().unwrap()], &[("HELIX_NOJIT", "1")], "");
+        let (walker, _, _) =
+            run(&["run", f.to_str().unwrap()], &[("HELIX_NOJIT", "1"), ("HELIX_NOVM", "1")], "");
+        assert_eq!(out, vm, "JIT and VM diverge on:\n{src}");
+        assert_eq!(vm, walker, "VM and tree-walker diverge on:\n{src}");
+    }
+
+    // THE REFUSALS. Each is a silent wrong answer if it were permissive instead.
+    let bad: &[(&str, &str)] = &[
+        // Not text, and it says so rather than substituting U+FFFD.
+        (r#"print(from_hex("ff").to_string())"#, "not valid UTF-8"),
+        (r#"print(from_hex("0").to_hex())"#, "even number of digits"),
+        (r#"print(from_hex("zz").to_hex())"#, "not a hex byte"),
+        (r#"print(from_hex("00").nope())"#, "type Bytes has no method"),
+        // A dict key must be orderable AND hashable; Bytes is not a key yet, and says so
+        // by name instead of accepting one and losing it.
+        (r#"print(dict().insert(from_hex("00"), 1))"#, "not a Bytes"),
+        (r#"print(from_hex("00") + from_hex("01"))"#, "needs numbers"),
+        // Text and bytes do not silently mix.
+        (r#"print(from_hex("00").concat("x"))"#, "expects Bytes"),
+    ];
+    for (src, want) in bad {
+        std::fs::write(&f, format!("{src}\n")).unwrap();
+        let (_, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+        assert_ne!(code, Some(0), "expected a refusal for {src}");
+        assert!(err.contains(want), "for {src} expected {want:?}, got: {err}");
+    }
+
+    // THE POINT, end to end: bytes that are NOT valid UTF-8 survive a round trip through a
+    // file, and the page-oriented reads work on them where the text ones must refuse.
+    std::fs::write(
+        &f,
+        format!(
+            "b = from_hex(\"00010203fffe\")\n\
+             b.write_to(\"{d}/bin\")\n\
+             back = read_bytes(\"{d}/bin\")\n\
+             print(back.to_hex(), back == b)\n\
+             from_hex(\"0011223344556677\").write_to(\"{d}/pg\")\n\
+             print(read_bytes_at(\"{d}/pg\", 2, 3))\n\
+             from_hex(\"ff\").write_at(\"{d}/pg\", 1)\n\
+             print(read_bytes(\"{d}/pg\").to_hex())\n"
+        ),
+    )
+    .unwrap();
+    let (out, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "00010203fffe true", "{out}");
+    assert_eq!(lines[1], r#"b"223344""#, "{out}");
+    assert_eq!(lines[2], "00ff223344556677", "{out}");
+
+    // `read_at` still REFUSES the same bytes, which is the contrast that makes `read_bytes_at`
+    // necessary rather than merely convenient.
+    //
+    // OFFSET 4, which is the 0xff. Byte 0 of that file is 0x00 — a perfectly valid UTF-8
+    // NUL — so reading it succeeds, and a test pointed there would assert the opposite of
+    // what it means to.
+    std::fs::write(&f, format!("print(read_at(\"{d}/bin\", 4, 1))\n")).unwrap();
+    let (_, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("not valid UTF-8"), "{err}");
+
+    // Capability: reading bytes is a READ, and it is gated.
+    std::fs::write(&f, format!("print(read_bytes(\"{d}/bin\").length())\n")).unwrap();
+    let (_, err, code) = run(&["run", f.to_str().unwrap()], &[("HELIX_CAP", "enforce")], "");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`read_bytes` needs `fs-read`"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The escaper must handle FIVE characters, not four.
+///
+/// The copy that lived privately in `src/writers.rs` escaped `&`, `<`, `>` and `"` and left
+/// `'` alone. Inside a single-quoted attribute — `<a title='...'>` — an unescaped apostrophe
+/// CLOSES the attribute, and everything after it is markup. An escaper that handles four of
+/// the five is worse than none, because it is trusted.
+///
+/// It was also unreachable from Helix, so every server-rendering program wrote its own,
+/// which is how a four-of-five escaper spreads.
+#[test]
+fn html_escape_handles_the_fifth_character() {
+    let dir = std::env::temp_dir().join(format!("hx_esc_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("t.helix");
+
+    let cases: &[(&str, &str)] = &[
+        // All five, and the apostrophe is the one that used to get through.
+        (r#"print(html_escape("<a href='x' title=\"y\">a&b</a>"))"#,
+         "&lt;a href=&#39;x&#39; title=&quot;y&quot;&gt;a&amp;b&lt;/a&gt;"),
+        (r#"print(html_escape("it's"))"#, "it&#39;s"),
+        // `&#39;` not `&apos;` — the named form is XML/HTML5 only and undefined in HTML4.
+        (r#"print(html_escape("'").contains("&#39;"), html_escape("'").contains("apos"))"#,
+         "true false"),
+        // Nothing to escape: unchanged, and the implementation hands back the same string
+        // rather than a copy.
+        (r#"print(html_escape("plain text 123"))"#, "plain text 123"),
+        (r#"print(html_escape(""))"#, ""),
+        // Escaping is not idempotent, and must not pretend to be: `&` in `&amp;` is itself
+        // an `&`. Double-escaping is the caller's bug to avoid, not something to paper over.
+        (r#"print(html_escape(html_escape("&")))"#, "&amp;amp;"),
+        // Non-ASCII passes through untouched — it needs no entity and mangling it would be
+        // the classic escaper bug.
+        (r#"print(html_escape("héllo → wörld"))"#, "héllo → wörld"),
+        (r#"print(html_escape("a<b"), html_escape("é<é"))"#, "a&lt;b é&lt;é"),
+        // `missing` propagates rather than rendering the word "missing" into a page.
+        (r#"print(html_escape(missing))"#, "missing"),
+    ];
+    for (src, want) in cases {
+        std::fs::write(&f, format!("{src}\n")).unwrap();
+        let (out, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+        assert_eq!(code, Some(0), "{src}\n{err}");
+        assert_eq!(out.trim(), *want, "{src}");
+        let (vm, _, _) = run(&["run", f.to_str().unwrap()], &[("HELIX_NOJIT", "1")], "");
+        let (walker, _, _) =
+            run(&["run", f.to_str().unwrap()], &[("HELIX_NOJIT", "1"), ("HELIX_NOVM", "1")], "");
+        assert_eq!(out, vm, "JIT and VM diverge on:\n{src}");
+        assert_eq!(vm, walker, "VM and tree-walker diverge on:\n{src}");
+    }
+
+    // A non-string is refused rather than stringified — escaping a number is a sign the
+    // caller meant something else.
+    std::fs::write(&f, "print(html_escape(1))\n").unwrap();
+    let (_, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("expected a string"), "{err}");
+
+    // AND THE SAME IMPLEMENTATION BACKS `to_html`, which is the point of removing the
+    // private copy: one escaper, so the builtin and the renderer cannot disagree.
+    std::fs::write(
+        &f,
+        "print(dataframe({s: [\"it's <b>\"]}).to_html().contains(\"&#39;\"))\n",
+    )
+    .unwrap();
+    let (out, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "true", "to_html must escape the apostrophe too: {out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

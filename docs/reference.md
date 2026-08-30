@@ -248,6 +248,39 @@ A rational's denominator, after reduction to lowest terms.
 2
 ```
 
+### `from_base64(s)`
+
+Bytes from a standard base64 string.
+
+**Note:** The inverse of `Bytes.to_base64()`. Note `base64_decode` answers a STRING and so fails on data that is not UTF-8; this one answers Bytes and never does. Keywords: base64, decode, parse, bytes, binary, blob.
+
+```
+>>> from_base64("SGVsbG8=")
+b"48656c6c6f"
+```
+
+### `from_hex(s)`
+
+Bytes from a lowercase or uppercase hex string.
+
+**Note:** The inverse of `Bytes.to_hex()`. An odd number of digits, or a non-hex digit, is REFUSED by name rather than silently truncated — a half-read digest is not a shorter digest, it is the wrong one. Keywords: hex, decode, parse, bytes, digest, hash, binary.
+
+```
+>>> from_hex("48656c6c6f")
+b"48656c6c6f"
+```
+
+### `html_escape(s)`
+
+The string with &, <, >, " and ' replaced by HTML entities.
+
+**Note:** ESCAPES FIVE CHARACTERS, INCLUDING THE APOSTROPHE. Inside a single-quoted attribute (`<a title='...'>`) an unescaped `'` closes the attribute and everything after it is markup, so an escaper handling four of the five is one you cannot rely on — which is worse than none, because it is trusted. Uses `&#39;` rather than `&apos;`: the named form is XML and HTML5 only and is undefined in HTML4. ALLOCATES ONLY WHEN SOMETHING NEEDS ESCAPING — text with none is returned unchanged, sharing the original, which is the overwhelmingly common case in a page. `missing` propagates rather than rendering the word "missing" into a page. Keywords: html, escape, entity, xss, sanitize, render, attribute, markup, server rendering.
+
+```
+>>> html_escape("<a href='x'>")
+&lt;a href=&#39;x&#39;&gt;
+```
+
 ### `numerator(q)`
 
 A rational's numerator, after reduction to lowest terms.
@@ -597,6 +630,26 @@ Read a BED interval file into a DataFrame.
 
 ```
 >>> read_bed("peaks.bed")
+```
+
+### `read_bytes(path)`
+
+The whole file as Bytes, with no UTF-8 requirement.
+
+**Note:** `read_text` REFUSES a file that is not UTF-8, which is right for text and useless for a store: a page of packed integers is not text and never will be. Keywords: binary, blob, read, file, bytes, storage, database, page.
+
+```
+>>> read_bytes("db/page.0")
+```
+
+### `read_bytes_at(path, offset, len)`
+
+Read at most len bytes from offset, with no UTF-8 requirement.
+
+**Note:** `read_at`'s binary twin, and the one that makes a page-oriented BINARY store possible: `read_at` must refuse a slice that splits a character, so a page boundary landing mid-character is unreadable as text and perfectly readable as bytes. Returns what is there, so a short final page is shorter rather than an error. Keywords: pread, offset, page, random access, binary, blob, database.
+
+```
+>>> read_bytes_at("db/pages", 4096, 4096)
 ```
 
 ### `read_csv(path)`
@@ -2117,7 +2170,7 @@ Transform every element with the function, keeping order and length.
 
 ### `max()`
 
-The largest element of all numbers, all strings, or all DNA.
+The largest element of all numbers, all strings, all DNA, or all Bytes.
 
 **Note:** An array containing missing reduces to missing, where sort refuses instead.
 
@@ -2874,6 +2927,17 @@ The first n characters (the whole string if shorter).
 he
 ```
 
+### `to_bytes()`
+
+The string's UTF-8 encoding as Bytes.
+
+**Note:** The one-way door into binary. Coming back is `Bytes.to_string()`, which can FAIL — which is precisely why the two are different types. Keywords: bytes, binary, encode, utf8, blob.
+
+```
+>>> "Hi".to_bytes()
+b"4869"
+```
+
 ### `to_float()`
 
 Parse a numeric string as a Float.
@@ -3086,6 +3150,155 @@ Every length-k substring, overlapping, ambiguity codes included.
 ```
 >>> dna("ACGTA").windows(4)
 ["ACGT", "CGTA"]
+```
+
+## Bytes methods
+
+### `append_to(path)`
+
+Append the bytes to the end of the file, creating it if absent.
+
+**Note:** How a binary write-ahead log grows. Keywords: append, log, wal, file, binary.
+
+```
+>>> from_hex("00ff").append_to("log.bin")
+```
+
+### `byte_at(i)`
+
+The byte at index i as an Int 0-255; missing past the end.
+
+**Note:** `String.char_at`'s counterpart, and O(1) where char_at is O(i) — a byte index needs no decoding. Past the end is `missing`, not zero: an out-of-range read has no honest answer and ADR 0001 propagates the absence. Keywords: index, at, byte, get, subscript.
+
+```
+>>> from_hex("00ff").byte_at(1)
+255
+```
+
+### `concat(other)`
+
+The two byte strings joined end to end.
+
+**Note:** Takes Bytes only; convert text with `s.to_bytes()` first, so a silent encoding never happens where a caller meant to append raw bytes. Keywords: append, join, plus, combine.
+
+```
+>>> from_hex("00ff").concat(from_hex("10"))
+b"00ff10"
+```
+
+### `count()`
+
+The number of bytes; alias of length.
+
+```
+>>> from_hex("00ff").count()
+2
+```
+
+### `drop(n)`
+
+All but the first n bytes.
+
+**Note:** Saturating: past the end is empty. Keywords: suffix, tail, skip, slice.
+
+```
+>>> from_hex("00ff10").drop(1)
+b"ff10"
+```
+
+### `is_empty()`
+
+Whether there are no bytes at all.
+
+```
+>>> from_hex("").is_empty()
+true
+```
+
+### `length()`
+
+The number of bytes.
+
+**Note:** BYTES, not characters — the distinction `String.length()` cannot make. Alias of count. Keywords: size, len, count, bytes.
+
+```
+>>> from_hex("00ff10").length()
+3
+```
+
+### `slice(start, end)`
+
+The bytes from start up to end.
+
+**Note:** Clamped at both ends rather than raising, so a record read that runs off the end is short instead of fatal. Keywords: range, substring, window, page.
+
+```
+>>> from_hex("00ff10aa").slice(1, 3)
+b"ff10"
+```
+
+### `take(n)`
+
+The first n bytes.
+
+**Note:** Saturating like the String twin: past the end is the whole value, never an error — which is how a final partial page reads. Keywords: prefix, head, slice, page.
+
+```
+>>> from_hex("00ff10").take(2)
+b"00ff"
+```
+
+### `to_base64()`
+
+Standard base64.
+
+**Note:** Shorter than hex and the usual way to put binary in JSON, which refuses Bytes directly. Does NOT preserve ordering — use to_hex when the string has to sort like the bytes. Keywords: base64, encode, json, transport.
+
+```
+>>> from_hex("48656c6c6f").to_base64()
+SGVsbG8=
+```
+
+### `to_hex()`
+
+Lowercase hex, two digits per byte.
+
+**Note:** The form Bytes PRINTS, from the same implementation, so the shown value and this string can never disagree. Hex PRESERVES BYTE ORDER lexicographically, which makes it an honest stand-in wherever Bytes is not yet accepted — as a dict key, for instance. Keywords: hex, encode, digest, display, key.
+
+```
+>>> from_hex("00ff").to_hex()
+00ff
+```
+
+### `to_string()`
+
+The bytes decoded as UTF-8; raises when they are not.
+
+**Note:** THE ONE THAT CAN FAIL, and the reason Bytes is a separate type: it refuses by name rather than substituting U+FFFD, which would silently change the data on the way out. For arbitrary bytes use to_hex or to_base64, which never fail. Keywords: decode, utf8, text, string, convert.
+
+```
+>>> from_hex("4869").to_string()
+Hi
+```
+
+### `write_at(path, offset)`
+
+Overwrite bytes at an offset, extending if needed; returns the count.
+
+**Note:** `read_bytes_at`'s twin — the one that makes a page update O(page) instead of O(file), and binary rather than text. Creates the file if absent and never truncates it. Keywords: pwrite, offset, page, in place, update, database.
+
+```
+>>> from_hex("00ff").write_at("db/pages", 4096)
+```
+
+### `write_to(path)`
+
+Write the bytes as the full contents of the file; returns the count.
+
+**Note:** The binary counterpart to `String.write_to`. Keywords: write, save, file, binary, blob.
+
+```
+>>> from_hex("00ff").write_to("out.bin")
 ```
 
 ## Tensor methods

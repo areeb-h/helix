@@ -330,6 +330,13 @@ pub(crate) fn string_method(
             }
             Ok(Value::int_array(scores))
         }
+        // The one-way door into `Bytes`: a `Str` is UTF-8, so its bytes are exactly its
+        // encoding. Coming back is `to_string()`, which can FAIL — which is the whole
+        // reason the two are different types.
+        "to_bytes" => {
+            arity(0)?;
+            Ok(Value::Bytes(Rc::new(s.as_bytes().to_vec())))
+        }
         "parse_json" => {
             arity(0)?;
             crate::json::parse(s).map_err(|e| HelixError::new(e, line, col))

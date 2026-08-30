@@ -7046,8 +7046,8 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         // the type error names the same three domains `sort` names.
         for (src, want) in [
             ("[1, missing, 2].argsort()", "cannot sort: the array has missing values"),
-            ("[1, \"a\"].argsort()", "all numbers, all strings, or all DNA"),
-            ("[true, false].argsort()", "all numbers, all strings, or all DNA"),
+            ("[1, \"a\"].argsort()", "all numbers, all strings, all DNA, or all Bytes"),
+            ("[true, false].argsort()", "all numbers, all strings, all DNA, or all Bytes"),
             ("[1, 2].argsort(1)", "`argsort` takes no arguments"),
         ] {
             let (tw, vm) = (run_tw(src), run_vm(src));
@@ -7943,8 +7943,8 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         // quietly start accepting an array the general path refuses.
         for (src, want) in [
             ("[1, missing].sort()", "cannot sort: the array has missing values"),
-            ("[1, \"a\"].sort()", "all numbers, all strings, or all DNA"),
-            ("[3, 1].enumerate().sort()", "all numbers, all strings, or all DNA"),
+            ("[1, \"a\"].sort()", "all numbers, all strings, all DNA, or all Bytes"),
+            ("[3, 1].enumerate().sort()", "all numbers, all strings, all DNA, or all Bytes"),
             ("[1, 2].sort(3)", "takes no arguments, got 1"),
             ("[1, 2].reverse(3)", "takes no arguments, got 1"),
             ("(0..5).sort(3)", "takes no arguments, got 1"),

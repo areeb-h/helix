@@ -236,7 +236,7 @@ pub fn to_html(args: &[Value], line: usize, col: usize) -> Result<Value, HelixEr
             let text = if matches!(cell, Value::Missing) {
                 "·".to_string()
             } else {
-                html_escape(&plain_cell(cell))
+                html_escape(&plain_cell(cell)).into_owned()
             };
             s.push_str(&format!("<td{cls}>{text}</td>"));
         }
@@ -666,8 +666,12 @@ fn md_escape(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
 }
 
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+// ONE IMPLEMENTATION, shared with the `html_escape` builtin. The copy that used to live
+// here escaped four of the five characters — it left `'` alone, which closes a
+// single-quoted attribute — and ran four sequential `replace` passes, allocating four times
+// per cell whether or not anything needed escaping.
+fn html_escape(s: &str) -> std::borrow::Cow<'_, str> {
+    crate::interp::builtins::encoding::html_escape(s)
 }
 
 fn svg_escape(s: &str) -> String {

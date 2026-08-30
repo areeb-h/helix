@@ -31,7 +31,8 @@ pub struct BuiltinDef {
 pub fn category_of(name: &str) -> &'static str {
     match name {
         // Filesystem I/O (readers + the two writers).
-        "lock_file" | "try_lock_file"
+        "read_bytes" | "read_bytes_at"
+        | "lock_file" | "try_lock_file"
         | "rename" | "fsync" | "sync_dir" | "create_new" | "file_size" | "read_at"
         | "write_at" | "truncate" | "remove_dir"
         | "read_csv" | "read_parquet" | "read_text" | "read_json" | "read_dir" | "file_exists"
@@ -54,7 +55,8 @@ pub fn category_of(name: &str) -> &'static str {
         "dna" | "headers" | "range" | "tensor" | "zeros" | "ones" | "eye" | "to_array" | "to_dataframe"
         | "to_tensor" | "dataframe" | "dict" | "rational" | "linspace" => "constructor",
         // Scalar conversions / accessors.
-        "chr" | "ord" | "to_float" | "to_int" | "numerator" | "denominator" => "conversion",
+        "chr" | "ord" | "to_float" | "to_int" | "numerator" | "denominator"
+        | "from_hex" | "from_base64" | "html_escape" => "conversion",
         // Math — elementwise, broadcasting, missing-propagating.
         "sqrt" | "cbrt" | "abs" | "exp" | "ln" | "log10" | "log2" | "log" | "sin" | "cos"
         | "tan" | "asin" | "acos" | "atan" | "atan2" | "sinh" | "cosh" | "tanh" | "floor"
@@ -125,6 +127,11 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "write_at", pure: false },
     BuiltinDef { path: "truncate", pure: false },
     BuiltinDef { path: "remove_dir", pure: false },
+    BuiltinDef { path: "html_escape", pure: true },
+    BuiltinDef { path: "read_bytes", pure: false },
+    BuiltinDef { path: "read_bytes_at", pure: false },
+    BuiltinDef { path: "from_hex", pure: true },
+    BuiltinDef { path: "from_base64", pure: true },
     BuiltinDef { path: "lock_file", pure: false },
     BuiltinDef { path: "try_lock_file", pure: false },
     BuiltinDef { path: "read_fasta", pure: false },
@@ -322,7 +329,7 @@ pub static STRING_METHODS: &[&str] = &[
     "upper", "lower", "count", "length", "chars", "reverse", "trim", "split", "replace", "contains",
     "starts_with", "ends_with", "take", "drop", "repeat", "ljust", "rjust", "center", "phred",
     "parse_json", "to_float", "to_int", "write_to", "append_to", "index_of", "split_once",
-    "concat", "replace_first", "last_index_of", "char_at",
+    "concat", "replace_first", "last_index_of", "char_at", "to_bytes",
     // The regex family (src/regexes.rs) — named `re_` because whether `.` means "any
     // character" or "a dot" must be visible at the call site.
     "re_match", "re_find", "re_find_all", "re_replace", "re_captures", "re_split",
@@ -335,6 +342,14 @@ pub static HEADERS_METHODS: &[&str] = &[
 ];
 
 /// DNA-sequence methods.
+/// `Bytes` — the binary counterpart to `String` (ADR 0042). Listed here so the type is
+/// DISCOVERABLE: `helix doc Bytes`, `helix search` and the docs-coverage guard all read
+/// this table, so a method that is not here is a method nobody can find.
+pub static BYTES_METHODS: &[&str] = &[
+    "length", "count", "is_empty", "byte_at", "take", "drop", "slice", "concat",
+    "to_hex", "to_base64", "to_string", "write_to", "append_to", "write_at",
+];
+
 pub static DNA_METHODS: &[&str] = &[
     "gc_content", "reverse_complement", "complement", "kmers", "windows", "codons", "kmer_counts",
     "canonical_kmer_counts", "align", "find", "find_all", "gc_skew", "longest_homopolymer",
@@ -406,11 +421,12 @@ pub fn methods_of(table: &[&'static str]) -> Vec<&'static str> {
 
 /// The method tables by receiver type — the single source for `helix doc <Type>`
 /// introspection and the method-uniqueness test.
-pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 10] {
+pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 11] {
     [
         ("Array", ARRAY_METHODS),
         ("String", STRING_METHODS),
         ("Dna", DNA_METHODS),
+        ("Bytes", BYTES_METHODS),
         ("Tensor", TENSOR_METHODS),
         ("DataFrame", DF_METHODS),
         ("GroupBy", GROUPBY_METHODS),
