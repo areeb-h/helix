@@ -37,7 +37,7 @@ const MAGIC: &[u8; 8] = b"HLXBND01";
 /// The fixed-size tail of a v1 overlay: `[name_len: u32][src_len: u64][MAGIC: 8]`.
 const TRAILER_LEN: u64 = 4 + 8 + 8;
 
-/// v2: the payload is an ARCHIVE of modules rather than a single source string.
+/// v3: the payload is an ARCHIVE of modules, plus the program's DECLARED CEILING.
 ///
 /// v1 could hold exactly one file, which is the only reason `helix build` refused any
 /// program with an import -- and that refusal is what pushed a field user into inlining
@@ -47,10 +47,18 @@ const TRAILER_LEN: u64 = 4 + 8 + 8;
 /// v1 is still READ. `--runtime` lets a bundle be built against a different `helix`
 /// binary, so the reader and the writer are not always the same version, and an old
 /// runtime handed a new overlay must recognise it rather than misparse it.
-const MAGIC_V2: &[u8; 8] = b"HLXBND02";
+/// A bundled program loads through [`crate::module::load_archive`], which has no manifest
+/// to read — so a `[capabilities]` block governed `helix run` and evaporated at
+/// `helix build`, leaving "ship to production" and "declared authority" as two features
+/// instead of one. v3 carries it.
+///
+/// The MAGIC is bumped rather than v2's payload quietly redefined, which is what a version
+/// stamp is for: an artifact written by a v2 builder is not reinterpreted under v3 rules.
+/// v2 existed only within one unreleased cycle and so is not read back; v1 shipped, and is.
+const MAGIC_V3: &[u8; 8] = b"HLXBND03";
 
-/// `[payload_len: u64][MAGIC_V2: 8]`.
-const TRAILER_V2_LEN: u64 = 8 + 8;
+/// `[payload_len: u64][MAGIC_V3: 8]`.
+const TRAILER_V3_LEN: u64 = 8 + 8;
 
 /// A built program's embedded source: every module it needs, and which one to run.
 pub struct Embedded {
@@ -59,6 +67,8 @@ pub struct Embedded {
     pub modules: Vec<(String, String)>,
     /// Index into `modules` of the entry file.
     pub entry: usize,
+    /// The authority ceiling the program declared when it was built, if any.
+    pub capabilities: Option<crate::pkg::Capabilities>,
 }
 
 fn read_u32(b: &[u8], at: usize) -> Option<usize> {
@@ -69,11 +79,23 @@ fn read_u64(b: &[u8], at: usize) -> Option<usize> {
     Some(u64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?) as usize)
 }
 
-/// Parse a v2 payload: `[n u32][entry u32]` then `n` x `[key_len u32][src_len u64][key][src]`.
-fn parse_v2(b: &[u8]) -> Option<Embedded> {
+/// Parse a v3 payload: `[n u32][entry u32][caps_len u32][caps json]` then `n` x
+/// `[key_len u32][src_len u64][key][src]`.
+fn parse_v3(b: &[u8]) -> Option<Embedded> {
     let n = read_u32(b, 0)?;
     let entry = read_u32(b, 4)?;
-    let mut at = 8;
+    let caps_len = read_u32(b, 8)?;
+    let mut at: usize = 12;
+    // A zero-length block means the program declared nothing, which is different from
+    // declaring an empty ceiling: the first leaves the artifact unconfined (today's
+    // behaviour), the second would deny everything.
+    let capabilities = if caps_len == 0 {
+        None
+    } else {
+        let raw = b.get(at..at.checked_add(caps_len)?)?;
+        at += caps_len;
+        serde_json::from_slice(raw).ok()?
+    };
     let mut modules = Vec::with_capacity(n);
     for _ in 0..n {
         let key_len = read_u32(b, at)?;
@@ -88,7 +110,7 @@ fn parse_v2(b: &[u8]) -> Option<Embedded> {
     if entry >= modules.len() {
         return None;
     }
-    Some(Embedded { modules, entry })
+    Some(Embedded { modules, entry, capabilities })
 }
 
 /// If the running executable carries an embedded program (it was produced by
@@ -102,26 +124,26 @@ pub fn embedded() -> Option<Embedded> {
     let exe = std::env::current_exe().ok()?;
     let mut f = std::fs::File::open(&exe).ok()?;
     let total = f.metadata().ok()?.len();
-    if total < TRAILER_V2_LEN {
+    if total < TRAILER_V3_LEN {
         return None;
     }
     // Magic occupies the final 8 bytes.
     f.seek(SeekFrom::End(-8)).ok()?;
     let mut magic = [0u8; 8];
     f.read_exact(&mut magic).ok()?;
-    if &magic == MAGIC_V2 {
-        f.seek(SeekFrom::End(-(TRAILER_V2_LEN as i64))).ok()?;
+    if &magic == MAGIC_V3 {
+        f.seek(SeekFrom::End(-(TRAILER_V3_LEN as i64))).ok()?;
         let mut len_bytes = [0u8; 8];
         f.read_exact(&mut len_bytes).ok()?;
         let payload_len = u64::from_le_bytes(len_bytes);
-        let whole = payload_len.checked_add(TRAILER_V2_LEN)?;
+        let whole = payload_len.checked_add(TRAILER_V3_LEN)?;
         if whole > total {
             return None;
         }
         f.seek(SeekFrom::Start(total - whole)).ok()?;
         let mut body = vec![0u8; payload_len as usize];
         f.read_exact(&mut body).ok()?;
-        return parse_v2(&body);
+        return parse_v3(&body);
     }
     if &magic != MAGIC {
         return None;
@@ -151,6 +173,7 @@ pub fn embedded() -> Option<Embedded> {
     Some(Embedded {
         modules: vec![(String::from_utf8(name).ok()?, String::from_utf8(src).ok()?)],
         entry: 0,
+        capabilities: None,
     })
 }
 
@@ -164,6 +187,8 @@ pub fn embedded() -> Option<Embedded> {
 /// What a built program needs from its runtime.
 pub struct Built {
     pub path: PathBuf,
+    /// The ceiling baked into the artifact, if the project declared one.
+    pub capabilities: Option<crate::pkg::Capabilities>,
     /// The optional Cargo features this program's code actually reaches, sorted.
     pub features: Vec<&'static str>,
     pub bytes: u64,
@@ -171,6 +196,12 @@ pub struct Built {
     pub modules: usize,
     /// The runtime that was copied: a `--runtime` path, or `None` for this interpreter.
     pub runtime: Option<String>,
+    /// True when the embedded runtime is a DEBUG build of this interpreter.
+    ///
+    /// Known exactly rather than guessed at: with no `--runtime`, the runtime IS this
+    /// binary, so `cfg!(debug_assertions)` is the answer. A size threshold would be a
+    /// heuristic that misfires on a legitimately large release build.
+    pub debug_runtime: bool,
 }
 
 /// The optional features a program's own code requires.
@@ -274,7 +305,7 @@ pub fn build(
     let mut image = std::fs::read(&me)
         .map_err(|e| mkerr(format!("cannot read the `helix` binary at `{}`: {e}", me.display())))?;
     let tail = |m: &[u8; 8]| image.len() >= 8 && &image[image.len() - 8..] == m;
-    if tail(MAGIC) || tail(MAGIC_V2) {
+    if tail(MAGIC) || tail(MAGIC_V3) {
         return Err(mkerr(format!(
             "`{}` is already a built program, not a runtime",
             me.display()
@@ -285,11 +316,22 @@ pub fn build(
         ));
     }
 
-    // Append the v2 overlay: [payload][payload_len u64][MAGIC_V2], the payload being
-    // [n u32][entry u32] then n x [key_len u32][src_len u64][key][src].
+    // Append the v3 overlay: [payload][payload_len u64][MAGIC_V3], the payload being
+    // [n u32][entry u32][caps_len u32][caps json] then n x [key_len u32][src_len u64][key][src].
+    //
+    // The ceiling comes from `module::load` above, which installed whatever the project's
+    // manifest declared — so the artifact enforces exactly what `helix run` enforced, and
+    // the declaration cannot drift from the thing it is supposed to govern.
+    let caps = crate::capability::declared_ceiling();
+    let caps_json = match &caps {
+        Some(c) => serde_json::to_vec(c).unwrap_or_default(),
+        None => Vec::new(),
+    };
     let mut payload = Vec::new();
     payload.extend_from_slice(&(archive.len() as u32).to_le_bytes());
     payload.extend_from_slice(&(entry_idx as u32).to_le_bytes());
+    payload.extend_from_slice(&(caps_json.len() as u32).to_le_bytes());
+    payload.extend_from_slice(&caps_json);
     for (k, src) in &archive {
         payload.extend_from_slice(&(k.len() as u32).to_le_bytes());
         payload.extend_from_slice(&(src.len() as u64).to_le_bytes());
@@ -299,7 +341,7 @@ pub fn build(
     let payload_len = payload.len() as u64;
     image.extend_from_slice(&payload);
     image.extend_from_slice(&payload_len.to_le_bytes());
-    image.extend_from_slice(MAGIC_V2);
+    image.extend_from_slice(MAGIC_V3);
 
     let out_path = out.map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(entry.file_stem().map(|s| s.to_os_string()).unwrap_or_else(|| "program".into()))
@@ -318,6 +360,8 @@ pub fn build(
         }
     }
     Ok(Built {
+        debug_runtime: runtime.is_none() && cfg!(debug_assertions),
+        capabilities: caps,
         features: features_used(&loaded.stmts),
         bytes: image.len() as u64,
         modules: archive.len(),

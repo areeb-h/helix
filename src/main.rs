@@ -1587,8 +1587,56 @@ fn run_build(args: &[String]) -> ExitCode {
                         built.runtime.clone().unwrap_or_else(|| {
                             format!("helix {} (this interpreter)", env!("CARGO_PKG_VERSION"))
                         }),
-                    )
-                    .gap();
+                    );
+                // A 2.3 GB ARTIFACT NEEDS AN EXPLANATION, NOT JUST A NUMBER.
+                //
+                // `helix build` embeds the binary that invoked it, so running it from a
+                // debug build ships an unstripped, un-LTO'd interpreter with full debug
+                // info — about 2.3 GB, of which the program is a couple of hundred bytes.
+                // A field report already shipped a 120 MB web server this way, from the
+                // gate build; debug is twenty times worse again.
+                //
+                // Said only when it is CERTAIN: with no `--runtime` the runtime is this
+                // binary, so `debug_assertions` is exact. A size threshold would be a
+                // heuristic, and a heuristic that cries wolf on a large release build is
+                // worse than silence.
+                if built.debug_runtime {
+                    r = r.note(
+                        "warning",
+                        "this artifact embeds a DEBUG interpreter",
+                        "almost all of that size is debug info, not your program. Build the \
+                         runtime with `cargo build --release` and pass `--runtime`, or run \
+                         `helix build` from a release binary.",
+                    );
+                }
+                r = r.gap();
+                // A ceiling that is enforced but invisible invites the question "did that
+                // actually get in?" every time someone ships. Say it once, here.
+                r = match &built.capabilities {
+                    Some(c) => {
+                        let mut g: Vec<&str> = Vec::new();
+                        if c.fs_read() && c.fs_write() {
+                            g.push("fs: all");
+                        } else if c.fs_read() {
+                            g.push("fs: read");
+                        } else if c.fs_write() {
+                            g.push("fs: write");
+                        }
+                        if c.net_on() {
+                            g.push("net");
+                        }
+                        if c.process_on() {
+                            g.push("process");
+                        }
+                        let shown = if g.is_empty() {
+                            "nothing granted".to_string()
+                        } else {
+                            report::Report::list(&opts, &g)
+                        };
+                        r.note("allows", shown, "baked in from `[capabilities]`; the artifact enforces this with no environment variable")
+                    }
+                    None => r,
+                };
                 // WHICH RUNTIME DOES THIS PROGRAM NEED? `--runtime` made the size a
                 // choice; without this it was not an INFORMED one -- the only way to find
                 // out whether a program touches a DataFrame, a genomics reader or the
@@ -1935,6 +1983,14 @@ pub(crate) fn run_archive_capture(modules: Vec<(String, String)>, entry: usize) 
 }
 
 fn run_embedded(emb: bundle::Embedded) -> ExitCode {
+    // THE ARTIFACT ENFORCES WHAT IT DECLARED. A bundled program has no manifest to read —
+    // it may be the only file on the machine — so the ceiling travels inside it and is
+    // installed here, before a single statement runs. Without this a `[capabilities]`
+    // block governed `helix run` and evaporated at `helix build`, which is the worse half:
+    // the artifact is the thing that reaches production.
+    if let Some(caps) = emb.capabilities.clone() {
+        capability::install_ceiling(caps);
+    }
     // The program's own arguments, not `helix`'s: argv[0] is this artifact's name.
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let tool = std::env::current_exe()

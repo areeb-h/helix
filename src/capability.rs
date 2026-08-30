@@ -170,6 +170,13 @@ pub fn install_ceiling(c: crate::pkg::Capabilities) {
     let _ = CEILING.set(c);
 }
 
+/// The ceiling the loaded project declared, if any — for `helix build`, which has to bake
+/// it into the artifact. A bundle has no manifest to read at run time, so the declaration
+/// travels inside it or it does not travel at all.
+pub fn declared_ceiling() -> Option<crate::pkg::Capabilities> {
+    CEILING.get().cloned()
+}
+
 /// Install the process authority (idempotent — first writer wins). Call once at startup.
 pub fn install(a: Authority) {
     let _ = AUTHORITY.set(a);
@@ -334,37 +341,63 @@ fn gate_effect(eff: Effect, name: &str, args: &[Value], line: usize, col: usize)
             );
             Ok(())
         }
-        Mode::Enforce => Err(HelixError::new(
-            format!("capability denied: `{name}` needs `{}` authority, which is not granted", eff.label()),
-            line,
-            col,
-        )
-        // NAME THE MECHANISM THAT EXISTS. This hint used to offer two ways to grant
-        // authority and NEITHER WAS REAL: `[capabilities]` is refused by the manifest parser
-        // (deliberately — see `pkg::Manifest` — so that writing it could not *look* like it
-        // restricted a program while doing nothing), and no `--allow-*` flag has ever been
-        // implemented. The one mechanism that works — `HELIX_ALLOW_FS`, `HELIX_ALLOW_NET`
-        // and `HELIX_ALLOW_PROCESS` — went
-        // unmentioned.
-        //
-        // So a reader who turned the sandbox on and hit a denial had no way forward from the
-        // message: both roads it offered were walls. On a security surface that is the worst
-        // possible dead end, because the reachable exit is to turn the sandbox off — which
-        // is the one outcome this whole subsystem exists to avoid.
-        .hint(match eff {
-            Effect::FsRead => "grant it for this run with `HELIX_ALLOW_FS=read` (or `all`).",
-            Effect::FsWrite => "grant it for this run with `HELIX_ALLOW_FS=write` (or `all`).",
-            Effect::Net => "grant it for this run with `HELIX_ALLOW_NET=on`.",
-            Effect::Process => {
-                "grant it for this run with `HELIX_ALLOW_PROCESS=on` — but note a subprocess \
-                 reaches whatever ITS permissions allow, including the filesystem and network \
-                 you declined here (ADR 0037 D3)."
+        Mode::Enforce => {
+            // A DECLARED CEILING MAKES THE ENVIRONMENT HINT WRONG.
+            //
+            // This hint once offered two ways to grant authority and neither was real:
+            // `[capabilities]` was refused by the manifest parser (deliberately — see
+            // `pkg::Manifest` — so writing it could not *look* like it restricted a program
+            // while doing nothing), and no `--allow-*` flag has ever existed. The one
+            // mechanism that worked went unmentioned, so a reader who turned the sandbox on
+            // had no way forward: both roads were walls, and the reachable exit was to turn
+            // the sandbox off — the one outcome this subsystem exists to avoid.
+            //
+            // Now `[capabilities]` works, and under a ceiling the environment cannot widen
+            // anything. Pointing at `HELIX_ALLOW_FS=write` there sends the reader to a
+            // variable that provably will not help: the identical dead end, reintroduced by
+            // the fix for it. So when a ceiling is in force, the ceiling is the answer — and
+            // it names rebuilding too, because a built artifact has no manifest beside it to
+            // edit.
+            if declared_ceiling().is_some() {
+                return Err(HelixError::new(
+                    format!(
+                        "capability denied: `{name}` needs `{}` authority, which this \
+                         program does not declare",
+                        eff.label()
+                    ),
+                    line,
+                    col,
+                )
+                .hint(
+                    "this is a `[capabilities]` ceiling, so no environment variable can \
+                     grant it. Add the authority to `[capabilities]` in `helix.toml` — and \
+                     if this is a built artifact, rebuild it, because the ceiling is baked \
+                     in at `helix build` time.",
+                ));
             }
-            // No builtin carries `Env` yet, and `Pure` never reaches a denial.
-            Effect::Env | Effect::Pure => {
-                "this effect has no grant variable yet; it is classified but ungranted."
-            }
-        })),
+            Err(HelixError::new(
+                format!(
+                    "capability denied: `{name}` needs `{}` authority, which is not granted",
+                    eff.label()
+                ),
+                line,
+                col,
+            )
+            .hint(match eff {
+                Effect::FsRead => "grant it for this run with `HELIX_ALLOW_FS=read` (or `all`).",
+                Effect::FsWrite => "grant it for this run with `HELIX_ALLOW_FS=write` (or `all`).",
+                Effect::Net => "grant it for this run with `HELIX_ALLOW_NET=on`.",
+                Effect::Process => {
+                    "grant it for this run with `HELIX_ALLOW_PROCESS=on` — but note a subprocess \
+                     reaches whatever ITS permissions allow, including the filesystem and network \
+                     you declined here (ADR 0037 D3)."
+                }
+                // No builtin carries `Env` yet, and `Pure` never reaches a denial.
+                Effect::Env | Effect::Pure => {
+                    "this effect has no grant variable yet; it is classified but ungranted."
+                }
+            }))
+        }
         Mode::Off => Ok(()),
     }
 }

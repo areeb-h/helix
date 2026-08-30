@@ -13062,3 +13062,152 @@ fn a_declared_capability_ceiling_enforces_itself() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A denial under a CEILING must not point at an environment variable.
+///
+/// The old hint offered two ways to grant authority and neither was real, which left a
+/// reader's only exit "turn the sandbox off" — the one outcome the subsystem exists to
+/// avoid. Fixing that made it name `HELIX_ALLOW_FS`. Then `[capabilities]` arrived, under
+/// which the environment cannot widen anything, so that same hint became provably useless
+/// advice: the identical dead end, reintroduced by the fix for it.
+#[test]
+fn a_denial_under_a_ceiling_names_the_ceiling_not_a_variable() {
+    let dir = std::env::temp_dir().join(format!("hx_ceilhint_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("w.helix"), "\"x\".write_to(\"out.txt\")\n").unwrap();
+
+    let go = |env: &[(&str, &str)]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_helix"));
+        cmd.current_dir(&dir).args(["run", "w.helix"]).stdin(Stdio::null());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        String::from_utf8_lossy(&cmd.output().expect("spawn").stderr).into_owned()
+    };
+
+    // Under a ceiling: name the ceiling, and do NOT send them to a variable.
+    std::fs::write(
+        dir.join("helix.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[capabilities]\nfs = \"read\"\n",
+    )
+    .unwrap();
+    let err = go(&[]);
+    assert!(err.contains("does not declare"), "should say what the PROGRAM declares:\n{err}");
+    assert!(err.contains("[capabilities]"), "should name the mechanism:\n{err}");
+    assert!(err.contains("rebuild"), "an artifact has no manifest beside it:\n{err}");
+    assert!(
+        !err.contains("HELIX_ALLOW_FS"),
+        "a ceiling denial must not point at a variable that cannot help:\n{err}"
+    );
+
+    // WITHOUT a ceiling the variable IS the answer, so it must still be offered — the two
+    // hints are not interchangeable, which is exactly why the check is on the ceiling.
+    std::fs::write(dir.join("helix.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n")
+        .unwrap();
+    let err = go(&[("HELIX_CAP", "enforce")]);
+    assert!(err.contains("HELIX_ALLOW_FS"), "env-only denial should name the variable:\n{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A built artifact enforces the ceiling it was built with.
+///
+/// A bundled program loads through `load_archive` and has no manifest to read — it may be
+/// the only file on the machine. Without baking the declaration into the overlay,
+/// `[capabilities]` governed `helix run` and evaporated at `helix build`, which is the
+/// worse half: the artifact is the thing that reaches production.
+#[test]
+fn a_bundled_program_enforces_the_ceiling_it_was_built_with() {
+    let dir = std::env::temp_dir().join(format!("hx_bakedcap_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("away")).unwrap();
+    std::fs::write(dir.join("data.txt"), "hello\n").unwrap();
+    std::fs::write(
+        dir.join("p.helix"),
+        "print(read_text(\"data.txt\"))\n\"x\".write_to(\"out.txt\")\nprint(\"wrote\")\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("helix.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[capabilities]\nfs = \"read\"\n",
+    )
+    .unwrap();
+
+    let out = dir.join("away/app");
+    let (report, err, code) =
+        run(&["build", dir.join("p.helix").to_str().unwrap(), "-o", out.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    // The build says what it baked in, because a ceiling that is enforced but invisible
+    // invites "did that actually get in?" on every ship.
+    assert!(report.contains("allows: fs: read"), "the build should report the ceiling:\n{report}");
+
+    // Run it somewhere with NO manifest, and no environment variable.
+    std::fs::copy(dir.join("data.txt"), dir.join("away/data.txt")).unwrap();
+    let run_artifact = |env: &[(&str, &str)]| {
+        let mut cmd = Command::new(&out);
+        cmd.current_dir(dir.join("away")).stdin(Stdio::null());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let o = cmd.output().expect("failed to run the artifact");
+        (
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+            o.status.code(),
+        )
+    };
+
+    let (out_s, err_s, code) = run_artifact(&[]);
+    assert_eq!(out_s.trim(), "hello", "the read the ceiling allows must work:\n{err_s}");
+    assert_ne!(code, Some(0), "the write the ceiling forbids must not");
+    assert!(err_s.contains("does not declare"), "{err_s}");
+
+    // And the environment cannot widen a BAKED ceiling either.
+    let (_, err_s, code) =
+        run_artifact(&[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_FS", "all")]);
+    assert_ne!(code, Some(0), "a baked ceiling must not be widenable:\n{err_s}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// No two tests may share a temp-directory name.
+///
+/// Every test here builds its scratch directory as `hx_<name>_{pid}`, and within one test
+/// BINARY the pid is identical — so two tests that pick the same `<name>` get the same
+/// directory and run in it concurrently. That is not a hypothetical: a test added in this
+/// session reused `hx_hint_`, wrote a `helix.toml` with `[capabilities]` into it, and the
+/// older test sharing that name then resolved that manifest and got a different diagnostic
+/// than the one it was asserting. It failed in the gate and passed on a rerun, which is the
+/// worst way for a suite to tell you something.
+///
+/// The convention cannot be made safe by care alone — nothing about writing a new test
+/// prompts you to check a hundred existing ones — so it is checked.
+#[test]
+fn every_test_uses_its_own_temp_directory_name() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cli.rs"),
+    )
+    .expect("this file must be readable");
+
+    let mut names: Vec<&str> = Vec::new();
+    for (i, _) in src.match_indices("hx_") {
+        let rest = &src[i..];
+        // `hx_<name>_{}` — the format string, before `std::process::id()` fills it in.
+        if let Some(end) = rest.find("_{}")
+            && rest[..end].chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            names.push(&rest[..end]);
+        }
+    }
+    assert!(names.len() > 20, "the scan found almost nothing ({}) — it has stopped working", names.len());
+
+    names.sort_unstable();
+    let dupes: Vec<&&str> = names.windows(2).filter(|w| w[0] == w[1]).map(|w| &w[0]).collect();
+    assert!(
+        dupes.is_empty(),
+        "these temp-directory names are used by more than one test, so those tests share a \
+         directory and race:\n  {}",
+        dupes.iter().map(|d| format!("{d}_{{}}")).collect::<Vec<_>>().join("\n  ")
+    );
+}
