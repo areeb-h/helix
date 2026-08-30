@@ -12763,16 +12763,31 @@ fn build_says_which_runtime_the_program_needs() {
     // THE TWO THAT LOOK WRONG AND ARE NOT.
     // A server needs no optional feature -- `http` is the client (ureq).
     let o = build("listen(8080)\n");
-    assert!(o.contains("needs no optional feature"), "a server needs no feature:\n{o}");
+    assert!(o.contains("needs: no optional feature"), "a server needs no feature:\n{o}");
     // ...and neither does reading a file.
     let o = build("print(read_text(\"x.txt\"))\n");
-    assert!(o.contains("needs no optional feature"), "a file read needs no feature:\n{o}");
+    assert!(o.contains("needs: no optional feature"), "a file read needs no feature:\n{o}");
 
     // The suggestion must name what ELSE `--no-default-features` costs, or "would serve
     // this program" reads as "costs nothing".
     assert!(o.contains("--no-default-features"), "expected the suggestion:\n{o}");
     assert!(o.contains("speed, not answers"), "expected the performance caveat:\n{o}");
     assert!(o.contains("jit"), "the caveat should name the features it drops:\n{o}");
+
+    // THE PLAIN FORM IS PARSED, so its shape is part of the contract: one fact per line,
+    // `label: value`, no alignment padding to strip and no multi-byte separator. The rich
+    // block is free to align and colour; a pipe must stay splittable.
+    let o = build("print(\"abc\".re_match(\"b\"), http_get(\"http://x/\"))\n");
+    assert!(o.contains("needs: http, regex"), "plain output must use a comma:\n{o}");
+    assert!(!o.contains('\u{b7}'), "plain output must not carry the rich separator:\n{o}");
+    assert!(o.lines().any(|l| l.starts_with("program: ")), "expected `program:`:\n{o}");
+    assert!(o.lines().any(|l| l.starts_with("modules: ")), "expected `modules:`:\n{o}");
+
+    // A size is read to answer "how big, roughly". `{:.1} MB` renders a 212-byte stub
+    // artifact as `0.0 MB`, which is the same category error as an axis tick printed with
+    // the value formatter.
+    assert!(o.contains(" B)"), "a small artifact should be sized in bytes:\n{o}");
+    assert!(!o.contains("0.0 MB"), "a size must not round away to nothing:\n{o}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

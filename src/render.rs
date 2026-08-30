@@ -24,7 +24,7 @@ const CELL_MAX: usize = 40;
 
 /// A semantic role a value plays when rendered, mapped to a color by the [`Theme`].
 #[derive(Clone, Copy)]
-enum Role {
+pub(crate) enum Role {
     Num,
     Str,
     Dna,
@@ -245,8 +245,22 @@ impl RenderOpts {
         RenderOpts { color: false, ..self.clone() }
     }
 
+    /// True when this terminal was told it cannot draw beyond ASCII (`HELIX_BOX=ascii`).
+    ///
+    /// A report reuses the table's answer rather than asking its own question: a terminal
+    /// whose font cannot draw `─` cannot draw `·` either, and one flag the user already
+    /// knows about beats a second one they would have to discover.
+    pub(crate) fn ascii_only(&self) -> bool {
+        self.boxes.h == '-'
+    }
+
+    /// A horizontal rule `n` columns wide, in the active box style.
+    pub(crate) fn rule(&self, n: usize) -> String {
+        self.boxes.h.to_string().repeat(n)
+    }
+
     /// Color `s` for `role` when color is on; otherwise return it unchanged.
-    fn paint(&self, role: Role, s: &str) -> String {
+    pub(crate) fn paint(&self, role: Role, s: &str) -> String {
         let code = self.theme.code(role);
         if self.color && !code.is_empty() {
             format!("\x1b[{code}m{s}\x1b[0m")

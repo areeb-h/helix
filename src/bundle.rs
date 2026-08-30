@@ -167,6 +167,10 @@ pub struct Built {
     /// The optional Cargo features this program's code actually reaches, sorted.
     pub features: Vec<&'static str>,
     pub bytes: u64,
+    /// How many modules travelled inside the artifact.
+    pub modules: usize,
+    /// The runtime that was copied: a `--runtime` path, or `None` for this interpreter.
+    pub runtime: Option<String>,
 }
 
 /// The optional features a program's own code requires.
@@ -316,6 +320,8 @@ pub fn build(
     Ok(Built {
         features: features_used(&loaded.stmts),
         bytes: image.len() as u64,
+        modules: archive.len(),
+        runtime: runtime.map(|p| p.display().to_string()),
         path: out_path,
     })
 }

@@ -760,10 +760,17 @@ pub fn cli_new(name: &str) -> Result<(), HelixError> {
         cur = env!("CARGO_PKG_VERSION"),
     );
     std::fs::write(&path, body).map_err(|e| err(format!("could not write helix.toml: {e}")))?;
-    println!(
-        "Created helix.toml for package `{name}` (helix >= {}).",
-        env!("CARGO_PKG_VERSION")
-    );
+    let opts = crate::render::RenderOpts::auto();
+    crate::report::Report::new("new", format!("created helix.toml for package `{name}`"))
+        .field("package", name.to_string())
+        .field("helix", format!(">= {}", env!("CARGO_PKG_VERSION")))
+        .gap()
+        .note(
+            "next",
+            "add a dependency",
+            "`helix add <name> --path ../lib`, or `--url <tarball>` for a remote one",
+        )
+        .print(&opts);
     Ok(())
 }
 
@@ -777,16 +784,25 @@ pub enum AddSource {
     Url { url: String, sha256: Option<String> },
 }
 
+/// `n dependencies` / `1 dependency`. Four call sites spelled this inline, which is three
+/// more chances to write `1 dependencies`.
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// `helix add <name> --path <dir>` / `--url <tarball> [--sha256 <hash>]` — add (or
 /// update) a dependency in `helix.toml` and re-lock.
 pub fn cli_add(name: &str, source: AddSource) -> Result<(), HelixError> {
     let cwd = cwd()?;
     let (updated, n) = add_dependency(&cwd, name, source)?;
-    println!(
-        "{} `{name}` ({n} dependenc{} locked).",
-        if updated { "Updated" } else { "Added" },
-        if n == 1 { "y" } else { "ies" }
-    );
+    let opts = crate::render::RenderOpts::auto();
+    crate::report::Report::new(
+        if updated { "update" } else { "add" },
+        format!("{} `{name}`", if updated { "updated" } else { "added" }),
+    )
+    .field("dependency", name.to_string())
+    .field("locked", plural(n, "dependency", "dependencies"))
+    .print(&opts);
     Ok(())
 }
 
@@ -913,14 +929,25 @@ pub fn cli_sync() -> Result<(), HelixError> {
     let unchanged = Lockfile::load(&cwd)?.is_some_and(|existing| existing == lock);
     lock.write(&cwd)?;
     let n = dirs.len();
+    let opts = crate::render::RenderOpts::auto();
     if unchanged {
-        println!("helix.lock is up to date ({n} dependenc{}).", if n == 1 { "y" } else { "ies" });
-    } else {
-        println!("Locked {n} dependenc{} → helix.lock", if n == 1 { "y" } else { "ies" });
-        for p in &lock.packages {
-            println!("  {} ({}, {})", p.name, p.source, &p.sha256[..p.sha256.len().min(12)]);
-        }
+        crate::report::Report::new("sync", "helix.lock is up to date")
+            .field("locked", plural(n, "dependency", "dependencies"))
+            .print(&opts);
+        return Ok(());
     }
+    let mut r = crate::report::Report::new("sync", "wrote helix.lock")
+        .field("locked", plural(n, "dependency", "dependencies"))
+        .gap();
+    for p in &lock.packages {
+        // The hash is the POINT of a lockfile, so it is shown, truncated to the prefix a
+        // human compares. The full value stays in the file, where a machine reads it.
+        r = r.field_owned(
+            p.name.clone(),
+            format!("{}  {}", &p.sha256[..p.sha256.len().min(12)], p.source),
+        );
+    }
+    r.print(&opts);
     Ok(())
 }
 
@@ -928,7 +955,9 @@ pub fn cli_sync() -> Result<(), HelixError> {
 /// a reproducible, locked state. The CI / pre-commit gate.
 pub fn cli_verify() -> Result<(), HelixError> {
     let n = verify(&cwd()?)?;
-    println!("Verified {n} dependenc{} — all match helix.lock.", if n == 1 { "y" } else { "ies" });
+    crate::report::Report::new("verify", "every dependency matches helix.lock")
+        .field("verified", plural(n, "dependency", "dependencies"))
+        .print(&crate::render::RenderOpts::auto());
     Ok(())
 }
 
