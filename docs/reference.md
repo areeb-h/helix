@@ -509,6 +509,16 @@ String
 
 ## io
 
+### `create_new(path, contents)`
+
+Create a file only if absent, atomically; false if it already existed.
+
+**Note:** ATOMIC, which `file_exists` then `write_to` is not — that pair races. Two jobs: a LOCK or leader election, where whoever creates the file wins and the kernel decides; and a safe CONTENT-ADDRESSED write, where a chunk named by its own hash must never be rewritten and `false` means "already stored", which is success. Nothing is written when it answers false. Keywords: atomic, lock, exclusive, race, leader, content addressed, idempotent, database.
+
+```
+>>> create_new("db/lock", "pid")
+```
+
 ### `file_exists(path)`
 
 Whether a file or directory exists at the path.
@@ -517,12 +527,52 @@ Whether a file or directory exists at the path.
 >>> file_exists("results.csv")
 ```
 
+### `file_size(path)`
+
+The file's length in BYTES, from metadata alone.
+
+**Note:** O(1). `read_text(p).length()` is O(file) AND counts CHARACTERS, a different number for any non-ASCII content, so it is neither a fast nor a correct substitute. Pairs with `read_at` to walk a file page by page. Keywords: size, length, bytes, stat, metadata, database, storage.
+
+```
+>>> file_size("db/chunk.0")
+```
+
+### `fsync(path)`
+
+Flush one file's bytes to the storage device and wait for it.
+
+**Note:** `write_to` returning means the bytes reached the OPERATING SYSTEM, which a power loss discards; this waits for the device. HALF OF DURABILITY ON ITS OWN — the file's contents become safe but the directory entry naming it may not be, so a newly created or renamed file still needs `sync_dir` on its parent. Costly by design: it waits. Keywords: durable, flush, sync, crash, power loss, commit, storage, database, fsync.
+
+```
+>>> fsync("db/chunk.0")
+```
+
+### `lock_file(path)`
+
+Take a kernel-held exclusive lock, waiting for any current holder.
+
+**Note:** THE LOCK RELEASES WHEN ITS HOLDER DIES, which is what a `create_new` lock file cannot do: the kernel hangs this on an open descriptor, so it goes away on `release()`, on the handle being dropped, on exit, AND on SIGKILL. A lock file left by a crashed process is indistinguishable from a live writer, and every remedy at that level is a guess — a PID that may have been reused, a timestamp that may be a long pause. Measured both ways: after `kill -9` the kernel lock is free and the lock file still says busy. ADVISORY on every platform — it excludes other lock TAKERS, not other writers. Answers a Lock, which has `release()`, `held()` and `path()`. Keywords: lock, mutex, exclusive, flock, single writer, concurrency, crash, stale, database.
+
+```
+>>> lock_file("db/.lock")
+```
+
 ### `mkdir(path)`
 
 Create a directory and any missing parents; true if it was newly created.
 
 ```
 >>> mkdir("out/plots")
+```
+
+### `read_at(path, offset, len)`
+
+Read at most len bytes from offset, without reading the whole file.
+
+**Note:** WHAT MAKES A PAGE-ORIENTED STORE POSSIBLE: every read was O(file), so one index lookup paid for the whole dataset. Returns what is there, so a short final page is a shorter string rather than an error — the courtesy `pread` extends. THE SLICE MUST BE VALID UTF-8, because a Helix string is: a boundary splitting a multi-byte character is refused by name rather than replaced with U+FFFD, which would silently corrupt the byte you asked for. Keywords: pread, offset, seek, random access, page, index, database, storage, slice.
+
+```
+>>> read_at("db/pages", 4096, 4096)
 ```
 
 ### `read_bam(path, region?)`
@@ -629,6 +679,16 @@ Read a VCF into a DataFrame; with a region, an indexed query against the .tbi.
 >>> read_vcf("calls.vcf.gz", "chr1:10000-20000")
 ```
 
+### `remove_dir(path)`
+
+Remove an EMPTY directory; false if it was not there.
+
+**Note:** EMPTY ONLY, AND NEVER RECURSIVE. A recursive delete is one typo away from removing a tree nobody named, and this language will not make that a one-liner — remove the contents with `read_dir` and `remove_file`, which keeps the decision at the call site. Idempotent like `remove_file`. Keywords: rmdir, directory, remove, delete, cleanup, empty.
+
+```
+>>> remove_dir("db/old")
+```
+
 ### `remove_file(path)`
 
 Delete a file; true if it was removed, false if it was not there (idempotent).
@@ -637,12 +697,62 @@ Delete a file; true if it was removed, false if it was not there (idempotent).
 >>> remove_file("stale_cache.json")
 ```
 
+### `rename(from, to)`
+
+Atomically move a file within one filesystem, replacing the destination.
+
+**Note:** THE ATOMIC COMMIT PRIMITIVE, and what makes write-temp-then-rename expressible: a reader never sees a half-written destination, and an existing one is replaced in the same instant. REFUSES TO CROSS A FILESYSTEM (EXDEV) rather than degrading to copy-then-delete, because that copy reintroduces exactly the window callers came here to avoid — write the temporary beside its destination. Renaming is not durable until the parent directory is flushed: the full sequence is write, `fsync`, `rename`, `sync_dir`. Keywords: atomic, commit, move, replace, durable, crash, transaction, storage, database.
+
+```
+>>> rename("db/tmp.part", "db/head")
+```
+
 ### `source_path(rel)`
 
 Resolve a path against the directory of the file the call is written in, not the CWD.
 
 ```
 >>> read_text(source_path("data/codon_table.csv"))
+```
+
+### `sync_dir(path)`
+
+Flush a directory entry, so a create or rename inside it survives a crash.
+
+**Note:** THE STEP EVERYONE FORGETS. After `rename(tmp, final)` the contents can be durable while the rename is not: a crash reverts the directory and the commit vanishes even though `fsync` reported success. ANSWERS `false` WHERE THE PLATFORM CANNOT DO IT (Windows exposes no directory flush through the standard library) rather than `true` — a durability claim that cannot be kept is the shape of lie that loses data on exactly one platform, so the answer is testable. Keywords: durable, directory, flush, sync, crash, rename, commit, database.
+
+```
+>>> sync_dir("db")
+```
+
+### `truncate(path, len)`
+
+Set a file's length, discarding anything past it.
+
+**Note:** How a write-ahead log is reclaimed after a checkpoint. GROWING IS LEGAL and zero-fills, which is how a page file is preallocated. Keywords: truncate, shrink, grow, preallocate, wal, log, checkpoint, database, storage.
+
+```
+>>> truncate("db/wal", 0)
+```
+
+### `try_lock_file(path)`
+
+Take a kernel-held exclusive lock, or `missing` if another process holds it.
+
+**Note:** `lock_file` without the wait. `missing` is an ANSWER, not a failure: a store that reports "another process has this open" beats one that hangs with no output, so this is usually the one a database wants. Test it with `.is_missing()` — comparing to `missing` with `==` PROPAGATES missing (ADR 0001) rather than answering a Bool. Same crash-release guarantee and same advisory limit as `lock_file`. Keywords: lock, try, non-blocking, mutex, exclusive, flock, single writer, busy, database.
+
+```
+>>> try_lock_file("db/.lock")
+```
+
+### `write_at(path, offset, text)`
+
+Overwrite bytes at an offset, extending the file if needed; returns bytes written.
+
+**Note:** `read_at`'s twin. Updating one page meant rewriting the whole file, which is O(file) per update and replaces data that was already durable. Returns the BYTE count, not the character count — the distinction that matters when computing the next offset. Creates the file if absent and never truncates it. Keywords: pwrite, offset, seek, page, in place, update, database, storage.
+
+```
+>>> write_at("db/pages", 4096, page)
 ```
 
 ## linalg
@@ -2125,7 +2235,7 @@ The p-th quantile (p in [0, 1]) of the values, linearly interpolated.
 
 Fold left-to-right: the accumulator starts at init, f(acc, x) per element.
 
-**Note:** Building a collection here is amortized LINEAR when the accumulator IS the collection (ADR 0029), and QUADRATIC when it is a field of a record — the take-append-store only fires on a local, so through a field every step copies. That matters because `mut` is top-level only, so a fold carrying two values carries them in a record; `helix check --lint` names the shape when you write it.
+**Note:** Building a collection here is amortized LINEAR when the accumulator IS the collection, and ALSO when it is an ARRAY in a record field (ADR 0029): `concat` appends into a shared buffer, measured 3.3x per 4x the input where it was 27.9x, and 36 ms where it was 2591 ms at n=160,000. A DICT in a record field is STILL QUADRATIC — `insert` clones the whole map per step and the take-append-store only fires on a local — measured 16.6x per 4x and 71 s at n=128,000; a STRING built by interpolation in a record field is too (10.1x). That matters because `mut` is top-level only, so a fold carrying two values carries them in a record, which is what AGENTS.md teaches; `helix check --lint` names the dict shape when you write it.
 
 ```
 >>> [1, 2, 3].reduce(0, (acc, x) => acc + x)

@@ -31,7 +31,10 @@ pub struct BuiltinDef {
 pub fn category_of(name: &str) -> &'static str {
     match name {
         // Filesystem I/O (readers + the two writers).
-        "read_csv" | "read_parquet" | "read_text" | "read_json" | "read_dir" | "file_exists"
+        "lock_file" | "try_lock_file"
+        | "rename" | "fsync" | "sync_dir" | "create_new" | "file_size" | "read_at"
+        | "write_at" | "truncate" | "remove_dir"
+        | "read_csv" | "read_parquet" | "read_text" | "read_json" | "read_dir" | "file_exists"
         | "remove_file" | "mkdir" | "read_fasta" | "read_fastq" | "read_vcf" | "read_bcf"
         | "read_sam" | "read_bam" | "read_gff" | "read_bed" => "io",
         // Networking — client + server.
@@ -113,6 +116,17 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "file_exists", pure: false },
     BuiltinDef { path: "remove_file", pure: false },
     BuiltinDef { path: "mkdir", pure: false },
+    BuiltinDef { path: "rename", pure: false },
+    BuiltinDef { path: "fsync", pure: false },
+    BuiltinDef { path: "sync_dir", pure: false },
+    BuiltinDef { path: "create_new", pure: false },
+    BuiltinDef { path: "file_size", pure: false },
+    BuiltinDef { path: "read_at", pure: false },
+    BuiltinDef { path: "write_at", pure: false },
+    BuiltinDef { path: "truncate", pure: false },
+    BuiltinDef { path: "remove_dir", pure: false },
+    BuiltinDef { path: "lock_file", pure: false },
+    BuiltinDef { path: "try_lock_file", pure: false },
     BuiltinDef { path: "read_fasta", pure: false },
     BuiltinDef { path: "read_fastq", pure: false },
     BuiltinDef { path: "read_vcf", pure: false },

@@ -5394,7 +5394,14 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // passes the args through untouched, so the `unwrap` went with it.
         ("src/parser.rs", 7),
         ("src/bio.rs", 0),
-        ("src/value.rs", 0),
+        // THREE `RefCell` BORROWS, RAISED WITH THE PROOFS AT THE SITES. `ArrayData::Shared`
+        // is the append-only buffer that makes a fold linear through a record field, and a
+        // buffer that grows behind shared handles needs interior mutability. Each borrow
+        // carries an argument at its definition for why it cannot conflict: the sole
+        // `borrow_mut` reads its argument BEFORE taking the cell (so `xs.concat(xs)`, which
+        // aliases the buffer, does not double-borrow) and runs no Helix code while holding
+        // it, so no reader can be in flight.
+        ("src/value.rs", 3),
         // The ADR 0032 split moved jit.rs's one budgeted call into analysis.rs.
         ("src/jit.rs", 0),
         ("src/jit/analysis.rs", 1),
@@ -7327,24 +7334,43 @@ fn test_json_and_check_lint() {
     assert_eq!(lcode, Some(0), "lints never change the exit code");
     assert!(lout.contains("LAST-wins"), "{lout}");
 
-    // ADR 0029's guarantee stops at a record field, and the lint is what makes that
-    // audible. `mut` is top-level only, so a fold carrying two values carries them in a
-    // record — the shape AGENTS.md teaches — and through a field the take-append-store
-    // cannot fire, so the fold is quadratic with nothing to say so.
+    // ADR 0029's guarantee stops at a record field for a DICT, and the lint is what makes
+    // that audible. `mut` is top-level only, so a fold carrying two values carries them in
+    // a record — the shape AGENTS.md teaches — and through a field the take-append-store
+    // cannot fire, so `insert` clones the whole map per step: measured 16.6x per 4x the
+    // input and 71 s at n=128,000.
     // The block above removes `dir` before asserting, so re-make it.
     std::fs::create_dir_all(&dir).unwrap();
     let acc = dir.join("acc.helix");
     std::fs::write(
         &acc,
-        "r = range(0, 4).reduce({xs: [], k: 0}, (a, i) => {xs: a.xs.concat([i]), k: a.k + 1})
+        "r = range(0, 4).reduce({d: dict(), k: 0}, (a, i) => {d: a.d.insert(i, i), k: a.k + 1})
 print(r.k)
 ",
     )
     .unwrap();
     let (aout, _, acode) = run(&["check", "--lint", acc.to_str().unwrap()], &[], "");
     assert_eq!(acode, Some(0), "lints never change the exit code");
-    assert!(aout.contains("ADR 0029"), "the record-field fold must be named: {aout}");
+    assert!(aout.contains("ADR 0029"), "the record-field dict fold must be named: {aout}");
     assert!(aout.contains("O(n^2)"), "and its class stated: {aout}");
+
+    // AND THE ARRAY HALF MUST NOW BE SILENT. `ArrayData::Shared` made it linear (3.3x per
+    // 4x the input where it was 27.9x, 36 ms where it was 2591 ms at n=160,000), so the
+    // note would be a checker contradicting the runtime — which is how a checker gets
+    // turned off. This is the assertion that fails if the two ever drift apart again.
+    let arr = dir.join("arr.helix");
+    std::fs::write(
+        &arr,
+        "r = range(0, 4).reduce({xs: [], k: 0}, (a, i) => {xs: a.xs.concat([i]), k: a.k + 1})
+print(r.k)
+",
+    )
+    .unwrap();
+    let (arrout, _, _) = run(&["check", "--lint", arr.to_str().unwrap()], &[], "");
+    assert!(
+        !arrout.contains("ADR 0029"),
+        "an array in a record field is linear now — the lint must not claim otherwise: {arrout}"
+    );
 
     // A BARE accumulator is the covered case and must stay silent, or the lint teaches
     // people to avoid the spelling that actually works.
@@ -11108,10 +11134,12 @@ fn check_lint_walks_the_import_graph() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    // The quadratic shape lives HERE, in the imported module.
+    // The quadratic shape lives HERE, in the imported module. It is the DICT spelling: the
+    // array one became linear with `ArrayData::Shared`, so the lint no longer fires on it
+    // and using it as bait would make this test pass for the wrong reason.
     std::fs::write(
         dir.join("lib.helix"),
-        "export fn build(n) = range(0, n).reduce({xs: [], k: 0}, (a, i) => {xs: a.xs.concat([i]), k: a.k + 1}).k\n",
+        "export fn build(n) = range(0, n).reduce({d: dict(), k: 0}, (a, i) => {d: a.d.insert(i, i), k: a.k + 1}).k\n",
     )
     .unwrap();
     // The entry is clean — it has nothing to lint of its own.
@@ -11328,5 +11356,437 @@ fn an_unknown_manifest_key_names_the_build_version() {
         err.contains(env!("CARGO_PKG_VERSION")),
         "the refusal names this build's version: {err}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A collection accumulated in a RECORD FIELD must be amortized-linear, which is ADR
+/// 0029's guarantee and was the one shape it did not reach.
+///
+/// `Op::ConcatIntoLocal` makes a BARE accumulator linear by taking the value out of its
+/// local slot, leaving the `Rc` unique so the append extends in place. Through a record
+/// field there is no slot to take from — reading `acc.xs` clones the `Rc` while the record
+/// still holds one — so `Rc::get_mut` always failed and every step copied the whole
+/// accumulator. Measured before the fix at n=160,000 with startup subtracted: 2,591 ms
+/// against 12 ms bare, and a 4n/n ratio of 27.9x against 3.0x.
+///
+/// The shape is not niche: `mut` is top-level only, so a fold carrying two values *must*
+/// carry them in a record, which is what AGENTS.md teaches.
+///
+/// A RATIO, NOT A WALL-CLOCK BUDGET. Both folds run in this same process on this same
+/// machine, so speed, allocator and build profile cancel; only the complexity class
+/// survives. Quadratic-vs-linear showed as ~130x here including startup, linear-vs-linear
+/// as ~2x, so 20x has an order of magnitude of headroom on both sides and cannot flake
+/// into either verdict.
+#[test]
+fn a_fold_through_a_record_field_is_linear() {
+    let dir = std::env::temp_dir().join(format!("hx_acc_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    const N: usize = 160_000;
+
+    let bare = dir.join("bare.helix");
+    std::fs::write(
+        &bare,
+        format!("print(range(0, {N}).reduce([], (a, i) => a.concat([i])).count())\n"),
+    )
+    .unwrap();
+    let field = dir.join("field.helix");
+    std::fs::write(
+        &field,
+        format!(
+            "r = range(0, {N}).reduce({{xs: [], k: 0}}, (a, i) => {{xs: a.xs.concat([i]), k: a.k + 1}})\nprint(r.xs.count(), r.k)\n"
+        ),
+    )
+    .unwrap();
+
+    // Best of three each: a scheduler hiccup must not decide a correctness verdict.
+    let best = |path: &std::path::Path, want: &str| -> std::time::Duration {
+        let mut best = std::time::Duration::from_secs(3600);
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            let (out, err, code) = run(&["run", path.to_str().unwrap()], &[], "");
+            let dt = t0.elapsed();
+            assert_eq!(code, Some(0), "{err}");
+            // The answer is asserted too — a fast wrong answer is the failure mode a
+            // timing test is least equipped to notice.
+            assert_eq!(out.trim(), want, "{path:?}");
+            best = best.min(dt);
+        }
+        best
+    };
+
+    let t_bare = best(&bare, &N.to_string());
+    let t_field = best(&field, &format!("{N} {N}"));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        t_field.as_secs_f64() < t_bare.as_secs_f64() * 20.0,
+        "the record-field fold is not linear: {:?} against {:?} bare (ratio {:.1}x). \
+         ADR 0029 guarantees amortized-linear accumulation, and `ArrayData::Shared` is \
+         what extends it through a field.",
+        t_field,
+        t_bare,
+        t_field.as_secs_f64() / t_bare.as_secs_f64().max(1e-9)
+    );
+}
+
+/// The append buffer is SHARED, so the cases that could make sharing observable are the
+/// ones worth pinning: an older view must not see a newer append, a branch must copy, the
+/// receiver may alias the argument, and the result must keep the representation the
+/// copying `concat` produced.
+#[test]
+fn a_shared_append_buffer_is_not_observable() {
+    let dir = std::env::temp_dir().join(format!("hx_shbuf_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("t.helix");
+
+    let cases: &[(&str, &str)] = &[
+        // REPRESENTATION IS THE HAZARD, not the elements. `array_sniff` repacks, and an
+        // `Ints` reduction answers `Int` where the general path answers `Float` — so a
+        // lazy append that forgot to re-sniff would be a wrong ANSWER, not a slow one.
+        ("a = [1, 2].concat([3])\nprint(a, a.sum(), type_of(a.sum()))", "[1, 2, 3] 6 Int"),
+        (
+            "b = [1.0, 2.0].concat([3.0])\nprint(b, b.sum(), type_of(b.sum()))",
+            "[1.0, 2.0, 3.0] 6.0 Float",
+        ),
+        ("print([].concat([]).count())", "0"),
+        ("print([\"x\"].concat([1]))", "[\"x\", 1]"),
+        ("print([1, 2].concat([3], [4, 5]).sum())", "15"),
+        // BRANCHING: two values over one buffer must not see each other. `base` keeps its
+        // own length, and extending it a second time copies rather than appends.
+        (
+            "base = [1].concat([2])\nx = base.concat([98])\ny = base.concat([99])\nprint(base, x, y)",
+            "[1, 2] [1, 2, 98] [1, 2, 99]",
+        ),
+        (
+            "base = [1].concat([2])\nx = base.concat([98])\nz = x.concat([100])\ny = base.concat([99])\nprint(base, x, y, z)",
+            "[1, 2] [1, 2, 98] [1, 2, 99] [1, 2, 98, 100]",
+        ),
+        // SELF-CONCAT aliases the buffer. Reading the argument while the cell is held for
+        // writing is a `RefCell` double borrow — a host abort, which ADR 0024 forbids.
+        ("xs = [1].concat([2])\nprint(xs.concat(xs))", "[1, 2, 1, 2]"),
+        ("ys = [1].concat([2])\nprint(ys.concat(ys, ys))", "[1, 2, 1, 2, 1, 2]"),
+        // The packed fast paths must still engage after materialization.
+        ("print([3, 1, 2].concat([0]).sort(), [1, 2].concat([3]).cumsum())", "[0, 1, 2, 3] [1, 3, 6]"),
+        ("print([-1, 2].concat([-3]).abs(), [1, 2].concat([3]) + 1)", "[1, 2, 3] [2, 3, 4]"),
+        // A zero-argument `concat` keeps its arity error rather than being swallowed.
+        ("print([1].concat())", "ERROR"),
+    ];
+
+    for (src, want) in cases {
+        std::fs::write(&f, format!("{src}\n")).unwrap();
+        let (out, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+        if *want == "ERROR" {
+            assert_ne!(code, Some(0), "expected a refusal for:\n{src}\ngot: {out}");
+            continue;
+        }
+        assert_eq!(code, Some(0), "{src}\n{err}");
+        assert_eq!(out.trim(), *want, "{src}");
+
+        // ALL THREE ENGINES, because a lazy representation is exactly the kind of thing
+        // one engine can densify and another cannot.
+        let (vm, _, _) = run(&["run", f.to_str().unwrap()], &[("HELIX_NOJIT", "1")], "");
+        let (walker, _, _) =
+            run(&["run", f.to_str().unwrap()], &[("HELIX_NOJIT", "1"), ("HELIX_NOVM", "1")], "");
+        assert_eq!(out, vm, "JIT and VM diverge on:\n{src}");
+        assert_eq!(vm, walker, "VM and tree-walker diverge on:\n{src}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The durable-commit sequence must be EXPRESSIBLE, and each step must do its own job.
+///
+/// A field report building a versioned store concluded — correctly — that
+/// write-temp-then-rename could not be written: the filesystem surface was `mkdir`,
+/// `remove_file`, `file_exists`, `read_dir`, `read_text`, `write_to`, `append_to`. It
+/// designed around the gap with signed heads and newest-that-verifies, which is a better
+/// design than rename would have produced; but no amount of cleverness above the
+/// filesystem supplies a promise the filesystem never made. ADR 0041 adds the promises.
+#[test]
+fn a_durable_commit_is_expressible() {
+    let dir = std::env::temp_dir().join(format!("hx_commit_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = dir.to_str().unwrap().replace('\\', "/");
+    let f = dir.join("t.helix");
+
+    // WRITE, FSYNC, RENAME, SYNC_DIR — in that order, which is the whole point. `fsync`
+    // makes the contents durable and `sync_dir` makes the NAME durable; a store that does
+    // only the first believes it committed and, after a crash, did not.
+    std::fs::write(
+        &f,
+        format!(
+            "tmp = \"{d}/head.part\"\n\
+             \"seq=1\".write_to(tmp)\n\
+             fsync(tmp)\n\
+             rename(tmp, \"{d}/head\")\n\
+             sync_dir(\"{d}\")\n\
+             print(read_text(\"{d}/head\"), not file_exists(tmp))\n"
+        ),
+    )
+    .unwrap();
+    let (out, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "seq=1 true", "the commit must land and leave no temp");
+
+    // `rename` REPLACES an existing destination in one step — the property that makes it a
+    // commit rather than a move.
+    std::fs::write(
+        &f,
+        format!(
+            "\"old\".write_to(\"{d}/a\")\n\"new\".write_to(\"{d}/b\")\n\
+             rename(\"{d}/b\", \"{d}/a\")\n\
+             print(read_text(\"{d}/a\"), not file_exists(\"{d}/b\"))\n"
+        ),
+    )
+    .unwrap();
+    let (out, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "new true");
+
+    // `create_new` is ATOMIC, which `file_exists` then `write_to` is not: that pair races,
+    // and this is the lock / leader-election / safe-content-addressed-write primitive.
+    // The loser writes NOTHING.
+    std::fs::write(
+        &f,
+        format!(
+            "p = \"{d}/lock\"\n\
+             print(create_new(p, \"pid-1\"), create_new(p, \"pid-2\"), read_text(p))\n"
+        ),
+    )
+    .unwrap();
+    let (out, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "true false pid-1");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Random access, which is what makes a page-oriented store possible: every read used to be
+/// O(file), so one index lookup paid for the whole dataset.
+#[test]
+fn a_file_can_be_read_and_written_at_an_offset() {
+    let dir = std::env::temp_dir().join(format!("hx_pages_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = dir.to_str().unwrap().replace('\\', "/");
+    let f = dir.join("t.helix");
+
+    std::fs::write(
+        &f,
+        format!(
+            "p = \"{d}/pages\"\n\
+             \"AAAA\".write_to(p)\n\
+             write_at(p, 4, \"BBBB\")\n\
+             write_at(p, 8, \"CCCC\")\n\
+             print(file_size(p), read_at(p, 4, 4), read_at(p, 8, 4))\n\
+             write_at(p, 4, \"ZZZZ\")\n\
+             print(read_at(p, 0, 12))\n\
+             print(\"[{{read_at(p, 8, 999)}}]\", \"[{{read_at(p, 999, 4)}}]\")\n\
+             truncate(p, 4)\n\
+             print(file_size(p), read_text(p))\n"
+        ),
+    )
+    .unwrap();
+    let (out, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "12 BBBB CCCC", "{out}");
+    // An in-place page update touches only its own page.
+    assert_eq!(lines[1], "AAAAZZZZCCCC", "{out}");
+    // A short read at EOF returns what is there; past EOF is empty. Both are `pread`'s
+    // courtesy, and erroring instead would make reading a final partial page impossible.
+    assert_eq!(lines[2], "[CCCC] []", "{out}");
+    assert_eq!(lines[3], "4 AAAA", "{out}");
+
+    // The refusals. Each is a wrong answer waiting to happen if it were permissive.
+    let bad: &[(&str, &str)] = &[
+        ("print(read_at(\"P\", 0 - 1, 4))", "non-negative"),
+        ("print(truncate(\"P\", 0 - 1))", "non-negative"),
+        // A slice that splits a multi-byte character is REFUSED, not replaced with U+FFFD,
+        // which would silently corrupt the byte the caller asked for.
+        ("\"aé\".write_to(\"P\")\nprint(read_at(\"P\", 0, 2))", "not valid UTF-8"),
+    ];
+    for (src, want) in bad {
+        std::fs::write(&f, format!("{}\n", src.replace('P', &format!("{d}/pages")))).unwrap();
+        let (_, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+        assert_ne!(code, Some(0), "expected a refusal for {src}");
+        assert!(err.contains(want), "for {src} expected {want:?}, got: {err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `remove_dir` removes an EMPTY directory and is never recursive, and every new storage
+/// verb is capability-gated — a durability primitive that escaped the sandbox would be a
+/// hole in it, and `fs-read` must not imply `fs-write`.
+#[test]
+fn the_storage_verbs_are_gated_and_remove_dir_is_never_recursive() {
+    let dir = std::env::temp_dir().join(format!("hx_gate_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/f"), "x").unwrap();
+    let d = dir.to_str().unwrap().replace('\\', "/");
+    let f = dir.join("t.helix");
+
+    // NON-EMPTY IS AN ERROR. A recursive delete is one typo from removing a tree nobody
+    // named, so it is not a one-liner in this language.
+    std::fs::write(&f, format!("print(remove_dir(\"{d}/sub\"))\n")).unwrap();
+    let (_, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0), "a non-empty directory must not be removed");
+    assert!(err.contains("never recursive"), "{err}");
+
+    // Absent is `false`, matching `remove_file`'s idempotence; empty removes.
+    std::fs::write(
+        &f,
+        format!(
+            "print(remove_dir(\"{d}/gone\"))\n\
+             remove_file(\"{d}/sub/f\")\n\
+             print(remove_dir(\"{d}/sub\"), file_exists(\"{d}/sub\"))\n"
+        ),
+    )
+    .unwrap();
+    let (out, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.lines().collect::<Vec<_>>(), vec!["false", "true false"], "{out}");
+
+    // CAPABILITY. `file_size` is a read; `rename` is a write and stays denied when only
+    // read is granted.
+    std::fs::write(&f, format!("print(file_size(\"{d}/t.helix\"))\n")).unwrap();
+    let (_, err, code) =
+        run(&["run", f.to_str().unwrap()], &[("HELIX_CAP", "enforce")], "");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`file_size` needs `fs-read`"), "{err}");
+    let (_, _, code) = run(
+        &["run", f.to_str().unwrap()],
+        &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_FS", "read")],
+        "",
+    );
+    assert_eq!(code, Some(0), "fs-read must be enough to stat");
+
+    std::fs::write(&f, format!("print(rename(\"{d}/t.helix\", \"{d}/t2\"))\n")).unwrap();
+    let (_, err, code) = run(
+        &["run", f.to_str().unwrap()],
+        &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_FS", "read")],
+        "",
+    );
+    assert_ne!(code, Some(0), "fs-read must NOT imply fs-write");
+    assert!(err.contains("`rename` needs `fs-write`"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A lock must survive its holder's death — by disappearing.
+///
+/// `create_new` is atomic and is the right answer for a content-addressed write, but as a
+/// LOCK it has the one flaw that matters: the file does not release when its holder crashes,
+/// so the next process finds a marker it cannot distinguish from a live writer. Every remedy
+/// at that level is a guess — a PID that may have been reused, a timestamp that may be a long
+/// pause, a heartbeat that is one more thing to get wrong.
+///
+/// A kernel lock lives on an open file description, so closing releases it — and a killed
+/// process closes everything. This test kills the holder and asserts the difference, because
+/// asserting only that the lock works would pass on the broken design too.
+#[test]
+fn a_kernel_lock_releases_when_its_holder_is_killed() {
+    let dir = std::env::temp_dir().join(format!("hx_lock_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = dir.to_str().unwrap().replace('\\', "/");
+
+    // Uncontended: acquire, inspect, release. `release` answers whether THIS call released
+    // it, so a double release is legal and still distinguishable.
+    let basic = dir.join("basic.helix");
+    std::fs::write(
+        &basic,
+        format!(
+            "l = lock_file(\"{d}/a.lock\")\n\
+             print(l.held(), l.release(), l.release(), l.held())\n"
+        ),
+    )
+    .unwrap();
+    let (out, err, code) = run(&["run", basic.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "true true false false", "{out}");
+
+    // A holder that blocks, so a second process can be observed being excluded.
+    let hold = dir.join("hold.helix");
+    std::fs::write(
+        &hold,
+        format!("l = lock_file(\"{d}/db.lock\")\nprint(l.held())\nsleep(60000)\n"),
+    )
+    .unwrap();
+    let probe = dir.join("probe.helix");
+    std::fs::write(
+        &probe,
+        format!(
+            "l = try_lock_file(\"{d}/db.lock\")\n\
+             print(if l.is_missing() then \"BUSY\" else \"ACQUIRED\")\n"
+        ),
+    )
+    .unwrap();
+
+    let mut holder = std::process::Command::new(env!("CARGO_BIN_EXE_helix"))
+        .args(["run", hold.to_str().unwrap()])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the lock holder");
+
+    // Wait for the holder to actually take the lock rather than racing a fixed sleep.
+    {
+        use std::io::Read;
+        let mut buf = [0u8; 5];
+        let mut got = 0;
+        let so = holder.stdout.as_mut().expect("piped stdout");
+        while got < 4 {
+            match so.read(&mut buf[got..]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => got += n,
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&buf[..got]).starts_with("true"),
+            "the holder never reported taking the lock"
+        );
+    }
+
+    let (out, _, _) = run(&["run", probe.to_str().unwrap()], &[], "");
+    assert_eq!(out.trim(), "BUSY", "a second process must be excluded while it is held");
+
+    // THE POINT. Kill the holder outright — no unwinding, no destructors, no chance to tidy
+    // up — and the lock must be gone.
+    let _ = holder.kill();
+    let _ = holder.wait();
+    let (out, _, _) = run(&["run", probe.to_str().unwrap()], &[], "");
+    assert_eq!(out.trim(), "ACQUIRED", "the kernel must release a killed holder's lock");
+
+    // THE CONTRAST, asserted rather than assumed: the same crash leaves a `create_new` lock
+    // file behind forever. This is the assertion that makes the test about the difference.
+    let cn = dir.join("cn.helix");
+    std::fs::write(
+        &cn,
+        format!("print(if create_new(\"{d}/cn.lock\", \"pid\") then \"ACQUIRED\" else \"BUSY\")\n"),
+    )
+    .unwrap();
+    let (first, _, _) = run(&["run", cn.to_str().unwrap()], &[], "");
+    let (again, _, _) = run(&["run", cn.to_str().unwrap()], &[], "");
+    assert_eq!(first.trim(), "ACQUIRED");
+    assert_eq!(again.trim(), "BUSY", "a lock FILE cannot tell a corpse from a live writer");
+
+    // Gated like every other write verb, and a Lock refuses a method it does not have.
+    let (_, err, code) = run(
+        &["run", probe.to_str().unwrap()],
+        &[("HELIX_CAP", "enforce")],
+        "",
+    );
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`try_lock_file` needs `fs-write`"), "{err}");
+
+    let bad = dir.join("bad.helix");
+    std::fs::write(&bad, format!("print(lock_file(\"{d}/a.lock\").nope())\n")).unwrap();
+    let (_, err, code) = run(&["run", bad.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("a Lock has no method `nope`"), "{err}");
+
     let _ = std::fs::remove_dir_all(&dir);
 }

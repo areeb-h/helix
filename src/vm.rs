@@ -213,6 +213,17 @@ enum CompSource {
 /// inherits every call site at once.
 fn densify_lazy_top(stack: &mut [Value]) {
     use crate::value::ArrayData;
+    // A LAZY-APPEND array does not share the `Range -> Ints` shape below: it materializes
+    // through `array_sniff`, so its dense twin may be any of the eager representations.
+    // This is the VM half of the one door — `interp::ops::densify_lazy` is the other, and a
+    // variant that joined only one of them is how `Range` and `Enumerate` ended up with
+    // different fallbacks the first time.
+    if let Some(Value::Array(a)) = stack.last()
+        && let Some(d) = a.densified()
+    {
+        *stack.last_mut().expect("stack top present") = Value::Array(std::rc::Rc::new(d));
+        return;
+    }
     let ints = match stack.last() {
         Some(Value::Array(a)) if matches!(&**a, ArrayData::Range { .. }) => {
             Some(a.to_ints().expect("Range materializes to Ints").into_owned())

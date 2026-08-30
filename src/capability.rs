@@ -67,7 +67,15 @@ pub fn effect_of(name: &str) -> Effect {
         | "read_csv" | "read_parquet" | "read_text" | "read_json" | "read_dir" | "file_exists"
         | "read_fasta" | "read_fastq" | "read_vcf" | "read_bcf" | "read_sam" | "read_bam"
         | "read_gff" | "read_bed" => Effect::FsRead,
-        "remove_file" | "mkdir" => Effect::FsWrite,
+        // THE DURABLE-STORAGE SUBSTRATE (ADR 0041). `fsync` and `sync_dir` are classified
+        // as WRITES even though they add no bytes: they exist only to complete a write that
+        // already happened, and a program granted read-only authority has nothing to make
+        // durable. `file_size` and `read_at` observe without changing and are reads.
+        "remove_file" | "mkdir" | "rename" | "fsync" | "sync_dir" | "create_new"
+        | "write_at" | "truncate" | "remove_dir"
+        // A lock is taken to WRITE; a reader has nothing to exclude anyone from.
+        | "lock_file" | "try_lock_file" => Effect::FsWrite,
+        "file_size" | "read_at" => Effect::FsRead,
         "listen" | "http_get" | "http_post" | "http_request" | "http_stream" => Effect::Net,
         // The first `Process` grant. ADR 0021 reserved the category and ADR 0037 D3
         // states its ceiling: a subprocess is a BOUNDARY EXIT, not confinement — it
@@ -347,6 +355,8 @@ mod tests {
         for n in [
             "read_text", "read_csv", "read_json", "read_dir", "read_vcf", "read_bam",
             "file_exists", "remove_file", "mkdir", "listen", "http_get",
+            "rename", "fsync", "sync_dir", "create_new", "file_size", "read_at",
+            "write_at", "truncate", "remove_dir", "lock_file", "try_lock_file",
         ] {
             assert!(effect_of(n).gated(), "`{n}` must remain capability-gated (ADR 0021)");
         }

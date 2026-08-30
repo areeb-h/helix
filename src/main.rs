@@ -39,6 +39,7 @@ mod docs;
 mod visit;
 mod doctest;
 mod error;
+mod filelock;
 mod fmt;
 mod framefmt;
 #[cfg(feature = "bio")]
@@ -2375,32 +2376,40 @@ fn lint_source(shown: &str, src: &str) -> Vec<String> {
                     // `xs.reduce(dict(), …)` — the fold that stands in for
                     // `to_dict()`, with the last-wins rule attached so a
                     // mechanical migration cannot invert a first-wins fold.
-                    // A COLLECTION ACCUMULATED INSIDE A RECORD, which ADR 0029's
-                    // amortized-linear guarantee does not reach — and which is the shape
-                    // AGENTS.md teaches, because `mut` is top-level only and a fold
+                    // A DICT ACCUMULATED INSIDE A RECORD, which ADR 0029's
+                    // amortized-linear guarantee still does not reach — and which is the
+                    // shape AGENTS.md teaches, because `mut` is top-level only and a fold
                     // carrying two values has to carry them in a record.
                     //
-                    // `Op::ConcatIntoLocal` is a take-append-store in ONE instruction, and
-                    // its own doc says why that is what makes it safe: the slot is never
-                    // observably empty, so there is nothing to prove. Through a record
-                    // field there is no such slot — reading `a.xs` clones the `Rc` while
-                    // the record still holds one, so the append copies. Silence here would
-                    // be the performance cliff ADR 0026 forbids.
+                    // THE ARRAY CASE USED TO BE HERE TOO AND IS NOW A FIX RATHER THAN A
+                    // DIAGNOSTIC. `ArrayData::Shared` gives `concat` an append-only buffer,
+                    // so an array in a record field is linear: measured 2.2x and 3.3x per
+                    // 4x the input where it was 9.3x and 27.9x, and 36 ms where it was
+                    // 2,591 ms at n=160,000. Keeping the note would be a checker
+                    // contradicting the runtime, which trains people to ignore it.
+                    //
+                    // `Dict::insert` has no such buffer: it clones the whole `BTreeMap` per
+                    // call, and `Op::InsertIntoLocal` only rescues the bare-local spelling
+                    // (reading `a.d` clones the `Rc` while the record still holds one, so
+                    // `Rc::get_mut` always fails). Measured per 4x the input: 15.4x then
+                    // 16.6x, and **71 seconds** at n=128,000 against 4 ms for the array. It
+                    // is now the worst remaining cliff of this family, so the diagnostic
+                    // ADR 0026 requires stays until that fix lands.
                     Expr::Method { name, args, line, .. }
                         if name == "reduce"
                             && matches!(args.first(), Some(Expr::Record(fs))
-                                if fs.iter().any(|(_, v)| matches!(v, Expr::Array(xs) if xs.is_empty())
-                                    || matches!(v, Expr::Call { name: n, args: a, .. } if n == "dict" && a.is_empty()))) =>
+                                if fs.iter().any(|(_, v)| matches!(v, Expr::Call { name: n, args: a, .. } if n == "dict" && a.is_empty()))) =>
                     {
                         notes.push((*line, format!(
-                            "{shown}:{line}: this fold accumulates a collection INSIDE a \
-                             record, which ADR 0029's amortized-linear guarantee does not \
-                             cover — the take-append-store that makes `acc = acc.concat(…)` \
-                             linear only fires when the accumulator IS the local, so through \
-                             a field every step copies and the fold is O(n^2). Measured over \
-                             8x the input: 3.8x for a bare accumulator, 22.8x for a record \
-                             field. Fine for tens or hundreds of steps; for thousands, fold \
-                             the collection on its own and carry the rest beside it."
+                            "{shown}:{line}: this fold accumulates a DICT inside a record, \
+                             which ADR 0029's amortized-linear guarantee does not reach — \
+                             `insert` clones the whole map per step, and the take-append-store \
+                             that rescues `acc = acc.insert(…)` only fires when the \
+                             accumulator IS the local, so through a field the fold is O(n^2). \
+                             Measured per 4x the input: 16.6x, and 71 s at n=128,000. (An \
+                             ARRAY in a record field is linear as of 0.7.1 — this is the dict \
+                             half only.) Fine for tens or hundreds of steps; for thousands, \
+                             fold the dict on its own and carry the rest beside it."
                         )));
                     }
                     Expr::Method { name, args, line, .. } if name == "reduce" => {

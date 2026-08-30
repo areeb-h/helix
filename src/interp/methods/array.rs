@@ -91,6 +91,15 @@ pub(crate) fn array_numeric_fast(
     col: usize,
 ) -> Result<Option<Value>, HelixError> {
     use crate::value::ArrayData;
+    // A LAZY-APPEND array is materialized to exactly the array the copying `concat` would
+    // have produced, BEFORE any packed dispatch. The representation decides the ANSWER
+    // here and not merely the speed: `Ints` reaches `array_int_reduce` and sums to an
+    // `Int`, where declining would fall through to the general path and sum to a `Float`.
+    // The `Shared` arms below are therefore unreachable; they stay for exhaustiveness and
+    // are grouped with the other non-packed variants so that reaching one is still safe.
+    if let Some(d) = ad.densified() {
+        return array_numeric_fast(&d, name, args, line, col);
+    }
     // Lazy-Range `take`/`drop`: O(1) re-slicing of the arithmetic progression — the
     // whole point of the lazy representation (`range(100000000).take(1)` previously
     // materialized ~1.6 GB of boxed Values to keep one element, contradicting the
@@ -183,7 +192,7 @@ pub(crate) fn array_numeric_fast(
     match name {
         "count" | "length" => {
             return Ok(match ad {
-                ArrayData::Values(_) => None,
+                ArrayData::Values(_) | ArrayData::Shared { .. } => None,
                 ArrayData::Ints(xs) => Some(Value::Int(xs.len() as i64)),
                 ArrayData::Floats(xs) => Some(Value::Int(xs.len() as i64)),
                 // O(1) on the lazy representations — a lazy enumerate's count is its
@@ -200,7 +209,7 @@ pub(crate) fn array_numeric_fast(
         "first" | "last" => {
             let first = name == "first";
             return Ok(match ad {
-                ArrayData::Values(_) => None,
+                ArrayData::Values(_) | ArrayData::Shared { .. } => None,
                 // O(1): one (index, element) tuple on demand; Missing on empty like
                 // the general path.
                 ArrayData::Enumerate { inner } => Some(if inner.is_empty() {
@@ -254,7 +263,10 @@ pub(crate) fn array_numeric_fast(
         "sort" | "reverse" => {
             let rev = name == "reverse";
             return Ok(match ad {
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => None,
+                ArrayData::Values(_)
+                | ArrayData::Enumerate { .. }
+                | ArrayData::Zip { .. }
+                | ArrayData::Shared { .. } => None,
                 ArrayData::Ints(xs) => {
                     let mut v = xs.clone();
                     if rev {
@@ -334,7 +346,10 @@ pub(crate) fn array_numeric_fast(
         // ascending step and the reversal for a descending one — both lazy, O(1).
         "argsort" => {
             return Ok(match ad {
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => None,
+                ArrayData::Values(_)
+                | ArrayData::Enumerate { .. }
+                | ArrayData::Zip { .. }
+                | ArrayData::Shared { .. } => None,
                 ArrayData::Ints(xs) => {
                     let mut idx: Vec<i64> = (0..xs.len() as i64).collect();
                     idx.sort_unstable_by(|&a, &b| {
@@ -370,7 +385,10 @@ pub(crate) fn array_numeric_fast(
         // simply poisons the running total from that point on, exactly as before.
         "cumsum" => {
             return Ok(match ad {
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => None,
+                ArrayData::Values(_)
+                | ArrayData::Enumerate { .. }
+                | ArrayData::Zip { .. }
+                | ArrayData::Shared { .. } => None,
                 // `to_ints` borrows for `Ints` and computes for `Range`; `None` cannot
                 // happen for either, and deferring is the safe reading of it regardless.
                 ArrayData::Ints(_) | ArrayData::Range { .. } => match ad.to_ints() {
@@ -409,7 +427,10 @@ pub(crate) fn array_numeric_fast(
         return Ok(None);
     }
     match ad {
-        ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => Ok(None),
+        ArrayData::Values(_)
+        | ArrayData::Enumerate { .. }
+        | ArrayData::Zip { .. }
+        | ArrayData::Shared { .. } => Ok(None),
         ArrayData::Ints(xs) => array_int_reduce(xs, name, line, col).map(Some),
         // A reduction consumes every element, so materialize the range once (bit-identical to
         // reducing the equivalent `Int` array); still lazy for the O(1) methods above.

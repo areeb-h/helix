@@ -409,6 +409,52 @@ pub(crate) fn call_method(
                     _ => {}
                 }
             }
+            // `concat` ON A SHARED RECEIVER — the append that makes a fold linear through a
+            // RECORD FIELD, which `Op::ConcatIntoLocal` cannot reach. That op works by
+            // taking the accumulator OUT of its local slot, leaving the `Rc` unique so the
+            // append extends in place; through a record field there is no slot to take
+            // from, because reading `acc.xs` clones the `Rc` while the record still holds
+            // one. So `Rc::get_mut` always failed and every step copied the whole
+            // accumulator: measured at n=160,000 with startup subtracted, 2,591 ms through
+            // a field against 12 ms bare, a 4n/n ratio of 27.9x against 3.0x.
+            //
+            // LIKE `zip`, IT HAS TO BE HERE. `array_method(&items.to_values(), …)` below is
+            // the copy this exists to avoid, so any placement after it measures identically;
+            // and it needs the receiver's `Rc` to share, which `array_numeric_fast`'s
+            // `&ArrayData` cannot give.
+            //
+            // DECLINES UNLESS EVERY ARGUMENT IS AN ARRAY, so `concat`'s argument-type error
+            // stays exactly the eager arm's, in the eager arm's order. A zero-argument
+            // `concat()` declines too, keeping its copy semantics.
+            if name == "concat"
+                && !args.is_empty()
+                && args.iter().all(|a| matches!(a, Value::Array(_)))
+            {
+                let mut acc = std::rc::Rc::clone(items);
+                let mut all = true;
+                for a in args {
+                    match a {
+                        Value::Array(add) => {
+                            match crate::value::ArrayData::concat_shared(&acc, add) {
+                                Some(Value::Array(next)) => acc = next,
+                                // Any decline abandons the whole fast path rather than
+                                // leaving a half-appended accumulator behind.
+                                _ => {
+                                    all = false;
+                                    break;
+                                }
+                            }
+                        }
+                        _ => {
+                            all = false;
+                            break;
+                        }
+                    }
+                }
+                if all {
+                    return Ok(Value::Array(acc));
+                }
+            }
             match array_numeric_fast(items, name, args, line, col)? {
                 // A typed array's numeric reduction reads the packed buffer directly.
                 Some(v) => Ok(v),
@@ -423,6 +469,32 @@ pub(crate) fn call_method(
         Value::PyObject(h) => crate::python::method(h, name, args, line, col),
         Value::Dict(map) => dict_method(map, name, args, line, col),
         Value::Net(h) => net_method(h, name, args, line, col),
+        Value::Lock(h) => match name {
+            // `release` is idempotent and answers whether THIS call released it, so a
+            // double release is not an error and is still distinguishable.
+            "release" => {
+                if args.len() != 1 && !args.is_empty() {
+                    return Err(HelixError::new(
+                        format!("`release` takes no arguments, got {}", args.len()),
+                        line,
+                        col,
+                    ));
+                }
+                let was_held = !h.is_released();
+                h.release().map_err(|e| {
+                    HelixError::new(format!("could not release `{}`: {e}", h.path), line, col)
+                })?;
+                Ok(Value::Bool(was_held))
+            }
+            "held" => Ok(Value::Bool(!h.is_released())),
+            "path" => Ok(Value::Str(std::rc::Rc::new(h.path.clone()))),
+            other => Err(HelixError::new(
+                format!("a Lock has no method `{other}`"),
+                line,
+                col,
+            )
+            .hint("a lock answers `release()`, `held()` and `path()`.")),
+        },
         Value::Headers(hs) => headers_method(hs, name, args, line, col),
         Value::Record(fields) => record_method(fields, name, args, line, col),
         other => Err(HelixError::new(

@@ -17,6 +17,69 @@
   [ADR 0026 — Library performance boundary](0026-library-performance-boundary.md) (a
   performance cliff is a diagnostic or a fix, never silence).
 
+## Amendment (2026-08-29) — the ARRAY half is fixed; the dict half is not
+
+`ArrayData::Shared` closes the array case. Measured on a release build, startup subtracted,
+min of 3, class proven by the n→4n ratio:
+
+| shape | n=10,000 | n=40,000 | n=160,000 | 4n/n |
+|---|--:|--:|--:|--:|
+| array, bare accumulator | 2 ms | 4 ms | 14 ms | 2.0x, 3.5x — linear |
+| array in a record field, **before** | 10 ms | 93 ms | **2591 ms** | 9.3x, **27.9x** — quadratic |
+| array in a record field, **after** | 5 ms | 11 ms | **36 ms** | 2.2x, **3.3x** — linear |
+
+**72x at n=160,000, and the class changed.** The bare spelling is unchanged.
+
+**What it is.** Not the `head`/`tail` tree sketched as option 2 below. That grows one node
+per append, so n appends make a chain of depth n: `get` degrades to O(n), a recursive
+traversal overflows the stack at exactly the sizes that motivate the fix, and the nodes
+cost more than the elements they describe. Instead `concat` on a shared receiver returns a
+view of an **append-only buffer**, `Shared { buf: Rc<RefCell<Vec<Value>>>, len }`.
+
+**Why sharing is safe**, which is the whole argument and the reason this needs no analysis:
+the buffer only ever grows and each value freezes its own `len`, so element `i < len` is
+written once and never changes. A value reads only a settled prefix, and two values over
+one buffer cannot observe each other. Appending is O(1) for the newest view
+(`len == buf.len()`); extending an OLDER view — a program that kept the shorter array and
+grew it again — copies the prefix into a fresh buffer, which is O(n) exactly when the
+program really did branch. Same trade as a persistent vector, without the tree.
+
+**It is general, not a recognizer**, which is what disqualified option 1: it is a property
+of `concat`, so `a.b.xs.concat(e)`, `a.d["k"].concat(e)`, `{...a, xs: a.xs.concat(e)}` and
+`step(a, i).concat(e)` are all linear without any of them being a case anyone enumerated.
+
+**The hazard was representation, not elements.** `Value::array_sniff` REPACKS, so
+`[1, 2].concat([3])` must still be `Ints`: an `Ints` reduction answers `Int` where the
+general path answers `Float`, which is a wrong ANSWER and not a slow one. `Shared` is
+therefore materialized through `array_sniff` (`ArrayData::densified`) and nothing but
+`concat` observes it. Rust's exhaustive matches enumerated all eleven sites — the "touches
+every consumer" risk this ADR anticipated was real but bounded and compiler-checked.
+
+**Two bugs the design produced and the review caught.** The `borrow_mut` initially spanned
+the read of the argument, so `xs.concat(xs)` — legal, and aliasing the buffer — was a
+`RefCell` double borrow, a host abort ADR 0024 forbids; the addition is now read first.
+And the VM half of the "one door" (`densify_lazy_top`) was missed while the tree-walker
+half was patched, which is precisely the split that doc warns produced divergent `Range`
+and `Enumerate` fallbacks the first time.
+
+### What is still quadratic, measured rather than assumed
+
+| shape | 4n/n | n=128,000 |
+|---|--:|--:|
+| **dict in a record field** | 15.4x, **16.6x** | **71 s** |
+| **string interpolated in a record field** | 4.8x, **10.1x** | 243 ms |
+
+`Dict::insert` clones the whole `BTreeMap` per call and `Op::InsertIntoLocal` rescues only
+the bare-local spelling, so the dict case is now the **worst remaining cliff of this
+family** — far worse than the array case ever was. `helix check --lint` was narrowed to it
+rather than deleted: the array note would now be a checker contradicting the runtime, which
+is how a checker gets ignored, and ADR 0026 still requires a diagnostic where a fix has not
+landed.
+
+An interpolated string in a record field has the same shape and no lint yet; it is not
+detectable by the same syntactic test (there is no `dict()`-like literal to key on), and
+naming it needs its own rule.
+
 ## Amendment (2026-08-28) — the guarantee stops at a record field
 
 **Reported from the field, reproduced here.** The guarantee holds for a bare

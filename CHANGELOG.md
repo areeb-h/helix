@@ -4,6 +4,64 @@
 
 ### Added
 
+- **`lock_file` / `try_lock_file` — a lock the KERNEL holds, so it releases when its holder
+  dies.** `create_new` is atomic and is the right answer for a content-addressed write, but
+  as a lock it has the one flaw that matters: the file is still there after the holder
+  crashes, and the next process cannot tell a live writer from a corpse. Every remedy at
+  that level is a guess — a PID that may have been reused, a timestamp that may be a long
+  pause, a heartbeat that is one more thing to get wrong.
+
+  A kernel lock lives on an open file description, so it is released by `release()`, by the
+  handle being dropped, by the process exiting, **and by SIGKILL**. Measured both ways in
+  one test: after `kill -9`, the kernel lock is free and the lock file still reports busy.
+
+  ```helix
+  l = try_lock_file("db/.lock")        # `missing` if another process has it
+  if l.is_missing() then ... else ...  # `== missing` PROPAGATES (ADR 0001) — use is_missing
+  ```
+
+  `try_lock_file` answering `missing` is an ANSWER, not a failure: a store that reports
+  "another process has this open" beats one that hangs with no output. A `Lock` answers
+  `release()` (idempotent, and says whether *this* call released it), `held()` and `path()`.
+
+  **Advisory on every platform** — they exclude other lock takers, not other writers. Named
+  here rather than discovered during a corruption.
+
+- **A durable-storage substrate: `rename`, `fsync`, `sync_dir`, `create_new`, `file_size`,
+  `read_at`, `write_at`, `truncate`, `remove_dir`.** A correct storage engine could not be
+  written in Helix, and a field report building a versioned store established exactly why:
+  the filesystem surface had no `rename`, so write-temp-then-rename was inexpressible, and
+  no `fsync`, so "written" meant "reached the page cache" — which a power loss discards.
+
+  These land as ONE set rather than the three that were blocking, because a partial
+  durability story is worse than none: a program that calls `fsync` and skips `sync_dir`
+  believes it committed and, after a crash, did not. A durable commit is exactly
+  `write` → `fsync` → `rename` → `sync_dir`.
+
+  ```helix
+  "seq=1".write_to(tmp)
+  fsync(tmp)              # the CONTENTS are on the device
+  rename(tmp, head)       # the commit, atomic — no reader sees a half-written file
+  sync_dir(dir)           # the NAME is on the device
+  ```
+
+  `rename` refuses to cross a filesystem rather than degrading to copy-then-delete, because
+  that copy reintroduces the window it exists to remove. `create_new` is atomic where
+  `file_exists` then `write_to` races, which makes it both a lock and a safe
+  content-addressed write. `read_at`/`write_at` make access O(page) instead of O(file), so
+  an index lookup no longer pays for the whole dataset. `remove_dir` is empty-only and
+  never recursive — a recursive delete is one typo from removing a tree nobody named.
+
+  **`sync_dir` answers `false` where the platform cannot flush a directory** (Windows
+  exposes no way through the standard library) rather than `true`. A durability claim that
+  cannot be kept is the shape of lie that loses data on exactly one platform, so the answer
+  is testable instead.
+
+  All nine are capability-gated, and `fs-read` does not imply `fs-write`. The honest limit:
+  a Helix `Str` is UTF-8, so `read_at` refuses a slice that splits a character rather than
+  substituting U+FFFD — this supports a text-structured store, and arbitrary binary needs a
+  `Bytes` type the language does not yet have. See ADR 0041.
+
 - **`[workspace]` in `helix.toml` — a directory can be a package without being the module
   root.** `helix.toml` was carrying two meanings at once: *this is a distributable package*
   (what `helix add <name> --path <dir>` consumes) and *in-project imports are anchored
@@ -38,6 +96,32 @@
   once.
 
 ### Fixed
+
+- **A fold that accumulates an ARRAY in a record field is no longer quadratic.** ADR 0029
+  makes amortized-linear accumulation a language guarantee, and this was the shape it did
+  not reach — the one `mut` being top-level only *forces*, since a fold carrying two values
+  must carry them in a record. Measured on a release build with startup subtracted, at
+  n=160,000: **2591 ms → 36 ms**, and the class changed from quadratic (27.9x per 4x the
+  input) to linear (3.3x).
+
+  `Op::ConcatIntoLocal` makes a bare accumulator linear by taking the value out of its
+  local slot, which leaves the `Rc` unique so the append extends in place. Through a record
+  field there is no slot: reading `acc.xs` clones the `Rc` while the record still holds one,
+  so every step copied the whole accumulator. `concat` on a shared receiver now returns a
+  view of an APPEND-ONLY buffer instead. Sharing is safe by construction rather than by
+  analysis — the buffer only grows and each value freezes its own length, so a value reads
+  only a prefix that is already settled and two values cannot observe each other. Appending
+  is O(1) for the newest view; extending an older one copies, which is O(n) exactly when the
+  program really did branch.
+
+  It is a property of `concat`, not a recognised syntax, so `a.b.xs.concat(e)`,
+  `{...a, xs: a.xs.concat(e)}` and `step(a, i).concat(e)` are all linear too.
+
+  **Still quadratic, and now named precisely:** a DICT in a record field (16.6x per 4x,
+  **71 s** at n=128,000 — `insert` clones the whole map per step) and a string built by
+  interpolation in a record field (10.1x). `helix check --lint` was narrowed to the dict
+  case rather than deleted; keeping the array note would be a checker contradicting the
+  runtime, which is how a checker gets ignored.
 
 - **A failed import now says where imports are anchored, and what chose that anchor.**
   `cannot find module `ui.parse`` with *expected … under the project root* was true and

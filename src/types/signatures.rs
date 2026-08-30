@@ -305,7 +305,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         // generic readers + hashing + fs ops: one string argument each
         "read_text" | "read_json" | "read_dir" | "file_exists" | "sha256" | "remove_file"
-        | "mkdir" => {
+        | "mkdir" | "fsync" | "sync_dir" | "remove_dir" | "file_size" => {
             if args.len() != 1 {
                 return Err(arity_err(name, 1, args.len(), line, col));
             }
@@ -316,10 +316,74 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             Ok(match name {
                 "read_text" | "sha256" => Type::String,
                 "file_exists" | "remove_file" | "mkdir" => Type::Bool,
+                // ADR 0041's storage substrate. `sync_dir` is Bool because it answers
+                // whether the platform actually flushed the directory entry.
+                "fsync" | "sync_dir" | "remove_dir" => Type::Bool,
+                "file_size" => Type::Int,
                 "read_dir" => Type::Array(Box::new(Type::String)),
                 // JSON shape isn't known statically; Unknown keeps field/index access permissive.
                 _ => Type::Unknown,
             })
+        }
+        // ADR 0041's storage substrate, the arities that are not one path.
+        // Runtime-only handle, like `Value::Net`: the checker sees `Unknown`, so
+        // `.release()` on the result is permitted and checked at run time.
+        "lock_file" | "try_lock_file" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            if !compatible(&args[0], &Type::String) {
+                return Err(type_err(name, "a string path", &args[0], line, col));
+            }
+            Ok(Type::Unknown)
+        }
+        "rename" | "create_new" => {
+            if args.len() != 2 {
+                return Err(arity_err(name, 2, args.len(), line, col));
+            }
+            for a in args.iter().take(2) {
+                if !compatible(a, &Type::String) {
+                    return Err(type_err(name, "a string", a, line, col));
+                }
+            }
+            Ok(Type::Bool)
+        }
+        "truncate" => {
+            if args.len() != 2 {
+                return Err(arity_err(name, 2, args.len(), line, col));
+            }
+            if !compatible(&args[0], &Type::String) {
+                return Err(type_err(name, "a string path", &args[0], line, col));
+            }
+            if !compatible(&args[1], &Type::Int) {
+                return Err(type_err(name, "an Int length", &args[1], line, col));
+            }
+            Ok(Type::Bool)
+        }
+        "read_at" | "write_at" => {
+            if args.len() != 3 {
+                return Err(arity_err(name, 3, args.len(), line, col));
+            }
+            if !compatible(&args[0], &Type::String) {
+                return Err(type_err(name, "a string path", &args[0], line, col));
+            }
+            if !compatible(&args[1], &Type::Int) {
+                return Err(type_err(name, "an Int offset", &args[1], line, col));
+            }
+            if name == "read_at" {
+                if !compatible(&args[2], &Type::Int) {
+                    return Err(type_err(name, "an Int length", &args[2], line, col));
+                }
+                Ok(Type::String)
+            } else {
+                if !compatible(&args[2], &Type::String) {
+                    return Err(type_err(name, "string contents", &args[2], line, col));
+                }
+                // The BYTE count written, which is not the character count for any
+                // non-ASCII text — the distinction that matters when the caller is
+                // computing the next offset.
+                Ok(Type::Int)
+            }
         }
         // `read_vcf`/`read_bam` scan with one argument; the optional region second
         // argument runs an indexed query, so these readers accept one or two strings.

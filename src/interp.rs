@@ -1540,6 +1540,16 @@ fn apply_float_fn(
     col: usize,
 ) -> Result<Value, HelixError> {
     use crate::value::ArrayData;
+    // A LAZY-APPEND array is materialized to exactly the array the copying `concat` would
+    // have produced, BEFORE any packed dispatch. The representation decides the ANSWER and
+    // not merely the speed — an `Ints` reduction answers `Int` where the general path
+    // answers `Float` — so the `Shared` arms below are unreachable. They stay for
+    // exhaustiveness, grouped with the other non-packed variants so reaching one is safe.
+    if let Value::Array(a) = &v
+        && let Some(d) = a.densified()
+    {
+        return apply_float_fn(name, f, Value::Array(Rc::new(d)), line, col);
+    }
     let scalar_fallback = |v: &Value| {
         broadcast_unary(v, &|s| match s.as_f64() {
             Some(x) => Ok(Value::Float(f(x))),
@@ -1562,9 +1572,10 @@ fn apply_float_fn(
                 ArrayData::Range { .. } => Ok(Value::float_array(
                     a.to_ints().unwrap().iter().map(|&x| f(x as f64)).collect(),
                 )),
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {
-                    scalar_fallback(&Value::Array(a))
-                }
+                ArrayData::Values(_)
+                | ArrayData::Enumerate { .. }
+                | ArrayData::Zip { .. }
+                | ArrayData::Shared { .. } => scalar_fallback(&Value::Array(a)),
             }
         }
         Value::Tensor(t) => {
@@ -1596,6 +1607,16 @@ fn apply_round_fn(
     col: usize,
 ) -> Result<Value, HelixError> {
     use crate::value::ArrayData;
+    // A LAZY-APPEND array is materialized to exactly the array the copying `concat` would
+    // have produced, BEFORE any packed dispatch. The representation decides the ANSWER and
+    // not merely the speed — an `Ints` reduction answers `Int` where the general path
+    // answers `Float` — so the `Shared` arms below are unreachable. They stay for
+    // exhaustiveness, grouped with the other non-packed variants so reaching one is safe.
+    if let Value::Array(a) = v
+        && let Some(d) = a.densified()
+    {
+        return apply_round_fn(name, f, &Value::Array(Rc::new(d)), line, col);
+    }
     match v {
         Value::Array(ad) => match &**ad {
             // Checked per element (same rule as `round_to_i64`): an out-of-range / non-finite
@@ -1608,9 +1629,10 @@ fn apply_round_fn(
             ArrayData::Ints(xs) => Ok(Value::int_array(xs.clone())),
             // Rounding whole numbers is a no-op — return the range unchanged (it is already `Int`).
             ArrayData::Range { .. } => Ok(Value::Array(ad.clone())),
-            ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {
-                round_box(name, f, v, line, col)
-            }
+            ArrayData::Values(_)
+            | ArrayData::Enumerate { .. }
+            | ArrayData::Zip { .. }
+            | ArrayData::Shared { .. } => round_box(name, f, v, line, col),
         },
         // A tensor stays a whole-valued FLOAT tensor, so apply the f64 rounding
         // function directly — no i64 conversion, meaning `round(tensor([1e30]))`
@@ -1668,6 +1690,16 @@ fn round_box(name: &str, f: fn(f64) -> f64, v: &Value, line: usize, col: usize) 
 /// exact general path. Output identical to the per-element map.
 pub(crate) fn apply_abs(v: Value, line: usize, col: usize) -> Result<Value, HelixError> {
     use crate::value::ArrayData;
+    // A LAZY-APPEND array is materialized to exactly the array the copying `concat` would
+    // have produced, BEFORE any packed dispatch. The representation decides the ANSWER and
+    // not merely the speed — an `Ints` reduction answers `Int` where the general path
+    // answers `Float` — so the `Shared` arms below are unreachable. They stay for
+    // exhaustiveness, grouped with the other non-packed variants so reaching one is safe.
+    if let Value::Array(a) = &v
+        && let Some(d) = a.densified()
+    {
+        return apply_abs(Value::Array(Rc::new(d)), line, col);
+    }
     let boxed = |v: &Value| {
         broadcast_unary(v, &|s| match s {
             Value::Int(i) => Ok(Value::Int(i.wrapping_abs())),
@@ -1696,9 +1728,10 @@ pub(crate) fn apply_abs(v: Value, line: usize, col: usize) -> Result<Value, Heli
                 ArrayData::Range { .. } => Ok(Value::int_array(
                     a.to_ints().unwrap().iter().map(|&x| x.wrapping_abs()).collect(),
                 )),
-                ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {
-                    boxed(&Value::Array(a))
-                }
+                ArrayData::Values(_)
+                | ArrayData::Enumerate { .. }
+                | ArrayData::Zip { .. }
+                | ArrayData::Shared { .. } => boxed(&Value::Array(a)),
             }
         }
         other => boxed(&other),
@@ -1709,6 +1742,16 @@ pub(crate) fn apply_abs(v: Value, line: usize, col: usize) -> Result<Value, Heli
 /// the exact general path.
 pub(crate) fn apply_sign(v: &Value, line: usize, col: usize) -> Result<Value, HelixError> {
     use crate::value::ArrayData;
+    // A LAZY-APPEND array is materialized to exactly the array the copying `concat` would
+    // have produced, BEFORE any packed dispatch. The representation decides the ANSWER and
+    // not merely the speed — an `Ints` reduction answers `Int` where the general path
+    // answers `Float` — so the `Shared` arms below are unreachable. They stay for
+    // exhaustiveness, grouped with the other non-packed variants so reaching one is safe.
+    if let Value::Array(a) = v
+        && let Some(d) = a.densified()
+    {
+        return apply_sign(&Value::Array(Rc::new(d)), line, col);
+    }
     fn fsign(x: f64) -> i64 {
         if x > 0.0 {
             1
@@ -1727,7 +1770,10 @@ pub(crate) fn apply_sign(v: &Value, line: usize, col: usize) -> Result<Value, He
                     ad.to_ints().unwrap().iter().map(|&x| x.signum()).collect(),
                 ));
             }
-            ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {}
+            ArrayData::Values(_)
+            | ArrayData::Enumerate { .. }
+            | ArrayData::Zip { .. }
+            | ArrayData::Shared { .. } => {}
         }
     }
     broadcast_unary(v, &|s| match s {

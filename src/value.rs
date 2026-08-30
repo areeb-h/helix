@@ -122,6 +122,14 @@ pub enum Value {
     /// compared, serialized, or sent through a computed result, so — like `PyObject`
     /// — it falls through every value-equality / structural path with no extra arms.
     Net(Rc<crate::serve::NetHandle>),
+    /// An opaque KERNEL-HELD file lock (see `src/filelock.rs`). Opaque for the same reason
+    /// `Net` is: effect-only, never compared, serialized or computed with, so it falls
+    /// through every structural path with no extra arms.
+    ///
+    /// The `Rc` is the lifetime: the lock lives exactly as long as the handle, because the
+    /// kernel hangs it on the open descriptor inside. That is what makes it release on a
+    /// CRASH as well as on a drop — the property `create_new`'s lock file cannot have.
+    Lock(Rc<crate::filelock::LockHandle>),
 }
 
 /// A [`Value::Dict`] key: a hashable, totally-orderable scalar. Floats are excluded
@@ -217,6 +225,39 @@ pub enum ArrayData {
     ///    in-place optimizer in the tree declines on both sources, and neither buffer's
     ///    contents nor length can change underneath the frozen `len`.
     Zip { a: std::rc::Rc<ArrayData>, b: std::rc::Rc<ArrayData>, len: usize },
+    /// A **lazy** append: this value's view of an APPEND-ONLY buffer that later appends
+    /// may extend past `len`. What makes `acc = {xs: acc.xs.concat(e), …}` linear.
+    ///
+    /// THE PROBLEM. `Op::ConcatIntoLocal` makes a BARE accumulator linear by taking the
+    /// value out of its slot, which leaves the `Rc` unique so the append extends in place.
+    /// Through a record field there is no slot to take from: reading `acc.xs` clones the
+    /// `Rc` while the record still holds one, so `Rc::get_mut` always fails and every step
+    /// copies the whole accumulator. Measured at n=160,000 with startup subtracted: 12 ms
+    /// bare against 2,591 ms through a field, and a 4n/n ratio of 27.9x against 3.0x. The
+    /// shape is not niche — `mut` is top-level only, so a fold carrying two values *must*
+    /// carry them in a record, which is what AGENTS.md teaches.
+    ///
+    /// WHY A SHARED BUFFER RATHER THAN THE `head`/`tail` TREE ADR 0029 SKETCHED. A tree
+    /// grows one node per append, so n appends make a chain of depth n: `get` becomes O(n),
+    /// a recursive traversal overflows the stack at the sizes that motivate the fix, and
+    /// the nodes cost more memory than the elements. A buffer has none of that — `get` is
+    /// O(1) and there is one allocation.
+    ///
+    /// WHY SHARING IS SAFE, which is the whole argument. The buffer is APPEND-ONLY and each
+    /// value freezes its own `len`, so element `i < len` is written once and never changes.
+    /// A value therefore only ever reads a prefix that is already settled, and two values
+    /// over one buffer cannot observe each other. Appending is O(1) only for the NEWEST
+    /// view (`len == buf.len()`); when an older view is extended — someone kept the
+    /// shorter array and grew it again — the prefix is copied into a fresh buffer, which
+    /// is O(n) exactly when the program really did branch. That is the same trade a
+    /// persistent vector makes, without the tree.
+    ///
+    /// REPRESENTATION IS THE HAZARD, not the elements. `Value::array_sniff` REPACKS, so
+    /// `[1, 2].concat([3])` must still be `Ints` — an `Ints` sum answers `Int` where the
+    /// general path can answer `Float`, which is a wrong ANSWER and not a slow one. So
+    /// this variant is materialized THROUGH `array_sniff` by [`ArrayData::densified`], and
+    /// nothing but `concat` is allowed to observe it (see `call_method`).
+    Shared { buf: std::rc::Rc<std::cell::RefCell<Vec<Value>>>, len: usize },
 }
 
 impl ArrayData {
@@ -229,6 +270,10 @@ impl ArrayData {
             ArrayData::Enumerate { inner } => inner.len(),
             // The FROZEN length — see the variant's invariant 1. Never `a.len().min(b.len())`.
             ArrayData::Zip { len, .. } => *len,
+            // The frozen length too, and for the same kind of reason: the buffer may be
+            // LONGER than this value (a later append extended it), and reading `buf.len()`
+            // here would make an older array silently grow.
+            ArrayData::Shared { len, .. } => *len,
         }
     }
 
@@ -253,6 +298,16 @@ impl ArrayData {
             ArrayData::Enumerate { inner } => {
                 Value::Tuple(std::rc::Rc::new(vec![Value::Int(i as i64), inner.get(i)]))
             }
+            // O(1). `i < len <= buf.len()` and the buffer is append-only, so this slot is
+            // settled — no later append can change what an existing value reads.
+            //
+            // NEITHER PANIC IS REACHABLE, which is what earns this a ratchet budget.
+            // The INDEX: `len` is frozen at construction from the buffer's own length and
+            // the buffer only grows, so `len <= buf.len()` always; callers index below
+            // `len` (stated on `get`). The BORROW: the only `borrow_mut` in the codebase is
+            // in `concat_shared`, which runs no Helix code and touches nothing else while
+            // it holds the cell — so no `get` can be in flight during it.
+            ArrayData::Shared { buf, .. } => buf.borrow()[i].clone(),
             // Lazy `zip`: the `(a[i], b[i])` pair, built on demand — identical to the
             // materialized `Value::Tuple([a[i], b[i]])` the eager path built.
             ArrayData::Zip { a, b, .. } => {
@@ -292,6 +347,12 @@ impl ArrayData {
             ArrayData::Range { .. } | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => {
                 Cow::Owned((0..self.len()).map(|i| self.get(i)).collect())
             }
+            // Owned, not borrowed: the elements live behind a `RefCell`, so there is no
+            // slice to hand out with this value's lifetime. Only the value's own prefix.
+            // The range and the borrow are unreachable panics for the same two reasons
+            // given on `get`: `len <= buf.len()` by construction, and nothing holds the
+            // cell across code that could re-enter.
+            ArrayData::Shared { buf, len } => Cow::Owned(buf.borrow()[..*len].to_vec()),
         }
     }
 
@@ -302,6 +363,80 @@ impl ArrayData {
     /// is a single concrete iterator type across the variants (no `Box<dyn>`).
     pub fn iter_values(&self) -> impl Iterator<Item = Value> + '_ {
         (0..self.len()).map(move |i| self.get(i))
+    }
+
+    /// This array as an ordinary eager one, or `None` if it already is.
+    ///
+    /// THROUGH `array_sniff`, which is the point rather than a detail: the representation
+    /// decides ANSWERS, not just speed — `[1, 2, 3].sum()` is `Int` off the packed path and
+    /// can be `Float` off the general one. So a [`Shared`](ArrayData::Shared) array becomes
+    /// exactly the array the copying `concat` would have produced, and every consumer that
+    /// matches on `Ints`/`Floats`/`Values` keeps working unchanged.
+    pub fn densified(&self) -> Option<ArrayData> {
+        match self {
+            ArrayData::Shared { .. } => match Value::array_sniff(self.to_values().into_owned()) {
+                Value::Array(a) => Some((*a).clone()),
+                // `array_sniff` returns `Value::Array` for every input; anything else
+                // would be a contract break rather than a case to handle.
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `cur.concat(add)` as an O(1) append when `cur` is the NEWEST view of a shared
+    /// buffer, or `None` to fall back to the exact copying path.
+    ///
+    /// Seeding costs one copy of the receiver, which is why a fold is linear overall: the
+    /// seed happens once (on a short or empty accumulator) and every later step is O(1).
+    /// Returning `None` is always safe — it is the behaviour that shipped.
+    pub fn concat_shared(cur: &std::rc::Rc<ArrayData>, add: &ArrayData) -> Option<Value> {
+        use std::rc::Rc;
+        match &**cur {
+            ArrayData::Shared { buf, len } => {
+                // THE ADDITION IS READ BEFORE THE BUFFER IS BORROWED, and that ordering is
+                // load-bearing rather than stylistic. `xs.concat(xs)` is legal, and when
+                // `add` is a view of THIS buffer, reading it while a `borrow_mut` is live
+                // is a `RefCell` double borrow — a panic on a user-reachable path, which
+                // ADR 0024 forbids outright. Collecting first costs O(|add|), which is the
+                // payload's own cost and the same guard `concat_in_place` already pays.
+                let addition: Vec<Value> = add.iter_values().collect();
+                // UNREACHABLE PANIC, and the line above is the proof: every read of `add`
+                // is finished before the cell is taken. Between here and each `drop(b)`
+                // the only operations are `Vec::len`, a slice `to_vec` (which clones
+                // `Value`s — `Rc` bumps, no cell access) and `extend` over an owned `Vec`.
+                // No Helix code runs, so nothing can re-enter and no second borrow exists.
+                let mut b = buf.borrow_mut();
+                // NOT the newest view: someone kept this shorter array and is extending it
+                // again. Copy its prefix into a fresh buffer rather than appending, or the
+                // two branches would see each other's elements.
+                if b.len() != *len {
+                    let mut fresh: Vec<Value> = b[..*len].to_vec();
+                    drop(b);
+                    fresh.extend(addition);
+                    let len = fresh.len();
+                    return Some(Value::Array(Rc::new(ArrayData::Shared {
+                        buf: Rc::new(std::cell::RefCell::new(fresh)),
+                        len,
+                    })));
+                }
+                b.extend(addition);
+                let len = b.len();
+                drop(b);
+                Some(Value::Array(Rc::new(ArrayData::Shared { buf: Rc::clone(buf), len })))
+            }
+            // Seed. Every other variant becomes a buffer on its first append; the copy here
+            // is the one the eager path would have made anyway.
+            _ => {
+                let mut fresh: Vec<Value> = cur.to_values().into_owned();
+                fresh.extend(add.iter_values());
+                let len = fresh.len();
+                Some(Value::Array(Rc::new(ArrayData::Shared {
+                    buf: Rc::new(std::cell::RefCell::new(fresh)),
+                    len,
+                })))
+            }
+        }
     }
 }
 
@@ -678,6 +813,7 @@ impl Value {
             Value::Headers(_) => "Headers",
             Value::Dict(_) => "Dict",
             Value::Net(_) => "Net",
+            Value::Lock(_) => "Lock",
         }
     }
 
@@ -754,6 +890,13 @@ impl fmt::Display for Value {
                 crate::serve::NetHandle::HttpStream { .. } => write!(f, "<http-stream>"),
                 crate::serve::NetHandle::CookieJar(j) => write!(f, "<cookie-jar: {} cookies>", j.len()),
             },
+            Value::Lock(h) => {
+                if h.is_released() {
+                    write!(f, "<lock released: {}>", h.path)
+                } else {
+                    write!(f, "<lock: {}>", h.path)
+                }
+            }
             Value::PyObject(h) => write!(f, "{}", h.repr()),
             // A tracked value prints as its forward value (the graph stays hidden).
             Value::Node(n) => write!(f, "{}", crate::autodiff::node_value(n)),

@@ -525,6 +525,14 @@ fn try_inplace_broadcast(op: &BinOp, l: &mut Value, r: &mut Value) -> Option<Val
 /// other half of the one door. See that function for why both exist rather than a fallback
 /// per consumer.
 fn densify_lazy(v: &mut Value) {
+    // A LAZY-APPEND array does not share the `Range -> Ints` shape below: it materializes
+    // through `array_sniff`, so its dense twin may be any of the eager representations.
+    if let Value::Array(a) = v
+        && let Some(d) = a.densified()
+    {
+        *v = Value::Array(std::rc::Rc::new(d));
+        return;
+    }
     let ints = match v {
         Value::Array(a) if matches!(&**a, crate::value::ArrayData::Range { .. }) => {
             Some(a.to_ints().expect("Range → Ints").into_owned())
@@ -557,7 +565,12 @@ fn typed_broadcast(op: &BinOp, l: &Value, r: &Value) -> Option<Value> {
             // stop raising "operator `+` needs numbers, but got a Tuple" and start doing
             // arithmetic over reinterpreted memory. It is written first, and pinned by tests
             // that assert the error rather than the value.
-            ArrayData::Values(_) | ArrayData::Enumerate { .. } | ArrayData::Zip { .. } => None,
+            // A lazy-append array is densified by `densify_lazy` before `typed_broadcast`,
+            // so it never reaches here; declining is the safe reading either way.
+            ArrayData::Values(_)
+            | ArrayData::Enumerate { .. }
+            | ArrayData::Zip { .. }
+            | ArrayData::Shared { .. } => None,
         }
     }
     // `/` is always float; a zero divisor must raise the *same* error as the scalar
