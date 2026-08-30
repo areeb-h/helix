@@ -13258,3 +13258,64 @@ fn every_test_uses_its_own_temp_directory_name() {
         dupes.iter().map(|d| format!("{d}_{{}}")).collect::<Vec<_>>().join("\n  ")
     );
 }
+
+/// `helix effects` propagates two INDEPENDENT classifications over the call graph.
+///
+/// Helix already decides both per builtin, and guards both exhaustively: authority via
+/// `capability::effect_of` (what the sandbox gates) and reproducibility via
+/// `BuiltinDef::pure` (whether a result may be memoized). Nothing here infers anything —
+/// it closes over calls a program already makes.
+///
+/// The case that proves the axes are separate is `report`: it reaches `now()` through
+/// `stamp`, so it holds **no authority at all** — fully sandboxable — and is still not
+/// reproducible. A tool that reported only capabilities would call it clean.
+#[test]
+fn effects_closes_over_the_call_graph_on_both_axes() {
+    let dir = std::env::temp_dir().join(format!("hx_effects_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("p.helix");
+    std::fs::write(
+        &f,
+        "fn pure_math(x) = x * 2 + 1\n\
+         fn stamp() = now()\n\
+         fn report(xs) = \"{xs.count()} at {stamp()}\"\n\
+         fn load(p) = read_text(p)\n\
+         fn ingest(p) = load(p).length()\n",
+    )
+    .unwrap();
+
+    let (out, err, code) = run(&["effects", f.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+
+    // Pure arithmetic: neither axis fires.
+    assert!(out.contains("pure_math: no authority, reproducible"), "{out}");
+
+    // NO AUTHORITY, NOT REPRODUCIBLE — the case a capability-only view would miss — and the
+    // path is the actionable half: "not reproducible" alone tells nobody where to look.
+    assert!(out.contains("report: no authority, not reproducible"), "{out}");
+    assert!(
+        out.contains("via report -> stamp -> now"),
+        "the path that introduced the clock must be named:\n{out}"
+    );
+
+    // Authority closes transitively: `ingest` never names `read_text` itself.
+    assert!(out.contains("ingest: fs-read"), "{out}");
+    assert!(out.contains("via ingest -> load -> read_text"), "{out}");
+
+    // PLAIN OUTPUT IS PARSED. The rich middle dot must not reach a line a script splits —
+    // the same defect this suite already pins for the build report.
+    assert!(!out.contains('\u{b7}'), "plain output carries the rich separator:\n{out}");
+
+    // The machine form carries the same two axes, separately addressable.
+    let (js, err, code) = run(&["effects", f.to_str().unwrap(), "--json"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let v: serde_json::Value = serde_json::from_str(&js).expect("valid JSON");
+    let arr = v.as_array().expect("an array");
+    let report = arr.iter().find(|f| f["name"] == "report").expect("report is listed");
+    assert_eq!(report["deterministic"], serde_json::json!(false));
+    assert_eq!(report["effects"].as_array().map(|a| a.len()), Some(0), "report holds no authority");
+    assert_eq!(report["nondeterministic_via"]["name"], serde_json::json!("now"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 /// `FsRead`/`FsWrite`/`Net`/`Process`/`Env`; everything else (math, `print`/`emit` output,
 /// `sleep`/`clock_monotonic`, randomness, crypto key generation) is `Pure` and never gated —
 /// those are effects but not *authority*.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Effect {
     Pure,
     FsRead,

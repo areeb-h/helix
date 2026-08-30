@@ -65,6 +65,17 @@ impl Report {
         self
     }
 
+    /// [`Report::note`] for a label computed at run time.
+    pub fn note_owned(
+        mut self,
+        label: String,
+        value: impl Into<String>,
+        note: impl Into<String>,
+    ) -> Self {
+        self.rows.push(Row::Field { label, value: value.into(), note: Some(note.into()) });
+        self
+    }
+
     /// [`Report::field`] for a label computed at run time.
     pub fn field_owned(mut self, label: String, value: impl Into<String>) -> Self {
         self.rows.push(Row::Field { label, value: value.into(), note: None });
@@ -89,6 +100,15 @@ impl Report {
     /// belonging to a value, which matters when the values are themselves comma-free
     /// identifiers; ASCII mode falls back to a comma because a middle dot is exactly the
     /// sort of character a limited font renders as a box.
+    /// The separator this output should use between items.
+    ///
+    /// Exposed because every caller that hand-wrote `\u{b7}` got it wrong: plain output is
+    /// PARSED, and a multi-byte separator in a line a script splits is a defect, not a
+    /// style. Ask once, here.
+    pub fn sep(opts: &RenderOpts) -> &'static str {
+        if !opts.rich || opts.ascii_only() { ", " } else { " \u{b7} " }
+    }
+
     pub fn list(opts: &RenderOpts, items: &[&str]) -> String {
         // PLAIN OUTPUT IS PARSED, so it gets a comma. `·` is a multi-byte character in a
         // line a script may split, and the middle dot earns its place only in the rich

@@ -36,6 +36,7 @@ mod capability;
 mod chart;
 mod dataframe;
 mod docs;
+mod effects;
 mod visit;
 mod doctest;
 mod error;
@@ -376,6 +377,9 @@ fn run() -> ExitCode {
         },
         // `helix check <script>…` — load + type-check, produce nothing, run nothing.
         Some("check") => run_check(&args),
+        // `helix effects <script> [--json]` — the authority and reproducibility closure of
+        // every function, over the call graph.
+        Some("effects") => run_effects(&args),
         // `helix fmt <script>… [--check]` — normalize whitespace; never change a token.
         Some("fmt") => run_fmt(&args),
         // `helix build <script> [-o name]` — bundle a program into a standalone exe.
@@ -1498,6 +1502,92 @@ fn run_fmt(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `helix effects <script> [--json]` — what each function REACHES.
+///
+/// Helix already classifies every builtin along two independent axes and guards both
+/// exhaustively; this propagates them over the call graph and shows the path that
+/// introduced each one. "not reproducible" is not actionable on its own — "not
+/// reproducible: `now`, via report -> stamp" is.
+///
+/// Deliberately NOT part of `check`. That contract — never rejects a runnable program — is
+/// what makes the edit/run loop usable, and this answers a different question rather than
+/// the same one more harshly.
+fn run_effects(args: &[String]) -> ExitCode {
+    let json = args.iter().any(|a| a == "--json");
+    let Some(path) = args.iter().skip(2).find(|a| !a.starts_with("--")) else {
+        eprintln!("error: `helix effects` needs a script path, e.g. `helix effects main.helix`");
+        return ExitCode::from(2);
+    };
+    let path = match resolve_script(path) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprint!("{msg}");
+            return ExitCode::FAILURE;
+        }
+    };
+    run_on_big_stack(move || {
+        let loaded = match module::load(&path) {
+            Ok(l) => l,
+            Err(rendered) => {
+                eprint!("{rendered}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let all = effects::closure(&loaded.stmts);
+        if json {
+            let out: Vec<serde_json::Value> = all
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "name": f.name,
+                        "effects": f.effects.iter().map(|(e, p)| serde_json::json!({
+                            "effect": e.label(),
+                            "via": p,
+                        })).collect::<Vec<_>>(),
+                        "deterministic": f.deterministic(),
+                        "nondeterministic_via": f.nondeterministic.as_ref().map(|(n, p)| {
+                            serde_json::json!({ "name": n, "via": p })
+                        }),
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
+            return ExitCode::SUCCESS;
+        }
+        if all.is_empty() {
+            println!("no functions in {}", path.display());
+            return ExitCode::SUCCESS;
+        }
+        let opts = render::RenderOpts::auto();
+        let mut r = report::Report::new(
+            "effects",
+            format!("{} function(s) in {}", all.len(), path.display()),
+        );
+        for f in &all {
+            let labels: Vec<&str> = f.effects.iter().map(|(e, _)| e.label()).collect();
+            let authority =
+                if labels.is_empty() { "no authority".to_string() } else { report::Report::list(&opts, &labels) };
+            match &f.nondeterministic {
+                Some((who, via)) => {
+                    r = r.note_owned(
+                        f.name.clone(),
+                        format!("{authority}{}not reproducible", report::Report::sep(&opts)),
+                        format!("`{who}` via {}", via.join(" -> ")),
+                    )
+                }
+                None => {
+                    r = r.field_owned(
+                        f.name.clone(),
+                        format!("{authority}{}reproducible", report::Report::sep(&opts)),
+                    )
+                }
+            }
+        }
+        r.print(&opts);
+        ExitCode::SUCCESS
+    })
+}
+
 /// `helix build <script> [-o name]` — bundle a program and everything it imports into a
 /// standalone executable (see `src/bundle.rs`). Runs on the big stack: the build path loads and
 /// type-checks the program, both of which recurse over the AST.
@@ -1865,6 +1955,7 @@ fn print_help() {
          helix run <script>       run a script (`.helix` optional: `helix run main`)\n    \
          helix eval \"<code>\"       run a one-liner\n    \
          helix check <script>…    type-check without running (`--json` for tools)\n    \
+         helix effects <script>   what each function reaches (authority + reproducibility)\n    \
          helix fmt <script>…      format (no options; `--check` reports instead of writing)\n    \
          helix build <script>     bundle a program + its runtime into one executable\n    \
          helix emit-hbc <script>  compile to a .hbc bytecode container (for ctype's hvm)\n    \
