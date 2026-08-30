@@ -42,10 +42,97 @@ use crate::error::HelixError;
 /// authority and did nothing at all — the worst shape a security control can have. An
 /// unknown key is now a clear error naming the key, so an unimplemented or misspelled
 /// section fails loudly instead of granting silent trust.
+/// A `[capabilities]` table — the MOST a program may do, on any machine, under any
+/// deployment.
+///
+/// ```toml
+/// [capabilities]
+/// fs = "read"     # omitted | "read" | "write" | "all"
+/// net = "on"      # omitted | "on"
+/// process = "on"  # omitted | "on"
+/// ```
+///
+/// Three properties, each against a specific failure:
+///
+/// - **Present means enforced.** No environment variable is needed. A declaration that only
+///   takes effect when someone remembers to set a variable is not a declaration — it is a
+///   comment that happens to parse.
+/// - **The environment NARROWS, never widens.** `HELIX_ALLOW_FS=all` against `fs = "read"`
+///   gives read. That is what makes the file worth reading: it states a ceiling, not a
+///   default, so the answer to "what is the most this program can do" is in the repository
+///   rather than spread across every deployment that runs it.
+/// - **Absent means today's behaviour.** Non-breaking, an invitation rather than a
+///   migration. Default-deny-with-no-table would break every existing program, and security
+///   that makes a tool unusable gets turned off wholesale — which is worse than none.
+///
+/// Note what a `process` grant CANNOT promise: a subprocess runs as a separate program with
+/// its own permissions, so it is a boundary exit rather than confinement (ADR 0037 D3).
+/// Declaring `process = "on"` while withholding `net` does not keep the child off the
+/// network.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Capabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+}
+
+impl Capabilities {
+    /// A value that does not parse is REFUSED, not silently treated as no grant.
+    ///
+    /// Denying is the safe half — it fails closed — but it fails closed WITHOUT SAYING SO,
+    /// and the shape that makes that dangerous is already in this tree: ADR 0021 describes
+    /// net authority as a host:port allowlist, which is the eventual design and not what
+    /// this parses. Someone who follows the ADR and writes `net = "example.com:443"`
+    /// believes they granted network access, gets "capability denied" from a program they
+    /// authorised, and has nothing pointing at the manifest.
+    fn validate(&self, path: &Path) -> Result<(), HelixError> {
+        let check = |key: &str, v: &Option<String>, allowed: &[&str]| -> Result<(), HelixError> {
+            let Some(v) = v else { return Ok(()) };
+            if allowed.contains(&v.as_str()) {
+                return Ok(());
+            }
+            Err(err(format!(
+                "`capabilities.{key}` in `{}` is \"{v}\", which is not a grant",
+                path.display()
+            ))
+            .hint(format!(
+                "the values are {}. Scoped paths and host:port arrive with cap-std \
+                 (ADR 0021), so a path or a hostname here is refused rather than silently \
+                 granting nothing.",
+                allowed.iter().map(|a| format!("`{a}`")).collect::<Vec<_>>().join(" or ")
+            )))
+        };
+        check("fs", &self.fs, &["read", "write", "all"])?;
+        check("net", &self.net, &["on"])?;
+        check("process", &self.process, &["on"])?;
+        Ok(())
+    }
+
+    pub fn fs_read(&self) -> bool {
+        matches!(self.fs.as_deref(), Some("read") | Some("all"))
+    }
+    pub fn fs_write(&self) -> bool {
+        matches!(self.fs.as_deref(), Some("write") | Some("all"))
+    }
+    pub fn net_on(&self) -> bool {
+        self.net.is_some()
+    }
+    pub fn process_on(&self) -> bool {
+        self.process.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub package: Package,
+    /// The authority ceiling this package declares. See [`Capabilities`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Capabilities>,
     /// Declared dependencies, by the name they are imported under.
     #[serde(default)]
     pub dependencies: BTreeMap<String, Dependency>,
@@ -240,6 +327,9 @@ impl Manifest {
                 "a package name is what an `import` writes: letters, digits and \
                  underscores, not starting with a digit. `my-package` cannot be imported.",
             ));
+        }
+        if let Some(c) = &self.capabilities {
+            c.validate(path)?;
         }
         if parse_semver(&self.package.version).is_none() {
             return Err(err(format!(
@@ -1533,20 +1623,42 @@ mod tests {
 
     /// An unknown `helix.toml` key is a hard error, not a silent discard.
     ///
-    /// This is a SECURITY property. `src/capability.rs` documents a `[capabilities]` block
-    /// as the intended durable source of truth for a program's authority, while phase 1b
-    /// remains unimplemented — so before `deny_unknown_fields`, writing that block looked
+    /// This is a SECURITY property, and `[capabilities]` is the case that motivated it:
+    /// `src/capability.rs` documented that block as the durable source of truth for a
+    /// program's authority while the implementation did not exist, so writing it looked
     /// like it restricted the program and did absolutely nothing. A control that appears to
     /// be enforcing and is not is worse than one that is plainly absent.
+    ///
+    /// **That block now works** (`a_declared_capability_ceiling_enforces_itself`), so it is
+    /// no longer the example here — the rule it forced stays, guarding whichever block is
+    /// documented-but-unimplemented next.
     #[test]
     fn an_unknown_manifest_key_is_rejected_rather_than_silently_dropped() {
-        // the case that motivated it
+        // A section this binary does not know: refused, not ignored.
         let e = toml::from_str::<Manifest>(
-            "[package]\nname = \"demo\"\n\n[capabilities]\nfs = \"read\"\n",
+            "[package]\nname = \"demo\"\n\n[registry]\nurl = \"https://example.com\"\n",
         )
         .unwrap_err()
         .to_string();
-        assert!(e.contains("capabilities"), "the message must name the key; got: {e}");
+        assert!(e.contains("registry"), "the message must name the key; got: {e}");
+
+        // THE SAME RULE INSIDE `[capabilities]`, which is where it now matters most: a
+        // misspelled grant must not read as an absent one. `fs_read = "on"` denying
+        // everything silently would be the original failure wearing a new hat.
+        let e = toml::from_str::<Manifest>(
+            "[package]\nname = \"demo\"\n\n[capabilities]\nfs_read = \"on\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("fs_read"), "a misspelled grant must name itself; got: {e}");
+
+        // ...and the real block parses.
+        let m: Manifest = toml::from_str(
+            "[package]\nname = \"demo\"\n\n[capabilities]\nfs = \"read\"\n",
+        )
+        .unwrap();
+        let c = m.capabilities.expect("the block should parse");
+        assert!(c.fs_read() && !c.fs_write() && !c.net_on() && !c.process_on());
 
         // a typo in a known key is caught by the same rule
         let e = toml::from_str::<Manifest>("[package]\nnaem = \"demo\"\n")

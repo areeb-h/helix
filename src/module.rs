@@ -144,6 +144,26 @@ fn project_context(entry: &Path) -> Result<ProjectContext, String> {
         return Ok(ProjectContext { deps: BTreeMap::new(), root: entry_dir, from_manifest: false });
     };
 
+    // THE DECLARED AUTHORITY CEILING, INSTALLED FROM THE MANIFEST THAT GOVERNS THIS
+    // PROGRAM — the package's own, not the workspace root's.
+    //
+    // This is the one function that knows WHICH manifest governs a program, and it runs
+    // once per load, which is why the install lives here rather than in a caller that
+    // would have to repeat the walk up. `install_ceiling` is single-write, so a process
+    // that loads several programs keeps the first one's ceiling; that matches the way the
+    // environment authority is installed, and an authority that could be replaced mid-run
+    // is a thing worth not having.
+    //
+    // A `[capabilities]` block in a DEPENDENCY is not consulted. A library cannot grant
+    // itself authority the program that imports it did not declare, which is the whole
+    // point of a ceiling; the reverse — a dependency NARROWING the program — is a real
+    // idea and a different feature (per-evaluation attenuation, ADR 0021).
+    if let Ok(Some(m)) = crate::pkg::Manifest::load(&near)
+        && let Some(caps) = m.capabilities.clone()
+    {
+        crate::capability::install_ceiling(caps);
+    }
+
     // …then one further question: is this package a MEMBER of a workspace above it? If so
     // the workspace root anchors, and the member's manifest goes on meaning only "this is
     // a package" (ADR 0040).

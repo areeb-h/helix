@@ -155,15 +155,61 @@ impl Authority {
 
 static AUTHORITY: OnceLock<Authority> = OnceLock::new();
 
+/// The `[capabilities]` ceiling declared by the project's manifest, once the project is
+/// known. Separate from [`AUTHORITY`] because the two are learned at different moments: the
+/// environment is readable at startup, the manifest only after the entry file is resolved.
+///
+/// Combining at read time rather than rewriting `AUTHORITY` keeps the install path
+/// single-write. An authority that could be replaced mid-run is a thing an attacker would
+/// look for, and there is no reason to have one.
+static CEILING: OnceLock<crate::pkg::Capabilities> = OnceLock::new();
+
+/// Install the declared ceiling (idempotent — first writer wins). Called once the entry
+/// file's project is known.
+pub fn install_ceiling(c: crate::pkg::Capabilities) {
+    let _ = CEILING.set(c);
+}
+
 /// Install the process authority (idempotent — first writer wins). Call once at startup.
 pub fn install(a: Authority) {
     let _ = AUTHORITY.set(a);
 }
 
-/// The installed authority, or `unconfined` (Off) if none was installed — so library/test
-/// code that drives `call_builtin` directly is never gated.
+/// The authority actually in force: the environment's, narrowed by the manifest's declared
+/// ceiling.
+///
+/// THE THREE PROPERTIES LIVE HERE.
+///
+/// - **Present means enforced.** A manifest that declares `[capabilities]` turns the gate
+///   on by itself. `HELIX_CAP` is not consulted for the mode in that case, and in
+///   particular `audit` cannot be used to weaken a declared ceiling: audit ALLOWS the
+///   access it logs, so honouring it here would let the environment widen authority by
+///   spelling a mode.
+/// - **The environment narrows, never widens.** A grant survives only if BOTH allow it.
+///   `HELIX_ALLOW_FS=all` against `fs = "read"` gives read.
+/// - **An UNSET variable is not a denial.** Without a manifest, an absent
+///   `HELIX_ALLOW_FS` denies (that is `install_from_env`'s rule and it is unchanged). With
+///   one, the declaration stands on its own — otherwise every deployment would have to
+///   restate what the repository already says, which is the failure the table exists to
+///   end.
+///
+/// With no manifest ceiling this is exactly the installed authority, so an existing program
+/// sees no change at all.
 pub fn current() -> Authority {
-    AUTHORITY.get().cloned().unwrap_or_else(Authority::unconfined)
+    let env = AUTHORITY.get().cloned().unwrap_or_else(Authority::unconfined);
+    let Some(c) = CEILING.get() else { return env };
+    // The environment only narrows where it was actually configured. `Mode::Off` means no
+    // variable asked for anything, so the ceiling stands alone.
+    let env_says = env.mode != Mode::Off;
+    let narrow = |ceiling: bool, from_env: bool| ceiling && (!env_says || from_env);
+    Authority {
+        mode: Mode::Enforce,
+        fs_read: narrow(c.fs_read(), env.fs_read),
+        fs_write: narrow(c.fs_write(), env.fs_write),
+        net: narrow(c.net_on(), env.net),
+        process: narrow(c.process_on(), env.process),
+        env: false,
+    }
 }
 
 /// Build the authority from the environment (phase 1 bootstrap; the manifest

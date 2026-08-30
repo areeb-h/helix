@@ -395,6 +395,39 @@ Three properties, each against a specific failure:
 Explicitly **not** default-deny-with-no-block: every existing program breaks, and security
 that makes a tool unusable gets turned off wholesale.
 
+#### Landed ✅
+
+All three properties are pinned by `a_declared_capability_ceiling_enforces_itself`, including
+the negative that proves the first one: a table declaring `net` and saying nothing about `fs`
+denies both filesystem effects with **no environment variable anywhere**. Without that case
+the table could be doing nothing, which is precisely the failure `deny_unknown_fields` was
+added to prevent.
+
+Three decisions worth recording, because each closes a way the ceiling could have leaked:
+
+- **`HELIX_CAP=audit` cannot weaken a declared ceiling.** Audit *allows* the access it logs,
+  so honouring it would let the environment widen authority by spelling a mode. A manifest
+  with capabilities is always `Enforce`.
+- **Combining happens at read time**, in `capability::current`, rather than by rewriting the
+  installed authority. The environment is knowable at startup and the manifest only after the
+  entry resolves; keeping the install single-write means there is no authority that can be
+  *replaced* mid-run, which is a thing an attacker would look for.
+- **A dependency's `[capabilities]` is not consulted.** A library cannot grant itself
+  authority the importing program did not declare — that is the whole point of a ceiling. The
+  reverse, a dependency NARROWING the program, is a real idea and a different feature
+  (per-evaluation attenuation, ADR 0021).
+
+The gate caught the one thing worth catching: `an_unknown_manifest_key_is_rejected_rather_
+than_silently_dropped` used `[capabilities]` as its specimen of a refused unknown key, so it
+failed by succeeding. Its rule survives with a different example, plus the case that now
+matters more — a misspelled grant (`fs_read = "on"`) must be refused rather than read as an
+absent one, which would be the original failure wearing a new hat.
+
+**Still open here:** the bundle does not carry its declared ceiling (2.3's second half). A
+bundled program loads through `load_archive`, which has no manifest, so `helix build` must
+bake the grants into the overlay — otherwise "ship to production" and "declared authority"
+remain two features instead of one.
+
 ### 2.2 The manifest is honest about identity
 
 - **`package.name` is unvalidated** and used *only in tests*. A package can name itself

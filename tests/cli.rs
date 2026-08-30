@@ -12961,3 +12961,104 @@ fn installing_a_package_executes_no_code() {
         found.join("\n  ")
     );
 }
+
+/// `[capabilities]` is a CEILING: present means enforced, and the environment may narrow it
+/// but never widen it.
+///
+/// The manifest used to REFUSE this table, deliberately — `deny_unknown_fields` was added
+/// precisely because a `[capabilities]` block that parsed and did nothing "looked like it
+/// restricted a program's authority and did nothing at all, the worst shape a security
+/// control can have". This is that block finally meaning something.
+///
+/// Every case below runs with **no `HELIX_CAP` at all** unless it is testing the
+/// environment's effect, because that is the property: a declaration that only takes effect
+/// when someone remembers to set a variable is not a declaration.
+#[test]
+fn a_declared_capability_ceiling_enforces_itself() {
+    let dir = std::env::temp_dir().join(format!("hx_caps_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("data.txt"), "hello\n").unwrap();
+    std::fs::write(dir.join("r.helix"), "print(read_text(\"data.txt\"))\n").unwrap();
+    std::fs::write(dir.join("w.helix"), "\"x\".write_to(\"out.txt\")\nprint(\"wrote\")\n").unwrap();
+
+    let manifest = |caps: &str| {
+        std::fs::write(
+            dir.join("helix.toml"),
+            format!("[package]\nname = \"app\"\nversion = \"0.1.0\"\n{caps}"),
+        )
+        .unwrap();
+    };
+    let go = |prog: &str, env: &[(&str, &str)]| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_helix"));
+        cmd.current_dir(&dir).args(["run", prog]).stdin(Stdio::null());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let o = cmd.output().expect("failed to spawn helix");
+        (
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+            o.status.code(),
+        )
+    };
+
+    // ABSENT MEANS TODAY'S BEHAVIOUR. Non-breaking is a property, not a courtesy:
+    // default-deny would break every existing program, and security that makes a tool
+    // unusable gets turned off wholesale.
+    manifest("");
+    let (out, err, code) = go("r.helix", &[]);
+    assert_eq!(code, Some(0), "no table must change nothing:\n{err}");
+    assert_eq!(out.trim(), "hello");
+    let (_, err, code) = go("w.helix", &[]);
+    assert_eq!(code, Some(0), "no table must change nothing:\n{err}");
+
+    // PRESENT MEANS ENFORCED. The table declares `net` and says nothing about `fs`, so both
+    // filesystem effects are denied — with no environment variable anywhere. This negative
+    // is the whole property; without it the table could be doing nothing.
+    manifest("\n[capabilities]\nnet = \"on\"\n");
+    for prog in ["r.helix", "w.helix"] {
+        let (_, err, code) = go(prog, &[]);
+        assert_ne!(code, Some(0), "{prog} should be denied by the declaration alone");
+        assert!(err.contains("capability denied"), "{prog}:\n{err}");
+    }
+
+    // A grant works, and grants exactly what it says.
+    manifest("\n[capabilities]\nfs = \"read\"\n");
+    let (out, err, code) = go("r.helix", &[]);
+    assert_eq!(code, Some(0), "`fs = \"read\"` must permit a read:\n{err}");
+    assert_eq!(out.trim(), "hello");
+    let (_, err, code) = go("w.helix", &[]);
+    assert_ne!(code, Some(0), "`fs = \"read\"` must not permit a write");
+    assert!(err.contains("fs-write"), "{err}");
+
+    // THE ENVIRONMENT CANNOT WIDEN. This is what makes the file worth reading: it states
+    // the most the program can do on ANY machine, under any deployment.
+    let widen = [("HELIX_CAP", "enforce"), ("HELIX_ALLOW_FS", "all")];
+    let (_, err, code) = go("w.helix", &widen);
+    assert_ne!(code, Some(0), "the environment must not widen a declared ceiling");
+    assert!(err.contains("fs-write"), "{err}");
+    let (out, _, code) = go("r.helix", &widen);
+    assert_eq!(code, Some(0), "...and must not break what the ceiling does allow");
+    assert_eq!(out.trim(), "hello");
+
+    // ...BUT IT CAN NARROW. A deployment may hold a program to less than it declared.
+    manifest("\n[capabilities]\nfs = \"all\"\n");
+    let (_, err, code) = go("w.helix", &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_FS", "read")]);
+    assert_ne!(code, Some(0), "the environment must be able to narrow:\n{err}");
+    let (_, err, code) = go("w.helix", &[]);
+    assert_eq!(code, Some(0), "with no variable set, the declaration stands alone:\n{err}");
+
+    // AND A VALUE THAT DOES NOT PARSE IS REFUSED. Denying silently is the safe half, but
+    // it fails closed without saying so: ADR 0021 describes net authority as a host:port
+    // allowlist, so someone who follows it writes `net = "example.com:443"`, believes they
+    // granted network access, and gets a denial with nothing pointing at the manifest.
+    manifest("\n[capabilities]\nnet = \"example.com:443\"\n");
+    let (_, err, code) = go("r.helix", &[]);
+    assert_ne!(code, Some(0), "an unparseable grant must be refused");
+    assert!(err.contains("capabilities.net"), "name the key:\n{err}");
+    assert!(err.contains("not a grant"), "{err}");
+    assert!(err.contains("cap-std") || err.contains("host:port"), "say why:\n{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

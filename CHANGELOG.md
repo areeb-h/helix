@@ -4,6 +4,58 @@
 
 ### Added
 
+- **`[capabilities]` in `helix.toml` is a real authority ceiling.**
+
+  ```toml
+  [capabilities]
+  fs = "read"     # omitted | "read" | "write" | "all"
+  net = "on"      # omitted | "on"
+  process = "on"  # omitted | "on"
+  ```
+
+  The manifest used to *refuse* this table on purpose: `deny_unknown_fields` was added
+  because a `[capabilities]` block that parsed and did nothing "looked like it restricted a
+  program's authority and did nothing at all — the worst shape a security control can have".
+  This is that block finally meaning something.
+
+  - **Present means enforced.** A table that declares `net` and says nothing about `fs`
+    denies both filesystem effects, **with no environment variable anywhere**. A declaration
+    that only takes effect when someone remembers to set a variable is not a declaration.
+  - **The environment narrows, never widens.** `HELIX_ALLOW_FS=all` against `fs = "read"`
+    still denies writes. That is what makes the file worth reading: it states the most the
+    program can do on *any* machine, under any deployment. `HELIX_CAP=audit` cannot weaken a
+    declared ceiling either — audit *allows* the access it logs, so honouring it would let
+    the environment widen authority by spelling a mode.
+  - **But it can narrow.** `fs = "all"` declared with `HELIX_ALLOW_FS=read` denies writes, so
+    a deployment may hold a program to less than it declared.
+  - **Absent means today's behaviour**, so nothing existing breaks. Default-deny would break
+    every program, and security that makes a tool unusable gets turned off wholesale.
+
+  A dependency's `[capabilities]` is **not** consulted: a library cannot grant itself
+  authority the importing program did not declare. A misspelled grant (`fs_read = "on"`) is
+  refused rather than read as an absent one, and an unparseable value (`net =
+  "example.com:443"`, which is what ADR 0021's eventual host:port design would suggest) names
+  the key and says why.
+
+- **`installing_a_package_executes_no_code`** guards a property that was an accident.
+  Resolving a dependency reads bytes, verifies a hash and unpacks an archive — no `setup.py`,
+  no `postinstall`, no `build.rs` — so a compromised package cannot act until a program
+  imports and calls it. Unlike the unwrap budget it is modelled on, it has **no raise path**;
+  and it was verified to *fail* (injecting a `Command::new` reports the file and line), not
+  merely to pass.
+
+### Changed
+
+- **A package name is validated where its author can fix it.** The identifier rule was
+  enforced on a *consumer's* dependency key while a package's own `name` went unchecked, so a
+  package could call itself `my-package` and hand the error to whoever depended on it.
+- **A dependency key must agree with the package it points at.** `helix add ui --path ./web`
+  wrote a key `ui` pointing at a package named `web`, and since `import ui.x` resolves
+  *through the key*, the program imported a package under a name its author never chose.
+  Refused now, naming both. A target with no manifest declares no name and so cannot
+  disagree — that stays allowed.
+
+
 - **`helix build` says which runtime a program needs.** `--runtime` made the artifact's
   size a choice; it did not make it an informed one. The only way to learn whether a
   program touched a DataFrame, a genomics reader or the HTTP client was to build against a
