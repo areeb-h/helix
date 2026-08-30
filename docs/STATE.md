@@ -21,9 +21,13 @@ Everything below is on `main` and **not** in v0.7.0.
 
 **The next release is a MINOR (0.8.0), not a patch.** `docs/RELEASING.md` makes a
 language-surface addition a minor by definition, and this cycle adds a `[workspace]` manifest
-table, fifteen builtins and a new `Value` type. Note that `release.sh` would NOT have caught
-this: it only refuses a patch whose `Unreleased` carries `### Changed`, and all of this is
-`### Added`. Worth tightening — see the queue.
+table, seventeen builtins, a new `Value` type and three DataFrame verbs.
+
+`release.sh` WOULD have refused a patch here, but only by luck: it checks for a `### Changed`
+heading, and `html_escape` happening to alter `to_html` bytes supplied one. Without that
+single entry every other addition sits under `### Added` and would have slipped through. The
+guard is right about `### Changed` and blind to "language-surface addition", which is the
+other half of the same policy — see the queue.
 
 ---
 
@@ -212,7 +216,10 @@ no `dict()`-like literal to key on, so detecting it needs its own rule.
 ### 4. Tighten two guards that let something through
 
 - **`release.sh`** only refuses a patch when `Unreleased` has `### Changed`. A
-  language-surface addition under `### Added` is also a minor by policy and slips past.
+  language-surface addition under `### Added` is also a minor by policy and slips past. In
+  v0.8.0 the guard did fire — but only because `html_escape` happened to change `to_html`
+  bytes; without that one entry, a release adding a manifest table, seventeen builtins and a
+  new `Value` type could have shipped as a patch.
 - **The panic ratchet** skips lines starting with `*` to ignore doc-comment continuations,
   which also skips `*stack.last_mut().expect(...) = …`. `vm.rs` has two uncounted. Tightening
   it will shift budgets across several files, so it is its own change.
