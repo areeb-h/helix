@@ -89,23 +89,88 @@ survived every differential run this project has. The codebase had already writt
 epitaph for the earlier instance of it, in `backend/mod.rs`: *"exit 0, `helix check` ok, and
 all three engines agree because all three are equally wrong."*
 
-So the oracle's strength is not one property but three, and only the third is real coverage:
+#### Make verification evidence explicit
 
-| shape | what agreement proves |
-|---|---|
-| shared implementation (most builtins, all column verbs) | **nothing** — it is one function |
-| interpreted-only, no JIT sites (storage, `Bytes`) | determinism, not correctness |
-| genuinely engine-specific (JIT kernels, packed fast paths) | the property the oracle exists for |
+**Engine agreement is not a scalar guarantee.** "walker ✓ VM ✓ JIT ✓" is read as *three
+implementations corroborated this*, and sometimes the truth is *three entry points called the
+same faulty function*. Those are worlds apart, and today they print the same green.
 
-Sharing the implementation is still the right design — two hand-written column resolvers
-would drift — but the safety it buys is *no divergence*, not *no bug*, and those are
-different claims. For shared code the load-bearing check is a corpus golden that pins the
-ANSWER, which is why `df_column_name_shadowing.helix` was written to pin behaviour its own
-comment called wrong, and predicted the change that fixed it.
+Five levels, strongest first, which must never be presented as equivalent:
 
-**Worth building:** `vmparity` could report which of the three shapes each program fell into,
-so "gate green" stops flattening them. `jit-explain` already knows the kernel-site count, so
-the second row is mechanically detectable today; the first would need a note per verb.
+| level | evidence | example |
+|---|---|---|
+| **independent parity** | engines reach the answer through materially different code | a JIT kernel vs its bytecode fallback |
+| **backend differential** | polars vs native-df — *only if the operation forks before them* | frame arithmetic, sort stability |
+| **shared-semantic parity** | engines differ, then meet in shared machinery | every column verb, via `dataframe_ops.rs` |
+| **vacuous parity** | no engine-distinct path exists at all | storage, `Bytes` — `0 kernel sites` |
+| **external expectation** | an answer authored by a human, not produced by the code | corpus goldens, the release claims |
+
+The last row is not the weakest. For anything at level 3 or below it is **the only real
+evidence**, which is why it belongs at the top of a feature's test plan rather than the bottom.
+
+#### The rule this yields
+
+> **A component cannot be evidence for semantics that it defines.**
+
+Same principle as refusing to bless a golden from the implementation that produced it. It has
+a sharp practical consequence: when a semantic operation lives *above* the engine fork,
+engine parity is not its primary test, and neither is the backend differential — the primary
+test has to originate outside the shared implementation.
+
+#### The measured case
+
+The `select` / `sort` / `group` shadowing bug is the permanent fixture for this class, and it
+was invisible to **both** differential mechanisms at once:
+
+- **Engine parity: blind.** `arg_as_column_name` lives in `dataframe_ops.rs`, shared by the
+  walker and the VM *deliberately* so they cannot diverge. Three engines, one wrong function.
+- **Backend differential: blind.** `column_name_args` computes the names and only then calls
+  `lf.select(&names)`, so the fork happens *after* the mistake — polars and native-df receive
+  identical wrong names and agree.
+- **Corpus golden: caught it.** A human wrote the expected column down.
+
+The codebase had already written the epitaph for the earlier instance, in `backend/mod.rs`:
+*"exit 0, `helix check` ok, and all three engines agree because all three are equally wrong."*
+
+Sharing the implementation remains right — two hand-written column resolvers would drift —
+but what it buys is *no divergence*, not *no bug*.
+
+**Worth building**, roughly in order of value per effort:
+
+1. `helix test --engines --explain-oracle`, reporting which level each program reached.
+   `jit-explain` already knows the kernel-site count, so vacuous parity is mechanically
+   detectable today; shared-semantic needs a note per verb, or a call-graph pass.
+2. **Mutation testing at the semantic chokepoints.** Perturb a shared helper — return the
+   wrong column, invert a predicate, flip null handling — and require that *some* test fails.
+   A surviving mutant is an evidence hole, named precisely. `arg_as_column_name` is exactly
+   the shape this finds, and it would have found it.
+3. **Property/metamorphic tests** where no second implementation exists: `decode(encode(b))
+   == b`, `sort(sort(x)) == sort(x)`, `df.slice(0, n).count() <= n`. These are independent of
+   the implementation without needing a rival one, which is what levels 3–4 lack.
+
+#### Related: expose the transitive effect closure
+
+`capability::effect_of` already classifies every builtin, and
+`no_ungated_effectful_builtins` already forces that classification exhaustively — it walks
+`BUILTINS`, skips those the registry marks `pure`, skips the gated ones, and requires anything
+left to sit in a `harmless` allowlist with a written justification. **The bottom layer exists
+and is guarded.**
+
+What is missing is propagation. Closing effects over the call graph and reporting them from
+`helix describe --json` would give:
+
+    report
+    effects: fs.read (via read_csv), clock (via now)
+    deterministic: no — clock, through report -> now
+
+One piece of information, several features: capability auditing, reproducibility reasoning,
+caching eligibility, deployment manifests, and agent introspection. It is not a Koka-sized
+effect system; it propagates what Helix already knows.
+
+**Do not fold this into `check`.** That contract — *never rejects a runnable program* — is
+what makes the edit/run loop usable, and a grumpier type checker is not the ask. A stricter
+facility should answer a *different question* (`helix effects`, or a `verify` with explicitly
+selected properties), not the same question more harshly.
 
 ### `Type::Unknown` grows every time a type is added
 
