@@ -1,0 +1,65 @@
+# The v0.9.0 release notes, as a program.
+#
+# Every line below is a cell of the changelog's tables and fences. The expectations in
+# `v0.9.0-claims.expected` are authored BY HAND from the notes — capturing them from a
+# binary would prove only that the binary agrees with itself, which every other gate
+# already covers. This is the one check that can notice the notes promising something the
+# binary does not do, and in v0.6.0 exactly that happened.
+#
+# Nothing here needs a server or a feature build: the PostgreSQL cells that do are in
+# `v0.9.0-errors.tsv`, which pins what a default binary says instead.
+
+# --- "a method call is resolved by its receiver": the notes' three-line fence, and the
+# --- claim that all three spellings live in ONE program.
+fn where(b, c) = {tbl: b.tbl, conds: b.conds.concat([c])}
+fn select(b, c) = {tbl: b.tbl, conds: b.conds, cols: [c]}
+fn all(b) = b.conds.join(" and ")
+
+q = {tbl: "people", conds: []}
+print(q.where("age > 40").where("active").all())
+print([1, 2, 3].where(it > 1))
+f = dataframe({name: ["ann", "bo", "cy"], age: [41, 33, 52]})
+print(f.where(@age > 40).select(@name).count())
+
+# --- "a type that OWNS the name never falls back": Array keeps `join` even with a
+# --- four-parameter `fn join` in scope, and a Record has none so it falls back.
+fn join(a, b, c, d) = "MINE"
+fn thru(xs) = xs.join(",")
+print(thru(["a", "b"]))
+print({r: 1}.join("x", "y", "z"))
+
+# --- "a frame reaching a function as an untyped parameter keeps its verbs", with the
+# --- bare column names the notes quote.
+fn adults(d) = d.where(age > 40)
+fn by_age(d) = d.sort(age)
+print(adults(f).count())
+print(by_age(f).column("age"))
+
+# --- and a group, whose aggregation column is written bare too.
+g = dataframe({k: ["a", "a", "b"], v: [1, 2, 3]}).group(k)
+fn totals(x) = x.sum(v)
+print(totals(g).count())
+
+# --- "the same names still mean the comprehension on an array, and `missing`
+# --- propagates" (ADR 0001), in the same program as the verbs above.
+print(missing.where(it > 1))
+
+# --- the native DataFrame engine is the shipped one: every verb the notes tabulate,
+# --- with its result CONSUMED, because a lazy engine answers `count()` without doing
+# --- the work.
+rows = dataframe({id: [3, 1, 2, 1], w: [10, 20, 30, 40]})
+print(rows.sort(@id).column("id"))
+print(rows.where(@w > 15).column("w"))
+print(rows.unique("id").count())
+print(rows.group(@id).sum(@w).count())
+print(rows.with({w2: @w * 2}).column("w2"))
+print(rows.join(dataframe({id: [1], tag: ["x"]}), @id).count())
+
+# --- ONE QUERY SURFACE. String predicates on a column shipped in v0.7.0 (ADR 0039);
+# --- what this release adds is that they survive a receiver the checker cannot prove,
+# --- so a helper taking a frame as a parameter reads the same as the postgres one.
+fn starting(d, p) = d.where(@name.starts_with(p))
+fn bare(d) = d.where(name.starts_with("a"))
+print(starting(f, "a").count())
+print(bare(f).count())
+print(f.where(@name.re_match("^[ac]")).count())

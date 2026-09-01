@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.9.0 — 2026-09-01
 
 ### Changed
 
@@ -98,6 +98,12 @@
   program and every `fn main` test is a single file — the regression test is a multi-file
   one.
 
+- **`helix effects` leaked the loader's namespaced names.** A multi-file program rewrites
+  every top-level name to `m<N>$name`; error messages strip that before display, and the
+  report did not — so it printed `m8$version` and `m9$_status`, a spelling that appears in
+  no source file and that nobody can grep for. Both the text and `--json` forms show the
+  names the source uses now.
+
 - **A `Connection` did not own its method names.** It was in no method table, so
   `type_owns_method` answered false and a user's own `fn query(c, sql)` silently took a
   call meant for the database — matching arities, no error, a program that never reaches
@@ -119,6 +125,12 @@
   (`g.mean(v)` → "`v` is not defined"), so the fix covers the family: both readings behind
   `Op::ReceiverIs`, decided on the value. **Twenty cases across the two receivers now agree
   on all three engines, where twelve diverged.**
+
+  One consequence worth naming: the String predicates a query has had since v0.7.0
+  (`@name.starts_with(p)`, `re_match`, and a bare `name.starts_with("a")`) now survive
+  a receiver the checker cannot prove, so a helper that takes a frame as a parameter
+  reads exactly like the one that takes a connection. That is one query surface rather
+  than two, and it is what the routing fix buys beyond the bug it closes.
 
   It costs nothing measurable: an unproven receiver never fused anyway (the chain analysis
   cannot see an array through a parameter), so guard off → on leaves the unproven/pinned

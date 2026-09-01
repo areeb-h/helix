@@ -1,0 +1,27 @@
+# The v0.9.0 release notes' ERROR claims: the cells whose "now" column says the
+# program stops instead of answering. One per line:
+#
+#   <substring the diagnostic must contain>	<program>
+#
+# Tab-separated, `#` comments ignored. Each program must exit NON-ZERO and its
+# stderr must contain the substring. Both halves matter: an exit code without the
+# message is a program that failed for some other reason. Each program is ONE line,
+# because that is how the runner writes them — and the substring must not begin with
+# `-`, because the runner greps for it.
+
+# --- PostgreSQL is behind `--features postgres`, and the notes say the verb still
+# --- exists, describes itself and type-checks everywhere — only the body is gated
+# --- (ADR 0032). A default binary saying so IS the claim.
+no PostgreSQL support	print(postgres_query("postgres://u:p@h/d", "select 1"))
+no PostgreSQL support	print(postgres_open("postgres://u:p@h/d"))
+
+# --- "a name nothing provides is still an error, with its did-you-mean intact" —
+# --- the sentence the receiver-directed rule is careful not to cost.
+has no method `nonesuch`	print({ a: 1 }.nonesuch())
+
+# --- "a verb the receiver does not have is refused the same way on every engine",
+# --- which the notes list among the wording divergences closed. The receiver is a
+# --- LAMBDA PARAMETER on purpose: the checker cannot prove it, so these reach the
+# --- run-time dispatch the claim is about rather than being rejected before it.
+a DataFrame has no method `map`	print((x => x.map(1))(dataframe({ v: [1] })))
+no aggregation `sort`	print((x => x.sort(v))(dataframe({ k: ["a"], v: [1] }).group(k)))

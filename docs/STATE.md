@@ -10,6 +10,13 @@ Last updated: 2026-08-31.
 
 ## Released
 
+- **v0.9.0** — tag `v0.9.0`, published 2026-09-01. PostgreSQL spoken directly with
+  TLS the server cannot turn off (ADR 0044); a method call resolved by its RECEIVER
+  (ADR 0045), which is what makes a fluent library writable at all; polars retired to
+  the oracle seat (ADR 0033 Stage 4); and the class of bug all three kept turning up —
+  a decision made where the answer was not yet available. Measured against the previous
+  tag, same profile: no wall or RSS regression on any crosslang workload, `b3_groupby`
+  0.11s → **0.03s**, RSS down 4–39 MB.
 - **v0.8.0** — tag on `289eb3d`, published 2026-08-30. The `[workspace]` manifest table
   (ADR 0040), the durable-storage substrate (ADR 0041) with kernel-held locks, `Bytes`
   (ADR 0042), row windows and runtime schemas (ADR 0043), `html_escape`, and the
@@ -29,7 +36,8 @@ Still open — see the queue.
 
 ## In flight for the next release
 
-Everything below is on `main` and **not** in v0.8.0.
+Nothing yet — the sections below shipped in **v0.9.0** and are kept for the reasoning,
+which is the part that outlives the release. The next entry goes above them.
 
 ### PostgreSQL, and TLS the server cannot turn off (ADR 0044)
 

@@ -1534,7 +1534,28 @@ fn run_effects(args: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let all = effects::closure(&loaded.stmts);
+        let mut all = effects::closure(&loaded.stmts);
+        // THE NAMES A READER SEES ARE THE ONES THEY WROTE. A multi-file program
+        // namespaces every top-level name (`m8$version`), which is an internal spelling
+        // and appears in no source file; error messages already strip it, and a report is
+        // not a different kind of output. JSON gets the same treatment for the same
+        // reason — a name in a machine-readable report is still a name someone greps for.
+        if loaded.multi_module {
+            for f in &mut all {
+                f.name = strip_mangling(&f.name);
+                for (_, path) in &mut f.effects {
+                    for step in path.iter_mut() {
+                        *step = strip_mangling(step);
+                    }
+                }
+                if let Some((who, path)) = &mut f.nondeterministic {
+                    *who = strip_mangling(who);
+                    for step in path.iter_mut() {
+                        *step = strip_mangling(step);
+                    }
+                }
+            }
+        }
         if json {
             let out: Vec<serde_json::Value> = all
                 .iter()

@@ -14193,3 +14193,40 @@ fn a_frame_through_an_untyped_parameter_keeps_its_verbs() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+/// A report shows the names the SOURCE uses, not the ones the loader invented.
+///
+/// A multi-file program rewrites every top-level name to `m<N>$name`. Error messages
+/// strip that before display; `helix effects` did not, so a field build's report was 366
+/// lines of `m8$version` and `m9$_status` — a spelling that appears in no source file and
+/// which nobody can grep for.
+///
+/// The single-file run is the control: whatever the multi-file one prints, it must print
+/// the same NAMES, because namespacing is an implementation detail of loading and not a
+/// property of the program.
+#[test]
+fn effects_reports_source_names_not_namespaced_ones() {
+    let dir = std::env::temp_dir().join(format!("hx_eff_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("lib.helix"), "export fn helper() = read_text(\"/etc/hostname\")\n")
+        .unwrap();
+    let app = dir.join("app.helix");
+    std::fs::write(&app, "import lib\nfn top() = lib.helper()\nfn main() = print(top())\n")
+        .unwrap();
+
+    for args in [vec!["effects"], vec!["effects", "--json"]] {
+        let mut a = args.clone();
+        a.push(app.to_str().unwrap());
+        let (out, err, code) = run(&a, &[], "");
+        assert_eq!(code, Some(0), "{err}");
+        assert!(!out.contains("m0$"), "the loader's spelling reached the report: {out}");
+        assert!(!out.contains("m1$"), "the loader's spelling reached the report: {out}");
+        // …and the names it DOES show are the ones written in the two files.
+        assert!(out.contains("helper"), "{out}");
+        assert!(out.contains("top"), "{out}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
