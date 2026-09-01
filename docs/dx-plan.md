@@ -240,6 +240,43 @@ with mechanisms so nothing has to be rediscovered:
   indexing landed with the bridge; the `.exp()` asymmetry is now its own entry
   below, because the bridge made it reachable by an ordinary spelling.)*
 
+### The fixed cost of a comprehension (2026-09-01)
+
+A field build brought a query builder from 24.15 to 5.65 us against GORM's 2.76, and the
+remaining gap is ours rather than theirs. Measured here, min-of-7, load 0.30,
+`HELIX_THREADS=1`, control subtracted:
+
+| shape, over a 2-element array | us |
+|---|--:|
+| `map(it).count()` | 0.145 |
+| `filter(it > 0).count()` | 0.187 |
+| `any(it > 0)` | 0.081 |
+| `reduce(0, +)` | **0.029** |
+
+And across sizes: `map` over 2 costs 0.137, over 20 costs 0.146, over 2000 costs 1.426 —
+so **~0.135 us FIXED per comprehension and ~0.65 ns per element**, a ratio of 200. Below
+about 200 elements a comprehension pays for its setup, not its work, which is why fusing
+four passes into one `reduce` won that build 1.44x on a two-element array. That is the
+reverse of the advice for a large array, and worth stating in the docs as its own rule.
+
+WHAT IT IS NOT. Not the JIT: the same shapes under `HELIX_NOJIT=1` are 1.5-5x SLOWER
+(`reduce` 0.029 -> 0.154), so the native path is already earning its place at n=2. Not
+`ColumnBuilder` either — it is a small enum plus a counter, one allocation for two
+elements, and glibc's tcache serves that in ~2 ns.
+
+WHY IT IS NOT FIXED HERE. The remaining candidates (op dispatch across `CompInit` /
+`CompNext` / `CompPush` / `CompEnd`, the fusion guard, the native call setup) differ by
+30-150 ns, and this harness carries about 10% noise at that scale — the pinned control
+moved as much as the subject in the guard A/B earlier this cycle. Choosing between them
+needs a profiler on the Rust binary, not another Helix micro-benchmark, and an
+unmeasured VM optimisation is exactly what this file exists to keep out of a release.
+
+THE ARITHMETIC THAT MAKES IT WORTH DOING. A hand-minimal Helix renderer for that build's
+exact query is 0.71 us — the language already beats GORM by 3.9x for the work itself. Of
+their 5.65, roughly 1.2 us is comprehension setup (nine of them) and roughly 1.2 us is
+record lookups. Removing ALL of the first still lands at 4.45, so this is necessary and
+not sufficient: closing it needs both halves, and neither side should claim the win alone.
+
 ### UFCS after the PyObject narrowing (2026-08-20)
 
 v0.3.0 shipped UFCS gated on `registry::is_any_method`, and called it strictly additive.
