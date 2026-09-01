@@ -4016,6 +4016,104 @@
         }
     }
 
+    /// A method call is resolved by its RECEIVER, not by its name — on both engines.
+    ///
+    /// UFCS shipped gated at PARSE time on `registry::is_any_method`: a global name test
+    /// with no idea what the receiver is. Every good verb name is some type's method, so
+    /// `fn where(q, c)` beside `q.where(c)` on a record was invisible and the call died
+    /// with "type Record has no method `where`" — which made a fluent library (a query
+    /// builder, an ORM) unwritable in the language. The decision moved to run time, where
+    /// the receiver exists.
+    ///
+    /// TWO ROUTES HAD NO DISPATCH TO FAIL, and they are what this test is really about.
+    /// `select`/`group`/`with` compile to DataFrame column-verb ops, and
+    /// `where`/`map`/`filter`/`reduce`/`scan`/`any`/`all` compile to inline comprehension
+    /// loops — both with UNEVALUATED arguments, chosen by the compiler before any value
+    /// exists. Those call sites now emit BOTH readings behind `Op::ReceiverIs`, whose
+    /// predicate (`RecvClass::holds`) is the same function the tree-walker calls. One
+    /// predicate, two engines: that is what this asserts, case by case.
+    ///
+    /// The receiver-evaluated-ONCE half lives in `tests/corpus/ufcs_receiver_decides`,
+    /// which compares stdout — double evaluation is a side-effect count, not a value, so
+    /// it is invisible to the value comparison here.
+    #[test]
+    fn ufcs_resolves_on_the_receiver_not_the_name() {
+        const Q: &str = "fn q(t) = { tbl: t, cs: [] }\n\
+             fn where(b, c) = { tbl: b.tbl, cs: b.cs.concat([c]) }\n\
+             fn select(b, c) = { tbl: b.tbl, cs: b.cs.concat([c]) }\n\
+             fn take(b, n) = { tbl: b.tbl, cs: b.cs.concat([\"limit\"]) }\n\
+             fn first(b) = b.cs.count()\n\
+             fn all(b) = b.tbl\n";
+
+        // The user's verbs answer on a record — including the names the compiler routes
+        // by type, which is the half that needed the new opcode.
+        for (src, want) in [
+            (format!("{Q}q(\"t\").where(\"a\").first()"), "1"),
+            (format!("{Q}q(\"t\").where(\"a\").where(\"b\").select(\"n\").first()"), "3"),
+            (format!("{Q}q(\"t\").select(\"n\").all()"), "t"),
+            (format!("{Q}q(\"t\").take(5).first()"), "1"),
+            // Chained across lines with no continuation characters.
+            (format!("{Q}q(\"t\")\n    .where(\"a\")\n    .select(\"n\")\n    .first()"), "2"),
+        ] {
+            let (tw, vm) = (run_tw(&src), run_vm(&src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+
+        // THE SAME NAMES, in the SAME program, still mean the comprehension on an array
+        // and still mean the array's own method where it has one. A type that OWNS a name
+        // never falls back, which is what keeps a real method's real error from being
+        // re-run as something else.
+        for (src, want) in [
+            (format!("{Q}[1, 2, 3].where(it > 1)"), "[2, 3]"),
+            (format!("{Q}[1, 2, 3].all(it > 0)"), "true"),
+            (format!("{Q}[1, 2, 3].map(it * 2).where(it > 2)"), "[4, 6]"),
+            // `first` is an Array method AND a user function here: the array keeps its own.
+            (format!("{Q}[7, 8, 9].first()"), "7"),
+            // ADR 0001: `missing` is inside the class the loop accepts, so it propagates
+            // rather than falling back to the function.
+            (format!("{Q}missing.where(it > 1)"), "missing"),
+        ] {
+            let (tw, vm) = (run_tw(&src), run_vm(&src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            assert_eq!(vm, Ok(want.to_string()), "`{src}`");
+        }
+
+        // A wrong-arity fallback reports the FUNCTION's arity, which names the real
+        // mismatch where "no such method" could not. Both engines raise the same
+        // sentence because both raise it from `interp::arity_err`.
+        let arity = "fn take(b, n, m) = 1\n{ a: 1 }.take(1)";
+        let (tw, vm) = (run_tw(arity), run_vm(arity));
+        assert_eq!(tw, vm, "engines disagree on `{arity}`");
+        let msg = vm.unwrap_err();
+        assert!(msg.contains("`take` expects 3 arguments, got 2"), "got: {msg}");
+
+        // WHAT STILL DECLINES, and why each one must. The compiler stops at a local, an
+        // upvalue, or a global before it ever reaches a `fn` slot; the walker's
+        // `decl_name` test draws the identical line, so an alias and a shadow are refused
+        // by both and the method error stands with its did-you-mean intact.
+        for (src, needle) in [
+            // An alias is a global holding a function VALUE, not a declared name.
+            ("fn ident(x) = x\nh = ident\n{ a: 1 }.h()", "has no method `h`"),
+            // A LOCAL of the same name. The compiler stops at `resolve_local` before it
+            // reaches the `fn` slot; the walker's `lookup` finds the parameter, which is
+            // not a function value. Both decline, so the two engines agree — and they
+            // agree with what `select(...)` written as a free call would have meant here.
+            (
+                "fn select(b, c) = 1\nfn go(select) = { a: 1 }.select(\"x\")\ngo(5)",
+                "has no method `select`",
+            ),
+            // No free spelling of the name at all — unchanged behaviour.
+            ("{ a: 1 }.nonesuch()", "has no method `nonesuch`"),
+        ] {
+            let (tw, vm) = (run_tw(src), run_vm(src));
+            assert_eq!(tw, vm, "engines disagree on `{src}`");
+            let msg = vm.unwrap_err();
+            assert!(msg.contains(needle), "`{src}` got: {msg}");
+        }
+
+    }
+
     /// The VM must be observationally identical to the tree-walker.
     fn assert_parity(src: &str) {
         assert_eq!(

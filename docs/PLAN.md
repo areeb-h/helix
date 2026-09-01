@@ -108,6 +108,41 @@ Five levels, strongest first, which must never be presented as equivalent:
 The last row is not the weakest. For anything at level 3 or below it is **the only real
 evidence**, which is why it belongs at the top of a feature's test plan rather than the bottom.
 
+#### A guard that cannot fail
+
+Vacuity above is about COVERAGE: nothing engine-distinct runs, so nothing is compared. This
+is about the PREDICATE. A check's condition can quietly become true for every input, and it
+then passes unconditionally while still printing green.
+
+Six instances, every one of which looked rigorous from the outside:
+
+| the check | why it could not fail |
+|---|---|
+| `dfcheck.sh` ran `examples/dataframes.helix` | the path had moved, so it diffed three copies of "no such file" — and ADR 0033 cited it as acceptance evidence |
+| `dfdiff.sh` proved a binary was dual by probing `HELIX_DF_ENGINE=native` | after Stage 4 native ships in EVERY build, so a single-engine binary passed the probe and the harness would have compared native against itself: 134 programs, 0 divergences, no information |
+| a mutation harness reported `caught` | the suite was already red, so every mutant was "caught" |
+| `cargo clippy … \| tail -3 && echo CLEAN` | `&&` tests `tail`'s exit status, never cargo's — it printed CLEAN over two real errors |
+| a shell group ending `\|\| echo FAILED` | the group then SUCCEEDS, so the next `&&` step ran on unpatched source and reported a clean build of the old code |
+| `read_csv(p).count()` as a "read" benchmark | a lazy engine answers it without parsing a field, so it timed how fast the engine DECLINED the work |
+
+The shape behind all six: **whatever the pass condition is attached to is what is actually
+being tested**, and in each case that had drifted from what the name promised. Two of them
+drifted because the world changed underneath a check that had been correct when written —
+which is why this belongs here rather than in a list of past bugs. It will happen again, and
+the next instance will look exactly as convincing.
+
+**The remedy is a demonstration, not a review.** A guard that has never been seen to fail is
+a claim, not evidence. Break the thing it guards, watch it go red, restore. The dense-join
+edge cases were verified this way: removing the empty-slot check made a left join silently
+drop the two rows whose keys fell inside the right frame's range but matched nothing, and
+`tests/corpus/df_join_dense_edges.helix` caught it. That costs one build, and it is the only
+thing that distinguishes a guard from a comment.
+
+A cheap standing version of the same idea: when a check's subject changes — a feature becomes
+the default, a file moves, an engine ships everywhere — **re-ask what its condition now
+discriminates between**. Three of the six above were introduced by exactly that kind of
+change.
+
 #### The rule this yields
 
 > **A component cannot be evidence for semantics that it defines.**

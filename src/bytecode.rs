@@ -50,6 +50,11 @@ pub enum CompKind {
     All,
     /// `position` — the first index whose predicate result is exactly `Bool(want)`.
     Position,
+    /// `scan` — identical to [`CompKind::Map`] at run time (the VM reads the kind for
+    /// nothing but the error's method name), and a separate variant for the same reason
+    /// `Where` is one: a `scan` on a bad receiver reported "no method `map`", naming a
+    /// call that appears nowhere in the source.
+    Scan,
 }
 
 impl CompKind {
@@ -62,6 +67,7 @@ impl CompKind {
             CompKind::Any => "any",
             CompKind::All => "all",
             CompKind::Position => "position",
+            CompKind::Scan => "scan",
         }
     }
 }
@@ -125,6 +131,17 @@ impl Builder {
         let idx = self.upvalues.len() as u32;
         self.upvalues.push((name.to_string(), src));
         Some(idx)
+    }
+
+    /// Is `name` reachable as an upvalue — WITHOUT registering the capture?
+    ///
+    /// `resolve_upvalue` appends to `self.upvalues` as a side effect, so a *speculative*
+    /// question must not use it: asking whether a UFCS fallback is possible would
+    /// otherwise mint a capture for a name the call never loads, growing the closure's
+    /// upvalue list with a phantom.
+    fn can_capture(&self, name: &str) -> bool {
+        self.upvalues.iter().any(|(n, _)| n == name)
+            || self.enclosing.iter().any(|(n, _)| n == name)
     }
 
     /// The capturable environment this function exposes to a nested lambda: each
@@ -259,7 +276,7 @@ fn mentions_column(e: &Expr) -> bool {
                 || [start, stop, step].iter().any(|o| o.as_deref().is_some_and(mentions_column))
         }
         Expr::Lambda { body, .. } => mentions_column(body),
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             bindings.iter().any(|(_, v)| mentions_column(v)) || mentions_column(body)
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
@@ -567,12 +584,33 @@ impl Compiler {
         self.compile_expr(b, recv)?;
         let slot = b.declare_local("$dfrecv");
         b.emit(Op::StoreLocal(slot), line, col);
+        self.df_verb_from_slot(b, slot, name, args, group_agg, eval_args_on_missing, line, col)
+    }
+
+    /// [`Self::compile_df_verb_guarded`]'s body, from a receiver already in `slot`. Split
+    /// out so a call site with TWO readings can test the receiver once and hand the same
+    /// local to both branches.
+    #[allow(clippy::too_many_arguments)]
+    fn df_verb_from_slot(
+        &mut self,
+        b: &mut Builder,
+        slot: u32,
+        name: &str,
+        args: &[Expr],
+        group_agg: bool,
+        eval_args_on_missing: bool,
+        line: usize,
+        col: usize,
+    ) -> R<()> {
         b.emit(Op::LoadLocal(slot), line, col);
         b.emit(
             Op::Method(std::rc::Rc::new(MethodData {
                 name: std::rc::Rc::new("is_missing".to_string()),
                 nargs: 0,
                 ufcs_name: std::cell::OnceCell::new(),
+                // Synthesized, and `is_missing` is universal: dispatch cannot fail, so
+                // there is nothing for a fallback to catch.
+                ufcs_fn: None,
             })),
             line,
             col,
@@ -615,6 +653,173 @@ impl Compiler {
                 col,
             );
         }
+        let end = b.code.len() as u32;
+        b.code[jend] = Op::Jump(end);
+        Ok(())
+    }
+
+    /// The hidden local a two-reading call site parks its receiver in, so both branches
+    /// see the SAME value and the receiver's side effects happen exactly once. A NAME
+    /// rather than a bare slot because the comprehension branch below hands it back to
+    /// `compile_comprehension` as an ordinary `Ident` receiver, which resolves by name.
+    const SPLIT_RECV: &str = "$splitrecv";
+
+    /// A comprehension name the program also declares as a `fn`: `xs.where(it > 3)` and
+    /// `q.where("age > 40")` are both real, and only the receiver says which.
+    ///
+    /// The comprehension reading cannot fail its way into a fallback the way an ordinary
+    /// method call can — it compiles to an inline loop, so there is no dispatch to fail.
+    /// Hence the branch: test the receiver, run the loop for an array (or a `missing`
+    /// that propagates, ADR 0001), call the function for anything else.
+    ///
+    /// FUSION IS DECLINED HERE, deliberately: a fused chain rewrites several stages into
+    /// one native loop over the whole expression, which cannot be half-taken. A call site
+    /// with two readings is exactly the rare one, and correctness outranks the fusion it
+    /// gives up. Stages BELOW this one still fuse among themselves.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_comprehension_split(
+        &mut self,
+        b: &mut Builder,
+        recv: &Expr,
+        name: &str,
+        args: &[Expr],
+        fidx: u32,
+        line: usize,
+        col: usize,
+    ) -> R<()> {
+        self.compile_expr(b, recv)?;
+        let slot = b.declare_local(Self::SPLIT_RECV);
+        b.emit(Op::StoreLocal(slot), line, col);
+        b.emit(Op::LoadLocal(slot), line, col);
+        b.emit(Op::ReceiverIs(RecvClass::Iterable), line, col);
+        let jufcs = b.emit(Op::JumpIfFalse(0), line, col);
+        // The comprehension reading, over the receiver already in the local: a
+        // synthesized `Ident` resolves to that slot by name, so the receiver expression
+        // is compiled ONCE and its side effects happen once whichever branch runs.
+        let held = Expr::Ident { name: Self::SPLIT_RECV.to_string(), line, col };
+        if matches!(name, "any" | "all") {
+            self.compile_any_all(b, &held, name, args, line, col)?;
+        } else {
+            self.compile_comprehension(b, &held, name, args, line, col)?;
+        }
+        let jend = b.emit(Op::Jump(0), line, col);
+        let ufcs_at = b.code.len() as u32;
+        b.code[jufcs] = Op::JumpIfFalse(ufcs_at);
+        // The ordinary path, not a direct call — see `method_with_fallback`. A receiver
+        // that is not iterable may still OWN this name (a String's `map`, a Dict's
+        // `filter`), and the tree-walker gives it its own method here.
+        self.method_with_fallback(b, slot, name, args, Some(fidx), line, col)?;
+        let end = b.code.len() as u32;
+        b.code[jend] = Op::Jump(end);
+        Ok(())
+    }
+
+    /// A split's OTHER branch: the ordinary value-method call, with the UFCS fallback
+    /// slot attached.
+    ///
+    /// Deliberately not a `CallFn` to `fidx`. The question at a split site is not "frame or
+    /// function" but "frame, or whatever this receiver normally means" — and for a type
+    /// that OWNS the name that is its own method. `Op::Method` already encodes the whole
+    /// rule (dispatch, then retry as a free call only on FAILURE, and never for an owning
+    /// type), which is the same rule the tree-walker's other branch runs. Emitting a direct
+    /// call re-decided it, and got it wrong: `xs.join(",")` on an untyped parameter went to
+    /// a user's `fn join` even though `Array` owns `join` — the walker answered and the VM
+    /// raised, which is the divergence class this project treats as worst.
+    #[allow(clippy::too_many_arguments)]
+    fn method_with_fallback(
+        &mut self,
+        b: &mut Builder,
+        slot: u32,
+        name: &str,
+        args: &[Expr],
+        ufcs_fn: Option<u32>,
+        line: usize,
+        col: usize,
+    ) -> R<()> {
+        b.emit(Op::LoadLocal(slot), line, col);
+        for a in args {
+            self.compile_expr(b, a)?;
+        }
+        b.emit(
+            Op::Method(std::rc::Rc::new(MethodData {
+                name: std::rc::Rc::new(name.to_string()),
+                nargs: args.len() as u32,
+                ufcs_name: std::cell::OnceCell::new(),
+                ufcs_fn,
+            })),
+            line,
+            col,
+        );
+        Ok(())
+    }
+
+    /// The DataFrame reading of `join`, from a receiver already in `slot`.
+    ///
+    /// Split out of the routing above so a two-reading call site can test the receiver
+    /// once and hand the same local to both branches — the twin of `df_verb_from_slot`.
+    fn df_join_from_slot(
+        &mut self,
+        b: &mut Builder,
+        slot: u32,
+        args: &[Expr],
+        line: usize,
+        col: usize,
+    ) -> R<()> {
+        b.emit(Op::LoadLocal(slot), line, col);
+        match args.first() {
+            Some(other) => {
+                self.compile_expr(b, other)?;
+                b.emit(Op::DfJoin { spec: std::rc::Rc::new(args[1..].to_vec()) }, line, col);
+            }
+            // No operand to join with — the tree-walker's own diagnostic, so the compiler
+            // stays total for a type-checked program.
+            None => {
+                b.emit(
+                    Op::raise(
+                        std::rc::Rc::new("`join` needs a DataFrame to join with".to_string()),
+                        std::rc::Rc::new("e.g. `samples.join(meta, sample_id)`.".to_string()),
+                    ),
+                    line,
+                    col,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A call site with two readings: the type-directed one, and a UFCS call to the
+    /// declared `fn` in `fidx`. Emits the receiver once, tests it, and lets run time
+    /// choose — which is what the tree-walker does, so this is how the VM agrees with it.
+    ///
+    /// `on_class` emits the type-directed reading, with the receiver available in the
+    /// local it is handed. The UFCS reading loads that same local as the first argument
+    /// and compiles the rest as ORDINARY VALUES, which is the whole difference between
+    /// the two: a column verb's `@name` and a comprehension's `it > 3` are unevaluated
+    /// syntax, while a function's arguments are values.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_recv_split(
+        &mut self,
+        b: &mut Builder,
+        recv: &Expr,
+        name: &str,
+        args: &[Expr],
+        class: RecvClass,
+        fidx: u32,
+        line: usize,
+        col: usize,
+        on_class: &mut dyn FnMut(&mut Self, &mut Builder, u32) -> R<()>,
+    ) -> R<()> {
+        self.compile_expr(b, recv)?;
+        let slot = b.declare_local("$splitrecv");
+        b.emit(Op::StoreLocal(slot), line, col);
+        b.emit(Op::LoadLocal(slot), line, col);
+        b.emit(Op::ReceiverIs(class), line, col);
+        let jufcs = b.emit(Op::JumpIfFalse(0), line, col);
+        on_class(self, b, slot)?;
+        let jend = b.emit(Op::Jump(0), line, col);
+        let ufcs_at = b.code.len() as u32;
+        b.code[jufcs] = Op::JumpIfFalse(ufcs_at);
+        self.method_with_fallback(b, slot, name, args, Some(fidx), line, col)?;
         let end = b.code.len() as u32;
         b.code[jend] = Op::Jump(end);
         Ok(())
@@ -687,6 +892,26 @@ impl Compiler {
     /// reassigned" at line 1.
     fn fn_slot_defined_above(&self, i: usize) -> bool {
         self.funcs[i].is_some()
+    }
+
+    /// The function slot a failed method dispatch may retry `name(recv, …)` against.
+    ///
+    /// [`Self::resolve`]'s precedence, made read-only and narrowed to `NameRef::Func`: a
+    /// declared top-level `fn`, shadowed by nothing. The narrowing is the point — a
+    /// local, an upvalue, or a global holding a function VALUE is deliberately refused,
+    /// because the parse-time rewrite refuses it too (`self.fn_names.contains`), and the
+    /// rule stays "a declared function can be called in method position" rather than
+    /// widening to "anything callable can". An alias (`h = id`) is a global, so `x.h()`
+    /// declines here exactly as the walker's `decl_name` test declines it.
+    fn ufcs_fn_slot(&self, b: &Builder, name: &str) -> Option<u32> {
+        if b.resolve_local(name).is_some() || b.can_capture(name) {
+            return None;
+        }
+        if self.globals.iter().any(|g| g == name) {
+            return None;
+        }
+        let i = self.func_names.iter().position(|f| f == name)?;
+        self.fn_slot_visible(i).then_some(i as u32)
     }
 
     fn fn_slot_visible(&self, _i: usize) -> bool {
@@ -1233,7 +1458,7 @@ impl Compiler {
                 b.scopes.pop();
                 b.next_slot = saved_next;
             }
-            Expr::Let { bindings, body } => {
+            Expr::Let { bindings, body, .. } => {
                 b.scopes.push(Vec::new());
                 let saved_next = b.next_slot;
                 for (name, expr) in bindings {
@@ -1396,9 +1621,12 @@ impl Compiler {
                 self.compile_expr(b, recv)?;
                 b.emit(Op::GetField(crate::symbol::Symbol::intern(name)), *line, *col);
             }
-            Expr::Method { recv, name, args, line, col, .. } => {
+            Expr::Method { recv, name, args, ufcs, line, col, .. } => {
                 use crate::types::Type;
                 let n = name.as_str();
+                // The name the fallback resolves to — see the tree-walker's twin, and
+                // `module::rw`, which fills it.
+                let free = ufcs.as_deref().unwrap_or(n);
 
                 // 1. Type-directed column verbs. When the type checker proved the
                 // receiver is a DataFrame/GroupBy, the args are *columns/predicates*
@@ -1431,6 +1659,29 @@ impl Compiler {
                 if n == "join"
                     && matches!(self.recv_type(recv), Some(Type::DataFrame) | Some(Type::Unknown))
                 {
+                    // …unless the program declares `fn join`, in which case this call has
+                    // two readings and only the receiver settles it — the same split the
+                    // column verbs and the comprehensions take. `join` needs it MORE than
+                    // they do: their Unknown-receiver route requires an argument that
+                    // mentions a `@column`, which can only be a frame operation, while a
+                    // join key may be written bare (`samples.join(meta, sample_id)`), so
+                    // this route fires on ordinary arguments too.
+                    if let Some(fidx) = self.ufcs_fn_slot(b, free) {
+                        let (ar, l, c) = (args.to_vec(), *line, *col);
+                        return self.compile_recv_split(
+                            b,
+                            recv,
+                            name,
+                            args,
+                            RecvClass::Frame,
+                            fidx,
+                            l,
+                            c,
+                            &mut move |s: &mut Self, b: &mut Builder, slot: u32| {
+                                s.df_join_from_slot(b, slot, &ar, l, c)
+                            },
+                        );
+                    }
                     // Evaluate the receiver first (matching the tree-walker's order, so
                     // its side effects run before any error).
                     self.compile_expr(b, recv)?;
@@ -1468,12 +1719,37 @@ impl Compiler {
                 // `@column` can't be a value), so don't let it fall to the
                 // value-method path, whose arg compile raises at runtime.
                 if matches!(n, "mean" | "sum" | "min" | "max" | "count" | "std")
-                    && (matches!(self.recv_type(recv), Some(Type::GroupBy))
-                        || (matches!(self.recv_type(recv), Some(Type::Unknown) | None)
-                            && args.iter().any(mentions_column)))
+                    && matches!(self.recv_type(recv), Some(Type::GroupBy))
                 {
                     return self
                         .compile_df_verb_guarded(b, recv, name, args, true, true, *line, *col);
+                }
+                // …and when the checker could not prove it, BOTH readings. `g.mean(v)`
+                // through an untyped parameter is an aggregation over the column `v` on the
+                // tree-walker, which has the group, and was "`v` is not defined" here,
+                // which guessed "value method" and evaluated it. A `@column` argument used
+                // to be the only hint that switched the route, and an aggregation's column
+                // is normally written bare.
+                if matches!(n, "mean" | "sum" | "min" | "max" | "count" | "std")
+                    && matches!(self.recv_type(recv), Some(Type::Unknown) | None)
+                    && (args.iter().any(mentions_column) || !args.is_empty() || n == "count")
+                {
+                    let (nm, ar, l, c) = (name.clone(), args.to_vec(), *line, *col);
+                    let ufcs = self.ufcs_fn_slot(b, free);
+                    self.compile_expr(b, recv)?;
+                    let slot = b.declare_local(Self::SPLIT_RECV);
+                    b.emit(Op::StoreLocal(slot), l, c);
+                    b.emit(Op::LoadLocal(slot), l, c);
+                    b.emit(Op::ReceiverIs(RecvClass::GroupByOnly), l, c);
+                    let jval = b.emit(Op::JumpIfFalse(0), l, c);
+                    self.df_verb_from_slot(b, slot, &nm, &ar, true, true, l, c)?;
+                    let jend = b.emit(Op::Jump(0), l, c);
+                    let val_at = b.code.len() as u32;
+                    b.code[jval] = Op::JumpIfFalse(val_at);
+                    self.method_with_fallback(b, slot, &nm, &ar, ufcs, l, c)?;
+                    let end = b.code.len() as u32;
+                    b.code[jend] = Op::Jump(end);
+                    return Ok(());
                 }
 
                 // 2. Comprehensions compile to inline bytecode loops (no closures).
@@ -1484,6 +1760,94 @@ impl Compiler {
                 // `count`, or another stage over an idempotent Int source compiles to ONE
                 // native loop with no intermediate arrays. Detected at the outermost
                 // method; falls back to the per-stage path for anything ineligible.
+                // A FRAME THE CHECKER COULD NOT PROVE. `where`/`filter` are the only
+                // comprehension names a DataFrame also owns, and when the receiver's type
+                // is unproven — an untyped parameter, a branch that yields either — the
+                // compiler used to guess "comprehension". That guess evaluates the
+                // argument as a value, so `f.where(age > 40)` (bare column names, ADR
+                // 0039's own spelling) died with "`age` is not defined" while the
+                // tree-walker, which has the receiver, ran the column verb.
+                //
+                // A `@column` argument was the one hint that flipped the route (step 1
+                // above), and a bare name carries no hint at all — so the shape this broke
+                // is precisely the one a database helper is written in.
+                //
+                // Both readings, then, behind the receiver test. `FrameOnly` and not
+                // `Frame`: a `missing` receiver belongs to the comprehension branch, which
+                // propagates it (ADR 0001) — routing it here as well would be two answers
+                // to one question. Deliberately NOT extended to `map`/`reduce`/`scan`/
+                // `any`/`all`: a frame owns none of those, so there is no second reading,
+                // and `map` keeps its fusion.
+                if matches!(n, "where" | "filter" | "sort" | "drop_missing" | "drop_nan")
+                    && matches!(self.recv_type(recv), Some(Type::Unknown) | None)
+                {
+                    let (nm, ar, l, c) = (name.clone(), args.to_vec(), *line, *col);
+                    let ufcs = self.ufcs_fn_slot(b, free);
+                    self.compile_expr(b, recv)?;
+                    let slot = b.declare_local(Self::SPLIT_RECV);
+                    b.emit(Op::StoreLocal(slot), l, c);
+                    b.emit(Op::LoadLocal(slot), l, c);
+                    b.emit(Op::ReceiverIs(RecvClass::DataFrameOnly), l, c);
+                    let jnotdf = b.emit(Op::JumpIfFalse(0), l, c);
+                    // `eval_args_on_missing` is false to match step 1's rule for these two
+                    // names, though `FrameOnly` means no `missing` reaches it.
+                    self.df_verb_from_slot(b, slot, &nm, &ar, false, false, l, c)?;
+                    let jend = b.emit(Op::Jump(0), l, c);
+                    // A GROUP, refused BEFORE its arguments are evaluated. The tree-walker
+                    // checks the receiver first and says "a grouped DataFrame has no
+                    // aggregation `sort`"; evaluating first turned that into "`v` is not
+                    // defined", which is a different answer to the same program and points
+                    // at the wrong thing besides.
+                    let notdf_at = b.code.len() as u32;
+                    b.code[jnotdf] = Op::JumpIfFalse(notdf_at);
+                    b.emit(Op::LoadLocal(slot), l, c);
+                    b.emit(Op::ReceiverIs(RecvClass::GroupByOnly), l, c);
+                    let jcomp = b.emit(Op::JumpIfFalse(0), l, c);
+                    let e = crate::interp::no_such_aggregation(&nm, l, c);
+                    b.emit(
+                        Op::raise(
+                            std::rc::Rc::new(e.message.clone()),
+                            std::rc::Rc::new(e.hint.clone().unwrap_or_default()),
+                        ),
+                        l,
+                        c,
+                    );
+                    let jend2 = b.emit(Op::Jump(0), l, c);
+                    let comp_at = b.code.len() as u32;
+                    b.code[jcomp] = Op::JumpIfFalse(comp_at);
+                    // The comprehension reading over the receiver already in the local — and
+                    // if the program also declares `fn where`, its own split nests here, so
+                    // all three readings coexist.
+                    // `where`/`filter` are comprehension-shaped and the rest are
+                    // ordinary value methods — the ONLY thing that differs between the two
+                    // halves of this family, so it is the only thing decided here.
+                    if matches!(n, "where" | "filter") {
+                        let held =
+                            Expr::Ident { name: Self::SPLIT_RECV.to_string(), line: l, col: c };
+                        match ufcs {
+                            Some(fidx) => {
+                                self.compile_comprehension_split(b, &held, &nm, &ar, fidx, l, c)?
+                            }
+                            None => self.compile_comprehension(b, &held, &nm, &ar, l, c)?,
+                        }
+                    } else {
+                        self.method_with_fallback(b, slot, &nm, &ar, ufcs, l, c)?;
+                    }
+                    let end = b.code.len() as u32;
+                    b.code[jend] = Op::Jump(end);
+                    b.code[jend2] = Op::Jump(end);
+                    return Ok(());
+                }
+                // A comprehension name this program ALSO declares as a `fn`. Two
+                // readings, and only the receiver settles it — see
+                // `compile_comprehension_split`. Ahead of fusion because a fused chain
+                // cannot be half-taken.
+                if matches!(n, "map" | "filter" | "where" | "reduce" | "scan" | "any" | "all")
+                    && let Some(fidx) = self.ufcs_fn_slot(b, free)
+                {
+                    return self
+                        .compile_comprehension_split(b, recv, name, args, fidx, *line, *col);
+                }
                 if !self.no_fuse
                     && matches!(n, "map" | "filter" | "where" | "reduce" | "count")
                     && let Some(plan) = self.collect_fusion_chain(b, recv, n, args)
@@ -1508,6 +1872,28 @@ impl Compiler {
                 // works; anything else raises). The type checker already rejects
                 // `array.select(...)`, so a wrong concrete type can't reach here.
                 if matches!(n, "select" | "group" | "with") {
+                    // …unless the program declares `fn select`/`fn group`/`fn with`, in
+                    // which case the receiver decides and only run time knows it. The
+                    // comment above used to say the checker rejects every other concrete
+                    // type; it accepts a record now, because a user's own verb is a real
+                    // reading of this call.
+                    if let Some(fidx) = self.ufcs_fn_slot(b, free) {
+                        let (nm, ar) = (name.to_string(), args.to_vec());
+                        let (l, c) = (*line, *col);
+                        return self.compile_recv_split(
+                            b,
+                            recv,
+                            name,
+                            args,
+                            RecvClass::Frame,
+                            fidx,
+                            l,
+                            c,
+                            &mut move |s: &mut Self, b: &mut Builder, slot: u32| {
+                                s.df_verb_from_slot(b, slot, &nm, &ar, false, true, l, c)
+                            },
+                        );
+                    }
                     return self
                         .compile_df_verb_guarded(b, recv, name, args, false, true, *line, *col);
                 }
@@ -1528,6 +1914,7 @@ impl Compiler {
                         name: std::rc::Rc::new(name.clone()),
                         nargs: args.len() as u32,
                         ufcs_name: std::cell::OnceCell::new(),
+                        ufcs_fn: self.ufcs_fn_slot(b, free),
                     })),
                     *line,
                     *col,

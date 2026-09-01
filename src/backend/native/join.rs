@@ -25,6 +25,24 @@ pub fn join(
         return Err(HelixError::new(format!("`{how}` is not a join kind"), line, col)
             .hint("try \"inner\", \"left\", \"right\", or \"outer\"."));
     }
+    // THE SEAM'S SHARED DIAGNOSTIC, not a private one. `backend/mod.rs` states that
+    // engine-agnostic validation lives there "so every backend produces identical
+    // Helix error messages" — but `validate_join_keys` had exactly one caller, in
+    // `backend/polars.rs`. A bad key therefore read as "no column `k` in the left
+    // frame" on one engine and a bare "no column `k`" on the other, losing the only
+    // thing a join error needs to say: WHICH side is missing it.
+    //
+    // Nothing caught this. `dfdiff` compares 129 programs and none of them joins on
+    // a bad key, and the `#[cfg_attr(not(dataframes), allow(dead_code))]` on the
+    // validator meant a native-only build compiled it as dead code without a word.
+    // An `allow` that silences a warning also silences the question the warning was
+    // asking.
+    let lnames: Vec<String> =
+        left.columns(line, col)?.into_iter().map(|(n, _)| n.clone()).collect();
+    let rnames: Vec<String> =
+        right.columns(line, col)?.into_iter().map(|(n, _)| n.clone()).collect();
+    crate::backend::validate_join_keys(&lnames, &rnames, keys, line, col)?;
+
     let lkeys: Vec<&Col> = keys.iter().map(|k| left.col(k, line, col)).collect::<Result<_, _>>()?;
     let rkeys: Vec<&Col> =
         keys.iter().map(|k| right.col(k, line, col)).collect::<Result<_, _>>()?;
@@ -56,33 +74,90 @@ pub fn join(
     // Pair emission is generic over "how do I probe row r": each typed key
     // shape supplies index-build and probe closures that never box a cell; the
     // generic RowKey machinery remains for multi-key and rare dtypes.
-    let mut pairs: Vec<(Option<usize>, Option<usize>)> = Vec::new();
+    // TWO PARALLEL INDEX COLUMNS, not a vector of pairs. The pair vector was
+    // 32 bytes a row — two `Option<usize>`, neither with a spare niche — and was
+    // then split into exactly these two vectors by two more full passes. For a
+    // 400k-row join that was ~25 MB of allocation and copying to express 12 MB of
+    // indices, all of it before a single column was gathered.
+    //
+    // Reserved at the left row count: every join kind emits at least one row per
+    // matched left row, so that is the result's natural scale.
+    let mut left_idx: Vec<Option<usize>> = Vec::with_capacity(left.len());
+    let mut right_idx: Vec<Option<usize>> = Vec::with_capacity(left.len());
     let mut right_hit = vec![false; right.len()];
     let keep_unmatched_left = matches!(how, "left" | "outer" | "full");
     {
         let mut emit = |lrow: usize, rrows: Option<&Vec<usize>>| match rrows {
             Some(rrows) => {
                 for &rrow in rrows {
-                    pairs.push((Some(lrow), Some(rrow)));
+                    left_idx.push(Some(lrow));
+                    right_idx.push(Some(rrow));
                     right_hit[rrow] = true;
                 }
             }
             None => {
                 if keep_unmatched_left {
-                    pairs.push((Some(lrow), None));
+                    left_idx.push(Some(lrow));
+                    right_idx.push(None);
                 }
             }
         };
         match (keys.len(), lkeys[0], rkeys[0]) {
             (1, Col::I64 { vals: lv, valid: lm }, Col::I64 { vals: rv, valid: rm }) => {
-                let mut index: HashMap<i64, Vec<usize>> = HashMap::new();
-                for (row, (v, ok)) in rv.iter().zip(rm).enumerate() {
+                // DENSE DIRECT ADDRESSING, the same shape the `Str` branch below
+                // already uses with dictionary codes. A hash table exists to map an
+                // arbitrary key onto a dense slot; an integer key inside a bounded
+                // range IS that slot, so the table is redundant work. The build
+                // hashed once per RIGHT row and the probe once per LEFT row, which
+                // at 400k rows was most of this verb's time — in `std`'s SipHash,
+                // a keyed DoS-resistant hash whose properties nothing here needs.
+                //
+                // The range comes from the right side because that is what gets
+                // indexed. A left value outside it simply misses, which is the
+                // same answer the map would have given.
+                let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+                let mut any = false;
+                for (v, ok) in rv.iter().zip(rm) {
                     if *ok {
-                        index.entry(*v).or_default().push(row);
+                        any = true;
+                        lo = lo.min(*v);
+                        hi = hi.max(*v);
                     }
                 }
-                for (lrow, (v, ok)) in lv.iter().zip(lm).enumerate() {
-                    emit(lrow, if *ok { index.get(v) } else { None });
+                // A sparse range would swap a hash table for a larger, emptier
+                // array. Bounded by both a multiple of the rows indexed and a hard
+                // ceiling, so a pathological key can never allocate unboundedly.
+                let span: u128 = if any { (hi as i128 - lo as i128 + 1) as u128 } else { 0 };
+                let budget = ((right.len() as u128) * 4).clamp(1024, 1 << 24);
+                if any && span <= budget {
+                    let mut by_slot: Vec<Vec<usize>> = vec![Vec::new(); span as usize];
+                    for (row, (v, ok)) in rv.iter().zip(rm).enumerate() {
+                        if *ok {
+                            by_slot[(*v as i128 - lo as i128) as usize].push(row);
+                        }
+                    }
+                    for (lrow, (v, ok)) in lv.iter().zip(lm).enumerate() {
+                        // An EMPTY slot must read as `None`, not as `Some(&[])`:
+                        // `emit` treats `Some` as "matched" and would then drop the
+                        // unmatched-left row a left/outer join has to keep.
+                        let m = if *ok && *v >= lo && *v <= hi {
+                            let slot = &by_slot[(*v as i128 - lo as i128) as usize];
+                            if slot.is_empty() { None } else { Some(slot) }
+                        } else {
+                            None
+                        };
+                        emit(lrow, m);
+                    }
+                } else {
+                    let mut index: HashMap<i64, Vec<usize>> = HashMap::new();
+                    for (row, (v, ok)) in rv.iter().zip(rm).enumerate() {
+                        if *ok {
+                            index.entry(*v).or_default().push(row);
+                        }
+                    }
+                    for (lrow, (v, ok)) in lv.iter().zip(lm).enumerate() {
+                        emit(lrow, if *ok { index.get(v) } else { None });
+                    }
                 }
             }
             (
@@ -134,7 +209,8 @@ pub fn join(
     if matches!(how, "right" | "outer" | "full") {
         for (rrow, hit) in right_hit.iter().enumerate() {
             if !hit {
-                pairs.push((None, Some(rrow)));
+                left_idx.push(None);
+                right_idx.push(Some(rrow));
             }
         }
     }
@@ -150,11 +226,12 @@ pub fn join(
     // typed when both sides share a dtype. The boxed builders exist only as the
     // mixed-dtype fallback (Int key joined to Float key, etc.).
     let coalesced = |k: usize| -> Result<Col, HelixError> {
-        if let Some(c) = Col::coalesce_gather(lkeys[k], rkeys[k], &pairs) {
+        if let Some(c) = Col::coalesce_gather(lkeys[k], rkeys[k], &left_idx, &right_idx) {
             return Ok(c);
         }
-        let cells: Vec<Value> = pairs
+        let cells: Vec<Value> = left_idx
             .iter()
+            .zip(&right_idx)
             .map(|(l, r)| match (l, r) {
                 (Some(lr), _) => lkeys[k].get(*lr),
                 (None, Some(rr)) => rkeys[k].get(*rr),
@@ -163,9 +240,6 @@ pub fn join(
             .collect();
         Col::from_values(&keys[k], &cells, line, col)
     };
-    let left_idx: Vec<Option<usize>> = pairs.iter().map(|p| p.0).collect();
-    let right_idx: Vec<Option<usize>> = pairs.iter().map(|p| p.1).collect();
-
     let mut out: Vec<(String, Col)> = Vec::with_capacity(left.width() + right.width() - keys.len());
     let push = |name: String, packed: Col, out: &mut Vec<(String, Col)>| {
         let final_name =

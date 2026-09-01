@@ -140,6 +140,17 @@ numpy = { version = "0.28", optional = true }
 # (ADR 0010), behind the `managed` feature so the pure core stays dependency-free.
 # rustls (not OpenSSL) keeps the binary self-contained; sha2 is the trust boundary.
 ureq = { version = "2", optional = true }
+# TLS for the PostgreSQL client (ADR 0044). Every one of these is ALREADY
+# compiled into a default build as a `ureq` transitive dependency, so making
+# them direct costs zero crates and zero build time — what it buys is that
+# `--no-default-features --features postgres` is self-sufficient instead of
+# silently depending on `http` having been enabled. `default-features = false`
+# on rustls matters: its default provider is `aws-lc-rs`, which WOULD be a new
+# crate (and a C toolchain); `ring` is the one already in the tree.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+# The Mozilla root set — the same anchors the HTTP client trusts, so the binary
+# has one trust story and no dependency on a populated OS certificate store.
+webpki-roots = { version = "1", optional = true }
 # Content hashing — core, because the package manager's lockfile pins every
 # dependency by sha256 (the integrity/reproducibility property), and the managed
 # downloader verifies hashes before extract (ADR 0010).
@@ -206,7 +217,7 @@ rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
 [features]
 # HTTP data-fetching and the fast allocator are on by default; build with
 # `--no-default-features` for a network-free / system-allocator binary.
-default = ["http", "mimalloc", "dataframes", "bio", "jit", "regex"]
+default = ["http", "mimalloc", "native-df", "bio", "jit", "regex"]
 # Swap in the mimalloc global allocator (a pure runtime win; see src/main.rs).
 mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 # `http_get` — fetch data over HTTP(S) from a Helix program.
@@ -219,7 +230,7 @@ dataframes = ["dep:polars"]
 # The genomics readers (noodles x6, needletail). Five of the seven return a
 # DataFrame, so `bio` implies `dataframes`; read_bed is hand-rolled and ungated.
 bio = [
-    "dataframes",
+    "native-df",
     "dep:noodles-vcf",
     "dep:noodles-bcf",
     "dep:noodles-gff",
@@ -250,8 +261,18 @@ python = ["dataframes", "dep:pyo3", "dep:pyo3-polars", "dep:numpy"]
 managed = ["http"]
 # SQLite, compiled from bundled C source so the binary keeps its "no system
 # dependency" property (no libsqlite3 to install, as with no BLAS and no OpenSSL).
-# Implies `dataframes` because a query RETURNS a frame — the same reason `bio` does.
+# A query RETURNS a frame, so this needs *an* engine -- but not a particular one
+# (`src/db.rs` works on either), and the default already supplies `native-df`.
+# The previous comment here claimed `db` implied `dataframes`; the feature list
+# never said so, and saying it would have pinned queries to polars.
 db = ["dep:rusqlite"]
+# PostgreSQL over its wire protocol, hand-rolled. ADDS NO DEPENDENCIES: SCRAM-SHA-256
+# needs sha2 + hmac + base64 + OsRng and TLS needs rustls, every one of which is already
+# in the tree for another reason, so this feature is code and nothing else. `libpq` would
+# have ended the binary's no-system-dependency property (the property that made SQLite a
+# bundled C build), and a pure-Rust driver would have brought an async runtime into a
+# synchronous language.
+postgres = ["dep:rustls", "dep:webpki-roots"]
 # `re_match` and friends on String.
 regex = ["dep:regex"]
 

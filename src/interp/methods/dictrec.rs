@@ -12,7 +12,7 @@ use std::rc::Rc;
 /// `insert`/`remove` are immutable — they return a new dict (the map is cloned, so a
 /// one-shot update is O(n); build in bulk with `pairs.to_dict()` for O(n log n)).
 pub(crate) fn dict_method(
-    map: &Rc<std::collections::BTreeMap<crate::value::DictKey, Value>>,
+    d: &Rc<crate::value::Dict>,
     name: &str,
     args: &[Value],
     line: usize,
@@ -37,6 +37,20 @@ pub(crate) fn dict_method(
         }
     };
     let key_of = |v: &Value| DictKey::from_value(v).map_err(|m| HelixError::new(m, line, col));
+
+    // INSERT ANSWERS BEFORE ANYTHING MATERIALISES, and the order is the whole point.
+    // This is the general path -- what `acc.field.insert(k, v)` reaches, the spelling a
+    // record field forces because the record keeps the dict aliased. Appending to the
+    // log is O(1); merging the view is O(n). Materialising first and then appending
+    // measured 32 s at n=32,000 against the 4.3 s copy it was meant to replace.
+    if name == "insert" {
+        arity(2)?;
+        let k = key_of(&args[0])?;
+        return Ok(Value::insert_in_place(d.clone(), k, args[1].clone()));
+    }
+
+    // Every remaining method READS, so the merged view is built once here.
+    let map = d.map();
     match name {
         // `get(k)` → the value, or `missing` when absent (so `d.get(k) ?? default` works).
         "get" => {
@@ -117,19 +131,13 @@ pub(crate) fn dict_method(
                     .collect(),
             ))
         }
-        "insert" => {
-            arity(2)?;
-            let k = key_of(&args[0])?;
-            let mut new = (**map).clone();
-            new.insert(k, args[1].clone());
-            Ok(Value::Dict(Rc::new(new)))
-        }
         "remove" => {
             arity(1)?;
             let k = key_of(&args[0])?;
-            let mut new = (**map).clone();
+            // A remove cannot be expressed as an append, so this settles the view.
+            let mut new = (*map).clone();
             new.remove(&k);
-            Ok(Value::Dict(Rc::new(new)))
+            Ok(Value::dict(new))
         }
         _ => Err(unknown_method(
             "Dict",

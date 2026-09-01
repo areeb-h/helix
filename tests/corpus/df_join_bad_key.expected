@@ -1,0 +1,8 @@
+exit: 0
+--- stdout ---
+false
+no column `no_such_key` in the left frame
+false
+no column `gene` in the right frame
+2
+--- stderr ---

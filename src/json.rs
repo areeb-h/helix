@@ -106,6 +106,7 @@ fn to_serde(v: &Value) -> Result<serde_json::Value, String> {
         // payload (`{ properties: params.to_dict() }.to_json()`). JSON object keys must be
         // strings, so a non-string dict key is stringified.
         Value::Dict(map) => {
+            let map = map.map();
             let mut m = serde_json::Map::new();
             for (k, val) in map.iter() {
                 let key = match k {

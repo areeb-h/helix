@@ -67,6 +67,7 @@ mod regexes;
 mod climain;
 mod subprocess;
 mod db;
+mod pg;
 mod jitexplain;
 mod json;
 mod lattice;
@@ -2127,11 +2128,12 @@ fn run_file_capture_args(
             (module::load_archive(modules, i).map_err(|d| d.rendered)?, Some(src))
         }
     };
+    let entry_prefix = loaded.entry_prefix.clone();
     let mut stmts = loaded.stmts;
     // The borrow of `stmts` ends with this match, so the call it produces can be pushed
     // afterwards. (`drop(sig)` to release it early is what clippy's `drop_non_drop`
     // catches, correctly: `MainSig` has no destructor and dropping it means nothing.)
-    let appended = match climain::find(&stmts) {
+    let appended = match climain::find(&stmts, entry_prefix.as_deref()) {
         Some(sig) => {
             // `--help` is answered from the DECLARATION, without running anything. A
             // script's top level is its program, so running it to print help would run
@@ -2148,7 +2150,7 @@ fn run_file_capture_args(
 
             let args = climain::bind(&sig, argv)
                 .map_err(|e| render_err(e, &loaded.spans, loaded.multi_module))?;
-            Some(climain::call(args, sig.line, sig.col))
+            Some(climain::call(sig.name, args, sig.line, sig.col))
         }
         // No `fn main`: arguments are REFUSED rather than discarded. Silently ignoring
         // them is what this whole change exists to end, and a program that cannot accept
@@ -2212,7 +2214,7 @@ fn diag_json(severity: &str, file: &str, d: &module::Diag) -> serde_json::Value 
 /// rendered text produced by the very same call.
 fn check_file_structured(path: &std::path::Path) -> Result<module::Loaded, module::Diag> {
     let loaded = module::load_diag(path)?;
-    if let Some(e) = climain_violation(&loaded.stmts) {
+    if let Some(e) = climain_violation(&loaded.stmts, loaded.entry_prefix.as_deref()) {
         let (src, filename, local) = module::locate(&loaded.spans, e.line);
         let mut e = e;
         e.line = local;
@@ -2249,7 +2251,7 @@ fn check_file_structured(path: &std::path::Path) -> Result<module::Loaded, modul
 
 fn check_file_capture(path: &std::path::Path) -> Result<module::Loaded, String> {
     let loaded = module::load(path)?;
-    if let Some(e) = climain_violation(&loaded.stmts) {
+    if let Some(e) = climain_violation(&loaded.stmts, loaded.entry_prefix.as_deref()) {
         return Err(render_err(e, &loaded.spans, loaded.multi_module));
     }
     if let Err(e) = types::check(&loaded.stmts) {
@@ -2316,8 +2318,11 @@ fn lint_units(
 /// The alternative is a tool that builds, installs, ships, and fails on its first real
 /// invocation — the argument is the same one that puts `helix check` in front of every
 /// run in the first place.
-fn climain_violation(stmts: &[ast::Stmt]) -> Option<crate::error::HelixError> {
-    let sig = climain::find(stmts)?;
+fn climain_violation(
+    stmts: &[ast::Stmt],
+    entry_prefix: Option<&str>,
+) -> Option<crate::error::HelixError> {
+    let sig = climain::find(stmts, entry_prefix)?;
     let bad = climain::unbindable_param(&sig)?;
     Some(
         crate::error::HelixError::new(
@@ -2699,6 +2704,9 @@ fn emit_test_json(passed: usize, failed: usize, doc_files_skipped: usize, ev: Ve
 fn lint_source(shown: &str, src: &str) -> Vec<String> {
     use crate::ast::{BinOp, Expr};
     let mut notes: Vec<(usize, String)> = Vec::new();
+    // Links of a `let … in let … in` chain already claimed by the note on its head, so one
+    // long head produces one note rather than one per level.
+    let mut seen_chain: std::collections::HashSet<*const Expr> = std::collections::HashSet::new();
     // The AST lints walk the real tree (src/visit.rs) — no textual guessing.
     // A parse failure returns no notes: `check` already reported it properly.
     if let Ok(toks) = crate::lexer::lex(src)
@@ -2768,18 +2776,38 @@ fn lint_source(shown: &str, src: &str) -> Vec<String> {
                     }
                     // A `let` head past ~6 bindings: `do {{ }}` (or a `where`
                     // clause on the fn) reads better than a long preamble.
-                    Expr::Let { bindings, body, .. } if bindings.len() > 6 => {
-                        let at = bindings
-                            .iter()
-                            .find_map(|(_, v)| crate::visit::expr_pos(v))
-                            .or_else(|| crate::visit::expr_pos(body))
-                            .map(|(l, _)| l)
-                            .unwrap_or(1);
-                        notes.push((at, format!(
-                            "{shown}:{at}: a `let` head with {} bindings — `do {{ … }}` \
-                             (sequential bindings) or a `where` clause reads better past ~6.",
-                            bindings.len()
-                        )));
+                    //
+                    // NOT a `do` block, which is the form this advises — the two lower to
+                    // the same node, and without `from_do` the rule fired on blocks that
+                    // already were `do { … }` and told them to become one.
+                    //
+                    // The CHAIN is counted, not one node of it: `let a = … in let b = … in`
+                    // is the same long head written as a nest, and it was invisible to a
+                    // rule that looked at a single `Let`. `seen_chain` keeps the note on
+                    // the head — the walk is pre-order, so the outermost link is reached
+                    // first and claims the ones below it.
+                    Expr::Let { bindings, body, from_do: false }
+                        if !seen_chain.contains(&(e as *const Expr)) =>
+                    {
+                        let mut n = bindings.len();
+                        let mut cur = body.as_ref();
+                        while let Expr::Let { bindings: bs, body: b2, from_do: false } = cur {
+                            seen_chain.insert(cur as *const Expr);
+                            n += bs.len();
+                            cur = b2.as_ref();
+                        }
+                        if n > 6 {
+                            let at = bindings
+                                .iter()
+                                .find_map(|(_, v)| crate::visit::expr_pos(v))
+                                .or_else(|| crate::visit::expr_pos(body))
+                                .map(|(l, _)| l)
+                                .unwrap_or(1);
+                            notes.push((at, format!(
+                                "{shown}:{at}: a `let` head with {n} bindings — `do {{ … }}` \
+                                 (sequential bindings) or a `where` clause reads better past ~6."
+                            )));
+                        }
                     }
                     _ => {}
                 }
@@ -2797,8 +2825,17 @@ fn lint_source(shown: &str, src: &str) -> Vec<String> {
             // Any comment line continues the doc block — the doctest extractor
             // tolerates a plain `#` between the example and the fn, so the
             // lint must too (the sweep caught it contradicting `helix test`).
+            //
+            // BUT THE EXAMPLE ITSELF HAS TO BE ON A `##` LINE, because that is the only
+            // kind `doctest::doc_examples_in` reads. Counting a `>>>` on a plain `#` line
+            // made this rule satisfiable by an example that never runs — the exact
+            // failure it exists to prevent, and invisible, because the lint went green.
+            // Tolerating `#` BETWEEN the example and the `fn` is a different thing and
+            // stays: that is prose, and the extractor skips it too.
             while j > 0 && lines[j - 1].trim_start().starts_with('#') {
-                if lines[j - 1].contains(">>>") {
+                if lines[j - 1].trim_start().starts_with("##")
+                    && lines[j - 1].contains(">>>")
+                {
                     has_example = true;
                 }
                 j -= 1;
@@ -2807,7 +2844,9 @@ fn lint_source(shown: &str, src: &str) -> Vec<String> {
                 let name = rest.split(['(', ' ']).next().unwrap_or("?");
                 notes.push((i + 1, format!(
                     "{shown}:{}: `export fn {name}` has no `>>>` doc example — the house \
-                     standard is executable docs (## with a `>>> call` and its output).",
+                     standard is executable docs. The example must be on a `##` line: \
+                     `helix test` reads only those, so a `>>>` under a plain `#` is a \
+                     comment nothing runs.",
                     i + 1
                 )));
             }
@@ -2909,7 +2948,20 @@ fn run_doc_examples(
             }
             let got = results[0].1.trim_end();
             let want = ex.expect.join("\n");
-            if !ex.expect.is_empty() && got != want.trim_end() {
+            // TRAILING WHITESPACE IS OFF BOTH SIDES, PER LINE. An expectation is written
+            // in a `##` comment, where trailing spaces are invisible and get stripped by
+            // every formatter, so it cannot carry them; comparing them made any padded
+            // line — a fixed-width column, which is what this language's own report and
+            // log functions emit — impossible to expect. Only the last line used to be
+            // reached, because the trim was on the whole string.
+            //
+            // Leading whitespace stays significant: indentation is structure, and
+            // `doc_examples_in` already strips exactly the `>>>` line's indent so nested
+            // output keeps its shape.
+            let norm = |t: &str| {
+                t.lines().map(str::trim_end).collect::<Vec<_>>().join("\n")
+            };
+            if !ex.expect.is_empty() && norm(got) != norm(want.trim_end()) {
                 failed += 1;
                 if json {
                     ev.push(serde_json::json!({
@@ -2948,7 +3000,12 @@ fn run_doc_examples(
                         "code": ex.code.join(" ; "),
                     }));
                 } else {
-                    println!("  ok    {where_} (doc)");
+                    // The engine count is stated because it is not the default anyone
+                    // would assume: a bare `ok` beside a suite's `(3 engines agree)` reads
+                    // as "this one ran on one engine", which is how a field build came to
+                    // file a gap that was never there. `--engines` does not gate this —
+                    // a doc example has no cheap single-engine mode worth having.
+                    println!("  ok    {where_} (doc, 3 engines agree)");
                 }
             }
         }

@@ -373,6 +373,16 @@ pub struct Checker {
     /// checked load on the interpreter's hottest opcode — its own change, with its
     /// own measurement, not a side effect of improving a message.
     deferred_globals: FxHashSet<String>,
+    /// Every name declared by a top-level `fn` — the checker's twin of the compiler's
+    /// `func_names` and the walker's `FuncVal::decl_name`, and the gate on typing a
+    /// failed method call as a UFCS call.
+    ///
+    /// Deliberately the HOISTED set, not `fn_decls`: name resolution is file-scoped
+    /// (ADR 0027), so `q.where(c)` above `fn where(q, c)` runs on both engines, and a
+    /// checker that used the reached-so-far set would reject exactly that program.
+    /// Shadowing is not read from here — `env` already answers it, because a later
+    /// `where = 5` rebinds the name to a non-function type.
+    fn_globals: FxHashSet<String>,
 }
 
 impl Default for Checker {
@@ -400,6 +410,7 @@ impl Checker {
                 .map(|s| s.to_string())
                 .collect(),
             deferred_globals: FxHashSet::default(),
+            fn_globals: FxHashSet::default(),
         }
     }
 
@@ -863,6 +874,7 @@ impl Checker {
                 name,
                 args,
                 named,
+                ufcs,
                 line,
                 col,
             } => {
@@ -878,7 +890,7 @@ impl Checker {
                     )
                     .hint("only functions take named arguments; pass method arguments positionally."));
                 }
-                self.synth_method(recv, name, args, *line, *col)
+                self.synth_method(recv, name, ufcs.as_deref(), args, *line, *col)
             }
             Expr::CallValue { callee, args, .. } => {
                 // Calling a first-class function *value* — its parameter/return types
@@ -1021,7 +1033,7 @@ impl Checker {
                     ret: Box::new(body_t),
                 })
             }
-            Expr::Let { bindings, body } => {
+            Expr::Let { bindings, body, .. } => {
                 let mut saved: Vec<(String, Option<Type>)> = Vec::with_capacity(bindings.len());
                 for (name, expr) in bindings {
                     let t = self.synth(expr)?;
@@ -1203,6 +1215,7 @@ pub fn check(program: &[Stmt]) -> Result<TypeMap, HelixError> {
                 name.clone(),
                 Type::Function { params: param_types, ret: Box::new(ret_ty) },
             );
+            checker.fn_globals.insert(name.clone());
         }
     }
     // The same courtesy for top-level VALUE bindings, and for the same reason: a

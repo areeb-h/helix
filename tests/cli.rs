@@ -2956,12 +2956,59 @@ fn type_of_names_the_type_and_now_is_an_absolute_instant() {
     // …and it is the one that SURVIVES A RESTART, which is the whole distinction from
     // `clock_monotonic`. Two separate processes must see it advance; monotonic restarts
     // near zero every time, which is exactly why sessions could not expire.
+    // Real elapsed time is measured with `Instant`, which is MONOTONIC, so the
+    // test can tell a Helix defect apart from a host clock correction.
+    let started = std::time::Instant::now();
     let (a, _, _) = run_source("print(now())\n", &[], "now_p1");
     std::thread::sleep(std::time::Duration::from_millis(1100));
     let (b, _, _) = run_source("print(now())\n", &[], "now_p2");
     let (a, b) = (a.trim().parse::<f64>().unwrap(), b.trim().parse::<f64>().unwrap());
-    assert!(b > a, "now() must advance across processes: {a} then {b}");
-    assert!(b - a >= 1.0, "it must advance by real elapsed time: {a} then {b}");
+    let real = started.elapsed().as_secs_f64();
+    let advanced = b - a;
+
+    // The property that distinguishes `now()` from `clock_monotonic`, asserted
+    // unconditionally: it is an absolute instant, so a LATER process reads a
+    // LARGER value. Monotonic restarts near zero and would fail this.
+    assert!(advanced > 0.0, "now() must advance across processes: {a} then {b}");
+
+    // The stronger claim — that it advances by the REAL elapsed time — is only
+    // meaningful when the wall clock was not corrected underneath it, and this
+    // suite runs under WSL2, which resyncs the guest clock against the host. That
+    // is a host event, not a Helix defect: `now()` faithfully reports the wall
+    // clock it is given, and `web/auth.helix` needs exactly that so sessions
+    // survive a restart. Measured once during a resync, `now()` advanced 404 ms
+    // across a sleep that `clock_monotonic` correctly reported as 1100 ms.
+    //
+    // So the precondition is made EXPLICIT rather than assumed. This test failed
+    // roughly one gate run in four while passing in isolation — the signature of
+    // a gate that lies, and the reason to state the condition instead of widening
+    // the tolerance until it hides.
+    // RETRIED, NOT SKIPPED. Skipping would make a real defect indistinguishable
+    // from a host correction: a `now()` that advanced too slowly for its own
+    // reasons would silently pass, and a guard that cannot fail is worth nothing.
+    // A host correction is rare and clears on the next attempt; a defect fails
+    // every attempt and still reports.
+    let mut adv = advanced;
+    let mut span = real;
+    let mut tries = 1;
+    while tries < 4 && adv < span - 0.25 {
+        let started = std::time::Instant::now();
+        let (a2, _, _) = run_source("print(now())\n", &[], "now_p1");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let (b2, _, _) = run_source("print(now())\n", &[], "now_p2");
+        let a2 = a2.trim().parse::<f64>().unwrap();
+        let b2 = b2.trim().parse::<f64>().unwrap();
+        adv = b2 - a2;
+        span = started.elapsed().as_secs_f64();
+        tries += 1;
+    }
+    assert!(
+        adv >= span - 0.25,
+        "the wall clock never tracked real time across {tries} attempts (last: \
+         advanced {adv:.3}s over {span:.3}s of real time) — a host correction \
+         clears on a retry, so this looks like `now()` itself"
+    );
+    assert!(adv >= 1.0, "it must advance by real elapsed time: advanced {adv:.3}s");
 
     let (m1, _, _) = run_source("print(clock_monotonic())\n", &[], "mono_p1");
     let (m2, _, _) = run_source("print(clock_monotonic())\n", &[], "mono_p2");
@@ -4537,7 +4584,10 @@ fn helix_test_runs_the_users_own_doc_examples() {
     std::fs::write(&lib, doc("42")).unwrap();
     let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
     assert_eq!(code, Some(0), "stderr: {err}\nout: {out}");
-    assert!(out.contains("(doc)") && out.contains("1 passed"), "out:\n{out}");
+    // The engine count is part of the line on purpose: a bare `ok` beside a suite's
+    // `(3 engines agree)` reads as "this one ran on one engine", which is a gap a
+    // field build filed that was never there. Pinned so it cannot quietly go back.
+    assert!(out.contains("(doc, 3 engines agree)") && out.contains("1 passed"), "out:\n{out}");
 
     // A DRIFTED example fails, naming both sides. This is the entire value proposition.
     std::fs::write(&lib, doc("999")).unwrap();
@@ -5415,7 +5465,17 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // `borrow_mut` reads its argument BEFORE taking the cell (so `xs.concat(xs)`, which
         // aliases the buffer, does not double-borrow) and runs no Helix code while holding
         // it, so no reader can be in flight.
-        ("src/value.rs", 3),
+        // 3 -> 6: the dict's pending-inserts log needs interior mutability, so
+        // `Dict::map` and `Value::insert_in_place` take three `RefCell` borrows
+        // between them. Each is proved exclusive at its site: every borrow is held
+        // only across `BTreeMap` and `Value` clones, and a `Value` clone is shallow
+        // -- every variant is a scalar or an `Rc` handle -- so no Helix code can run
+        // under a borrow and re-enter the cell. `insert_in_place` also drops its
+        // borrow before the branch that calls `map()`, which is what keeps those two
+        // from contending. The slice into the log uses `get(..len)` rather than an
+        // index for the same reason: `len` is within the log by construction, but
+        // being wrong would abort the host instead of raising a Helix error.
+        ("src/value.rs", 6),
         // The ADR 0032 split moved jit.rs's one budgeted call into analysis.rs.
         ("src/jit.rs", 0),
         ("src/jit/analysis.rs", 1),
@@ -10391,7 +10451,20 @@ fn unavailable_df_engine_is_refused_not_ignored() {
                     err.contains(&format!("this build has no `{engine}` DataFrame engine")),
                     "[{engine}] refused without naming the engine: {err}"
                 );
-                assert!(err.contains("--features native-df"), "[{engine}] no way out: {err}");
+                // Pin the INVARIANT, not the spelling: the way out must name the
+                // feature that supplies the MISSING engine. This asserted the literal
+                // `--features native-df`, which was right only while polars was the
+                // default — once native shipped by default the hint correctly changed
+                // to `--features dataframes` for a missing polars, and a test pinned
+                // to the old string called the fix a regression. A test that has to
+                // change whenever a correct answer changes was testing the answer,
+                // not the property.
+                let feature = if engine == "polars" { "dataframes" } else { "native-df" };
+                assert!(
+                    err.contains(&format!("--features {feature}")),
+                    "[{engine}] the way out must name the feature supplying the MISSING \
+                     engine, not one this build already has: {err}"
+                );
             }
         }
     }
@@ -12018,16 +12091,24 @@ fn html_escape_handles_the_fifth_character() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A column verb reached with evaluated arguments must say what is actually wrong.
+/// A column verb reached through an untyped parameter RUNS, and runs the same everywhere.
 ///
 /// `where`/`filter`/`select`/`sort`/`group`/`with` take UNEVALUATED asts, because their
-/// arguments are column references rather than values. When the receiver's type is not known
-/// statically — `fn f(d, k) = d.sort(k)` — the arguments get evaluated first, and the verb
-/// arrived at the value-method table it is deliberately absent from.
+/// arguments are column references rather than values. When the receiver's type was not
+/// known statically — `fn f(d, k) = d.sort(k)` — the compiler used to route them as value
+/// methods, whose arguments are evaluated, and the verb arrived at a table it is
+/// deliberately absent from.
 ///
-/// It then fell through to the catch-all and reported **"a DataFrame has no method `sort` —
-/// did you mean `sort`?"**: a message that contradicts itself and sends the reader hunting a
-/// typo that is not there. The method exists; it cannot be reached that way.
+/// This test used to assert the REFUSAL that arm produced, on the reasoning that it beat
+/// the self-contradicting "a DataFrame has no method `sort` — did you mean `sort`?" it
+/// replaced. Both readings missed the real defect: **the tree-walker was answering the
+/// whole time.** It dispatches on the value, so it took the column verb and printed
+/// `[1, 2, 3]` while the VM and the JIT refused — a three-engine divergence that a test
+/// pinning one side of it could only entrench.
+///
+/// The receiver is tested at run time now (`Op::ReceiverIs`), so all three take the column
+/// verb. What survives of the original intent is below: the working spelling is unchanged,
+/// and a genuinely unknown method still gets the ordinary message.
 #[test]
 fn a_column_verb_does_not_deny_it_exists() {
     let dir = std::env::temp_dir().join(format!("hx_colverb_{}", std::process::id()));
@@ -12040,19 +12121,21 @@ fn a_column_verb_does_not_deny_it_exists() {
         "fn first_by(d, k) = d.sort(k).column(\"v\")\nprint(first_by(dataframe({v: [3, 1, 2]}), \"v\"))\n",
     )
     .unwrap();
-    let (_, err, code) = run(&["run", f.to_str().unwrap()], &[], "");
-    assert_ne!(code, Some(0));
-    assert!(
-        err.contains("needs its columns named at the call site"),
-        "the verb must explain itself: {err}"
-    );
-    // The self-contradiction specifically must not come back.
-    assert!(
-        !err.contains("has no method `sort`"),
-        "`sort` exists — saying otherwise while suggesting it is the bug: {err}"
-    );
-    // And it says what to do instead, including that a name in a variable is not supported.
-    assert!(err.contains("@"), "the sigil is the fix: {err}");
+    let p = f.to_str().unwrap();
+    let (jit, ej, cj) = run(&["run", p], &[], "");
+    let (vm, ev, cv) = run(&["run", p], &[("HELIX_NOJIT", "1")], "");
+    let (tw, et, ct) = run(&["run", p], &[("HELIX_NOVM", "1")], "");
+    assert_eq!((cj, &jit), (cv, &vm), "jit vs vm: {ej} / {ev}");
+    assert_eq!((cv, &vm), (ct, &tw), "vm vs tree-walker: {ev} / {et}");
+    assert_eq!(cj, Some(0), "{ej}");
+    assert_eq!(jit.trim(), "[1, 2, 3]", "{jit}");
+    // The self-contradiction specifically must not come back on any of them.
+    for e in [&ej, &ev, &et] {
+        assert!(
+            !e.contains("has no method `sort`"),
+            "`sort` exists — saying otherwise while suggesting it is the bug: {e}"
+        );
+    }
 
     // The spelling that works is unaffected, at top level and inside a function.
     for src in [
@@ -13316,6 +13399,797 @@ fn effects_closes_over_the_call_graph_on_both_axes() {
     assert_eq!(report["deterministic"], serde_json::json!(false));
     assert_eq!(report["effects"].as_array().map(|a| a.len()), Some(0), "report holds no authority");
     assert_eq!(report["nondeterministic_via"]["name"], serde_json::json!("now"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// A dict READ BETWEEN INSERTS must stay linear — the read-modify-write shape, which
+/// is what every counter, memo table, session store and rate limiter is.
+///
+/// THIS TEST EXISTS BECAUSE THE SHAPE HAD NO GUARD AND A CHANGE BROKE IT. `Dict` became
+/// a settled map plus a shared append-only log, which took insert-only accumulation from
+/// 71 s to 20 ms at n=128,000. The first version cached the merged view PER VALUE, and
+/// since every insert produces a new value with an empty cache, a `get` after each
+/// insert rebuilt the whole map from `base`. `insert` went O(n) -> O(1) while
+/// `get`-after-write went O(log n) -> O(n log n): the cliff did not disappear, it moved
+/// from one operation to a pair, and read-modify-write came out ~13x SLOWER than before
+/// the log existed.
+///
+/// Nothing caught it. The corpus checks that reads are CORRECT and never that they are
+/// cheap, the benchmark measured only insert-only accumulation — the one shape that
+/// cannot see this — and `docs/PLAN.md` had predicted it in advance: caching "can be
+/// per-TIP, which is enough, because the fold pattern only ever reads the tip". Per-value
+/// is not per-tip.
+///
+/// The cache is now shared along the chain with the prefix length it covers, so a read at
+/// the tip EXTENDS it by the entries added since instead of rebuilding.
+///
+/// A RATIO, NOT A WALL-CLOCK BUDGET, for the same reason as
+/// `a_fold_through_a_record_field_is_linear`: both folds run in this process on this
+/// machine, so speed, allocator and profile cancel and only the complexity class
+/// survives. Measured at n=10,000: ~1.6x with the shared cache, ~1160x with the
+/// per-value one. 20x cannot flake into either verdict.
+#[test]
+fn a_dict_read_between_inserts_is_linear() {
+    let dir = std::env::temp_dir().join(format!("hx_rmw_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    const N: usize = 10_000;
+
+    // The control: insert-only, known linear, and the thing the log was built for.
+    let writes = dir.join("writes.helix");
+    std::fs::write(
+        &writes,
+        format!("print(range(0, {N}).reduce(dict(), (a, i) => a.insert(i, i)).count())\n"),
+    )
+    .unwrap();
+    // The subject: a read of the dict being built, between every pair of writes.
+    let rmw = dir.join("rmw.helix");
+    std::fs::write(
+        &rmw,
+        format!(
+            "print(range(0, {N}).reduce(dict(), (a, i) => a.insert(i, (a.get(i) ?? 0) + 1)).count())\n"
+        ),
+    )
+    .unwrap();
+
+    let best = |path: &std::path::Path| -> std::time::Duration {
+        let mut best = std::time::Duration::from_secs(3600);
+        for _ in 0..3 {
+            let t0 = std::time::Instant::now();
+            let (out, err, code) = run(&["run", path.to_str().unwrap()], &[], "");
+            let dt = t0.elapsed();
+            assert_eq!(code, Some(0), "{err}");
+            // The answer is asserted too: a fast wrong answer is what a timing test is
+            // least equipped to notice, and a dict that silently loses a key would be
+            // both fast and wrong.
+            assert_eq!(out.trim(), N.to_string(), "{path:?}");
+            best = best.min(dt);
+        }
+        best
+    };
+
+    let t_writes = best(&writes);
+    let t_rmw = best(&rmw);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        t_rmw.as_secs_f64() < t_writes.as_secs_f64() * 20.0,
+        "a dict read between inserts is not linear: {:?} against {:?} insert-only \
+         (ratio {:.1}x). The merged view is being REBUILT on each read rather than \
+         extended — check that the cache is shared along the chain and carries the \
+         prefix length it covers.",
+        t_rmw,
+        t_writes,
+        t_rmw.as_secs_f64() / t_writes.as_secs_f64()
+    );
+}
+
+
+/// `postgres_query` — ADR 0038's decisions over a network connection.
+///
+/// THE ASSERTIONS SPLIT THREE WAYS, not two. `sqlite_query` needs only its feature; this
+/// also needs a SERVER, so:
+///
+///   * the SHAPE — it exists, type-checks, describes itself, carries the `net` label, and
+///     says what to rebuild with — is asserted in EVERY build, because testing only the
+///     enabled half is how a gated verb rots in the builds that lack it (ADR 0032);
+///   * the BEHAVIOUR runs only when the feature is on AND `HELIX_PG_TEST_URL` names a
+///     reachable server. Start one with:
+///     `podman run -d -e POSTGRES_PASSWORD=pw -p 5432:5432 postgres:19beta3`
+///
+/// `net` rather than `fs-read` is the one ADR 0038 decision that does not carry over.
+/// SQLite earned `fs-read` by opening the file read-only; a socket has no such mode, so
+/// the read-only guarantee is enforced at the far end instead — inside a read-only
+/// transaction the SERVER refuses INSERT, UPDATE, DELETE and DDL. That is asserted below,
+/// because a verb that could `delete from users` while labelled as a read would make the
+/// ADR 0021 audit log state something false.
+#[test]
+fn postgres_query_is_a_frame_read_only_and_parameterised() {
+    // Always true, feature or not.
+    let (out, _, code) = run(&["describe", "postgres_query"], &[], "");
+    assert_eq!(code, Some(0));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["effect"], "net", "a query over a socket spends network authority");
+    assert_eq!(v[0]["category"], "db");
+    assert!(v[0]["sig"].as_str().unwrap().contains("params?"), "{out}");
+
+    let dir = std::env::temp_dir().join(format!("hx_pg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("q.helix");
+    let w = |src: &str| std::fs::write(&prog, src).unwrap();
+
+    // The type checker knows it in every build, including one that cannot run it.
+    w("df = postgres_query(\"postgres://u:p@localhost/d\", \"select 1\")\nprint(df.count())\n");
+    let (_, err, code) = run(&["check", prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "it must type-check without the feature: {err}");
+
+    let Ok(url) = std::env::var("HELIX_PG_TEST_URL") else {
+        // No server: run it anyway, because the GATED-OFF diagnostic is itself a claim
+        // worth checking, and it is the half that ships to everyone.
+        let (_, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+        if err.contains("no PostgreSQL support") {
+            assert_eq!(code, Some(1));
+            assert!(err.contains("--features postgres"), "it must name the rebuild: {err}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+
+    // A query IS a frame, which is the reason for returning one rather than rows: the
+    // whole DataFrame verb surface applies without a conversion step.
+    w(&format!(
+        "df = postgres_query(\"{url}\", \"select 1 as a, 2.5 as b, true as c, null::text as d\")\n\
+         print(df.count())\nprint(df.columns())\nprint(df.column(\"d\"))\n"
+    ));
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    if err.contains("no PostgreSQL support") {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert_eq!(code, Some(0), "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.first().copied(), Some("1"), "{out}");
+    assert_eq!(lines.get(1).copied(), Some("[\"a\", \"b\", \"c\", \"d\"]"), "{out}");
+    // SQL NULL is `missing`, not a sentinel and not an empty string (ADR 0001).
+    assert_eq!(lines.get(2).copied(), Some("[missing]"), "{out}");
+
+    // READ-ONLY IS ENFORCED BY THE SERVER. If this ever succeeds, the `net`-labelled
+    // read verb has become a writer and the capability audit is telling a lie.
+    w(&format!(
+        "r = try postgres_query(\"{url}\", \"create table hx_should_not_exist (x int)\")\n\
+         print(r.ok)\nprint(r.error)\n"
+    ));
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.starts_with("false"), "DDL must be refused: {out}");
+    assert!(out.contains("read-only transaction"), "the server must be the one refusing: {out}");
+
+    // Parameters bind as VALUES: the classic payload matches a user literally named that,
+    // which is to say nothing. Injection is unrepresentable through this surface, not
+    // discouraged (ADR 0038 D2).
+    w(&format!(
+        "rows = postgres_query(\"{url}\", \"select $1::text as who\", [\"x' or 1=1 --\"])\n\
+         print(rows.count())\nprint(rows.column(\"who\"))\n"
+    ));
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "1\n[\"x' or 1=1 --\"]", "the payload must be a VALUE: {out}");
+
+    // The capability is real: denied without `net`, and the denial names the grant.
+    w(&format!("print(postgres_query(\"{url}\", \"select 1\").count())\n"));
+    let (_, err, code) = run(&[prog.to_str().unwrap()], &[("HELIX_CAP", "enforce")], "");
+    assert_eq!(code, Some(1), "a network verb must be refused without the grant");
+    assert!(err.contains("needs `net` authority"), "{err}");
+    let (out, err, code) =
+        run(&[prog.to_str().unwrap()], &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_NET", "on")], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "1");
+
+    // The password never reaches a diagnostic.
+    w("r = try postgres_query(\"postgres://u:hunter2@localhost:59999/d\", \"select 1\")\nprint(r.error)\n");
+    let (out, _, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(!out.contains("hunter2"), "an error must never echo the password: {out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// `postgres_open` — one connection, reused, and closed without anyone closing it.
+///
+/// WHY A CONNECTION VALUE EXISTS. `postgres_query` opens a TCP connection and completes a
+/// SCRAM-SHA-256 exchange per call. Measured against PostgreSQL 19: 4.7 ms, the same for
+/// `select 1` as for a whole table — the handshake IS the query time. Removing the
+/// read-only transaction's two round trips moved it by 0.01 ms, which is the proof that
+/// the round trips were never the cost. Five queries cost ~21 ms through five connections
+/// and ~6 ms through one.
+///
+/// THE LIFETIME IS THE VALUE'S. There is no `close`, because Helix values are
+/// reference-counted rather than collected: the socket shuts when the last handle to it
+/// goes, deterministically, which is the same rule `Lock` already relies on. The third
+/// assertion below is the one that matters — it asks the SERVER how many connections it
+/// is holding, so a leak would show up as a number rather than as a slow afternoon.
+///
+/// Behaviour needs both the feature and a server; see
+/// `postgres_query_is_a_frame_read_only_and_parameterised` for the same three-way split.
+#[test]
+fn postgres_open_reuses_one_connection_and_closes_it() {
+    let (out, _, code) = run(&["describe", "postgres_open"], &[], "");
+    assert_eq!(code, Some(0));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["effect"], "net");
+    assert_eq!(v[0]["category"], "db");
+
+    let dir = std::env::temp_dir().join(format!("hx_pgc_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("c.helix");
+    let w = |src: &str| std::fs::write(&prog, src).unwrap();
+
+    let Ok(url) = std::env::var("HELIX_PG_TEST_URL") else {
+        w("c = postgres_open(\"postgres://u:p@localhost/d\")\nprint(c.query(\"select 1\").count())\n");
+        let (_, err, code) = run(&["check", prog.to_str().unwrap()], &[], "");
+        assert_eq!(code, Some(0), "it must type-check without the feature: {err}");
+        let (_, err, _) = run(&[prog.to_str().unwrap()], &[], "");
+        if err.contains("no PostgreSQL support") {
+            assert!(err.contains("--features postgres"), "{err}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+
+    // One connection answers many queries, and the result is a frame like any other.
+    w(&format!(
+        "c = postgres_open(\"{url}\")\n\
+         a = c.query(\"select 1 as x\").count()\n\
+         b = c.query(\"select $1::int as x\", [7]).column(\"x\")\n\
+         print(a)\nprint(b)\n"
+    ));
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    if err.contains("no PostgreSQL support") {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "1\n[7]", "{out}");
+
+    // Read-only holds on an open connection too — it is set in the STARTUP packet, so the
+    // session is read-only before a statement could be sent, not after a `begin`.
+    w(&format!(
+        "c = postgres_open(\"{url}\")\nr = try c.query(\"create table hx_nope (x int)\")\nprint(r.ok)\n"
+    ));
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "false", "DDL must be refused on an open connection: {out}");
+
+    // THE LEAK CHECK. Three connections are opened inside a function and become
+    // unreachable when it returns; the server is then asked how many it still holds. No
+    // `close` appears anywhere in this program, which is the point.
+    w(&format!(
+        "watch = postgres_open(\"{url}\")\n\
+         fn live(w) = w.query(\"select count(*) as n from pg_stat_activity where application_name = 'helix'\").column(\"n\").first()\n\
+         fn burst(u) = postgres_open(u).query(\"select 1\").count() + postgres_open(u).query(\"select 1\").count() + postgres_open(u).query(\"select 1\").count()\n\
+         before = live(watch)\n\
+         n = burst(\"{url}\")\n\
+         print(before)\nprint(n)\nprint(live(watch))\n"
+    ));
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.first().copied(), Some("1"), "only the watcher should be open: {out}");
+    assert_eq!(lines.get(1).copied(), Some("3"), "the burst must have run: {out}");
+    assert_eq!(
+        lines.get(2).copied(),
+        Some("1"),
+        "three connections leaked — the socket must close when the last handle goes: {out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// TLS, against a live server that has it on.
+///
+/// `HELIX_PG_TLS_URL` must be a URL whose server speaks TLS, INCLUDING whatever
+/// `sslrootcert=` the certificate needs — for a self-signed test server that is the CA
+/// that signed it. Absent, this skips, like its two siblings above.
+///
+/// WHAT IT ASSERTS THAT "TLS WORKS" WOULD NOT. Two things, and the second is the one that
+/// matters: the SERVER reports the session as encrypted (`pg_stat_ssl`, not the client's
+/// own opinion of itself), and the SAME URL with the anchor removed FAILS. Without that
+/// second half, a client that established TLS while verifying nothing would pass — which
+/// is exactly what `sslmode=require` is, and exactly what this design refuses.
+///
+/// The downgrade refusal — a server answering `N` — is not here on purpose: it needs no
+/// database, so it is a unit test in `src/pg/tls.rs` that runs whenever the feature is
+/// built, rather than only where a server happens to be.
+#[test]
+fn postgres_tls_is_verified_and_the_server_confirms_it() {
+    let Ok(url) = std::env::var("HELIX_PG_TLS_URL") else { return };
+    let dir = std::env::temp_dir().join(format!("hx_pgtls_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("t.helix");
+    let w = |src: &str| std::fs::write(&prog, src).unwrap();
+
+    // 1. The server says the session is encrypted.
+    w(&format!(
+        "f = postgres_query(\"{url}\", \"select ssl from pg_stat_ssl where pid = pg_backend_pid()\")\n\
+         print(f.column(\"ssl\").first())\n"
+    ));
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    if err.contains("no PostgreSQL support") {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "true", "the server must report the session as encrypted: {out}");
+
+    // 2. VERIFICATION IS REAL. The same connection without the anchor must fail — if it
+    // succeeded, the first assertion would only prove that bytes were encrypted, not that
+    // anyone checked who was on the other end.
+    let bare = url.split('?').next().unwrap().to_string();
+    w(&format!(
+        "r = try postgres_query(\"{bare}\", \"select 1 as x\")\nprint(r.ok)\nprint(r.error)\n"
+    ));
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let mut lines = out.lines();
+    assert_eq!(
+        lines.next(),
+        Some("false"),
+        "an unverifiable certificate must be refused, not merely encrypted: {out}"
+    );
+    let why = lines.collect::<Vec<_>>().join(" ");
+    assert!(
+        why.contains("certificate") || why.contains("UnknownIssuer"),
+        "the refusal must say it was the certificate: {why}"
+    );
+
+    // 3. Plaintext is reachable, and only by asking for it in the URL.
+    w(&format!(
+        "f = postgres_query(\"{bare}?sslmode=disable\", \"select ssl from pg_stat_ssl where pid = pg_backend_pid()\")\n\
+         print(f.column(\"ssl\").first())\n"
+    ));
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "false", "`sslmode=disable` must actually be plaintext: {out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// Namespacing must not disable a feature — a `import` line changes no semantics.
+///
+/// `module::load` rewrites every top-level name to `m<N>$name` the moment a second file is
+/// involved. TWO features looked their target up by the name written in the source and so
+/// silently switched off:
+///
+///   * the ADR 0045 UFCS fallback — a method call site says `where`, because a method name
+///     is not a top-level name and must not be rewritten, so the lookup missed and "no
+///     such function" is indistinguishable from "no fallback";
+///   * `fn main` (ADR 0037) — `climain::find` matched `name == "main"`, so a program that
+///     took command-line arguments became one that refused them.
+///
+/// Neither was reachable by any existing test, because every UFCS program in the corpus
+/// and every `fn main` test is a SINGLE FILE. That is what this covers, on both engines.
+#[test]
+fn an_import_does_not_disable_ufcs_or_fn_main() {
+    let dir = std::env::temp_dir().join(format!("hx_mod_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let w = |name: &str, src: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, src).unwrap();
+        p
+    };
+    let both = |p: &std::path::Path| {
+        let (a, ea, ca) = run(&[p.to_str().unwrap()], &[], "");
+        let (b, eb, cb) = run(&[p.to_str().unwrap()], &[("HELIX_NOVM", "1")], "");
+        assert_eq!(ca, cb, "engines disagree on exit: {ea} / {eb}");
+        assert_eq!(a, b, "engines disagree on output");
+        (a, ea, ca)
+    };
+
+    // A library exporting the verbs a fluent API is made of — every one of them a name
+    // some built-in type already owns, which is what made them worth testing.
+    w(
+        "q.helix",
+        "export fn from(t) = { tbl: t, conds: [], cols: [] }\n\
+         export fn where(q, c) = { tbl: q.tbl, conds: q.conds.concat([c]), cols: q.cols }\n\
+         export fn select(q, c) = { tbl: q.tbl, conds: q.conds, cols: q.cols.concat([c]) }\n\
+         export fn sql(q) = \"select {q.cols.join(\\\", \\\")} from {q.tbl}\"\n\
+         fn main(x) = print(\"THE LIBRARY'S MAIN RAN\")\n",
+    );
+
+    // 1. Imported verbs chain in method position, and the OTHER two readings of the same
+    // names still hold in the same file.
+    let p = w(
+        "chain.helix",
+        "import q.{from, where, select, sql}\n\
+         print(from(\"people\").where(\"age > 40\").select(\"name\").sql())\n\
+         print([1, 2, 3].where(it > 1))\n\
+         f = dataframe({ name: [\"ann\", \"bo\"], age: [41, 33] })\n\
+         print(f.where(@age > 40).select(@name).count())\n",
+    );
+    let (out, err, code) = both(&p);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        vec!["select name from people", "[2, 3]", "1"],
+        "{out}"
+    );
+
+    // 2. A verb defined in THIS file, with an import present. This is the minimal repro:
+    // the same two lines pass with the `import` removed.
+    let p = w(
+        "local.helix",
+        "import q\n\
+         fn where(b, c) = { conds: b.conds.concat([c]) }\n\
+         print({ conds: [] }.where(\"age > 40\").conds)\n",
+    );
+    let (out, err, code) = both(&p);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "[\"age > 40\"]", "{out}");
+
+    // 3. `fn main` takes its arguments, and the IMPORTED library's `main` does not hijack
+    // the entry point — which is why the lookup takes the entry module's prefix rather
+    // than matching any `*$main`.
+    let p = w("app.helix", "import q\nfn main(who) = print(\"hello {who}\")\n");
+    let (out, err, code) = run(&[p.to_str().unwrap(), "world"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "hello world", "{out}");
+    let (out, err, code) = run(&[p.to_str().unwrap(), "world"], &[("HELIX_NOVM", "1")], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "hello world", "{out}");
+
+    // 4. And ADR 0037 D6 still refuses an unbindable parameter — it was reached through
+    // the same lookup, so it was off too.
+    let p = w("bad.helix", "import q\nfn main(xs: Array) = print(xs)\n");
+    let (_, err, code) = run(&["check", p.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0), "an unbindable `main` parameter must still be refused");
+    assert!(err.contains("cannot be built from a command-line argument"), "{err}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// The doc-example lint and `helix test` must agree on what a doc example IS.
+///
+/// `doctest::doc_examples_in` reads `##` lines only — a plain `#` is prose. The lint
+/// counted a `>>>` on any comment line, so
+///
+///     # >>> dbl(21)
+///     # 42
+///     export fn dbl(x) = x * 2
+///
+/// satisfied the rule and ran nowhere. A codebase that comments with `#` throughout would
+/// have cleared every finding that way and finished with a green lint over examples
+/// nothing executes — the precise thing the rule exists to prevent. Found by a field build
+/// adopting it across 333 exports.
+///
+/// The assertion is the AGREEMENT, not either side alone: the lint is silent exactly when
+/// `helix test` finds something to run.
+#[test]
+fn the_doc_example_lint_and_the_runner_agree_on_what_counts() {
+    let dir = std::env::temp_dir().join(format!("hx_lintdoc_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("helix.toml"), "[package]\nname = \"l\"\nversion = \"0.1.0\"\n").unwrap();
+    let f = dir.join("lib.helix");
+    std::fs::write(
+        &f,
+        // `dbl`'s example is on a plain `#` line: invisible to the runner, so the lint
+        // must still ask for one. `trip`'s is on `##`: it runs, so the lint is satisfied.
+        "# >>> dbl(21)\n# 42\nexport fn dbl(x) = x * 2\n\
+         \n## >>> trip(2)\n## 6\nexport fn trip(x) = x * 3\n",
+    )
+    .unwrap();
+
+    let (out, _, _) = run(&["check", "--lint", f.to_str().unwrap()], &[], "");
+    assert!(
+        out.contains("`export fn dbl` has no `>>>` doc example"),
+        "an example the runner cannot see must not satisfy the lint: {out}"
+    );
+    assert!(!out.contains("`export fn trip`"), "a `##` example satisfies it: {out}");
+    // …and the message says WHY, because "add an example" to someone who just added one
+    // is not an answer.
+    assert!(out.contains("must be on a `##` line"), "{out}");
+
+    // The other half of the agreement: exactly one example runs, and it is `trip`'s.
+    let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}{out}");
+    assert!(out.contains("1 passed"), "{out}");
+    assert!(out.contains("(doc, 3 engines agree)"), "{out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The long-`let` lint had its two constructs the wrong way round.
+///
+/// `do { a = 1 … result }` lowers to ONE `Expr::Let` with N bindings — the same node a
+/// `let a = …, b = … in body` head produces — while `let … in let … in` is N nodes of one
+/// binding each. So the rule fired on `do` blocks, advising `do { … }`, which they already
+/// were; and never fired on a chain, at any length, which is its actual target. Both of a
+/// field build's findings were `do` blocks.
+#[test]
+fn the_long_let_lint_fires_on_a_let_head_and_not_on_a_do_block() {
+    let dir = std::env::temp_dir().join(format!("hx_lintlet_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, body: &str| {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    };
+    let notes = |p: &std::path::Path| {
+        let (out, _, _) = run(&["check", "--lint", p.to_str().unwrap()], &[], "");
+        out.lines().filter(|l| l.contains("`let` head with")).count()
+    };
+
+    // A `do` block of nine statements IS the form the note recommends.
+    let p = write(
+        "do.helix",
+        "fn nine() = do {\n  a = 1\n  b = 2\n  c = 3\n  d = 4\n  e = 5\n  f = 6\n  g = 7\n  \
+         h = 8\n  i = 9\n  a + b + c + d + e + f + g + h + i\n}\n",
+    );
+    assert_eq!(notes(&p), 0, "a `do` block must not be told to become a `do` block");
+
+    // A nested chain is the same long head written as a nest — and was invisible.
+    let p = write(
+        "chain.helix",
+        "fn nine() =\n  let a = 1 in let b = 2 in let c = 3 in let d = 4 in let e = 5 in\n  \
+         let f = 6 in let g = 7 in let h = 8 in let i = 9 in\n  \
+         a + b + c + d + e + f + g + h + i\n",
+    );
+    assert_eq!(notes(&p), 1, "a nine-link `let` chain is one long head, and one note");
+
+    // The comma form, which always fired, still does — once.
+    let p = write(
+        "head.helix",
+        "fn nine() =\n  let a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8, i = 9 in\n  \
+         a + b + c + d + e + f + g + h + i\n",
+    );
+    assert_eq!(notes(&p), 1, "{}", "the comma head still fires");
+
+    // Six is under the threshold in every form.
+    let p = write(
+        "six.helix",
+        "fn six() = let a = 1 in let b = 2 in let c = 3 in let d = 4 in let e = 5 in \
+         let f = 6 in a + b + c + d + e + f\n",
+    );
+    assert_eq!(notes(&p), 0, "six bindings is not a long head");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// `join` is the third type-directed route, and it had no receiver test.
+///
+/// ADR 0045 D2 gave both readings to the column verbs and the comprehensions. `join` is
+/// neither — it mixes an evaluated frame operand with by-name keys, so it has its own op —
+/// and its route fires for a receiver the checker typed `Unknown` with NO column-mention
+/// requirement, because a key may be written bare (`samples.join(meta, sample_id)`). So a
+/// user's `fn join` was taken by the frame route and the two engines disagreed:
+/// the tree-walker dispatched on the runtime Record and answered, the VM raised
+/// "`join` takes 1 argument, got 3".
+///
+/// It needed a `where` in front to reach: a record LITERAL types as `Record`, so the route
+/// declined, and only a user verb's unannotated return (`Unknown`) opened it. That is why
+/// `{r: 1}.join(…)` alone was always fine — and why this test chains.
+///
+/// THIS CANNOT LIVE IN `src/vm/tests.rs`: those helpers compile with no TypeMap, so
+/// `recv_type` is `None`, the route never fires, and the bug is invisible. It needs the
+/// real pipeline, which means the CLI.
+#[test]
+fn a_user_join_and_the_frame_join_coexist() {
+    let dir = std::env::temp_dir().join(format!("hx_join_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("j.helix");
+    std::fs::write(
+        &prog,
+        // A user `join`, the DataFrame's `join`, and the DataFrame's `join` reached
+        // through an untyped parameter — the Unknown-receiver route itself — all in one
+        // program, so neither reading can have taken the other's calls.
+        "fn where(q, c) = {...q, n: 1}\n\
+         fn join(q, a, b, c) = \"MINE\"\n\
+         print({ r: 1 }.where(\"c\").join(\"x\", \"y\", \"z\"))\n\
+         l = dataframe({ id: [1, 2], x: [10, 20] })\n\
+         r = dataframe({ id: [2], y: [5] })\n\
+         print(l.join(r, @id).count())\n\
+         fn thru(a, b) = a.join(b, @id).count()\n\
+         print(thru(l, r))\n",
+    )
+    .unwrap();
+
+    let (a, ea, ca) = run(&[prog.to_str().unwrap()], &[], "");
+    let (b, eb, cb) = run(&[prog.to_str().unwrap()], &[("HELIX_NOVM", "1")], "");
+    assert_eq!((ca, &a), (cb, &b), "engines disagree: {ea} / {eb}");
+    assert_eq!(ca, Some(0), "{ea}");
+    assert_eq!(a.lines().collect::<Vec<_>>(), vec!["MINE", "1", "1"], "{a}");
+
+    // AND THE HALF THE FIRST FIX GOT WRONG. A split's other branch has to be the ORDINARY
+    // method path, not a direct call to the function: a receiver that OWNS the name keeps
+    // its own method. `Array` owns `join`, so `xs.join(",")` through an untyped parameter
+    // is the array's — and sending it to the user's four-parameter `fn join` made the
+    // walker answer and the VM raise, which is the divergence class this project treats as
+    // worst. One case per split family, each through a receiver the checker cannot pin.
+    std::fs::write(
+        &prog,
+        "fn join(q, t, l, r) = \"MINE\"
+         fn where(q, c) = \"MINEW\"
+         fn select(q, c) = \"MINES\"
+         fn thru_join(xs) = xs.join(\",\")
+         fn thru_where(xs) = xs.where(it > 1)
+         fn thru_select(xs) = xs.select(\"x\")
+         print(thru_join([\"a\", \"b\"]))
+         print(thru_where([1, 2, 3]))
+         print(thru_select({ q: 1 }))
+         print({ q: 1 }.join(\"a\", \"b\", \"c\"))
+",
+    )
+    .unwrap();
+    let (a, ea, ca) = run(&[prog.to_str().unwrap()], &[], "");
+    let (b, eb, cb) = run(&[prog.to_str().unwrap()], &[("HELIX_NOVM", "1")], "");
+    assert_eq!((ca, &a), (cb, &b), "engines disagree: {ea} / {eb}");
+    assert_eq!(ca, Some(0), "{ea}");
+    assert_eq!(
+        a.lines().collect::<Vec<_>>(),
+        // Array keeps `join` and `where`; Record owns neither `select` nor `join`, so both
+        // fall back to the user's.
+        vec!["a,b", "[2, 3]", "MINES", "MINE"],
+        "{a}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A doc example can expect padded, fixed-width output.
+///
+/// The expectation lives in a `##` comment, where trailing spaces are invisible and every
+/// formatter strips them — so `doc_examples_in` trims them, and it must. The comparison
+/// then trimmed only the END of the whole output, which reaches the last line and no
+/// other: a padded line anywhere above it could not match anything writable. In a language
+/// whose own report and log functions emit fixed-width columns that is not a corner case,
+/// and it made two real exports unexampleable.
+///
+/// Leading whitespace stays significant, which the second example pins: indentation is
+/// structure, not padding.
+#[test]
+fn a_doc_example_can_expect_padded_output() {
+    let dir = std::env::temp_dir().join(format!("hx_pad_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("helix.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\n").unwrap();
+    std::fs::write(
+        dir.join("lib.helix"),
+        "## Every line but the last carries trailing spaces.\n\
+         ##\n\
+         ##     >>> report()\n\
+         ##     name    n\n\
+         ##     ann     3\n\
+         ##     bo      1\n\
+         ##     0\n\
+         export fn report() = do {\n  \
+           a = print(\"name    n   \")\n  \
+           b = print(\"ann     3   \")\n  \
+           c = print(\"bo      1\")\n  \
+           0\n\
+         }\n\
+         \n\
+         ## Leading whitespace is structure and still has to match.\n\
+         ##\n\
+         ##     >>> nested()\n\
+         ##       indented\n\
+         ##     0\n\
+         export fn nested() = do {\n  \
+           a = print(\"  indented\")\n  \
+           0\n\
+         }\n",
+    )
+    .unwrap();
+
+    let (out, err, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}{out}");
+    assert!(out.contains("2 passed"), "{out}");
+
+    // And the leading-whitespace half really is load-bearing: drop the indent from the
+    // expectation and it must FAIL, or the first assertion proves nothing about it.
+    std::fs::write(
+        dir.join("lib.helix"),
+        "## >>> nested()\n## indented\n## 0\n\
+         export fn nested() = do {\n  a = print(\"  indented\")\n  0\n}\n",
+    )
+    .unwrap();
+    let (out, _, code) = run(&["test", dir.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0), "leading whitespace must still be compared: {out}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// A frame or a group that reaches a function as an untyped parameter keeps its verbs.
+///
+/// Every DataFrame verb is routed by TYPE, and when the checker cannot prove the receiver
+/// — an untyped parameter, a branch that yields either — the compiler used to GUESS. The
+/// guess evaluates the arguments as values, and a frame verb's arguments are column names,
+/// so the shape a database helper is written in died on two engines and ran on the third:
+///
+///     fn adults(f) = f.where(age > 40)   # bare column names: ADR 0039's own spelling
+///     walker: 2        VM / JIT: `age` is not defined
+///
+/// A `@column` argument was the one hint that switched the route, and a bare name carries
+/// no hint at all. `where` is where it was reported; the same guess was in `sort`,
+/// `drop_missing`, `drop_nan`, and every grouped aggregation, so the fix is the family.
+///
+/// The assertions are one per verb the fix covers, each through a parameter, and each
+/// compared across all three engines — the divergence is the defect, so agreement is the
+/// assertion, and the value is checked so agreement on a shared error would not pass.
+#[test]
+fn a_frame_through_an_untyped_parameter_keeps_its_verbs() {
+    let dir = std::env::temp_dir().join(format!("hx_dfp_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("p.helix");
+
+    let three = |src: &str| -> (String, String) {
+        std::fs::write(&prog, src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "jit vs vm: {ej} / {ev}\n{src}");
+        assert_eq!((cv, &vm), (ct, &tw), "vm vs tree-walker: {ev} / {et}\n{src}");
+        (jit.trim().to_string(), ej)
+    };
+
+    const D: &str = "d = dataframe({ name: [\"ann\", \"bo\", \"cy\"], age: [41, 33, 52] })\n";
+    for (body, want) in [
+        // The reported case: a bare column name in a predicate.
+        ("fn f(x) = x.where(age > 40)\nprint(f(d).count())\n", "2"),
+        ("fn f(x) = x.filter(age > 40)\nprint(f(d).count())\n", "2"),
+        // `sort` reads a bare name as a column too — and used to evaluate it as a value.
+        ("fn f(x) = x.sort(age)\nprint(f(d).column(\"age\"))\n", "[33, 41, 52]"),
+        // No arguments at all, and still a column verb rather than a value method.
+        ("fn f(x) = x.drop_missing()\nprint(f(d).count())\n", "3"),
+        // The `@` spelling, which always worked, must keep working.
+        ("fn f(x) = x.where(@age > 40)\nprint(f(d).count())\n", "2"),
+        // An ARRAY through the same parameter still means the comprehension.
+        ("fn f(x) = x.where(it > 1)\nprint(f([1, 2, 3]))\n", "[2, 3]"),
+        // And `missing` still propagates (ADR 0001) rather than taking either route.
+        ("fn f(x) = x.where(it > 1)\nprint(f(missing))\n", "missing"),
+    ] {
+        let src = format!("{D}{body}");
+        let (out, err) = three(&src);
+        assert_eq!(out, want, "{err}\n{src}");
+    }
+
+    // The grouped aggregations, whose column is normally written bare.
+    const G: &str = "d = dataframe({ k: [\"a\", \"a\", \"b\"], v: [1, 2, 3] })\ng = d.group(k)\n";
+    for (body, want) in [
+        ("fn f(x) = x.sum(v)\nprint(f(g).count())\n", "2"),
+        ("fn f(x) = x.mean(v)\nprint(f(g).count())\n", "2"),
+        ("fn f(x) = x.max(v)\nprint(f(g).count())\n", "2"),
+    ] {
+        let src = format!("{G}{body}");
+        let (out, err) = three(&src);
+        assert_eq!(out, want, "{err}\n{src}");
+    }
+
+    // A verb the receiver does NOT have is refused the same way on every engine — and for
+    // a group, refused BEFORE its arguments are evaluated, or the message names the wrong
+    // thing (`v` is not defined) instead of the wrong verb.
+    for (src, needle) in [
+        (format!("{G}fn f(x) = x.sort(v)\nprint(try f(g))\n"), "no aggregation `sort`"),
+        (format!("{D}fn f(x) = x.map(1)\nprint(try f(d))\n"), "has no method `map`"),
+    ] {
+        let (out, err) = three(&src);
+        assert!(out.contains(needle), "{needle} not in {out} {err}");
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }

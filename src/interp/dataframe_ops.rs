@@ -58,6 +58,27 @@ fn arg_as_column_name(
     }
 }
 
+/// "a grouped DataFrame has no aggregation `x`" — one sentence, both engines.
+///
+/// The VM reached its own spelling ("a GroupBy has no value-method `x`") whenever a group
+/// arrived somewhere the compiler had routed as a value method; the walker reached this
+/// one. Same outcome, two sentences, one program.
+pub(crate) fn no_such_aggregation(name: &str, line: usize, col: usize) -> HelixError {
+    HelixError::new(format!("a grouped DataFrame has no aggregation `{name}`"), line, col)
+        .hint("try mean, sum, min, max, count, or std.")
+}
+
+/// "the thing you asked to join with is not a frame" — one sentence, both engines.
+///
+/// The VM reaches this from `Op::DfJoin` and the tree-walker from its own join arm, and
+/// they spelled it differently ("needs a DataFrame to join with, found Int" against
+/// "expects a DataFrame, found Int"): the same outcome in two sentences, which is still
+/// one program answered two ways.
+pub(crate) fn join_operand_err(v: &Value, line: usize, col: usize) -> HelixError {
+    HelixError::new(format!("`join` expects a DataFrame, found {}", v.type_name()), line, col)
+        .hint("e.g. `samples.join(meta, sample_id)`.")
+}
+
 /// Column-name arguments for `select`/`sort`/`group` (each must be a bare ident).
 pub(crate) fn column_name_args(
     args: &[Expr],
@@ -254,12 +275,7 @@ pub(crate) fn groupby_agg(
             )?;
             Ok(Value::dataframe(handle.group_agg(keys, name, &value_col, line, col)?))
         }
-        _ => Err(HelixError::new(
-            format!("a grouped DataFrame has no aggregation `{}`", name),
-            line,
-            col,
-        )
-        .hint("try mean, sum, min, max, count, or std.")),
+        _ => Err(no_such_aggregation(name, line, col)),
     }
 }
 
@@ -297,13 +313,7 @@ impl super::Interp {
                 };
                 let right = match other {
                     Value::DataFrame(lf) => lf,
-                    v => {
-                        return Err(HelixError::new(
-                            format!("`join` expects a DataFrame, found {}", v.type_name()),
-                            line,
-                            col,
-                        ))
-                    }
+                    v => return Err(join_operand_err(&v, line, col)),
                 };
                 let (keys, how) = parse_join_spec(&args[1..], line, col)?;
                 Ok(Value::dataframe(lf.join(&right, &keys, &how, line, col)?))

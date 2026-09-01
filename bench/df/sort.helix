@@ -1,0 +1,7 @@
+# The WHOLE ordering is consumed.
+#
+# `.sort(...).count()` needs no order and is dropped outright — that read as a 36x
+# loss for a verb that is a 1.95x win. `.sort(...).head(3)` is no better: a top-3
+# selection is O(n) and never sorts. Only pulling the full ordered column out
+# measures sorting.
+print(read_csv("/tmp/helix_dfbench/main.csv").sort(@x).column("id").count())

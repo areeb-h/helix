@@ -93,7 +93,7 @@ pub(crate) fn headers_method(
                 map.entry(crate::value::DictKey::Str(Rc::new(n.to_ascii_lowercase())))
                     .or_insert_with(|| Value::Str(Rc::new(v.clone())));
             }
-            Ok(Value::Dict(Rc::new(map)))
+            Ok(Value::dict(map))
         }
         _ => Err(unknown_method(
             "Headers",

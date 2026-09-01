@@ -391,6 +391,450 @@ enum FastKey {
     Code(u32),
 }
 
+/// The column shapes [`fast_key`] can key on.
+fn keyable(c: &Col) -> bool {
+    matches!(c, Col::I64 { .. } | Col::Bool { .. } | Col::Str { .. })
+}
+
+/// One row's typed key from a shape-checked column.
+///
+/// Shared by every fast path that buckets rows, so they cannot drift apart on
+/// what "the same key" means -- which matters more than the duplication it saves,
+/// because `group`, `unique` and `join` disagreeing about key identity is exactly
+/// the kind of divergence the differential campaign exists to catch.
+fn fast_key(c: &Col, row: usize) -> FastKey {
+    match c {
+        Col::I64 { vals, valid } => {
+            if valid[row] { FastKey::Int(vals[row]) } else { FastKey::Missing }
+        }
+        Col::Bool { vals, valid } => {
+            if valid[row] { FastKey::Bool(vals[row]) } else { FastKey::Missing }
+        }
+        Col::Str { codes, valid, .. } => {
+            if valid[row] { FastKey::Code(codes[row]) } else { FastKey::Missing }
+        }
+        _ => unreachable!("shape-checked by the caller"),
+    }
+}
+
+// ---- unique_by ----
+
+/// `Some(keep)` — ascending row indices — for a ONE-COLUMN key subset;
+/// `None` falls back to the generic `RowKey` path.
+///
+/// WHY THIS IS THE WHOLE FUNCTION. The generic path allocates a `Vec<KeyCell>`
+/// per row, clones it again on first sight of a key, and keeps a parallel
+/// `order` vector. Here the key is one machine word, so the map alone is enough:
+/// a subset key keeps the LAST occurrence (upsert — newest wins, `verbs.rs`),
+/// which is exactly what an unconditional `insert` does, so no first-seen order
+/// needs tracking at all. The generic path's final `sort_unstable` on the kept
+/// indices is reproduced verbatim, so output row order is identical.
+///
+/// Whole-row `unique()` (an EMPTY subset) keeps the FIRST occurrence and spans
+/// every column: a different rule over a different key, so it gets its own path
+/// in [`unique_keep_all`] rather than being bent to fit this one.
+/// Whether a column can take part in the allocation-free row key.
+///
+/// Wider than [`keyable`] on purpose: this admits F64, because a whole-row unique
+/// over a realistic frame nearly always has a float column in it, and excluding
+/// floats would send exactly the frames that matter back to the allocating path.
+/// `Null` is admitted because every one of its cells is missing, so it can only
+/// ever agree -- it constrains nothing and costs nothing.
+fn row_keyable(c: &Col) -> bool {
+    matches!(
+        c,
+        Col::I64 { .. } | Col::F64 { .. } | Col::Bool { .. } | Col::Str { .. } | Col::Null { .. }
+    )
+}
+
+/// One cell as raw bits, for HASHING ONLY. Collisions are permitted here and
+/// resolved by [`rows_eq`]; this exists to be cheap, not to be decisive.
+fn cell_bits(c: &Col, row: usize) -> u64 {
+    const MISSING: u64 = 0x9e37_79b9_7f4a_7c15;
+    match c {
+        Col::I64 { vals, valid } => {
+            if valid[row] { vals[row] as u64 } else { MISSING }
+        }
+        // `-0.0` folds to `0.0` before hashing, exactly as `KeyCell::of` does:
+        // they are `==` in scalar Helix, so they must land in one bucket.
+        Col::F64 { vals, valid } => {
+            if valid[row] { (vals[row] + 0.0).to_bits() } else { MISSING }
+        }
+        Col::Bool { vals, valid } => {
+            if valid[row] { vals[row] as u64 } else { MISSING }
+        }
+        Col::Str { codes, valid, .. } => {
+            if valid[row] { codes[row] as u64 } else { MISSING }
+        }
+        Col::Null { .. } => MISSING,
+    }
+}
+
+/// Do two rows agree in this column? The DECISIVE test, read straight from the
+/// typed column with nothing materialised.
+///
+/// Dictionary codes compare as codes: entries are unique within a column, so code
+/// equality is string equality -- the same license `group_agg` relies on. Floats
+/// compare by canonicalised BIT PATTERN, which makes NaN equal to itself, matching
+/// `RowKey`'s rule that grouping equality is identity rather than `==`.
+fn cells_eq(c: &Col, a: usize, b: usize) -> bool {
+    match c {
+        Col::I64 { vals, valid } => valid[a] == valid[b] && (!valid[a] || vals[a] == vals[b]),
+        Col::F64 { vals, valid } => {
+            valid[a] == valid[b]
+                && (!valid[a] || (vals[a] + 0.0).to_bits() == (vals[b] + 0.0).to_bits())
+        }
+        Col::Bool { vals, valid } => valid[a] == valid[b] && (!valid[a] || vals[a] == vals[b]),
+        Col::Str { codes, valid, .. } => {
+            valid[a] == valid[b] && (!valid[a] || codes[a] == codes[b])
+        }
+        Col::Null { .. } => true,
+    }
+}
+
+fn rows_eq(cols: &[&Col], a: usize, b: usize) -> bool {
+    cols.iter().all(|c| cells_eq(c, a, b))
+}
+
+/// A `Hasher` for keys that ARE ALREADY HASHES.
+///
+/// `std`'s default is SipHash-1-3: keyed, DoS-resistant, and defined over
+/// arbitrary bytes. All three properties are wasted here. `row_hash` has already
+/// mixed the row's cells into a well-distributed `u64`, so handing that to a
+/// `HashMap` hashed it a SECOND time — the table was doing the expensive half of
+/// the work twice and the cheap half not at all.
+///
+/// Nothing in these tables is a security boundary: they are built from a
+/// program's own data, live for the duration of one verb, and are never exposed
+/// to an adversary choosing keys.
+#[derive(Default)]
+struct PreHashed(u64);
+
+impl std::hash::Hasher for PreHashed {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // Unreachable by construction — only `u64` keys are stored — but folding
+        // the bytes keeps it a correct hasher rather than merely an unused one.
+        for b in bytes {
+            self.0 = (self.0 ^ *b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    fn write_u64(&mut self, v: u64) {
+        // splitmix64's finalizer. `row_hash` mixes well, but bucket selection
+        // reads the LOW bits, and one avalanche removes any dependence on where
+        // FNV happens to put its entropy.
+        let mut z = v;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        self.0 = z ^ (z >> 31);
+    }
+}
+
+type PreHashedMap<V> = HashMap<u64, V, std::hash::BuildHasherDefault<PreHashed>>;
+
+fn row_hash(cols: &[&Col], row: usize) -> u64 {
+    // FNV-1a over the cells' bits. No allocation, no `Value`, no per-row Vec --
+    // which is the entire point of this path.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for c in cols {
+        h ^= cell_bits(c, row);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// `Some(keep)` — ascending row indices — for whole-row `unique()`;
+/// `None` falls back to the generic `RowKey` path.
+///
+/// WHY THIS EXISTS. The generic path builds a `RowKey` per row: a `Vec<KeyCell>`
+/// allocated for every row, cloned again on first sight, with an `Rc` bump per
+/// string cell. That makes the cost proportional to ROWS rather than to distinct
+/// rows, which is backwards for the shape this verb is usually asked about -- a
+/// categorical column where a million rows carry a thousand distinct values. It
+/// measured 4.8x behind the polars oracle at 100k rows and 9.0x at 400k, growing
+/// linearly while the oracle grew sublinearly. Nothing here is cleverer than that
+/// path; it just refuses to allocate to ask a question it can answer by looking.
+///
+/// Keeps the FIRST occurrence, and visits rows in order, so `keep` is already
+/// ascending — the generic path's closing `sort_unstable` would be a no-op.
+/// Whole-row unique by COMPOSITE direct addressing.
+///
+/// The single-column idea, carried to the whole row: if every column has a
+/// bounded dense domain, then the row's identity IS a mixed-radix integer over
+/// those domains, and that integer is a slot. One array probe per row replaces a
+/// hash, a table probe and a candidate comparison.
+///
+/// Keeps the FIRST occurrence — a slot is claimed only when empty — and visits
+/// rows in order, so `keep` comes out ascending with no sort to do afterwards.
+///
+/// REFUSED when any column has no bounded domain (a float is the common case), or
+/// when the product of domains exceeds the budget. The product is the real hazard:
+/// it is the worst case, not the actual distinct count, and CORRELATED columns
+/// make it wildly pessimistic — two perfectly correlated 1000-value columns ask
+/// for a million slots to hold a thousand rows. The budget is what keeps that from
+/// trading a hash table for an enormous empty array.
+/// Whole-row unique by COMPOSITE direct addressing.
+///
+/// The single-column idea carried to the whole row: if every column has a bounded
+/// domain, the row's identity IS a mixed-radix integer over those domains, and
+/// that integer is a slot. One array probe per row replaces a hash, a table probe
+/// and a candidate comparison.
+///
+/// Keeps the FIRST occurrence — a slot is claimed only when empty — and visits
+/// rows in order, so `keep` comes out ascending with no sort to do.
+///
+/// REFUSED when any column has no bounded domain, or when the product of domains
+/// exceeds the budget. The product is the real hazard: it is the worst case, not
+/// the actual distinct count, and CORRELATED columns make it wildly pessimistic —
+/// two perfectly correlated 1000-value columns ask for a million slots to hold a
+/// thousand rows.
+fn unique_dense_row(cols: &[&Col], n: usize) -> Option<Vec<usize>> {
+    if n > u32::MAX as usize {
+        return None;
+    }
+    // 4M slots = 16 MB. Past this the array stops being the cheaper structure.
+    const MAX_SLOTS: u128 = 1 << 22;
+
+    let mut sizes: Vec<u128> = Vec::with_capacity(cols.len());
+    let mut bases: Vec<i64> = Vec::with_capacity(cols.len());
+    let mut product: u128 = 1;
+    for c in cols {
+        let (size, base) = dense_domain(c, n)?;
+        product = product.checked_mul(size as u128)?;
+        if product > MAX_SLOTS {
+            return None;
+        }
+        sizes.push(size as u128);
+        bases.push(base);
+    }
+
+    let mut seen = vec![NO_ROW; product as usize];
+    let mut keep: Vec<usize> = Vec::new();
+    for row in 0..n {
+        // Horner over the domains: idx = ((s0 * d1 + s1) * d2 + s2) ...
+        let mut idx: u128 = 0;
+        for ((c, size), base) in cols.iter().zip(&sizes).zip(&bases) {
+            idx = idx * size + dense_slot(c, row, *base) as u128;
+        }
+        let slot = idx as usize;
+        if seen[slot] == NO_ROW {
+            seen[slot] = row as u32;
+            keep.push(row);
+        }
+    }
+    Some(keep)
+}
+
+pub fn unique_keep_all(
+    frame: &NativeFrame,
+    subset: &[String],
+    line: usize,
+    col: usize,
+) -> Option<Result<Vec<usize>, HelixError>> {
+    // Each fast path decides its OWN applicability, so both take the same
+    // arguments and the caller just offers them the question in turn.
+    if !subset.is_empty() {
+        return None;
+    }
+    let named = match frame.columns(line, col) {
+        Ok(c) => c,
+        Err(e) => return Some(Err(e)),
+    };
+    let cols: Vec<&Col> = named.into_iter().map(|(_, c)| c).collect();
+    if cols.is_empty() || !cols.iter().all(|c| row_keyable(c)) {
+        return None;
+    }
+
+    let n = frame.len();
+    // Composite direct addressing first, for the same reason the single-column
+    // path tries it first: when the domains are bounded there is no key to hash.
+    if let Some(keep) = unique_dense_row(&cols, n) {
+        return Some(Ok(keep));
+    }
+    // One entry per DISTINCT row, holding a representative row number inline --
+    // not a bucket vector, which would allocate once per distinct row and give
+    // most of the win back on a frame that is mostly distinct.
+    let mut first: PreHashedMap<usize> =
+        PreHashedMap::with_capacity_and_hasher(n / 8 + 16, Default::default());
+    // Only ever touched by a genuine 64-bit hash collision between rows that are
+    // actually different. Rare, but handled rather than assumed away: a wrong
+    // answer here would be a silently dropped row.
+    let mut extra: PreHashedMap<Vec<usize>> = PreHashedMap::default();
+    let mut keep: Vec<usize> = Vec::new();
+
+    for row in 0..n {
+        let h = row_hash(&cols, row);
+        match first.get(&h) {
+            None => {
+                first.insert(h, row);
+                keep.push(row);
+            }
+            Some(&rep) => {
+                if rows_eq(&cols, rep, row) {
+                    continue;
+                }
+                let bucket = extra.entry(h).or_default();
+                if bucket.iter().any(|&seen| rows_eq(&cols, seen, row)) {
+                    continue;
+                }
+                bucket.push(row);
+                keep.push(row);
+            }
+        }
+    }
+    Some(Ok(keep))
+}
+
+/// An empty slot in a dense direct-address table.
+const NO_ROW: u32 = u32::MAX;
+
+/// Dedup a single key column by DIRECT ADDRESSING — no hash table at all.
+///
+/// The idea: a hash table exists to map an arbitrary key into a dense slot. When
+/// the key is ALREADY a dense integer, that map is the identity and the whole
+/// table is redundant work. Two columns hand it to us for free:
+///
+///   * `Col::Str` is dictionary-encoded, and its codes are dense in
+///     `[0, dict.len())` BY CONSTRUCTION. The distinct set is already computed —
+///     hashing the strings would be recomputing what the column knows.
+///   * `Col::I64` needs one scan for its range, and a bounded range is the normal
+///     case for the columns people actually deduplicate: ids, categories, keys.
+///
+/// So dedup becomes one pass of array writes: `last[slot] = row`. Unconditional,
+/// because a one-column subset keeps the LAST occurrence (upsert) — the same rule
+/// the hash path implements with `insert`. Slot 0 is reserved for missing, so a
+/// missing key stays its own key exactly as `RowKey` has it.
+///
+/// Cost: one linear pass with no hashing, no probing and no rehash growth, plus a
+/// sweep of the table. The table is `4 * (domain + 1)` bytes — 4 KB for a
+/// thousand-value dictionary, whatever the row count. The row count only ever
+/// touches the pass, never the table.
+///
+/// `None` when no dense domain applies, and the hash path still stands behind it.
+/// The dense slot domain of a key column: how many slots it needs, and the base
+/// to subtract from an `I64` value. Slot 0 is ALWAYS missing, so a missing cell
+/// keeps its own identity exactly as `RowKey` gives it.
+///
+/// `None` when the column has no bounded domain — a float, or an integer whose
+/// range is too sparse to be worth an array.
+///
+/// ONE definition, because `unique`, whole-row `unique` and `group` must agree on
+/// what "the same key" means. Three copies of this arithmetic would be three
+/// chances to disagree, and a disagreement here is a silent wrong answer rather
+/// than a crash.
+fn dense_domain(c: &Col, n: usize) -> Option<(usize, i64)> {
+    match c {
+        // Dictionary codes are dense in `[0, dict.len())` by construction: the
+        // distinct set is already computed, so there is nothing left to hash.
+        Col::Str { dict, .. } => Some((dict.len() + 1, 0)),
+        Col::Bool { .. } => Some((3, 0)),
+        Col::Null { .. } => Some((1, 0)),
+        Col::I64 { vals, valid } => {
+            let (mut lo, mut hi) = (i64::MAX, i64::MIN);
+            let mut any = false;
+            for row in 0..n {
+                if valid[row] {
+                    any = true;
+                    lo = lo.min(vals[row]);
+                    hi = hi.max(vals[row]);
+                }
+            }
+            if !any {
+                return Some((1, 0));
+            }
+            // A sparse range would trade a hash table for a larger, emptier array.
+            // Bounded by a multiple of the rows and a hard ceiling, so a
+            // pathological key cannot allocate unboundedly.
+            let span = (hi as i128 - lo as i128 + 1) as u128;
+            let budget = ((n as u128) * 4).clamp(1024, 1 << 24);
+            if span > budget {
+                return None;
+            }
+            Some((span as usize + 1, lo))
+        }
+        _ => None,
+    }
+}
+
+/// The slot a row occupies within its column's dense domain (see [`dense_domain`]).
+fn dense_slot(c: &Col, row: usize, base: i64) -> usize {
+    match c {
+        Col::Str { codes, valid, .. } => {
+            if valid[row] { codes[row] as usize + 1 } else { 0 }
+        }
+        Col::Bool { vals, valid } => {
+            if valid[row] { vals[row] as usize + 1 } else { 0 }
+        }
+        Col::Null { .. } => 0,
+        Col::I64 { vals, valid } => {
+            if valid[row] { (vals[row] as i128 - base as i128) as usize + 1 } else { 0 }
+        }
+        _ => unreachable!("domain-checked by dense_domain"),
+    }
+}
+
+/// Dedup a single key column by DIRECT ADDRESSING — no hash table at all.
+///
+/// A hash table exists to map an arbitrary key onto a dense slot; when the key is
+/// already a dense integer that map is the identity, and the table is redundant
+/// work. Unconditional writes, because a one-column subset keeps the LAST
+/// occurrence (upsert) — the rule the hash path implements with `insert`.
+fn unique_dense(kc: &Col, n: usize) -> Option<Vec<usize>> {
+    // Rows are stored as `u32` in the table; refuse rather than truncate.
+    if n > u32::MAX as usize {
+        return None;
+    }
+    let (domain, base) = dense_domain(kc, n)?;
+    let mut last = vec![NO_ROW; domain];
+    for row in 0..n {
+        last[dense_slot(kc, row, base)] = row as u32;
+    }
+    // Sweeping the table yields rows in SLOT order, not row order, so the sort is
+    // what makes this reproduce the hash path byte for byte.
+    let mut keep: Vec<usize> =
+        last.into_iter().filter(|&r| r != NO_ROW).map(|r| r as usize).collect();
+    keep.sort_unstable();
+    Some(keep)
+}
+
+pub fn unique_keep(
+    frame: &NativeFrame,
+    subset: &[String],
+    line: usize,
+    col: usize,
+) -> Option<Result<Vec<usize>, HelixError>> {
+    if subset.len() != 1 {
+        return None;
+    }
+    let kc = match frame.col(&subset[0], line, col) {
+        Ok(c) => c,
+        Err(e) => return Some(Err(e)),
+    };
+    if !keyable(kc) {
+        return None;
+    }
+    let n = frame.len();
+    // Direct addressing first: when the key domain is already dense there is no
+    // reason to hash it. Measured at 400k rows over 1000 distinct values, the hash
+    // path below spent ~6ms almost entirely in `std`'s SipHash.
+    if let Some(keep) = unique_dense(kc, n) {
+        return Some(Ok(keep));
+    }
+    let mut chosen: HashMap<FastKey, usize> = HashMap::with_capacity(n / 8 + 16);
+    for row in 0..n {
+        // Unconditional: the later row supersedes the earlier one. Missing is its
+        // own key here, matching `RowKey`, so all-missing rows collapse to one.
+        chosen.insert(fast_key(kc, row), row);
+    }
+    let mut keep: Vec<usize> = chosen.into_values().collect();
+    keep.sort_unstable();
+    Some(Ok(keep))
+}
+
 /// `Some(frame)` when key/value columns match the fast shapes; `None` → generic.
 pub fn group_agg(
     frame: &NativeFrame,
@@ -411,7 +855,7 @@ pub fn group_agg(
         Ok(c) => c,
         Err(e) => return Some(Err(e)),
     };
-    if !matches!(kc, Col::I64 { .. } | Col::Bool { .. } | Col::Str { .. }) {
+    if !keyable(kc) {
         return None;
     }
     if !matches!(vc, Col::I64 { .. } | Col::F64 { .. }) {
@@ -420,32 +864,46 @@ pub fn group_agg(
     let n = frame.len();
 
     // Group discovery: first-seen order, one typed key per row (no Vec per row).
-    let mut index: HashMap<FastKey, usize> = HashMap::new();
+    const NO_GROUP: u32 = u32::MAX;
     let mut group_of = Vec::with_capacity(n);
     let mut first_row: Vec<usize> = Vec::new();
-    for row in 0..n {
-        let key = match kc {
-            Col::I64 { vals, valid } => {
-                if valid[row] { FastKey::Int(vals[row]) } else { FastKey::Missing }
+    match dense_domain(kc, n) {
+        // DIRECT ADDRESSING when the key domain is bounded: slot -> group id in a
+        // flat array, so finding a row's group is one array read instead of a hash
+        // and a probe. Group ids are still handed out in FIRST-SEEN order, which is
+        // the output row order the oracle pins — the array changes how a group is
+        // FOUND, never which group a row belongs to nor where it lands.
+        Some((domain, base)) if n < u32::MAX as usize => {
+            let mut slot_group = vec![NO_GROUP; domain];
+            for row in 0..n {
+                let slot = dense_slot(kc, row, base);
+                let g = if slot_group[slot] == NO_GROUP {
+                    let g = first_row.len() as u32;
+                    slot_group[slot] = g;
+                    first_row.push(row);
+                    g
+                } else {
+                    slot_group[slot]
+                };
+                group_of.push(g as usize);
             }
-            Col::Bool { vals, valid } => {
-                if valid[row] { FastKey::Bool(vals[row]) } else { FastKey::Missing }
+        }
+        _ => {
+            let mut index: HashMap<FastKey, usize> = HashMap::new();
+            for row in 0..n {
+                let key = fast_key(kc, row);
+                let g = match index.get(&key) {
+                    Some(&g) => g,
+                    None => {
+                        let g = first_row.len();
+                        index.insert(key, g);
+                        first_row.push(row);
+                        g
+                    }
+                };
+                group_of.push(g);
             }
-            Col::Str { codes, valid, .. } => {
-                if valid[row] { FastKey::Code(codes[row]) } else { FastKey::Missing }
-            }
-            _ => unreachable!("shape-checked above"),
-        };
-        let g = match index.get(&key) {
-            Some(&g) => g,
-            None => {
-                let g = first_row.len();
-                index.insert(key, g);
-                first_row.push(row);
-                g
-            }
-        };
-        group_of.push(g);
+        }
     }
     let ngroups = first_row.len();
 

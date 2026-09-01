@@ -1,0 +1,17 @@
+# A ragged CSV is DATA, not an error: a short row pads with missing and a long
+# row truncates to the header. Both DataFrame engines must agree on that.
+#
+# This is the corpus's FIRST program that reads a CSV. The divergence it pins --
+# native refusing a ragged row while polars padded it -- was undeclared and
+# invisible for exactly that reason: `scripts/dfdiff.sh` compares 129 programs and
+# not one of them had read a CSV, so the readers were never differentially tested
+# at all. A corpus is only evidence for what it exercises.
+path = "/tmp/helix_corpus_ragged.csv"
+wrote = "a,b,c\n1,2,3\n4\n5,6\n7,8,9,10\n".write_to(path)
+df = read_csv(path)
+print(df.count())
+print(df.columns())
+print(df.column("a"))
+print(df.column("b"))
+print(df.column("c"))
+cleaned = remove_file(path)

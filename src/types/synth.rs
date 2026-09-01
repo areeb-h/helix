@@ -251,10 +251,14 @@ impl super::Checker {
         &mut self,
         recv: &Expr,
         name: &str,
+        // `ufcs`: the free function a failed dispatch falls back to, as it actually
+        // resolves — see `ast::Expr::Method`. `None` means the method's own name.
+        ufcs: Option<&str>,
         args: &[Expr],
         line: usize,
         col: usize,
     ) -> Result<Type, HelixError> {
+        let free = ufcs.unwrap_or(name);
         // Pre-ADR-0017 namespaced call (`stats.t_test(a, b)`) parses as a method on a
         // bare identifier. If that identifier is an unbound *removed namespace* (not a
         // local that shadows it), point the user at the new spelling before the receiver
@@ -348,8 +352,38 @@ impl super::Checker {
                 })
             }
         };
-        // UFCS, half two, mirrored so the checker cannot reject what the engines now
-        // run: a builtin-named method that no table claims types as the builtin with
+        // UFCS, run-time half, mirrored so the checker cannot reject what the engines
+        // now run: a method call no table claims, whose name is a declared top-level
+        // `fn`, types as that function with the receiver prepended.
+        //
+        // The guards are `ufcs_fallback_applies`'s, read in checker terms: only on the
+        // ERROR path, never for a receiver whose table owns the name, and never for the
+        // permissive types (Unknown / Missing / DataFrame / GroupBy) where the checker
+        // cannot see what the receiver will be. `env` carries the shadowing rule — a
+        // `where = 5` above the call rebinds the name away from `Function`, and this
+        // declines, exactly as the compiler declines a `NameRef::Global`.
+        //
+        // Ordered BEFORE the builtin mirror below because a user binding of a name
+        // shadows a builtin of it, which is what `synth_call` and both engines already
+        // do for an ordinary call.
+        if result.is_err()
+            && self.fn_globals.contains(free)
+            && matches!(self.env.get(free), Some(Type::Function { .. }))
+            && !matches!(rt, Type::Unknown | Type::Missing | Type::DataFrame | Type::GroupBy)
+            && !crate::registry::type_owns_method(&Self::receiver_table_name(&rt), name)
+        {
+            let mut ats = Vec::with_capacity(args.len() + 1);
+            ats.push(rt.clone());
+            for a in args {
+                ats.push(self.synth(a)?);
+            }
+            // The function's own answer, including its own arity and argument errors,
+            // which name the real mismatch where the method error could only say that
+            // the receiver has no such method.
+            return self.synth_call(free, &ats, line, col);
+        }
+        // UFCS, builtin half, mirrored for the same reason: a builtin-named method that
+        // no table claims types as the builtin with
         // the receiver prepended. Only on the ERROR path — a method that owns its
         // name keeps its type — and never for the permissive receivers (Unknown /
         // Missing / DataFrame / GroupBy), matching `ufcs_fallback_applies` at run

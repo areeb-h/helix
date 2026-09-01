@@ -4,7 +4,7 @@ A running note so the thread is not lost between sessions. **Newest first.** Eve
 is measured or gated unless it says otherwise — a claim without a number in this file is a
 claim nobody checked.
 
-Last updated: 2026-08-30.
+Last updated: 2026-08-31.
 
 ---
 
@@ -30,6 +30,127 @@ Still open — see the queue.
 ## In flight for the next release
 
 Everything below is on `main` and **not** in v0.8.0.
+
+### PostgreSQL, and TLS the server cannot turn off (ADR 0044)
+
+`postgres_query(url, sql, params?)` and `postgres_open(url)` behind `--features postgres`,
+hand-rolled against the v3 wire protocol, **zero new crates**. Verified against a live
+PostgreSQL 19 Beta 3: typed columns, `NULL` -> `missing`, parameters as values, read-only
+enforced by the server (SQLSTATE 25006 on a write), SCRAM-SHA-256 with the server's own
+signature checked, and `net` refused without the capability.
+
+**The security decision worth arguing.** `libpq` and Go's `pgx` default to
+`sslmode=prefer`: the client asks for TLS, and if the server answers `N` the session
+continues in plaintext. Helix has two modes, not six -- `verify-full` (default) and
+`disable` -- and no mode in which the SERVER can cause the downgrade. `require` and
+`verify-ca` are refused with the reason each would have cost. Proven by the adversarial
+case, not asserted: a listener that answers `N` makes both verbs fail, as a unit test that
+needs no database (`src/pg/tls.rs`).
+
+**Measured** (min of 7, load 1.41): TLS costs **+1.4 ms per connection and nothing per
+query**. Five queries: 20.8 ms over five plaintext connections, 28.0 over five TLS ones,
+**6.2 over one TLS connection**. The handshake is the query time, which is what makes the
+connection value worth more than the transaction round trips it replaced (removing those
+moved the number by 0.01 ms).
+
+**A credential leak, found by writing the test.** `parse_url` echoed the whole raw URL --
+password included -- into the error for an unparseable URL, which is the most widely copied
+text a program produces. Fixed, and `the_password_never_appears_in_an_error` goes red
+against the old line.
+
+The URL policy lives in `src/pg/conninfo.rs`, deliberately OUTSIDE the feature gate: the
+gate does not build `--features postgres`, so a policy test inside it would be a test that
+never runs. `sslmode`'s accepted values are the security policy, and they are now pinned by
+tests that run in every build.
+
+**Still open:** `SCRAM-SHA-256-PLUS` channel binding, and writes/transactions behind an
+explicit capability.
+
+### A method call is resolved by its receiver (ADR 0045)
+
+**A fluent library was unwritable in Helix, and nothing said so.** UFCS was gated at parse
+time on `registry::is_any_method` — a global test on a *name*, made where the receiver
+does not exist. Every verb a query builder is made of is some type's method, so
+
+    where  select  first  count  all  any  join  sort  take  drop
+    insert  get  keys  values  filter  map  sum  min  max  unique
+
+were invisible as user functions: `fn where(q, c)` two lines above `q.where(c)` failed
+with ``type Record has no method `where` ``.
+
+The decision moved to run time. A failed dispatch retries as `name(recv, args…)` against a
+declared `fn`, then a builtin; a type that OWNS the name never falls back. The two
+families the compiler routes by TYPE — `select`/`group`/`with`, and the comprehension
+loops — have no dispatch to fail, so they emit BOTH readings behind a new
+`Op::ReceiverIs`, with the receiver compiled once into a hidden local. The tree-walker
+CALLS that opcode's predicate rather than restating it.
+
+Gate green at **478 / 317 / 3 / 32**, dfdiff **136 programs, 0 divergences**, vmparity 0,
+checkall 89/89.
+
+**Two sabotages, both red.** Compiling the receiver into both branches turns the corpus
+program into an outright VM-vs-tree-walker divergence; dropping `Missing` from `Iterable`
+drifts it from its golden and fails the unit test. The FIRST version of the once-only
+check did not go red — it watched only the branch that never received the duplicate. It
+watches both sides now. That is the seventh time in this repo a guard has been found
+unable to fail, and the remedy is the same one every time: break it and look.
+
+**Found on the way.** `Op::DfColumnVerb` raised "expected a DataFrame, got Record" where
+the walker raised "a Record has no method `select`" — a pre-existing divergence, reachable
+whenever the checker cannot pin the receiver down. It calls the walker's own constructors
+now.
+
+**Still open, precisely.** The parser's desugars run before any receiver exists and still
+win: `sort_by`, `min_by`, `max_by`, `argmin`, `argmax`, `take_while`, `drop_while`,
+`zipmap`, `flat_map`, `count_where`, `position`. And `Op::GroupByAgg` still has the
+divergence `Op::DfColumnVerb` just lost. Both recorded in `docs/dx-plan.md`.
+
+### Polars is retired from the product (ADR 0033 Stage 4)
+
+The default flipped: `default` and `bio` pull `native-df`, and polars stays behind the
+`dataframes` feature **as the oracle only**. Binary 120 → **31 MB** (stripped 77 → **20**),
+crates compiled 1,566 → **192**, startup 4.9 → **2.96 ms** like-for-like (**2.5 ms** for
+the appliance build — not the same binary, so not the same row; a field build measuring
+~4 ms was right not to reproduce the 2.5 this once claimed). Gate was green at
+477 / 314 / 3 / 32 with dfdiff at **134 programs, 0 divergences** when this landed.
+
+Keeping the oracle is the point, not a hedge: an engine cannot be its own evidence, so the
+thing that says the replacement *means the same* has to outlive the thing it replaced.
+
+**Every verb is faster.** 1.6M rows, materialised frames, every output consumed, min-of-7
+(polars → native): `group` 20.7 → **5.2 ms** (4.00×), `join` 84.6 → **29.9** (2.82×),
+`unique("col")` 9.0 → **3.2** (2.81×), `with` 49.0 → **19.8** (2.47×), `sort` 74.5 → **38.1**
+(1.95×), `where` 26.0 → **13.6** (1.92×), `unique` 33.2 → **23.4** (1.42×).
+
+One idea did most of it. **A hash table exists to map an arbitrary key onto a dense slot,
+and a dictionary code already IS one** — `Col::Str` codes are dense in `[0, dict.len())` by
+construction, so the distinct set is already computed and hashing the strings recomputes
+what the column knows. An `I64` range is one scan away. The join's `Str` branch had done
+this since Stage 3; it had simply never been generalized. `dense_domain`/`dense_slot` are
+now one definition shared by `unique`, whole-row `unique` and `group`, because three copies
+of that arithmetic are three chances to disagree about key identity.
+
+**The flip exposed three undeclared divergences, and none of them was visible.** Native
+refused ragged CSVs where polars padded them; native's join bypassed `validate_join_keys`,
+the seam's shared diagnostic, which had exactly one caller; and an `allow(dead_code)` gated
+on the wrong feature had been hiding the second. All three survived because **of 157 corpus
+files, none read a CSV** and none joined on a bad key. A differential is evidence only for
+what its corpus exercises. Five programs now cover it, taking dfdiff 129 → 134.
+
+**The measurement lesson cost four wrong answers, one of them published.** A lazy engine's
+fast number is usually a refusal: `read_csv(p).count()` parses nothing, `join(dim,@k).count()`
+on a one-to-one join joins nothing, `sort(@x).count()` sorts nothing. Timed that way polars
+read 0.11 ms for a sort costing 74 ms and 5.7 ms for a join costing 84 ms — turning two
+native wins into reported losses. **The tell is sub-linear growth**: polars' "join" grew
+1.12× for 4× the rows, which no join does. Every program in `bench/df/` now ends in
+`.column(...)`.
+
+**Still open.** `--features python` requires `pyo3-polars` — two call sites in
+`src/python.rs`, the one configuration where polars reaches a shipped binary. The
+replacement is the Arrow PyCapsule interface, which would also buy pandas/pyarrow/duckdb
+interop; not taken because it needs either the arrow stack Stage 2 deliberately avoided or
+a hand-written C Data Interface, to remove a dependency from a feature nobody gets unless
+they ask for it.
 
 ### Terminal output that reads as carefully as it is computed
 

@@ -1078,6 +1078,7 @@ impl super::Compiler {
             name: "reduce".to_string(),
             args: args.to_vec(),
             named: Vec::new(),
+            ufcs: None,
             line,
             col,
         };
@@ -1245,7 +1246,7 @@ impl super::Compiler {
         }
 
         self.compile_expr(b, recv)?;
-        let init_at = b.emit(Op::CompInit(CompKind::Map, 0), line, col);
+        let init_at = b.emit(Op::CompInit(CompKind::Scan, 0), line, col);
 
         b.scopes.push(Vec::new());
         let saved_next = b.next_slot;
@@ -1271,7 +1272,7 @@ impl super::Compiler {
 
         // missing-source landing: the whole result is `missing` (as for `map`).
         let missing_at = b.code.len() as u32;
-        b.code[init_at] = Op::CompInit(CompKind::Map, missing_at);
+        b.code[init_at] = Op::CompInit(CompKind::Scan, missing_at);
         let mk = b.add_const(Value::Missing);
         b.emit(Op::Const(mk), line, col);
 

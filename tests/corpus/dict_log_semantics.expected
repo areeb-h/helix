@@ -1,0 +1,12 @@
+exit: 0
+--- stdout ---
+overwrite count 2  a=99  b=2
+older views 0 1 2 2
+d1.a=1  d2.a=1  d3.a=99
+branch 10 20  base untouched missing
+remove count 1 a=missing b=2
+equal true  and after overwrite false
+sorted ["x", "y"]  [1, 2]  [("x", 1), ("y", 2)]
+printed {"x" => 1, "y" => 2}
+contains true false
+--- stderr ---

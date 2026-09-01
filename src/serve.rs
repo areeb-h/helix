@@ -1318,6 +1318,7 @@ fn merge_headers(
             }
         }
         Value::Dict(map) => {
+            let map = map.map();
             for (k, v) in map.iter() {
                 if let DictKey::Str(s) = k {
                     add((**s).clone(), text(v));

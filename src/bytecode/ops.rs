@@ -138,6 +138,15 @@ pub enum Op {
     /// column (`mean`/`sum`/`min`/`max`/`count`/`std`). Emitted only when the type
     /// checker proved the receiver is a GroupBy.
     GroupByAgg(std::rc::Rc<GroupByAggData>),
+    /// Pop the receiver and push whether it belongs to `class`.
+    ///
+    /// Emitted only where a call site has two readings: a type-directed route (a
+    /// DataFrame column verb, a comprehension loop) and a UFCS call to a declared `fn`
+    /// of the same name. The tree-walker picks between them on the receiver's runtime
+    /// type; this is how the VM asks the same question. It consumes the receiver
+    /// because both branches reload it from the local the compiler stored it in — the
+    /// column-verb and comprehension routes need it there anyway.
+    ReceiverIs(RecvClass),
     /// Begin a comprehension over the popped receiver. If it's an array, push an
     /// iterator; if `missing`, jump to the given target (the result is `missing`);
     /// otherwise raise "no such method".
@@ -318,6 +327,44 @@ pub struct DfColumnVerbData {
     pub locals: std::rc::Rc<Vec<(String, u32)>>,
 }
 
+/// The receiver classes [`Op::ReceiverIs`] can test — each one is exactly the set of
+/// values some type-directed compile route accepts, so a `false` answer means that route
+/// would have raised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvClass {
+    /// What a DataFrame column verb / GroupBy aggregation accepts. `Missing` is IN the
+    /// set on purpose: the column-verb route carries its own ADR-0001 guard that
+    /// propagates a missing receiver, so sending `missing` down it keeps that behaviour
+    /// exactly rather than re-deciding it here.
+    Frame,
+    /// What a comprehension accepts: an array, or a `missing` that propagates (ADR 0001).
+    Iterable,
+    /// A DataFrame, and only that — for a call site whose other branch already handles
+    /// `missing` (a comprehension carries ADR 0001's propagation itself, so sending
+    /// `missing` down the column-verb route as well would be two answers to one question)
+    /// and whose verb a GROUP does not have.
+    DataFrameOnly,
+    /// A grouped DataFrame, and only that. `mean`/`sum`/… mean an aggregation on a group
+    /// and something else on everything else, so the two must not share a class: a group
+    /// sent down the column-verb route is a different wrong answer, not none.
+    GroupByOnly,
+}
+
+impl RecvClass {
+    /// Does `v` belong to this class?
+    pub fn holds(self, v: &crate::value::Value) -> bool {
+        use crate::value::Value;
+        match self {
+            RecvClass::Frame => {
+                matches!(v, Value::DataFrame(_) | Value::GroupBy(_) | Value::Missing)
+            }
+            RecvClass::Iterable => matches!(v, Value::Array(_) | Value::Missing),
+            RecvClass::DataFrameOnly => matches!(v, Value::DataFrame(_)),
+            RecvClass::GroupByOnly => matches!(v, Value::GroupBy(_)),
+        }
+    }
+}
+
 /// Payload of [`Op::Method`] — a value-method call's name and argument count, boxed
 /// so `Op` stays small (the method name is shared across call sites of the same name).
 #[derive(Debug, Clone)]
@@ -330,6 +377,17 @@ pub struct MethodData {
     /// afterwards — the hash lookup it replaces measured +4–8% on hot method loops.
     /// Runtime-only (starts unset after deserialisation, fills on first run).
     pub ufcs_name: std::cell::OnceCell<bool>,
+    /// The function slot a FAILED dispatch may retry as `name(recv, …)`: the declared
+    /// top-level `fn` this call site would have called had `name` been written as a free
+    /// call. `None` at every call site in a program that declares no such function, which
+    /// is nearly all of them.
+    ///
+    /// COMPILE time, not a run-time name lookup, because the answer has to be the one
+    /// `Expr::Call` would give HERE — a local, an upvalue, or a global of the same name
+    /// shadows the `fn`, and only the compiler's scope stack knows that. The tree-walker
+    /// reaches the same decision from `FuncVal::decl_name`, which is what keeps the two
+    /// engines from disagreeing about which `where` a program meant.
+    pub ufcs_fn: Option<u32>,
 }
 
 /// Payload of [`Op::CallValue`] — a function-value call's argument count and the

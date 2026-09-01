@@ -230,7 +230,7 @@ pub(super) fn a_parse_cookies(name: &str, args: Vec<Value>, line: usize, col: us
                         );
                     }
                 }
-                Ok(Value::Dict(Rc::new(map)))
+                Ok(Value::dict(map))
             }
             other => Err(type_err("parse_cookies", "a string", other, line, col)),
         }

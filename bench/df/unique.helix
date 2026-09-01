@@ -1,0 +1,2 @@
+# The deduplicated column is consumed.
+print(read_csv("/tmp/helix_dfbench/main.csv").unique("k").column("k").count())

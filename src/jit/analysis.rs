@@ -284,7 +284,7 @@ fn value_eligible_cap_indexed(
                 && value_eligible_cap_indexed(then_branch, eligible, locals, pb, caps, bounds, synth)
                 && value_eligible_cap_indexed(else_branch, eligible, locals, pb, caps, bounds, synth)
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut locals2 = locals.clone();
             for (n, v) in bindings {
                 // A `let` that REBINDS the loop counter `pb` breaks the invariant the `Index`
@@ -384,7 +384,7 @@ pub(crate) fn float_reduce_body_eligible<'e>(
         // correct is acceptable, wrong is not). This closes the field's ~19-23× trap:
         // `let d = xs[j] - t[j] in acc + d*d` fell to the interpreter while the
         // written-twice spelling compiled.
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut inner = locals.clone();
             for (n, v) in bindings {
                 if n == pa || n == pb {
@@ -534,7 +534,7 @@ fn infer_reduce_f64_kind<'e>(
         }
         // A `let` scope — sequential bindings, each typed by its init and visible to
         // the ones after it (the walker's semantics); rebinding `pa`/`pb` declines.
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut inner = locals.clone();
             for (n, v) in bindings {
                 if n == pa || n == pb {
@@ -802,7 +802,7 @@ fn infer_f64_indexed<'e>(
         // SFloat-typed local keeps SFloat's refusal rules at its uses); rebinding
         // `pa`/`pb` declines. Locals never record captures: the `Ident` arm checks
         // them first, and the `Index` arm refuses any index that mentions one.
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut inner = locals.clone();
             for (n, v) in bindings {
                 if n == pa || n == pb {
@@ -1167,12 +1167,13 @@ fn subst_acc(e: &Expr, pa: &str, n: usize, fields: &[String]) -> Expr {
             line: *line,
             col: *col,
         },
-        Expr::Let { bindings, body } => Expr::Let {
+        Expr::Let { bindings, body, from_do } => Expr::Let {
             bindings: bindings
                 .iter()
                 .map(|(nm, v)| (nm.clone(), subst_acc(v, pa, n, fields)))
                 .collect(),
             body: s(body),
+            from_do: *from_do,
         },
         other => other.clone(),
     }
@@ -1800,7 +1801,7 @@ pub fn body_raises(e: &Expr, user_fns: &HashSet<&str>, msigs: &MixedSigTable) ->
         // hit the mixed-call codegen's unreachable! (SIGABRT, rc 134, uncatchable),
         // and `let inv = 1.0 / e in a + inv` silently printed `inf` at rc 0 where both
         // interpreters raise. Found by the v0.2.6 stabilization sweep (p51/p08).
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             bindings.iter().any(|(_, v)| body_raises(v, user_fns, msigs))
                 || body_raises(body, user_fns, msigs)
         }
@@ -2425,7 +2426,7 @@ fn value_eligible_cap(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>
                 && value_eligible_cap(then_branch, eligible, locals, caps)
                 && value_eligible_cap(else_branch, eligible, locals, caps)
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut locals2 = locals.clone();
             for (n, v) in bindings {
                 if !value_eligible_cap(v, eligible, &locals2, caps) {
@@ -2655,7 +2656,7 @@ fn body_calls(e: &Expr, name: &str) -> bool {
                 || body_calls(then_branch, name)
                 || body_calls(else_branch, name)
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             bindings.iter().any(|(_, v)| body_calls(v, name))
                 || body_calls(body, name)
         }
@@ -2689,7 +2690,7 @@ fn self_calls_tail_only(e: &Expr, self_name: &str, arity: usize) -> bool {
                 && self_calls_tail_only(then_branch, self_name, arity)
                 && self_calls_tail_only(else_branch, self_name, arity)
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             bindings.iter().all(|(_, v)| !body_calls(v, self_name))
                 && self_calls_tail_only(body, self_name, arity)
         }
@@ -2766,7 +2767,7 @@ fn free_idents<'a>(e: &'a Expr, bound: &HashSet<&'a str>, out: &mut Vec<&'a str>
             free_idents(then_branch, bound, out);
             free_idents(else_branch, bound, out);
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut bound2 = bound.clone();
             for (n, v) in bindings {
                 free_idents(v, &bound2, out);
@@ -3101,7 +3102,7 @@ fn mixed_tail_ret_kind<'a>(
                 _ => None,
             }
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut saved: Vec<(&'a str, Option<NumKind>)> = Vec::new();
             for (n, v) in bindings {
                 let k = infer_typed_env(v, env, sigs, user_fns)?;
@@ -3583,7 +3584,7 @@ fn value_eligible(e: &Expr, eligible: &HashSet<&str>, locals: &HashSet<&str>, ki
                 && value_eligible(then_branch, eligible, locals, kind)
                 && value_eligible(else_branch, eligible, locals, kind)
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut locals2 = locals.clone();
             for (n, v) in bindings {
                 if !value_eligible(v, eligible, &locals2, kind) {

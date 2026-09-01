@@ -1,0 +1,4 @@
+# `.column(...)` is not decoration — it CONSUMES the result. Written as
+# `.where(...).count()`, a lazy engine answers the count without materialising a
+# single row, and the timing then measures how fast it declined the work.
+print(read_csv("/tmp/helix_dfbench/main.csv").where(@x > 0.5).column("x").count())

@@ -1,0 +1,10 @@
+# The joined COLUMN is consumed, not just the row count.
+#
+# `.join(...).count()` on a one-to-one join lets a planner prove the count equals
+# the left frame's count and skip the join outright. Measured that way polars
+# reported 5.7 ms for work that actually costs 84 ms — which turned a 2.8x win
+# into a 3.2x loss in a table that was published before anyone read the growth
+# curve. The giveaway was there: it grew 1.12x for 4x the rows.
+m = read_csv("/tmp/helix_dfbench/main.csv")
+dim = read_csv("/tmp/helix_dfbench/dim.csv")
+print(m.join(dim, @k).column("label").count())

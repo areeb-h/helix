@@ -164,6 +164,14 @@ pub fn unique_by(
     col: usize,
 ) -> Result<NativeFrame, HelixError> {
     use std::collections::HashMap;
+    // Neither fast path needs a per-row allocation; the generic path below DEFINES
+    // the answer and these only take the cases they can reproduce exactly.
+    if let Some(keep) = super::fast::unique_keep_all(frame, subset, line, col) {
+        return Ok(frame.take(keep?));
+    }
+    if let Some(keep) = super::fast::unique_keep(frame, subset, line, col) {
+        return Ok(frame.take(keep?));
+    }
     let key_cols: Vec<&Col> = if subset.is_empty() {
         frame.columns(line, col)?.into_iter().map(|(_, c)| c).collect()
     } else {

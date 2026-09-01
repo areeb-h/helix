@@ -1,0 +1,22 @@
+# A join key missing from either frame must read as the SAME Helix error on every
+# DataFrame engine, naming WHICH side lacks it and listing that side's columns.
+#
+# This existed as a divergence and nothing saw it: the shared validator in
+# backend/mod.rs had exactly one caller (the polars backend), so native answered a
+# bare "no column X" while polars said "in the left frame". dfdiff compares 129
+# programs and none of them joined on a bad key, so the differential was silent.
+# Both branches of the validator are exercised here, via try so one program can
+# reach the second.
+s = dataframe({sample_id: [1, 2], gene: ["a", "b"]})
+m = dataframe({sample_id: [1, 2], tissue: ["x", "y"]})
+
+left_missing = try s.join(m, no_such_key)
+print(left_missing.ok)
+print(left_missing.error)
+
+right_missing = try s.join(m, gene)
+print(right_missing.ok)
+print(right_missing.error)
+
+fine = s.join(m, sample_id)
+print(fine.count())

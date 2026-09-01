@@ -1864,7 +1864,7 @@ fn gen_tail<'a>(
             b.seal_block(else_b);
             gen_tail(b, else_branch, vars, fn_ids, module, kind, tl);
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             // Same shadow/restore discipline as `gen_value`'s Let — the map mutation
             // must be undone for a sibling `if` branch generated after this subtree.
             let mut saved: Vec<(&'a str, Option<Variable>)> = Vec::new();
@@ -2299,7 +2299,7 @@ fn gen_tail_mixed<'a>(
             b.seal_block(else_b);
             gen_tail_mixed(b, else_branch, vars, env, module, tl);
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut saved: Vec<(&'a str, Option<Variable>, Option<NumKind>)> = Vec::new();
             for (n, v) in bindings {
                 let (vv, vk) = gen_value_env(b, v, vars, env, module, tl);
@@ -2472,7 +2472,7 @@ fn gen_value<'a>(
             b.seal_block(merge_b);
             b.use_var(rvar)
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut saved: Vec<(&'a str, Option<Variable>)> = Vec::new();
             for (n, v) in bindings {
                 let vv = gen_value(b, v, vars, fn_ids, module, kind);
@@ -3145,7 +3145,7 @@ fn gen_f64_typed<'a>(
         // outer binder or capture restores it when the scope closes — the same
         // choreography the walker's env uses. The analyses guarantee `pa`/`pb` are
         // never rebound here.
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut saved: Vec<(&'a str, Option<(Variable, NumKind)>)> =
                 Vec::with_capacity(bindings.len());
             for (n, vexpr) in bindings {

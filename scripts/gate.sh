@@ -92,14 +92,14 @@ grep -E "test result:|FAILED|error\[|panicked" "$TLOG" | tail -25
 # build artifacts with either target dir, so it would mean a third full compile of the
 # crate on every gate run. It stays a CI-only check; this catches the overlapping
 # majority, which is every line of the native backend.
-log "clippy (--features native-df -D warnings)"
+log "clippy (--features dataframes -D warnings)"
 CLOG=$(mktemp)
-CARGO_TARGET_DIR=target/dual cargo clippy --all-targets --features native-df -- -D warnings >"$CLOG" 2>&1 || rc=1
+CARGO_TARGET_DIR=target/dual cargo clippy --all-targets --features dataframes -- -D warnings >"$CLOG" 2>&1 || rc=1
 grep -E "^error|^warning:" "$CLOG" | tail -5 || true
 rm -f "$CLOG"
 
-log "native-df differential (the dual-engine campaign)"
-CARGO_TARGET_DIR=target/dual cargo test "${TEST_ARGS[@]}" --features native-df --bins backend::native >"$TLOG" 2>&1 || rc=1
+log "dual-engine differential (native default + polars oracle)"
+CARGO_TARGET_DIR=target/dual cargo test "${TEST_ARGS[@]}" --features dataframes --bins backend::native >"$TLOG" 2>&1 || rc=1
 grep -E "test result:|FAILED|error\[|panicked" "$TLOG" | tail -5
 rm -f "$TLOG"
 
@@ -114,7 +114,7 @@ rm -f "$TLOG"
 # test harness, not the plain bin), so the link is explicit. Measured on this box: 363ms
 # to link against the already-warm deps, 2.9s for 120 programs under both backends.
 log "dfdiff (every tracked program under BOTH DataFrame backends)"
-CARGO_TARGET_DIR=target/dual cargo build "${TEST_ARGS[@]}" --features native-df >/dev/null 2>&1 || rc=1
+CARGO_TARGET_DIR=target/dual cargo build "${TEST_ARGS[@]}" --features dataframes >/dev/null 2>&1 || rc=1
 bash scripts/dfdiff.sh 2>&1 | tail -2 || rc=1
 
 log "vmparity (BIN=$BIN)"

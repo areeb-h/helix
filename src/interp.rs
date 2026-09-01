@@ -82,7 +82,13 @@ enum TailFlow {
 }
 
 /// The call-arity error, worded identically to the VM's `CallFn`/`TailCallFn`.
-fn arity_err(name: &str, want: usize, got: usize, line: usize, col: usize) -> HelixError {
+pub(crate) fn arity_err(
+    name: &str,
+    want: usize,
+    got: usize,
+    line: usize,
+    col: usize,
+) -> HelixError {
     HelixError::new(
         format!(
             "`{}` expects {} argument{}, got {}",
@@ -640,11 +646,18 @@ impl Interp {
                 recv,
                 name,
                 args,
+                ufcs,
                 line,
                 col,
                 ..
             } => {
                 let recv_v = self.eval(recv)?;
+                // THE NAME THE FALLBACK ASKS FOR, which is not always the one written.
+                // `module::load` namespaces top-level names once a second file is
+                // involved (`fn where` becomes `m0$where`) while a METHOD name stays as
+                // written, because it is matched against type tables. Asking for the
+                // written name is what made a single `import` line disable UFCS.
+                let free = ufcs.as_deref().unwrap_or(name.as_str());
                 // `is_missing` is universal — every value answers it. DataFrame and
                 // GroupBy receivers are routed to their verb dispatch below, which
                 // never reaches the universal handler in `call_method`, so intercept
@@ -675,37 +688,87 @@ impl Interp {
                 }
                 // Comprehension-style methods take an *unevaluated* expression
                 // that is run once per element with `it` bound to the element.
-                if matches!(
+                // The comprehension route — unless the receiver is not comprehension-
+                // shaped AND the program declares a `fn` of this name, in which case the
+                // call has a second reading and falls through to the value-method path
+                // below, where the UFCS retry finds it.
+                //
+                // `RecvClass::Iterable.holds` is the VM's own test, CALLED here rather
+                // than restated: the two engines have to agree about which `where` a
+                // program meant, and one predicate is how that stays true. With no
+                // function to fall back to, the route is taken exactly as before, so the
+                // comprehension's own error and hint are unchanged.
+                //
+                // `position` is excluded because it has no second reading to offer: the
+                // parser desugars it (`desugar_position`) before a `fn position` could be
+                // seen here, so the VM emits no split for it and this must not either.
+                let comp = matches!(
                     name.as_str(),
-                    "map" | "filter" | "where" | "reduce" | "scan" | "any" | "all" | "position"
-                ) {
+                    "map" | "filter" | "where" | "reduce" | "scan" | "any" | "all"
+                );
+                if (comp
+                    && (crate::bytecode::RecvClass::Iterable.holds(&recv_v)
+                        || self.ufcs_decl_fn(free).is_none()))
+                    || name.as_str() == "position"
+                {
                     return self.eval_comprehension(&recv_v, name, args, *line, *col);
                 }
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
                     vals.push(self.eval(a)?);
                 }
-                // UFCS, half two: a builtin-NAMED method that fails dispatch retries
-                // as `name(recv, args…)`. `is_builtin_name` is one O(1) lookup and
-                // no hot method name is a builtin, so the hot path never takes this
-                // branch; the clone that keeps the args alive for the retry happens
-                // only for calls that are errors today. See `ufcs_fallback_applies`
-                // for who never falls back, and why the decision lives at run time.
-                if crate::registry::is_builtin_name(name)
-                    && ufcs_fallback_applies(&recv_v, name)
-                {
-                    let saved = vals.clone();
-                    return match call_method(&recv_v, name, &vals, *line, *col) {
-                        Ok(v) => Ok(v),
-                        Err(_) => {
-                            let mut bargs = Vec::with_capacity(saved.len() + 1);
-                            bargs.push(recv_v);
-                            bargs.extend(saved);
-                            self.call_builtin(name, bargs, *line, *col)
+                // UFCS, RUN-TIME half. A method call that fails dispatch retries as
+                // `name(recv, args…)` — first against a declared `fn` of that name,
+                // then against a builtin of it. The VM's arm is the same three steps in
+                // the same order, so the engines cannot disagree about what a fallback
+                // produced.
+                //
+                // WHY THE DECISION CANNOT LIVE IN THE PARSER. The parse-time rewrite is
+                // gated on `!registry::is_any_method(name)` — a global name test with no
+                // idea what the receiver is. That makes every good verb name unusable by
+                // a user's own library: `where`, `select`, `first`, `count`, `all`,
+                // `join`, `sort`, `take`, `get`, `sum`, `min`, `max`, `unique` are all
+                // some type's method, so `fn where(q, c)` beside `q.where(c)` on a record
+                // failed with "type Record has no method `where`" while the function sat
+                // two lines above it. Only the receiver settles it, and only run time
+                // has the receiver.
+                //
+                // `ufcs_fallback_applies` is what makes retrying safe: a type that OWNS
+                // the name never falls back, so a DataFrame's `where` is still the frame
+                // verb and a real method's real error is never re-run as something else.
+                //
+                // Nothing is spent on the success path. The previous shape cloned the
+                // arguments BEFORE dispatch so a retry could still reach them, and paid
+                // for an `is_builtin_name` gate to keep that clone off hot loops — but
+                // `call_method` only borrows, so the retry can move what is still there,
+                // and the whole question moves inside the error arm, which a working
+                // method call never reaches.
+                match call_method(&recv_v, name, &vals, *line, *col) {
+                    Ok(v) => Ok(v),
+                    Err(e) if ufcs_fallback_applies(&recv_v, name) => {
+                        match self.ufcs_decl_fn(free) {
+                            Some(g) => {
+                                let mut fargs = Vec::with_capacity(vals.len() + 1);
+                                fargs.push(recv_v);
+                                fargs.extend(vals);
+                                // Reported under the name the SOURCE says, not the
+                                // namespaced one, so an arity error names `where` rather
+                                // than `m0$where`.
+                                self.call_function(name, &g, fargs, *line, *col)
+                            }
+                            None if crate::registry::is_builtin_name(name) => {
+                                let mut bargs = Vec::with_capacity(vals.len() + 1);
+                                bargs.push(recv_v);
+                                bargs.extend(vals);
+                                self.call_builtin(name, bargs, *line, *col)
+                            }
+                            // No free spelling of this name: the method error stands,
+                            // with its did-you-mean intact.
+                            None => Err(e),
                         }
-                    };
+                    }
+                    Err(e) => Err(e),
                 }
-                call_method(&recv_v, name, &vals, *line, *col)
             }
             Expr::Index {
                 recv,
@@ -767,7 +830,7 @@ impl Interp {
                     decl_name: None,
                 })))
             }
-            Expr::Let { bindings, body } => {
+            Expr::Let { bindings, body, .. } => {
                 // Bind sequentially (later bindings see earlier ones), evaluate
                 // the body, then restore the outer scope. A FAILING initializer
                 // must restore too (`bind_err`, not `?`): an early return here
@@ -892,6 +955,24 @@ impl Interp {
     /// engine, and an *infinite* tail recursion spins (like `while true`)
     /// everywhere, instead of erroring at a depth only this engine had.
     /// Non-tail recursion still counts against the shared `MAX_CALL_DEPTH`.
+    /// The declared `fn` a failed method call may retry against, or `None`.
+    ///
+    /// The walker's twin of the compiler's `ufcs_fn_slot`, and it has to agree with it
+    /// exactly or the engines diverge on which `where` a program meant. `lookup` answers
+    /// with whatever the name is bound to right here, so a local or a global holding
+    /// something else has already shadowed the function and this returns `None` —
+    /// matching the compiler, which stops at `NameRef::Local`/`Global` before it ever
+    /// reaches a `Func` slot. `decl_name` is the second narrowing: only a value a
+    /// top-level `fn` statement declared UNDER THIS NAME qualifies, which refuses an
+    /// alias (`h = id` is a function value whose `decl_name` is `id`) the same way the
+    /// compiler refuses it for being a global.
+    fn ufcs_decl_fn(&self, name: &str) -> Option<Rc<crate::value::FuncVal>> {
+        match &self.lookup(name)?.value {
+            Value::Function(g) if g.decl_name.as_deref() == Some(name) => Some(g.clone()),
+            _ => None,
+        }
+    }
+
     fn call_function(
         &mut self,
         name: &str,
@@ -994,7 +1075,7 @@ impl Interp {
                     self.eval_tail(else_branch)
                 }
             }
-            Expr::Let { bindings, body } => {
+            Expr::Let { bindings, body, .. } => {
                 // Mirrors `eval`'s `Let` arm; only the body is tail.
                 let mut saved: Vec<(String, Option<Binding>)> = Vec::with_capacity(bindings.len());
                 let mut bind_err: Option<HelixError> = None;
@@ -1911,3 +1992,4 @@ pub(crate) use builtins::ASSERTIONS_RUN;
 pub(crate) use builtins::{capture_begin, capture_take};
 
 mod comprehensions;
+pub(crate) use comprehensions::not_an_array;

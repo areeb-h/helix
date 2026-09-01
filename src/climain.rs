@@ -23,6 +23,10 @@ use crate::error::HelixError;
 
 /// The `fn main` a program declares, in the form the binder needs.
 pub struct MainSig<'a> {
+    /// The name `main` is DECLARED under — `main`, or `m<N>$main` once a second file
+    /// namespaced it. The synthesized call uses this rather than the literal `"main"`,
+    /// so the call names exactly the function this signature came from.
+    pub name: &'a str,
     pub params: &'a [(String, Option<TypeAnn>)],
     pub defaults: &'a [Option<Expr>],
     pub line: usize,
@@ -30,10 +34,25 @@ pub struct MainSig<'a> {
 }
 
 /// The `fn main` a program declares, if it declares one.
-pub fn find(stmts: &[Stmt]) -> Option<MainSig<'_>> {
+///
+/// `entry_prefix` is the ENTRY module's namespace (`Loaded::entry_prefix`), and passing it
+/// is not optional bookkeeping: `module::load` namespaces every top-level name the moment
+/// a second file is involved, so the entry file's `fn main` is stored as `m<N>$main`. This
+/// used to match `name == "main"` and therefore found nothing — a program that took
+/// command-line arguments silently became one that refused them, and the only symptom was
+/// an `import` line somewhere above.
+///
+/// Matching any `*$main` would have been the easy fix and the wrong one: an imported
+/// library declaring `fn main` would then hijack the entry point of every program that
+/// imports it.
+pub fn find<'a>(stmts: &'a [Stmt], entry_prefix: Option<&str>) -> Option<MainSig<'a>> {
+    let want = match entry_prefix {
+        Some(p) => format!("{p}$main"),
+        None => "main".to_string(),
+    };
     stmts.iter().find_map(|s| match s {
-        Stmt::Func { name, params, defaults, line, col, .. } if name == "main" => {
-            Some(MainSig { params, defaults, line: *line, col: *col })
+        Stmt::Func { name, params, defaults, line, col, .. } if *name == want => {
+            Some(MainSig { name, params, defaults, line: *line, col: *col })
         }
         _ => None,
     })
@@ -183,8 +202,8 @@ pub fn bind(sig: &MainSig<'_>, argv: &[String]) -> Result<Vec<Expr>, HelixError>
 }
 
 /// The `main(…)` call to append to the program.
-pub fn call(args: Vec<Expr>, line: usize, col: usize) -> Stmt {
-    Stmt::Expr(Expr::Call { name: "main".to_string(), args, line, col })
+pub fn call(name: &str, args: Vec<Expr>, line: usize, col: usize) -> Stmt {
+    Stmt::Expr(Expr::Call { name: name.to_string(), args, line, col })
 }
 
 /// `--help`, built from the declaration and the `##` doc comment above `fn main`.

@@ -471,6 +471,7 @@ pub(crate) fn call_method(
         Value::PyObject(h) => crate::python::method(h, name, args, line, col),
         Value::Dict(map) => dict_method(map, name, args, line, col),
         Value::Net(h) => net_method(h, name, args, line, col),
+        Value::Db(c) => crate::pg::conn_method(c, name, args, line, col),
         Value::Lock(h) => match name {
             // `release` is idempotent and answers whether THIS call released it, so a
             // double release is not an error and is still distinguishable.
@@ -810,6 +811,25 @@ fn no_args(name: &str, args: &[Value], line: usize, col: usize) -> Result<(), He
             col,
         ))
     }
+}
+
+/// "this receiver has no method by that name", for a caller that has a VALUE rather
+/// than a type table — the VM's type-directed ops, which discover at run time that the
+/// receiver is not the frame the compiler routed them for.
+///
+/// Routes to the same [`unknown_method`] every per-type dispatcher ends with, and picks
+/// the same candidate list from the registry, so the sentence and its did-you-mean are
+/// the tree-walker's rather than a second spelling of them. A type the registry does not
+/// table (a scalar, a tuple) has no candidates, which is right: there is nothing to
+/// suggest.
+pub(crate) fn no_such_method(recv: &Value, name: &str, line: usize, col: usize) -> HelixError {
+    let t = recv.type_name();
+    let cands = crate::registry::type_method_tables()
+        .iter()
+        .find(|(n, _)| *n == t)
+        .map(|(_, m)| crate::registry::methods_of(m))
+        .unwrap_or_default();
+    unknown_method(t, name, &cands, line, col)
 }
 
 fn unknown_method(

@@ -1046,7 +1046,7 @@ pub(crate) fn array_method(
                 let key = DictKey::from_value(&pair[0]).map_err(|m| HelixError::new(m, line, col))?;
                 map.insert(key, pair[1].clone());
             }
-            Ok(Value::Dict(Rc::new(map)))
+            Ok(Value::dict(map))
         }
         "unique" => {
             // Distinct values in first-seen order. Text and `Int`/`missing` arrays are

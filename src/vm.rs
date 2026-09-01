@@ -1570,31 +1570,79 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         Value::DataFrame(lf) => {
                             crate::interp::df_value_method(lf, name, args, line, col)
                         }
-                        Value::GroupBy(_) => Err(HelixError::new(
-                            format!("a GroupBy has no value-method `{}`", name),
-                            line,
-                            col,
-                        )
-                        .hint("aggregate with a column, e.g. `g.mean(col)`.")),
-                        // UFCS, half two — the tree-walker's fallback, verbatim:
-                        // a builtin-named method that fails dispatch retries as
-                        // `name(recv, args…)`. Same predicate, same builtin host, so
-                        // the engines cannot disagree about what a fallback produced.
-                        _ if *d.ufcs_name.get_or_init(|| crate::registry::is_builtin_name(name))
-                            && crate::interp::ufcs_fallback_applies(&recv, name) =>
-                        {
-                            let saved = args.clone();
-                            match crate::interp::call_method(&recv, name, &args, line, col) {
-                                Ok(v) => Ok(v),
-                                Err(_) => {
-                                    let mut bargs = Vec::with_capacity(saved.len() + 1);
-                                    bargs.push(recv.clone());
-                                    bargs.extend(saved);
+                        // The walker's own constructor, not a second spelling of it.
+                        Value::GroupBy(_) => {
+                            Err(crate::interp::no_such_aggregation(name, line, col))
+                        }
+                        // UFCS, RUN-TIME half — the tree-walker's arm, step for step:
+                        // a method call that fails dispatch retries as
+                        // `name(recv, args…)`, against a declared `fn` first and a
+                        // builtin of the same name second. Same predicate, same order,
+                        // same hosts, so the engines cannot disagree about what a
+                        // fallback produced. See `src/interp.rs` for why the receiver —
+                        // and therefore run time — is the only thing that can decide it.
+                        _ => match crate::interp::call_method(&recv, name, &args, line, col) {
+                            Ok(v) => Ok(v),
+                            Err(e) if crate::interp::ufcs_fallback_applies(&recv, name) => {
+                                if let Some(fidx) = d.ufcs_fn {
+                                    // Enter the function with the receiver as its first
+                                    // argument. Deliberately the plain bytecode entry:
+                                    // the memoization and native specializations
+                                    // `CallFn` reaches for first all key on all-Int or
+                                    // all-Float arguments, and a receiver that just
+                                    // failed method dispatch is neither — the callee's
+                                    // own body still reaches every one of them.
+                                    let fidx = fidx as usize;
+                                    let callee = &program.funcs[fidx];
+                                    let nargs = args.len() + 1;
+                                    if nargs != callee.n_params as usize {
+                                        return Err(crate::interp::arity_err(
+                                            name,
+                                            callee.n_params as usize,
+                                            nargs,
+                                            line,
+                                            col,
+                                        ));
+                                    }
+                                    if frames.len() > VM_MAX_DEPTH {
+                                        return Err(crate::error::recursion_depth_err(
+                                            VM_MAX_DEPTH,
+                                            line,
+                                            col,
+                                        ));
+                                    }
+                                    stack.push(recv);
+                                    stack.extend(args);
+                                    let start = stack.len() - nargs;
+                                    let base = locals.len();
+                                    locals.extend(stack.drain(start..));
+                                    locals.resize(base + callee.n_locals as usize, Value::Unit);
+                                    frames.push(Frame {
+                                        func: fidx,
+                                        ip: 0,
+                                        base,
+                                        memo_key: None,
+                                        upvalues: no_upvalues.clone(),
+                                    });
+                                    // The callee's `Return` pushes where this method's
+                                    // result would have gone, so there is nothing to
+                                    // push here.
+                                    return Ok(());
+                                }
+                                if *d
+                                    .ufcs_name
+                                    .get_or_init(|| crate::registry::is_builtin_name(name))
+                                {
+                                    let mut bargs = Vec::with_capacity(args.len() + 1);
+                                    bargs.push(recv);
+                                    bargs.extend(args);
                                     host.call_builtin(name, bargs, line, col)
+                                } else {
+                                    Err(e)
                                 }
                             }
-                        }
-                        _ => crate::interp::call_method(&recv, name, &args, line, col),
+                            Err(e) => Err(e),
+                        },
                     }
                 }?;
                 stack.push(result);
@@ -1608,12 +1656,23 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let recv = stack.pop().unwrap();
                 let lf = match &recv {
                     Value::DataFrame(lf) => lf.clone(),
+                    // NOT a frame after all. The compiler routed this call by type
+                    // because the checker could not pin the receiver down; the walker
+                    // dispatches on the value and reports the ordinary method error, so
+                    // this must report the SAME one — it used to say "expected a
+                    // DataFrame, got Record" where the walker said "a Record has no
+                    // method `select`", which is one program with two answers.
+                    //
+                    // Which sentence depends on how the walker would have arrived:
+                    // `where`/`filter` go through the comprehension route, every other
+                    // column verb through value-method dispatch. Both constructors are
+                    // the walker's own, called rather than restated.
                     other => {
-                        return Err(HelixError::new(
-                            format!("expected a DataFrame, got {}", other.type_name()),
-                            line,
-                            col,
-                        ))
+                        return Err(if matches!(name.as_str(), "where" | "filter") {
+                            crate::interp::not_an_array(other, name, line, col)
+                        } else {
+                            crate::interp::no_such_method(other, name, line, col)
+                        })
                     }
                 };
                 let base = frames[fi].base;
@@ -1643,14 +1702,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         let rf = match &right {
                             Value::DataFrame(rf) => rf.clone(),
                             other => {
-                                return Err(HelixError::new(
-                                    format!(
-                                        "`join` needs a DataFrame to join with, found {}",
-                                        other.type_name()
-                                    ),
-                                    line,
-                                    col,
-                                ))
+                                // The walker's own constructor, not a second spelling of it.
+                                return Err(crate::interp::join_operand_err(other, line, col))
                             }
                         };
                         let (keys, how) = crate::interp::parse_join_spec(spec.as_slice(), line, col)?;
@@ -1712,6 +1765,14 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 )?;
                 stack.push(result);
             }
+            Op::ReceiverIs(class) => {
+                // Total rather than budgeted: the compiler emits this immediately after
+                // the receiver, so the stack cannot be empty — and spelling that as an
+                // `unwrap` would spend an ADR-0024 budget slot to say so. An empty stack
+                // answers `false`, which is the safe reading of "this is not the class".
+                let ok = stack.pop().is_some_and(|v| class.holds(&v));
+                stack.push(Value::Bool(ok));
+            }
             Op::CompInit(kind, missing_target) => {
                 let v = stack.pop().unwrap();
                 match v {
@@ -1724,18 +1785,22 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     }
                     // `missing.map(...)` etc. propagate (ADR-0001).
                     Value::Missing => frames[fi].ip = *missing_target as usize,
-                    other => {
-                        return Err(HelixError::new(
-                            format!(
-                                "type {} has no method `{}`",
-                                other.type_name(),
-                                kind.method_name()
-                            ),
+                    // A FRAME OR A GROUP gets the tree-walker's own sentence. It
+                    // dispatches on the value and reaches its DataFrame arm, which reports
+                    // "a DataFrame has no method `map`"; this used to report "type
+                    // DataFrame has no method `map`" — the same outcome in a different
+                    // sentence, which is still two engines disagreeing about one program.
+                    // The frame's own verbs (`where`, `filter`) never reach here: the
+                    // compiler emits a receiver test for those.
+                    other @ (Value::DataFrame(_) | Value::GroupBy(_)) => {
+                        return Err(crate::interp::no_such_method(
+                            &other,
+                            kind.method_name(),
                             line,
                             col,
-                        )
-                        .hint("`map`, `filter`, `where`, and `reduce` work on arrays."))
+                        ))
                     }
+                    other => return Err(crate::interp::not_an_array(&other, kind.method_name(), line, col)),
                 }
             }
             Op::TryJitReduce { loop_idx, acc_slot, after } => {

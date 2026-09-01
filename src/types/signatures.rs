@@ -186,6 +186,35 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // `assert_error` takes whatever `try` produced plus an optional substring; the
         // record's shape is checked at run time, where the actual fields exist.
         // `sqlite_query(path, sql, params?)` — rows out as a frame, like `read_csv`.
+        // `postgres_with(url, fn)` yields whatever the BODY returns, so the result type
+        // is the body's and cannot be named here. The arity is still checked, which is
+        // the part a caller gets wrong.
+        "postgres_open" => {
+            if args.len() != 1 {
+                return Err(HelixError::new(
+                    format!("`postgres_open` takes a URL, got {} arguments", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            Ok(Type::Unknown)
+        }
+        // `postgres_query(url, sql, params?)` — the same shape as `sqlite_query`, and
+        // deliberately so: the difference between the two is the connection and the
+        // placeholder syntax, not the way a query is spelled.
+        "postgres_query" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(HelixError::new(
+                    format!(
+                        "`postgres_query` takes a URL, a SQL string and optional parameters, got {} arguments",
+                        args.len()
+                    ),
+                    line,
+                    col,
+                ));
+            }
+            Ok(Type::DataFrame)
+        }
         "sqlite_query" => {
             if args.len() < 2 || args.len() > 3 {
                 return Err(HelixError::new(

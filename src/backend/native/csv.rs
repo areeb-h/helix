@@ -396,13 +396,22 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
                 let row = base + r;
                 let rec = &bytes[s..e];
                 split_fields(rec, &mut fspans).map_err(|m| (row, m))?;
-                if fspans.len() != ncol {
-                    return Err((
-                        row,
-                        format!("has {} fields, expected {ncol}", fspans.len()),
-                    ));
-                }
-                for (c, &span) in fspans.iter().enumerate() {
+                // A RAGGED ROW IS DATA, NOT AN ERROR. A short row pads with missing;
+                // a long row truncates to the header's width. That is what the polars
+                // backend has always done, and `tests/cli.rs` records it as policy:
+                // files real pipelines emit stay countable and readable column-wise,
+                // and making `read_csv` strict is an ADR decision, not a side effect
+                // of swapping engines.
+                //
+                // Refusing them here was an UNDECLARED cross-engine divergence --
+                // `scripts/dfdiff-allow.txt` is empty, so nothing had decided it. It
+                // survived because not one corpus program reads a CSV at all, which is
+                // the standing lesson: a differential covers only what its corpus
+                // exercises. `tests/corpus/df_ragged_csv.helix` now exercises this.
+                //
+                // The pad needs no special case: an empty UNQUOTED field is exactly
+                // how every `Seg` variant already spells missing.
+                for c in 0..ncol {
                     let name = &headers[c];
                     let ctx = |field: &str, want: &str| {
                         format!(
@@ -410,8 +419,13 @@ pub fn read_csv(path: &str, line: usize, col: usize) -> Result<crate::backend::D
                              was inferred from the first {INFER_ROWS} rows)"
                         )
                     };
-                    let f = field_text(rec, span, &mut scratch).map_err(|m| (row, m))?;
-                    segs[c].push(f, span.3, &ctx).map_err(|m| (row, m))?;
+                    match fspans.get(c) {
+                        Some(&span) => {
+                            let f = field_text(rec, span, &mut scratch).map_err(|m| (row, m))?;
+                            segs[c].push(f, span.3, &ctx).map_err(|m| (row, m))?;
+                        }
+                        None => segs[c].push("", false, &ctx).map_err(|m| (row, m))?,
+                    }
                 }
             }
             Ok(segs)

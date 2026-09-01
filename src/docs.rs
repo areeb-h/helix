@@ -718,6 +718,22 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "Opens READ-ONLY, so the fs-read capability label is the truth and a typo in the path fails instead of creating an empty database. Parameters bind as VALUES to `?`; there is no way to splice text into the statement, which is what makes injection unrepresentable rather than merely discouraged.",
     },
     DocEntry {
+        name: "postgres_open",
+        sig: "postgres_open(url)",
+        doc: "Open one PostgreSQL connection and reuse it for every query made through it.",
+        example: "postgres_open(\"postgres://me:pw@localhost/app\")",
+        example_out: "",
+        notes: "The connection is opened ONCE and reused for every query inside, which is the whole point: a connection costs a TCP handshake plus a SCRAM exchange — measured at 4.7 ms against PostgreSQL 19, the same for `select 1` as for a full table — so five queries through `postgres_query` spend ~24 ms before doing any work. There is no close to forget: Helix values are reference-counted, so the socket shuts when the last handle to it goes. The connection answers `query(sql, params?)`, with the same parameter discipline and the same server-enforced read-only session as `postgres_query`. Keywords: postgres, connection, pool, reuse, handshake, scope, transaction.",
+    },
+    DocEntry {
+        name: "postgres_query",
+        sig: "postgres_query(url, sql, params?)",
+        doc: "Run a read-only SQL query against a PostgreSQL server and return the rows as a DataFrame.",
+        example: "postgres_query(\"postgres://me:pw@localhost/app\", \"select name from users where age > $1\", [30])",
+        example_out: "",
+        notes: "Runs inside a READ-ONLY transaction, so the server itself refuses INSERT, UPDATE, DELETE and DDL — the guarantee is enforced at the far end, because there is no such thing as a read-only socket. Parameters bind as VALUES to $1, $2, ...; there is no way to splice text into the statement, which is what makes injection unrepresentable rather than merely discouraged. Authenticates with SCRAM-SHA-256 and verifies the SERVER's signature too, so the exchange proves both directions. Speaks protocol 3.0, which every server from 7.4 to 19 accepts. Columns typed int2/int4/int8 become Int, float4/float8/numeric become Float, bool becomes Bool, and every other type — uuid, jsonb, timestamps, extension types — arrives as the text the server printed rather than being refused. NULL becomes missing. Keywords: postgres, postgresql, sql, database, query, rows, table.",
+    },
+    DocEntry {
         name: "run",
         sig: "run(program, args?)",
         doc: "Run a program with an argv list; returns {status, stdout, stderr}, raising if it fails.",
@@ -3520,6 +3536,22 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             example: "{x: 1, y: 2}.items()",
             example_out: "[(\"x\", 1), (\"y\", 2)]",
             notes: "",
+        },
+    ),
+    (
+        "Connection",
+        DocEntry {
+            name: "query",
+            sig: "query(sql, params?)",
+            doc: "Run one read-only statement on this connection; returns a DataFrame.",
+            example: "conn.query(\"select name from people where age > $1\", [40])",
+            example_out: "",
+            notes: "PARAMETERS ARE VALUES, never text spliced into the statement: `$1`, `$2` … are \
+                    bound by the server, so a string containing a quote is data. The session is \
+                    read-only from its first byte (set in the startup packet), so a write comes \
+                    back as the server's own SQLSTATE 25006 rather than a client-side guess. \
+                    The connection closes when the last handle to it goes — there is nothing to \
+                    call. Keywords: sql, postgres, database, select, parameter.",
         },
     ),
     (

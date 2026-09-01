@@ -1,0 +1,2 @@
+# The aggregate column is consumed, not just the number of groups.
+print(read_csv("/tmp/helix_dfbench/main.csv").group(@g).sum(@x).column("x").count())

@@ -127,14 +127,31 @@ pub enum Value {
     /// (not a hash map) so iteration order is **deterministic** (sorted by key),
     /// matching Helix's reproducibility guarantee. Keys are hashable scalars
     /// ([`DictKey`]: int, string, bool, or DNA); values are any `Value`. Immutable —
-    /// `insert`/`remove` return a new dict (copy-on-write when uniquely owned).
-    Dict(Rc<std::collections::BTreeMap<DictKey, Value>>),
+    /// `insert`/`remove` return a new dict. Backed by [`Dict`]: a settled map plus
+    /// a shared append-only log, so an insert costs O(1) whether or not the value
+    /// is uniquely owned.
+    Dict(Rc<Dict>),
     /// An opaque network handle — a bound HTTP listener or a single accepted
     /// connection (see `src/serve.rs`). Held behind an `Rc` so the variant is one
     /// word. Effect-only (created by `listen`, consumed by `accept`/`respond`); never
     /// compared, serialized, or sent through a computed result, so — like `PyObject`
     /// — it falls through every value-equality / structural path with no extra arms.
     Net(Rc<crate::serve::NetHandle>),
+    /// An open PostgreSQL connection (see `src/pg`). Opaque for the same reason `Net` and
+    /// `Lock` are: effect-only, never compared, serialized or computed with, so it falls
+    /// through every structural path with no extra arms.
+    ///
+    /// The `Rc` IS the lifetime: the socket shuts when the last handle to it goes, which
+    /// in Helix is deterministic because values are reference-counted rather than
+    /// collected. There is no `close` to forget, which is the same rule `Lock` relies on.
+    ///
+    /// The variant exists in EVERY build while only `--features postgres` can construct
+    /// one — that is ADR 0032's gate-the-body pattern, which keeps the verb type-checking
+    /// and describing itself everywhere. So the allow below is narrowed to exactly the
+    /// configuration where "never constructed" is the intended truth, rather than being a
+    /// blanket that could also hide a real dead branch.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    Db(Rc<crate::pg::Conn>),
     /// An opaque KERNEL-HELD file lock (see `src/filelock.rs`). Opaque for the same reason
     /// `Net` is: effect-only, never compared, serialized or computed with, so it falls
     /// through every structural path with no extra arms.
@@ -143,6 +160,133 @@ pub enum Value {
     /// kernel hangs it on the open descriptor inside. That is what makes it release on a
     /// CRASH as well as on a drop — the property `create_new`'s lock file cannot have.
     Lock(Rc<crate::filelock::LockHandle>),
+}
+
+/// A dict: a settled `base` map plus a shared, append-only log of pending inserts,
+/// of which THIS value sees the first `len`.
+///
+/// WHY A LOG. `insert` used to clone the whole `BTreeMap`, so building a dictionary
+/// in a fold was quadratic — 4.3 s at n=32,000 for the record-field spelling, 281x
+/// the bare-local one. `Op::InsertIntoLocal` rescued the bare-local shape by taking
+/// the accumulator out of its slot so the `Rc` was unique, but a dict living in a
+/// RECORD FIELD is aliased by the record itself: refcount 2, `Rc::get_mut` fails,
+/// full copy, every iteration.
+///
+/// The log removes the need for a unique `Rc` at all. `adds` sits behind
+/// `Rc<RefCell<..>>`, so appending mutates through a SHARED handle, and the older
+/// value stays correct because it reads only `adds[..len]` — nothing already
+/// written can change under it. That is what makes this fix the OPERATION rather
+/// than one syntactic spelling: every way of spelling an insert gets it.
+///
+/// READS MATERIALISE, and that is deliberate. Applying the log in order is what
+/// makes overwrite correct without arithmetic — `count()` is NOT
+/// `base.len() + adds.len()`, because an add over an existing key contributes
+/// nothing, and `get` needs the LAST occurrence of a key rather than the first.
+/// Both were named as traps before this was built; building the map instead of
+/// reasoning about the log is what disposes of them. A read costs one merge, cached
+/// per value, and a fold reads once at the end.
+/// The map a dict presents to every reader.
+pub type DictMap = std::collections::BTreeMap<DictKey, Value>;
+
+/// A dict chain's merged view, together with the prefix of the log it covers.
+/// Shared by every value in the chain, so a read at the tip extends it rather than
+/// rebuilding from `base`.
+type DictCache = Rc<std::cell::RefCell<Option<(usize, Rc<DictMap>)>>>;
+
+pub struct Dict {
+    base: Rc<DictMap>,
+    /// Shared with every value in this chain. Append-only: an entry, once written,
+    /// is never rewritten or removed, which is exactly the property that lets an
+    /// older `len` keep meaning what it meant.
+    adds: Rc<std::cell::RefCell<Vec<(DictKey, Value)>>>,
+    len: usize,
+    /// The merged view and the prefix length it covers, SHARED along the chain.
+    ///
+    /// Per-value caching is what a first attempt did, and it was wrong in a way the
+    /// plan had predicted: every insert makes a new value with an empty cache, so a
+    /// read after each write rebuilds from `base`. Insert went O(n) -> O(1) and
+    /// `get`-after-write went O(log n) -> O(n log n) — the cliff RELOCATED from one
+    /// operation to a pair, and read-modify-write (every rate limiter, counter, memo
+    /// table and session store) came out 13x slower than before the log existed.
+    ///
+    /// Storing the covered length is what lets a read EXTEND the cache by the few
+    /// entries added since, instead of rebuilding. A read at the tip after one
+    /// insert costs one `BTreeMap` insert, so the alternating shape is O(n log n)
+    /// overall — what a plain `BTreeMap` always cost — while pure accumulation keeps
+    /// its single merge at the end.
+    cache: DictCache,
+}
+
+impl Dict {
+    pub fn from_map(m: std::collections::BTreeMap<DictKey, Value>) -> Dict {
+        Dict {
+            base: Rc::new(m),
+            adds: Rc::new(std::cell::RefCell::new(Vec::new())),
+            len: 0,
+            cache: Rc::new(std::cell::RefCell::new(None)),
+        }
+    }
+
+    /// The merged view: `base` with `adds[..len]` applied in order, later wins.
+    ///
+    /// Every read goes through here, so no caller has to know a log exists.
+    pub fn map(&self) -> Rc<std::collections::BTreeMap<DictKey, Value>> {
+        if self.len == 0 {
+            return self.base.clone();
+        }
+        // Two borrows, on two different cells, so they cannot contend with each
+        // other. Neither can overlap a second borrow of its own cell either:
+        // everything that runs while they are held is a `BTreeMap` clone and `Value`
+        // clones, and a `Value` clone is shallow — every variant is a scalar or an
+        // `Rc` handle — so no Helix code runs underneath to re-enter. ADR 0024 counts
+        // these as panicking, correctly; this is the proof they cannot, and the
+        // budget in `tests/cli.rs` is raised in the same commit.
+        let adds = self.adds.borrow();
+        let mut cache = self.cache.borrow_mut();
+
+        if let Some((covered, m)) = cache.as_mut() {
+            if *covered == self.len {
+                return m.clone();
+            }
+            // THE TIP MOVED FORWARD: apply just the entries added since, rather than
+            // merging the whole map again. This is the case a read-modify-write loop
+            // hits every iteration, and rebuilding here is what made it quadratic.
+            //
+            // `make_mut` clones only if someone else still holds the view; in the
+            // alternating shape the caller has dropped it by now, so the extension
+            // lands in place. If they do hold it, they keep the map they were given
+            // and this chain gets its own — which is what makes sharing the cache
+            // safe rather than merely fast.
+            if *covered < self.len
+                && let Some(fresh) = adds.get(*covered..self.len)
+            {
+                let target = Rc::make_mut(m);
+                for (k, v) in fresh {
+                    target.insert(k.clone(), v.clone());
+                }
+                *covered = self.len;
+                return m.clone();
+            }
+        }
+
+        // No cache yet, or one covering a LONGER prefix — an older view, which the
+        // plan expects to be rare by construction. Build from `base`.
+        let mut m = (*self.base).clone();
+        // `get(..len)`, never `[..len]`: `len` is within the log by construction —
+        // it is only ever set to a length this value observed — but an index that is
+        // wrong ABORTS THE HOST, and a total fallback costs nothing to write.
+        for (k, v) in adds.get(..self.len).unwrap_or(&[]) {
+            m.insert(k.clone(), v.clone());
+        }
+        let rc = Rc::new(m);
+        // An older view must not evict the tip's cache; the tip is what gets read
+        // repeatedly, and demoting it would put the loop back where it started.
+        let older_than_cache = matches!(cache.as_ref(), Some((covered, _)) if *covered > self.len);
+        if !older_than_cache {
+            *cache = Some((self.len, rc.clone()));
+        }
+        rc
+    }
 }
 
 /// A [`Value::Dict`] key: a hashable, totally-orderable scalar. Floats are excluded
@@ -795,23 +939,42 @@ impl Value {
     /// the whole `BTreeMap` per call, which is what made building a dictionary in a fold
     /// quadratic. No representation subtlety here (unlike the array case): a `BTreeMap` has
     /// one form, so the fast and slow paths are the same map either way.
-    pub fn insert_in_place(
-        cur: Rc<std::collections::BTreeMap<DictKey, Value>>,
-        k: DictKey,
-        v: Value,
-    ) -> Value {
-        let mut cur = cur;
-        match Rc::get_mut(&mut cur) {
-            Some(m) => {
-                m.insert(k, v);
-                Value::Dict(cur)
-            }
-            None => {
-                let mut new = (*cur).clone();
-                new.insert(k, v);
-                Value::Dict(Rc::new(new))
+    pub fn insert_in_place(cur: Rc<Dict>, k: DictKey, v: Value) -> Value {
+        {
+            // Held only across a `push` and a length read — no Helix code runs under
+            // it, and the branch below drops it before `map()` could take the same
+            // cell. That ordering is what makes this borrow provably exclusive.
+            let mut adds = cur.adds.borrow_mut();
+            if cur.len == adds.len() {
+                // AT THE TIP: append and hand back a view one longer. No unique
+                // `Rc` is needed, which is the whole point — the caller may be a
+                // record field with the record still holding a reference.
+                adds.push((k, v));
+                let len = adds.len();
+                drop(adds);
+                return Value::Dict(Rc::new(Dict {
+                    base: cur.base.clone(),
+                    adds: cur.adds.clone(),
+                    len,
+                    // The SAME cache cell, not a fresh one. Handing the new tip an
+                    // empty cache is precisely the bug this replaced: the next read
+                    // would rebuild from `base` instead of extending by one entry.
+                    cache: cur.cache.clone(),
+                }));
             }
         }
+        // BRANCHING OFF AN OLDER VIEW. Entries past `len` already belong to values
+        // that exist, and the log is append-only precisely so those keep meaning
+        // what they meant — so this view settles into a base of its own and starts
+        // a fresh log. The copy happens once per branch, not once per insert.
+        let mut m = (*cur.map()).clone();
+        m.insert(k, v);
+        Value::Dict(Rc::new(Dict::from_map(m)))
+    }
+
+    /// A dict from an already-built map — the ordinary way to construct one.
+    pub fn dict(m: std::collections::BTreeMap<DictKey, Value>) -> Value {
+        Value::Dict(Rc::new(Dict::from_map(m)))
     }
 
     pub fn type_name(&self) -> &'static str {
@@ -839,6 +1002,7 @@ impl Value {
             Value::Headers(_) => "Headers",
             Value::Dict(_) => "Dict",
             Value::Net(_) => "Net",
+            Value::Db(_) => "Connection",
             Value::Lock(_) => "Lock",
         }
     }
@@ -916,6 +1080,9 @@ impl fmt::Display for Value {
                 crate::serve::NetHandle::HttpStream { .. } => write!(f, "<http-stream>"),
                 crate::serve::NetHandle::CookieJar(j) => write!(f, "<cookie-jar: {} cookies>", j.len()),
             },
+            // Opaque, and prints as such: a connection has no value form, and printing
+            // the target would put a host and user into program output by accident.
+            Value::Db(_) => write!(f, "<postgres-connection>"),
             Value::Lock(h) => {
                 if h.is_released() {
                     write!(f, "<lock released: {}>", h.path)
@@ -1001,6 +1168,7 @@ impl fmt::Display for Value {
                     Value::Str(s) => format!("\"{}\"", s),
                     other => format!("{}", other),
                 };
+                let map = map.map();
                 for (i, (k, v)) in map.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
@@ -1205,10 +1373,11 @@ fn display_elem(v: &Value, line: usize, col: usize) -> Result<String, HelixError
 /// of a payload silently is worse than not building it. Shared by the tree-walker and
 /// the VM so the two cannot disagree about what a spread produced.
 pub fn dict_as_record_fields(
-    map: &std::collections::BTreeMap<DictKey, Value>,
+    d: &Dict,
 ) -> Result<Vec<(crate::symbol::Symbol, Value)>, String> {
+    let map = d.map();
     let mut out = Vec::with_capacity(map.len());
-    for (k, val) in map {
+    for (k, val) in map.iter() {
         match k {
             DictKey::Str(s) => out.push((crate::symbol::Symbol::intern(s), val.clone())),
             other => {

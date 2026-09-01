@@ -1,0 +1,10 @@
+exit: 0
+--- stdout ---
+[10, 14]
+6
+[missing, "a", missing, missing, "c", missing]
+[-3, 0, 4]
+["x", missing, "y", missing, "z"]
+2
+3
+--- stderr ---

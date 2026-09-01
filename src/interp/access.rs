@@ -430,7 +430,7 @@ pub(crate) fn eval_index(recv: &Value, idx: &Value, line: usize, col: usize) -> 
     }
     if let Value::Dict(map) = recv {
         let key = crate::value::DictKey::from_value(idx).map_err(|m| HelixError::new(m, line, col))?;
-        return Ok(map.get(&key).cloned().unwrap_or(Value::Missing));
+        return Ok(map.map().get(&key).cloned().unwrap_or(Value::Missing));
     }
     let i = match idx {
         Value::Int(i) => *i,

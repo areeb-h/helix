@@ -169,7 +169,7 @@ fn any_call(e: &Expr, pred: &dyn Fn(&str) -> bool) -> bool {
                     .any(|o| o.as_ref().is_some_and(|x| any_call(x, pred)))
         }
         Expr::Lambda { body, .. } => any_call(body, pred),
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             bindings.iter().any(|(_, v)| any_call(v, pred)) || any_call(body, pred)
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
@@ -216,7 +216,7 @@ fn reads_mutable(e: &Expr, bound: &HashSet<&str>, mutable: &HashSet<&str>) -> bo
             }
             reads_mutable(body, &b, mutable)
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut b = bound.clone();
             for (n, v) in bindings {
                 if reads_mutable(v, &b, mutable) {
@@ -273,7 +273,7 @@ fn children(e: &Expr) -> Vec<&Expr> {
             v
         }
         Expr::Lambda { body, .. } => vec![body],
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut v: Vec<&Expr> = bindings.iter().map(|(_, e)| e).collect();
             v.push(body);
             v
@@ -334,7 +334,7 @@ fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String
             collect_free(body, bound, free);
             bound.truncate(n);
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let n = bound.len();
             for (name, v) in bindings {
                 collect_free(v, bound, free); // a binding's value sees earlier bindings

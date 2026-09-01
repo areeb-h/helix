@@ -1,0 +1,30 @@
+# The key rules  must obey, on every engine and every fast path.
+#
+# Three implementations answer this verb now — composite direct addressing for a
+# whole row of bounded domains, single-column direct addressing, and the hash path
+# behind both — and they must agree with each other and with the polars oracle.
+# A fast path that disagreed about what "the same row" means would be a silent
+# wrong answer, which is the one failure this project refuses everywhere.
+a = dataframe({k: [1, 1, 2, 1], g: ["x", "x", "y", "x"]})
+print(a.unique().count())
+print(a.unique("k").count())
+
+# Missing is its OWN key, not a wildcard: two missing keys are one group.
+b = dataframe({k: [1, missing, 1, missing], g: ["x", "y", "x", "y"]})
+print(b.unique().count())
+print(b.unique("k").count())
+
+# -0.0 and 0.0 are  in scalar Helix, so they must be ONE key here. The rows
+# still differ, because the boolean column does.
+c = dataframe({f: [0.0, -0.0, 1.5], t: [true, false, true]})
+print(c.unique().count())
+
+d = dataframe({b: [true, false, true, true], n: [1, 1, 1, 1]})
+print(d.unique().count())
+print(d.unique("b").count())
+
+# Whole-row unique keeps the FIRST occurrence; a one-column subset keeps the LAST.
+# Both emit rows in ascending row order, so this pins order as well as membership.
+ee = dataframe({k: [5, 3, 5, 3, 9]})
+print(ee.unique().column("k"))
+print(ee.unique("k").column("k"))

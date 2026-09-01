@@ -213,11 +213,11 @@ jobs:
       # is why 28 tests (including every `mod against_the_oracle` comparison against
       # the polars oracle) were dead in every gate until v0.5.2.
       - name: dual DataFrame engines (clippy)
-        run: cargo clippy --all-targets --features native-df -- -D warnings
+        run: cargo clippy --all-targets --features dataframes -- -D warnings
       # The compile above is already paid, so running the campaign is nearly free.
       # This is the only place the two DataFrame engines are compared at all.
       - name: dual DataFrame engines (differential campaign)
-        run: cargo test --features native-df
+        run: cargo test --features dataframes
       # The verb-level campaign above was GREEN while sixteen semantic divergences were
       # live (ADR 0036) — they hid in expression shapes no verb test built. This runs
       # every tracked program under both backends and diffs the output, which is the
@@ -225,7 +225,7 @@ jobs:
       # native-df` also produces the dual binary `dfdiff.sh` requires.
       - name: dual DataFrame engines (whole-program diff)
         run: |
-          CARGO_TARGET_DIR=target/dual cargo build --profile gate --features native-df
+          CARGO_TARGET_DIR=target/dual cargo build --profile gate --features dataframes
           BIN=./target/dual/gate/helix bash scripts/dfdiff.sh
 
   installer:

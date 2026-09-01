@@ -406,6 +406,26 @@ The SHA-256 digest of the string's UTF-8 bytes, as 64 lowercase hex chars.
 
 ## db
 
+### `postgres_open(url)`
+
+Open one PostgreSQL connection and reuse it for every query made through it.
+
+**Note:** The connection is opened ONCE and reused for every query inside, which is the whole point: a connection costs a TCP handshake plus a SCRAM exchange — measured at 4.7 ms against PostgreSQL 19, the same for `select 1` as for a full table — so five queries through `postgres_query` spend ~24 ms before doing any work. There is no close to forget: Helix values are reference-counted, so the socket shuts when the last handle to it goes. The connection answers `query(sql, params?)`, with the same parameter discipline and the same server-enforced read-only session as `postgres_query`. Keywords: postgres, connection, pool, reuse, handshake, scope, transaction.
+
+```
+>>> postgres_open("postgres://me:pw@localhost/app")
+```
+
+### `postgres_query(url, sql, params?)`
+
+Run a read-only SQL query against a PostgreSQL server and return the rows as a DataFrame.
+
+**Note:** Runs inside a READ-ONLY transaction, so the server itself refuses INSERT, UPDATE, DELETE and DDL — the guarantee is enforced at the far end, because there is no such thing as a read-only socket. Parameters bind as VALUES to $1, $2, ...; there is no way to splice text into the statement, which is what makes injection unrepresentable rather than merely discouraged. Authenticates with SCRAM-SHA-256 and verifies the SERVER's signature too, so the exchange proves both directions. Speaks protocol 3.0, which every server from 7.4 to 19 accepts. Columns typed int2/int4/int8 become Int, float4/float8/numeric become Float, bool becomes Bool, and every other type — uuid, jsonb, timestamps, extension types — arrives as the text the server printed rather than being refused. NULL becomes missing. Keywords: postgres, postgresql, sql, database, query, rows, table.
+
+```
+>>> postgres_query("postgres://me:pw@localhost/app", "select name from users where age > $1", [30])
+```
+
 ### `sqlite_query(path, sql, params?)`
 
 Run a read-only SQL query against a SQLite file and return the rows as a DataFrame.
@@ -1579,7 +1599,7 @@ Turns the bytecode VM off, so the tree-walking interpreter executes everything.
 Selects the DataFrame backend in a build that carries more than one.
 
 - **Values:** polars | native
-- **Unset:** the build's default (polars when present)
+- **Unset:** native (the shipped engine); polars only when explicitly asked for
 
 **Note:** A build without the requested engine REFUSES rather than silently answering with the other one — which is what lets `scripts/dfdiff.sh` trust that it is really comparing two engines. An empty value means no preference. The two are held byte-identical across every tracked program, so this is a performance and coverage choice, not a semantic one. Keywords: dataframe, backend, polars, native, engine, differential.
 
@@ -4029,6 +4049,18 @@ Blocks until a client arrives, any conn in conns is readable, or the timeout end
 
 ```
 >>> listener.wait(conns, 50)
+```
+
+## Connection methods
+
+### `query(sql, params?)`
+
+Run one read-only statement on this connection; returns a DataFrame.
+
+**Note:** PARAMETERS ARE VALUES, never text spliced into the statement: `$1`, `$2` … are bound by the server, so a string containing a quote is data. The session is read-only from its first byte (set in the startup packet), so a write comes back as the server's own SQLSTATE 25006 rather than a client-side guess. The connection closes when the last handle to it goes — there is nothing to call. Keywords: sql, postgres, database, select, parameter.
+
+```
+>>> conn.query("select name from people where age > $1", [40])
 ```
 
 ## Record methods

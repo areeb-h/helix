@@ -46,6 +46,13 @@ pub struct Loaded {
     /// True if more than one file was loaded (so names were namespaced and error
     /// messages need the internal `m<N>$` prefixes stripped before display).
     pub multi_module: bool,
+    /// The ENTRY module's namespace prefix, when there is one — so a caller that needs a
+    /// top-level name of the entry file (`fn main`) can spell it. `None` for a single
+    /// file, where nothing is namespaced.
+    ///
+    /// It has to be the entry's specifically, not "any module's": an imported library
+    /// declaring `fn main` must not become the program's entry point.
+    pub entry_prefix: Option<String>,
 }
 
 /// Resolve a (global) error line to the file it belongs to and the line within that
@@ -399,7 +406,12 @@ fn assemble(loader: Loader) -> Result<Loaded, Diag> {
     if loader.modules.len() == 1 {
         let m = loader.modules.into_iter().next().unwrap();
         let span = Span { start_line: 1, source: m.source, filename: m.filename, key: m.key };
-        return Ok(Loaded { stmts: m.stmts, spans: vec![span], multi_module: false });
+        return Ok(Loaded {
+            stmts: m.stmts,
+            spans: vec![span],
+            multi_module: false,
+            entry_prefix: None,
+        });
     }
     // Modules are in post-order (each dependency before the module that imports it,
     // entry last), so concatenating their rewrites preserves define-before-use. Each
@@ -424,7 +436,10 @@ fn assemble(loader: Loader) -> Result<Loaded, Diag> {
         out.extend(stmts);
         offset += loader.modules[idx].source.lines().count();
     }
-    Ok(Loaded { stmts: out, spans, multi_module: true })
+    // Post-order: dependencies first, ENTRY LAST — the same ordering the loop above
+    // relies on for define-before-use.
+    let entry_prefix = Some(format!("m{}", loader.modules.len() - 1));
+    Ok(Loaded { stmts: out, spans, multi_module: true, entry_prefix })
 }
 
 struct Module {
@@ -579,6 +594,7 @@ impl Loader {
                             name: "import".to_string(),
                             args: vec![Expr::Str(module)],
                             named: vec![],
+                            ufcs: None,
                             line: l,
                             col: c,
                         },
@@ -1078,7 +1094,7 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
     // `dep.member(...)` / `dep.member` where `dep` is an imported module → a direct
     // reference to the dependency's mangled name. Handled before generic recursion
     // because they replace the whole node. The member must be exported by the module.
-    if let Expr::Method { recv, name, args, named, line, col } = e
+    if let Expr::Method { recv, name, args, named, line, col, .. } = e
         && let Some(dep) = module_of(recv, ctx, bound) {
             check_exported(ctx, recv, &dep, name, *line, *col)?;
             for a in args.iter_mut() {
@@ -1182,10 +1198,31 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
                 }
             }
         }
-        Expr::Method { recv, args, named, .. } => {
+        Expr::Method { recv, name, args, named, ufcs, .. } => {
             rw(recv, ctx, bound)?;
             for a in args.iter_mut() {
                 rw(a, ctx, bound)?;
+            }
+            // THE UFCS FALLBACK'S NAME, resolved exactly as a free call of it would be —
+            // and stored beside the method name rather than replacing it, because the
+            // method name is matched against type tables and must stay as written.
+            //
+            // The precedence is the `Expr::Call` arm's, for the same reasons: a local
+            // binding shadows (so `bound` declines outright), this module's own top-level
+            // definition wins over an import, and a name that is neither is left alone —
+            // it can only be a real method or an error.
+            //
+            // Trailing defaults are NOT filled here, where the `Call` arm fills them: the
+            // arguments belong to the method reading as well, and a split call site emits
+            // both. A selectively-imported verb with omitted defaults therefore works
+            // qualified and not in method position — recorded rather than silently
+            // differing.
+            if !bound.contains(name) {
+                if ctx.top_level.contains(name) {
+                    *ufcs = Some(mangle(&ctx.prefix, name));
+                } else if let Some(dep) = ctx.selected.get(name) {
+                    *ufcs = Some(mangle(dep, name));
+                }
             }
             // A non-module method that carries named args is a checker error, but its arg
             // values may still reference imports — rewrite them so the error (or a future
@@ -1215,7 +1252,7 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
             b.extend(params.iter().cloned());
             rw(body, ctx, &b)?;
         }
-        Expr::Let { bindings, body } => {
+        Expr::Let { bindings, body, .. } => {
             let mut b = bound.clone();
             for (n, v) in bindings.iter_mut() {
                 rw(v, ctx, &b)?;

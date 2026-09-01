@@ -1,14 +1,19 @@
 //! The DataFrame **backend seam** (ADR 0012). Helix's DataFrame verbs are defined
 //! against a small typed column-expression IR (`ColExpr`) and an object-safe
-//! `DataHandle` trait — **not** against any one engine. The default (and today the
-//! only) backend is Polars (`backend::polars`); a homegrown columnar engine and an
-//! optional DuckDB backend are future `impl DataHandle`s behind this same seam.
+//! `DataHandle` trait — **not** against any one engine. The shipped backend is the
+//! native columnar engine (`backend::native`); Polars (`backend::polars`) remains
+//! behind the `dataframes` feature as the DIFFERENTIAL ORACLE, not as a default.
 //!
 //! Why a seam: Polars' Rust API is officially unstable (0.x, breaking every few
-//! months, no upgrade guides). Pinning the *language* to it is the real risk.
-//! Routing every verb through `DataHandle` confines all `polars::` types to
-//! `backend/polars.rs`, so an API break — or an engine swap — touches one file,
-//! never the interpreter, VM, type checker, or `Value`.
+//! months, no upgrade guides). Pinning the *language* to it was the real risk —
+//! and the seam is what made the swap possible: confining every `polars::` type to
+//! `backend/polars.rs` meant changing engines touched the feature list and this
+//! file's routing, never the interpreter, VM, type checker, or `Value`.
+//!
+//! Polars stays in the tree deliberately. An engine cannot be its own evidence,
+//! and `scripts/dfdiff.sh` running every tracked program under BOTH engines is
+//! what says the replacement means the same thing — so the oracle outlives the
+//! default it replaced.
 //!
 //! The front half of the verb→engine lowering (`ast_to_colexpr`) and the shared,
 //! engine-agnostic diagnostics (`validate_join_keys`) live here so every backend
@@ -60,15 +65,16 @@ pub fn build_frame(
     line: usize,
     col: usize,
 ) -> Result<Df, HelixError> {
-    // Engine routing (ADR 0033): polars is the default while it remains the
-    // oracle; the native engine serves builds without it, and a dual-engine dev
-    // build can pick native explicitly (differential runs only).
+    // Engine routing (ADR 0033): the NATIVE engine is the default everywhere,
+    // including in a dual build, so a dev binary answers exactly as a shipped one
+    // does. Polars is opt-in via `HELIX_DF_ENGINE=polars`, which is how the
+    // differential harness drives the oracle side.
     #[cfg(all(feature = "dataframes", feature = "native-df"))]
     {
-        if native_selected() {
-            return native::build_frame(columns, line, col);
+        if polars_selected() {
+            return polars::build_frame(columns, line, col);
         }
-        polars::build_frame(columns, line, col)
+        native::build_frame(columns, line, col)
     }
     #[cfg(all(feature = "dataframes", not(feature = "native-df")))]
     {
@@ -85,19 +91,23 @@ pub fn build_frame(
     }
 }
 
-/// Dual-engine dev builds only: `HELIX_DF_ENGINE=native` opts a run into the
-/// native engine so the differential harness can drive both from one binary.
+/// Dual-engine dev builds only: `HELIX_DF_ENGINE=polars` opts a run into the
+/// ORACLE engine so the differential harness can drive both from one binary.
 /// Single-engine builds never consult the environment (reproducibility).
+///
+/// The sense of this test is deliberate. It asks whether polars was REQUESTED,
+/// not whether native was, so that the fallthrough — every run that says nothing
+/// — lands on the engine Helix actually ships.
 #[cfg(all(feature = "dataframes", feature = "native-df"))]
-pub(crate) fn native_selected() -> bool {
-    std::env::var("HELIX_DF_ENGINE").map(|v| v == "native").unwrap_or(false)
+pub(crate) fn polars_selected() -> bool {
+    std::env::var("HELIX_DF_ENGINE").map(|v| v == "polars").unwrap_or(false)
 }
 
 /// The DataFrame engines this binary was actually built with, in the order a
 /// diagnostic should list them.
 pub fn available_engines() -> &'static [&'static str] {
     match (cfg!(feature = "dataframes"), cfg!(feature = "native-df")) {
-        (true, true) => &["polars", "native"],
+        (true, true) => &["native", "polars"],
         (true, false) => &["polars"],
         (false, true) => &["native"],
         (false, false) => &[],
@@ -106,9 +116,9 @@ pub fn available_engines() -> &'static [&'static str] {
 
 /// Validate `HELIX_DF_ENGINE` against what this build contains, once, at startup.
 ///
-/// It used to be read only by `native_selected`, which exists **only** in the
+/// It used to be read only by the engine-selection helper, which exists **only** in the
 /// dual-engine configuration — so on every shipped binary (whose default features
-/// omit `native-df`) `HELIX_DF_ENGINE=native` was read by nothing at all. A user
+/// then omitted `native-df`) `HELIX_DF_ENGINE=native` was read by nothing at all. A user
 /// asking for the native engine silently got polars, with no diagnostic and a
 /// different answer: `41 / 10` is `4` on one engine and `4.1` on the other. That is
 /// exactly the silent-wrong class this language refuses everywhere else — an
@@ -128,9 +138,14 @@ pub fn check_engine_selection() -> Option<String> {
     }
     let known = ["polars", "native"];
     Some(if known.contains(&want) {
+        // Name the feature that supplies the MISSING engine. This hint was hardcoded
+        // to `native-df` from when polars was the default; once native became the
+        // default it told the reader to rebuild with the engine their binary already
+        // had — a hint that sends you in a circle is worse than no hint at all.
+        let feature = if want == "polars" { "dataframes" } else { "native-df" };
         format!(
             "HELIX_DF_ENGINE=`{want}` — this build has no `{want}` DataFrame engine\n\
-             help: this binary was built with: {}. Rebuild with `--features native-df` \
+             help: this binary was built with: {}. Rebuild with `--features {feature}` \
                  for a dual-engine build, or unset HELIX_DF_ENGINE to use the default.",
             if have.is_empty() { "no DataFrame engine".to_string() } else { have.join(", ") }
         )
@@ -649,7 +664,15 @@ pub fn validate_predicate(pred: &ColExpr, line: usize, col: usize) -> Result<(),
 
 /// Validate join keys against both frames' schemas (shared by every backend) so a
 /// typo reads as a clean Helix error rather than an engine's lazy-plan dump.
-#[cfg_attr(not(feature = "dataframes"), allow(dead_code))]
+///
+/// "Shared by every backend" is now true. It was aspirational: only the polars
+/// backend called this, and the dead-code allow below was gated on `dataframes`
+/// alone — so a native-only build silently compiled an unused validator while the
+/// native join produced its own, worse message.
+#[cfg_attr(
+    not(any(feature = "dataframes", feature = "native-df")),
+    allow(dead_code)
+)]
 pub fn validate_join_keys(
     left_cols: &[String],
     right_cols: &[String],

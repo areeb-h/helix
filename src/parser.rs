@@ -234,8 +234,8 @@ fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Ex
     }
     let key = args.into_iter().next().unwrap();
     let s = || Expr::Ident { name: "$s".to_string(), line: l, col: c };
-    let keys = Expr::Method { recv: Box::new(s()), name: "map".into(), args: vec![key], named: vec![], line: l, col: c };
-    let order = Expr::Method { recv: Box::new(keys), name: "argsort".into(), args: vec![], named: vec![], line: l, col: c };
+    let keys = Expr::Method { recv: Box::new(s()), name: "map".into(), args: vec![key], named: vec![], ufcs: None, line: l, col: c };
+    let order = Expr::Method { recv: Box::new(keys), name: "argsort".into(), args: vec![], named: vec![], ufcs: None, line: l, col: c };
     let gather = Expr::Lambda {
         params: vec!["$si".to_string()],
         body: Box::new(Expr::Index {
@@ -245,8 +245,8 @@ fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Ex
             col: c,
         }),
     };
-    let body = Expr::Method { recv: Box::new(order), name: "map".into(), args: vec![gather], named: vec![], line: l, col: c };
-    Ok(Expr::Let { bindings: vec![("$s".to_string(), recv)], body: Box::new(body) })
+    let body = Expr::Method { recv: Box::new(order), name: "map".into(), args: vec![gather], named: vec![], ufcs: None, line: l, col: c };
+    Ok(Expr::Let { bindings: vec![("$s".to_string(), recv)], body: Box::new(body), from_do: false })
 }
 
 /// `recv.take_while(p)` / `recv.drop_while(p)` → take/drop the leading run where `p`
@@ -293,6 +293,7 @@ fn desugar_filter_compose(
         name: nm.into(),
         args,
         named: vec![],
+        ufcs: None,
         line: l,
         col: c,
     };
@@ -318,6 +319,7 @@ fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize
         name: nm.into(),
         args,
         named: vec![],
+        ufcs: None,
         line: l,
         col: c,
     };
@@ -331,7 +333,7 @@ fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize
     };
     let verb = if name == "take_while" { "take" } else { "drop" };
     let body = m(w(), verb, vec![stop]);
-    Ok(Expr::Let { bindings: vec![("$w".to_string(), recv)], body: Box::new(body) })
+    Ok(Expr::Let { bindings: vec![("$w".to_string(), recv)], body: Box::new(body), from_do: false })
 }
 
 /// Let a higher-order method take a *named function* as its single argument:
@@ -370,6 +372,7 @@ fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Exp
             name: f.clone(),
             args: vec![it()],
             named: vec![],
+            ufcs: None,
             line: l,
             col: c,
         },
@@ -407,7 +410,7 @@ fn desugar_position(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<E
     // built a full array of results to find an index that short-circuiting reaches
     // immediately. Both engines now compile `position` as a short-circuiting scan, so it
     // is O(prefix) in time and O(1) in space. See `desugar_take_drop_while`.
-    Ok(Expr::Method { recv: Box::new(recv), name: "position".into(), args, named: vec![], line: l, col: c })
+    Ok(Expr::Method { recv: Box::new(recv), name: "position".into(), args, named: vec![], ufcs: None, line: l, col: c })
 }
 
 /// Desugar `recv.min_by(key)` / `max_by(key)` / `argmin()` / `argmax()` into
@@ -497,6 +500,7 @@ fn desugar_order_by(
             name: "map".to_string(),
             args: vec![Expr::Lambda { params, body: Box::new(key) }],
             named: vec![],
+            ufcs: None,
             line,
             col,
         };
@@ -513,10 +517,12 @@ fn desugar_order_by(
             name: m.to_string(),
             args: vec![],
             named: vec![],
+            ufcs: None,
             line,
             col,
         };
         let indexed = Expr::Let {
+            from_do: false,
             bindings: vec![("$obi".to_string(), idx_expr)],
             body: Box::new(Expr::If {
                 cond: Box::new(method0(ident("$obi"), "is_missing")),
@@ -532,6 +538,7 @@ fn desugar_order_by(
             }),
         };
         return Ok(Expr::Let {
+            from_do: false,
             bindings: vec![("$obe".to_string(), recv)],
             body: Box::new(Expr::If {
                 cond: Box::new(method0(ident("$obe"), "is_missing")),
@@ -576,6 +583,7 @@ fn desugar_order_by(
             name: "enumerate".to_string(),
             args: vec![],
             named: vec![],
+            ufcs: None,
             line,
             col,
         };
@@ -604,6 +612,7 @@ fn desugar_order_by(
         name: "reduce".to_string(),
         args: vec![index(ident("$ob"), 0), cmp],
         named: vec![],
+        ufcs: None,
         line,
         col,
     };
@@ -638,6 +647,7 @@ fn desugar_order_by(
     // `desugar_order_by(keys, inner, …)` call above, and the key `map` produces a packed
     // column, so the kernel takes it.
     let slow = Expr::Let {
+        from_do: false,
         bindings: vec![("$ob".to_string(), src)],
         body: Box::new(index(reduced, ret_idx)),
     };
@@ -668,6 +678,7 @@ fn desugar_order_by(
         name: m.to_string(),
         args: vec![],
         named: vec![],
+        ufcs: None,
         line,
         col,
     };
@@ -677,6 +688,7 @@ fn desugar_order_by(
             name: "count".to_string(),
             args: vec![],
             named: vec![],
+            ufcs: None,
             line,
             col,
         }
@@ -730,6 +742,7 @@ fn desugar_order_by(
                             col,
                         }],
                         named: vec![],
+                        ufcs: None,
                         line,
                         col,
                     }),
@@ -754,6 +767,7 @@ fn desugar_order_by(
                             }),
                         }],
                         named: vec![],
+                        ufcs: None,
                         line,
                         col,
                     }),
@@ -771,6 +785,7 @@ fn desugar_order_by(
         col,
     };
     Ok(Expr::Let {
+        from_do: false,
         bindings: vec![("$oba".to_string(), recv)],
         body: Box::new(Expr::Binary {
             op: BinOp::Coalesce,
@@ -779,6 +794,7 @@ fn desugar_order_by(
                 name: "$arg_extreme".to_string(),
                 args: vec![Expr::Bool(want_max)],
                 named: vec![],
+                ufcs: None,
                 line,
                 col,
             }),
@@ -1035,7 +1051,7 @@ impl Parser {
             )
             .hint("separate the bindings with commas: `where a = 1, b = 2`."));
         }
-        Ok(Expr::Let { bindings, body: Box::new(body) })
+        Ok(Expr::Let { bindings, body: Box::new(body), from_do: false })
     }
 
     fn advance(&mut self) -> Token {
@@ -1939,6 +1955,10 @@ impl Parser {
                                 name: name.clone(),
                                 args,
                                 named,
+                                // A qualified module call (`dep.f(a, k: v)`): the loader
+                                // rewrites the whole node into a resolved `Call`, so there
+                                // is no fallback for it to carry.
+                                ufcs: None,
                                 line: l,
                                 col: c,
                             };
@@ -1962,6 +1982,7 @@ impl Parser {
                                 name: name.clone(),
                                 args,
                                 named: vec![],
+                                ufcs: None,
                                 line: l,
                                 col: c,
                             };
@@ -2058,6 +2079,7 @@ impl Parser {
                                     name: "zip".into(),
                                     args: vec![other],
                                     named: vec![],
+                                    ufcs: None,
                                     line: l,
                                     col: c,
                                 };
@@ -2066,6 +2088,7 @@ impl Parser {
                                     name: "map".into(),
                                     args: vec![f],
                                     named: vec![],
+                                    ufcs: None,
                                     line: l,
                                     col: c,
                                 }
@@ -2075,6 +2098,7 @@ impl Parser {
                                 name: name.clone(),
                                 args: wrap_bound_fn_arg(&name, args, l, c),
                                 named: vec![],
+                                ufcs: None,
                                 line: l,
                                 col: c,
                             },
@@ -2624,7 +2648,7 @@ impl Parser {
                 return Ok(if bindings.is_empty() {
                     expr
                 } else {
-                    Expr::Let { bindings, body: Box::new(expr) }
+                    Expr::Let { bindings, body: Box::new(expr), from_do: true }
                 });
             }
             // A non-final bare expression is a side-effecting statement (e.g. `print(…)`).
@@ -2731,7 +2755,7 @@ impl Parser {
                 }
             }
             Expr::Lambda { body, .. } => Self::relocate(body, l, c),
-            Expr::Let { bindings, body } => {
+            Expr::Let { bindings, body, .. } => {
                 for (_, v) in bindings {
                     Self::relocate(v, l, c);
                 }
@@ -2879,6 +2903,7 @@ impl Parser {
                 Ok(Expr::Let {
                     bindings,
                     body: Box::new(body),
+                    from_do: false,
                 })
             }
             Tok::Do => self.do_block(),
@@ -3128,6 +3153,7 @@ impl Parser {
                         name: "to_dict".to_string(),
                         args: vec![],
                         named: vec![],
+                        ufcs: None,
                         line: l,
                         col: c,
                     });

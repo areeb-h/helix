@@ -1,0 +1,49 @@
+# A dict is a settled map plus a shared append-only log; these are the rules that
+# makes it indistinguishable from the map it replaced.
+#
+# The log exists because insert used to clone the whole BTreeMap, which made
+# building a dictionary in a fold quadratic (4.3 s at n=32,000). Appending to a
+# shared log needs no unique Rc, so it fixes every spelling -- but it moves two
+# questions from arithmetic to semantics, and both were named as traps before the
+# change was built:
+#
+#   count() is NOT base.len() + adds.len(), because an add that overwrites an
+#   existing key contributes nothing. get(k) needs the LAST occurrence in the log,
+#   not the first. Getting either wrong is a silently wrong dictionary.
+#
+# An older view is also a value in its own right: it reads only its own prefix of
+# the log, so later inserts through a sibling must not move it.
+
+# OVERWRITE: count is not base+adds, and get must see the LAST write.
+d0 = dict()
+d1 = d0.insert("a", 1)
+d2 = d1.insert("b", 2)
+d3 = d2.insert("a", 99)
+print("overwrite count {d3.count()}  a={d3.get("a")}  b={d3.get("b")}")
+
+# OLDER VIEWS are values in their own right and must not move under later inserts.
+print("older views {d0.count()} {d1.count()} {d2.count()} {d3.count()}")
+print("d1.a={d1.get("a")}  d2.a={d2.get("a")}  d3.a={d3.get("a")}")
+
+# BRANCHING: two inserts from the same view are independent.
+b1 = d2.insert("z", 10)
+b2 = d2.insert("z", 20)
+print("branch {b1.get("z")} {b2.get("z")}  base untouched {d2.get("z")}")
+
+# REMOVE cannot be an append.
+r = d3.remove("a")
+print("remove count {r.count()} a={r.get("a")} b={r.get("b")}")
+
+# EQUALITY: built differently, same content.
+p = dict().insert("x", 1).insert("y", 2)
+q = dict().insert("y", 2).insert("x", 1)
+print("equal {p == q}  and after overwrite {p.insert("x", 5) == q}")
+
+# ORDER: iteration is sorted by key regardless of insertion order.
+print("sorted {q.keys()}  {q.values()}  {q.items()}")
+print("printed {q}")
+
+# CONTAINS / HAS after an overwrite through the log.
+print("contains {d3.contains("a")} {d3.contains("nope")}")
+
+# JSON and spread cross the boundary from a logged dict.

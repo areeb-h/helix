@@ -95,7 +95,7 @@ pub fn category_of(name: &str) -> &'static str {
         "source_path" => "io",
         // Its own category: a query is neither a file reader nor a network verb, and
         // an agent asking "how do I reach a database" should find it by name.
-        "sqlite_query" => "db",
+        "sqlite_query" | "postgres_query" | "postgres_open" => "db",
         _ => "core",
     }
 }
@@ -126,6 +126,10 @@ pub fn feature_of(name: &str) -> Option<&'static str> {
         "dataframe" | "read_csv" | "read_parquet" => Some("dataframes"),
         // Bundled SQLite. Returns a frame, hence also `dataframes` in Cargo.toml.
         "sqlite_query" => Some("db"),
+        // PostgreSQL over its own wire protocol — a separate feature from `db` because it
+        // shares no code with SQLite. It adds no DEPENDENCY, so the only thing the flag
+        // buys back is code size.
+        "postgres_query" | "postgres_open" => Some("postgres"),
         // The spec-compliant genomics readers. `read_bed` is hand-rolled, and `dna` /
         // `align` are pure computation, so none of those three appear here.
         "read_vcf" | "read_bcf" | "read_sam" | "read_bam" | "read_gff" | "read_fasta"
@@ -156,6 +160,8 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "listen", pure: false },
     BuiltinDef { path: "read_csv", pure: false },
     BuiltinDef { path: "sqlite_query", pure: false },
+    BuiltinDef { path: "postgres_query", pure: false },
+    BuiltinDef { path: "postgres_open", pure: false },
     BuiltinDef { path: "read_parquet", pure: false },
     BuiltinDef { path: "read_text", pure: false },
     BuiltinDef { path: "read_json", pure: false },
@@ -431,6 +437,15 @@ pub static RECORD_METHODS: &[&str] = &["get", "expect", "has", "keys", "values",
 /// Network-handle (`Net`) methods — the HTTP server surface (`src/serve.rs`). A
 /// listener (from `listen(port)`) has `accept`; a connection (from `accept()`) has
 /// `respond`. Effects, dispatched at runtime like the other opaque types.
+/// A PostgreSQL connection's methods (ADR 0044).
+///
+/// The table exists in EVERY build even though only `--features postgres` can construct a
+/// `Connection` — that is ADR 0032's gate-the-body rule, and it is load-bearing twice
+/// over: `helix doc Connection` answers everywhere, and `type_owns_method` answers TRUE,
+/// which is what stops a user's `fn query(c, sql)` from silently taking a call meant for
+/// the database (ADR 0045's fallback declines for any type that owns the name).
+pub static CONNECTION_METHODS: &[&str] = &["query"];
+
 pub static NET_METHODS: &[&str] = &[
     "accept", "poll", "request", "respond", "sse", "stream", "send", "next", "status",
     "close",
@@ -466,7 +481,7 @@ pub fn methods_of(table: &[&'static str]) -> Vec<&'static str> {
 
 /// The method tables by receiver type — the single source for `helix doc <Type>`
 /// introspection and the method-uniqueness test.
-pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 11] {
+pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 12] {
     [
         ("Array", ARRAY_METHODS),
         ("String", STRING_METHODS),
@@ -477,6 +492,7 @@ pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 11] {
         ("GroupBy", GROUPBY_METHODS),
         ("Dict", DICT_METHODS),
         ("Net", NET_METHODS),
+        ("Connection", CONNECTION_METHODS),
         ("Record", RECORD_METHODS),
         // LAST deliberately: Headers shares names (count, get, keys, items) with the
         // common types, and whichever table lists a name first becomes its owner for
@@ -581,7 +597,7 @@ mod tests {
         // and bump this. The bump is the point.
         assert_eq!(
             BUILTINS.len(),
-            159,
+            161,
             "a builtin was added or removed — decide whether it needs a Cargo feature, add it \
              to `feature_of` if it does, and update this count in the same change"
         );
@@ -599,6 +615,9 @@ mod tests {
             ("http_post", "http"),
             ("http_request", "http"),
             ("http_stream", "http"),
+            ("postgres_open", "postgres"),
+            ("postgres_query", "postgres"),
+
             ("read_bam", "bio"),
             ("read_bcf", "bio"),
             ("read_csv", "dataframes"),

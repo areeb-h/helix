@@ -1,0 +1,14 @@
+exit: 0
+--- stdout ---
+select name, age from people where age > 40 and active
+[3, 4, 5]
+true
+[6, 8, 10]
+2
+missing
+built
+["x"]
+tap
+[2, 3]
+select x from t where a and limit 10
+--- stderr ---

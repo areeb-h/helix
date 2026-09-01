@@ -103,7 +103,7 @@ pub(super) fn a_dict(args: Vec<Value>, line: usize, col: usize) -> Result<Value,
             )
             .hint("build a populated dict with `[(k, v), …].to_dict()` or `xs.frequencies().to_dict()`."));
         }
-        Ok(Value::Dict(Rc::new(std::collections::BTreeMap::new())))
+        Ok(Value::dict(std::collections::BTreeMap::new()))
     
 }
 

@@ -1,0 +1,3 @@
+# Baseline: CSV parse + row count. Every other program pays this cost, so the
+# verb under test costs (its total - this).
+print(read_csv("/tmp/helix_dfbench/main.csv").count())

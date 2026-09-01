@@ -144,6 +144,7 @@ pub(super) fn a_dataframe(name: &str, args: Vec<Value>, line: usize, col: usize)
                 }
             }
             Value::Dict(d) => {
+                let d = d.map();
                 if d.is_empty() {
                     return Err(HelixError::new("`dataframe` needs at least one column", line, col)
                         .hint("an empty dict has no columns to build from."));

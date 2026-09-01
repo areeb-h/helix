@@ -104,6 +104,21 @@ fn comp_shape_check(
     }
 }
 
+/// What a comprehension says about a receiver it cannot iterate.
+///
+/// Shared with the VM's `Op::DfColumnVerb`, which routes `where`/`filter` by type and can
+/// only discover at run time that the receiver is not a frame either — the walker reaches
+/// this same sentence for that program, and one definition is how they stay the same
+/// sentence.
+pub(crate) fn not_an_array(recv: &Value, name: &str, line: usize, col: usize) -> HelixError {
+    HelixError::new(
+        format!("type {} has no method `{}`", recv.type_name(), name),
+        line,
+        col,
+    )
+    .hint("`map`, `filter`, `where`, and `reduce` work on arrays.")
+}
+
 impl super::Interp {
     pub(super) fn eval_comprehension(
         &mut self,
@@ -124,14 +139,7 @@ impl super::Interp {
                 comp_shape_check(name, args, line, col)?;
                 return Ok(Value::Missing);
             }
-            other => {
-                return Err(HelixError::new(
-                    format!("type {} has no method `{}`", other.type_name(), name),
-                    line,
-                    col,
-                )
-                .hint("`map`, `filter`, `where`, and `reduce` work on arrays."))
-            }
+            other => return Err(not_an_array(other, name, line, col)),
         };
 
         match name {

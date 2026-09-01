@@ -16,8 +16,9 @@
 #
 #   Usage: scripts/dfdiff.sh [--list] [--allow FILE]
 #
-# Requires a DUAL-ENGINE binary (both `dataframes` and `native-df` features):
-#   CARGO_TARGET_DIR=target/dual cargo build --profile gate --features native-df
+# Requires a DUAL-ENGINE binary. `native-df` ships by DEFAULT, so the feature to
+# add is the polars oracle:
+#   CARGO_TARGET_DIR=target/dual cargo build --profile gate --features dataframes
 #
 # A divergence not named in the allowlist is a FAILURE. The allowlist holds only
 # deltas an ADR has decided, each line `<program>  # <ADR reference>`.
@@ -36,15 +37,23 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-[ -x "$BIN" ] || { echo "no dual-engine binary at $BIN — build with --features native-df" >&2; exit 1; }
-# Prove it IS dual. A single-engine build REFUSES `HELIX_DF_ENGINE=native` (see
+[ -x "$BIN" ] || { echo "no dual-engine binary at $BIN — build with --features dataframes" >&2; exit 1; }
+# Prove it IS dual, by probing for the ENGINE THIS BUILD MIGHT LACK. A
+# single-engine build REFUSES an engine it does not carry (see
 # `backend::check_engine_selection`) rather than silently answering with the other
-# engine, so this check stays valid after the v0.6.0 unification removes every
-# divergence a behavioural probe could have used.
-if ! HELIX_DF_ENGINE=native "$BIN" eval 'print(1)' >/dev/null 2>&1; then
-  echo "REFUSING: $BIN does not accept HELIX_DF_ENGINE=native." >&2
+# one, so a probe is a valid dual-ness test — but only if it names the engine that
+# can actually be missing.
+#
+# This probe asked for `native`, which was the right question while polars was the
+# default. Native now ships in EVERY build, so that check passed for a native-only
+# binary and this script would have compared native against itself: 129 programs,
+# 0 divergences, and no information — the exact vacuous-parity failure that
+# `dfcheck.sh` shipped when it diffed three copies of "no such file". Polars is
+# now the optional half, so polars is what must be probed for.
+if ! HELIX_DF_ENGINE=polars "$BIN" eval 'print(1)' >/dev/null 2>&1; then
+  echo "REFUSING: $BIN does not accept HELIX_DF_ENGINE=polars (no oracle engine)." >&2
   echo "  Build a dual-engine binary:" >&2
-  echo "    CARGO_TARGET_DIR=target/dual cargo build --profile gate --features native-df" >&2
+  echo "    CARGO_TARGET_DIR=target/dual cargo build --profile gate --features dataframes" >&2
   exit 1
 fi
 

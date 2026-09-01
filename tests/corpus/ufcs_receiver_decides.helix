@@ -1,0 +1,68 @@
+# A method call is resolved by its RECEIVER, not by its name.
+#
+# Helix has had UFCS since v0.3.0 -- a function called in method position, so a user's
+# own verb chains like a built-in one. It was gated at PARSE time on "no type has a
+# method by this name", which is a global test with no idea what the receiver is. That
+# made every good verb name unusable by a user's own library: where, select, first,
+# count, all, join, sort, take, drop, insert, get, sum, min, max, unique are each some
+# type's method, so `fn where(q, c)` sitting two lines above `q.where(c)` was invisible
+# and the call died with "type Record has no method `where`".
+#
+# Only the receiver settles it, and only run time has the receiver. So the decision
+# moved there: a method call that fails dispatch retries as `name(recv, args...)`, and
+# the two verbs the compiler routes by TYPE rather than by name -- DataFrame column
+# verbs, and comprehensions, which compile to inline loops with no dispatch to fail --
+# emit both readings behind a receiver test (`Op::ReceiverIs`).
+#
+# This program is the proof that the readings do not interfere: the same three names
+# mean three different things in it, chosen by what they are called on.
+
+fn q(tbl) = { tbl: tbl, conds: [], cols: [] }
+fn where(b, c) = { tbl: b.tbl, conds: b.conds.concat([c]), cols: b.cols }
+fn select(b, c) = { tbl: b.tbl, conds: b.conds, cols: b.cols.concat([c]) }
+fn all(b) = "select {b.cols.join(\", \")} from {b.tbl} where {b.conds.join(\" and \")}"
+
+# 1. THE USER'S VERBS, chained across lines with no continuation characters.
+sql = q("people")
+    .where("age > 40")
+    .where("active")
+    .select("name")
+    .select("age")
+    .all()
+print(sql)
+
+# 2. THE SAME NAMES on an array, in the same program, still mean the comprehension.
+xs = [1, 2, 3, 4, 5]
+print(xs.where(it > 2))
+print(xs.all(it > 0))
+print(xs.map(it * 2).where(it > 4))
+
+# 3. And on a DataFrame they still mean the column verb. A type that OWNS a name never
+# falls back -- that predicate is what keeps a real method's real error from being
+# re-run as something else.
+f = dataframe({ name: ["ann", "bo", "cy"], age: [41, 33, 52] })
+print(f.where(@age > 40).select(@name).count())
+
+# 4. A `missing` receiver still propagates through a comprehension (ADR 0001) rather
+# than falling back to the function -- `missing` is inside the class the loop accepts.
+m = missing
+print(m.where(it > 1))
+
+# 5. THE RECEIVER IS EVALUATED ONCE, on BOTH sides of the split. Both readings are
+# emitted but only one receiver: it is parked in a hidden local that each branch reloads.
+# A receiver compiled into a branch instead would run its side effects a second time
+# whenever that branch is the one taken -- so this has to be asserted from each side, and
+# `print` returning what it prints is what makes the count visible.
+#
+# The record side, which takes the function:
+fn built(n) = { tbl: print("built"), conds: [], cols: [n] }
+print(built("x").where("c").cols)
+# ...and the array side, which takes the comprehension. Watching only the record side is
+# how the first version of this check passed a sabotage that duplicated the receiver.
+fn tapped() = let p = print("tap") in [1, 2, 3]
+print(tapped().where(it > 1))
+
+# 6. A verb whose name no type claims resolves at parse time, as it always has, and
+# composes with one that needs the run-time decision.
+fn limit(b, n) = { tbl: b.tbl, conds: b.conds.concat(["limit {n}"]), cols: b.cols }
+print(q("t").where("a").limit(10).select("x").all())

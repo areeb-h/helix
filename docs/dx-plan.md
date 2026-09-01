@@ -263,11 +263,72 @@ UFCS is now restricted to **user-defined functions**. What that leaves:
   emitter). That is a real change and it should be made deliberately, not smuggled in
   behind a bug fix. With it, builtins could chain again — `tensor(t).to_array()`,
   `(0 - 1).abs()` — which is what the narrowing costs today.
-  **STATUS: landed ("half two")** — a builtin-named method call that fails dispatch
-  now retries the builtin on the receiver at run time, on all engines
-  (`ufcs_fallback_applies` in src/interp.rs; the VM's `ufcs_name` seam), restoring
-  builtin chaining. The reverse direction — methods as free functions, the
-  half-resolution below — remains open, as recorded.
+  **STATUS: landed in full (2026-08-31, ADR 0045).** Half two shipped first — a
+  builtin-named method call that fails dispatch retries the builtin on the receiver, on
+  all engines (`ufcs_fallback_applies`; the VM's `ufcs_name` seam). The rest landed with
+  the user's own functions, which is what actually mattered: `is_any_method` blocks
+  `where`, `select`, `first`, `count`, `all`, `join`, `sort`, `take`, `drop`, `insert`,
+  `get`, `keys`, `values`, `filter`, `map`, `sum`, `min`, `max`, `unique` — the entire
+  vocabulary of a fluent library — so a query builder or an ORM could not be written in
+  the language at all.
+
+  The predicted opcode is real and is called `Op::ReceiverIs`. It did NOT touch the
+  bytecode format: `hbc.rs` rejects `Op::Method` outright (value methods are outside the
+  hvm core subset), and nothing else serialises a `Program`, so the sizing and
+  serialisation this note feared do not exist for these ops. What it did need was the
+  compiler emitting BOTH readings at a two-reading call site, which is where the work
+  actually was.
+
+  **What is still open, precisely.** The parser's own desugars run before any receiver
+  exists and still win: `sort_by`, `min_by`, `max_by`, `argmin`, `argmax`, `take_while`,
+  `drop_while`, `zipmap`, `flat_map`, `count_where`, `position`. A user's `fn sort_by` is
+  therefore unreachable in method position. Closing it means either moving those desugars
+  behind the same receiver test, or teaching the parser to decline a desugar whose name
+  the file also declares — the second is smaller and the second is also wrong, because it
+  would break `xs.sort_by(...)` in the same file. So: the receiver test, again, at seven
+  more sites. Not urgent; none of these is a natural library verb.
+
+  **NAMESPACING TURNED IT OFF, and the corpus could not see that.** `module::load`
+  rewrites every top-level name to `m<N>$name` once a second file is involved, and the
+  fallback looked its target up by the name at the CALL SITE — which for a method is the
+  written one, because a method name must not be rewritten. So the feature was live in
+  exactly the files that do not need it and absent from every file that does; a library's
+  consumer always has an import. Fixed by carrying the resolved name on the call site
+  (`Expr::Method::ufcs`, filled by the loader). `climain::find` had the same bug for
+  `fn main` and is fixed with it. The lesson is the test, not the fix: no corpus program
+  has an import, so a single-file corpus was blind to every multi-file program by
+  construction — `an_import_does_not_disable_ufcs_or_fn_main` is the multi-file guard.
+
+  **A FRAME REACHING A ROUTE CHOSEN BY TYPE — closed 2026-09-01, and it was worse than
+  first recorded.** Every verb a frame or a group routes by TYPE guessed when the checker
+  could not prove the receiver, and the guess evaluates the arguments as values where a
+  frame verb's arguments are column names. So this ran on one engine and died on two:
+
+      fn adults(f) = f.where(age > 40)   # bare column names: ADR 0039's own spelling
+      # walker: 2        VM / JIT: `age` is not defined
+
+  Not a curiosity — that is the shape a database helper is written in, and a `@column`
+  argument was the only hint that switched the route. The same guess was in `sort`,
+  `drop_missing`, `drop_nan` and every grouped aggregation (`g.mean(v)` → "`v` is not
+  defined"), so the fix is the family: `ReceiverIs(DataFrameOnly)` / `GroupByOnly`, both
+  readings emitted, decided on the value. Twenty measured cases across the two receivers
+  now agree on all three engines, where twelve diverged.
+
+  The fusion cost this note feared is **not measurable**, and the control says why: an
+  unproven receiver never fused in the first place, because the chain analysis cannot see
+  an array. Guard off → on, unproven/pinned ratio 1.335 → 1.341 at 4M elements. `map` is
+  untouched regardless: a frame owns no `map`, so there was never a second reading.
+
+  Six wording divergences went with it — a group refused after its arguments were
+  evaluated (naming `v` rather than `sort`), `scan` reporting "no method `map`", and four
+  sentences written twice. Each is one constructor now, called by both engines.
+
+  **The other twin.** `Op::GroupByAgg` still raises "expected a GroupBy, got X" for a
+  non-GroupBy receiver where the walker reports something else — the same divergence
+  `Op::DfColumnVerb` had, which ADR 0045 fixed by calling the walker's own constructors.
+  It was left because the walker's path for an aggregation on a non-group receiver
+  evaluates the `@column` first and raises the column-reference error, so matching it is
+  not the same one-line substitution.
 - **The residue.** A user's own `fn` can still collide with a Python attribute they also
   call (`fn helper` plus `np.helper(...)`). It is a name they chose and can see, and it
   was an error before UFCS existed, so nothing that worked changes — but it is not

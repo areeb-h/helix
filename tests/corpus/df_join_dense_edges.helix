@@ -1,0 +1,35 @@
+# Join edge cases the DENSE key path introduces, on every engine.
+#
+# The native join indexes an integer key by direct addressing when the right
+# frame's key range is small: slot = value - min. That makes three situations
+# newly distinguishable, and getting any of them wrong is a silently dropped or
+# invented row rather than an error:
+#
+#   1. A left key INSIDE the right's range whose slot is EMPTY. The slot exists
+#      and is addressable, but holds no rows. It must read as "no match" — if it
+#      reads as "matched with zero rows", a left join drops the row it is
+#      supposed to keep.
+#   2. A left key OUTSIDE the right's range. Indexing must not be attempted.
+#   3. A NEGATIVE key range, where the base subtraction is the thing most likely
+#      to be off by one.
+right = dataframe({k: [10, 12, 14], label: ["a", "b", "c"]})
+
+# 11 and 13 fall INSIDE [10, 14] but match nothing — the empty-slot case.
+# 7 and 20 fall outside the range entirely.
+left = dataframe({k: [10, 11, 7, 14, 13, 20], v: [1, 2, 3, 4, 5, 6]})
+
+print(left.join(right, @k).sort(@k).column("k"))
+print(left.join(right, @k, "left").count())
+print(left.join(right, @k, "left").sort(@k).column("label"))
+
+# Negative and zero-crossing ranges.
+nr = dataframe({k: [-3, 0, 4], label: ["x", "y", "z"]})
+nl = dataframe({k: [-3, -1, 0, 2, 4], v: [1, 2, 3, 4, 5]})
+print(nl.join(nr, @k).sort(@k).column("k"))
+print(nl.join(nr, @k, "left").sort(@k).column("label"))
+
+# A missing key matches nothing, on either side, and is kept by a left join.
+mr = dataframe({k: [1, missing, 3], label: ["p", "q", "r"]})
+ml = dataframe({k: [1, missing, 3], v: [1, 2, 3]})
+print(ml.join(mr, @k).count())
+print(ml.join(mr, @k, "left").count())

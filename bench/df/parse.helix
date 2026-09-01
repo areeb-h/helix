@@ -1,0 +1,5 @@
+# Forces EVERY column to be materialised. read.helix asks only for a row count,
+# which a lazy engine can answer without parsing a single field -- so the two are
+# not the same question, and only this one measures the CSV parser.
+d = read_csv("/tmp/helix_dfbench/main.csv")
+print(d.column("x").sum(), d.column("y").sum(), d.column("id").sum(), d.column("k").sum(), d.column("g").count())

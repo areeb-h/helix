@@ -218,6 +218,18 @@ pub enum Expr {
         /// (a value's method) is rejected by the type checker — so no engine sees a `Method`
         /// with a non-empty `named`.
         named: Vec<(String, Expr)>,
+        /// The free function this call site falls back to when dispatch fails — the UFCS
+        /// half of ADR 0045 — as the name it actually resolves to. `None` means "the same
+        /// name as the method", which is right for a single-file program and for every
+        /// method call that has no such function.
+        ///
+        /// IT HAS TO BE A SEPARATE FIELD because the two names differ. `module::load`
+        /// namespaces every top-level name once a second file is involved (`fn where`
+        /// becomes `m0$where`), but a METHOD name is not a top-level name and must stay
+        /// as written or it would match no type's table. Resolving the fallback from the
+        /// method name is what made a single `import` line silently disable UFCS for every
+        /// verb that collides with a built-in method.
+        ufcs: Option<String>,
         line: usize,
         col: usize,
     },
@@ -259,6 +271,13 @@ pub enum Expr {
     Let {
         bindings: Vec<(String, Expr)>,
         body: Box<Expr>,
+        /// Written as `do { … }` rather than `let … in …`.
+        ///
+        /// The two lower to the SAME node — a `do` block's statements become bindings,
+        /// with a bare statement bound to a throwaway `$do<N>` — so nothing else can tell
+        /// them apart, and a lint that advised "use `do { … }`" was firing on blocks that
+        /// already were one. Semantically irrelevant: no engine reads this.
+        from_do: bool,
     },
     /// `if cond then a else b` — a value-producing expression, not a statement.
     If {

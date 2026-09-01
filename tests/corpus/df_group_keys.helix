@@ -1,0 +1,32 @@
+# The key rules  must obey, on every engine and every path.
+#
+# Group discovery has three implementations now — direct addressing over a bounded
+# key domain, a typed hash for unbounded ones, and the generic RowKey path — and
+# the output ROW ORDER is first-seen, not sorted. A fast path that changed the
+# order would be a silent wrong answer for anyone reading the first row.
+a = dataframe({g: ["b", "a", "b", "c", "a"], v: [1, 2, 3, 4, 5]})
+print(a.group(@g).sum(@v).column("g"))
+print(a.group(@g).sum(@v).column("v"))
+print(a.group(@g).count(@v).column("v"))
+
+# Missing is its OWN group, not a discard and not a wildcard.
+b = dataframe({g: ["x", missing, "x", missing], v: [1, 2, 3, 4]})
+print(b.group(@g).sum(@v).count())
+print(b.group(@g).sum(@v).column("v"))
+
+# Integer keys, including negatives — the dense path subtracts a base, so a range
+# that does not start at zero is the case most likely to be off by one.
+c = dataframe({k: [-5, 3, -5, 3, 0], v: [1, 1, 1, 1, 1]})
+print(c.group(@k).sum(@v).column("k"))
+print(c.group(@k).sum(@v).column("v"))
+
+# Boolean keys.
+d = dataframe({t: [true, false, true], v: [10, 20, 30]})
+print(d.group(@t).sum(@v).column("t"))
+print(d.group(@t).sum(@v).column("v"))
+
+# Every aggregate the fast path claims to cover.
+ee = dataframe({g: ["p", "q", "p"], v: [2.0, 5.0, 4.0]})
+print(ee.group(@g).mean(@v).column("v"))
+print(ee.group(@g).min(@v).column("v"))
+print(ee.group(@g).max(@v).column("v"))

@@ -87,7 +87,7 @@ pub static ENV: &[EnvDoc] = &[
     EnvDoc {
         name: "HELIX_DF_ENGINE",
         values: "polars | native",
-        default: "the build's default (polars when present)",
+        default: "native (the shipped engine); polars only when explicitly asked for",
         doc: "Selects the DataFrame backend in a build that carries more than one.",
         notes: "A build without the requested engine REFUSES rather than silently answering with the other one — which is what lets `scripts/dfdiff.sh` trust that it is really comparing two engines. An empty value means no preference. The two are held byte-identical across every tracked program, so this is a performance and coverage choice, not a semantic one. Keywords: dataframe, backend, polars, native, engine, differential.",
     },

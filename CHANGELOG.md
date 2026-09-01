@@ -2,7 +2,260 @@
 
 ## Unreleased
 
+### Changed
+
+- **A method call is resolved by its receiver, not by its name.** (ADR 0045.) UFCS was
+  gated at PARSE time on `registry::is_any_method` — a global test on a name, made at a
+  point where the receiver does not exist. Every good verb name is some type's method, so
+
+      where  select  first  count  all  any  join  sort  take  drop
+      insert  get  keys  values  filter  map  sum  min  max  unique
+
+  were all unusable by a user's own library: `fn where(q, c)` two lines above `q.where(c)`
+  was invisible, and the call died with ``type Record has no method `where` ``. A query
+  builder, an ORM, a pipeline DSL — none could be written in Helix, and nothing said why.
+
+  A failed dispatch now retries as `name(recv, args…)` against a declared `fn`, then
+  against a builtin. A type that OWNS the name never falls back, so an array keeps its
+  comprehension and a DataFrame keeps its column verb — **in the same program**, chosen by
+  what the verb is called on:
+
+  ```
+  fn where(b, c) = { tbl: b.tbl, conds: b.conds.concat([c]) }
+
+  q("people").where("age > 40").select("name").all()   # the user's verb
+  [1, 2, 3].where(it > 1)                              # the comprehension
+  frame.where(@age > 40)                               # the column verb
+  ```
+
+  The two families the compiler routes by TYPE — `select`/`group`/`with`, and the
+  comprehension loops — have no dispatch to fail, so they now emit BOTH readings behind a
+  new `Op::ReceiverIs`, the receiver-test opcode `docs/dx-plan.md` said this would need.
+  The receiver is compiled once into a hidden local, so its side effects happen once
+  whichever branch runs. The tree-walker CALLS that opcode's predicate rather than
+  restating it, and a wrong-arity fallback raises from the one `arity_err` both engines
+  already share.
+
+  A local, a global, or an alias (`h = id`) of the same name still shadows the function,
+  identically on both engines. The parser's own desugars (`sort_by`, `take_while`,
+  `zipmap`, `position`, …) still win, which is recorded in `docs/dx-plan.md` rather than
+  left to be discovered. Nothing is spent on the success path: the argument clone the old
+  fallback made BEFORE dispatch is gone, because `call_method` only borrows them.
+
+  Found and fixed on the way: `Op::DfColumnVerb` raised its own sentence for a
+  non-DataFrame receiver ("expected a DataFrame, got Record") where the tree-walker raised
+  the ordinary method error — a pre-existing divergence, reachable whenever the checker
+  could not pin the receiver down.
+
+- **The native DataFrame engine is the default; polars is now the oracle only.**
+  (ADR 0033 Stage 4.) `default` and `bio` pull `native-df`. Polars stays behind the
+  `dataframes` feature because an engine cannot be its own evidence —
+  `scripts/dfdiff.sh` running every tracked program under both engines is what says
+  the replacement means the same thing, so the oracle outlives the default it
+  replaced.
+
+  | | with polars | shipped now |
+  |---|--:|--:|
+  | binary (full features) | 120 MB | **31 MB** |
+  | stripped | 77 MB | **20 MB** |
+  | crates compiled | 1,566 | **192** |
+  | startup (like-for-like) | 4.9 ms | **2.96 ms** |
+  | startup (appliance profile) | — | **2.5 ms** |
+
+  **The feature that adds a second engine inverted**: a dual-engine build is
+  `--features dataframes` now, not `--features native-df`. A dual build also
+  DEFAULTS to native, so a dev binary answers exactly as a shipped one does —
+  it defaulted to polars, which would have had every developer and every CI job
+  exercising the oracle while every user ran the shipped engine.
+
+  Every verb is faster. At 1.6M rows on materialised frames with every output
+  consumed, min-of-7 (polars → native): `group` 20.7 → **5.2 ms**, `join`
+  84.6 → **29.9**, `unique("col")` 9.0 → **3.2**, `with` 49.0 → **19.8**, `sort`
+  74.5 → **38.1**, `where` 26.0 → **13.6**, `unique` 33.2 → **23.4**.
+
+  `--features python` still requires `pyo3-polars`; it is the one configuration
+  where polars reaches a shipped binary.
+
+### Fixed
+
+- **A single `import` line silently disabled two features.** `module::load` namespaces
+  every top-level name once a second file is involved (`fn where` is stored as
+  `m0$where`), and two lookups asked for the name written in the source instead:
+
+  - the ADR 0045 **UFCS fallback** — a method call site says `where`, because a method name
+    is not a top-level name and must not be rewritten. The lookup missed, and "no such
+    function" is indistinguishable from "no fallback", so the call died with the pre-UFCS
+    error. The feature was present in exactly the files that do not need it and absent from
+    every file that does — a library's consumer always has an import.
+  - **`fn main`** (ADR 0037) — `climain::find` matched `name == "main"`, so a program that
+    took command-line arguments became one that refused them, and D6's refusal of an
+    unbindable parameter stopped firing with it.
+
+  A method call site now carries the name its fallback resolves to, filled by the loader
+  with the same precedence a free call gets; `climain::find` takes the entry module's
+  prefix (matching any `*$main` would have let an imported library's `main` hijack the
+  entry point). Neither was reachable by any existing test, because every UFCS corpus
+  program and every `fn main` test is a single file — the regression test is a multi-file
+  one.
+
+- **A `Connection` did not own its method names.** It was in no method table, so
+  `type_owns_method` answered false and a user's own `fn query(c, sql)` silently took a
+  call meant for the database — matching arities, no error, a program that never reaches
+  the server. `helix doc Connection` now answers too.
+
+- **A frame or a group reaching a function as an untyped parameter lost its verbs.**
+  Every DataFrame verb is routed by TYPE, and when the checker could not prove the
+  receiver the compiler guessed — evaluating the arguments as values, where a frame verb's
+  arguments are column names:
+
+  ```
+  fn adults(f) = f.where(age > 40)     # bare column names, ADR 0039's own spelling
+  walker: 2                            VM / JIT: `age` is not defined
+  ```
+
+  A `@column` argument was the only hint that switched the route, and a bare name carries
+  none — so the shape that broke is the one a database helper is written in. The same
+  guess was in `sort`, `drop_missing`, `drop_nan` and every grouped aggregation
+  (`g.mean(v)` → "`v` is not defined"), so the fix covers the family: both readings behind
+  `Op::ReceiverIs`, decided on the value. **Twenty cases across the two receivers now agree
+  on all three engines, where twelve diverged.**
+
+  It costs nothing measurable: an unproven receiver never fused anyway (the chain analysis
+  cannot see an array through a parameter), so guard off → on leaves the unproven/pinned
+  ratio at 1.335 → 1.341 on 4M elements. `map` is untouched — a frame owns no `map`, so
+  there was never a second reading to choose between.
+
+  Six error-wording divergences went with it: a group was refused only after its arguments
+  were evaluated, so the message named `v` rather than `sort`; `scan` on a bad receiver
+  reported "no method `map`", naming a call that appears nowhere in the source; and four
+  sentences were written once per engine. Each is a single constructor now.
+
+- **A split's other branch skipped ordinary method dispatch.** The first version of the
+  fix below sent every non-frame receiver straight to the user's function, so a type that
+  OWNS the name lost its own method: `Array` owns `join`, and `xs.join(",")` through an
+  untyped parameter went to a four-parameter `fn join` — the tree-walker answered and the
+  VM raised. Every split now emits the ordinary `Op::Method` with the fallback attached,
+  which is the same rule the walker runs, rather than re-deciding it.
+
+- **A user's `fn join` was taken by the DataFrame's `join`, and the engines disagreed.**
+  `join` is compiled by type like the column verbs, but with no requirement that an
+  argument mention a `@column` — a key may be written bare — so an `Unknown` receiver
+  routed to the frame join whatever the arguments were. It took a chain to reach: a record
+  literal types as `Record` and declines, while a user verb's unannotated return is
+  `Unknown`. The tree-walker dispatched on the runtime value and answered; the VM raised
+  ``` `join` takes 1 argument, got 3 ```. It now emits both readings behind
+  `Op::ReceiverIs` like the other two families.
+
+- **A doc example could not expect padded output.** The expectation lives in a `##`
+  comment, where trailing spaces are invisible and every formatter strips them — so they
+  are trimmed from the expectation, and must be. The comparison then trimmed only the END
+  of the whole output, which reaches the last line and no other, so a fixed-width column
+  anywhere above it could match nothing writable. Both sides are compared line by line now.
+  Leading whitespace is still significant: indentation is structure.
+
+- **The doc-example lint could be satisfied by an example that never runs.**
+  `helix test` reads `>>>` examples from `##` doc comments only — a plain `#` is prose.
+  The lint counted a `>>>` on any comment line, so `# >>> f(21)` cleared the finding and
+  executed nowhere. A codebase that comments with `#` throughout would have closed every
+  finding that way and finished with a green lint over examples nothing runs, which is the
+  one thing the rule exists to prevent. The lint now requires `##`, says so in the message,
+  and a test asserts the two AGREE rather than testing either alone.
+
+- **The long-`let` lint had its two constructs the wrong way round.** `do { … }` and
+  `let a = …, b = … in …` lower to the same node, while `let … in let … in` is a nest of
+  single-binding nodes — so the rule fired on `do` blocks, advising `do { … }`, which they
+  already were, and never fired on a chain at any length, which is its actual target. The
+  node records which form it was written as, and the rule counts the chain.
+
+- **A password could reach an error message.** `postgres_query`'s URL parser echoed the
+  whole raw URL back when it failed to parse. An error is the most widely copied text a
+  program produces, and a credential that reaches one has escaped.
+
+- **`read_csv` accepted ragged rows on one engine and refused them on the other.**
+  A short row pads with missing and a long row truncates to the header — the
+  behaviour `tests/cli.rs` records as policy, because files real pipelines emit
+  should stay countable and readable column-wise. The native engine errored
+  instead. Making `read_csv` strict is a decision that belongs in an ADR, not a
+  side effect of swapping engines.
+
+- **A bad join key did not say which frame was missing it, on the native engine.**
+  `validate_join_keys` is the seam's shared diagnostic — "so every backend produces
+  identical Helix error messages" — but it had exactly one caller, in
+  `backend/polars.rs`. Native fell through to a generic column lookup and dropped
+  the only part a join error needs. A `#[cfg_attr(not(feature = "dataframes"),
+  allow(dead_code))]` on the validator had been quietly accepting that a
+  native-only build compiled it unused.
+
+- **`helix` told you to rebuild with the engine you already had.** The hint for an
+  unavailable `HELIX_DF_ENGINE` named a fixed feature; it now names the feature
+  that supplies the MISSING engine.
+
+- **A `now()` test failed about one gate run in four.** WSL2 resyncs the guest wall
+  clock against the host, so `now()` can advance less than a `sleep` while
+  `clock_monotonic` reports it correctly. The test retries rather than skipping,
+  because skipping would make a real defect indistinguishable from a host
+  correction — a guard that cannot fail.
+
+### Internal
+
+- **Five corpus programs, covering ground the differential had never touched.**
+  All three divergences above were invisible for one reason: of 157 corpus files,
+  **none read a CSV** and none joined on a bad key. A differential is evidence only
+  for what its corpus exercises. `df_ragged_csv`, `df_join_bad_key`,
+  `df_unique_keys`, `df_group_keys` and `df_join_dense_edges` take dfdiff from 129
+  to 134 programs.
+
+- **`bench/df/`** — a DataFrame benchmark that refuses to measure above load 1.5,
+  asserts both engines printed the same thing before reporting any timing, and
+  treats a divergence as outranking every number. Every program consumes its result
+  through `.column(...)`: a lazy engine answers `.count()` without materialising
+  anything, and timed that way polars read 0.11 ms for a sort that costs 74 ms.
+
+
 ### Added
+
+- **PostgreSQL, spoken directly.** (ADR 0044.) `postgres_query(url, sql, params?)` returns
+  a DataFrame; `postgres_open(url)` returns a connection that answers
+  `c.query(sql, params?)`. Behind `--features postgres`, verified against a live
+  **PostgreSQL 19 Beta 3**.
+
+  ```
+  db = postgres_open("postgres://user:pw@host/db")
+  db.query("select name, age from people where age > $1", [40])
+    .where(@age < 55)
+    .select(@name)
+  ```
+
+  **Zero new dependencies.** The wire protocol has been frozen since 2003 (18 added 3.2,
+  19 carries it backward-compatibly, and `libpq` still requests 3.0), and SCRAM-SHA-256
+  needs only `sha2`/`hmac`/`base64`/`OsRng` — all already core. `libpq` would have ended
+  the binary's no-system-dependency property; a driver crate would have brought an async
+  runtime into a synchronous language.
+
+  **TLS is on by default, and the server cannot turn it off.** `libpq` defaults to
+  `sslmode=prefer`, and so does Go's `pgx`: if the server answers "no TLS", the session
+  continues in plaintext and the password exchange is readable by anyone on the path.
+  Helix has two modes rather than six — `verify-full` (the default: TLS, chain to a trusted
+  root, hostname checked) and `disable` (plaintext, spelled out by the person who wants
+  it). `require` and `verify-ca` are refused *with the reason*, because each is a trap with
+  a name; a private or provider CA is a file (`sslrootcert=`), never a switch that turns
+  checking off. An unknown `sslmode` value or an unknown parameter is an error, not a
+  silent default. Measured cost: **+1.4 ms per connection, nothing per query.**
+
+  **Read-only from the first byte**, sent as a startup parameter rather than a
+  `begin transaction read only` — so the session is read-only before a statement could be
+  sent, at zero round trips. An `insert` or a `create table` comes back as SQLSTATE 25006
+  from the server, not from a client-side blocklist.
+
+  **There is no `close` to forget.** Helix values are reference-counted, so a connection's
+  socket shuts when the last handle goes — deterministically, the same rule `Lock` relies
+  on. Five queries cost **20.7 ms through five connections and 6.0 ms through one**;
+  a `pg_stat_activity` check pins that three connections opened inside a function are gone
+  when it returns.
+
+  Parameters are values (`$1`, never string interpolation), `NULL` reads as `missing`,
+  unknown column types read as text rather than failing, and the capability label is `net`
+  — refused without it, like every other network verb.
 
 - **`[capabilities]` in `helix.toml` is a real authority ceiling.**
 

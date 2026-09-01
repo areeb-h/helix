@@ -76,7 +76,10 @@ pub fn effect_of(name: &str) -> Effect {
         // A lock is taken to WRITE; a reader has nothing to exclude anyone from.
         | "lock_file" | "try_lock_file" => Effect::FsWrite,
         "file_size" | "read_at" | "read_bytes" | "read_bytes_at" => Effect::FsRead,
-        "listen" | "http_get" | "http_post" | "http_request" | "http_stream" => Effect::Net,
+        "listen" | "http_get" | "http_post" | "http_request" | "http_stream"
+        // A database query is a network verb. It only reads, but Helix has ONE
+        // network authority, so `net` is what it costs and what it declares.
+        | "postgres_query" | "postgres_open" => Effect::Net,
         // The first `Process` grant. ADR 0021 reserved the category and ADR 0037 D3
         // states its ceiling: a subprocess is a BOUNDARY EXIT, not confinement — it
         // runs with its own permissions, so granting `run` on a shell or on `helix`

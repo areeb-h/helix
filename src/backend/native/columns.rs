@@ -160,25 +160,91 @@ impl Col {
 
     /// Gather rows by index (sort/filter/join all reduce to this). A string
     /// column shares its dictionary — the gather moves 4-byte codes.
-    pub fn take(&self, idx: &[usize]) -> Col {
+    /// The start of a contiguous ascending run, when `idx` is exactly
+    /// `[start, start + idx.len())`.
+    ///
+    /// WHY BOTHER LOOKING. A surprising share of gathers are runs wearing a
+    /// gather's clothing. `head`, `tail` and `slice` are runs by definition, and so
+    /// is the LEFT side of an ordinary dimension join — every row matches once, in
+    /// order, so the index is `0, 1, 2, …` and the gather random-accesses a column
+    /// into a copy of itself. Detecting that is one sequential pass that exits on
+    /// the first mismatch, and it turns the work into a memcpy.
+    fn contiguous_run(idx: &[usize]) -> Option<usize> {
+        let first = *idx.first()?;
+        idx.iter().enumerate().all(|(k, &i)| i == first + k).then_some(first)
+    }
+
+    /// Copy a contiguous row range: one memcpy per buffer, no index indirection
+    /// and no bounds check per element.
+    fn slice_copy(&self, start: usize, len: usize) -> Col {
+        let end = start + len;
         match self {
-            Col::I64 { vals, valid } => Col::I64 {
-                vals: idx.iter().map(|&i| vals[i]).collect(),
-                valid: idx.iter().map(|&i| valid[i]).collect(),
-            },
-            Col::F64 { vals, valid } => Col::F64 {
-                vals: idx.iter().map(|&i| vals[i]).collect(),
-                valid: idx.iter().map(|&i| valid[i]).collect(),
-            },
-            Col::Bool { vals, valid } => Col::Bool {
-                vals: idx.iter().map(|&i| vals[i]).collect(),
-                valid: idx.iter().map(|&i| valid[i]).collect(),
-            },
+            Col::I64 { vals, valid } => {
+                Col::I64 { vals: vals[start..end].to_vec(), valid: valid[start..end].to_vec() }
+            }
+            Col::F64 { vals, valid } => {
+                Col::F64 { vals: vals[start..end].to_vec(), valid: valid[start..end].to_vec() }
+            }
+            Col::Bool { vals, valid } => {
+                Col::Bool { vals: vals[start..end].to_vec(), valid: valid[start..end].to_vec() }
+            }
             Col::Str { dict, codes, valid } => Col::Str {
                 dict: dict.clone(),
-                codes: idx.iter().map(|&i| codes[i]).collect(),
-                valid: idx.iter().map(|&i| valid[i]).collect(),
+                codes: codes[start..end].to_vec(),
+                valid: valid[start..end].to_vec(),
             },
+            Col::Null { .. } => Col::Null { len },
+        }
+    }
+
+    pub fn take(&self, idx: &[usize]) -> Col {
+        // The bound is part of what makes a run usable, so it belongs in the
+        // question rather than in a second nested test.
+        if let Some(start) =
+            Self::contiguous_run(idx).filter(|&s| s + idx.len() <= self.len())
+        {
+            return self.slice_copy(start, idx.len());
+        }
+        // ONE pass, not two. Values and validity were gathered in separate sweeps,
+        // so every random index was paid twice and each sweep evicted the cache
+        // lines the other had just pulled in. Same output, half the index traffic.
+        match self {
+            Col::I64 { vals, valid } => {
+                let mut v = Vec::with_capacity(idx.len());
+                let mut m = Vec::with_capacity(idx.len());
+                for &i in idx {
+                    v.push(vals[i]);
+                    m.push(valid[i]);
+                }
+                Col::I64 { vals: v, valid: m }
+            }
+            Col::F64 { vals, valid } => {
+                let mut v = Vec::with_capacity(idx.len());
+                let mut m = Vec::with_capacity(idx.len());
+                for &i in idx {
+                    v.push(vals[i]);
+                    m.push(valid[i]);
+                }
+                Col::F64 { vals: v, valid: m }
+            }
+            Col::Bool { vals, valid } => {
+                let mut v = Vec::with_capacity(idx.len());
+                let mut m = Vec::with_capacity(idx.len());
+                for &i in idx {
+                    v.push(vals[i]);
+                    m.push(valid[i]);
+                }
+                Col::Bool { vals: v, valid: m }
+            }
+            Col::Str { dict, codes, valid } => {
+                let mut c = Vec::with_capacity(idx.len());
+                let mut m = Vec::with_capacity(idx.len());
+                for &i in idx {
+                    c.push(codes[i]);
+                    m.push(valid[i]);
+                }
+                Col::Str { dict: dict.clone(), codes: c, valid: m }
+            }
             Col::Null { .. } => Col::Null { len: idx.len() },
         }
     }
@@ -186,6 +252,15 @@ impl Col {
     /// Gather with missing fill: `None` slots become invalid. The join's side
     /// columns reduce to this — typed, never boxing a cell.
     pub fn take_opt(&self, idx: &[Option<usize>]) -> Col {
+        // The left side of an inner join that matched every row once, in order,
+        // arrives here as `Some(0), Some(1), Some(2), …` — the identity. Rather
+        // than gather a column into a copy of itself, recognise the run and memcpy.
+        // Checking costs one sequential pass with an early exit; a `None` anywhere
+        // (an unmatched row in a left/outer join) fails it immediately and falls
+        // through to the general path below.
+        if idx.iter().enumerate().all(|(k, o)| *o == Some(k)) && idx.len() <= self.len() {
+            return self.slice_copy(0, idx.len());
+        }
         match self {
             Col::I64 { vals, valid } => {
                 let mut v = Vec::with_capacity(idx.len());
@@ -262,16 +337,25 @@ impl Col {
     /// Coalesce-gather for a join's key column: the left row's cell when the
     /// pair has one, else the right's. Both sides share a dtype (checked by the
     /// caller); mixed dtypes take the boxed path instead.
+    /// Coalesce a join key from both sides, driven by the two parallel index
+    /// columns the join emits.
+    ///
+    /// This took a `&[(Option<usize>, Option<usize>)]`, which forced the join to
+    /// materialise a tuple vector purely to be split into the two index vectors
+    /// everything else consumed — 32 bytes a row to express two 16-byte columns,
+    /// plus the two passes that split it. Zipping the columns is the same
+    /// iteration with none of the intermediate.
     pub fn coalesce_gather(
         left: &Col,
         right: &Col,
-        pairs: &[(Option<usize>, Option<usize>)],
+        lidx: &[Option<usize>],
+        ridx: &[Option<usize>],
     ) -> Option<Col> {
         match (left, right) {
             (Col::I64 { vals: lv, valid: lm }, Col::I64 { vals: rv, valid: rm }) => {
-                let mut v = Vec::with_capacity(pairs.len());
-                let mut m = Vec::with_capacity(pairs.len());
-                for (l, r) in pairs {
+                let mut v = Vec::with_capacity(lidx.len());
+                let mut m = Vec::with_capacity(lidx.len());
+                for (l, r) in lidx.iter().zip(ridx) {
                     match (l, r) {
                         (Some(i), _) => {
                             v.push(lv[*i]);
@@ -290,9 +374,9 @@ impl Col {
                 Some(Col::I64 { vals: v, valid: m })
             }
             (Col::F64 { vals: lv, valid: lm }, Col::F64 { vals: rv, valid: rm }) => {
-                let mut v = Vec::with_capacity(pairs.len());
-                let mut m = Vec::with_capacity(pairs.len());
-                for (l, r) in pairs {
+                let mut v = Vec::with_capacity(lidx.len());
+                let mut m = Vec::with_capacity(lidx.len());
+                for (l, r) in lidx.iter().zip(ridx) {
                     match (l, r) {
                         (Some(i), _) => {
                             v.push(lv[*i]);
@@ -311,9 +395,9 @@ impl Col {
                 Some(Col::F64 { vals: v, valid: m })
             }
             (Col::Bool { vals: lv, valid: lm }, Col::Bool { vals: rv, valid: rm }) => {
-                let mut v = Vec::with_capacity(pairs.len());
-                let mut m = Vec::with_capacity(pairs.len());
-                for (l, r) in pairs {
+                let mut v = Vec::with_capacity(lidx.len());
+                let mut m = Vec::with_capacity(lidx.len());
+                for (l, r) in lidx.iter().zip(ridx) {
                     match (l, r) {
                         (Some(i), _) => {
                             v.push(lv[*i]);
@@ -337,8 +421,8 @@ impl Col {
             ) => {
                 // The dictionaries differ; hash-cons the union — Rc reuse, no
                 // per-cell text allocation.
-                let mut b = StrBuilder::with_capacity(pairs.len());
-                for (l, r) in pairs {
+                let mut b = StrBuilder::with_capacity(lidx.len());
+                for (l, r) in lidx.iter().zip(ridx) {
                     match (l, r) {
                         (Some(i), _) => {
                             if lm[*i] {

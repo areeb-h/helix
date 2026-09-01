@@ -801,6 +801,9 @@ pub(crate) fn eq3(l: &Value, r: &Value) -> Option<bool> {
             }))
         }
         (Value::Dict(a), Value::Dict(b)) => {
+            // The merged views, never the logs: two dicts holding the same keys are
+            // equal however each of them was built up.
+            let (a, b) = (a.map(), b.map());
             if a.len() != b.len() {
                 return Some(false);
             }
@@ -933,6 +936,7 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
         // A dict is its key→value mapping: equal iff same keys with structurally-equal
         // values. Keys compare exactly (`DictKey: Eq`); values recurse through `values_equal`.
         (Value::Dict(a), Value::Dict(b)) => {
+            let (a, b) = (a.map(), b.map());
             a.len() == b.len()
                 && a.iter().all(|(k, v)| b.get(k).is_some_and(|v2| values_equal(v, v2)))
         }

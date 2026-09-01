@@ -155,6 +155,11 @@ impl super::Interp {
                 return crate::db::sqlite_query(&args, line, col)
                     .map(|df| Value::DataFrame(std::rc::Rc::new(df)));
             }
+            "postgres_open" => return crate::pg::postgres_open(&args, line, col),
+            "postgres_query" => {
+                return crate::pg::postgres_query(&args, line, col)
+                    .map(|df| Value::DataFrame(std::rc::Rc::new(df)));
+            }
             "read_bcf" => return bio::a_read_bcf(name, args, line, col),
             "read_sam" => return bio::a_read_sam(name, args, line, col),
             "read_bam" => return bio::a_read_bam(args, line, col),
@@ -531,6 +536,7 @@ fn http_request_fields(req: &Value, line: usize, col: usize) -> Result<HttpReqPa
             }
         }
         Some(Value::Dict(map)) => {
+            let map = map.map();
             for (k, v) in map.iter() {
                 if let crate::value::DictKey::Str(s) = k {
                     hdrs.push(((**s).clone(), hval(v)));
