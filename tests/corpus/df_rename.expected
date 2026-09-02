@@ -1,0 +1,25 @@
+exit: 0
+--- stdout ---
+["one", "TWO", "three"]
+[3, 4]
+["ONE", "two", "three"]
+["one", "two", "THREE"]
+[1, 2]
+["one", "two", "three"]
+[3, 4]
+["x", "two", "y"]
+["id", "two", "three"]
+[1, 2]
+[1, missing, 3]
+2
+2
+[1, 2, 3]
+["p", "q"]
+[4, 2]
+[2, 3]
+[1.5, 2.5]
+["a", "b"]
+["post", "id", "name"]
+3
+["ann", "ann", "bo"]
+--- stderr ---

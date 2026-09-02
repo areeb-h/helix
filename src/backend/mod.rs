@@ -323,6 +323,56 @@ pub trait DataHandle {
     fn column_names(&self, line: usize, col: usize) -> Result<Vec<String>, HelixError>;
     fn filter(&self, pred: &ColExpr, line: usize, col: usize) -> Result<Df, HelixError>;
     fn select(&self, names: &[String], line: usize, col: usize) -> Result<Df, HelixError>;
+
+    /// `df.rename(old, new)` -- the same column under a different name, in the same place.
+    ///
+    /// **Provided, not implemented per backend.** A rename is exactly "copy the column
+    /// under the new name, then project in the original order", and every backend already
+    /// implements both halves with dfdiff covering them -- so the engines agree here by
+    /// construction rather than by two implementations that happen to match. The cost is
+    /// two column-set rebuilds where a native relabel would need one; overriding it is
+    /// worth doing when a measurement asks, and none has.
+    ///
+    /// Both arguments are ordinary evaluated strings, like `unique`'s and `column`'s, so a
+    /// library passes its own parameters straight through -- which is the point. Aligning a
+    /// child's foreign key to a parent's key is a rename, and until now a frame had no way
+    /// to say one: the `with`-value route cannot, because in an EXPRESSION position ADR
+    /// 0028 makes a binding its value, so `f.with({to: from})` inserts the literal text.
+    /// A rename is two NAME positions, so it needs no new syntax at all.
+    fn rename(&self, old: &str, new: &str, line: usize, col: usize) -> Result<Df, HelixError> {
+        let names = self.column_names(line, col)?;
+        if !names.iter().any(|n| n == old) {
+            return Err(HelixError::new(
+                format!("no column `{old}` in the DataFrame"),
+                line,
+                col,
+            )
+            .hint(format!("columns: {}", names.join(", "))));
+        }
+        // RENAMING ONTO AN OCCUPIED NAME WOULD DISCARD THAT COLUMN -- a wrong answer
+        // wearing the shape of a successful call, and the caller would find out later or
+        // never. Refuse it, and say what it would have cost.
+        if old != new && names.iter().any(|n| n == new) {
+            return Err(HelixError::new(
+                format!(
+                    "cannot rename `{old}` to `{new}`: the DataFrame already has a column `{new}`"
+                ),
+                line,
+                col,
+            )
+            .hint(
+                "rename or drop the existing column first -- renaming onto it would discard its data.",
+            ));
+        }
+        let widened =
+            self.with_columns(&[(new.to_string(), ColExpr::Col(old.to_string()))], line, col)?;
+        // The ORIGINAL order with one name swapped, so the column stays where it was
+        // rather than moving to the end -- `with_columns` appends, `select` puts it back.
+        let ordered: Vec<String> =
+            names.iter().map(|n| if n == old { new.to_string() } else { n.clone() }).collect();
+        widened.select(&ordered, line, col)
+    }
+
     fn with_columns(
         &self,
         cols: &[(String, ColExpr)],

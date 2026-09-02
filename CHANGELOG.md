@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Added
+
+- **`df.rename(old, new)`** — the same column under a different name, in the same
+  position. A frame had no way to say this, and it was the last thing blocking a generic
+  relation-attach in a library: aligning a child's foreign key to a parent's key IS a
+  rename.
+
+  ```helix
+  fn attach(child, parent, fk, pk) = child.rename(fk, pk).join(parent, pk)
+  attach(posts, users, "author_id", "id").columns()   # ["post", "id", "name"]
+  ```
+
+  Both arguments are ordinary evaluated strings, like `unique`'s and `column`'s, so a
+  library passes its own parameters straight through — no new syntax, and none of ADR
+  0028's name-position machinery. The `with`-value route could never express this: in an
+  EXPRESSION position ADR 0028 makes a binding its *value*, so `f.with({to: from})`
+  inserts the literal text `"author_id"` rather than that column's data. A rename is two
+  NAME positions, which the language already spells.
+
+  **Renaming onto an occupied name is refused**, with a message that says what it would
+  have cost — silently discarding that column is a wrong answer wearing the shape of a
+  successful call. Renaming a column to *itself* is a no-op rather than a collision:
+  refusing it would make `rename(fk, pk)` fail exactly when the child already used the
+  parent's name, which is the case a caller is least able to predict.
+
+  Implemented once, as a **provided** trait method — "copy the column under the new name,
+  then project in the original order" — rather than twice, so the two DataFrame backends
+  agree here by construction instead of by two implementations that happen to match. The
+  cost is two column-set rebuilds where a native relabel would need one; that is worth
+  overriding when a measurement asks, and none has.
+
 ### Fixed
 
 - **A column name captured from an enclosing scope resolved on one engine and not the

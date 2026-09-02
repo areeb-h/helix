@@ -103,6 +103,8 @@ static SYNONYMS: &[(&str, &[&str])] = &[
     // A different word for the same statistic.
     ("percentile", &["quantile"]),
     ("groupby", &["group"]),
+    ("alias", &["rename"]),
+    ("relabel", &["rename"]),
     ("dedupe", &["unique"]),
     ("dedup", &["unique"]),
     ("distinct", &["unique"]),

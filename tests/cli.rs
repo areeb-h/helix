@@ -14488,3 +14488,77 @@ fn the_memo_cache_keys_on_strings_and_bools_and_they_are_in_the_key() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+/// `df.rename(old, new)` — the refusals, and three engines agreeing on all of it.
+///
+/// The success cases live in `tests/corpus/df_rename.helix`, which dfdiff runs under BOTH
+/// DataFrame backends. What that cannot cover is the refusals, because a corpus program
+/// has one exit code; they are here, and they are the interesting half:
+///
+///   * renaming onto an OCCUPIED name would discard that column — a wrong answer wearing
+///     the shape of a successful call. It is refused, and the message says what it would
+///     have cost rather than just that it was refused.
+///   * renaming a column that does not exist is the ordinary missing-column error, so it
+///     reads like every other one and lists the columns that do exist.
+///
+/// `rename` is a PROVIDED trait method (copy the column under the new name, then project
+/// in the original order), so both backends run the same two calls. That makes agreement
+/// structural — which is why this asserts the errors, where the two hand-written halves it
+/// composes could still disagree, rather than re-asserting the happy path dfdiff covers.
+#[test]
+fn rename_refuses_what_would_silently_discard_a_column() {
+    let dir = std::env::temp_dir().join(format!("hx_ren_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("r.helix");
+
+    const D: &str = "D = dataframe({a: [1, 2], b: [3, 4]})\n";
+    for (label, src, want_ok, needle) in [
+        // THE ONE THAT MATTERS: `b` already exists, and renaming onto it would drop it.
+        ("onto-existing", format!("{D}print(D.rename(\"a\", \"b\").columns())\n"), false,
+         "already has a column `b`"),
+        // …including when the names arrive as arguments, which is the library case and the
+        // only way this is reached in practice.
+        ("onto-existing-param",
+         format!("{D}fn r(f, x, y) = f.rename(x, y)\nprint(r(D, \"a\", \"b\").columns())\n"),
+         false, "already has a column `b`"),
+        ("no-such-column", format!("{D}print(D.rename(\"nope\", \"z\").columns())\n"), false,
+         "no column `nope`"),
+        ("one-argument", format!("{D}print(D.rename(\"a\").columns())\n"), false,
+         "the old column name and the new one"),
+        ("three-arguments", format!("{D}print(D.rename(\"a\", \"z\", \"q\").columns())\n"), false,
+         "the old column name and the new one"),
+        ("non-string", format!("{D}print(D.rename(\"a\", 5).columns())\n"), false,
+         "column name string"),
+        // Renaming a column to ITSELF is not a collision — it is a no-op, and refusing it
+        // would make `rename(fk, pk)` fail exactly when the child already used the parent's
+        // name, which is the case a caller is least able to predict.
+        ("onto-itself", format!("{D}print(D.rename(\"a\", \"a\").columns())\n"), true,
+         "[\"a\", \"b\"]"),
+        // And the column keeps its VALUES, not a broadcast of its name — the failure the
+        // `with`-value route has, and the reason this verb exists at all.
+        ("values-not-name", format!("{D}print(D.rename(\"a\", \"z\").column(\"z\"))\n"), true,
+         "[1, 2]"),
+    ] {
+        std::fs::write(&prog, &src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "{label}: jit vs vm: {ej} / {ev}");
+        assert_eq!((cv, &vm), (ct, &tw), "{label}: vm vs tree-walker: {ev} / {et}");
+        if want_ok {
+            assert_eq!(cj, Some(0), "{label} should succeed: {ej}");
+            assert_eq!(jit.trim(), needle, "{label}");
+        } else {
+            assert_ne!(cj, Some(0), "{label} should be REFUSED, got: {jit}");
+            assert!(
+                ej.contains(needle) && et.contains(needle),
+                "{label}: message must say `{needle}`\njit: {ej}\ntree-walker: {et}"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

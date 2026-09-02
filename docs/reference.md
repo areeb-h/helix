@@ -3602,6 +3602,17 @@ Join with another frame on key column(s); a trailing string picks the type.
 1
 ```
 
+### `rename(old, new)`
+
+The same column under a different name, in the same position.
+
+**Note:** Both names are ordinary strings, so a library can pass its own parameters. Renaming onto an existing column is refused rather than silently discarding it.
+
+```
+>>> dataframe({a: [1, 2], b: [3, 4]}).rename("a", "z").columns()
+["z", "b"]
+```
+
 ### `select(@col, ...)`
 
 A frame with only the named columns, in the given order.

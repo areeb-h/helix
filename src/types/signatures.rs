@@ -1341,7 +1341,7 @@ pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type
     Ok(match name {
         "where" | "filter" | "drop_missing" | "drop_nan" | "select" | "sort" | "head" | "tail"
         | "slice" | "cache" | "with"
-        | "join" | "vstack" | "unique" => Type::DataFrame,
+        | "join" | "vstack" | "unique" | "rename" => Type::DataFrame,
         "group" => Type::GroupBy,
         "count" => Type::Int,
         "columns" => Type::Array(Box::new(Type::String)),

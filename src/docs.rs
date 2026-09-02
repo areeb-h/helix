@@ -3134,6 +3134,17 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
     (
         "DataFrame",
         DocEntry {
+            name: "rename",
+            sig: "rename(old, new)",
+            doc: "The same column under a different name, in the same position.",
+            example: "dataframe({a: [1, 2], b: [3, 4]}).rename(\"a\", \"z\").columns()",
+            example_out: "[\"z\", \"b\"]",
+            notes: "Both names are ordinary strings, so a library can pass its own parameters. Renaming onto an existing column is refused rather than silently discarding it.",
+        },
+    ),
+    (
+        "DataFrame",
+        DocEntry {
             name: "column",
             sig: "column(name)",
             doc: "One column's values as an array.",

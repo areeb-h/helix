@@ -242,6 +242,17 @@ with mechanisms so nothing has to be rediscovered:
 
 ### A frame has no `rename`, and no dynamic column REFERENCE (2026-09-02)
 
+**`rename` LANDED 2026-09-02.** It needed no new syntax and no seam change in the
+end: two NAME positions, both ordinary evaluated strings, and a *provided* trait
+method composing `with_columns` + `select` — so both backends agree by construction
+rather than by two implementations matching. The estimate below ("a MINOR and an
+hour of careful work") was right about the registration sites and wrong about the
+backends: reading the seam showed `unique` and `column` already take evaluated
+string arguments, which is the pattern `rename` wanted, not `select`'s.
+
+The dynamic column REFERENCE below is still open, and is now the only half left —
+though with `rename` in place nothing has asked for it.
+
 With `with`'s key and `join`'s keys now taking a binding, one gap is left and it is
 narrower than it first looked. Those are NAME positions, where ADR 0028 makes a binding
 name a column. An EXPRESSION position is the opposite by the same rule — a binding is its

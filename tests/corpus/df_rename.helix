@@ -1,0 +1,62 @@
+# `rename` must mean the same thing on both DataFrame backends.
+#
+# It is a PROVIDED trait method — "copy the column under the new name, then project in
+# the original order" — so both engines run the same two calls rather than two hand-written
+# implementations. That makes agreement structural, which is a reason to check it here
+# rather than an excuse not to: the two halves it composes are backend code, and a
+# `with_columns` that appended where the other replaced would show up as an order or a
+# duplicate, only through this verb.
+
+# THE COLUMN STAYS WHERE IT WAS. `with_columns` appends, so a rename that forgot to
+# re-project would move the column to the end — visible only if a middle column is renamed.
+a = dataframe({one: [1, 2], two: [3, 4], three: [5, 6]})
+print(a.rename("two", "TWO").columns())
+print(a.rename("two", "TWO").column("TWO"))
+print(a.rename("one", "ONE").columns())
+print(a.rename("three", "THREE").columns())
+
+# The values are the column's, not a broadcast of its NAME — the failure the `with`-value
+# route actually has, and the reason this verb exists.
+print(a.rename("one", "z").column("z"))
+
+# A no-op rename is still a frame, with everything in place.
+print(a.rename("two", "two").columns())
+print(a.rename("two", "two").column("two"))
+
+# Chained, so the second rename sees the first's output rather than the original.
+print(a.rename("one", "x").rename("three", "y").columns())
+
+# FROM A BINDING. Both arguments are ordinary evaluated strings, so a library passes its
+# own parameters — the whole point of the verb.
+fn ren(f, from, to) = f.rename(from, to)
+print(ren(a, "one", "id").columns())
+print(ren(a, "one", "id").column("id"))
+
+# Missing values survive a rename, and the renamed column is still missing-aware.
+b = dataframe({v: [1, missing, 3]})
+print(b.rename("v", "w").column("w"))
+print(b.rename("v", "w").drop_missing().count())
+
+# A renamed column is an ordinary column downstream: it filters, sorts and groups.
+c = dataframe({k: ["p", "q", "p"], n: [1, 2, 3]})
+print(c.rename("n", "amount").where(@amount > 1).count())
+print(c.rename("n", "amount").sort(@amount).column("amount"))
+print(c.rename("k", "grp").group(@grp).sum(@n).column("grp"))
+print(c.rename("k", "grp").group(@grp).sum(@n).column("n"))
+
+# Renaming AFTER a filter, so the input is a derived frame rather than a literal one.
+print(c.where(@n > 1).rename("n", "amount").column("amount"))
+
+# Floats and strings, so the rename is not quietly typed to Int.
+d = dataframe({f: [1.5, 2.5], s: ["a", "b"]})
+print(d.rename("f", "g").column("g"))
+print(d.rename("s", "t").column("t"))
+
+# THE SHAPE THIS VERB WAS ADDED FOR: aligning a child's foreign key to a parent's key,
+# with both names arriving as arguments rather than as literals.
+posts = dataframe({post: [1, 2, 3], author_id: [10, 10, 20]})
+users = dataframe({id: [10, 20], name: ["ann", "bo"]})
+fn attach(child, parent, fk, pk) = child.rename(fk, pk).join(parent, pk)
+print(attach(posts, users, "author_id", "id").columns())
+print(attach(posts, users, "author_id", "id").count())
+print(attach(posts, users, "author_id", "id").sort(@post).column("name"))

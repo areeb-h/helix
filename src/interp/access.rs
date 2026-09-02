@@ -315,6 +315,21 @@ pub(crate) fn df_value_method(
             let name = column_arg(&args, line, col)?;
             Ok(Value::array_sniff(lf.column_values(&name, line, col)?))
         }
+        // Two NAME arguments, both ordinary evaluated strings -- so a library can pass its
+        // own parameters through without any of ADR 0028's name-position machinery, which
+        // is exactly what a generic relation-attach needs.
+        "rename" => {
+            if args.len() != 2 {
+                return Err(HelixError::new(
+                    "`rename` takes the old column name and the new one",
+                    line,
+                    col,
+                )
+                .hint("e.g. `df.rename(\"author_id\", \"id\")`."));
+            }
+            let names = column_args("rename", &args, line, col)?;
+            Ok(Value::dataframe(lf.rename(&names[0], &names[1], line, col)?))
+        }
         "to_json" => {
             if !args.is_empty() {
                 return Err(HelixError::new("`to_json` takes no arguments", line, col));
