@@ -6133,7 +6133,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("[1, 2].position()", "takes one predicate function"),
             ("[1, 2].position(it > 0, it < 5)", "takes one predicate function"),
             ("[1, 2].take_while()", "takes one predicate function"),
-            ("5.position(it > 0)", "type Int has no method `position`"),
+            ("5.position(it > 0)", "an Int has no method `position`"),
             ("\"abc\".position(it)", "no method `position`"),
         ] {
             let (tw, vm) = (run_tw(src), run_vm(src));

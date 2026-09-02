@@ -1336,7 +1336,7 @@ pub(super) fn record_method_type(
                     })
                 }
                 None => Err(HelixError::new(
-                    format!("type Record has no method `{other}`"),
+                    format!("{} has no method `{other}`", crate::value::with_article("Record")),
                     line,
                     col,
                 )

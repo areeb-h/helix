@@ -2,7 +2,7 @@ exit: 1
 --- stdout ---
 
 --- stderr ---
-error: type Int has no method `where`
+error: an Int has no method `where`
   --> <src>:1:12
   |
 1 | fn g(x) = x.where(it > 1)

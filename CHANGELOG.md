@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+### Changed
+
+- **One refusal, one sentence.** The checker said `type Int has no method \`nope\`` where
+  the runtime said `an Int has no method \`nope\`` — the same rejection reached by two
+  routes a caller cannot choose between. A receiver whose type is known refuses in the
+  checker; the same receiver through a parameter is `Unknown`, so the checker steps aside
+  and the runtime answers. The checker now speaks the runtime's sentence.
+
+  The runtime's form won on evidence rather than taste: the sibling family — `` `f` is an
+  Int, not a function `` — already ran `with_article` on both sides, so an article was
+  already the house style and `type Int` was the outlier.
+
+  **`docs/dx-plan.md` estimated ~40 pins across 14 files; it was four.** Most of what
+  `grep` matched was the sentence that did not move. Unifying onto the majority form is
+  what made a change that had been deferred for months cheap.
+
+  **What was actually hard was finding the producers.** Enumerating — forcing the same
+  refusal through a literal receiver and a parameter receiver, then diffing — found three
+  things grep did not:
+
+  - `types.rs::unknown_method` was one of **three** checker producers. Fixing it left
+    `Array` and `String` agreeing while `Int` still diverged through
+    `types/synth.rs`'s scalar fallback, and `Record` through a hardcoded string.
+  - `interp/comprehensions.rs::not_an_array` is a **runtime** path that spoke the
+    **checker's** sentence, so unifying the checker alone would have *inverted* the drift
+    on `x.map(it)` rather than closing it.
+  - Three more sites built the right words by hand (`a Tensor`, `a DataFrame`,
+    `a Connection`) — correct only because someone typed the right article for a
+    consonant.
+
+  The enumerator is kept as the guard
+  (`a_refusal_reads_the_same_from_the_checker_and_the_runtime`), covering seven receiver
+  types across four refusal families. Sabotaged three ways; each producer is caught by a
+  different case, which is the property that matters — a guard catching one of three is
+  how this drift survived in the first place.
+
+  The article was, accidentally, how you could tell which half refused, and this cycle used
+  it twice to diagnose. That is not a reason to keep two sentences: `helix check` answers
+  the same question outright, and a diagnostic that works by reading grammar is not one
+  anyone can rely on.
+
 ### Fixed
 
 - **`a Array has no method`.** The runtime's no-method error built its sentence with a

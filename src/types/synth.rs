@@ -356,7 +356,11 @@ impl super::Checker {
             // a function rather than leaving the user with a bare rejection.
             other => {
                 let err = HelixError::new(
-                    format!("type {} has no method `{}`", other, name),
+                    format!(
+                        "{} has no method `{}`",
+                        crate::value::with_article(&other.to_string()),
+                        name
+                    ),
                     line,
                     col,
                 );

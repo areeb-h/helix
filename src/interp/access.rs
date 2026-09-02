@@ -363,7 +363,11 @@ pub(crate) fn df_value_method(
         _ => {
             let methods = crate::registry::methods_of(crate::registry::DF_METHODS);
             let err =
-                HelixError::new(format!("a DataFrame has no method `{}`", name), line, col);
+                HelixError::new(
+                    format!("{} has no method `{}`", crate::value::with_article("DataFrame"), name),
+                    line,
+                    col,
+                );
             Err(match crate::suggest::hint(name, crate::suggest::Site::Method, &methods) {
                 Some(h) => err.hint(h),
                 None => err.hint(format!("DataFrame methods: {}", methods.join(", "))),

@@ -9302,10 +9302,10 @@ fn ufcs_never_changes_a_call_that_already_resolved() {
     }
 
     let keeps = [
-        ("typo", "print([1, 2].lenght())\n", "type Array has no method `lenght`"),
-        ("wrong_recv", "print(\"abc\".windows(2))\n", "type String has no method `windows`"),
-        ("unknown", "print([1, 2].nosuchthing())\n", "type Array has no method `nosuchthing`"),
-        ("no_fn", "print({a: 1}.nope())\n", "type Record has no method `nope`"),
+        ("typo", "print([1, 2].lenght())\n", "an Array has no method `lenght`"),
+        ("wrong_recv", "print(\"abc\".windows(2))\n", "a String has no method `windows`"),
+        ("unknown", "print([1, 2].nosuchthing())\n", "an Array has no method `nosuchthing`"),
+        ("no_fn", "print({a: 1}.nope())\n", "a Record has no method `nope`"),
         ("namespace", "print(stats.t_test([1.0], [2.0]))\n", "no longer available"),
     ];
     for (name, env) in ENGINES {
@@ -15009,6 +15009,82 @@ fn the_runtime_no_method_error_takes_the_right_article() {
         err.contains("a Unit has no method") || err.contains("Unit"),
         "Unit takes `a`, not `an` — the rule is about sound: {err}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// One refusal, one sentence — whichever half of the language refuses.
+///
+/// Every case below is the same rejection reached two ways: a LITERAL receiver, whose type
+/// the checker knows and refuses on, and the same receiver through a PARAMETER, which is
+/// `Unknown` so the checker steps aside and the runtime answers. A user cannot predict
+/// which route their program takes, so the two must say the same thing.
+///
+/// THIS IS A GUARD, NOT A CLEANUP, because the drift came back twice while it was being
+/// closed. `types.rs::unknown_method` turned out to be one of THREE checker producers —
+/// `types/synth.rs`'s scalar fallback and a hardcoded `type Record` in `signatures.rs`
+/// were quiet until Int and Record were forced through. And `interp/comprehensions.rs`'s
+/// `not_an_array` is a RUNTIME path that spoke the CHECKER's old sentence, so unifying the
+/// checker alone would have INVERTED the drift on `x.map(it)` rather than closing it.
+///
+/// Grep found none of that. Diffing the two columns did, which is why the instrument that
+/// found it is the one left behind.
+#[test]
+fn a_refusal_reads_the_same_from_the_checker_and_the_runtime() {
+    let dir = std::env::temp_dir().join(format!("hx_fam_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // The first `error:` line, which is the sentence under test; the caret block below it
+    // legitimately differs (different source, different column).
+    let first_error = |src: &str, tag: &str| -> String {
+        let p = dir.join(format!("{tag}.helix"));
+        std::fs::write(&p, src).unwrap();
+        let (_, err, code) = run(&[p.to_str().unwrap()], &[], "");
+        assert_ne!(code, Some(0), "expected a refusal from:\n{src}\ngot success");
+        err.lines()
+            .find(|l| l.starts_with("error:"))
+            .unwrap_or_else(|| panic!("no `error:` line for:\n{src}\n{err}"))
+            .to_string()
+    };
+
+    // (label, literal receiver → the CHECKER refuses, parameter receiver → the RUNTIME does)
+    for (label, checker_src, runtime_src) in [
+        ("no-method-int", "print((5).nope())\n", "fn g(x) = x.nope()\nprint(g(5))\n"),
+        ("no-method-array", "print([1].nope())\n", "fn g(x) = x.nope()\nprint(g([1]))\n"),
+        ("no-method-string", "print(\"s\".nope())\n", "fn g(x) = x.nope()\nprint(g(\"s\"))\n"),
+        ("no-method-float", "print((1.5).nope())\n", "fn g(x) = x.nope()\nprint(g(1.5))\n"),
+        ("no-method-bool", "print(true.nope())\n", "fn g(x) = x.nope()\nprint(g(true))\n"),
+        ("no-method-record", "print({a: 1}.nope())\n", "fn g(x) = x.nope()\nprint(g({a: 1}))\n"),
+        ("no-method-tuple", "print((1, 2).nope())\n", "fn g(x) = x.nope()\nprint(g((1, 2)))\n"),
+        // The comprehension family, which lives in the runtime and once spoke the
+        // checker's sentence — the case that would have inverted the drift.
+        ("not-an-array-int", "print((5).map(it))\n", "fn g(x) = x.map(it)\nprint(g(5))\n"),
+        // Int and Bool, deliberately. For a String or Record receiver the checker
+        // reports the unbound `it` BEFORE the method — its argument-vs-receiver order
+        // differs by receiver type — so those programs never reach this family from
+        // the checker and would be testing something else.
+        ("not-an-array-bool", "print(true.map(it))\n",
+         "fn g(x) = x.map(it)\nprint(g(true))\n"),
+        ("not-an-array-filter", "print((5).filter(it))\n",
+         "fn g(x) = x.filter(it)\nprint(g(5))\n"),
+        // Not a function. The parameter is named `f` too, so only the route differs.
+        ("not-a-function", "fn f(x) = x\nf = 5\nprint(f(1))\n",
+         "fn call(f) = f(1)\nprint(call(5))\n"),
+        // Field access on a value that has none.
+        ("no-field-int", "print((5).nope)\n", "fn g(x) = x.nope\nprint(g(5))\n"),
+    ] {
+        let a = first_error(checker_src, &format!("c_{label}"));
+        let b = first_error(runtime_src, &format!("r_{label}"));
+        assert_eq!(
+            a, b,
+            "{label}: the same refusal reads two ways.\n  checker: {a}\n  runtime: {b}\n\
+             One refusal, one sentence — see `types.rs::unknown_method` and \
+             `interp/methods::unknown_method`, and note there is more than one producer on \
+             each side."
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }

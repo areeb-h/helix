@@ -188,7 +188,10 @@ pub fn conn_method(
             crate::backend::build_frame(built, line, col)
                 .map(|df| Value::DataFrame(std::rc::Rc::new(df)))
         }
-        other => Err(err(format!("a Connection has no method `{other}`"))
+        other => Err(err(format!(
+            "{} has no method `{other}`",
+            crate::value::with_article("Connection")
+        ))
             .hint("a Connection answers `query(sql, params?)`.")),
     }
 }

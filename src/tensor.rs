@@ -695,7 +695,7 @@ pub fn method(
         }
         _ => {
             let err = HelixError::new(
-                format!("a Tensor has no method `{}`", name),
+                format!("{} has no method `{}`", crate::value::with_article("Tensor"), name),
                 line,
                 col,
             );

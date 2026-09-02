@@ -64,3 +64,18 @@ no entry. A source edit is not a behavior change.
   real binary and therefore type-checks first.
 
   Message-only: no program's exit code, stdout, or value changed.
+
+- `tests__corpus__d7_where_misquote` — `` type Int has no method `where` `` became
+  `` an Int has no method `where` ``, pinned at the **v0.5.1 and v0.6.0** baselines. This
+  is the error-family unification, not the article fix above: the CHECKER said "type Int"
+  where the RUNTIME said "an Int" for the same refusal, reached by two routes a caller
+  cannot choose between — a receiver whose type is known refuses in the checker, and the
+  same receiver through a parameter is `Unknown`, so the runtime answers.
+
+  The runtime's form won because the sibling family already spoke it ("`f` is an Int, not
+  a function" runs through `with_article` on both sides), which also made the change
+  cheap: `docs/dx-plan.md` estimated ~40 pins, and it was four, because most of what grep
+  matched was the sentence that did not move.
+
+  Message-only. `a_refusal_reads_the_same_from_the_checker_and_the_runtime` now holds the
+  property, and it catches all three producers — verified by sabotaging each in turn.

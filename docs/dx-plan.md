@@ -174,11 +174,36 @@ mechanism so nothing has to be rediscovered:
   needs `Expr::Call` to CARRY named pairs to the module loader (today only
   `Expr::Method` does), i.e. an AST change + parser deferral for names in
   `selected_imports`. Surface addition → 0.6.0.
-- **Static/runtime error family drift.** The checker says `type Int has no
-  method ...`, the runtime says `an Int has no method ...` — same refusal, two
-  sentence families, both pinned in many places. Unifying is a coordinated
-  message change across `types/synth.rs` + `interp/methods` + every pin;
-  worth doing once, not incrementally.
+- ~~**Static/runtime error family drift.**~~ **DONE 2026-09-02.** The checker now
+  speaks the runtime's sentence, and a test holds the property rather than a convention.
+
+  **The estimate was wrong in a useful direction: four pins, not ~40.** Most of what
+  `grep "has no method"` matched was the RUNTIME's sentence, which did not move — the
+  unification brought the checker to the form the majority already spoke. The runtime's
+  form won on evidence in the tree, not taste: the sibling family ("`f` is an Int, not a
+  function") already ran `with_article` on both sides, so an article was the house style
+  and "type Int" was the outlier.
+
+  **What made it hard was not the count.** Enumerating — forcing the same refusal through
+  a LITERAL receiver (checker) and a PARAMETER receiver (runtime) and diffing the columns
+  — found three things grep did not:
+
+    * `types.rs::unknown_method` was one of THREE checker producers. Fixing it left
+      `Array` and `String` agreeing while `Int` still diverged, via
+      `types/synth.rs`'s scalar fallback, and `Record` via a hardcoded string in
+      `signatures.rs`.
+    * `interp/comprehensions.rs::not_an_array` is a RUNTIME path that spoke the CHECKER's
+      sentence. Unifying the checker alone would have INVERTED the drift for
+      `x.map(it)` rather than closing it.
+    * Three more sites built the right words by hand (`a Tensor`, `a DataFrame`,
+      `a Connection`) — correct only because someone typed the right article.
+
+  `a_refusal_reads_the_same_from_the_checker_and_the_runtime` is the enumerator kept as a
+  guard. Sabotaged three ways, each producer caught by a different case.
+
+  Still divergent and NOT part of this, because it is a different question: the checker's
+  argument-vs-receiver order. `(5).map(it)` refuses the method, `"s".map(it)` refuses the
+  unbound `it` first. Same program shape, different first complaint by receiver type.
 
   **Sized and motivated 2026-09-02.** About 40 pins across 14 source files plus four
   corpus goldens (`grep -rn "has no method"`). The case for doing it is no longer

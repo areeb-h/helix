@@ -285,7 +285,25 @@ fn field_on_non_record(t: &Type, name: &str, line: usize, col: usize) -> HelixEr
 }
 
 fn unknown_method(type_name: &str, name: &str, candidates: &[&str], line: usize, col: usize) -> HelixError {
-    let err = HelixError::new(format!("type {} has no method `{}`", type_name, name), line, col);
+    // ONE REFUSAL, ONE SENTENCE — the runtime's, in `interp/methods`. This said "type Int
+    // has no method" while the runtime said "an Int has no method", and the two are the
+    // same refusal reached by two routes: a receiver whose type is known refuses here, and
+    // the same receiver through a parameter is `Unknown`, so the checker steps aside and
+    // the runtime answers. A user has no way to predict which sentence they get.
+    //
+    // The runtime's form wins because the SIBLING family already chose it: "`f` is an Int,
+    // not a function" runs through `with_article` on both sides. An article is the house
+    // style for naming a value's type in an error; "type Int" was the outlier.
+    //
+    // The article used to double as a tell for WHICH half refused, and this cycle leaned on
+    // that twice while diagnosing. That is not a reason to keep two sentences: `helix check`
+    // answers the same question outright — clean means the runtime refused — and a
+    // diagnostic that works by reading grammar is not one anyone can rely on.
+    let err = HelixError::new(
+        format!("{} has no method `{}`", crate::value::with_article(type_name), name),
+        line,
+        col,
+    );
     match crate::suggest::hint(name, crate::suggest::Site::Method, candidates) {
         Some(h) => err.hint(h),
         // No near-miss: point at the doc command instead of dumping 79 names — a dump

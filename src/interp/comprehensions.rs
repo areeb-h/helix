@@ -112,7 +112,11 @@ fn comp_shape_check(
 /// sentence.
 pub(crate) fn not_an_array(recv: &Value, name: &str, line: usize, col: usize) -> HelixError {
     HelixError::new(
-        format!("type {} has no method `{}`", recv.type_name(), name),
+        // The article, like every other no-method sentence. This is a RUNTIME path that
+        // spoke the CHECKER's old form, so unifying the checker alone would have inverted
+        // the drift rather than closed it: `fn g(x) = x.map(it)` on an Int would have had
+        // the checker saying "an Int" and this saying "type Int".
+        format!("{} has no method `{}`", crate::value::with_article(recv.type_name()), name),
         line,
         col,
     )
