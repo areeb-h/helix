@@ -11,9 +11,10 @@ additional effort from the Polars/array core; computational biology is the
 differentiated focus area. See positioning notes in memory and below.
 
 ## Flagship — Computational biology
-Parsing is delegated to the Rust bio ecosystem (`needletail`, `noodles`, `rust-bio`)
-in the same manner that DataFrames rely on Polars; Helix provides the consistent,
-fast, memory-safe surface.
+Parsing is delegated to the Rust bio ecosystem (`needletail`, `noodles`, `rust-bio`);
+Helix provides the consistent, fast, memory-safe surface. DataFrames used to be
+delegated the same way — to Polars — and since v0.9.0 they are not: that one is
+Helix's own engine, with polars kept as the oracle it is checked against.
 - [x] **`read_fasta(path)`** → array of `{id, seq, length}` records via
       `needletail` (FASTA/FASTQ, gzip-aware). `seq` is a `Dna` (ambiguous bases
       like `N` preserved). Demo: [examples/bio/genomics.helix](../examples/bio/genomics.helix).
@@ -208,10 +209,16 @@ Lexer → parser → AST → tree-walking interpreter.
       are the language's own, fixed by [ADR 0034](adr/0034-native-frame-semantics.md)) —
       the `native-df` feature covers filter/select/with/sort/group + six
       aggregations/join (inner/left/right/outer)/unique/vstack/head, CSV read+write,
-      and parquet read+write (zstd). Polars remains the **default and the oracle**;
-      Stage 4 (flipping the default) is deliberately not taken. On the dev box's
-      5M-row verb matrix the native engine is faster than our polars backend on all
-      16 measured verbs (one machine, one workload; every result cell-compared).
+      and parquet read+write (zstd). On the dev box's 5M-row verb matrix the native
+      engine is faster than our polars backend on all 16 measured verbs (one machine,
+      one workload; every result cell-compared).
+- [x] **Stage 4 — the native engine becomes the default** (v0.9.0). Polars moves to
+      `--features dataframes` and stays as the **oracle**: `scripts/dfdiff.sh` runs
+      every tracked program under both backends and compares cell by cell, because an
+      engine cannot be its own evidence. Flipping the default exposed three real
+      divergences no test had covered. Measured stripped, gate profile: default
+      **19.3 MB**, appliance **12.5 MB**, and the oracle build (which pulls polars back
+      in) **77.5 MB** — the size of what the default no longer carries.
 - [ ] Formal benchmarks: variance/CI, against pandas/DuckDB; 100M+ rows.
 
 ## Phase 3.5 — Math & numerics core (shipped)
@@ -285,6 +292,24 @@ estimators they require.
       that aren't valid identifiers (e.g. `d["first-name"]`); an absent key is
       `missing` (the safe/optional accessor; `.field` stays the typo-catching one). Plus
       `r.get(k)`/`r.has(k)`/`r.keys()` for unknown-shape (parsed-JSON) records.
+- [x] **SQL databases, returning frames** — `sqlite_query` bundled
+      ([ADR 0038](adr/0038-database-access.md)) and `postgres_query` / `postgres_open`
+      spoken directly over the v3 wire protocol
+      ([ADR 0044](adr/0044-postgresql.md), `--features postgres`) with **zero new
+      dependencies**: the protocol has been frozen since 2003 and SCRAM-SHA-256 needs
+      only primitives already in the tree. A query returns a DataFrame, so the whole
+      verb surface continues over the result. Parameters are **values** (`$1`), never
+      text spliced into a statement; the session is read-only from the startup packet,
+      so a write comes back as the server's own SQLSTATE rather than a client-side
+      guess; and a connection's socket closes when the last handle to it goes, so there
+      is no `close` to forget.
+- [x] **TLS the server cannot turn off** — `verify-full` by default and `disable` only
+      if the URL says so, where `libpq` has six modes and defaults to `prefer`, which
+      continues in plaintext whenever something on the path says to. `require` and
+      `verify-ca` are refused *with the reason each would have cost*. Measured: **+1.4 ms
+      per connection, nothing per query.**
+- [ ] Writes and transactions behind an explicit capability; `SCRAM-SHA-256-PLUS`
+      channel binding.
 - [ ] Reading CSV/Parquet/JSON straight from a URL; client auth helpers.
 - [ ] **HTTP/2 & HTTP/3** and linear multi-core scaling — a deliberate future
       major-version step on an async stack (Tokio + hyper + Quinn, TLS via rustls),

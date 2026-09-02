@@ -167,17 +167,31 @@ nums.filter(it % 2 == 0).map(it * it)      # vs Python: [x*x for x in nums if x%
 
 ---
 
-## Proposal 5 — A pipe operator `|>` ✅ *resolved differently — UFCS (v0.3.0)*
+## Proposal 5 — A pipe operator `|>` ✅ *resolved differently — UFCS (v0.3.0, completed v0.9.0)*
 
 > **Decision:** no `|>` was added. UFCS shipped instead: a user-defined function is
-> callable in method position — `x.f(a)` means `f(x, a)` when `f` is a user function
-> and no type owns the name — so a plain-function pipeline chains with the *one*
-> existing method syntax: `"data.csv".load().clean().normalize().summarize()`.
-> A *builtin*-named method that fails dispatch also retries as the free call, decided
-> at run time on the receiver — except for `PyObject`, `Node`, `DataFrame`, and
-> `GroupBy` receivers, which never fall back (see `ufcs_fallback_applies` in
-> `src/interp/methods.rs`; the PyObject exclusion is what keeps `np.round(1.5)` a
-> Python call). The original analysis is kept below.
+> callable in method position — `x.f(a)` means `f(x, a)` — so a plain-function pipeline
+> chains with the *one* existing method syntax:
+> `"data.csv".load().clean().normalize().summarize()`.
+>
+> **v0.9.0 finished it (ADR 0045): the RECEIVER decides, at run time.** The v0.3.0 rule
+> was "when no type owns the name", tested at parse time — a global check made where the
+> receiver does not exist. Every good verb name is some type's method, so `where`,
+> `select`, `first`, `count`, `all`, `join`, `sort`, `take`, `get`, `sum`, `min`, `max`
+> and `unique` were unusable by a user's own library, and a query builder could not be
+> written in the language at all. Now a call that fails dispatch retries as the free
+> call, and the families the compiler routes by TYPE — the DataFrame column verbs, the
+> comprehensions, and `join` — emit both readings behind a receiver test. A type that
+> OWNS the name always keeps it, which is what stops a real method's real error from
+> being re-run as something else; `PyObject` and `Node` never fall back, which is what
+> keeps `np.round(1.5)` a Python call. (See `ufcs_fallback_applies` and
+> `RecvClass::holds` in `src/interp/methods/mod.rs` and `src/bytecode/ops.rs`.)
+>
+> Still resolved at parse time, and so still outside the rule: the parser's own desugars
+> (`sort_by`, `min_by`, `take_while`, `zipmap`, `position`, …), which are rewritten
+> before any receiver exists. Recorded in `docs/dx-plan.md`.
+>
+> The original analysis is kept below.
 
 Method chains read top-to-bottom, but *plain functions* nest inside-out:
 ```helix

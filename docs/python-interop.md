@@ -61,12 +61,15 @@ print(m.gcd(12, 18))        # 6                   (method call)
 print(m.floor(3.7))         # 3
 ```
 
-A method call on a handle **always** takes the Python path. UFCS (v0.3.0) lets a
-builtin-named method that fails dispatch retry as the free call `name(recv, …)`, but
-that fallback deliberately never applies to a `PyObject` receiver: Python resolves
-attributes at run time, so no static table can see them, and a fallback would have
-silently rewritten `np.round(1.5)` into the two-argument builtin `round(np, 1.5)`.
-(The gate is `ufcs_fallback_applies` in `src/interp/methods.rs`.)
+A method call on a handle **always** takes the Python path. UFCS lets a method that
+fails dispatch retry as the free call `name(recv, …)` — since v0.9.0 that covers a
+user's own functions as well as builtins, decided on the receiver at run time (ADR
+0045) — but the fallback deliberately never applies to a `PyObject` receiver: Python
+resolves attributes at run time, so no static table can see them, and a fallback would
+have silently rewritten `np.round(1.5)` into the two-argument builtin `round(np, 1.5)`.
+That is not hypothetical; it shipped once, and `np.round(1.5)` type-checked clean while
+computing the wrong thing.
+(The gate is `ufcs_fallback_applies` in `src/interp/methods/mod.rs`.)
 
 ## What converts, and what stays opaque
 

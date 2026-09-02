@@ -30,8 +30,12 @@ All three must produce **byte-identical** output — values *and* error text —
 program. That is enforced in CI, not asserted here: see [Correctness gates](#correctness-gates).
 
 The **DataFrame backend is a separate axis** from the engine, selected by
-`HELIX_DF_ENGINE=polars|native` on a build that has both (`native-df`; polars is the
-default and the oracle, ADR 0033). The same byte-identity requirement applies across it,
+`HELIX_DF_ENGINE=polars|native` on a build that has both (`--features dataframes`).
+**Since v0.9.0 the native engine is the default and polars is the oracle** (ADR 0033
+Stage 4) — the reverse of the arrangement this paragraph used to describe, and the reason
+polars is kept at all: an engine cannot be its own evidence, so the thing that says the
+replacement means the same has to outlive the thing it replaced.
+The same byte-identity requirement applies across it,
 and since v0.6.0 naming a backend the build does not contain is **refused by name** rather
 than silently ignored — the old behaviour handed you polars with no diagnostic while you
 believed you were measuring the other engine, and the two did not agree (ADR 0036).

@@ -11,8 +11,9 @@ bash scripts/gate.sh   # clippy + the full suite + parity + the whole-tree type-
 ```
 
 **Run `scripts/gate.sh`, not `cargo test --release`.** `[profile.release]` uses fat LTO and
-one codegen unit, which links Polars, noodles and Cranelift as a single LLVM unit — about
-twenty minutes and several gigabytes in one rustc. The `gate` profile keeps `opt-level = 3`
+one codegen unit, which links noodles and Cranelift as a single LLVM unit — and polars too
+on a `--features dataframes` build — about twenty minutes and several gigabytes in one
+rustc. The `gate` profile keeps `opt-level = 3`
 so the differential fuzzers and perf-sensitive tests run at full speed, and drops LTO. No
 test's pass/fail depends on the optimization level, so it is a faithful gate.
 

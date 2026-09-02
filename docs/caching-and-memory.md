@@ -21,10 +21,13 @@ mutable systems; there is no case in which the data changes underneath the cache
    precisely because values are immutable. It is also why a 200-operation run holds
    RSS flat (see [memory-safety](memory-safety.md)).
 
-2. **`DataFrame.cache()` — explicit, eager, safe.** On the default (Polars)
-   backend, a lazy frame normally re-scans its source file on every
-   materialization. `df.cache()` materializes it **once** into memory and
-   re-wraps it as lazy, so every subsequent query reuses the in-memory result:
+2. **`DataFrame.cache()` — explicit, eager, safe.** On a LAZY backend a frame
+   re-scans its source file on every materialization, and `df.cache()`
+   materializes it **once** into memory and re-wraps it as lazy, so every
+   subsequent query reuses the in-memory result. That is the polars backend
+   (`--features dataframes`), which since v0.9.0 is the oracle rather than the
+   default; the native engine is **eager**, so a frame is already in memory and
+   `cache()` is a no-op that costs nothing rather than a fix for a re-scan:
 
    ```helix
    big = read_csv("huge.csv").cache()
@@ -101,8 +104,8 @@ The objective is to process data far larger than RAM, with full precision.
 
 - **Columnar and zero-copy:** data resides in typed columnar buffers rather than
   24-byte boxed `Value`s, so numeric arrays avoid the interpreter's per-element
-  overhead — Arrow/Polars on the default backend; the native engine
-  (`native-df`) keeps its own typed columns, dictionary-encoded for strings.
+  overhead — the default engine (`native-df`) keeps its own typed columns,
+  dictionary-encoded for strings; the polars oracle build uses Arrow's.
   (The scalar interpreter's `Value` is being reduced separately; see
   [performance-roadmap](performance-roadmap.md) Track A.)
 - **Lazy execution:** DataFrame verbs extend a query plan that materializes once,

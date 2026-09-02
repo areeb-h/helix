@@ -54,10 +54,14 @@ separately in [docs/benchmarks.md](docs/benchmarks.md).
 ## Install
 
 Helix ships as a **single self-contained binary** — no runtime to install (no Python, no system
-BLAS; the core links nothing external beyond the C runtime). The full build is ~76 MB because it
-embeds the Polars engine, yet starts instantly. There is also an **appliance profile**
-(`cargo build --release --no-default-features --features appliance`, ADR 0032): the full language
-surface with the native DataFrame engine in place of Polars, at ~9.3 MB stripped.
+BLAS; the core links nothing external beyond the C runtime). Measured on the gate profile,
+stripped: the default build is **19.3 MB** and the **appliance profile**
+(`cargo build --release --no-default-features --features appliance`, ADR 0032) is **12.5 MB**.
+
+The default build carries Helix's **own** DataFrame engine (ADR 0033). Polars is no longer in
+it: it stays behind `--features dataframes` as the **oracle** every native result is compared
+against, because an engine cannot be its own evidence. That oracle build is **77.5 MB**
+stripped — which is the size of what the default stopped carrying.
 
 ```sh
 # macOS / Linux — downloads the binary for your platform and verifies its SHA-256:
@@ -75,7 +79,7 @@ $ curl -LsSf https://raw.githubusercontent.com/areeb-h/helix/main/install.sh | s
 helix-install: downloading https://github.com/areeb-h/helix/releases/latest/download/helix-x86_64-unknown-linux-gnu.tar.gz
 helix-install: checksum ok (helix-x86_64-unknown-linux-gnu.tar.gz)
 helix-install: installed helix -> /home/areeb/.local/bin/helix
-helix 0.5.0
+helix 0.9.0
 helix-install: done. try:  helix eval "print(1 + 2)"   or   helix repl
 ```
 
@@ -83,10 +87,16 @@ helix-install: done. try:  helix eval "print(1 + 2)"   or   helix repl
 helix run script             # run a script (`.helix` optional)
 helix eval "print(1 + 2)"    # a one-liner
 helix repl                   # interactive session
-helix check script.helix     # type-check without running (takes many paths)
+helix check script.helix     # type-check without running (takes many paths; `--lint` for advice)
+helix test [path]            # run *_test.helix files and `##` doc examples (`--engines` cross-checks all 3)
 helix fmt script.helix       # format — no options, and it cannot change your program
-helix build script.helix     # compile to a standalone executable (no toolchain needed)
+helix effects script.helix   # what each function reaches: authority, and whether it is reproducible
+helix doc [Type]             # a type's methods (Array/String/Dna/Connection/…) or `builtins`
+helix search <term>          # find a capability by what it does, not by its name
+helix describe [what]        # the whole API as JSON — a name, a Type, or everything
+helix build script.helix     # bundle program + runtime into one executable (no toolchain needed)
 helix emit-hbc script.helix  # compile to a .hbc bytecode container (portable core-bytecode artifact)
+helix new / add / sync / verify   # manifest, dependencies, lockfile
 helix help                   # all commands
 ```
 
@@ -100,7 +110,7 @@ warning — the installer will not install what it cannot verify.
 > pipeline uploaded four of six platforms and no `SHA256SUMS`, so the installers correctly
 > refuse even the platforms that did upload. All three causes are fixed rather than worked
 > around — see [CHANGELOG.md](CHANGELOG.md). `releases/latest` resolves to the current release
-> (`v0.5.0`), so the commands above pick it up without you doing anything.
+> (`v0.9.0`), so the commands above pick it up without you doing anything.
 
 ## A tour
 
@@ -115,13 +125,21 @@ fn variance(xs) = let m = xs.mean(), n = xs.count() in xs.map((it - m) ** 2).sum
 # Native-speed numeric kernels — this reduce JIT-compiles to a native loop.
 dot = (range(0, n)).reduce(0.0, (acc, j) => acc + a[j] * b[j])
 
-# DataFrames (Polars/Arrow, lazy). Columns use `@` — always a column, never a variable,
-# so the two can't collide, and the whole chain lowers to one native Polars query.
+# DataFrames. Columns use `@` — always a column, never a variable, so the two can't
+# collide. A bare name works inside a query too, and a String predicate is a predicate.
 read_csv("patients.csv")
-    .where(@age > 40 and @resting_hr < 75)
+    .where(@age > 40 and @resting_hr < 75 and name.starts_with("A"))
     .select(@name, @diagnosis)
     .sort(@age)
     .write_csv("cohort.csv")
+
+# Databases return frames, so the same verbs continue over the result. Parameters are
+# VALUES (`$1`), never text spliced into the statement, and the session is read-only
+# from its first byte — a write comes back as the server's own SQLSTATE, not a guess.
+db = postgres_open("postgres://user:pw@host/db")   # TLS on by default, verified
+db.query("select name, age from people where age > $1", [40])
+    .where(@age < 55)
+    .select(@name)
 
 # First-class genomics.
 seq = dna("ATGCGTAC")
@@ -151,7 +169,11 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
 - **Pattern matching** — `match` with literal, range (half-open, matched by magnitude), or-,
   guard, and binding patterns.
 - **Dicts and UFCS** — string-keyed dict literals that spread into records; any user function is
-  callable as a method on its first argument (builtins fall back at runtime on the receiver).
+  callable as a method on its first argument, and **which one a call means is decided by the
+  RECEIVER, at run time** (ADR 0045). So `where`, `select`, `count` and `join` can be your own
+  verbs on your own type while an array keeps its comprehension and a frame keeps its column
+  verb — in the same file. A type that owns a name always keeps it; that is what makes a fluent
+  library writable without a second way to define behaviour.
 - **`missing`-safe by design** — a single dedicated absent value (not `NaN`), propagated through
   `.` access, method calls, and arithmetic, with three-valued boolean logic; `x ?? default`
   supplies a fallback. No `?.` operator needed.
@@ -178,17 +200,28 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
   BLAS dependency).
 
 ### Data
-- **DataFrames** backed by **Polars/Arrow**, held lazily: `read_csv`/`read_parquet`, in-memory
-  `dataframe({…})`, then `where`/`select`/`sort`/`group` + aggregations, `write_csv`/`write_parquet`
-  and `to_html`/`to_markdown`. A chain builds a single query plan and materializes once, delegated
-  to Polars' columnar, multi-threaded execution with predicate/projection pushdown.
-- **A second, native DataFrame engine** (`native-df`, standard in the appliance build) behind the
-  same seam (ADR 0033): eager, deterministic, and following the language's own scalar semantics
-  (ADR 0034) — filter/select/with/sort/group + aggregations, four join kinds, `unique`/`vstack`/`head`,
-  CSV and Parquet (zstd) in both directions. Polars remains the default backend and the oracle
-  every native result is cell-compared against. On a 5M-row, 16-verb benchmark on one dev
-  machine, the native engine beat our polars backend on all 16 verbs — a comparison against our
-  own use of Polars on one workload, not a general claim about Polars.
+- **DataFrames** on Helix's **own engine** (ADR 0033, the default since v0.9.0): `read_csv`/
+  `read_parquet`, in-memory `dataframe({…})` or `dataframe(dict)` for a runtime schema, then
+  `where`/`select`/`with`/`sort`/`group` + aggregations, four join kinds, `unique`/`vstack`/
+  `head`/`tail`/`slice`, `write_csv`/`write_parquet` and `to_html`/`to_markdown`. Eager,
+  deterministic, and following the language's own scalar semantics (ADR 0034) rather than a
+  library's.
+- **Polars is the oracle, not the engine.** It stays behind `--features dataframes`, and
+  `scripts/dfdiff.sh` runs every tracked program under both backends and compares them cell by
+  cell — an engine cannot be its own evidence, so the thing that says the replacement *means the
+  same* outlives the thing it replaced. Flipping the default exposed three real divergences no
+  test had covered. Measured at 1.6M rows on materialised frames with every output consumed,
+  min-of-7 (polars → native): `group` 20.7 → **5.2 ms**, `join` 84.6 → **29.9**, `unique(col)`
+  9.0 → **3.2**, `with` 49.0 → **19.8**, `sort` 74.5 → **38.1**, `where` 26.0 → **13.6**. That is
+  our use of Polars on our workloads, not a general claim about Polars.
+- **Databases return frames**, so the whole verb surface continues over a query result.
+  **SQLite** bundled (ADR 0038) and **PostgreSQL** spoken directly over the wire (ADR 0044,
+  `--features postgres`) with **zero new dependencies** — the v3 protocol has been frozen since
+  2003 and SCRAM-SHA-256 needs only primitives already in the tree. Parameters are values, never
+  interpolated text; the session is read-only from the startup packet; and **TLS is on by default
+  and the server cannot turn it off** — two modes where `libpq` has six, because its default
+  (`prefer`, which Go's `pgx` shares) continues in plaintext whenever something on the path says
+  so.
 - **Math standard library** that broadcasts over arrays/tensors and propagates `missing`: the full
   transcendental/rounding set plus `hypot`, `atan2`, constants, and the `**` power operator.
 
@@ -227,10 +260,14 @@ end-to-end in pure Helix.
   **bit-identical** on tens of thousands of randomly generated programs. A JIT miscompilation
   cannot ship silently; an out-of-bounds native read falls back to the exact checked interpreter
   error. This is the project's cardinal rule.
-- **Memory-safe** (inherited from the Rust host) **and authority-confined** — a
-  **capability sandbox** (denied-by-default filesystem/network authority, enforced at one registry
-  chokepoint, carried per-evaluation so self-generated code gets a *narrower* grant) is rolling out
-  `audit → enforce`. See [docs/memory-safety.md](docs/memory-safety.md).
+- **Memory-safe** (inherited from the Rust host) **and authority-confined** — a **capability
+  sandbox** (ADR 0021) enforced at one registry chokepoint and carried per-evaluation, so
+  self-generated code gets a *narrower* grant. It is off unless asked for, and asking is a
+  `[capabilities]` table in `helix.toml`: **present means enforced**, it is a ceiling rather than
+  a request, a dependency cannot widen it, and `helix build` bakes it into the artifact where no
+  environment variable can reopen it. `helix effects` reports what a program actually reaches, so
+  the ceiling can be measured before it is declared. See
+  [docs/memory-safety.md](docs/memory-safety.md).
 
 ### Packaging & interop
 - **`helix build`** copies the interpreter and appends your program as an overlay → a standalone
@@ -268,13 +305,15 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 
 ## Status & roadmap
 
-A mature implementation, **not a prototype**: ~670 tests (445 library + 223 CLI), zero compiler
-warnings, a differential oracle and VM/tree-walker parity gate on every change. Phase status (full plan in
+A mature implementation, **not a prototype**: **840 tests** (481 library + 324 CLI + 3 native-df
++ 32 dual-engine differential), plus 137 corpus programs run under both DataFrame backends and a
+whole-tree type-check — zero compiler warnings, with a differential oracle and a VM/tree-walker
+parity gate on every change. Phase status (full plan in
 [docs/ROADMAP.md](docs/ROADMAP.md)):
 
 1. **Core language & interpreter** — done
 2. **Type checker & module system** — done (package manager pending)
-3. **DataFrame engine** (Polars/Arrow; a second, native backend covers the core verb matrix) — done
+3. **DataFrame engine** (Helix's own, default since v0.9.0; polars retained as the oracle) — done
 4. **Tensor engine & linear algebra** — done
 5. **JIT compilation** — done for numeric kernels (coverage expanding; SIMD is the next lever)
 6. **GPU support** — future
@@ -287,10 +326,11 @@ cargo build --release
 ```
 
 Requires a recent Rust toolchain. For fast iteration during development, `scripts/gate.sh` runs
-clippy + the full test suite + the VM/tree-walker parity diff + the whole-tree type-check on an
-optimized-but-fast profile. **Do not use `cargo test --release`** — that profile's fat LTO links
-Polars, noodles and Cranelift as one LLVM unit, which costs about twenty minutes per build and
-changes no test's outcome.
+clippy + the full test suite + the VM/tree-walker parity diff + `dfdiff` across both DataFrame
+backends + the whole-tree type-check, on an optimized-but-fast profile. **Do not use
+`cargo test --release`** — that profile's fat LTO links noodles and Cranelift as one LLVM unit
+(and polars too, on a `--features dataframes` build), which costs about twenty minutes per build
+and changes no test's outcome.
 
 ## The formatter
 

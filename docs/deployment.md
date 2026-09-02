@@ -29,14 +29,17 @@ curl -LsSf https://raw.githubusercontent.com/<owner>/helix/main/install.sh | sh
 
 For small boxes where the full binary is mostly dead weight, the `appliance` feature
 profile ([ADR 0032](adr/0032-appliance-profile.md)) keeps the full language surface —
-HTTP, mimalloc, and the native DataFrame engine ([ADR 0033](adr/0033-native-dataframe-engine.md))
-— while leaving out polars, the genomics readers, and the JIT:
+HTTP, mimalloc, and the DataFrame engine ([ADR 0033](adr/0033-native-dataframe-engine.md))
+— while leaving out the genomics readers, the JIT, and regex:
 
 ```sh
 cargo build --no-default-features --features appliance
 ```
 
-That is ~9.3 MB stripped (gate profile) against ~76 MB for the full build. Frames run
+That is **12.5 MB stripped (gate profile) against 19.3 MB** for the default build —
+measured 2026-09-01, and both figures moved when the DataFrame engine changed: polars is
+no longer in the default build at all, so the appliance's saving is now the genomics
+readers, the JIT and regex rather than a DataFrame backend. Frames run
 on the native engine (filter/select/with/sort/group/join/unique/vstack/head, CSV and
 parquet in both directions); a verb needing an absent backend says what to rebuild
 with instead of failing obscurely.
@@ -110,4 +113,4 @@ Built: mimalloc allocator, PGO CI pipeline, static musl artifact with the instal
 glibc-2.35-floor auto-fallback, the `appliance` profile (ADR 0032), distroless Dockerfile,
 the `scripts/perf-verify.sh` regression gate. Deferred (see ADR 0016): BOLT, an
 x86-64-v3 *extra* artifact with CPU detection, ready-made Lambda/Cloud-Run examples, and
-a WASM/WASI edge build (interpreter+VM only — no JIT, limited Polars).
+a WASM/WASI edge build (interpreter+VM only — no JIT).

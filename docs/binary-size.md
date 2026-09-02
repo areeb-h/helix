@@ -1,5 +1,23 @@
 # Binary size and the Polars dependency
 
+> **Dateline 2026-09-01 (v0.9.0) — this document is now history, and says so at the top
+> because its title no longer describes the shipped binary.** ADR 0033 **Stage 4** landed:
+> Helix's own DataFrame engine is the default and polars is gone from the default build. It
+> stays behind `--features dataframes` as the correctness **oracle**, which is the reason it
+> is kept at all — an engine cannot be its own evidence.
+>
+> Measured on the gate profile, stripped: **default 19.3 MB**, **appliance 12.5 MB**, and
+> the oracle build (`--features dataframes`, which pulls polars back in) **77.5 MB** — the
+> last number is the size of what the default no longer carries. Crates compiled fell
+> **1,566 → 192**. Startup 4.9 → **2.96 ms** like-for-like (2.5 ms for the appliance
+> build — a different binary, so a different row).
+>
+> Everything below is the record of *why* the polars tail could not be trimmed
+> feature-by-feature, and of the reasoning that led to replacing it instead. It is worth
+> keeping for that, and it should not be read as a description of the current build.
+
+## Historical: the problem this document was written about
+
 The Helix binary is large (~65 MB release, default features) with ~1000 transitive
 crates — including an async runtime (`tokio`) and a cloud object-store
 (`object_store` → `reqwest`/`hyper`). This documents *why*, what was investigated, and
@@ -21,6 +39,11 @@ set. The polars backend remains the **default** engine and the correctness
 oracle; ADR 0033 Stage 4 (flipping the default) has not been taken. Everything
 below stands as the record of *why* the polars tail cannot be trimmed
 feature-by-feature.
+
+> **Superseded 2026-09-01:** Stage 4 was taken in v0.9.0 — see the dateline at the top
+> of this file. The 9.3 MB figure above is also stale: the appliance has since gained
+> bundled SQLite and the native engine's parquet path, and measures **12.5 MB stripped**
+> on the same profile.
 
 ## Update (2026-06-25) — re-measured, and the seam that changes the calculus
 

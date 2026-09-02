@@ -12,6 +12,22 @@ Helix has three comment forms and one rule that makes two of them worth distingu
 `##` costs nothing and breaks nothing. The distinction is a convention the *tooling*
 enforces, not a new syntax.
 
+> **An example only runs if it is on a `##` line.** `helix test` reads `>>>` examples out
+> of `##` doc comments and nowhere else, so
+>
+> ```helix
+> # >>> dbl(21)
+> # 42
+> export fn dbl(x) = x * 2
+> ```
+>
+> is a comment that executes nowhere. Until v0.9.0 that also *satisfied* `check --lint`,
+> which counted a `>>>` on any comment line — so a codebase commenting with `#` throughout
+> could clear every finding and end up with a green lint over examples nothing runs, which
+> is the one thing the rule exists to prevent. The lint requires `##` now and says so in
+> the message. A plain `#` line BETWEEN the example and the definition is still fine: that
+> is prose, and the extractor skips it too.
+
 `#[ … ]#` is the one that is genuinely different: it runs until its matching `]#`, across
 as many lines as you like, and it **nests** — so a region that already contains a block
 comment can be commented out whole, which is the case the non-nesting version of this

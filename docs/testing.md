@@ -90,8 +90,10 @@ Pass a single file (`helix test math_test.helix`) to run just that one.
 
 The toolchain's own suite runs through `scripts/gate.sh` (clippy with `-D warnings`,
 the full test suite on the `gate` profile, the dual-engine DataFrame campaign, and the
-example parity diff). Its current shape: **454 lib tests + 257 CLI tests + 3 other
-integration tests**, plus **32 dual-engine tests** that need the `native-df` feature.
+example parity diff). Its current shape as of v0.9.0: **481 lib tests + 324 CLI tests
++ 3 other integration tests**, plus **32 dual-engine tests**, and **137 corpus programs**
+run under both DataFrame backends by `scripts/dfdiff.sh` — which needs the `dataframes`
+feature, since polars is the oracle rather than the default now.
 Five pieces worth knowing about:
 
 - **The differential DataFrame suite** (`src/backend/native/tests.rs`): the same data

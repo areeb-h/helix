@@ -1,12 +1,24 @@
 # Helix DataFrame benchmarks
 
-> **Dateline 2026-08-24.** Helix now has **two** DataFrame backends behind one seam
-> (ADR 0012, ADR 0033): the **polars backend** — still the default engine and the
-> correctness oracle — and a **native engine** (cargo feature `native-df`, included
-> in the appliance profile). The section immediately below summarizes the native
-> engine's head-to-head against the polars backend; everything from
-> "The polars-backend benchmark" down is the original polars-backend
-> measurement, kept as a dated record.
+> **Dateline 2026-09-01 (v0.9.0).** Helix's **own** DataFrame engine is the default
+> (ADR 0033 Stage 4). Polars stays behind `--features dataframes` as the correctness
+> **oracle** — `scripts/dfdiff.sh` runs every tracked program under both backends and
+> compares them cell by cell — because an engine cannot be its own evidence.
+>
+> The current head-to-head, measured at **1.6M rows on materialised frames with every
+> output consumed**, min-of-7 (polars → native): `group` 20.7 → **5.2 ms**, `join`
+> 84.6 → **29.9**, `unique(col)` 9.0 → **3.2**, `with` 49.0 → **19.8**, `sort` 74.5 →
+> **38.1**, `where` 26.0 → **13.6**, `unique` 33.2 → **23.4**. Native wins every verb.
+>
+> **Consuming the output is not a formality.** A lazy engine answers `.count()` without
+> materialising anything, so `where(…).count()` times how fast it DECLINED the work —
+> which is how an earlier run of this suite reported polars at 5.7 ms for a join that
+> costs 84 and turned two native wins into apparent losses. Every program in
+> `bench/df/` ends in `.column(…)`. The tell is always sub-linear growth: polars' "join"
+> grew 1.12× for 4× the rows, which no join does.
+>
+> The 16-verb section immediately below, and everything from "The polars-backend
+> benchmark" down, are earlier dated records kept for their history.
 
 ## Native engine vs the polars backend (2026-08, 16-verb matrix)
 

@@ -1,7 +1,7 @@
 # Adoption assessment: requirements for switching to Helix
 
 A candid assessment, written against the current state of Helix (a fast
-bytecode-VM and Cranelift-JIT scientific language with Polars-backed DataFrames,
+bytecode-VM and Cranelift-JIT scientific language with its own DataFrame engine,
 tensors, a missing-data model, and a permissive static type checker). The objective
 is not to discourage — the implementation is sound — but to state precisely the gap
 between a well-designed language and a tool selected for production work.
@@ -26,8 +26,8 @@ Python is a modest language with a dominant ecosystem. It persists because it is
 
 Helix's strengths — C/Go-parity scalar speed, low-symbol syntax, expression
 orientation, no truthiness coercion, a single set of `where`/`select`/`map` verbs
-across Array and DataFrame, a coherent `missing` model, Polars DataFrames at 8–11×
-pandas — are all **language-quality** advantages. None of them answers the primary
+across Array and DataFrame, a coherent `missing` model, DataFrames measured faster than
+our own polars backend on every verb — are all **language-quality** advantages. None of them answers the primary
 question a scientist asks: whether the tool can run the libraries their field already
 depends on. At present the answer is no, so these qualities do not yet affect
 adoption.
@@ -57,10 +57,12 @@ Grounded in the current source, not aspirations:
    ecosystem cannot form.
 3. **Error handling has a v1.** `try EXPR` evaluates `EXPR` and catches any runtime
    error, yielding a record `{ok, value, error}`, so failures are recoverable
-   instead of aborting the program. Programs that use `try` currently run on the
-   tree-walker (the bytecode VM does not yet implement exception handling). A
-   surfaced `Result`/`?` form is not yet provided.
-4. **A standard library of roughly 140 builtins** plus the
+   instead of aborting the program. Error recovery is **native in the VM** since
+   v0.7.0 (`Op::TryBegin`/`TryOk`/`TryErr` and a handler unwind), so a `try` anywhere
+   no longer demotes the program to the tree-walker — verified with `jit-explain`: a
+   program containing one still has its kernels JIT-compiled. A surfaced `Result`/`?`
+   form is not yet provided.
+4. **A standard library of 161 builtins** (`helix doc builtins`) plus the
    Array/String/Dna/Tensor/DataFrame methods: IO (CSV/Parquet and the genomics
    formats), a math and statistics core (t-tests, regression), JSON, a hardened
    HTTP client and a native HTTP server, and a substantial string surface. Still
@@ -87,11 +89,18 @@ Stated so the strengths are clear alongside the limitations:
 - **A complete missing-data model.** One `missing` value, propagating through
   arithmetic and aggregation, distinct from float NaN, with a column validity bitmap;
   cleaner than pandas' combination of NaN, None, and NaT.
-- **DataFrames that reuse the array verbs.** `where`/`select`/`sort`/`group` lower to
-  lazy Polars plans; the same verbs apply to arrays. Less API surface than pandas.
+- **DataFrames that reuse the array verbs.** `where`/`select`/`sort`/`group` run on
+  Helix's own engine, following the language's own scalar semantics rather than a
+  library's; the same verbs apply to arrays, and to a SQL result. Less API surface than
+  pandas.
 - **A permissive type checker** that catches real mistakes (undefined names,
   incorrect arities, `5 + "x"`) before execution with clear messages, and does not
   interfere with dynamic/dataframe-shaped code (zero false positives).
+- **SQL that returns a frame.** SQLite bundled and PostgreSQL spoken directly over the
+  wire, so a query result continues into the same `where`/`select`/`group` verbs.
+  Parameters are values rather than interpolated text, the session is read-only, and TLS
+  is on by default in a way the server cannot override — which is a stronger default than
+  `libpq` or Go's `pgx` ship with.
 
 This is a strong *foundation*. It is not yet a *product*.
 
@@ -100,8 +109,10 @@ This is a strong *foundation*. It is not yet a *product*.
 - **General ML — no.** PyTorch/JAX dominate it and require autodiff, GPU, and a
   decade of ecosystem. Helix cannot enter this race.
 - **General data science — no.** pandas and Polars-from-Python already own tabular
-  work. Helix's DataFrames are Polars with improved syntax — a genuine improvement,
-  but not sufficient to displace existing notebooks and libraries.
+  work. Helix's DataFrames are now its own engine rather than a wrapper — faster than
+  our polars backend on every verb, and semantically the language's own — but a better
+  engine is still not sufficient to displace existing notebooks and libraries, which is
+  an ecosystem question rather than a speed one.
 - **Computational biology / bioinformatics scripting — possibly.** This is the
   hypothesis worth examining. Bioinformatics consists largely of ad-hoc scripts over
   **sequences and tabular data**, where Python (Biopython) is slow and awkward and

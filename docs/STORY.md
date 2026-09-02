@@ -29,7 +29,7 @@ strong static typing with extensive inference; educational errors; memory effici
 
 ## Implementation stages
 
-Each stage delivered working, tested code (the test count grew from 44 to the ~670 cases the gate runs today: 445 unit + 223 CLI + 3 other, as of v0.4.0, 2026-08).
+Each stage delivered working, tested code. The test count grew from 44 to the **840** the gate runs as of v0.9.0 (2026-09): 481 unit + 324 CLI + 3 other + 32 dual-engine, alongside 137 corpus programs run under both DataFrame backends.
 
 1. **Core interpreter** — lexer → parser → AST → tree-walking interpreter. Immutable
    bindings and `mut`, Int/Float/String/Bool/Array/Dna/Function, word-based booleans,
@@ -43,8 +43,9 @@ Each stage delivered working, tested code (the test count grew from 44 to the ~6
 4. **Static type checker** ([ADR-0002](adr/0002-type-system.md), [types.rs]) —
    permissive bidirectional inference, `Unknown` top type, zero false positives
    (every example type-checks cleanly — a regression-gated guarantee).
-5. **DataFrame engine** ([ROADMAP §3](ROADMAP.md), [benchmarks](benchmarks.md)) — lazy
-   Polars/Arrow LazyFrames; SQL-style verbs; CSV/Parquet; 50M-row query in approximately 0.2s.
+5. **DataFrame engine** ([ROADMAP §3](ROADMAP.md), [benchmarks](benchmarks.md)) —
+   Helix's own columnar engine since v0.9.0 (polars retained as the oracle); SQL-style
+   verbs; CSV/Parquet; and the same verbs continue over a SQLite or PostgreSQL result.
 6. **Tensor engine** ([ADR-0007](adr/0007-tensor-backend.md)) — ndarray-backed, NumPy
    broadcasting, axis reductions, matmul, pure-Rust linear algebra.
 7. **Leak-freedom and recursion robustness** ([memory-safety](memory-safety.md)) —
@@ -81,15 +82,20 @@ and one value model:
   Tiered: the JIT handles the numeric core; any construct it cannot compile falls back to
   the VM; any construct the VM cannot compile falls back to the tree-walker. The same
   language and the same results, verified by parity tests at every boundary.
-- **Bulk tabular** → Polars/Arrow (lazy, columnar, multicore, SIMD) — the default
-  backend and the oracle; a second, native backend (`native-df`,
-  [ADR 0033](adr/0033-native-dataframe-engine.md)) sits behind the same seam for
-  dependency-light appliance builds.
+- **Bulk tabular** → Helix's **own** columnar engine (`native-df`,
+  [ADR 0033](adr/0033-native-dataframe-engine.md)), eager and dictionary-encoded,
+  following the language's own scalar semantics ([ADR 0034](adr/0034-native-frame-semantics.md))
+  rather than a library's. Polars sits behind the same seam as the **oracle** it is
+  checked against — the one delegation this project took back, and the reason is in
+  ADR 0033: the semantics were the library's, not the language's.
 - **Tensors** → ndarray currently; a typed fusing compiler (CPU `rayon`+SIMD, GPU
   `CubeCL`) is the planned Track C — a structural distinction no incumbent provides.
 
-Delegation is the strategy: Helix provides a consistent, fast, memory-safe surface;
-Polars, ndarray, `needletail`/`noodles`, and Cranelift perform the underlying computation.
+Delegation is the strategy where the semantics are not the language's: Helix provides a
+consistent, fast, memory-safe surface, and ndarray, `needletail`/`noodles` and Cranelift
+perform the underlying computation. DataFrames are the exception that proves it — they
+were delegated to Polars until v0.9.0 and are now Helix's own, because a frame's scalar
+semantics ARE the language's and could not be borrowed.
 
 ---
 

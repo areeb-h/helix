@@ -1,11 +1,18 @@
 # Performance roadmap
 
-> **Status dateline 2026-08-24.** Track B is landed: the Cranelift JIT is the
+> **Status dateline 2026-09-01 (v0.9.0).** Track B is landed: the Cranelift JIT is the
 > shipped tier (cargo feature `jit`, on by default since v0.4.0; x86-64 Linux;
 > bytecode identical with or without it). Current cross-language numbers live in
 > [`bench/kernels/RESULTS.md`](../bench/kernels/RESULTS.md), not in the tables
-> below. A second, native DataFrame backend now exists behind the ADR 0012 seam
-> (ADR 0033, stages 0–3; polars remains the default and the oracle).
+> below. **Helix's own DataFrame engine is now the default** (ADR 0033 Stage 4) and
+> polars is retained only as the oracle behind `--features dataframes`.
+>
+> The next measured target on this track is the **fixed cost of a comprehension**:
+> ~0.135 µs fixed against ~0.65 ns per element, a ratio of 200, so below roughly 200
+> elements a comprehension pays for its setup rather than its work. It is not the JIT
+> (the same shapes are 1.5–5× slower under `HELIX_NOJIT=1`) and not `ColumnBuilder`.
+> See `docs/dx-plan.md` for the measurement and why it wants a profiler rather than
+> another micro-benchmark.
 
 Synthesized from three 2025 research sweeps (fast interpreters, modern JITs, and
 the data/tensor frontier). The central thesis:
@@ -16,7 +23,10 @@ the data/tensor frontier). The central thesis:
 > JIT 2021, adaptive specialization 2021, fusing array compilers, Arrow, CubeCL)
 > and **combining three best-in-class engines** behind one type system, which no
 > existing language does. On Helix's *actual* target workloads — data and
-> tensors — Helix is already faster than Python, R, and pandas today via Polars.
+> tensors — Helix is already faster than Python, R, and pandas today.
+
+*(That last sentence read "via Polars" until v0.9.0. It is now Helix's own engine, and
+the polars comparison moved to `docs/benchmarks.md`.)*
 
 ## Status at Track B's first landing (historical)
 

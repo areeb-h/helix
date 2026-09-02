@@ -1,5 +1,14 @@
 # Homegrown columnar engine vs Polars — measured
 
+> **Outcome, 2026-09-01: the experiment was taken, and it shipped.** This time-boxed
+> comparison decided in favour of a homegrown engine; it became
+> [ADR 0033](../../docs/adr/0033-native-dataframe-engine.md), and **Stage 4 landed in
+> v0.9.0** — the native engine is the default and polars is retained only as the oracle
+> every result is compared against. Stripped, gate profile: default **19.3 MB** against
+> **77.5 MB** for the build that still carries polars. The numbers below are the original
+> experiment and are kept as the record of how the decision was reached.
+
+
 A time-boxed experiment to decide whether replacing Polars with a homegrown in-memory
 columnar engine is viable for Helix (motivated by the verified ~65 MB binary that the
 Polars dependency forces — see `docs/binary-size.md`). Run with `cargo run --release
