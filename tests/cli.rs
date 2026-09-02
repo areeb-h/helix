@@ -14562,3 +14562,98 @@ fn rename_refuses_what_would_silently_discard_a_column() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+/// `join`'s options record — the refusals, and the one spelling that still means the old
+/// thing.
+///
+/// The join type used to be recognised only as a trailing string LITERAL, so every bare
+/// name in the argument list landed in the key set and a library could not pass the type
+/// through:
+///
+///     fn on(l, r, k, how) = l.join(r, k, how)     # error: no column `left`
+///     fn on(l, r, how)    = l.join(r, @id, how)   # error: no column `left`  <- key PINNED
+///
+/// The pinned line is the diagnosis: with nothing for `how` to be confused with it still
+/// fails, so a bare name there is simply always a key. Deciding the role from the VALUE
+/// instead would trade a refusal for a wrong answer — `l.join(r, k1, k2)` where `k2` is
+/// "left" and no such column exists is a clean error today, and would silently become a
+/// left join on `k1` alone.
+///
+/// The successful counts live in `tests/corpus/df_join_how.helix`, which dfdiff runs under
+/// both DataFrame backends. Here are the parts a corpus program cannot hold: the errors,
+/// and the assertion that a TRAILING string literal still means the type rather than
+/// quietly becoming a key when the string-key rule was added.
+#[test]
+fn a_join_type_can_come_from_a_binding_and_the_old_spelling_still_means_the_old_thing() {
+    let dir = std::env::temp_dir().join(format!("hx_jh_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("j.helix");
+
+    const F: &str = "L = dataframe({id: [1, 2, 3], v: [10, 20, 30]})\n\
+                     R = dataframe({id: [1, 2], w: [7, 8]})\n";
+    for (label, src, want_ok, needle) in [
+        // THE FILED CASE, now working: the type arrives as a parameter.
+        ("how-from-parameter",
+         format!("{F}fn on(l, r, k, how) = l.join(r, k, {{how: how}})\n\
+                  print(on(L, R, \"id\", \"left\").count(), on(L, R, \"id\", \"inner\").count())\n"),
+         true, "3 2"),
+        // …and from a lambda capture, which is a different resolution path.
+        ("how-from-capture",
+         format!("{F}fn on(l, how) = ((x) => x.join(R, @id, {{how: how}}))(l)\n\
+                  print(on(L, \"left\").count())\n"),
+         true, "3"),
+        // THE OLD SPELLING IS UNCHANGED. A trailing string literal is still the TYPE, not
+        // a key — the string-key rule applies only before the last argument, and if that
+        // ever slipped this reads 2 (an inner join on a column `left` that does not exist
+        // would error) instead of 3.
+        ("trailing-literal-is-still-the-type",
+         format!("{F}print(L.join(R, @id, \"left\").count())\n"), true, "3"),
+        // A string literal BEFORE the last argument is a key, which `select` has always
+        // accepted and `join` did not.
+        ("string-key-before-options",
+         format!("{F}print(L.join(R, \"id\", {{how: \"left\"}}).count())\n"), true, "3"),
+        // A lone trailing string keeps its old meaning — the type — so this is still the
+        // "no keys" error rather than silently joining on a column called `id`.
+        ("lone-trailing-string-unchanged",
+         format!("{F}print(L.join(R, \"id\").count())\n"), false, "at least one key column"),
+        ("unknown-option",
+         format!("{F}print(L.join(R, @id, {{hwo: \"left\"}}).count())\n"), false,
+         "has no option `hwo`"),
+        ("options-not-last",
+         format!("{F}print(L.join(R, {{how: \"left\"}}, @id).count())\n"), false,
+         "options must come last"),
+        ("how-is-not-a-string",
+         format!("{F}fn on(l, r, h) = l.join(r, @id, {{how: h}})\nprint(on(L, R, 5).count())\n"),
+         false, "must be a string"),
+        ("how-names-nothing",
+         format!("{F}print(L.join(R, @id, {{how: nope}}).count())\n"), false,
+         "no variable named `nope`"),
+        // An unknown kind is the BACKEND's refusal, and it must still arrive through the
+        // record form rather than being swallowed into a default inner join.
+        ("unknown-kind",
+         format!("{F}fn on(l, r, h) = l.join(r, @id, {{how: h}})\n\
+                  print(on(L, R, \"sideways\").count())\n"), false, "not a join kind"),
+    ] {
+        std::fs::write(&prog, &src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "{label}: jit vs vm: {ej} / {ev}");
+        assert_eq!((cv, &vm), (ct, &tw), "{label}: vm vs tree-walker: {ev} / {et}");
+        if want_ok {
+            assert_eq!(cj, Some(0), "{label} should succeed: {ej}");
+            assert_eq!(jit.trim(), needle, "{label}");
+        } else {
+            assert_ne!(cj, Some(0), "{label} should be REFUSED, got: {jit}");
+            assert!(
+                ej.contains(needle) && et.contains(needle),
+                "{label}: message must say `{needle}`\njit: {ej}\ntree-walker: {et}"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

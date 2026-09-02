@@ -240,6 +240,22 @@ with mechanisms so nothing has to be rediscovered:
   indexing landed with the bridge; the `.exp()` asymmetry is now its own entry
   below, because the bridge made it reachable by an ordinary spelling.)*
 
+### A join type could not come from a binding (2026-09-02)
+
+**FIXED.** `join` read the type only as a trailing string LITERAL, so a bare name was
+always a key and a library had to branch over five constants. Reported from the field as a
+standing workaround ("attach branching on a literal join type").
+
+The filing first read as an ambiguity between key and type; the probe that settled it
+pinned the key and failed identically, so a bare name in that list is simply always a key.
+The fix is a trailing options record, `{how: kind}` — the idiom `http_request` already
+uses. Deciding the role from the VALUE was rejected on purpose: `l.join(r, k1, k2)` with
+`k2` = "left" and no such column is a clean error today and would have become a silent
+left join on `k1` alone.
+
+A string literal before the last argument became a key at the same time, which `select`
+had always accepted and `join` had not.
+
 ### A frame has no `rename`, and no dynamic column REFERENCE (2026-09-02)
 
 **`rename` LANDED 2026-09-02.** It needed no new syntax and no seam change in the

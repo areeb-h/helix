@@ -1,0 +1,52 @@
+# The join TYPE, and the two spellings that pick it, on both DataFrame backends.
+#
+# A trailing string literal is sugar and was all there was, so a bare name in the argument
+# list always landed in the key set and a library could not pass the type through. The
+# general form is a trailing options record. Both spellings must mean exactly the same
+# thing on both engines — the row counts below are the whole assertion.
+
+L = dataframe({id: [1, 2, 3], v: [10, 20, 30]})
+R = dataframe({id: [1, 2], w: [7, 8]})
+
+# The default is inner, and the two spellings of "inner" agree with it.
+print(L.join(R, @id).count())
+print(L.join(R, @id, "inner").count())
+print(L.join(R, @id, {how: "inner"}).count())
+
+# Every kind, as a LITERAL and as a RECORD, must give the same count.
+print(L.join(R, @id, "left").count(), L.join(R, @id, {how: "left"}).count())
+print(L.join(R, @id, "right").count(), L.join(R, @id, {how: "right"}).count())
+print(L.join(R, @id, "outer").count(), L.join(R, @id, {how: "outer"}).count())
+print(L.join(R, @id, "full").count(), L.join(R, @id, {how: "full"}).count())
+
+# FROM A BINDING — the case the record form exists for. A bare `how` here would be read as
+# one more key, so this is the only spelling that can express it.
+fn on(l, r, k, how) = l.join(r, k, {how: how})
+print(on(L, R, "id", "inner").count())
+print(on(L, R, "id", "left").count())
+print(on(L, R, "id", "right").count())
+print(on(L, R, "id", "outer").count())
+
+# The columns of the result, so a left join is not merely the right ROW COUNT.
+print(on(L, R, "id", "left").columns())
+print(on(L, R, "id", "left").sort(@id).column("w"))
+print(on(L, R, "id", "inner").sort(@id).column("w"))
+
+# Multiple keys with an options record, so the record is not quietly assumed to be the
+# second argument.
+A = dataframe({a: [1, 1, 2], b: [1, 2, 1], v: [9, 8, 7]})
+B = dataframe({a: [1], b: [1], w: [5]})
+print(A.join(B, @a, @b).count())
+print(A.join(B, @a, @b, {how: "left"}).count())
+fn on2(l, r, h) = l.join(r, @a, @b, {how: h})
+print(on2(A, B, "left").count())
+print(on2(A, B, "inner").count())
+
+# A key from a binding AND a type from a binding in one call — both name positions
+# resolving at run time, which is the shape a library actually writes.
+fn attach(child, parent, fk, how) = child.rename(fk, "id").join(parent, "id", {how: how})
+posts = dataframe({post: [1, 2, 3], author_id: [10, 10, 99]})
+users = dataframe({id: [10, 20], name: ["ann", "bo"]})
+print(attach(posts, users, "author_id", "inner").count())
+print(attach(posts, users, "author_id", "left").count())
+print(attach(posts, users, "author_id", "left").sort(@post).column("name"))

@@ -131,13 +131,89 @@ pub(crate) fn parse_join_spec(
                 keys.push(column_name_from_binding(name, resolve_var))
             }
             Expr::Str(s) if i == args.len() - 1 => how = s.clone(),
+            // A STRING LITERAL BEFORE THE LAST ARGUMENT IS A KEY. ADR 0028 says a String
+            // literal names a column — `df.select("price")` is documented — and join was
+            // the one name position that did not accept one, because `Expr::Str` was
+            // matched only at the trailing index where it means the type. With an options
+            // record marking the type, a string before it cannot be the type, so there is
+            // nothing left for it to be. The trailing spelling is untouched.
+            Expr::Str(s) => keys.push(s.clone()),
+            // THE OPTIONS RECORD, and the only way to give the join type from a BINDING.
+            //
+            // A trailing string literal is sugar, and it is all there was: the type was
+            // recognised by its SYNTAX, so `fn on(l, r, k, how) = l.join(r, k, how)` put
+            // `how` in the key set and failed with "no column `left`". Pinning the key
+            // (`l.join(r, @id, how)`) failed identically, which is what proves this is not
+            // an ambiguity between key and type — a bare name in this list is simply always
+            // a key.
+            //
+            // Deciding the role from the VALUE instead would trade a refusal for a wrong
+            // answer: `l.join(r, k1, k2)` where `k2` is "left" and no such column exists is
+            // a clean error today, and would silently become a left join on `k1` alone. A
+            // record cannot be a key, so it disambiguates at any key count, and it is the
+            // idiom `http_request({method, url, ...})` already uses.
+            Expr::Record(fields) if i == args.len() - 1 => {
+                for (k, v) in fields {
+                    if k != "how" {
+                        return Err(HelixError::new(
+                            format!("`join` has no option `{k}`"),
+                            line,
+                            col,
+                        )
+                        .hint("the only join option is `how`, e.g. `{how: \"left\"}`."));
+                    }
+                    how = match v {
+                        Expr::Str(s) => s.clone(),
+                        Expr::Ident { name, .. } => match resolve_var(name) {
+                            Some(Value::Str(s)) => (*s).clone(),
+                            Some(other) => {
+                                return Err(HelixError::new(
+                                    format!(
+                                        "a join type must be a string, but `{name}` is {}",
+                                        other.type_name()
+                                    ),
+                                    line,
+                                    col,
+                                ))
+                            }
+                            None => {
+                                return Err(HelixError::new(
+                                    format!("no variable named `{name}`"),
+                                    line,
+                                    col,
+                                )
+                                .hint("the join type comes from a string, e.g. `{how: \"left\"}`."))
+                            }
+                        },
+                        _ => {
+                            return Err(HelixError::new(
+                                "a join type must be a string or a name bound to one",
+                                line,
+                                col,
+                            )
+                            .hint("e.g. `{how: \"left\"}` or `{how: kind}`."))
+                        }
+                    };
+                }
+            }
+            // A record ANYWHERE ELSE is a misplaced options record, not a mystery. Say so,
+            // because the generic "a join key must be a bare column name" would send the
+            // reader looking at the wrong argument.
+            Expr::Record(_) => {
+                return Err(HelixError::new(
+                    "`join` options must come last",
+                    line,
+                    col,
+                )
+                .hint("e.g. `left.join(right, id, {how: \"left\"})`."))
+            }
             _ => {
                 return Err(HelixError::new(
                     "a join key must be a bare column name",
                     line,
                     col,
                 )
-                .hint("e.g. `samples.join(meta, sample_id)`, with an optional join type like `\"left\"` last."))
+                .hint("e.g. `samples.join(meta, sample_id)`, with an optional join type like `\"left\"` or `{how: kind}` last."))
             }
         }
     }

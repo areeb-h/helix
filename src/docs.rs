@@ -3102,11 +3102,11 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         "DataFrame",
         DocEntry {
             name: "join",
-            sig: "join(other, @key, ..., how?)",
-            doc: "Join with another frame on key column(s); a trailing string picks the type.",
+            sig: "join(other, @key, ..., how? | {how: ...}?)",
+            doc: "Join with another frame on key column(s); a trailing string or options record picks the type.",
             example: "dataframe({id: [1, 2], x: [10, 20]}).join(dataframe({id: [2], y: [5]}), @id).count()",
             example_out: "1",
-            notes: "",
+            notes: "The type is inner, left, right, outer or full. A trailing STRING LITERAL is sugar; the general form is a trailing options record, `{how: kind}`, and it is the only way to give the type from a BINDING — a bare name in the argument list is always a key, so `l.join(r, k, how)` puts `how` in the key set. Deciding the role from the value instead would trade a refusal for a wrong answer: `l.join(r, k1, k2)` where k2 is \"left\" and no such column exists is a clean error, and would silently become a left join on k1 alone. Keywords: join type, how, left join, outer, binding, runtime, options.",
         },
     ),
     (

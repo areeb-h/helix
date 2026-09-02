@@ -4,6 +4,43 @@
 
 ### Added
 
+- **`join` takes an options record, so the join TYPE can come from a binding.** It could
+  only be a trailing string *literal*, so a library had to branch over five constants:
+
+  ```helix
+  fn on(l, r, k, how) = l.join(r, k, how)      # error: no column `left`
+  fn on(l, r, how)    = l.join(r, @id, how)    # error: no column `left`  <- key PINNED
+  ```
+
+  The second line is the diagnosis: with the key pinned there is nothing for `how` to be
+  confused with, and it still fails. The type was recognised by its SYNTAX, so every bare
+  name in the argument list landed in the key set. Now:
+
+  ```helix
+  fn on(l, r, k, how) = l.join(r, k, {how: how})     # inner | left | right | outer | full
+  l.join(r, @id, "left")                             # existing sugar, unchanged
+  ```
+
+  **Why a record rather than reading the value.** The tempting fix is "the last argument
+  is the type if its value is a join kind". It trades a refusal for a wrong answer:
+  `l.join(r, k1, k2)` where `k2` is `"left"` and no such column exists is a clean
+  "no column `left`" today, and would silently become a left join on `k1` alone — a typo'd
+  key quietly changing the join. Positional varargs plus an optional trailing value of the
+  same type cannot be disambiguated, so the disambiguation is written down instead. A
+  record can never be a key, so it works at any key count, leaves every existing call
+  untouched, and extends to future options without another positional slot. It is the
+  idiom `http_request({method, url, body?, headers?})` already uses.
+
+  Misplaced options say so (`join options must come last`) rather than falling into the
+  generic key error, and an unknown option is refused rather than ignored.
+
+- **A string literal is a join key.** `df.select("price")` has always named a column, but
+  `join` was the one name position that refused one, because a string was only matched at
+  the trailing index where it means the join type. A string BEFORE the last argument is now
+  a key — unambiguous only because the options record marks the type. A lone trailing
+  string keeps its existing meaning, so `l.join(r, "id")` still reads `"id"` as the type
+  and refuses for want of a key rather than silently changing what shipped.
+
 - **`df.rename(old, new)`** — the same column under a different name, in the same
   position. A frame had no way to say this, and it was the last thing blocking a generic
   relation-attach in a library: aligning a child's foreign key to a parent's key IS a

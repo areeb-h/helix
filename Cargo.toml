@@ -227,8 +227,11 @@ http = ["dep:ureq"]
 # build: every DataFrame verb still exists, type-checks, and describes itself —
 # running one says what to rebuild with (ADR 0032's gate-the-body pattern).
 dataframes = ["dep:polars"]
-# The genomics readers (noodles x6, needletail). Five of the seven return a
-# DataFrame, so `bio` implies `dataframes`; read_bed is hand-rolled and ungated.
+# The genomics readers (noodles x6, needletail). Five of the seven return a DataFrame, so
+# `bio` implies an ENGINE — `native-df` since ADR 0033 Stage 4, not `dataframes`. That
+# distinction is the whole reason the default build carries no polars: `bio` ships by
+# default, and pointing it at `dataframes` would have pulled polars back in through the
+# side door. `read_bed` is hand-rolled and ungated.
 bio = [
     "native-df",
     "dep:noodles-vcf",
