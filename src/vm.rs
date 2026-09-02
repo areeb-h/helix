@@ -565,10 +565,49 @@ struct Frame {
     base: usize,
     /// If set, this call is a memoization miss: store its return value under this
     /// key when the frame returns.
-    memo_key: Option<MemoKey>,
+    ///
+    /// BOXED, because every call pays for this field and almost none uses it. Measured:
+    /// `Option<MemoKey>` is 40 bytes against a 72-byte `Frame`, so inlining it made the
+    /// memo cache's key the majority of every call's frame — including the calls that can
+    /// never memoize. `Option<Box<_>>` is 8 bytes by niche optimisation, which takes the
+    /// frame to 40. The memoized minority pays one allocation it can afford: it is already
+    /// doing a hash insert on the same path, and a memoizable function has few distinct
+    /// calls by design. Same argument as `Op`'s size assertion — box the offending variant.
+    memo_key: Option<Box<MemoKey>>,
     /// The captured environment of the closure being run (empty for a plain
     /// function). `GetUpvalue` reads these; `MakeClosure` may copy from them.
     upvalues: std::rc::Rc<Vec<Value>>,
+}
+
+#[cfg(test)]
+mod frame_size {
+    //! EVERY CALL PUSHES A FRAME, so the frame's size is a per-call cost and belongs under
+    //! a budget — the same discipline `Op` already keeps for itself.
+    //!
+    //! It was 72 bytes, of which `Option<MemoKey>` was 40: the memo cache's key, inlined
+    //! into every call including the ones that can never memoize. Boxing it took the frame
+    //! to 40 and made a call taking a record 6.5% cheaper (min-of-15 interleaved, load
+    //! 0.92), with `scripts/perf-verify.sh` reporting no wall or RSS regression across
+    //! B1..B7.
+    //!
+    //! A call is FREE when its arguments are all numeric — the JIT specializes it — so this
+    //! budget is what a String- or Record-threading program actually pays.
+    #[test]
+    fn a_call_frame_stays_within_its_budget() {
+        use std::mem::size_of;
+        assert!(
+            size_of::<super::Frame>() <= 40,
+            "a call frame grew to {} bytes (budget 40). Every call pushes one, so this is a \
+             per-call cost. Box the offending field — that is what `memo_key` did, taking \
+             the frame from 72 to 40. Sizes now: Option<MemoKey> {}, MemoKey {}, MemoArg \
+             {}, Value {}.",
+            size_of::<super::Frame>(),
+            size_of::<Option<Box<super::MemoKey>>>(),
+            size_of::<super::MemoKey>(),
+            size_of::<super::MemoArg>(),
+            size_of::<crate::value::Value>(),
+        );
+    }
 }
 
 /// An active `try` error handler (from `Op::TryBegin`). Records the exact depths of
@@ -1079,7 +1118,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     let base = locals.len();
                     locals.extend(stack.drain(start..));
                     locals.resize(base + callee.n_locals as usize, Value::Unit);
-                    frames.push(Frame { func: idx, ip: 0, base, memo_key: Some(key), upvalues: no_upvalues.clone() });
+                    frames.push(Frame {
+                        func: idx,
+                        ip: 0,
+                        base,
+                        memo_key: Some(Box::new(key)),
+                        upvalues: no_upvalues.clone(),
+                    });
                     return Ok(());
                 }
 
@@ -1407,7 +1452,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // start fresh rather than freezing: a frozen cache would pin 5M values in RAM
                 // forever *and* stop memoizing, so a long-running process would lose the
                 // speedup. A periodic reset keeps both memory and memoization healthy.
-                if let Some(key) = frame.memo_key {
+                if let Some(key) = frame.memo_key.map(|k| *k) {
                     if memo.len() >= MEMO_MAX_ENTRIES {
                         memo.clear();
                     }

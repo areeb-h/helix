@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+### Performance
+
+- **A call frame was 72 bytes, and 40 of them were a memo key most calls never use.**
+  Every call pushes a `Frame`, and it carried `Option<MemoKey>` inline — the automatic
+  cache's key, on every call including the ones that can never memoize. Boxed, the field
+  is 8 bytes and the frame is **40**.
+
+  The measurement that found it also answers a question worth stating plainly: **a call is
+  free when its arguments are all numeric.** The JIT specializes it away. The cost appears
+  the moment one argument is not a number:
+
+  ```
+  f(x) = x + 1                    -3.2 ns/iter over the inline expression
+  f(x, t)  with a Str argument    91.3
+  f(r)     taking a record       131.9
+  ```
+
+  So the per-call overhead a String- or Record-threading program pays IS the VM's own call
+  path, and the frame was the largest single thing in it. Measured after, min-of-15
+  interleaved at load 0.92: a call taking a record **1.067x**, everything else within
+  noise, and `scripts/perf-verify.sh` reports no wall or RSS regression across B1..B7 —
+  `b3_groupby` 0.04s → **0.03s** with RSS down on three workloads.
+
+  The frame's size is now a **budget** (`vm::frame_size`), asserted rather than printed,
+  and its failure message names the fix — the same discipline `Op` already keeps for
+  itself. Verified by sabotage: un-boxing the key reports "a call frame grew to 72 bytes
+  (budget 40)".
+
+- **Not done, because the measurement said not to: taking a uniquely-held base in
+  `{...base, k: v}`.** A record spread copies the base's fields unconditionally, and the
+  obvious fix is to take them when the `Rc` is unshared — ADR 0029's take-append-store
+  argument, one construct over. Measured, it is not worth it:
+
+  | | ratio |
+  |---|---|
+  | shared 8-field base | 0.966x |
+  | unique 8-field base | 1.170x |
+  | fold with a 3-field accumulator | **0.967x** |
+
+  The fold is the case that motivated it, and it does not benefit at all: `reduce` holds
+  the accumulator in a local *and* on the stack, so the refcount is never 1. Reverted.
+  Recorded here because the idea is a natural one to have twice.
+
+  What the same measurement did establish: a spread costs **~100 ns fixed + ~5.6 ns per
+  base field**, and is *cheaper* than rebuilding the same record from a literal (280 ns vs
+  573 ns at 32 fields). A field build's 0.64 µs was five or six spreads, not one slow one.
+
 ### Added
 
 - **A Tuple answers `count()`, `length()` and `values()`, and `helix doc Tuple` works.**
