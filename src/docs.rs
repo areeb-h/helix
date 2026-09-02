@@ -3374,11 +3374,11 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         "Dict",
         DocEntry {
             name: "get",
-            sig: "get(k)",
-            doc: "The value for a key, or missing when absent (so `.get(k) ?? default` works).",
-            example: "{\"a\": 1, \"b\": 2}.get(\"a\")",
-            example_out: "1",
-            notes: "",
+            sig: "get(k, default?)",
+            doc: "The value for a key; missing (or the default) when the key is absent.",
+            example: "{\"a\": 1, \"b\": 2}.get(\"z\", 0)",
+            example_out: "0",
+            notes: "The same two-argument shape Record.get has — they are sibling types answering the same question, and until 0.9.1 only one of them could say \"or this instead\", which made `?? default` a workaround for something the other simply had. ABSENCE IS NOT A MISSING VALUE: a key whose value IS missing answers missing, not the default, on both types. Keywords: default, fallback, or else, absent, lookup.",
         },
     ),
     (

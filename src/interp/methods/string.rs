@@ -174,7 +174,7 @@ pub(crate) fn string_method(
         "index_of" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(
-                    format!("`{name}` expects 1 or 2 arguments, got {}", args.len()),
+                    format!("`{name}` takes 1 to 2 arguments, got {}", args.len()),
                     line,
                     col,
                 )

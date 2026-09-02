@@ -53,9 +53,24 @@ pub(crate) fn dict_method(
     let map = d.map();
     match name {
         // `get(k)` → the value, or `missing` when absent (so `d.get(k) ?? default` works).
+        // `get(k, default)` → the value, or `default` when absent — the same two-argument
+        // shape `Record::get` has always had. They are sibling types answering the same
+        // question, and one of them being unable to say "or this instead" made `?? default`
+        // a workaround for something the other simply had.
         "get" => {
-            arity(1)?;
-            Ok(map.get(&key_of(&args[0])?).cloned().unwrap_or(Value::Missing))
+            if args.len() != 1 && args.len() != 2 {
+                return Err(HelixError::new(
+                    format!("`get` takes 1 to 2 arguments, got {}", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            let found = map.get(&key_of(&args[0])?).cloned();
+            Ok(match (found, args.len()) {
+                (Some(v), _) => v,
+                (None, 2) => args[1].clone(),
+                (None, _) => Value::Missing,
+            })
         }
         // `expect(k)` → the value, RAISING on absence — the loud companion to `get`.
         // ADR 0001 keeps `get`/`d[k]` answering `missing` (an absent value is a condition
@@ -184,7 +199,7 @@ pub(crate) fn record_method(
         "get" => {
             if args.len() != 1 && args.len() != 2 {
                 return Err(HelixError::new(
-                    format!("`get` expects 1 or 2 arguments, got {}", args.len()),
+                    format!("`get` takes 1 to 2 arguments, got {}", args.len()),
                     line,
                     col,
                 ));

@@ -3865,13 +3865,15 @@ The value for a key, raising when it is absent (the loud companion to get).
 2
 ```
 
-### `get(k)`
+### `get(k, default?)`
 
-The value for a key, or missing when absent (so `.get(k) ?? default` works).
+The value for a key; missing (or the default) when the key is absent.
+
+**Note:** The same two-argument shape Record.get has — they are sibling types answering the same question, and until 0.9.1 only one of them could say "or this instead", which made `?? default` a workaround for something the other simply had. ABSENCE IS NOT A MISSING VALUE: a key whose value IS missing answers missing, not the default, on both types. Keywords: default, fallback, or else, absent, lookup.
 
 ```
->>> {"a": 1, "b": 2}.get("a")
-1
+>>> {"a": 1, "b": 2}.get("z", 0)
+0
 ```
 
 ### `has(k)`

@@ -2,7 +2,38 @@
 
 ## Unreleased
 
+### Added
+
+- **`Dict.get(k, default?)`**, the shape `Record.get` has always had. Two sibling types
+  answering the same question, and only one of them could say "or this instead" — so
+  `?? default` was a workaround for something the other simply had. Reported from the field
+  alongside an ORM build.
+
+  **Absence is not a missing value**, on both types: a key that is PRESENT with a `missing`
+  value answers `missing`, not the default. Getting that wrong would launder a real
+  `missing` in the data into a caller-chosen number, which is the ADR 0001 distinction
+  `expect` exists to make loud. Both edges are asserted on both types, so they cannot drift
+  apart.
+
 ### Changed
+
+- **Range arity reads the same from both halves.** Writing the test for `Dict.get` turned
+  up the same drift one family over:
+
+  ```
+  r.get("a", 1, 2)   checker:  `get` takes 1 to 2 arguments, got 3
+  d.get("a", 1, 2)   runtime:  `get` expects 1 or 2 arguments, got 3
+  ```
+
+  The checker has a systematic arity formatter — "takes no arguments" / "takes exactly N"
+  / "takes at least N" / "takes A to B" — and the runtime spelled range arity by hand at
+  three sites in different words. The systematic form wins; `range` already said "takes 1
+  to 3 arguments" from both halves, so it is what the tree mostly spoke.
+
+  Recorded and not fixed here: the arity family has a second split, between a USER
+  function ("expects N arguments") and a builtin ("takes N arguments"). Both are internally
+  consistent, so no program sees two answers for one refusal — which is the property under
+  test. Making them one word is a separate change with its own pins.
 
 - **One refusal, one sentence.** The checker said `type Int has no method \`nope\`` where
   the runtime said `an Int has no method \`nope\`` — the same rejection reached by two

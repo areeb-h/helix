@@ -15088,3 +15088,68 @@ fn a_refusal_reads_the_same_from_the_checker_and_the_runtime() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+/// `Dict.get(k, default?)` — and it agrees with `Record.get` on the edge that matters.
+///
+/// `Record.get` has taken a default since it was written; `Dict.get` took only the key, so
+/// `?? default` was a workaround for something the sibling type simply had. Reported from
+/// the field alongside an ORM build.
+///
+/// THE EDGE IS THE POINT. A key that is PRESENT with a `missing` VALUE is not an absent
+/// key, so it answers `missing` rather than the default — on both types. Getting that
+/// wrong would launder a real `missing` in the data into a caller-chosen number, which is
+/// the ADR 0001 distinction `expect` exists to make loud. Both are asserted, on both types,
+/// so the two cannot drift apart later.
+#[test]
+fn dict_get_takes_a_default_and_agrees_with_record_on_absence() {
+    let dir = std::env::temp_dir().join(format!("hx_dg_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("d.helix");
+
+    const D: &str = "d = [[\"a\", 1], [\"m\", missing]].to_dict()\n";
+    const R: &str = "r = {a: 1, m: missing}\n";
+
+    for (label, src, want) in [
+        ("dict-absent-default", format!("{D}print(d.get(\"z\", 0))\n"), "0"),
+        ("dict-present-ignores-default", format!("{D}print(d.get(\"a\", 99))\n"), "1"),
+        ("dict-absent-no-default", format!("{D}print(d.get(\"z\"))\n"), "missing"),
+        // PRESENT with a missing value — not absence, so the default does NOT apply.
+        ("dict-missing-value-is-not-absence", format!("{D}print(d.get(\"m\", 7))\n"), "missing"),
+        // The sibling must answer identically to every one of the above.
+        ("record-absent-default", format!("{R}print(r.get(\"z\", 0))\n"), "0"),
+        ("record-present-ignores-default", format!("{R}print(r.get(\"a\", 99))\n"), "1"),
+        ("record-absent-no-default", format!("{R}print(r.get(\"z\"))\n"), "missing"),
+        ("record-missing-value-is-not-absence", format!("{R}print(r.get(\"m\", 7))\n"), "missing"),
+        // A falsy default is still the default — `?? 0` and `get(k, 0)` must agree.
+        ("dict-falsy-default", format!("{D}print(d.get(\"z\", false), d.get(\"z\") ?? false)\n"),
+         "false false"),
+    ] {
+        std::fs::write(&prog, &src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "{label}: jit vs vm: {ej} / {ev}");
+        assert_eq!((cv, &vm), (ct, &tw), "{label}: vm vs tree-walker: {ev} / {et}");
+        assert_eq!(cj, Some(0), "{label}: {ej}");
+        assert_eq!(jit.trim(), want, "{label}");
+    }
+
+    // Arity is still bounded on both, and both say the same sentence about it.
+    for (label, src) in [
+        ("dict-three-args", format!("{D}print(d.get(\"a\", 1, 2))\n")),
+        ("record-three-args", format!("{R}print(r.get(\"a\", 1, 2))\n")),
+    ] {
+        std::fs::write(&prog, &src).unwrap();
+        let (_, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+        assert_ne!(code, Some(0), "{label} should be refused");
+        assert!(
+            err.contains("takes 1 to 2 arguments"),
+            "{label}: {err}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
