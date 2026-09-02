@@ -202,8 +202,11 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
 ### Data
 - **DataFrames** on Helix's **own engine** (ADR 0033, the default since v0.9.0): `read_csv`/
   `read_parquet`, in-memory `dataframe({…})` or `dataframe(dict)` for a runtime schema, then
-  `where`/`select`/`with`/`sort`/`group` + aggregations, four join kinds, `unique`/`vstack`/
-  `head`/`tail`/`slice`, `write_csv`/`write_parquet` and `to_html`/`to_markdown`. Eager,
+  `where`/`filter`/`select`/`with`/`rename`/`sort`/`group` + aggregations, four join kinds
+  (`inner`/`left`/`right`/`outer`, with the type from a literal or a `{how: kind}` record),
+  `unique`/`vstack`/`head`/`tail`/`slice`/`column`/`columns`/`count`/`cache`,
+  `drop_missing`/`drop_nan`, `write_csv`/`write_tsv`/`write_json`/`write_parquet` and
+  `to_html`/`to_markdown`/`to_table`. Eager,
   deterministic, and following the language's own scalar semantics (ADR 0034) rather than a
   library's.
 - **Polars is the oracle, not the engine.** It stays behind `--features dataframes`, and
@@ -305,9 +308,9 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 
 ## Status & roadmap
 
-A mature implementation, **not a prototype**: **840 tests** (481 library + 324 CLI + 3 native-df
-+ 32 dual-engine differential), plus 137 corpus programs run under both DataFrame backends and a
-whole-tree type-check — zero compiler warnings, with a differential oracle and a VM/tree-walker
+A mature implementation, **not a prototype**: **848 tests** (481 library + 332 CLI + 3 native-df
++ 32 dual-engine differential), plus 139 programs run under both DataFrame backends and a
+whole-tree type-check over 98 files — zero compiler warnings, with a differential oracle and a VM/tree-walker
 parity gate on every change. Phase status (full plan in
 [docs/ROADMAP.md](docs/ROADMAP.md)):
 

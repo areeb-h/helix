@@ -40,9 +40,10 @@ That is **12.5 MB stripped (gate profile) against 19.3 MB** for the default buil
 measured 2026-09-01, and both figures moved when the DataFrame engine changed: polars is
 no longer in the default build at all, so the appliance's saving is now the genomics
 readers, the JIT and regex rather than a DataFrame backend. Frames run
-on the native engine (filter/select/with/sort/group/join/unique/vstack/head, CSV and
-parquet in both directions); a verb needing an absent backend says what to rebuild
-with instead of failing obscurely.
+on the native engine (where/filter/select/with/rename/sort/group/join/unique/vstack/
+head/tail/slice, CSV and parquet in both directions); a verb needing an absent backend
+says what to rebuild with instead of failing obscurely — and since 0.9.1 a program can ask
+FIRST, with `has_feature("regex")`, instead of provoking that error and catching it.
 
 ## Docker
 

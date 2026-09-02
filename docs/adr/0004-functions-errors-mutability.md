@@ -1,6 +1,6 @@
 # ADR 0004 — Functions, errors & mutability
 
-- **Status:** Proposed
+- **Status:** Accepted — implemented. Functions, first-class values and `mut` ship; `try EXPR` returns the canonical `{ok, value, error}` record (see `docs/syntax-and-dx.md`), and values are immutable with `Rc` sharing.
 - **Date:** 2026-06-21
 - **Deciders:** Areeb + Claude
 - **Research:** [Domain 4](../research/2026-06-21-foundational-design.md#domain-4--functions-errors--mutability) (Hoare foundation high/3-0; syntax synthesis medium)

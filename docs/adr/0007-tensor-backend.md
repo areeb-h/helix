@@ -1,6 +1,6 @@
 # ADR 0007 — Tensor backend
 
-- **Status:** Proposed
+- **Status:** Accepted — CPU core implemented (`tensor`, broadcasting, axis-wise reductions, `matmul`/`dot`, and `det`/`inv`/`solve`/`norm` as Tensor methods, pure-Rust, no BLAS). GPU is ADR 0014 and unimplemented.
 - **Date:** 2026-06-21
 - **Deciders:** Areeb + Claude
 

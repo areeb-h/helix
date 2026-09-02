@@ -7,20 +7,20 @@ they are made deliberately and in the open.
 
 | # | Decision | Status |
 |---|----------|--------|
-| [0001](0001-missing-data.md) | Missing data & absence | Implementing — scalar done; Arrow-column part pending |
+| [0001](0001-missing-data.md) | Missing data & absence | Accepted — scalar half implemented; Arrow-column part pending |
 | [0002](0002-type-system.md) | Type system & inference | Accepted — first iteration implemented (`src/types.rs`) |
-| [0003](0003-collection-api.md) | Collection API unity | Implementing — `where` spans Array + DataFrame; full trait pending |
-| [0004](0004-functions-errors-mutability.md) | Functions, errors & mutability | Implementing — functions implemented; errors/COW pending |
+| [0003](0003-collection-api.md) | Collection API unity | Accepted — implementing; shared verb names ship, unifying trait pending |
+| [0004](0004-functions-errors-mutability.md) | Functions, errors & mutability | Accepted — implemented (functions, `mut`, and `try`'s result record) |
 | [0005](0005-syntax-conventions.md) | Syntax & surface conventions | Accepted |
 | [0006](0006-concurrency-and-scale.md) | Concurrency, parallelism & scale | Proposed — DataFrame layer live |
-| [0007](0007-tensor-backend.md) | Tensor backend (ndarray now, GPU later) | Implementing — CPU core implemented |
+| [0007](0007-tensor-backend.md) | Tensor backend (ndarray now, GPU later) | Accepted — CPU core implemented; GPU is ADR 0014 |
 | [0008](0008-cpython-interop.md) | CPython interop (Helix → Python) | Implemented (v1) — feature-gated |
 | [0009](0009-distribution-and-install.md) | Distribution & installation | Implementing — CLI + source install; releases wired |
-| [0010](0010-networking-privacy-security.md) | Networking, privacy & security | Proposed — governs the first network code |
-| [0011](0011-core-stdlib-boundary.md) | Core / stdlib boundary | Accepted — namespaces superseded by 0017 (registry + small-core stand) |
+| [0010](0010-networking-privacy-security.md) | Networking, privacy & security | Accepted — the client and a from-scratch HTTP server ship |
+| [0011](0011-core-stdlib-boundary.md) | Core / stdlib boundary | Partially superseded by 0017 — namespaces reversed; the registry stands |
 | [0012](0012-dataframe-backend-seam.md) | DataFrame backend seam | Accepted — Phase 1 implemented |
-| [0013](0013-package-manager.md) | Package manager & lockfile | Implemented (v1) — path + url deps, hash-pinned lock |
-| [0014](0014-gpu-tensor-backend.md) | GPU tensor backend (wgpu, seam-first) | Proposed — design only |
+| [0013](0013-package-manager.md) | Package manager & lockfile | In progress — manifest, lockfile, path + https deps ship |
+| [0014](0014-gpu-tensor-backend.md) | GPU tensor backend (wgpu, seam-first) | Accepted — decision made; no GPU code yet (the seam is Phase 1) |
 | [0015](0015-sequence-alignment.md) | Sequence alignment | Accepted — v1 implemented (hand-rolled affine-gap aligner) |
 | [0016](0016-build-and-packaging.md) | Build perf, allocator & containerization | Accepted — mimalloc + musl + Docker implemented; PGO wired in CI |
 | [0017](0017-methods-and-functions.md) | Methods on data + free functions (no namespaces) | Accepted — implemented; supersedes 0011's namespaces |
@@ -43,7 +43,7 @@ they are made deliberately and in the open.
 | [0034](0034-native-frame-semantics.md) | Native frame semantics — frames follow the language | **Accepted & implemented** — scalar-kernel evaluation, decided deltas (% euclidean, / true division, /0 errors), aggregation doctrine, CSV policy |
 | [0035](0035-where-clauses.md) | `where` clauses on function definitions | Accepted 2026-08-24 (delegated) — implemented as a parser desugar |
 | [0036](0036-one-semantics.md) | One semantics: does a column expression mean what the same expression means on scalars? | **Accepted & implemented** — all sixteen divergences closed (true division, euclidean `%`/`//`, `/0` an error, string `+`, sequential `.where()`, NaN propagated through every reduction and grouped aggregate, one sign-independent sort order, `==` stays IEEE with keys as a separate relation); the standing guards are `scripts/dfdiff.sh` and `tests/compat/`; ships in v0.6.0 |
-| [0037](0037-scripting-surface.md) | The scripting surface: can a Helix program be a tool? | **Proposed** (revised 2026-08-27) — a script's command line is `fn main`, bound by the rule Helix **already** uses at a call site: every parameter nameable, out of order, trailing defaults optional. The environment is declared, not read; subprocess is argv-only with no shell form; `exit` is uncatchable and refuses a bad code. One declaration is the parser, the help, the type contract **and** the capability grant — the four nobody joins. Carries its own verification plan, since argv is an axis no existing gate covers |
+| [0037](0037-scripting-surface.md) | The scripting surface: can a Helix program be a tool? | D1 accepted and implemented (`src/climain.rs`); D2–D4 open |
 | [0038](0038-database-access.md) | Database access: a query is a DataFrame, and injection is unrepresentable | **Accepted — Stage 1 (SQLite, read-only) implemented** — `sqlite_query(path, sql, params?)` returns a frame through the ADR 0012 seam (so it works on the native backend too — implying `dataframes` instead cost 63 MB); parameters bind as values with no string-building form; opened READ-ONLY so the `fs-read` label is the truth; `--features db`, measured at +1.9 MB on the appliance profile. Stages 2–3 (writes, PostgreSQL) proposed |
 | [0039](0039-string-predicates-in-queries.md) | Should a String predicate be usable inside a DataFrame query? | **Accepted & implemented** — `starts_with`, `ends_with`, `contains` and the `re_` family work on a column expression, with `contains` LITERAL and `re_match` a PATTERN exactly as on scalars (ADR 0036); `missing` propagates, which only `with` can show since `where` drops the row either way; ships in v0.7.0 |
 | [0040](0040-workspaces.md) | A repo of several packages: can one directory be both a package and not the module root? | **Accepted & implemented** — `helix.toml` carried two meanings at once ("this is a distributable package" and "imports anchor here") and `project_context` stops at the NEAREST one, so a repo with a manifest per package made each package its own root and `import ui.parse` inside `ui/` looked for `ui/ui/parse.helix`. A `[workspace]` table names members; the root anchors and the members stay packages. An unlisted package is untouched, a missing member is refused by name, and a member's own `[dependencies]` is refused rather than silently unresolved |

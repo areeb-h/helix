@@ -29,7 +29,7 @@ strong static typing with extensive inference; educational errors; memory effici
 
 ## Implementation stages
 
-Each stage delivered working, tested code. The test count grew from 44 to the **840** the gate runs as of v0.9.0 (2026-09): 481 unit + 324 CLI + 3 other + 32 dual-engine, alongside 137 corpus programs run under both DataFrame backends.
+Each stage delivered working, tested code. The test count grew from 44 to the **848** the gate runs as of 0.9.1-dev (2026-09-02): 481 unit + 332 CLI + 3 other + 32 dual-engine, alongside 139 programs run under both DataFrame backends.
 
 1. **Core interpreter** — lexer → parser → AST → tree-walking interpreter. Immutable
    bindings and `mut`, Int/Float/String/Bool/Array/Dna/Function, word-based booleans,

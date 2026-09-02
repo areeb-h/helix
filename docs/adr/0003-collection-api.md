@@ -1,6 +1,6 @@
 # ADR 0003 — Collection API unity
 
-- **Status:** Proposed
+- **Status:** Accepted — implementing. `where`/`filter`/`sort`/`unique`/`count` span Array and DataFrame with the same names; the unifying TRAIT is what remains.
 - **Date:** 2026-06-21
 - **Deciders:** Areeb + Claude
 - **Research:** [Domain 3](../research/2026-06-21-foundational-design.md#domain-3--collection-api-unity--one-obvious-way) (pandas anti-pattern high/3-0; synthesis medium)

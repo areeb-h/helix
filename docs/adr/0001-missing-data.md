@@ -1,6 +1,6 @@
 # ADR 0001 — Missing data & absence
 
-- **Status:** Proposed
+- **Status:** Accepted — implemented for scalars (`missing` is a first-class value; `drop_missing`/`is_missing` ship on Array and DataFrame). The Arrow-column half is what remains.
 - **Date:** 2026-06-21
 - **Deciders:** Areeb + Claude
 - **Research:** [Domain 1](../research/2026-06-21-foundational-design.md#domain-1--missing-data--absence) (high confidence, 3-0 verified)

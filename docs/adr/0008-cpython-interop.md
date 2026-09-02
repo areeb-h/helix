@@ -166,7 +166,7 @@ DataFrame columns, while native Helix code remains statically checked.
 - **`to_array` builtin** — registered in *both* builtin lists
   (`interp.rs::BUILTIN_FNS` and `types.rs::BUILTIN_FNS` — they are separate),
   `call_builtin`, and `signatures.rs` (→ `Array(Unknown)`).
-- **`src/module.rs`** — lowers `import python.*` to an assign before file resolution.
+- **`src/module.rs`** — lowers `import python.<module>` (any dotted path) to an assign before file resolution. There is no glob import: `import m.*` is a parse error, and `import python` on its own says it needs a module.
 - **`src/parser.rs`** — `member_name()` allows keywords after `.`.
 - **`Cargo.toml`** — `python` feature + optional `pyo3` (`auto-initialize`,
   `abi3-py38`). **`src/main.rs`** — `mod python;` (always compiled; body gated).

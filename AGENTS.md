@@ -16,6 +16,8 @@ helix doc builtins        # every free function
 helix check file.helix    # fast type-check; never rejects a runnable program
 helix check --json f.helix # the same diagnostics as data: line, col, message, hint,
                           #   AND the rendered prose. `--lint` notes come through too
+helix effects f.helix     # what each function REACHES, closed over the call graph:
+                          #   authority (fs/net/exec) and whether it is reproducible
 helix jit-explain f.helix # which numeric kernels compiled, by line (`--json` too)
 helix test <dir>          # runs *_test.helix files AND every `## >>>` doc example
 helix test --engines <dir> # …and re-runs each on all three engines, failing on any
