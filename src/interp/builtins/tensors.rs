@@ -15,7 +15,8 @@ use super::*;
 #[inline]
 pub(super) fn a_to_array(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
         arity(name, &args, 1, line, col)?;
-        match args.into_iter().next().unwrap() {
+        let arg = args.into_iter().next().unwrap();
+        match arg {
             // A Tensor flattens NATIVELY (row-major) — this was Python-gated,
             // which put a feature wall exactly between the two halves of a
             // network: the BLAS tensor path computes at ~177 GFLOPS and the
@@ -30,9 +31,28 @@ pub(super) fn a_to_array(name: &str, args: Vec<Value>, line: usize, col: usize) 
                 }
                 other => Ok(Value::array(vec![other])),
             },
+            // AN ARRAY IS ALREADY AN ARRAY, in every build. This used to fall through to
+            // the Python bridge, so `to_array([1, 2, 3])` answered the array on a
+            // `--features python` build (whose `imp::to_array` has this same identity arm)
+            // and "Helix was built without Python support" on a stock one. Same program,
+            // two answers, decided by a build flag — and the message blamed a feature for
+            // what was never a Python question.
+            Value::Array(_) => Ok(arg),
+            // A TUPLE has `values()`. Answering a type question with a feature error sends
+            // the reader to rebuild the binary over a method they already have.
+            Value::Tuple(_) => Err(HelixError::new(
+                "`to_array` does not take a Tuple",
+                line,
+                col,
+            )
+            .hint("a tuple's elements are `t.values()`.")),
             // Explicit, on-demand materialization of a Python iterable into a
             // native Helix Array (the visible escape hatch from
             // opaque-by-default).
+            //
+            // In a build WITHOUT python this still answers, and answers with the TYPE
+            // rather than the feature — see `python::to_array`, which is where the
+            // distinction belongs so there stays one call path.
             other => crate::python::to_array(other, line, col),
         }
     

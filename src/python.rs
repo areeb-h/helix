@@ -100,8 +100,19 @@ pub fn to_array(arg: Value, line: usize, col: usize) -> Result<Value, HelixError
     }
     #[cfg(not(feature = "python"))]
     {
-        let _ = arg;
-        Err(unsupported(line, col))
+        // A TYPE ERROR, NOT A FEATURE ERROR. Without python there is no `PyObject` variant
+        // in existence, so everything that reaches here is a value `to_array` does not take
+        // — and `to_array([1, 2, 3])` used to answer "Helix was built without Python
+        // support" on this build while returning the array on a `--features python` one.
+        // Same program, two answers, decided by a build flag. The Array and Tensor cases are
+        // answered natively by the caller now; this names whatever is left, and still points
+        // at the build that accepts more.
+        Err(HelixError::new(
+            format!("`to_array` does not take {}", crate::value::with_article(arg.type_name())),
+            line,
+            col,
+        )
+        .hint("it flattens a Tensor row-major; a Python iterable needs `--features python`."))
     }
 }
 

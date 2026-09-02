@@ -14839,3 +14839,84 @@ fn a_tuple_answers_count_and_values_through_both_the_checker_and_the_runtime() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+/// `to_array` answers the same way in every build.
+///
+/// It did not. Everything that was not a Tensor or a tracked Node fell through to the
+/// Python bridge, whose non-python arm blames the feature for any value at all — so:
+///
+///     to_array([1, 2, 3])
+///     stock build : error: Helix was built without Python support
+///     --features python : [1, 2, 3]        (imp::to_array has an identity arm)
+///
+/// Same program, two answers, decided by a build flag — and the message blamed a feature
+/// for what was never a Python question. The two cases the language can classify itself
+/// are answered natively now, and whatever is left is named by its TYPE, because in a
+/// build without python no `PyObject` can exist and so nothing reaching there is one.
+///
+/// THE ASSERTION THAT MATTERS is the negative: no value the language understands may
+/// answer "without Python support". That sentence is still correct for `python.import`,
+/// which has its own tests — this pins that it stopped being the answer for a plain Array.
+#[test]
+fn to_array_answers_by_type_not_by_build() {
+    let dir = std::env::temp_dir().join(format!("hx_ta_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("t.helix");
+
+    for (label, src, want) in [
+        // An Array is already an Array — the case that diverged.
+        ("array-identity", "print(to_array([1, 2, 3]))\n", "[1, 2, 3]"),
+        ("array-empty", "print(to_array([]))\n", "[]"),
+        ("array-nested", "print(to_array([[1], [2]]))\n", "[[1], [2]]"),
+        // A Tensor still flattens row-major; this is the documented behaviour and the
+        // reason the function exists in a build without python at all.
+        ("tensor-flattens", "print(to_array(tensor([[1.0, 2.0], [3.0, 4.0]])))\n",
+         "[1.0, 2.0, 3.0, 4.0]"),
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "{label}: jit vs vm: {ej} / {ev}");
+        assert_eq!((cv, &vm), (ct, &tw), "{label}: vm vs tree-walker: {ev} / {et}");
+        assert_eq!(cj, Some(0), "{label}: {ej}");
+        assert_eq!(jit.trim(), want, "{label}");
+    }
+
+    // The refusals name the TYPE. `to_array` is not gated on python in any build that can
+    // classify the value itself, so none of these may mention Python support.
+    for (label, src, needle) in [
+        ("tuple-names-values", "print(to_array((1, 2, 3)))\n", "does not take a Tuple"),
+        ("int-names-the-type", "print(to_array(5))\n", "does not take an Int"),
+        ("string-names-the-type", "print(to_array(\"ab\"))\n", "does not take a String"),
+        ("record-names-the-type", "print(to_array({a: 1}))\n", "does not take a Record"),
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (out, ej, cj) = run(&[p], &[], "");
+        let (_, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_ne!(cj, Some(0), "{label} should be REFUSED, got: {out}");
+        assert_eq!(cj, ct, "{label}: engines disagree on the refusal");
+        assert!(
+            ej.contains(needle) && et.contains(needle),
+            "{label}: must say `{needle}`\njit: {ej}\ntree-walker: {et}"
+        );
+        // THE NEGATIVE, which is the whole point: a build flag is not the answer to a
+        // type question. `python.import` still says this, and has its own tests.
+        assert!(
+            !ej.contains("without Python support"),
+            "{label}: a type error must not blame a missing feature: {ej}"
+        );
+    }
+
+    // The tuple message names a route that has to exist for the advice to be worth giving.
+    std::fs::write(&prog, "print((1, 2, 3).values())\n").unwrap();
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "[1, 2, 3]", "the hint must name a method that works");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

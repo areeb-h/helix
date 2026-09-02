@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Fixed
+
+- **`to_array` gave a different answer depending on how the binary was built.** Everything
+  that was not a Tensor or a tracked Node fell through to the Python bridge, whose
+  non-python arm blames the feature for any value at all:
+
+  ```
+  to_array([1, 2, 3])
+  stock build         →  error: Helix was built without Python support
+  --features python   →  [1, 2, 3]        (its own identity arm)
+  ```
+
+  Same program, two answers, decided by a build flag — the class this project spends most
+  of its guards on — and the message blamed a feature for what was never a Python
+  question. An Array is now identity in every build, a Tuple is told about `values()`, and
+  whatever is left is named by its TYPE: in a build without python no `PyObject` can
+  exist, so nothing reaching there is one.
+
+  The distinction lives in `python::to_array`, where the cfg already is, rather than as a
+  second call path at the call site — the first attempt split the caller instead and left
+  the bridge uncalled, which `-D warnings` correctly rejected as dead code.
+
+  `python.import` still answers "built without Python support", which is right and has its
+  own tests. The new test asserts the negative too: no value the language can classify may
+  answer a type question with a build flag.
+
 ### Performance
 
 - **A call frame was 72 bytes, and 40 of them were a memo key most calls never use.**
