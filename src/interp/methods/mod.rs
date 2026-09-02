@@ -879,8 +879,12 @@ fn unknown_method(
     line: usize,
     col: usize,
 ) -> HelixError {
+    // THROUGH `with_article`, not a hardcoded "a". This path used to read "a Array has no
+    // method", while every other runtime mention of a type went through the helper and
+    // said "an Array" — and the helper's own comment names `Array` as one of the cases it
+    // exists for. One spelling per concept, and the helper is the spelling.
     let err = HelixError::new(
-        format!("a {} has no method `{}`", type_name, name),
+        format!("{} has no method `{}`", crate::value::with_article(type_name), name),
         line,
         col,
     );

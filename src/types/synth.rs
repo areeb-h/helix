@@ -221,8 +221,14 @@ impl super::Checker {
             if matches!(t, Type::Unknown) {
                 return Ok(Type::Unknown);
             }
+            // THROUGH `with_article`, like the three runtime producers of this same
+            // sentence. Built with a literal "a", it said "`f` is a Int, not a function"
+            // where the runtime said "an Int" — and that spelling was pinned in
+            // `tests/corpus/m1b_assign_over_fn.expected`, so it was an expected output
+            // rather than a failing one. `Type`'s Display renders bare names, which is what
+            // the helper takes.
             return Err(HelixError::new(
-                format!("`{}` is a {}, not a function", name, t),
+                format!("`{}` is {}, not a function", name, crate::value::with_article(&t.to_string())),
                 line,
                 col,
             )

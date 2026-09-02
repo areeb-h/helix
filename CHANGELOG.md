@@ -4,6 +4,48 @@
 
 ### Fixed
 
+- **`a Array has no method`.** The runtime's no-method error built its sentence with a
+  hardcoded `"a {}"`, while every other runtime mention of a type went through
+  `value::with_article`:
+
+  ```
+  5      →  an Int has no method `nope`     ✓
+  [1]    →  a Array has no method `nope`    ✗
+  ```
+
+  `with_article`'s own doc comment names this exact case — "Every other vowel-initial name
+  here (`Int`, `Array`) takes 'an'" — so the helper already documented the right answer and
+  this path walked past it. One spelling per concept, and the helper is the spelling.
+
+  The guard covers every type the runtime can name, on all three engines, and pins `Unit`
+  as the deliberate exception the helper documents: the rule is about **sound**, so it is
+  "a Unit" for the same reason it is "a user". Verified red before the fix.
+
+  **The same sentence from the checker was wrong for longer, and pinned as correct.**
+  Three runtime sites build "`x` is <article> <T>, not a function" through the helper;
+  `types/synth.rs` built it with a literal `"a"`:
+
+  ```
+  fn f(x) = x + 1
+  f = 5
+  print(f(1))        →  error: `f` is a Int, not a function
+  ```
+
+  That spelling was the **expected output** in `tests/corpus/m1b_assign_over_fn.expected`,
+  so the corpus agreed with it. And a guard for exactly this already existed —
+  `src/vm/tests.rs` asserts no message says "a Int" or "a Array" — but every program it
+  checks goes through `run_vm`, which cannot reach the checker at all. A guard watching one
+  of two producers, with the miss recorded as the answer. Both are fixed, the golden is
+  corrected, and the guard now says in as many words what its reach is and where the other
+  half is covered.
+
+  Found while sizing the larger **error-family drift** recorded in `docs/dx-plan.md` — the
+  checker says `type Array has no method`, the runtime says `an Array has no method`. That
+  remains a separate, coordinated change (about 40 pins across 14 files and four corpus
+  goldens), and this cycle adds the case for making it twice over: the Tuple bug hid inside
+  that gap with the runtime fixed while the checker still refused, and this grammar bug hid
+  inside it behind a golden.
+
 - **`to_array` gave a different answer depending on how the binary was built.** Everything
   that was not a Tensor or a tracked Node fell through to the Python bridge, whose
   non-python arm blames the feature for any value at all:

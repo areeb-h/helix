@@ -41,3 +41,26 @@ tracked tree — one line carrying the whole arithmetic surface of the frame lan
 `tests/corpus/t9_eq3_tuples.helix` also bound `nan` and needed the same source edit, but
 its output did not move (`==` stays IEEE, so `nan == nan` is still `false`) — so it gets
 no entry. A source edit is not a behavior change.
+
+## v0.9.0 → 0.9.1-dev — the article on a type name
+
+- `tests__corpus__m1b_assign_over_fn` — `` `f` is a Int, not a function `` became
+  `` an Int ``. Pinned at both the **v0.5.1 and v0.6.0** baselines, which dates the bug:
+  the ungrammatical form shipped in at least those two releases.
+
+  `value::with_article` has always existed for exactly this, and its own doc comment names
+  the case — "Every other vowel-initial name here (`Int`, `Array`) takes 'an'". Three
+  runtime sites that build this same sentence route through it; the CHECKER
+  (`types/synth.rs`) built it with a literal `"a"`, so one program said "an Int" from the
+  runtime and "a Int" from the checker.
+
+  Two things about how it survived are worth keeping. The spelling was the **expected
+  output** in the corpus golden, so the corpus agreed with it. And a guard for precisely
+  this article already existed — `src/vm/tests.rs` asserts that no message says "a Int" or
+  "a Array" — but every program it checks goes through `run_vm`, which cannot reach the
+  checker at all. A guard watching one of two producers, with the miss recorded as the
+  answer. The article is now covered across both families by
+  `the_runtime_no_method_error_takes_the_right_article` in `tests/cli.rs`, which runs the
+  real binary and therefore type-checks first.
+
+  Message-only: no program's exit code, stdout, or value changed.

@@ -14920,3 +14920,95 @@ fn to_array_answers_by_type_not_by_build() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+/// The runtime's no-method error takes the right article for every type it can name.
+///
+///     5      ->  an Int has no method `nope`     <- via with_article
+///     [1]    ->  a Array has no method `nope`    <- via a hardcoded "a {}"
+///
+/// `unknown_method` built its sentence with a literal "a", while every other runtime
+/// mention of a type went through `crate::value::with_article` — whose own doc comment
+/// names `Array` as one of the cases it exists for, and excludes `U` deliberately because
+/// the rule is about SOUND ("a Unit", like "a user").
+///
+/// The receiver is a PARAMETER in every case, so its static type is Unknown and the
+/// checker steps aside: this exercises the runtime's sentence, not the checker's. The two
+/// are still different families ("type X has no method" vs "an X has no method") — that is
+/// the drift recorded in docs/dx-plan.md, and it is a separate change.
+#[test]
+fn the_runtime_no_method_error_takes_the_right_article() {
+    let dir = std::env::temp_dir().join(format!("hx_art_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("a.helix");
+
+    // Every receiver that names a distinct type, with the article `with_article` promises.
+    for (literal, want) in [
+        ("5", "an Int"),
+        ("5.0", "a Float"),
+        ("\"s\"", "a String"),
+        ("[1]", "an Array"),
+        ("(1, 2)", "a Tuple"),
+        ("{a: 1}", "a Record"),
+        ("true", "a Bool"),
+        ("dna(\"ACGT\")", "a Dna"),
+        ("[[\"k\", 1]].to_dict()", "a Dict"),
+        ("tensor([[1.0]])", "a Tensor"),
+    ] {
+        // A parameter, so the receiver is Unknown to the checker and the RUNTIME answers.
+        let src = format!("fn f(x) = x.no_such_method_here()\nprint(f({literal}))\n");
+        std::fs::write(&prog, &src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (_, ej, cj) = run(&[p], &[], "");
+        let (_, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (_, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, cv, ct), (Some(1), Some(1), Some(1)), "{literal}: {ej}");
+        for (engine, err) in [("jit", &ej), ("vm", &ev), ("tree-walker", &et)] {
+            assert!(
+                err.contains(&format!("{want} has no method")),
+                "{literal} on {engine}: expected `{want} has no method`, got: {err}"
+            );
+        }
+    }
+
+    // THE CHECKER'S OWN SENTENCE FAMILY, which is a separate producer and was wrong for
+    // longer. Three runtime sites build "`x` is <article> <T>, not a function" through
+    // `with_article`; `types/synth.rs` built it with a literal "a", so the same program
+    // said "an Int" from the runtime and "a Int" from the checker — and the checker's
+    // spelling was pinned as an expected output in
+    // `tests/corpus/m1b_assign_over_fn.expected`.
+    //
+    // `src/vm/tests.rs` already guards this article, over three programs, ALL through
+    // `run_vm` — which cannot reach the checker at all. That is why this lives here: the
+    // real binary type-checks first, so both producers are in reach.
+    for (label, src, want) in [
+        ("checker-int", "fn f(x) = x + 1\nf = 5\nprint(f(1))\n", "an Int"),
+        ("checker-array", "fn f(x) = x + 1\nf = [1]\nprint(f(1))\n", "an Array"),
+        ("checker-string", "fn f(x) = x + 1\nf = \"s\"\nprint(f(1))\n", "a String"),
+        ("checker-float", "fn f(x) = x + 1\nf = 1.0\nprint(f(1))\n", "a Float"),
+        ("checker-record", "fn f(x) = x + 1\nf = {a: 1}\nprint(f(1))\n", "a Record"),
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let (_, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+        assert_ne!(code, Some(0), "{label} should be refused");
+        assert!(
+            err.contains(&format!("is {want}, not a function")),
+            "{label}: expected `is {want}, not a function`, got: {err}"
+        );
+    }
+
+    // `Unit` is the deliberate exception `with_article` documents: the rule is about
+    // SOUND, and "a Unit" is right for the same reason "a user" is. If someone ever
+    // "fixes" that to `an`, this says it was a decision.
+    let src = "fn f(x) = x.no_such_method_here()\nfn u() = print(1)\nprint(f(u()))\n";
+    std::fs::write(&prog, src).unwrap();
+    let (_, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(1), "{err}");
+    assert!(
+        err.contains("a Unit has no method") || err.contains("Unit"),
+        "Unit takes `a`, not `an` — the rule is about sound: {err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

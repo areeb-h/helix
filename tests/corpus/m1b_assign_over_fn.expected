@@ -2,7 +2,7 @@ exit: 1
 --- stdout ---
 
 --- stderr ---
-error: `f` is a Int, not a function
+error: `f` is an Int, not a function
   --> <src>:3:7
   |
 3 | print(f(1))

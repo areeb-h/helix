@@ -6777,6 +6777,14 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
 
         // No message should say "a Int" or "a Array" again. This is the regression guard:
         // the fix is mechanical across ~39 sites, so a new one is easy to add by hand.
+        //
+        // ITS REACH IS THE VM ONLY, which is worth stating because it once mattered: every
+        // program below goes through `run_vm`, so the CHECKER's own sentences are invisible
+        // here. `types/synth.rs` said "`f` is a Int, not a function" for years underneath
+        // this guard, with the spelling pinned as an expected output in
+        // `tests/corpus/m1b_assign_over_fn.expected`. The article across BOTH families is
+        // covered by `the_runtime_no_method_error_takes_the_right_article` in tests/cli.rs,
+        // which runs the real binary and therefore sees the checker too.
         for src in [
             "r = {x: 5}\n(r.x)(1)",
             "[1, 2].filter(it)",

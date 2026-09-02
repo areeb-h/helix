@@ -179,6 +179,18 @@ mechanism so nothing has to be rediscovered:
   sentence families, both pinned in many places. Unifying is a coordinated
   message change across `types/synth.rs` + `interp/methods` + every pin;
   worth doing once, not incrementally.
+
+  **Sized and motivated 2026-09-02.** About 40 pins across 14 source files plus four
+  corpus goldens (`grep -rn "has no method"`). The case for doing it is no longer
+  aesthetic: the Tuple gap hid inside this drift. Teaching the RUNTIME that a tuple has
+  `count()` left `(1, 2).count()` still failing while
+  `{a: 1}.items().map(it.count())` worked — the second receiver is Unknown so the checker
+  waves it through, the first is typed `Tuple` and the checker had no arm. The only signal
+  saying which half was speaking was the article. Two families meant the fix looked applied
+  when half of it was not.
+
+  A grammar bug inside one half was fixed separately (`a Array` → `an Array`); that one is
+  not the drift, and fixing it does not reduce the drift.
 - **Polars-side tightenings** decided in ADR 0034's addendum (bool `sum`
   refusal, exact-case Bool inference, ragged-row refusal, duplicate-header
   refusal) — each narrows polars-backend behavior to the native doctrine, so
