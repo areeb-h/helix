@@ -240,6 +240,29 @@ with mechanisms so nothing has to be rediscovered:
   indexing landed with the bridge; the `.exp()` asymmetry is now its own entry
   below, because the bridge made it reachable by an ordinary spelling.)*
 
+### A `with` column cannot be named at run time (2026-09-02)
+
+`select` honours a binding in scope as a column name (ADR 0028). `with` does not, and
+cannot, because its argument is a RECORD and a record literal's field name is syntax
+everywhere else in the language:
+
+    K = "score"
+    d.with({K: @a * 2})     # a column literally named "K", silently
+
+All three engines agree, so this is not a divergence — it is a missing capability with a
+surprising default, and it blocked a field build from writing a generic relation-attach
+(the join key comes from a model's declared relation, so it is only known at run time).
+
+**The precedent is already set.** ADR 0043 hit exactly this for construction — "a column
+could not be named at run time" — and answered it by having `dataframe()` accept a
+**Dict** beside a record, columns in sorted key order because a Dict has no insertion
+order to invent. `with(dict)` is the same answer to the same question, and it keeps the
+record form meaning what a record literal means everywhere else rather than making `with`
+the one place a field name is evaluated.
+
+It is a language-surface addition, so it is a MINOR, and it is written down here rather
+than taken on the way past: the release that would carry it should carry it deliberately.
+
 ### The fixed cost of a comprehension (2026-09-01)
 
 A field build brought a query builder from 24.15 to 5.65 us against GORM's 2.76, and the

@@ -222,6 +222,44 @@ impl Builder {
     /// predicate can resolve a bare name to a local variable (matching the
     /// tree-walker's env). Outer scopes first; the VM's `resolve_var` takes the
     /// last (innermost) match on a duplicate name.
+    /// The captures a column verb's UNEVALUATED arguments need, minted here.
+    ///
+    /// Reporting the upvalues already registered is not enough, and that is the whole
+    /// subtlety: a column verb's arguments are never compiled as expressions, so nothing
+    /// ever asks to resolve a name inside them, so no capture is ever created. The list
+    /// would always be empty inside a lambda — which is exactly why
+    /// `fn f(d, lo) = ((x) => x.where(@ts > lo))(d)` raised here while the tree-walker
+    /// answered.
+    ///
+    /// So every bare name in the arguments is offered to `resolve_upvalue`, which
+    /// registers the capture if the enclosing environment has one. A name that turns out
+    /// to be a COLUMN rather than a variable costs an unused upvalue and nothing else:
+    /// the runtime resolver tries columns first, and this list is only consulted when a
+    /// name is not a column. A name bound nowhere registers nothing.
+    fn column_arg_captures(b: &mut Builder, args: &[Expr]) -> Vec<(String, u32)> {
+        let mut names: Vec<String> = Vec::new();
+        for a in args {
+            crate::visit::walk_expr(a, &mut |e| {
+                if let Expr::Ident { name, .. } = e
+                    && !names.contains(name)
+                {
+                    names.push(name.clone());
+                }
+            });
+        }
+        let mut out = Vec::new();
+        for n in names {
+            // A local shadows a capture, and is already carried by `locals`.
+            if b.resolve_local(&n).is_some() {
+                continue;
+            }
+            if let Some(idx) = b.resolve_upvalue(&n) {
+                out.push((n, idx));
+            }
+        }
+        out
+    }
+
     fn in_scope_locals(&self) -> Vec<(String, u32)> {
         let mut out: Vec<(String, u32)> = Vec::new();
         for scope in &self.scopes {
@@ -632,22 +670,29 @@ impl Compiler {
         b.code[jverb] = Op::JumpIfFalse(verb_at);
         b.emit(Op::LoadLocal(slot), line, col);
         if group_agg {
+            // Both computed BEFORE the emit: `column_arg_captures` takes `b` mutably
+            // (it registers captures), and so does `emit`.
+            let locals = std::rc::Rc::new(b.in_scope_locals());
+            let upvals = std::rc::Rc::new(Builder::column_arg_captures(b, args));
             b.emit(
                 Op::GroupByAgg(std::rc::Rc::new(GroupByAggData {
                     name: std::rc::Rc::new(name.to_string()),
                     args: std::rc::Rc::new(args.to_vec()),
-                    locals: std::rc::Rc::new(b.in_scope_locals()),
+                    locals,
+                    upvals,
                 })),
                 line,
                 col,
             );
         } else {
             let locals = std::rc::Rc::new(b.in_scope_locals());
+            let upvals = std::rc::Rc::new(Builder::column_arg_captures(b, args));
             b.emit(
                 Op::DfColumnVerb(std::rc::Rc::new(DfColumnVerbData {
                     name: std::rc::Rc::new(name.to_string()),
                     args: std::rc::Rc::new(args.to_vec()),
                     locals,
+                    upvals,
                 })),
                 line,
                 col,

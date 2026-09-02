@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Fixed
+
+- **A column name captured from an enclosing scope resolved on one engine and not the
+  other.** ADR 0028 says a binding in scope names the column; the VM implements that by
+  carrying the call site's LOCALS in the column-verb op, and a lambda's capture is not a
+  local of its own frame:
+
+  ```
+  fn f(d, lo) = ((x) => x.where(@ts > lo))(d)
+  tree-walker: 2        VM / JIT: no column or variable named `lo`
+  ```
+
+  The capture was not merely unread — it was never **created**. A column verb's arguments
+  are never compiled as expressions, so nothing ever asked to resolve a name inside them,
+  so no upvalue was ever registered; the list would have been empty however carefully it
+  was consulted. The compiler now offers every bare name in those arguments to
+  `resolve_upvalue`, which mints the capture when the enclosing environment has one, and
+  both engines consult the same three scopes in the same order: locals, then upvalues,
+  then globals — the order a parameter shadowing a capture requires.
+
+  Found by a field build within a day of v0.9.0, because nothing in the corpus put a frame
+  predicate inside a lambda. Seven shapes are now covered on all three engines, and an
+  enclosing `let` resolves as well, which is the same rule.
+
 ## v0.9.0 — 2026-09-01
 
 ### Changed

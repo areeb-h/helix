@@ -1648,7 +1648,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.push(result);
             }
             Op::DfColumnVerb(d) => {
-                let (name, args, lbind) = (&d.name, &d.args, &d.locals);
+                let (name, args, lbind, ubind) = (&d.name, &d.args, &d.locals, &d.upvals);
                 // A DataFrame column-verb (the type checker proved the receiver is a
                 // DataFrame). `resolve_var` resolves a bare predicate name that
                 // isn't a column to a local (via the captured slot map) or a global
@@ -1680,6 +1680,17 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     for (lname, slot) in lbind.iter().rev() {
                         if lname == nm {
                             return Some(locals[base + *slot as usize].clone());
+                        }
+                    }
+                    // THEN THE CAPTURES. A lambda's upvalue is neither a local of its
+                    // frame nor a global, and skipping it is what made
+                    // `fn f(d, lo) = ((x) => x.where(@ts > lo))(d)` answer on the
+                    // tree-walker and raise here. After the locals, because a parameter
+                    // shadows a capture — which is the order the walker gets by
+                    // installing captures underneath the parameters.
+                    for (uname, idx) in ubind.iter().rev() {
+                        if uname == nm {
+                            return frames[fi].upvalues.get(*idx as usize).cloned();
                         }
                     }
                     program
@@ -1729,7 +1740,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.push(result);
             }
             Op::GroupByAgg(d) => {
-                let (name, args, lbind) = (&d.name, &d.args, &d.locals);
+                let (name, args, lbind, ubind) = (&d.name, &d.args, &d.locals, &d.upvals);
                 let recv = stack.pop().unwrap();
                 let (handle, keys) = match &recv {
                     Value::GroupBy(g) => (g.handle.clone(), g.keys.clone()),
@@ -1746,6 +1757,17 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     for (lname, slot) in lbind.iter().rev() {
                         if lname == nm {
                             return Some(locals[base + *slot as usize].clone());
+                        }
+                    }
+                    // THEN THE CAPTURES. A lambda's upvalue is neither a local of its
+                    // frame nor a global, and skipping it is what made
+                    // `fn f(d, lo) = ((x) => x.where(@ts > lo))(d)` answer on the
+                    // tree-walker and raise here. After the locals, because a parameter
+                    // shadows a capture — which is the order the walker gets by
+                    // installing captures underneath the parameters.
+                    for (uname, idx) in ubind.iter().rev() {
+                        if uname == nm {
+                            return frames[fi].upvalues.get(*idx as usize).cloned();
                         }
                     }
                     program

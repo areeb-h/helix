@@ -14230,3 +14230,73 @@ fn effects_reports_source_names_not_namespaced_ones() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+/// A column name bound in an ENCLOSING scope resolves, on every engine.
+///
+/// ADR 0028 says a binding in scope names the column. The VM implements that by carrying
+/// the call site's locals in the column-verb op — and a lambda's capture is not a local of
+/// its own frame, so this diverged:
+///
+///     fn f(d, lo) = ((x) => x.where(@ts > lo))(d)
+///     tree-walker: 2        VM / JIT: no column or variable named `lo`
+///
+/// The subtlety is WHY the capture was missing rather than merely unread. A column verb's
+/// arguments are never compiled as expressions, so nothing ever asked to resolve a name
+/// inside them, so no upvalue was ever registered — the list of captures would have been
+/// empty however carefully it was consulted. The compiler now offers every bare name in
+/// those arguments to `resolve_upvalue`, which mints the capture when the enclosing
+/// environment has one.
+///
+/// Shipped in v0.9.0 and found by a field build within a day, because nothing in the
+/// corpus put a frame predicate inside a lambda. This is that coverage: eight shapes,
+/// each on all three engines, and the agreement is the assertion.
+#[test]
+fn a_column_name_captured_from_an_enclosing_scope_resolves() {
+    let dir = std::env::temp_dir().join(format!("hx_cap_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("c.helix");
+
+    const TS: &str = "D = dataframe({ts: [1, 5, 9]})\n";
+    for (label, src) in [
+        // The reported case: a lambda capturing the enclosing function's PARAMETER.
+        ("param", format!("{TS}fn f(d, lo) = ((x) => x.where(@ts > lo))(d)\nprint(f(D, 4).count())\n")),
+        // A `let` in the enclosing function is a binding in scope too.
+        ("let", format!("{TS}fn f(d) = let lo = 4 in ((x) => x.where(@ts > lo))(d)\nprint(f(D).count())\n")),
+        // A top-level constant always worked; it must keep working.
+        ("global", format!("LO = 4\n{TS}fn f(d) = ((x) => x.where(@ts > LO))(d)\nprint(f(D).count())\n")),
+        // No lambda at all — the plain parameter case.
+        ("direct", format!("{TS}fn f(d, lo) = d.where(@ts > lo)\nprint(f(D, 4).count())\n")),
+        // A BARE column name beside a captured variable: the resolver must tell them apart.
+        ("bare", format!("{TS}fn f(d, lo) = d.where(ts > lo)\nprint(f(D, 4).count())\n")),
+        // Two levels deep, which is the chained-capture path.
+        ("nested", format!("{TS}fn f(d, lo) = ((x) => ((y) => y.where(@ts > lo))(x))(d)\nprint(f(D, 4).count())\n")),
+        // A LOCAL shadows a capture of the same name — locals are consulted first, which
+        // is the order the tree-walker gets by installing captures under the parameters.
+        ("shadow", format!("{TS}fn f(d, lo) = ((lo) => lo.where(@ts > 4))(d)\nprint(f(D, 99).count())\n")),
+    ] {
+        std::fs::write(&prog, &src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "{label}: jit vs vm: {ej} / {ev}\n{src}");
+        assert_eq!((cv, &vm), (ct, &tw), "{label}: vm vs tree-walker: {ev} / {et}\n{src}");
+        assert_eq!(cj, Some(0), "{label}: {ej}\n{src}");
+        assert_eq!(jit.trim(), "2", "{label}: {jit}\n{src}");
+    }
+
+    // A grouped aggregation's value column is a column name in the same sense, so it
+    // takes the same route and needs the same capture.
+    let src = "D = dataframe({ k: [\"a\", \"a\", \"b\"], v: [1, 2, 3] })\n\
+               fn f(d, c) = ((x) => x.group(@k).sum(c))(d)\nprint(f(D, \"v\").count())\n";
+    std::fs::write(&prog, src).unwrap();
+    let p = prog.to_str().unwrap();
+    let (jit, ej, cj) = run(&[p], &[], "");
+    let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+    assert_eq!((cj, &jit), (ct, &tw), "agg: {ej} / {et}");
+    assert_eq!(jit.trim(), "2", "{jit}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

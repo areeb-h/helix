@@ -325,6 +325,15 @@ pub struct DfColumnVerbData {
     pub name: std::rc::Rc<String>,
     pub args: std::rc::Rc<Vec<Expr>>,
     pub locals: std::rc::Rc<Vec<(String, u32)>>,
+    /// The UPVALUES in scope at the call site, by name and index.
+    ///
+    /// A lambda's capture is neither a local of its own frame nor a global, so a column
+    /// verb inside one could not resolve
+    /// `fn f(d, lo) = ((x) => x.where(@ts > lo))(d)` while the tree-walker — which
+    /// installs captures under the parameters and finds them with the same lookup —
+    /// answered `2`. Carrying them here is what makes the two engines consult the same
+    /// scopes, in the same order: locals, then upvalues, then globals.
+    pub upvals: std::rc::Rc<Vec<(String, u32)>>,
 }
 
 /// The receiver classes [`Op::ReceiverIs`] can test — each one is exactly the set of
@@ -427,6 +436,8 @@ pub struct GroupByAggData {
     /// exactly the same sense as `select`'s, and a rule that held for one and not the other
     /// would be a fourth rule nobody could predict.
     pub locals: std::rc::Rc<Vec<(String, u32)>>,
+    /// The upvalues in scope, for the same reason as `DfColumnVerbData::upvals`.
+    pub upvals: std::rc::Rc<Vec<(String, u32)>>,
 }
 
 /// Payload of [`Op::Raise`] — a deferred error's message and hint, boxed to keep
