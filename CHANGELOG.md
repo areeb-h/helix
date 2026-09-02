@@ -4,6 +4,71 @@
 
 ### Added
 
+- **A Tuple answers `count()`, `length()` and `values()`, and `helix doc Tuple` works.**
+  It answered nothing at all before — not its length, and not the doc command, which
+  replied *"unknown type `Tuple`"*:
+
+  ```
+  (1, "a", true).count()   →  error: type Tuple has no method `count`
+  helix doc Tuple          →  error: unknown type `Tuple`. Try one of: Array, String, …
+  ```
+
+  That is hard to defend for a type the stdlib hands back from `enumerate`, `zip`, `top`,
+  `frequencies` and both `items()` methods, and that ADR 0025 orders with `<` and accepts
+  in `min_by`. Nothing recorded it as a decision — "tuples own nothing, by design" was an
+  inference drawn from the silence, by a field build and by me. The silence was a gap, and
+  it cost that build a hand-rolled `count / 2`.
+
+  `values()` is the explicit bridge to the Array surface, named as Record and Dict name the
+  same operation. A tuple deliberately gains nothing sequence-shaped of its own: no `map`,
+  no `filter`, no `first`. Going through `values()` says at the call site that you are
+  treating a fixed-size positional product as a sequence. A **homogeneous** tuple types as
+  an `Array` of that element, so `(3, 1, 2).values().sum()` type-checks; a mixed one gives
+  `Array<Unknown>` rather than a guess that would pass the checker and fail at run time.
+
+  **The interesting half was the split.** Teaching the runtime alone left this:
+
+  ```
+  (1, 2).count()                  →  error: type Tuple has no method `count`
+  {a: 1}.items().map(it.count())  →  [2]        ← worked
+  ```
+
+  Same `Value::Tuple`, two answers. The second receiver is `it`, whose static type is
+  Unknown, so the checker waves it through to the runtime that now answers; a literal tuple
+  has type `Tuple`, and the checker's receiver router had no arm for it. The two messages
+  say which side spoke — `type Tuple has no method` is the checker, `a Tuple has no method`
+  is the runtime — and the regression test asserts both receivers for that reason.
+
+- **`has_feature(name)` — ask before calling, instead of provoking the failure.** ADR 0032
+  gates the BODY, not the name: `re_match` in an appliance build still exists,
+  type-checks and describes itself, and running it says what to rebuild with. What a
+  *program* could not do was ask BEFORE calling, so a library that wanted to degrade
+  gracefully had to provoke the error and catch it. A field build carries exactly that as
+  a standing workaround.
+
+  ```helix
+  fn norm(s) = if has_feature("regex") then s.re_replace("[^a-z]", "") else s.lower()
+  ```
+
+  That is the same charge `type_of` was added to remove, in the words of its own doc
+  comment: a language that can only discover something by provoking an error charges an
+  exception for a question — measured there at 36x a plain lookup.
+
+  Measured across two real builds of the same source: the default answers
+  `regex=true, jit=true, native-df=true, appliance=false`; `--no-default-features
+  --features appliance` answers `regex=false, jit=false, native-df=true, appliance=true`.
+
+  **An unknown name is an ERROR, not `false`.** A typo answered with `false` would send a
+  program down its fallback path forever, on every build, with nothing to see — the exact
+  shape of a silent wrong answer this project keeps removing. Every feature Cargo.toml
+  defines answers truthfully: `appliance, bio, database, dataframes, default, http, jit,
+  managed, mimalloc, native-df, postgres, python, regex`.
+
+  It reads a compile-time constant, so it is pure — `helix effects` reports
+  `no authority, reproducible`. Its regression test asserts each answer against the
+  compiler's own `cfg!` rather than against a fixed value, so it stays true in an
+  appliance build and goes red if an arm is wired to the wrong feature.
+
 - **`join` takes an options record, so the join TYPE can come from a binding.** It could
   only be a trailing string *literal*, so a library had to branch over five constants:
 

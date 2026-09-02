@@ -66,7 +66,7 @@ pub enum Value {
     /// A columnar DataFrame, held behind the engine-agnostic backend seam (ADR
     /// 0012) as a **lazy** query plan. Verbs (`where`/`select`/`sort`/`group`)
     /// extend the plan; it materializes only at `print`/`count` — so a chain fuses
-    /// into one multi-threaded pass and (with the default Polars backend's
+    /// into one multi-threaded pass and (with the polars ORACLE backend's
     /// streaming engine) can run over data far larger than RAM.
     ///
     /// Wrapped in a second `Rc` so this variant is **one word** (`Df` is a fat

@@ -247,6 +247,12 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::String)
         }
+        "has_feature" => {
+            if args.len() != 1 {
+                return Err(arity_err(name, 1, args.len(), line, col));
+            }
+            Ok(Type::Bool)
+        }
         "now" => {
             if !args.is_empty() {
                 return Err(arity_err(name, 0, args.len(), line, col));
@@ -1153,6 +1159,39 @@ pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) 
                 "Array",
                 name,
                 &crate::registry::methods_of(crate::registry::ARRAY_METHODS),
+                line,
+                col,
+            ))
+        }
+    })
+}
+
+/// Tuple methods — the two structural questions, typed.
+///
+/// `values()` is typed as precisely as the tuple allows: a HOMOGENEOUS tuple gives an
+/// `Array` of that element type, so `(1, 2, 3).values().sum()` type-checks like any other
+/// numeric array; a mixed one gives `Array<Unknown>`, which is the honest answer rather
+/// than a guess that would make a later `sum()` pass the checker and fail at run time.
+pub(super) fn tuple_method_type(
+    name: &str,
+    ts: &[Type],
+    line: usize,
+    col: usize,
+) -> Result<Type, HelixError> {
+    Ok(match name {
+        "count" | "length" => Type::Int,
+        "values" => {
+            let el = match ts.split_first() {
+                Some((head, rest)) if rest.iter().all(|t| t == head) => head.clone(),
+                _ => Type::Unknown,
+            };
+            Type::Array(Box::new(el))
+        }
+        _ => {
+            return Err(unknown_method(
+                "Tuple",
+                name,
+                &crate::registry::methods_of(crate::registry::TUPLE_METHODS),
                 line,
                 col,
             ))

@@ -459,6 +459,68 @@ pub(super) fn a_type_of(name: &str, args: Vec<Value>, line: usize, col: usize) -
     Ok(Value::Str(std::rc::Rc::new(args[0].type_name().to_string())))
 }
 
+/// `has_feature(name)` — is this build's `name` capability compiled in?
+///
+/// ADR 0032 gates the BODY, not the name: `re_match` in an appliance build still exists,
+/// type-checks and describes itself, and running it says what to rebuild with. What a
+/// PROGRAM could not do was ask BEFORE calling, so a library that wanted to degrade
+/// gracefully had to provoke the failure and catch it. That is the charge `type_of` above
+/// was added to remove, and this is the same charge one level up: a question should not
+/// cost an exception.
+///
+/// AN UNKNOWN NAME IS AN ERROR, NOT `false`. A typo answered with `false` would send a
+/// program down its fallback path forever, on every build, with nothing to see — the exact
+/// shape of a silent wrong answer. Every name Cargo.toml defines answers truthfully;
+/// nothing else answers at all.
+pub(super) fn a_has_feature(
+    name: &str,
+    args: Vec<Value>,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    arity(name, &args, 1, line, col)?;
+    let want = match &args[0] {
+        Value::Str(s) => (**s).clone(),
+        other => {
+            return Err(HelixError::new(
+                format!("`has_feature` expects a feature name string, found {}", other.type_name()),
+                line,
+                col,
+            )
+            .hint("e.g. `has_feature(\"regex\")`."))
+        }
+    };
+    // One arm per feature in Cargo.toml's [features], so the set here cannot drift from the
+    // set that exists. `cfg!` is a compile-time constant, so this is a load, not a lookup.
+    let on = match want.as_str() {
+        "appliance" => cfg!(feature = "appliance"),
+        "bio" => cfg!(feature = "bio"),
+        "database" | "db" => cfg!(feature = "db"),
+        "dataframes" => cfg!(feature = "dataframes"),
+        "default" => cfg!(feature = "default"),
+        "http" => cfg!(feature = "http"),
+        "jit" => cfg!(feature = "jit"),
+        "managed" => cfg!(feature = "managed"),
+        "mimalloc" => cfg!(feature = "mimalloc"),
+        "native-df" => cfg!(feature = "native-df"),
+        "postgres" => cfg!(feature = "postgres"),
+        "python" => cfg!(feature = "python"),
+        "regex" => cfg!(feature = "regex"),
+        _ => {
+            return Err(HelixError::new(
+                format!("`{want}` is not a build feature"),
+                line,
+                col,
+            )
+            .hint(
+                "one of: appliance, bio, database, dataframes, default, http, jit, managed, \
+                 mimalloc, native-df, postgres, python, regex.",
+            ))
+        }
+    };
+    Ok(Value::Bool(on))
+}
+
 /// `now()` — seconds since the Unix epoch, as a Float.
 ///
 /// `clock_monotonic` measures elapsed time within ONE process, which is the right

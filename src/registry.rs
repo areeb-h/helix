@@ -48,7 +48,7 @@ pub fn category_of(name: &str) -> &'static str {
         "run" => "process",
         // Its own category: asking WHAT a value is, rather than converting or producing
         // one.  is the fallback the drift guard rejects, and rightly.
-        "type_of" => "inspect",
+        "type_of" | "has_feature" => "inspect",
         // Time / pacing.
         "sleep" | "clock_monotonic" => "time",
         // Constructors — make a value of a given type.
@@ -253,6 +253,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "now", pure: false },
     BuiltinDef { path: "run", pure: false },
     BuiltinDef { path: "type_of", pure: true },
+    BuiltinDef { path: "has_feature", pure: true },
     BuiltinDef { path: "degrees", pure: true },
     BuiltinDef { path: "radians", pure: true },
     BuiltinDef { path: "hypot", pure: true },
@@ -434,6 +435,18 @@ pub static DICT_METHODS: &[&str] = &[
 /// error. Static field access is the normal path; these are for runtime-unknown shapes.
 pub static RECORD_METHODS: &[&str] = &["get", "expect", "has", "keys", "values", "items"];
 
+/// Tuple methods — the two STRUCTURAL questions, named as Record and Dict name them.
+///
+/// A tuple is a fixed-size positional product, and it used to answer nothing at all: not
+/// its length, and not `helix doc Tuple`, which denied the type existed. That is hard to
+/// defend for a type the stdlib hands back from `enumerate`, `zip`, `top`, `frequencies`
+/// and both `items()` methods, and that ADR 0025 orders with `<`.
+///
+/// Deliberately NOT sequence-shaped: no `map`, no `filter`, no `first`. `values()` returns
+/// the Array, which has all of those — so the bridge is explicit and a tuple does not
+/// quietly become a second kind of Array.
+pub static TUPLE_METHODS: &[&str] = &["count", "length", "values"];
+
 /// Network-handle (`Net`) methods — the HTTP server surface (`src/serve.rs`). A
 /// listener (from `listen(port)`) has `accept`; a connection (from `accept()`) has
 /// `respond`. Effects, dispatched at runtime like the other opaque types.
@@ -481,7 +494,7 @@ pub fn methods_of(table: &[&'static str]) -> Vec<&'static str> {
 
 /// The method tables by receiver type — the single source for `helix doc <Type>`
 /// introspection and the method-uniqueness test.
-pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 12] {
+pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 13] {
     [
         ("Array", ARRAY_METHODS),
         ("String", STRING_METHODS),
@@ -494,6 +507,9 @@ pub fn type_method_tables() -> [(&'static str, &'static [&'static str]); 12] {
         ("Net", NET_METHODS),
         ("Connection", CONNECTION_METHODS),
         ("Record", RECORD_METHODS),
+        // Late deliberately, for the same reason Headers is last: `count` belongs to
+        // Array in a did-you-mean, not to the three-element thing `zip` just returned.
+        ("Tuple", TUPLE_METHODS),
         // LAST deliberately: Headers shares names (count, get, keys, items) with the
         // common types, and whichever table lists a name first becomes its owner for
         // did-you-mean examples — "xs.count()" must not become "x.count()" because a
@@ -595,9 +611,13 @@ mod tests {
         //
         // Adding a builtin? Decide whether it needs a feature, put it in `feature_of` if so,
         // and bump this. The bump is the point.
-        assert_eq!(
+        // 162 as of `has_feature`, which needs NO feature and must not have one: a build
+            // without regex is exactly where a program needs to ask, so gating the question
+            // on the thing being asked about would make it unanswerable precisely when it
+            // matters. That is the decision this count exists to force.
+            assert_eq!(
             BUILTINS.len(),
-            161,
+            162,
             "a builtin was added or removed — decide whether it needs a Cargo feature, add it \
              to `feature_of` if it does, and update this count in the same change"
         );

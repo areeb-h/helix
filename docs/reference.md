@@ -551,6 +551,17 @@ Read one integer from stdin (a line holding a number).
 
 ## inspect
 
+### `has_feature(name)`
+
+Is this build's `name` capability compiled in?
+
+**Note:** ADR 0032 gates the BODY, not the name: `re_match` in a build without regex still exists, type-checks and describes itself, and running it says what to rebuild with. This is how a program asks BEFORE calling, so a library can degrade gracefully without provoking the failure and catching it — the same charge type_of removes, one level up. Names: appliance, bio, database, dataframes, default, http, jit, managed, mimalloc, native-df, postgres, python, regex. An unknown name is an ERROR, not false: a typo answered with false would send a program down its fallback path forever, on every build, with nothing to see. The example above tests the TYPE rather than the value on purpose — the answer differs between builds, and a doc example must not. Keywords: feature, build, capability, appliance, regex, available, compiled in, gate, ADR 0032.
+
+```
+>>> type_of(has_feature("regex"))
+Bool
+```
+
 ### `type_of(value)`
 
 The value's type name as a String — the same names every diagnostic uses.
@@ -4130,6 +4141,39 @@ The field values as an array, in declaration order.
 ```
 >>> {x: 1, y: 2}.values()
 [1, 2]
+```
+
+## Tuple methods
+
+### `count()`
+
+How many elements the tuple has.
+
+**Note:** `length()` is the same method under the other name, as on Array and Dict. A tuple is a fixed-size positional product, so this is its arity — and until 0.9.1 it could not be asked at all, which cost a field build a hand-rolled count/2. Keywords: length, size, arity, how many, elements.
+
+```
+>>> (1, "a", true).count()
+3
+```
+
+### `length()`
+
+How many elements the tuple has (alias of count).
+
+```
+>>> (1, 2).length()
+2
+```
+
+### `values()`
+
+The elements as an Array, in order.
+
+**Note:** The explicit bridge to the Array surface, named as Record and Dict name the same operation. A tuple deliberately has no map/filter/first of its own: it is a fixed-size positional product, and going through values() says at the call site that you are treating it as a sequence. A HOMOGENEOUS tuple types as an Array of that element, so `(3, 1, 2).values().sum()` type-checks; a mixed one gives Array of Unknown rather than a guess that would pass the checker and fail at run time. Keywords: to array, elements, unpack, sequence, bridge.
+
+```
+>>> (3, 1, 2).values().sort()
+[1, 2, 3]
 ```
 
 ## Headers methods

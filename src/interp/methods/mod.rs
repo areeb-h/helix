@@ -500,11 +500,51 @@ pub(crate) fn call_method(
         },
         Value::Headers(hs) => headers_method(hs, name, args, line, col),
         Value::Record(fields) => record_method(fields, name, args, line, col),
+        Value::Tuple(items) => tuple_method(items, name, args, line, col),
         other => Err(HelixError::new(
             format!("{} has no method `{}`", crate::value::with_article(other.type_name()), name),
             line,
             col,
         )),
+    }
+}
+
+/// The two STRUCTURAL questions a tuple can answer about itself.
+///
+/// It answered neither, and `helix doc Tuple` denied the type existed — for a type the
+/// stdlib returns from `enumerate`, `zip`, `top`, `frequencies` and both `items()`
+/// methods, and that ADR 0025 orders with `<`. A field build carried a hand-rolled
+/// `count / 2` because of it.
+///
+/// `values()` is the explicit bridge to the Array surface, named as Record and Dict name
+/// the same operation. A tuple deliberately gains nothing sequence-shaped of its own: it
+/// is a fixed-size positional product, and `map`/`filter` on the Array `values()` returns
+/// says so at the call site.
+fn tuple_method(
+    items: &std::rc::Rc<Vec<Value>>,
+    name: &str,
+    args: &[Value],
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    match name {
+        "count" | "length" => {
+            if !args.is_empty() {
+                return Err(HelixError::new(
+                    format!("`{name}` takes no arguments"),
+                    line,
+                    col,
+                ));
+            }
+            Ok(Value::Int(items.len() as i64))
+        }
+        "values" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`values` takes no arguments", line, col));
+            }
+            Ok(Value::array((**items).clone()))
+        }
+        _ => Err(no_such_method(&Value::Tuple(items.clone()), name, line, col)),
     }
 }
 

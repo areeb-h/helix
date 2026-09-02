@@ -742,6 +742,14 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "argv only — there is no shell form, so a metacharacter in ordinary data cannot become a command. A non-zero exit RAISES (unlike subprocess.run's check=False default); inspect it with `try run(...)` instead. Granting this is a boundary exit, not confinement: the child runs with its own permissions.",
     },
     DocEntry {
+        name: "has_feature",
+        sig: "has_feature(name)",
+        doc: "Is this build's `name` capability compiled in?",
+        example: "type_of(has_feature(\"regex\"))",
+        example_out: "Bool",
+        notes: "ADR 0032 gates the BODY, not the name: `re_match` in a build without regex still exists, type-checks and describes itself, and running it says what to rebuild with. This is how a program asks BEFORE calling, so a library can degrade gracefully without provoking the failure and catching it — the same charge type_of removes, one level up. Names: appliance, bio, database, dataframes, default, http, jit, managed, mimalloc, native-df, postgres, python, regex. An unknown name is an ERROR, not false: a typo answered with false would send a program down its fallback path forever, on every build, with nothing to see. The example above tests the TYPE rather than the value on purpose — the answer differs between builds, and a doc example must not. Keywords: feature, build, capability, appliance, regex, available, compiled in, gate, ADR 0032.",
+    },
+    DocEntry {
         name: "type_of",
         sig: "type_of(value)",
         doc: "The value's type name as a String — the same names every diagnostic uses.",
@@ -3481,6 +3489,39 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             example: "{\"a\": 1, \"b\": 2}.length()",
             example_out: "2",
             notes: "",
+        },
+    ),
+    (
+        "Tuple",
+        DocEntry {
+            name: "count",
+            sig: "count()",
+            doc: "How many elements the tuple has.",
+            example: "(1, \"a\", true).count()",
+            example_out: "3",
+            notes: "`length()` is the same method under the other name, as on Array and Dict. A tuple is a fixed-size positional product, so this is its arity — and until 0.9.1 it could not be asked at all, which cost a field build a hand-rolled count/2. Keywords: length, size, arity, how many, elements.",
+        },
+    ),
+    (
+        "Tuple",
+        DocEntry {
+            name: "length",
+            sig: "length()",
+            doc: "How many elements the tuple has (alias of count).",
+            example: "(1, 2).length()",
+            example_out: "2",
+            notes: "",
+        },
+    ),
+    (
+        "Tuple",
+        DocEntry {
+            name: "values",
+            sig: "values()",
+            doc: "The elements as an Array, in order.",
+            example: "(3, 1, 2).values().sort()",
+            example_out: "[1, 2, 3]",
+            notes: "The explicit bridge to the Array surface, named as Record and Dict name the same operation. A tuple deliberately has no map/filter/first of its own: it is a fixed-size positional product, and going through values() says at the call site that you are treating it as a sequence. A HOMOGENEOUS tuple types as an Array of that element, so `(3, 1, 2).values().sum()` type-checks; a mixed one gives Array of Unknown rather than a guess that would pass the checker and fail at run time. Keywords: to array, elements, unpack, sequence, bridge.",
         },
     ),
     (

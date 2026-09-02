@@ -14657,3 +14657,185 @@ fn a_join_type_can_come_from_a_binding_and_the_old_spelling_still_means_the_old_
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+/// `has_feature(name)` must answer for the build it is actually in.
+///
+/// ADR 0032 gates the BODY, not the name: `re_match` in an appliance build still exists,
+/// type-checks and describes itself, and running it says what to rebuild with. What a
+/// PROGRAM could not do was ask BEFORE calling, so a library that wanted to degrade
+/// gracefully had to provoke the failure and catch it — the same charge `type_of` was
+/// added to remove, measured there at 36x a plain lookup.
+///
+/// THE ASSERTION IS AGAINST `cfg!`, NOT AGAINST A FIXED ANSWER. A test that expected
+/// `has_feature("regex") == true` would be asserting which build ran it, and would fail
+/// correctly-built appliance binaries while passing a `has_feature` that had drifted from
+/// Cargo.toml. Comparing each answer to the compiler's own `cfg!` makes this test say the
+/// one thing worth saying: the language's answer matches the build. It goes red if an arm
+/// is wired to the wrong feature, if a feature is added to Cargo.toml and not here, or if
+/// the whole thing starts returning a constant.
+#[test]
+fn has_feature_answers_for_the_build_it_is_in() {
+    let dir = std::env::temp_dir().join(format!("hx_hf_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("h.helix");
+
+    // Every feature Cargo.toml defines, paired with what the compiler says about it.
+    for (feat, expected) in [
+        ("appliance", cfg!(feature = "appliance")),
+        ("bio", cfg!(feature = "bio")),
+        ("database", cfg!(feature = "db")),
+        ("dataframes", cfg!(feature = "dataframes")),
+        ("default", cfg!(feature = "default")),
+        ("http", cfg!(feature = "http")),
+        ("jit", cfg!(feature = "jit")),
+        ("managed", cfg!(feature = "managed")),
+        ("mimalloc", cfg!(feature = "mimalloc")),
+        ("native-df", cfg!(feature = "native-df")),
+        ("postgres", cfg!(feature = "postgres")),
+        ("python", cfg!(feature = "python")),
+        ("regex", cfg!(feature = "regex")),
+    ] {
+        let src = format!("print(has_feature(\"{feat}\"))\n");
+        std::fs::write(&prog, &src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "{feat}: jit vs vm: {ej} / {ev}");
+        assert_eq!((cv, &vm), (ct, &tw), "{feat}: vm vs tree-walker: {ev} / {et}");
+        assert_eq!(cj, Some(0), "{feat}: {ej}");
+        assert_eq!(
+            jit.trim(),
+            if expected { "true" } else { "false" },
+            "has_feature(\"{feat}\") disagrees with cfg!(feature) in this same build"
+        );
+    }
+
+    // AN UNKNOWN NAME IS AN ERROR, NOT `false`. This is the whole safety property: a typo
+    // answered with `false` sends a program down its fallback path forever, on every
+    // build, with nothing to see.
+    for (label, src, needle) in [
+        ("typo", "print(has_feature(\"regexp\"))\n", "is not a build feature"),
+        ("empty", "print(has_feature(\"\"))\n", "is not a build feature"),
+        // A cargo feature that is real but not a runtime capability must still not be
+        // invented here — the list is closed on purpose.
+        ("not-a-feature", "print(has_feature(\"lto\"))\n", "is not a build feature"),
+        ("not-a-string", "print(has_feature(5))\n", "expects a feature name string"),
+        ("no-args", "print(has_feature())\n", "1 argument"),
+        ("two-args", "print(has_feature(\"regex\", \"http\"))\n", "1 argument"),
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (out, ej, cj) = run(&[p], &[], "");
+        let (_, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_ne!(cj, Some(0), "{label} should be REFUSED, got: {out}");
+        assert_eq!(cj, ct, "{label}: engines disagree on the refusal");
+        assert!(
+            ej.contains(needle) && et.contains(needle),
+            "{label}: message must say `{needle}`\njit: {ej}\ntree-walker: {et}"
+        );
+    }
+
+    // It reads a compile-time constant, so it is PURE: no authority, and reproducible.
+    // If that ever stops being true, `helix effects` is where a caller would find out.
+    std::fs::write(&prog, "fn f() = has_feature(\"regex\")\nprint(f())\n").unwrap();
+    let (eff, ee, ce) = run(&["effects", prog.to_str().unwrap()], &[], "");
+    assert_eq!(ce, Some(0), "{ee}");
+    assert!(
+        eff.contains("no authority") && eff.contains("reproducible"),
+        "has_feature must stay pure, got: {eff}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// A Tuple answers the two structural questions about itself, on every engine.
+///
+/// It answered neither, and `helix doc Tuple` denied the type existed — for a type the
+/// stdlib hands back from `enumerate`, `zip`, `top`, `frequencies` and both `items()`
+/// methods, and that ADR 0025 orders with `<`. A field build carried a hand-rolled
+/// `count / 2` because of it.
+///
+/// THE INTERESTING CASE IS THE SPLIT. Teaching the RUNTIME alone left this:
+///
+///     (1, 2).count()                  ->  error: type Tuple has no method `count`
+///     {a: 1}.items().map(it.count())  ->  [2]        <- worked
+///
+/// Same `Value::Tuple`, two answers. The second receiver is `it`, whose static type is
+/// Unknown, so the checker waves it through to the runtime that now answers; a LITERAL
+/// tuple has type `Tuple`, and the checker had no arm for it. The two messages even say
+/// which side spoke — "type Tuple has no method" is the checker, "a Tuple has no method"
+/// is the runtime. Both receivers are asserted below for exactly that reason.
+#[test]
+fn a_tuple_answers_count_and_values_through_both_the_checker_and_the_runtime() {
+    let dir = std::env::temp_dir().join(format!("hx_tup_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("t.helix");
+
+    for (label, src, want) in [
+        // A LITERAL tuple: static type `Tuple`, so this is the checker's arm.
+        ("literal-count", "print((1, \"a\", true).count())\n", "3"),
+        ("literal-length", "print((1, \"a\", true).length())\n", "3"),
+        ("literal-values", "print((1, \"a\", true).values())\n", "[1, \"a\", true]"),
+        // A HOMOGENEOUS tuple types as an Array of that element, so a numeric method on
+        // the result type-checks. A mixed one must NOT, which is asserted as a refusal
+        // below rather than guessed at here.
+        ("homogeneous-sum", "print((3, 1, 2).values().sum())\n", "6"),
+        ("homogeneous-sort", "print((3, 1, 2).values().sort())\n", "[1, 2, 3]"),
+        // Through an UNKNOWN receiver: the checker steps aside and the runtime answers.
+        // This is the shape that worked while the literal did not.
+        ("via-items", "print({a: 1, b: 2}.items().map(it.count()))\n", "[2, 2]"),
+        ("via-zip", "print([1, 2].zip([\"a\", \"b\"]).map(it.count()))\n", "[2, 2]"),
+        ("via-enumerate", "print([\"x\"].enumerate().map(it.values()))\n", "[[0, \"x\"]]"),
+        ("via-top", "print([\"a\", \"a\", \"b\"].top(1).map(it.values()))\n", "[[\"a\", 2]]"),
+        // Through a PARAMETER, which is Unknown at the call site — the library shape.
+        ("via-parameter", "fn n(t) = t.count()\nprint(n((1, 2, 3)))\n", "3"),
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "{label}: jit vs vm: {ej} / {ev}");
+        assert_eq!((cv, &vm), (ct, &tw), "{label}: vm vs tree-walker: {ev} / {et}");
+        assert_eq!(cj, Some(0), "{label}: {ej}");
+        assert_eq!(jit.trim(), want, "{label}");
+    }
+
+    // A tuple gains nothing SEQUENCE-shaped of its own. `values()` is the bridge, and it
+    // is explicit on purpose — if `map` ever starts working directly on a tuple, that was
+    // a decision and this says so.
+    for (label, src, needle) in [
+        ("no-map", "print((1, 2).values().count())\nprint((1, 2).map((x) => x))\n", "no method `map`"),
+        ("no-first", "print((1, 2).first())\n", "no method `first`"),
+        ("count-takes-no-args", "print((1, 2).count(3))\n", "takes no arguments"),
+        // An unknown method reached through an Unknown receiver is the RUNTIME's refusal,
+        // which words it with an article. Asserting the runtime half keeps both arms live.
+        ("runtime-refusal", "fn f(t) = t.nope()\nprint(f((1, 2)))\n", "a Tuple has no method"),
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (out, ej, cj) = run(&[p], &[], "");
+        let (_, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_ne!(cj, Some(0), "{label} should be REFUSED, got: {out}");
+        assert_eq!(cj, ct, "{label}: engines disagree on the refusal");
+        assert!(
+            ej.contains(needle) && et.contains(needle),
+            "{label}: message must say `{needle}`\njit: {ej}\ntree-walker: {et}"
+        );
+    }
+
+    // `helix doc Tuple` used to answer "unknown type `Tuple`" — the part of this that was
+    // not a missing method but a missing TYPE.
+    let (doc, ed, cd) = run(&["doc", "Tuple"], &[], "");
+    assert_eq!(cd, Some(0), "helix doc Tuple must work: {ed}");
+    for needle in ["count", "length", "values"] {
+        assert!(doc.contains(needle), "helix doc Tuple must list `{needle}`, got: {doc}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

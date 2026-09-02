@@ -330,6 +330,14 @@ impl super::Checker {
                 self.synth_simple_args(args)?;
                 dna_method_type(name, line, col)
             }
+            // A tuple answers the two STRUCTURAL questions about itself. Without this arm
+            // the checker refused them before the runtime could answer, and the refusal
+            // was invisible whenever the receiver's type was Unknown — so
+            // `{a: 1}.items().map(it.count())` worked while `(1, 2).count()` did not.
+            Type::Tuple(ts) => {
+                self.synth_simple_args(args)?;
+                tuple_method_type(name, ts, line, col)
+            }
             // Records get dynamic-access methods (`get`/`has`/`keys`/…) on top of static
             // `rec.field` access — the escape hatch for runtime-unknown shapes (parsed JSON).
             Type::Record(fields) => {

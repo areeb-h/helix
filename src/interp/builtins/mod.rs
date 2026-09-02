@@ -52,6 +52,7 @@ impl super::Interp {
             "now" => return output::a_now(name, args, line, col),
             "run" => return crate::subprocess::run(&args, line, col),
             "type_of" => return output::a_type_of(name, args, line, col),
+            "has_feature" => return output::a_has_feature(name, args, line, col),
             "range" => return corefns::a_range(args, line, col),
             "chr" => return corefns::a_chr(name, args, line, col),
             "ord" => return corefns::a_ord(name, args, line, col),
