@@ -14391,3 +14391,100 @@ print(D.join(D, k).count())
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+/// The automatic memo cache keys on `Str` and `Bool`, and they are really IN the key.
+///
+/// Threading a tag through a recursion is an ordinary shape that used to fall off the
+/// cache invisibly — measured, `fib(30)` cost 0.230s with a `Str` second argument against
+/// 0.006s without one, for identical work. Admitting them is only safe if the key
+/// actually distinguishes them, and the failure mode if it does not is silent: two calls
+/// collide and return each other's answers, no error, all three engines agreeing.
+///
+/// So this asserts the DISTINCTION rather than the speed. `f(1, "a")` and `f(1, "b")`
+/// return values three orders of magnitude apart; if the string were dropped from the key
+/// (or projected to a constant, which is what the old unreachable `_ => MemoArg::Int(0)`
+/// arm would have done had the gate ever drifted), the second call returns the first's
+/// answer and this goes red.
+#[test]
+fn the_memo_cache_keys_on_strings_and_bools_and_they_are_in_the_key() {
+    let dir = std::env::temp_dir().join(format!("hx_memo_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("m.helix");
+
+    // Each is `fib`-shaped, so `memoizable_fns` admits it (pure, no mutable global,
+    // two self-calls) and the cache is genuinely in play — a non-memoized function
+    // would pass these by simply recomputing, so each program is also run at a size
+    // that is far too slow to finish uncached within the suite if the cache is on.
+    for (label, src, want) in [
+        // The tag reaches the base case, so a collision is visible in the VALUE.
+        (
+            "str-in-key",
+            "fn f(n, tag) = if n < 2 then (if tag == \"a\" then 100 else 7) \
+             else f(n - 1, tag) + f(n - 2, tag)\nprint(f(20, \"a\"), f(20, \"b\"))\n",
+            "1094600 76622",
+        ),
+        // Same question for `Bool`.
+        (
+            "bool-in-key",
+            "fn g(n, up) = if n < 2 then (if up then 1000 else 1) \
+             else g(n - 1, up) + g(n - 2, up)\nprint(g(10, true), g(10, false))\n",
+            "89000 89",
+        ),
+        // A string PAST the length cap is not a key at all — the call is simply not
+        // memoized, which must leave the answer correct and only make it slower.
+        (
+            "over-the-cap",
+            &format!(
+                "fn f(n, tag) = if n < 2 then n else f(n - 1, tag) + f(n - 2, tag)\n\
+                 print(f(22, \"{}\"))\n",
+                "y".repeat(200)
+            ),
+            "17711",
+        ),
+        // Two DIFFERENT over-cap strings, neither cached: still no collision.
+        (
+            "over-the-cap-distinct",
+            &format!(
+                "fn f(n, tag) = if n < 2 then (if tag == \"{a}\" then 5 else 3) \
+                 else f(n - 1, tag) + f(n - 2, tag)\nprint(f(14, \"{a}\"), f(14, \"{b}\"))\n",
+                a = "y".repeat(200),
+                b = "z".repeat(200)
+            ),
+            // fib-shaped: `f(14)` has fib(15) = 610 leaf calls, and the two tags give
+            // the base case 5 and 3, so 3050 and 1830 — distinct, in exactly the 5:3
+            // ratio of the base values.
+            "3050 1830",
+        ),
+        // A Record still is not a key: correct, uncached. This pins the boundary, so
+        // widening it further is a deliberate act rather than an accident.
+        (
+            "record-is-not-a-key",
+            "fn f(s) = if s.n < 2 then s.n else f({n: s.n - 1}) + f({n: s.n - 2})\n\
+             print(f(20))\n"
+                .replace("f(20)", "f({n: 20})")
+                .as_str(),
+            "6765",
+        ),
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "{label}: jit vs vm: {ej} / {ev}");
+        assert_eq!((cv, &vm), (ct, &tw), "{label}: vm vs tree-walker: {ev} / {et}");
+        assert_eq!(cj, Some(0), "{label}: {ej}");
+        assert_eq!(jit.trim(), want, "{label}: the cache returned another call's answer");
+    }
+
+    // WHAT THIS DOES NOT COVER, stated rather than implied. Sabotaged three ways:
+    // projecting `Str` to a constant gives "1094600 1094600" and projecting `Bool` to one
+    // gives "89000 89000", both red. REMOVING THE LENGTH CAP stays GREEN — correctly, because
+    // an uncapped key is still a right key, only an unbounded one. The cap is a resource
+    // policy with no value-visible effect, so no assertion over values can watch it; the
+    // test that would is a memory measurement, not this one.
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

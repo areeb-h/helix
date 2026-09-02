@@ -105,15 +105,34 @@ const VM_MAX_DEPTH: usize = crate::interp::MAX_CALL_DEPTH;
 /// only a safety backstop.
 const MEMO_MAX_ENTRIES: usize = 5_000_000;
 
-/// One scalar argument as a memo key. Floats are keyed by their **bit pattern**
-/// (`to_bits`), which is exactly correct: bit-identical floats are the same value
-/// (so the cached result is valid), distinct bits are distinct keys (so `+0.0`
-/// vs `-0.0` are simply computed separately), and a NaN keys consistently against
-/// itself. This makes pure float recursion (e.g. `fibf`) memoizable too.
+/// Longest string that may take part in a memo key.
+///
+/// A key is hashed on EVERY call and retained for the life of the table, so it has to be
+/// cheap at both. A tag, mode or label — what actually threads through a recursion — is a
+/// handful of bytes; a document is not a cache key. Past the cap the call is simply not
+/// memoized, exactly as a Record is not: the result stays correct, it is only uncached.
+/// Never a truncated key, which would let two different strings collide and hand back a
+/// wrong answer.
+const MEMO_MAX_KEY_BYTES: usize = 64;
+
+/// One argument as a memo key. Floats are keyed by their **bit pattern** (`to_bits`),
+/// which is exactly correct: bit-identical floats are the same value (so the cached
+/// result is valid), distinct bits are distinct keys (so `+0.0` vs `-0.0` are simply
+/// computed separately), and a NaN keys consistently against itself. This makes pure
+/// float recursion (e.g. `fibf`) memoizable too.
+///
+/// `Str` is admitted under [`MEMO_MAX_KEY_BYTES`] because threading a tag through a
+/// recursion is an ordinary shape that used to fall off the cache invisibly — measured,
+/// `fib(30)` cost 0.230s with a `Str` second argument against 0.006s without one. It is
+/// no new retention hazard: the table already holds an arbitrary `Value` on the RESULT
+/// side of every entry, so a length-capped key is strictly more conservative than what
+/// it keeps already.
 #[derive(Hash, PartialEq, Eq, Clone)]
 enum MemoArg {
     Int(i64),
     Float(u64),
+    Bool(bool),
+    Str(std::rc::Rc<String>),
 }
 
 /// Key into the memo table: a function index plus its scalar arguments. The 1- and
@@ -179,13 +198,40 @@ fn interp_too_long(line: usize, col: usize) -> HelixError {
     .hint("build large text incrementally or write it to a file instead.")
 }
 
-/// Project a (gated-scalar) argument value into a hashable memo argument.
-fn memo_arg(v: &Value) -> MemoArg {
+/// Project an argument into a hashable memo key component, or `None` if it cannot be one.
+///
+/// **This is the single definition of what may key the cache.** Eligibility used to be a
+/// separate list at the call site (`all(matches!(v, Int | Float))`) with this function
+/// carrying an unreachable `_ => MemoArg::Int(0)` for anything else. The two agreed, so
+/// nothing was wrong — but nothing held them together either, and the failure that drift
+/// produces is the worst kind available: every ineligible value would key as the SAME
+/// `Int(0)`, so unrelated calls collide and return each other's results, with no error
+/// and all three engines agreeing. Eligibility is now *defined* as "every argument
+/// projects", so there is no second list left to disagree with.
+fn memo_arg(v: &Value) -> Option<MemoArg> {
     match v {
-        Value::Int(n) => MemoArg::Int(*n),
-        Value::Float(f) => MemoArg::Float(f.to_bits()),
-        _ => MemoArg::Int(0), // unreachable: gated by all_scalar
+        Value::Int(n) => Some(MemoArg::Int(*n)),
+        Value::Float(f) => Some(MemoArg::Float(f.to_bits())),
+        Value::Bool(b) => Some(MemoArg::Bool(*b)),
+        Value::Str(s) if s.len() <= MEMO_MAX_KEY_BYTES => Some(MemoArg::Str(s.clone())),
+        _ => None,
     }
+}
+
+/// The whole key, or `None` if any argument cannot key. Bails on the first ineligible
+/// argument, so a memoizable function called with a frame pays one match, not a walk.
+fn memo_key_for(idx: usize, args: &[Value]) -> Option<MemoKey> {
+    Some(match args {
+        [a] => MemoKey::A1(idx, memo_arg(a)?),
+        [a, b] => MemoKey::A2(idx, memo_arg(a)?, memo_arg(b)?),
+        _ => {
+            let mut v = Vec::with_capacity(args.len());
+            for a in args {
+                v.push(memo_arg(a)?);
+            }
+            MemoKey::An(idx, v)
+        }
+    })
 }
 
 /// What a comprehension iterates: a materialized array, or — for a fused
@@ -1004,16 +1050,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 // return. This turns exponential recursion (e.g. `fib`) linear —
                 // for integer *and* float arguments.
                 if program.memoizable[idx]
-                    && stack[start..]
-                        .iter()
-                        .all(|v| matches!(v, Value::Int(_) | Value::Float(_)))
+                    && let Some(key) = memo_key_for(idx, &stack[start..])
                 {
-                    let kargs = &stack[start..];
-                    let key = match kargs.len() {
-                        1 => MemoKey::A1(idx, memo_arg(&kargs[0])),
-                        2 => MemoKey::A2(idx, memo_arg(&kargs[0]), memo_arg(&kargs[1])),
-                        _ => MemoKey::An(idx, kargs.iter().map(memo_arg).collect()),
-                    };
                     if let Some(cached) = memo.get(&key) {
                         let cached = cached.clone();
                         stack.truncate(start);

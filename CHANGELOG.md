@@ -70,6 +70,55 @@
   none of which "is it bigger than zero" could see. Verified by sabotage: a +3600s and a
   +200s offset both go red, a +30s offset stays green inside the stated window.
 
+- **A `String` or `Bool` argument silently cost up to 46x, by falling off the automatic
+  memo cache.** The cache keyed on `Int` and `Float` only, so threading a tag through a
+  recursion — an ordinary shape — quietly turned a linear function exponential again:
+
+  ```
+  fib(30), identical work, only the ARGUMENT SHAPE differs
+  f(n)                     0.006s
+  f(n, tag)   tag: Str     0.230s      -> 0.005s
+  f(s)        s: Record    0.439s      -> unchanged, and deliberately so
+  ```
+
+  A `Str` keys up to 64 bytes (`MEMO_MAX_KEY_BYTES`); past the cap the call is not
+  memoized, which is correct and merely uncached — never a truncated key, which would let
+  two different strings collide and return a wrong answer. A Record, Array or frame is
+  still never a key: those are `Rc`-shared structures of unbounded size, so hashing one
+  means walking it on every call and then retaining it for the life of the table.
+
+  **The two halves of the rule are now one definition.** Eligibility was a list at the
+  call site (`all(matches!(v, Int | Float))`) while the projection carried an unreachable
+  `_ => MemoArg::Int(0)` for everything else. They agreed, so nothing was wrong — but
+  nothing held them together, and the failure drift produces is the worst kind available:
+  every ineligible value keys as the SAME `Int(0)`, so unrelated calls collide and return
+  each other's results, silently, with all three engines agreeing. Eligibility is now
+  *defined* as "every argument projects".
+
+  Verified by sabotage: projecting `Str` to a constant returns `1094600 1094600` where the
+  answers must differ, and `Bool` likewise `89000 89000`. Removing the length cap stays
+  green, correctly — an uncapped key is still a right key, only an unbounded one — and the
+  test says so rather than implying coverage it does not have.
+
+- **The performance gate reported PASS when every workload failed to run.**
+  `perf-verify.sh` is what enforces "no regression", and it `cd`s to `bench/crosslang`
+  before measuring — so a binary path given relative to where the caller stood stopped
+  resolving. Every run then failed to the script's own sentinel, and 999/999 is 1.00:
+
+  ```
+  b1_scalar    999s->999s (1.00)   1024K->1024K (1.00, +0MB)
+  ...
+  PASS — candidate has no wall/RSS regression vs baseline
+  ```
+
+  Seven dead workloads, reported as a perfect result, by the one gate whose whole job is
+  to refuse that. Found by running it. Three fixes, smallest first: both paths are
+  absolutized *before* the `cd`, which makes the documented usage work rather than merely
+  fail loudly; a preflight runs one workload on each binary and exits 2 if either cannot;
+  and the sentinel is treated as a failure wherever it survives instead of as a number to
+  divide. Verified by sabotage — the original relative-path call now measures correctly,
+  a missing binary and a binary that cannot run a workload both exit 2 with the reason.
+
 ### Documentation
 
 - **Float arguments are memoized, and three places said they were not.** The exclusion was

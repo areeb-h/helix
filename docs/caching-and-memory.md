@@ -80,13 +80,23 @@ mutable systems; there is no case in which the data changes underneath the cache
    against 0.006s for the `Int` `fib(32)`, while the same float recursion made
    non-memoizable takes 0.124s at `fibn(28.0)`, 25x longer on a quarter of the work.
 
-   A **non-number argument is never a key**: a Record, String, Array or frame stops
-   memoization for that call. Values are `Rc`-shared, so hashing one would mean
-   hashing structure of unbounded size on every call and then RETAINING it for the
-   life of the table — a cache that quietly pins the data it was asked about. A
-   function whose expensive work is a function of a spec should compute that work
-   once when the spec is built, which is a shape the caller controls; the automatic
-   cache deliberately stays where it can prove its keys are cheap and small.
+   A **`Bool` and a short `String` key as well.** Threading a tag, mode or label
+   through a recursion is an ordinary shape, and it used to fall off the cache with
+   nothing to show why: measured, `fib(30)` cost **0.230s** with a `Str` second
+   argument against 0.006s without one, for identical work. It is 0.005s now. A
+   string keys only up to **64 bytes** (`MEMO_MAX_KEY_BYTES`), which is what makes it
+   safe rather than merely allowed — a key is hashed on every call and retained for
+   the life of the table, and a tag is a handful of bytes while a document is not a
+   cache key. Past the cap the call is simply not memoized: correct, only uncached.
+   Never a truncated key, which would let two different strings collide and return a
+   wrong answer.
+
+   A **Record, Array or frame is still never a key**, and that boundary is deliberate.
+   Those are `Rc`-shared structures of unbounded size, so hashing one means walking it
+   on every call and then RETAINING it — a cache that quietly pins the data it was
+   asked about, with no cap that could bound it without a walk to measure first. A
+   function whose expensive work is a function of a *spec* should do that work once
+   when the spec is built, which is a shape the caller controls and can see.
 
    The VM also **bounds the table**: an entry cap (`MEMO_MAX_ENTRIES`) that, on overflow, **evicts** (clears
    and lets the table rebuild) rather than growing without limit — so memoizing over a
