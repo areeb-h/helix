@@ -70,9 +70,25 @@ mutable systems; there is no case in which the data changes underneath the cache
      redundancy. Linear recursion (one self-call) is left on the JIT, where a fast
      native step outperforms a cached bytecode step.
 
-   At runtime the VM additionally gates on **all-`Int` arguments** (float keys are
-   excluded, since NaN and precision make them unsafe hash keys) and **bounds the
-   table**: an entry cap (`MEMO_MAX_ENTRIES`) that, on overflow, **evicts** (clears
+   At runtime the VM additionally gates on **every argument being a number** — `Int`
+   or `Float`. Floats were excluded at first, on the usual reasoning that NaN and
+   precision make them unsafe hash keys; they are keyed by their **bits** instead,
+   which answers that exactly. Bit-identical floats are the same value, so a hit is
+   valid; `+0.0` and `-0.0` have distinct bits, so they are simply computed
+   separately rather than wrongly shared; and a NaN keys consistently against itself.
+   Float recursion is therefore memoized too — measured, `fibf(32.0)` runs in 0.005s
+   against 0.006s for the `Int` `fib(32)`, while the same float recursion made
+   non-memoizable takes 0.124s at `fibn(28.0)`, 25x longer on a quarter of the work.
+
+   A **non-number argument is never a key**: a Record, String, Array or frame stops
+   memoization for that call. Values are `Rc`-shared, so hashing one would mean
+   hashing structure of unbounded size on every call and then RETAINING it for the
+   life of the table — a cache that quietly pins the data it was asked about. A
+   function whose expensive work is a function of a spec should compute that work
+   once when the spec is built, which is a shape the caller controls; the automatic
+   cache deliberately stays where it can prove its keys are cheap and small.
+
+   The VM also **bounds the table**: an entry cap (`MEMO_MAX_ENTRIES`) that, on overflow, **evicts** (clears
    and lets the table rebuild) rather than growing without limit — so memoizing over a
    very large or unbounded key space stays memory-bounded instead of climbing to OOM
    (2026-07 hardening round, see [audit.md](audit.md)). The effect: `fib(35)` is

@@ -89,6 +89,23 @@ untouched, which is the case the DSL's ergonomics exist to serve.
 - Should a shadow be *diagnosed* rather than silently resolved? A query whose bare name has
   both a binding and a column is now unambiguous but still surprising; a note would cost
   nothing and would make the visible collision actually visible.
-- `with` creates columns as well as reading them. Does the same rule apply to the name being
-  DEFINED, or only to names being read? The current change treats reads uniformly; the
-  defining position deserves its own look.
+- ~~`with` creates columns as well as reading them. Does the same rule apply to the name
+  being DEFINED, or only to names being read?~~ **Answered 2026-09-02: yes, and the same
+  way.** Left open here, the defining position kept the old behaviour and produced the
+  wrong answer the Context argues against — with no error and all three engines agreeing,
+  so the differential oracle could not see it:
+
+  ```helix
+  fn rename(f, to) = f.with({to: @author_id})
+  rename(df, "id").columns()      # ["author_id", "to"]
+  ```
+
+  The argument that settled the read positions is about the library author's blindness to
+  the caller's schema, and defining a column is no less blind than reading one. A **join
+  key** is a third name position this ADR never reached; it took the same rule at the same
+  time, having failed the other way — `fn on(l, r, k) = l.join(r, k)` refused with "no
+  column `k`" rather than answering wrongly.
+
+  One limit is worth stating: only a `Str` binding counts. A name bound to a number or a
+  frame is a type mistake, and resolving it as a column name would convert that mistake
+  into a silent lookup of something that can never exist.

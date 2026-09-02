@@ -131,9 +131,7 @@ pub enum Op {
     /// fully evaluated value, so it is compiled and pushed normally; `spec` carries
     /// the *unevaluated* tail — the key column identifiers and an optional trailing
     /// join-type string — parsed at runtime (where diagnostics are native).
-    DfJoin {
-        spec: std::rc::Rc<Vec<Expr>>,
-    },
+    DfJoin(std::rc::Rc<DfJoinData>),
     /// Pop a GroupBy receiver and apply an aggregation over one *unevaluated*
     /// column (`mean`/`sum`/`min`/`max`/`count`/`std`). Emitted only when the type
     /// checker proved the receiver is a GroupBy.
@@ -320,6 +318,18 @@ pub enum Op {
 /// `Rc` so `Op` stays small — the dispatch loop streams every instruction, so the
 /// enum's width is a hot-path constant. DataFrame verbs are emitted at most once
 /// per source occurrence and never in hot loops, so the extra indirection is free.
+/// Payload of [`Op::DfJoin`] — boxed, because `Op` is asserted to stay within two words
+/// and three `Rc`s do not fit. The scopes ride along for the same reason the column verbs
+/// carry them: a join KEY is a column name, so it follows ADR 0028's rule, and
+/// `fn on(l, r, k) = l.join(r, k)` joins on the caller's key instead of hunting a column
+/// literally called `k`.
+#[derive(Debug, Clone)]
+pub struct DfJoinData {
+    pub spec: std::rc::Rc<Vec<Expr>>,
+    pub locals: std::rc::Rc<Vec<(String, u32)>>,
+    pub upvals: std::rc::Rc<Vec<(String, u32)>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct DfColumnVerbData {
     pub name: std::rc::Rc<String>,

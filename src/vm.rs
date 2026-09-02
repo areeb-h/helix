@@ -1703,7 +1703,8 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     crate::interp::df_column_verb(&lf, name.as_str(), args.as_slice(), &resolve, line, col)?;
                 stack.push(result);
             }
-            Op::DfJoin { spec } => {
+            Op::DfJoin(dj) => {
+                let (spec, lbind, ubind) = (&dj.spec, &dj.locals, &dj.upvals);
                 // Stack order: left receiver pushed first, then the right operand.
                 let right = stack.pop().unwrap();
                 let left = stack.pop().unwrap();
@@ -1717,7 +1718,26 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 return Err(crate::interp::join_operand_err(other, line, col))
                             }
                         };
-                        let (keys, how) = crate::interp::parse_join_spec(spec.as_slice(), line, col)?;
+                        let base = frames[fi].base;
+                        let resolve = |nm: &str| -> Option<Value> {
+                            for (lname, slot) in lbind.iter().rev() {
+                                if lname == nm {
+                                    return Some(locals[base + *slot as usize].clone());
+                                }
+                            }
+                            for (uname, idx) in ubind.iter().rev() {
+                                if uname == nm {
+                                    return frames[fi].upvalues.get(*idx as usize).cloned();
+                                }
+                            }
+                            program
+                                .global_names
+                                .iter()
+                                .position(|g| g == nm)
+                                .map(|i| globals[i].clone())
+                        };
+                        let (keys, how) =
+                            crate::interp::parse_join_spec(spec.as_slice(), &resolve, line, col)?;
                         Value::dataframe(lf.join(&rf, &keys, &how, line, col)?)
                     }
                     // The receiver's static type was `Unknown` and turned out NOT to be a

@@ -240,6 +240,28 @@ with mechanisms so nothing has to be rediscovered:
   indexing landed with the bridge; the `.exp()` asymmetry is now its own entry
   below, because the bridge made it reachable by an ordinary spelling.)*
 
+### A frame has no `rename`, and no dynamic column REFERENCE (2026-09-02)
+
+With `with`'s key and `join`'s keys now taking a binding, one gap is left and it is
+narrower than it first looked. Those are NAME positions, where ADR 0028 makes a binding
+name a column. An EXPRESSION position is the opposite by the same rule — a binding is its
+value — so
+
+    fn rn(f, to, from) = f.with({to: from})    # from = "author_id"
+
+writes the literal string, not the column. That is ADR 0028 being consistent rather than a
+bug: `@author_id` pins a column in an expression, and there is no `@{from}` spelling for
+"the column this binding names".
+
+The operation actually wanted is a **rename**, and a frame has none. `df.rename(old, new)`
+would be two NAME positions, so it needs no new syntax at all — just the rule that already
+exists. What it does need is a verb across the ADR 0012 seam: the trait method plus both
+backends, plus the nine registration sites and a dfdiff corpus program. That is a MINOR and
+an hour of careful work, not something to take on the way past a bug fix.
+
+It blocks a generic relation-attach in a library: aligning a child's foreign key to a
+parent's key needs the rename, and every other part of that join now works.
+
 ### A `with` column cannot be named at run time (2026-09-02)
 
 `select` honours a binding in scope as a column name (ADR 0028). `with` does not, and
@@ -249,9 +271,17 @@ everywhere else in the language:
     K = "score"
     d.with({K: @a * 2})     # a column literally named "K", silently
 
-All three engines agree, so this is not a divergence — it is a missing capability with a
-surprising default, and it blocked a field build from writing a generic relation-attach
-(the join key comes from a model's declared relation, so it is only known at run time).
+**FIXED 2026-09-02** — `with`'s key and `join`'s keys now resolve through the same rule
+`select` uses. ADR 0028 did not decide this; it named it as an OPEN QUESTION ("does the
+same rule apply to the name being DEFINED, or only to names being read?") and shipped the
+read positions only. This answers it, the same way and for the same reason, and covers the
+join key the ADR never reached. The entry
+below is kept for the reasoning about `dataframe(dict)`, which turned out NOT to be the
+answer: a Dict's values are evaluated, and a `with` value is unevaluated column syntax
+(`@x * @y`), so the Dict form cannot carry it. Resolving the KEY was the answer instead.
+
+All three engines agreed on the old behaviour, so this was not a divergence — it was a
+missing capability with a surprising default, and a wrong answer rather than a refusal.
 
 **The precedent is already set.** ADR 0043 hit exactly this for construction — "a column
 could not be named at run time" — and answered it by having `dataframe()` accept a

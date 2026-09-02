@@ -79,6 +79,12 @@ JIT pointer lifetime and arity; the and/or/`??` three-valued logic across engine
 transparency; the memoization depth guard, bound, and float-key exclusion;
 `any_call` covering every `Expr` variant.
 
+> **Superseded (2026-08).** The float-key *exclusion* verified here was later
+> replaced rather than kept: floats key by `to_bits`, so float recursion memoizes
+> too. The audit's finding was that the exclusion was sound, and it was — keying by
+> bits is what made admitting them sound as well. See
+> [caching-and-memory.md](caching-and-memory.md).
+
 **Result: 106 tests, zero warnings, all four crash classes converted into clean
 errors, all three engines reconciled on integer semantics.**
 

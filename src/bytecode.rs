@@ -239,6 +239,18 @@ impl Builder {
     fn column_arg_captures(b: &mut Builder, args: &[Expr]) -> Vec<(String, u32)> {
         let mut names: Vec<String> = Vec::new();
         for a in args {
+            // A `with` record's KEYS are column names (ADR 0028) and are stored as plain
+            // `String`s rather than `Expr::Ident`, so the expression walk below cannot see
+            // them. Without this, `((x) => x.with({to: @a}))` resolved `to` to its own
+            // spelling while the non-lambda form resolved the binding — the same shape as
+            // the predicate bug, one position over.
+            if let Expr::Record(fields) = a {
+                for (k, _) in fields {
+                    if !names.contains(k) {
+                        names.push(k.clone());
+                    }
+                }
+            }
             crate::visit::walk_expr(a, &mut |e| {
                 if let Expr::Ident { name, .. } = e
                     && !names.contains(name)
@@ -814,7 +826,17 @@ impl Compiler {
         match args.first() {
             Some(other) => {
                 self.compile_expr(b, other)?;
-                b.emit(Op::DfJoin { spec: std::rc::Rc::new(args[1..].to_vec()) }, line, col);
+                let jl = std::rc::Rc::new(b.in_scope_locals());
+                let ju = std::rc::Rc::new(Builder::column_arg_captures(b, &args[1..]));
+                b.emit(
+                    Op::DfJoin(std::rc::Rc::new(DfJoinData {
+                        spec: std::rc::Rc::new(args[1..].to_vec()),
+                        locals: jl,
+                        upvals: ju,
+                    })),
+                    line,
+                    col,
+                );
             }
             // No operand to join with — the tree-walker's own diagnostic, so the compiler
             // stays total for a type-checked program.
@@ -1733,8 +1755,14 @@ impl Compiler {
                     match args.first() {
                         Some(other) => {
                             self.compile_expr(b, other)?;
+                            let jl = std::rc::Rc::new(b.in_scope_locals());
+                            let ju = std::rc::Rc::new(Builder::column_arg_captures(b, &args[1..]));
                             b.emit(
-                                Op::DfJoin { spec: std::rc::Rc::new(args[1..].to_vec()) },
+                                Op::DfJoin(std::rc::Rc::new(DfJoinData {
+                                    spec: std::rc::Rc::new(args[1..].to_vec()),
+                                    locals: jl,
+                                    upvals: ju,
+                                })),
                                 *line,
                                 *col,
                             );

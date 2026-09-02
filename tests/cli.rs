@@ -2966,10 +2966,40 @@ fn type_of_names_the_type_and_now_is_an_absolute_instant() {
     let real = started.elapsed().as_secs_f64();
     let advanced = b - a;
 
-    // The property that distinguishes `now()` from `clock_monotonic`, asserted
-    // unconditionally: it is an absolute instant, so a LATER process reads a
-    // LARGER value. Monotonic restarts near zero and would fail this.
-    assert!(advanced > 0.0, "now() must advance across processes: {a} then {b}");
+    // The distinction from `clock_monotonic`, asserted unconditionally — in the one
+    // form the HOST CANNOT BREAK: a child's `now()` is the same wall clock THIS
+    // process reads.
+    //
+    // This assertion used to be `advanced > 0.0` — a later process reads a larger
+    // value — on the reasoning that a WSL2 clock resync could only make the advance
+    // too small. It can step the clock BACKWARD, and then this fired before the
+    // retry loop below (whose condition a backward step also trips) ever ran:
+    //
+    //     iter  bash `date`      helix now()      advance
+    //     2     1788318926.990   1788318926.333   -0.660   (bash itself: -0.655)
+    //
+    // The two agree to 5 ms, so `now()` was doing exactly its job. Comparing against
+    // this process's own `SystemTime` instead is immune — a resync moves both — and
+    // is strictly stronger than `> 0.0`, which could not have seen milliseconds
+    // reported as seconds, a timezone baked into the value, or the wrong epoch. Any
+    // of those miss by orders of magnitude; `clock_monotonic` misses by nine.
+    let host = |()| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+    };
+    let h0 = host(());
+    let (c, _, _) = run_source("print(now())
+", &[], "now_host");
+    let mid = (h0 + host(())) / 2.0;
+    let c = c.trim().parse::<f64>().unwrap();
+    // Wide on purpose: the claim is SAME CLOCK, not same instant, so the window has
+    // to survive a spawn and a resync without ever needing a retry.
+    assert!(
+        (c - mid).abs() < 120.0,
+        "now() must be this machine's wall clock: helix {c} vs host {mid}          (a process-relative clock would miss by ~1.7e9)"
+    );
 
     // The stronger claim — that it advances by the REAL elapsed time — is only
     // meaningful when the wall clock was not corrected underneath it, and this
@@ -14297,6 +14327,67 @@ fn a_column_name_captured_from_an_enclosing_scope_resolves() {
     let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
     assert_eq!((cj, &jit), (ct, &tw), "agg: {ej} / {et}");
     assert_eq!(jit.trim(), "2", "{jit}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// A column name from a binding works in EVERY position that takes one (ADR 0028).
+///
+/// `select`/`sort`/`group` resolved a bare name against bindings in scope; `with` and
+/// `join` did not, and they failed in the two different ways that ADR was written to end:
+///
+///     fn rename(f, to) = f.with({to: @author_id})   -> a column called `to`, NO ERROR
+///     fn on(l, r, k)   = l.join(r, k)               -> no column `k` in the left frame
+///
+/// The first is the shape the ADR's own opening names — "a library's parameter names are
+/// reserved words in data it has never seen" — and it was a wrong answer rather than a
+/// refusal, on all three engines, which is why nothing caught it.
+///
+/// Both positions hold a name that is NOT an expression (a record key, a join key), so
+/// each needed its own resolution AND its own capture: a closure's free-variable analysis
+/// could not see a record key either, so the same expression resolved one way inside a
+/// lambda and another way outside it.
+#[test]
+fn a_column_name_from_a_binding_works_in_every_position() {
+    let dir = std::env::temp_dir().join(format!("hx_colname_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("n.helix");
+
+    const A: &str = "A = dataframe({ a: [1, 2] })\n";
+    const J: &str = "L = dataframe({ id: [1], x: [9] })\nR = dataframe({ id: [1], y: [8] })\n";
+    for (label, src, want) in [
+        // `with`: the key is a column name, so a binding names the column.
+        ("with-binding", format!("z = \"score\"\n{A}print(A.with({{z: @a * 2}}).columns())\n"), "[\"a\", \"score\"]"),
+        // …and with nothing bound, the word itself, exactly as before.
+        ("with-plain", format!("{A}print(A.with({{z: @a * 2}}).columns())\n"), "[\"a\", \"z\"]"),
+        // Through a parameter, which is the case a library is written in.
+        ("with-param", format!("{A}fn rename(f, to) = f.with({{to: @a * 2}})\nprint(rename(A, \"id\").columns())\n"), "[\"a\", \"id\"]"),
+        // And through a CAPTURE, which needs the free-variable analysis to see the key.
+        ("with-capture", format!("{A}fn r(f, to) = ((x) => x.with({{to: @a * 2}}))(f)\nprint(r(A, \"id\").columns())\n"), "[\"a\", \"id\"]"),
+        // `join`: the same rule, where it used to refuse outright.
+        ("join-param", format!("{J}fn on(l, r, k) = l.join(r, k)\nprint(on(L, R, \"id\").count())\n"), "1"),
+        ("join-capture", format!("{J}fn on(l, r, k) = ((x) => x.join(R, k))(l)\nprint(on(L, R, \"id\").count())\n"), "1"),
+        // A binding that is not a String is not a column name: the word stands, so a
+        // type mistake stays a visible lookup failure rather than a silent one.
+        ("join-nonstring", "k = 5
+D = dataframe({ k: [1] })
+print(D.join(D, k).count())
+".to_string(), "1"),
+        // `@name` still pins the column wherever it is accepted.
+        ("join-sigil", format!("{J}id = \"nope\"\nprint(L.join(R, @id).count())\n"), "1"),
+    ] {
+        std::fs::write(&prog, &src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "{label}: jit vs vm: {ej} / {ev}\n{src}");
+        assert_eq!((cv, &vm), (ct, &tw), "{label}: vm vs tree-walker: {ev} / {et}\n{src}");
+        assert_eq!(cj, Some(0), "{label}: {ej}\n{src}");
+        assert_eq!(jit.trim(), want, "{label}\n{src}");
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }

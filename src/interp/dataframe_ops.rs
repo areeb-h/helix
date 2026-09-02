@@ -93,11 +93,29 @@ pub(crate) fn column_name_args(
     args.iter().map(|a| arg_as_column_name(a, resolve_var, line, col)).collect()
 }
 
+/// A column name written as a bare word: a binding in scope wins, else the word itself.
+///
+/// The same rule `arg_as_column_name` applies to an *expression* argument, for the two
+/// positions where the name is not an expression at all — a `with` record's key and a
+/// join key. Only a `Str` binding counts: a name that happens to be bound to a number or
+/// a frame is not a column name, and treating it as one would turn a type mistake into a
+/// silent lookup of something that will never exist.
+pub(crate) fn column_name_from_binding(
+    name: &str,
+    resolve_var: &dyn Fn(&str) -> Option<Value>,
+) -> String {
+    match resolve_var(name) {
+        Some(Value::Str(s)) => (*s).clone(),
+        _ => name.to_string(),
+    }
+}
+
 /// Parse the trailing arguments of `a.join(b, key.., [how])`: the key columns are
 /// bare identifiers; an optional final string literal selects the join type. Shared
 /// by the tree-walker (`eval_df_method`) and the VM (compiled into `Op::DfJoin`).
 pub(crate) fn parse_join_spec(
     args: &[Expr],
+    resolve_var: &dyn Fn(&str) -> Option<Value>,
     line: usize,
     col: usize,
 ) -> Result<(Vec<String>, String), HelixError> {
@@ -105,7 +123,13 @@ pub(crate) fn parse_join_spec(
     let mut how = String::from("inner");
     for (i, a) in args.iter().enumerate() {
         match a {
-            Expr::Column { name, .. } | Expr::Ident { name, .. } => keys.push(name.clone()),
+            // `@name` PINS the column, as everywhere else; a bare word takes the binding
+            // if there is one, so `fn on(l, r, k) = l.join(r, k)` joins on the caller's
+            // key instead of refusing with "no column `k`".
+            Expr::Column { name, .. } => keys.push(name.clone()),
+            Expr::Ident { name, .. } => {
+                keys.push(column_name_from_binding(name, resolve_var))
+            }
             Expr::Str(s) if i == args.len() - 1 => how = s.clone(),
             _ => {
                 return Err(HelixError::new(
@@ -241,7 +265,19 @@ pub(crate) fn df_column_verb(
             let mut cols = Vec::with_capacity(fields.len());
             for (cname, vexpr) in fields {
                 let ce = dataframe::ast_to_colexpr(vexpr, &columns, resolve_var)?;
-                cols.push((cname.clone(), ce));
+                // THE KEY IS A COLUMN NAME, so it follows the column-name rule
+                // rather than a record literal's. `f.with({to: @x})` used to add a column
+                // literally called `to` even with `to` bound in scope — a wrong answer with
+                // no error, on all three engines, which is the exact shape ADR 0028's
+                // opening paragraph names. A library renaming a column cannot know the
+                // caller's schema, and until now had no way to say which name it meant.
+                //
+                // ADR 0028 decided the READ positions and left this one open in as many
+                // words: "does the same rule apply to the name being DEFINED?". This is
+                // that question answered — the same way, because the argument that
+                // settled reads is about the library author's blindness to the caller's
+                // schema, and defining a column is no less blind than reading one.
+                cols.push((column_name_from_binding(cname, resolve_var), ce));
             }
             Ok(Value::dataframe(lf.with_columns(&cols, line, col)?))
         }
@@ -315,7 +351,8 @@ impl super::Interp {
                     Value::DataFrame(lf) => lf,
                     v => return Err(join_operand_err(&v, line, col)),
                 };
-                let (keys, how) = parse_join_spec(&args[1..], line, col)?;
+                let resolve = |n: &str| self.lookup(n).map(|b| b.value.clone());
+                let (keys, how) = parse_join_spec(&args[1..], &resolve, line, col)?;
                 Ok(Value::dataframe(lf.join(&right, &keys, &how, line, col)?))
             }
             // Every other DataFrame method takes plain *value* arguments (a row count,

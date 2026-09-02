@@ -26,6 +26,61 @@
   predicate inside a lambda. Seven shapes are now covered on all three engines, and an
   enclosing `let` resolves as well, which is the same rule.
 
+- **`with` and `join` now take a column name from a binding.** `select`/`sort`/`group`
+  resolve a bare word through the column-name rule — a binding in scope wins, `@name` pins
+  the column. ADR 0028 decided that for the positions where a name is READ and left the
+  DEFINING position open in as many words ("does the same rule apply to the name being
+  DEFINED?"); a join key it never reached at all. Both kept the old behaviour, and both
+  failed in the two different ways the ADR was written to prevent:
+
+  ```
+  fn rename(f, to) = f.with({to: @author_id})
+  rename(df, "id").columns()      # ["author_id", "to"]  -- a WRONG ANSWER, no error
+
+  fn on(l, r, k) = l.join(r, k)
+  on(a, b, "id")                  # no column `k` in the left frame  -- a REFUSAL
+  ```
+
+  Both are "a library's own parameter names are reserved words in data it has never seen",
+  which is the sentence ADR 0028 opens with — and the argument that settled the read
+  positions is about the library author's blindness to the caller's schema, which defining
+  a column shares exactly. A `with` record's KEY and a join key are name positions, not
+  expressions, so they now resolve the way every other name position does, and only a
+  `Str` binding counts — a name bound to a number or a frame is a type
+  mistake, not a column, and treating it as one would turn that mistake into a silent
+  lookup of something that can never exist. All three engines agree across eight shapes.
+
+  All three engines had *agreed* on the old behaviour, so the differential oracle could
+  never have found this: unanimous is not the same as correct.
+
+- **A clock test could fail on a host event.** `now()` was asserted to advance across two
+  processes, unconditionally, on the reasoning that a WSL2 clock resync could only make the
+  advance too small. A resync can step the clock **backward**, and then that assertion fired
+  before the retry loop below it — whose condition the same step trips — ever ran:
+
+  ```
+  bash `date`      helix now()      advance
+  1788318926.990   1788318926.333   -0.660   (bash itself: -0.655)
+  ```
+
+  The two agree to 5 ms, so `now()` was reporting the wall clock it was given, correctly.
+  The claim is now made against this process's own `SystemTime`, which a resync moves
+  identically — so it cannot flake, and it is strictly stronger: it also catches
+  milliseconds reported as seconds, a timezone baked into the value, and the wrong epoch,
+  none of which "is it bigger than zero" could see. Verified by sabotage: a +3600s and a
+  +200s offset both go red, a +30s offset stays green inside the stated window.
+
+### Documentation
+
+- **Float arguments are memoized, and three places said they were not.** The exclusion was
+  real once and was replaced rather than kept: floats key by `to_bits`, so bit-identical
+  floats share a result, `+0.0` and `-0.0` key separately instead of wrongly sharing, and a
+  NaN keys against itself. Measured: `fibf(32.0)` runs in 0.005s against 0.006s for the
+  integer `fib(32)`, while the same recursion made non-memoizable takes 0.124s at
+  `fibn(28.0)` — 25x longer on a quarter of the work. `caching-and-memory.md` also now
+  states the rule that follows from this and was nowhere written down: a **non-number**
+  argument is never a key, so a function taking a Record or String spec is not memoized.
+
 ## v0.9.0 — 2026-09-01
 
 ### Changed

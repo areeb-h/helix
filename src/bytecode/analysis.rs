@@ -18,8 +18,9 @@ type FuncSig<'a> = (&'a str, &'a [(String, Option<crate::ast::TypeAnn>)], &'a Ex
 ///     signature of exponential redundancy (linear recursion stays on the JIT,
 ///     where one fast native call per step beats a cached bytecode step).
 ///
-/// This is the static half of the automatic "under the hood" cache; the VM gates
-/// on all-`Int` arguments at runtime (float keys are excluded — NaN/precision).
+/// This is the static half of the automatic "under the hood" cache; the VM gates at
+/// runtime on every argument being `Int` or `Float`. Floats key by `to_bits` (see
+/// `MemoArg`), which is what makes them safe rather than merely allowed.
 pub fn memoizable_fns(program: &[Stmt]) -> HashSet<String> {
     let funcs: Vec<FuncSig> = program
         .iter()
@@ -343,8 +344,25 @@ fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String
             collect_free(body, bound, free);
             bound.truncate(n);
         }
-        Expr::Method { recv, args, .. } => {
+        Expr::Method { recv, name, args, .. } => {
             collect_free(recv, bound, free);
+            // `df.with({to: @a})` — the record's KEYS are column names (ADR 0028), not
+            // record fields, so a key that is a binding in scope names the column that
+            // binding holds. They are stored as plain `String`s, so the walk below cannot
+            // see them, and a closure would not capture `to` — which made the same
+            // expression resolve one way inside a lambda and another way outside it.
+            //
+            // Scoped to `with` deliberately: an ordinary record literal's key is syntax
+            // everywhere else in the language, and treating every one as a free name
+            // would capture a value for `{name: x}` whenever a `name` happened to be in
+            // scope — a cost with no reader.
+            if name == "with"
+                && let [Expr::Record(fields)] = args.as_slice()
+            {
+                for (k, _) in fields {
+                    note_free(k, bound, free);
+                }
+            }
             for a in args {
                 collect_free(a, bound, free);
             }
