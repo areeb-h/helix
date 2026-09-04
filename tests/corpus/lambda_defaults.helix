@@ -1,0 +1,14 @@
+# Lambda defaults — `(x, n = 10) => …` — and a function VALUE keeping its declaration's
+# defaults: a call short of the parameters by at most the number of defaults is padded at
+# run time, on every engine; the checker knows the range too, and refuses outside it in
+# the same words the engines use.
+f = (x, n = 10) => x + n
+print(f(1), f(1, 2))
+fn g(a, b = 5) = a * b
+h = g
+print(h(2), h(2, 3), g(2))
+add = (x, k = 100) => x + k
+print([1, 2, 3].map(add))
+fn call0(fun) = fun()
+r = try call0(f)
+print(r.error)

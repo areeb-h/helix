@@ -102,6 +102,10 @@ Lexer → parser → AST → tree-walking interpreter.
       v0.3.0 (dict literals, dict spread into records; `to_dict` accepts 2-element arrays).
 - [x] **Tuples and destructuring** `(a, b)`, `a, b = pair`, `mut a, b = …`, tuple
       indexing; `zip`/`enumerate` yield tuples. Destructure arity type-checked.
+- [x] **Lambda defaults** `(x, n = 10) => …` — the `fn` rules verbatim (literal, trailing),
+      padded at run time on every engine; a function VALUE keeps its declaration's
+      defaults (`h = g; h(2)`), and the checker refuses outside the range in the runtime's
+      words.
 - [x] **Lambda-param destructuring** `pairs.map((a, b) => a + b)` (over tuples
       from `zip`/`enumerate`, or any tuple/array element). Type-checked.
 - [x] **Optional chaining unneeded** — `.` is already missing-safe (propagates

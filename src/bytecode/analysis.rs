@@ -210,7 +210,7 @@ fn reads_mutable(e: &Expr, bound: &HashSet<&str>, mutable: &HashSet<&str>) -> bo
         Expr::Ident { name, .. } => {
             mutable.contains(name.as_str()) && !bound.contains(name.as_str())
         }
-        Expr::Lambda { params, body } => {
+        Expr::Lambda { params, body, .. } => {
             let mut b = bound.clone();
             for p in params {
                 b.insert(p.as_str());
@@ -329,7 +329,7 @@ fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String
                 collect_free(a, bound, free);
             }
         }
-        Expr::Lambda { params, body } => {
+        Expr::Lambda { params, body, .. } => {
             let n = bound.len();
             bound.extend(params.iter().map(|s| s.as_str()));
             collect_free(body, bound, free);

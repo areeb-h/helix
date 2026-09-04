@@ -1,0 +1,7 @@
+exit: 0
+--- stdout ---
+11 3
+10 6 10
+[101, 102, 103]
+`fun` takes 1 to 2 arguments, got 0
+--- stderr ---

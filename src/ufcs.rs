@@ -139,7 +139,7 @@ fn walk(e: &mut Expr, cx: &Cx, bound: &HashSet<String>) {
                 walk(x, cx, bound);
             }
         }
-        Expr::Lambda { params, body } => {
+        Expr::Lambda { params, body, .. } => {
             let mut b = bound.clone();
             b.extend(params.iter().cloned());
             walk(std::rc::Rc::make_mut(body), cx, &b);

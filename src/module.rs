@@ -1248,7 +1248,7 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
                 rw(x, ctx, bound)?;
             }
         }
-        Expr::Lambda { params, body } => {
+        Expr::Lambda { params, body, .. } => {
             let mut b = bound.clone();
             b.extend(params.iter().cloned());
             rw(std::rc::Rc::make_mut(body), ctx, &b)?;

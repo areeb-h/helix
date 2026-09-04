@@ -477,6 +477,7 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         pos: main.pos,
         n_params: 0,
         n_locals: main.max_slot,
+        defaults: Vec::new(),
     };
     c.funcs[0] = Some(main_chunk);
 
@@ -553,6 +554,7 @@ fn rejected_fn_chunk(name: &str, arity: u32) -> Chunk {
         pos: b.pos,
         n_params: arity,
         n_locals: b.max_slot.max(arity),
+        defaults: Vec::new(),
     }
 }
 
@@ -1084,7 +1086,7 @@ impl Compiler {
             }
             // Stripped by the module loader before compilation (see `Stmt::Import`).
             Stmt::Import { .. } => Ok(()),
-            Stmt::Func { name, params, body, line, col, .. } => {
+            Stmt::Func { name, params, defaults, body, line, col, .. } => {
                 // A top-level `fn` binds its name exactly like the walker's env
                 // bind: over an *immutable* global (the seeded constants
                 // `pi`/`e`/`inf`/`python`, or an earlier `x = …`) it raises at
@@ -1107,12 +1109,12 @@ impl Compiler {
                     let arity = params.len() as u32;
                     // `compile_func` may fill a slot reserved by the pre-pass rather than
                     // appending, so take the index from it instead of guessing `funcs.len()`.
-                    let idx = self.compile_func(name, params, body)?;
+                    let idx = self.compile_func(name, params, defaults, body)?;
                     b.emit(Op::MakeFunc { idx, arity }, *line, *col);
                     b.emit(Op::StoreGlobal(i as u32), *line, *col);
                     return Ok(());
                 }
-                self.compile_func(name, params, body).map(|_| ())
+                self.compile_func(name, params, defaults, body).map(|_| ())
             }
             Stmt::Expr(e) => {
                 self.compile_expr(b, e)?;
@@ -1185,6 +1187,7 @@ impl Compiler {
         &mut self,
         name: &str,
         params: &[(String, Option<crate::ast::TypeAnn>)],
+        defaults: &[Option<Expr>],
         body: &Expr,
     ) -> R<u32> {
         // Take the slot `reserve_top_level_fns` set aside for this name if there is one —
@@ -1227,6 +1230,7 @@ impl Compiler {
             pos: fb.pos,
             n_params: params.len() as u32,
             n_locals: fb.max_slot,
+            defaults: crate::interp::trailing_defaults(defaults),
         };
         self.funcs[idx] = Some(chunk);
         Ok(idx as u32)
@@ -1241,6 +1245,7 @@ impl Compiler {
     fn compile_lambda(
         &mut self,
         params: &[String],
+        defaults: &[Expr],
         body: &Expr,
         enclosing: Vec<(String, CaptureSrc)>,
     ) -> R<(u32, Vec<CaptureSrc>)> {
@@ -1272,6 +1277,7 @@ impl Compiler {
             pos: fb.pos,
             n_params: params.len() as u32,
             n_locals: fb.max_slot,
+            defaults: defaults.iter().filter_map(crate::interp::const_default_value).collect(),
         };
         self.funcs[idx as usize] = Some(chunk);
         Ok((idx, captures))
@@ -2020,14 +2026,14 @@ impl Compiler {
                 }
                 b.emit(Op::Slice(mask), *line, *col);
             }
-            Expr::Lambda { params, body, .. } => {
+            Expr::Lambda { params, defaults, body } => {
                 // A standalone lambda → a first-class function value. Its body is
                 // compiled into its own chunk; free variables that name enclosing
                 // locals become upvalues captured here, anything else resolves to a
                 // global. With captures it's a closure (`MakeClosure`); without, a
                 // plain function value (`MakeFunc`, no per-call allocation).
                 let enclosing = b.capturable_env();
-                let (idx, captures) = self.compile_lambda(params, body, enclosing)?;
+                let (idx, captures) = self.compile_lambda(params, defaults, body, enclosing)?;
                 let arity = params.len() as u32;
                 if captures.is_empty() {
                     b.emit(Op::MakeFunc { idx, arity }, 0, 0);

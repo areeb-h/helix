@@ -9,7 +9,7 @@ use super::*;
 // `it` by default, or the single lambda param. Body is the (sole) arg expr.
 pub(super) fn comprehension_params(args: &[Expr]) -> (Vec<String>, &Expr) {
     match args.first() {
-        Some(Expr::Lambda { params, body }) => (params.clone(), body.as_ref()),
+        Some(Expr::Lambda { params, body, .. }) => (params.clone(), body.as_ref()),
         Some(e) => (vec!["it".to_string()], e),
         None => (vec!["it".to_string()], &Expr::Missing),
     }
@@ -64,7 +64,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         )
     {
         if args.len() != 1 {
-            return Err(arity_err(name, 1, args.len(), line, col));
+            return Err(arity_err(name, 1, 1, args.len(), line, col));
         }
         let a = &args[0];
         if matches!(a, Type::Array(_) | Type::Tensor | Type::Unknown) {
@@ -87,19 +87,19 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         "print" => Ok(Type::Unit),
         "emit" => {
             if args.len() != 1 {
-                return Err(arity_err("emit", 1, args.len(), line, col));
+                return Err(arity_err("emit", 1, 1, args.len(), line, col));
             }
             Ok(Type::Unit)
         }
         "write" | "elog" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             Ok(Type::Unit)
         }
         "sleep" => {
             if args.len() != 1 {
-                return Err(arity_err("sleep", 1, args.len(), line, col));
+                return Err(arity_err("sleep", 1, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::Float) {
                 return Err(type_err("sleep", "a number of milliseconds", &args[0], line, col));
@@ -168,7 +168,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "source_path" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 return Err(type_err("source_path", "a string path", &args[0], line, col));
@@ -179,7 +179,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // (plus an optional tolerance). Equality/closeness is checked at runtime.
         "assert_eq" => {
             if args.len() != 2 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             Ok(Type::Unit)
         }
@@ -262,19 +262,19 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "type_of" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             Ok(Type::String)
         }
         "has_feature" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             Ok(Type::Bool)
         }
         "now" => {
             if !args.is_empty() {
-                return Err(arity_err(name, 0, args.len(), line, col));
+                return Err(arity_err(name, 0, 0, args.len(), line, col));
             }
             Ok(Type::Float)
         }
@@ -308,7 +308,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "dna" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             // A Dna passes through unchanged (the runtime is idempotent).
             if !compatible(&args[0], &Type::String) && !compatible(&args[0], &Type::Dna) {
@@ -334,7 +334,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         "read_csv" | "read_parquet" | "read_bcf" | "read_sam" | "read_gff"
         | "read_bed" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 return Err(type_err(name, "a string path", &args[0], line, col));
@@ -344,7 +344,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // Monotonic clock: no arguments, returns seconds as a Float.
         "clock_monotonic" => {
             if !args.is_empty() {
-                return Err(arity_err(name, 0, args.len(), line, col));
+                return Err(arity_err(name, 0, 0, args.len(), line, col));
             }
             Ok(Type::Float)
         }
@@ -353,7 +353,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // `print`/`sleep`) it lives outside the differential oracle.
         "read_int" => {
             if !args.is_empty() {
-                return Err(arity_err(name, 0, args.len(), line, col));
+                return Err(arity_err(name, 0, 0, args.len(), line, col));
             }
             Ok(Type::Int)
         }
@@ -361,7 +361,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         "read_text" | "read_json" | "read_dir" | "file_exists" | "sha256" | "remove_file"
         | "mkdir" | "fsync" | "sync_dir" | "remove_dir" | "file_size" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             let what = if name == "sha256" { "a string" } else { "a string path" };
             if !compatible(&args[0], &Type::String) {
@@ -387,7 +387,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // checked here, which is where most mistakes actually are.
         "html_escape" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 return Err(type_err(name, "a string", &args[0], line, col));
@@ -396,7 +396,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "read_bytes" | "from_hex" | "from_base64" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 let what = if name == "read_bytes" { "a string path" } else { "a string" };
@@ -406,7 +406,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "read_bytes_at" => {
             if args.len() != 3 {
-                return Err(arity_err(name, 3, args.len(), line, col));
+                return Err(arity_err(name, 3, 3, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 return Err(type_err(name, "a string path", &args[0], line, col));
@@ -420,7 +420,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "lock_file" | "try_lock_file" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 return Err(type_err(name, "a string path", &args[0], line, col));
@@ -429,7 +429,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "rename" | "create_new" => {
             if args.len() != 2 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             for a in args.iter().take(2) {
                 if !compatible(a, &Type::String) {
@@ -440,7 +440,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "truncate" => {
             if args.len() != 2 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 return Err(type_err(name, "a string path", &args[0], line, col));
@@ -452,7 +452,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "read_at" | "write_at" => {
             if args.len() != 3 {
-                return Err(arity_err(name, 3, args.len(), line, col));
+                return Err(arity_err(name, 3, 3, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 return Err(type_err(name, "a string path", &args[0], line, col));
@@ -479,7 +479,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // argument runs an indexed query, so these readers accept one or two strings.
         "read_vcf" | "read_bam" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 return Err(type_err(name, "a string path", &args[0], line, col));
@@ -493,7 +493,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "read_fasta" | "read_fastq" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::String) {
                 return Err(type_err(name, "a string path", &args[0], line, col));
@@ -504,7 +504,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "tensor" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             let a = &args[0];
             if is_numeric(a)
@@ -531,7 +531,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "zeros" | "ones" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &array_of_unknown()) {
                 return Err(type_err(name, "an array like `[2, 3]`", &args[0], line, col));
@@ -540,7 +540,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "eye" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !compatible(&args[0], &Type::Int) {
                 return Err(type_err("eye", "an integer", &args[0], line, col));
@@ -550,7 +550,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // two-arg math
         "atan2" | "hypot" | "min" | "max" => {
             if args.len() != 2 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             if any(args, |t| matches!(t, Type::Unknown)) {
                 return Ok(Type::Unknown);
@@ -583,7 +583,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // three-arg numeric: `clamp(x, lo, hi)` (scalar; the array form is the `.clamp` method)
         "clamp" => {
             if args.len() != 3 {
-                return Err(arity_err(name, 3, args.len(), line, col));
+                return Err(arity_err(name, 3, 3, args.len(), line, col));
             }
             if any(args, |t| matches!(t, Type::Unknown)) {
                 return Ok(Type::Unknown);
@@ -630,7 +630,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "gcd" => {
             if args.len() != 2 {
-                return Err(arity_err("gcd", 2, args.len(), line, col));
+                return Err(arity_err("gcd", 2, 2, args.len(), line, col));
             }
             if any(args, |t| matches!(t, Type::Unknown)) {
                 return Ok(Type::Unknown);
@@ -649,7 +649,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "isqrt" => {
             if args.len() != 1 {
-                return Err(arity_err("isqrt", 1, args.len(), line, col));
+                return Err(arity_err("isqrt", 1, 1, args.len(), line, col));
             }
             if matches!(args[0], Type::Unknown) {
                 return Ok(Type::Unknown);
@@ -666,7 +666,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "primes" => {
             if args.len() != 1 {
-                return Err(arity_err("primes", 1, args.len(), line, col));
+                return Err(arity_err("primes", 1, 1, args.len(), line, col));
             }
             if matches!(args[0], Type::Unknown) {
                 return Ok(Type::Unknown);
@@ -681,7 +681,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "chr" => {
             if args.len() != 1 {
-                return Err(arity_err("chr", 1, args.len(), line, col));
+                return Err(arity_err("chr", 1, 1, args.len(), line, col));
             }
             if matches!(args[0], Type::Missing) {
                 return Ok(Type::Missing);
@@ -693,7 +693,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "ord" => {
             if args.len() != 1 {
-                return Err(arity_err("ord", 1, args.len(), line, col));
+                return Err(arity_err("ord", 1, 1, args.len(), line, col));
             }
             if matches!(args[0], Type::Missing) {
                 return Ok(Type::Missing);
@@ -705,7 +705,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "hmac_sha256" => {
             if args.len() != 2 {
-                return Err(arity_err("hmac_sha256", 2, args.len(), line, col));
+                return Err(arity_err("hmac_sha256", 2, 2, args.len(), line, col));
             }
             if any(args, |t| matches!(t, Type::Missing)) {
                 return Ok(Type::Missing);
@@ -720,7 +720,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // A Dict of name -> value; `Unknown` because a Dict is opaque to the checker.
         "parse_cookies" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !matches!(args[0], Type::String | Type::Unknown | Type::Missing) {
                 return Err(type_err(name, "a string", &args[0], line, col));
@@ -731,7 +731,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // `Unknown` rather than claiming fields a given header may not carry.
         "parse_set_cookie" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !matches!(args[0], Type::String | Type::Unknown | Type::Missing) {
                 return Err(type_err(name, "a string", &args[0], line, col));
@@ -741,7 +741,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         "base64_encode" | "base64_decode" | "hex_encode" | "hex_decode" | "url_decode"
         | "url_decode_lenient" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if matches!(args[0], Type::Missing) {
                 return Ok(Type::Missing);
@@ -777,20 +777,20 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "headers" => {
             if args.len() != 1 {
-                return Err(arity_err("headers", 1, args.len(), line, col));
+                return Err(arity_err("headers", 1, 1, args.len(), line, col));
             }
             // The Headers value is runtime-dispatched (like Dict and Net).
             Ok(Type::Unknown)
         }
         "aes_keygen" => {
             if !args.is_empty() {
-                return Err(arity_err("aes_keygen", 0, args.len(), line, col));
+                return Err(arity_err("aes_keygen", 0, 0, args.len(), line, col));
             }
             Ok(Type::String)
         }
         "aes_encrypt" | "aes_decrypt" => {
             if args.len() != 2 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             if any(args, |t| matches!(t, Type::Missing)) {
                 return Ok(Type::Missing);
@@ -805,14 +805,14 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // A keypair record `{private, public}` — Unknown keeps field access permissive.
         "ed25519_keygen" => {
             if !args.is_empty() {
-                return Err(arity_err("ed25519_keygen", 0, args.len(), line, col));
+                return Err(arity_err("ed25519_keygen", 0, 0, args.len(), line, col));
             }
             Ok(Type::Unknown)
         }
         "ed25519_sign" | "ed25519_verify" => {
             let expected = if name == "ed25519_sign" { 2 } else { 3 };
             if args.len() != expected {
-                return Err(arity_err(name, expected, args.len(), line, col));
+                return Err(arity_err(name, expected, expected, args.len(), line, col));
             }
             if any(args, |t| matches!(t, Type::Missing)) {
                 return Ok(Type::Missing);
@@ -826,14 +826,14 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "rational" => {
             if args.len() != 2 {
-                return Err(arity_err("rational", 2, args.len(), line, col));
+                return Err(arity_err("rational", 2, 2, args.len(), line, col));
             }
             // an exact rational; Unknown keeps arithmetic on it permissive
             Ok(Type::Unknown)
         }
         "numerator" | "denominator" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             Ok(Type::Int)
         }
@@ -841,20 +841,20 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // is a runtime-only value, so the checker stays permissive (Unknown).
         "variable" | "value_of" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             Ok(Type::Unknown)
         }
         "gradient" => {
             if args.len() != 2 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             Ok(Type::Unknown)
         }
         // argmax/argmin over an array or tensor → the Int index of the extreme value.
         "argmax" | "argmin" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             if !matches!(&args[0], Type::Array(_) | Type::Tensor | Type::Unknown) {
                 return Err(type_err(name, "an array or tensor of numbers", &args[0], line, col));
@@ -863,20 +863,20 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "to_float" => {
             if args.len() != 1 {
-                return Err(arity_err("to_float", 1, args.len(), line, col));
+                return Err(arity_err("to_float", 1, 1, args.len(), line, col));
             }
             Ok(Type::Float)
         }
         "to_int" => {
             if args.len() != 1 {
-                return Err(arity_err("to_int", 1, args.len(), line, col));
+                return Err(arity_err("to_int", 1, 1, args.len(), line, col));
             }
             Ok(Type::Int)
         }
         // `dict()` → an empty Dict (ADR 0020); a runtime type, so `Unknown` to the checker.
         "dict" => {
             if !args.is_empty() {
-                return Err(arity_err("dict", 0, args.len(), line, col));
+                return Err(arity_err("dict", 0, 0, args.len(), line, col));
             }
             Ok(Type::Unknown)
         }
@@ -922,7 +922,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "correlation" => {
             if args.len() != 2 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             if any(args, |t| matches!(t, Type::Unknown)) {
                 return Ok(Type::Unknown);
@@ -939,7 +939,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "t_test" => {
             if args.len() != 2 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             if any(args, |t| matches!(t, Type::Unknown)) {
                 return Ok(Type::Unknown);
@@ -960,7 +960,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "linear_regression" => {
             if args.len() != 2 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             if any(args, |t| matches!(t, Type::Unknown)) {
                 return Ok(Type::Unknown);
@@ -987,7 +987,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "multiple_regression" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             // The first two args (predictors, y) drive the result; an optional 3rd is
             // the boolean `intercept` flag (validated at runtime).
@@ -1016,14 +1016,14 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         }
         "to_array" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             // Materializes a Python iterable (or array) — element type is Unknown.
             Ok(array_of_unknown())
         }
         "to_dataframe" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             Ok(Type::DataFrame)
         }
@@ -1031,40 +1031,40 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // record's shape is validated at runtime (each field must be an array).
         "dataframe" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             Ok(Type::DataFrame)
         }
         "to_tensor" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             Ok(Type::Tensor)
         }
         "http_get" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             // Returns a `{status, body}` record; Unknown keeps field access permissive.
             Ok(Type::Unknown)
         }
         "http_post" => {
             if args.len() != 2 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             // `(url, body)` → a `{status, body}` record (Unknown keeps field access permissive).
             Ok(Type::Unknown)
         }
         "http_request" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             // `({method, url, body?, headers?})` → `{status, body, headers}` (Unknown: permissive).
             Ok(Type::Unknown)
         }
         "http_stream" => {
             if args.len() != 1 {
-                return Err(arity_err(name, 1, args.len(), line, col));
+                return Err(arity_err(name, 1, 1, args.len(), line, col));
             }
             // `({method, url, …})` → a streaming Net handle (Unknown, like `listen`; methods
             // `.status()`/`.next()` dispatch at runtime).
@@ -1090,7 +1090,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         ])),
         "least_squares" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(arity_err(name, 2, args.len(), line, col));
+                return Err(arity_err(name, 2, 2, args.len(), line, col));
             }
             if any(&args[..2], |t| matches!(t, Type::Unknown)) {
                 return Ok(Type::Unknown);

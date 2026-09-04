@@ -39,6 +39,9 @@ pub enum Type {
     Function {
         params: Vec<Type>,
         ret: Box<Type>,
+        /// How many of `params` a call must supply; the rest have defaults. A call is
+        /// refused outside `required..=params.len()`, in the runtime's words.
+        required: usize,
     },
     Unit,
     /// Absent data. BOTTOM: compatible with everything; drops under `join`.
@@ -119,8 +122,8 @@ pub fn compatible(a: &Type, b: &Type) -> bool {
         (Record(_), Record(_)) => true, // permissive; field access does the checking
 
         (
-            Function { params: p1, ret: r1 },
-            Function { params: p2, ret: r2 },
+            Function { params: p1, ret: r1, .. },
+            Function { params: p2, ret: r2, .. },
         ) => {
             p1.len() == p2.len()
                 && p1.iter().zip(p2.iter()).all(|(x, y)| compatible(x, y))
@@ -245,18 +248,11 @@ fn try_binds_tighter_hint(e: HelixError, op: &BinOp, left: &Expr, right: &Expr) 
     }
 }
 
-fn arity_err(name: &str, want: usize, got: usize, line: usize, col: usize) -> HelixError {
-    HelixError::new(
-        format!(
-            "`{}` takes {} argument{}, got {}",
-            name,
-            want,
-            if want == 1 { "" } else { "s" },
-            got
-        ),
-        line,
-        col,
-    )
+/// The arity refusal, in the one sentence every layer speaks — this is the runtime's
+/// `arity_err`, so the checker cannot drift from it (it used to be a second copy, which
+/// happened to agree on `takes` while the runtime said `expects`).
+fn arity_err(name: &str, min: usize, max: usize, got: usize, line: usize, col: usize) -> HelixError {
+    crate::interp::arity_err(name, min, max, got, line, col)
 }
 
 /// `record has no field …`, with a did-you-mean or the field list — the refusal a static
@@ -524,12 +520,13 @@ impl Checker {
             Stmt::Func {
                 name,
                 params,
+                defaults,
                 ret,
                 body,
                 line,
                 col,
                 ..
-            } => self.check_func(name, params, ret, body, *line, *col),
+            } => self.check_func(name, params, defaults, ret, body, *line, *col),
             Stmt::Expr(e) => {
                 self.synth(e)?;
                 Ok(())
@@ -565,10 +562,14 @@ impl Checker {
         Ok(())
     }
 
+    // As the comprehension compilers: a declaration's parts are all distinct, and bundling
+    // them into a struct for the sake of a count would be shape for the count's sake.
+    #[allow(clippy::too_many_arguments)]
     fn check_func(
         &mut self,
         name: &str,
         params: &[(String, Option<TypeAnn>)],
+        defaults: &[Option<Expr>],
         ret: &Option<TypeAnn>,
         body: &Expr,
         line: usize,
@@ -626,6 +627,7 @@ impl Checker {
             Type::Function {
                 params: param_types.clone(),
                 ret: Box::new(ret_ann.clone().unwrap_or(Type::Unknown)),
+                required: params.len() - defaults.iter().flatten().count(),
             },
         );
 
@@ -689,6 +691,7 @@ impl Checker {
             Type::Function {
                 params: param_types,
                 ret: Box::new(final_ret),
+                required: params.len() - defaults.iter().flatten().count(),
             },
         );
         Ok(())
@@ -1036,7 +1039,7 @@ impl Checker {
                     }
                 })
             }
-            Expr::Lambda { params, body } => {
+            Expr::Lambda { params, defaults, body } => {
                 // Standalone lambda: params default to Unknown. Like a `fn`
                 // body (see `check_func`), the lambda body is deferred — a
                 // `mut` global read inside it types as Unknown, since the
@@ -1074,6 +1077,7 @@ impl Checker {
                 Ok(Type::Function {
                     params: params.iter().map(|_| Type::Unknown).collect(),
                     ret: Box::new(body_t),
+                    required: params.len() - defaults.len(),
                 })
             }
             Expr::Let { bindings, body, .. } => {
@@ -1246,7 +1250,7 @@ pub fn check(program: &[Stmt]) -> Result<TypeMap, HelixError> {
     // the definition against the user's function — a wrong type handed to the JIT, not just a
     // permissive check.
     for s in program {
-        if let Stmt::Func { name, params, ret, .. } = s
+        if let Stmt::Func { name, params, defaults, ret, .. } = s
             && crate::registry::lookup(name).is_none()
         {
             let param_types: Vec<Type> = params
@@ -1256,7 +1260,11 @@ pub fn check(program: &[Stmt]) -> Result<TypeMap, HelixError> {
             let ret_ty = ret.as_ref().map(ann_to_type).unwrap_or(Type::Unknown);
             checker.env.insert(
                 name.clone(),
-                Type::Function { params: param_types, ret: Box::new(ret_ty) },
+                Type::Function {
+                    params: param_types,
+                    ret: Box::new(ret_ty),
+                    required: params.len() - defaults.iter().flatten().count(),
+                },
             );
             checker.fn_globals.insert(name.clone());
         }

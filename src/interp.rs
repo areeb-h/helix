@@ -81,25 +81,64 @@ enum TailFlow {
     },
 }
 
-/// The call-arity error, worded identically to the VM's `CallFn`/`TailCallFn`.
-pub(crate) fn arity_err(
+/// The call-arity refusal, worded identically at every layer — checker, VM, walker — and
+/// for builtins and user functions alike: `takes N argument(s)`, or `takes M to N
+/// arguments` for a function with defaults. It used to read `expects` for user functions
+/// (and for the builtins that came through here) and `takes` for the rest: two spellings
+/// of one refusal, which a field build noticed.
+pub(crate) fn arity_err(name: &str, min: usize, max: usize, got: usize, line: usize, col: usize) -> HelixError {
+    let want = if min == max {
+        format!("{min} argument{}", if min == 1 { "" } else { "s" })
+    } else {
+        format!("{min} to {max} arguments")
+    };
+    HelixError::new(format!("`{name}` takes {want}, got {got}"), line, col)
+}
+
+/// The value of a literal default (`= 0`, `= -5`, `= ""`, `= true`, `= missing`) — the
+/// only shapes the parser admits — so a function value can carry its defaults.
+pub(crate) fn const_default_value(e: &Expr) -> Option<Value> {
+    Some(match e {
+        Expr::Int(i) => Value::Int(*i),
+        Expr::Float(f) => Value::Float(*f),
+        Expr::Str(s) => Value::Str(Rc::new(s.clone())),
+        Expr::Bool(b) => Value::Bool(*b),
+        Expr::Missing => Value::Missing,
+        Expr::Unary { op: crate::ast::UnOp::Neg, expr, .. } => match const_default_value(expr)? {
+            Value::Int(i) => Value::Int(i.checked_neg()?),
+            Value::Float(f) => Value::Float(-f),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// A declaration's trailing defaults (its parallel `Option` list), as values.
+pub(crate) fn trailing_defaults(defaults: &[Option<Expr>]) -> Vec<Value> {
+    defaults.iter().flatten().filter_map(const_default_value).collect()
+}
+
+/// Pad a call short of its parameters with the function's trailing defaults, or refuse
+/// the count: `(x, n = 10) => …` called with one argument runs with two. Shared by the
+/// walker's calls and by the VM's function-valued-field route, which holds its
+/// arguments as a `Vec` too.
+pub(crate) fn settle_args(
     name: &str,
-    want: usize,
-    got: usize,
+    params: usize,
+    defaults: &[Value],
+    mut args: Vec<Value>,
     line: usize,
     col: usize,
-) -> HelixError {
-    HelixError::new(
-        format!(
-            "`{}` expects {} argument{}, got {}",
-            name,
-            want,
-            if want == 1 { "" } else { "s" },
-            got
-        ),
-        line,
-        col,
-    )
+) -> Result<Vec<Value>, HelixError> {
+    if args.len() == params {
+        return Ok(args);
+    }
+    let min = params - defaults.len();
+    if args.len() < params && args.len() >= min {
+        args.extend(defaults[args.len() - min..].iter().cloned());
+        return Ok(args);
+    }
+    Err(arity_err(name, min, params, args.len(), line, col))
 }
 
 /// Check a `match` arm guard's value. Shared by the walker and the VM's
@@ -222,7 +261,7 @@ impl Interp {
             })
             .collect();
         for stmt in program {
-            if let Stmt::Func { name, params, body, .. } = stmt
+            if let Stmt::Func { name, params, defaults, body, .. } = stmt
                 && !assigned.contains(name.as_str())
                 && !self.globals.contains_key(name)
                 && !self.hoisted.contains(name)
@@ -232,6 +271,7 @@ impl Interp {
                     params: Rc::new(param_names),
                     body: Rc::new(body.clone()),
                     captured: Rc::new(Vec::new()),
+                    defaults: Rc::new(trailing_defaults(defaults)),
                     decl_name: Some(std::rc::Rc::from(name.as_str())),
                 }));
                 self.globals.insert(name.clone(), Binding { value: f, mutable: false });
@@ -279,6 +319,7 @@ impl Interp {
             Stmt::Func {
                 name,
                 params,
+                defaults,
                 body,
                 line,
                 col,
@@ -295,6 +336,7 @@ impl Interp {
                     params: Rc::new(param_names),
                     body: Rc::new(body.clone()),
                     captured: Rc::new(Vec::new()), // top-level fn: free names are globals
+                    defaults: Rc::new(trailing_defaults(defaults)),
                     decl_name: Some(std::rc::Rc::from(name.as_str())),
                 }));
                 // A `fn` over an existing MUTABLE global reassigns it (the VM stores
@@ -843,7 +885,7 @@ impl Interp {
                 }
                 eval_slice(&recv_v, s, e, st, *line, *col)
             }
-            Expr::Lambda { params, body, .. } => {
+            Expr::Lambda { params, defaults, body } => {
                 // Capture the lambda's free *local* variables by value — its
                 // lexical environment — so a returned or stored closure still sees
                 // them after the defining call has returned.
@@ -865,6 +907,7 @@ impl Interp {
                     params: Rc::new(params.clone()),
                     body: Rc::clone(body),
                     captured: Rc::new(captured),
+                    defaults: Rc::new(defaults.iter().filter_map(const_default_value).collect()),
                     decl_name: None,
                 })))
             }
@@ -1022,9 +1065,7 @@ impl Interp {
         // Arity BEFORE the depth guard — the VM checks arity first at every
         // call op, so a wrong-arity call sitting exactly at the depth boundary
         // must report the arity error on both engines.
-        if f.params.len() != args.len() {
-            return Err(arity_err(name, f.params.len(), args.len(), line, col));
-        }
+        let args = settle_args(name, f.params.len(), &f.defaults, args, line, col)?;
         self.depth += 1;
         if self.depth > MAX_CALL_DEPTH {
             self.depth -= 1;
@@ -1044,15 +1085,17 @@ impl Interp {
         let result = loop {
             // Entry arity was checked above; tail transfers re-check here —
             // mirroring `TailCallFn`'s arity-only (no depth) check.
-            if cur_f.params.len() != cur_args.len() {
-                break Err(arity_err(
-                    hop_name.as_deref().unwrap_or(name),
-                    cur_f.params.len(),
-                    cur_args.len(),
-                    cur_line,
-                    cur_col,
-                ));
-            }
+            cur_args = match settle_args(
+                hop_name.as_deref().unwrap_or(name),
+                cur_f.params.len(),
+                &cur_f.defaults,
+                cur_args,
+                cur_line,
+                cur_col,
+            ) {
+                Ok(a) => a,
+                Err(e) => break Err(e),
+            };
             // Fresh frame: any leftover locals belong to the frame a tail
             // transfer just ended (its lets/matches restored themselves; this
             // drops its params/captured). Captured lexical environment first,

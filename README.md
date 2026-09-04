@@ -175,7 +175,8 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
   `let {name, age} = person in …` — or `{name, age} = person` as a statement — to read
   fields (an absent one is `missing`, ADR 0046);
   `(a, b)` tuples that unpack (`q, r = divmod(17, 5)`) and destructure in lambda params
-  (`pairs.map((k, v) => …)`). Record spread/update: `{ ...base, status: 500 }`.
+  (`pairs.map((k, v) => …)`) and take defaults (`(x, n = 10) => …`). Record spread/update:
+  `{ ...base, status: 500 }`.
 - **Pattern matching** — `match` with literal, range (half-open, matched by magnitude), or-,
   guard, and binding patterns.
 - **Dicts and UFCS** — string-keyed dict literals that spread into records; any user function is

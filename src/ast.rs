@@ -275,6 +275,10 @@ pub enum Expr {
     /// implicit one-parameter shorthand.
     Lambda {
         params: Vec<String>,
+        /// Trailing literal defaults — `(x, n = 10) => …` carries `[10]`. A call short of
+        /// `params.len()` by at most this many is padded at run time (`settle_args` in the
+        /// walker, `settle_short` in the VM); the checker knows the range as `required`.
+        defaults: Vec<Expr>,
         /// SHARED, not owned. Every closure the walker creates from this site holds this
         /// node, so "same code" is a pointer comparison — the fact function equality is
         /// built on (`values_equal`) — and creating a closure copies a pointer, not a

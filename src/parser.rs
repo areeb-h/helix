@@ -238,6 +238,7 @@ fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Ex
     let order = Expr::Method { recv: Box::new(keys), name: "argsort".into(), args: vec![], named: vec![], ufcs: None, line: l, col: c };
     let gather = Expr::Lambda {
         params: vec!["$si".to_string()],
+        defaults: Vec::new(),
         body: std::rc::Rc::new(Expr::Index {
             recv: Box::new(s()),
             index: Box::new(Expr::Ident { name: "$si".to_string(), line: l, col: c }),
@@ -378,7 +379,7 @@ fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Exp
         },
         _ => return args,
     };
-    vec![Expr::Lambda { params: vec!["it".to_string()], body: std::rc::Rc::new(body) }]
+    vec![Expr::Lambda { params: vec!["it".to_string()],defaults: Vec::new(), body: std::rc::Rc::new(body) }]
 }
 
 /// Is this dotted path rooted at the implicit binder `it` (`it.a.b`)? Such a path is a
@@ -452,7 +453,7 @@ fn desugar_order_by(
         // `(k, n) => K`, or an implicit-`it` bare expression).
         let (params, key) = match args.len() {
             1 => match args.pop().unwrap() {
-                Expr::Lambda { params, body } if !params.is_empty() => (params, std::rc::Rc::unwrap_or_clone(body)),
+                Expr::Lambda { params, body, .. } if !params.is_empty() => (params, std::rc::Rc::unwrap_or_clone(body)),
                 Expr::Lambda { .. } => {
                     return Err(HelixError::new(
                         format!("`{name}` needs a key function with at least one parameter"),
@@ -498,7 +499,7 @@ fn desugar_order_by(
         let keys = Expr::Method {
             recv: Box::new(ident("$obe")),
             name: "map".to_string(),
-            args: vec![Expr::Lambda { params, body: std::rc::Rc::new(key) }],
+            args: vec![Expr::Lambda { params,defaults: Vec::new(), body: std::rc::Rc::new(key) }],
             named: vec![],
             ufcs: None,
             line,
@@ -593,6 +594,7 @@ fn desugar_order_by(
     // ($a, $b) => if $b[key] OP $a[key] then $b else $a
     let cmp = Expr::Lambda {
         params: vec!["$ob_a".to_string(), "$ob_b".to_string()],
+        defaults: Vec::new(),
         body: std::rc::Rc::new(Expr::If {
             cond: Box::new(Expr::Binary {
                 op,
@@ -758,6 +760,7 @@ fn desugar_order_by(
                             // the branch can never run for strings. `!=` is defined on
                             // every type and is true only for a NaN, which is exactly
                             // the test the guard one level up already uses.
+                            defaults: Vec::new(),
                             body: std::rc::Rc::new(Expr::Binary {
                                 op: BinOp::Ne,
                                 left: Box::new(ident("$nanq")),
@@ -1692,56 +1695,69 @@ impl Parser {
                 self.depth = saved;
                 return Ok(Some(Expr::Lambda {
                     params: vec![name],
+                    defaults: Vec::new(),
                     body: std::rc::Rc::new(body),
                 }));
             }
             return Ok(None);
         }
 
-        // zero or more parameters: ( ) =>  or  ( IDENT (, IDENT)* ) =>
+        // zero or more parameters — `() =>`, `(a, b) =>`, `(a, n = 10) =>` — as a LOOK, not
+        // a parse: the scan only decides whether `=>` follows a parameter list. The list
+        // is then parsed by `parse_params`, the definition's own parser, so a lambda
+        // default reads exactly as a `fn` default does: a literal constant, trailing.
         if matches!(self.peek(), Tok::LParen) {
             let mut k = self.pos + 1;
-            let mut params = Vec::new();
             // A zero-arg lambda `() => body` — a thunk (e.g. for benchmark harnesses).
             // Only commit if `=>` follows, so a bare `()` stays an ordinary expression.
             if matches!(self.toks[k].tok, Tok::RParen) {
                 k += 1;
             } else {
                 loop {
-                    match &self.toks[k].tok {
-                        Tok::Ident(nm) => {
-                            params.push(nm.clone());
-                            k += 1;
+                    if !matches!(self.toks[k].tok, Tok::Ident(_)) {
+                        return Ok(None); // non-ident in param list — not a lambda
+                    }
+                    k += 1;
+                    if matches!(self.toks[k].tok, Tok::Eq) {
+                        // `= …`: skip the default's tokens to the `,` or `)` that ends it,
+                        // bracket-aware. What a default may BE is `parse_params`' decision
+                        // — a literal constant — so `(x, n = x) => n` is refused by that
+                        // rule, in its words, rather than falling to the tuple parser.
+                        k += 1;
+                        let mut depth = 0usize;
+                        loop {
                             match &self.toks[k].tok {
-                                Tok::Comma => {
-                                    k += 1;
-                                    continue;
-                                }
-                                Tok::RParen => {
-                                    k += 1;
-                                    break;
-                                }
-                                _ => return Ok(None),
+                                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                                Tok::RParen | Tok::RBracket | Tok::RBrace if depth > 0 => depth -= 1,
+                                Tok::RParen | Tok::Comma => break,
+                                Tok::Newline | Tok::Eof => return Ok(None),
+                                _ => {}
                             }
+                            k += 1;
                         }
-                        _ => return Ok(None), // non-ident in param list — not a lambda
+                    }
+                    match &self.toks[k].tok {
+                        Tok::Comma => k += 1,
+                        Tok::RParen => {
+                            k += 1;
+                            break;
+                        }
+                        _ => return Ok(None),
                     }
                 }
             }
             if !matches!(self.toks[k].tok, Tok::FatArrow) {
                 return Ok(None);
             }
-            // Commit: consume `( params ) =>`, then parse the body.
-            while self.pos <= k {
-                self.advance();
-            }
-            // Same depth accounting as the single-param arm above.
+            let (params, defaults) = self.parse_params()?;
+            self.eat(&Tok::FatArrow, "after the parameter list")?;
             let saved = self.depth;
             self.deepen()?;
             let body = self.expr()?;
             self.depth = saved;
             return Ok(Some(Expr::Lambda {
-                params,
+                params: params.into_iter().map(|(n, _)| n).collect(),
+                defaults: defaults.into_iter().flatten().collect(),
                 body: std::rc::Rc::new(body),
             }));
         }

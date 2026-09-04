@@ -182,19 +182,11 @@ impl super::Checker {
     ) -> Result<Type, HelixError> {
         // A user binding of this name shadows a builtin of the same name — defining
         // `fn sign(..)` checks against *your* signature, not the math builtin's.
-        if let Some(Type::Function { params, ret }) = self.env.get(name).cloned() {
-            if params.len() != args.len() {
-                return Err(HelixError::new(
-                    format!(
-                        "`{}` expects {} argument{}, got {}",
-                        name,
-                        params.len(),
-                        if params.len() == 1 { "" } else { "s" },
-                        args.len()
-                    ),
-                    line,
-                    col,
-                ));
+        if let Some(Type::Function { params, ret, required }) = self.env.get(name).cloned() {
+            // Outside `required..=params.len()` — and in the runtime's words, so the
+            // refusal reads the same whether the checker or an engine gives it.
+            if args.len() < required || args.len() > params.len() {
+                return Err(crate::interp::arity_err(name, required, params.len(), args.len(), line, col));
             }
             for (i, (p, a)) in params.iter().zip(args.iter()).enumerate() {
                 if !compatible(a, p) {
@@ -545,7 +537,7 @@ impl super::Checker {
                     return Ok(Type::Unknown); // malformed → runtime errors; don't false-positive
                 }
                 let init_t = self.synth(&args[0])?;
-                if let Expr::Lambda { params, body } = &args[1]
+                if let Expr::Lambda { params, body, .. } = &args[1]
                     && params.len() == 2 {
                         let body_t = self.with_two(
                             &params[0],

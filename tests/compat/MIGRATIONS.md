@@ -79,3 +79,11 @@ no entry. A source edit is not a behavior change.
 
   Message-only. `a_refusal_reads_the_same_from_the_checker_and_the_runtime` now holds the
   property, and it catches all three producers — verified by sabotaging each in turn.
+
+- `tests__corpus__t11_diag` — `` `fs[0]` expects 1 argument, got 2 `` became
+  `` `fs[0]` takes 1 argument, got 2 ``, pinned at the **v0.5.1 and v0.6.0** baselines
+  (2026-09-04). The arity refusal now reads `takes` at every layer for every kind of
+  function: user functions said `expects` (checker, VM, walker) and builtins said `takes`
+  — except the builtins routed through the shared helper, which said `expects` too. One
+  helper, one sentence, and the range form (`takes 1 to 2 arguments`) lambda defaults
+  needed anyway. Message-only.

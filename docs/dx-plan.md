@@ -277,6 +277,17 @@ with mechanisms so nothing has to be rediscovered:
   indexing landed with the bridge; the `.exp()` asymmetry is now its own entry
   below, because the bridge made it reachable by an ordinary spelling.)*
 
+### Lambda defaults, function values keep defaults, one arity sentence (2026-09-04)
+
+**DONE.** The limitation the field build noted alongside 1.39. `(x, n = 10) => …` parses
+through `parse_params` (the lookahead only admits `= literal`); the lambda, the chunk and
+the walker's function value carry trailing default VALUES; every call route pads before
+its arity check (`settle_short` on the VM stack, `settle_args` for Vec-held args and the
+walker), so a first-class `h = g` keeps `g`'s defaults too. `Type::Function.required`
+gives the checker the range. And `arity_err` says `takes` everywhere — user fns, and the
+62 builtin refusals that had been saying `expects` through it — with the range form the
+defaults needed.
+
 ### PostgreSQL writes — `postgres_execute`, `postgres_open(url, "write")` (2026-09-04)
 
 **DONE** (ADR 0047), the largest functional gap the field build filed. A write is a

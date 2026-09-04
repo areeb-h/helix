@@ -804,7 +804,15 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
         macro_rules! enter_call {
             ($idx:expr, $nargs:expr, $name:expr) => {{
                 let idx: usize = $idx;
-                let nargs: usize = $nargs;
+                let nargs: usize = {
+                    let nargs: usize = $nargs;
+                    let callee = &program.funcs[idx];
+                    if nargs == callee.n_params as usize {
+                        nargs
+                    } else {
+                        settle_short(&mut stack, callee.n_params as usize, &callee.defaults, nargs, || &*$name, line, col)?
+                    }
+                };
                 let start = stack.len() - nargs;
 
                 // Memoization fast path (preferred over the JIT for the pure,
@@ -823,20 +831,6 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         return Ok(());
                     }
                     let callee = &program.funcs[idx];
-                    if nargs != callee.n_params as usize {
-                        let np = callee.n_params as usize;
-                        return Err(HelixError::new(
-                            format!(
-                                "`{}` expects {} argument{}, got {}",
-                                $name,
-                                np,
-                                if np == 1 { "" } else { "s" },
-                                nargs
-                            ),
-                            line,
-                            col,
-                        ));
-                    }
                     if frames.len() > VM_MAX_DEPTH {
                         return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
                     }
@@ -967,20 +961,6 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     }
                 }
                 let callee = &program.funcs[idx];
-                if nargs != callee.n_params as usize {
-                    let np = callee.n_params as usize;
-                    return Err(HelixError::new(
-                        format!(
-                            "`{}` expects {} argument{}, got {}",
-                            $name,
-                            np,
-                            if np == 1 { "" } else { "s" },
-                            nargs
-                        ),
-                        line,
-                        col,
-                    ));
-                }
                 if frames.len() > VM_MAX_DEPTH {
                     return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
                 }
@@ -1286,22 +1266,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             }
             Op::TailCallFn { idx, nargs } => {
                 let idx = *idx as usize;
-                let nargs = *nargs as usize;
                 let callee = &program.funcs[idx];
-                if nargs != callee.n_params as usize {
-                    let np = callee.n_params as usize;
-                    return Err(HelixError::new(
-                        format!(
-                            "`{}` expects {} argument{}, got {}",
-                            program.func_names[idx],
-                            np,
-                            if np == 1 { "" } else { "s" },
-                            nargs
-                        ),
-                        line,
-                        col,
-                    ));
-                }
+                let nargs = *nargs as usize;
+                let nargs = if nargs == callee.n_params as usize {
+                    nargs
+                } else {
+                    settle_short(&mut stack, callee.n_params as usize, &callee.defaults, nargs, || &*program.func_names[idx], line, col)?
+                };
                 // Native fast path — the same specialization dispatch as `CallFn`.
                 // Without it, a tail call INTO a JIT-compiled function (`fn escape(..) =
                 // step(..)`, the natural wrapper idiom) silently ran the callee on the
@@ -1421,11 +1392,11 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::CallValue(d) => {
                 let name = &d.name;
                 let nargs = d.nargs as usize;
-                let start = stack.len() - nargs;
+                let fpos = stack.len() - nargs - 1;
                 // The function value sits just below the args (loaded first). A
                 // plain `VmFunc` has no upvalues; a `Closure` carries its captured
                 // environment, which becomes the new frame's upvalues.
-                let (idx, frame_upvalues) = match &stack[start - 1] {
+                let (idx, frame_upvalues) = match &stack[fpos] {
                     Value::VmFunc { idx, .. } => (*idx as usize, no_upvalues.clone()),
                     Value::Closure(c) => (c.idx as usize, c.upvalues.clone()),
                     other => {
@@ -1438,20 +1409,12 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     }
                 };
                 let callee = &program.funcs[idx];
-                if nargs != callee.n_params as usize {
-                    let np = callee.n_params as usize;
-                    return Err(HelixError::new(
-                        format!(
-                            "`{}` expects {} argument{}, got {}",
-                            name,
-                            np,
-                            if np == 1 { "" } else { "s" },
-                            nargs
-                        ),
-                        line,
-                        col,
-                    ));
-                }
+                let nargs = if nargs == callee.n_params as usize {
+                    nargs
+                } else {
+                    settle_short(&mut stack, callee.n_params as usize, &callee.defaults, nargs, || &**name, line, col)?
+                };
+                let start = stack.len() - nargs;
                 if frames.len() > VM_MAX_DEPTH {
                     return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
                 }
@@ -1695,15 +1658,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         let args: Vec<Value> = stack.split_off(split);
                         stack.pop();
                         let callee = &program.funcs[idx];
-                        if args.len() != callee.n_params as usize {
-                            return Err(crate::interp::arity_err(
-                                name,
-                                callee.n_params as usize,
-                                args.len(),
-                                line,
-                                col,
-                            ));
-                        }
+                        let args = crate::interp::settle_args(name, callee.n_params as usize, &callee.defaults, args, line, col)?;
                         if frames.len() > VM_MAX_DEPTH {
                             return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
                         }
@@ -1765,15 +1720,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     }
                                 {
                                     let callee = &program.funcs[idx];
-                                    if args.len() != callee.n_params as usize {
-                                        return Err(crate::interp::arity_err(
-                                            name,
-                                            callee.n_params as usize,
-                                            args.len(),
-                                            line,
-                                            col,
-                                        ));
-                                    }
+                                    let args = crate::interp::settle_args(name, callee.n_params as usize, &callee.defaults, args, line, col)?;
                                     if frames.len() > VM_MAX_DEPTH {
                                         return Err(crate::error::recursion_depth_err(
                                             VM_MAX_DEPTH,
@@ -3128,3 +3075,29 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
 
 #[cfg(test)]
 mod tests;
+
+/// A call short of its parameters, or over them: pad from the callee's trailing defaults —
+/// on the stack, where the arguments already sit — or refuse. COLD on purpose: the
+/// equal-count case is decided by the one comparison at each call site, exactly as before
+/// defaults existed, so the hot path carries no `Result`, no call and no borrow. Measured:
+/// routing the equal case through a `Result`-returning helper cost a tail-call loop 5-9%
+/// (184 -> 193-201 ms over 3M calls, HELIX_NOJIT=1); this shape costs it nothing. The
+/// name is a closure because it is an indexed load the refusal needs and the call does not.
+#[cold]
+#[inline(never)]
+fn settle_short<'a>(
+    stack: &mut Vec<Value>,
+    n_params: usize,
+    defaults: &[Value],
+    nargs: usize,
+    name: impl FnOnce() -> &'a str,
+    line: usize,
+    col: usize,
+) -> Result<usize, HelixError> {
+    let min = n_params - defaults.len();
+    if nargs < n_params && nargs >= min {
+        stack.extend(defaults[nargs - min..].iter().cloned());
+        return Ok(n_params);
+    }
+    Err(crate::interp::arity_err(name(), min, n_params, nargs, line, col))
+}

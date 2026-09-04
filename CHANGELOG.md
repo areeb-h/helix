@@ -4,6 +4,21 @@
 
 ### Added
 
+- **Lambda defaults, and function values that keep them.** `(x, n = 10) => x + n` declares
+  a trailing default exactly as a `fn` does — a literal constant, defaults last, parsed by
+  the same parameter parser — and a call short of the parameters by at most that many is
+  padded at run time on every engine. The same padding gives a function VALUE its
+  declaration's defaults: `h = g; h(2)` with `fn g(a, b = 5)` used to be refused for
+  arity, because only a call BY NAME was filled by the parser. The checker knows the range,
+  so `f()` is refused at check time in the runtime's words: `` `f` takes 1 to 2 arguments,
+  got 0 ``. Zero cost on the equal-count path — measured, not assumed: 3M tail calls and
+  2M calls under `HELIX_NOJIT=1` at 1.000× against a clean build of the previous commit,
+  after a first shape that routed the equal case through a `Result`-returning helper had
+  cost the tail loop 5–9%. The equal case is the one comparison it always was; only a
+  short or long call enters a cold helper. Pinned by
+  `a_lambda_declares_defaults_and_a_function_value_keeps_them` and the corpus program
+  `lambda_defaults`.
+
 - **PostgreSQL writes: `postgres_execute(url, sql, params?)`, and `postgres_open(url,
   "write")` with `execute(sql, params?)` on the connection** (ADR 0047). The answer is
   always `{affected, rows}`: the count from the server's completion tag, and a frame of
@@ -88,6 +103,12 @@
   apart.
 
 ### Changed
+
+- **An arity refusal reads `takes` at every layer, for every kind of function.** User
+  functions said `expects` (checker, VM, walker) while builtins said `takes` — except the
+  builtins routed through the shared helper, which said `expects` too. One helper now:
+  `` `f` takes 2 arguments, got 1 ``, or `` takes 1 to 2 arguments `` with defaults. Licensed
+  in `tests/compat/MIGRATIONS.md` (message-only).
 
 - **Range arity reads the same from both halves.** Writing the test for `Dict.get` turned
   up the same drift one family over:

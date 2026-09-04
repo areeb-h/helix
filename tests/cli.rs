@@ -9331,7 +9331,7 @@ fn ufcs_never_changes_a_call_that_already_resolved() {
     for (name, env) in ENGINES {
         let (_, err, code) = run_source(arity, env, &format!("ufcs_arity_{name}"));
         assert_eq!(code, Some(1), "{name}");
-        assert!(err.contains("`area` expects 1 argument, got 2"), "{name}: {err}");
+        assert!(err.contains("`area` takes 1 argument, got 2"), "{name}: {err}");
     }
 }
 
@@ -15232,9 +15232,9 @@ fn a_function_valued_field_is_callable_with_method_syntax() {
         ("non-function-field", "w = {f: 5}\nprint(w.f(1))\n", "read it without parentheses"),
         // Arity is the callee's business, in the callee's own words — the same sentence
         // `(w.f)(1, 2)` gets.
-        ("arity", "w = {f: (x) => x}\nprint(w.f(1, 2))\n", "expects 1 argument, got 2"),
+        ("arity", "w = {f: (x) => x}\nprint(w.f(1, 2))\n", "takes 1 argument, got 2"),
         ("arity-via-parameter", "fn c(r) = r.f(1, 2)\nprint(c({f: (x) => x}))\n",
-         "expects 1 argument, got 2"),
+         "takes 1 argument, got 2"),
         // No such field AND no such function: the ordinary no-method refusal.
         ("nothing-at-all", "w = {a: 1}\nprint(w.nope(1))\n", "a Record has no method `nope`"),
     ] {
@@ -15551,4 +15551,58 @@ fn record_destructuring_is_also_a_statement() {
     let (out, err, code) = run_source("{a: 1}\nprint(1)\n", &[], "destructure_stmt_literal");
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out.trim(), "1");
+}
+
+/// A lambda can declare trailing defaults — `(x, n = 10) => x + n` — and a function VALUE
+/// keeps its declaration's defaults: `h = g; h(2)` pads from `fn g(a, b = 5)` at run time,
+/// where it used to be refused for arity because only a call BY NAME was filled by the
+/// parser. Same answers on all three engines. The checker knows the range too, so a count
+/// outside it is refused at check time in the runtime's words; a default is a literal
+/// constant and defaults come last — the `fn` rules, verbatim, from the same parser.
+#[test]
+fn a_lambda_declares_defaults_and_a_function_value_keeps_them() {
+    let src = "f = (x, n = 10) => x + n\nprint(f(1), f(1, 2))\nadd = (x, k = 100) => x + k\nprint([1, 2, 3].map(add))\nfn g(a, b = 5) = a * b\nh = g\nprint(h(2), h(2, 3), g(2))\nfn call0(fun) = fun()\nr = try call0(f)\nprint(r.error)\nk = (a, b = -1, c = missing) => [a, b, c]\nprint(k(1), k(1, 2), k(1, 2, 3))\n";
+    let want = "11 3\n[101, 102, 103]\n10 6 10\n`fun` takes 1 to 2 arguments, got 0\n[1, -1, missing] [1, 2, missing] [1, 2, 3]\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "lambda_defaults");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, want, "{env:?}");
+    }
+    let (_, err, code) = run_source("f = (x, n = 10) => x + n\nprint(f())\n", &[], "lambda_defaults_chk0");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`f` takes 1 to 2 arguments, got 0"), "{err}");
+    let (_, err, code) = run_source("f = (x, n = 10) => x + n\nprint(f(1, 2, 3))\n", &[], "lambda_defaults_chk3");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`f` takes 1 to 2 arguments, got 3"), "{err}");
+    let (_, err, code) = run_source("f = (x, n = x) => n\n", &[], "lambda_defaults_lit");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("must be a literal constant"), "{err}");
+    let (_, err, code) = run_source("f = (n = 1, x) => x\n", &[], "lambda_defaults_order");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("has no default but follows one that does"), "{err}");
+}
+
+/// An arity refusal reads `takes` at every layer and for every kind of function. User
+/// functions said `expects` (checker, VM, walker) while builtins said `takes` — except the
+/// builtins that came through the shared helper, which said `expects` too. One helper,
+/// one sentence: `takes N argument(s)`, or `takes M to N arguments` with defaults.
+#[test]
+fn an_arity_refusal_reads_takes_at_every_layer() {
+    for (src, want) in [
+        ("fn area(w, h) = w * h\nprint(area(1))\n", "`area` takes 2 arguments, got 1"),
+        ("print(emit())\n", "`emit` takes 1 argument, got 0"),
+        ("f = (a, b = 1) => a\nprint(f())\n", "`f` takes 1 to 2 arguments, got 0"),
+    ] {
+        let (_, err, code) = run_source(src, &[], "arity_chk");
+        assert_ne!(code, Some(0), "{src}");
+        assert!(err.contains(want), "{src}: {err}");
+        assert!(!err.contains("expects"), "{err}");
+    }
+    // At run time, through a value the checker cannot see, on all three engines.
+    let src = "fn call1(fun) = fun(1)\nr = try call1((a, b) => a + b)\nprint(r.error)\nr2 = try call1((a, b = 2, c = 3) => a)\nprint(r2.ok)\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "arity_rt");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, "`fun` takes 2 arguments, got 1\ntrue\n", "{env:?}");
+    }
 }

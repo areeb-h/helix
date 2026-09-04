@@ -745,6 +745,9 @@ pub struct Chunk {
     pub n_params: u32,
     /// Total local slots to reserve in a frame (params + every `let` binding).
     pub n_locals: u32,
+    /// Trailing parameter defaults, as values (`(x, n = 10) => …` carries `[10]`). A call
+    /// short of `n_params` by at most this many is padded from here (`settle_short`).
+    pub defaults: Vec<Value>,
 }
 
 /// A fully compiled program ready for the VM. `funcs[0]` is `main`; `funcs[1..]`

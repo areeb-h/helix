@@ -799,6 +799,10 @@ pub struct FuncVal {
     /// free names are globals resolved at call time. Installed under the parameters
     /// when the function is applied, so a returned/stored closure still sees them.
     pub captured: Rc<Vec<(String, Value)>>,
+    /// Trailing parameter defaults, as values — `(x, n = 10) => …` carries `[10]`, and a
+    /// top-level `fn g(a, b = 5)` carries `[5]` so a VALUE of it (`h = g`) keeps them. A
+    /// call short of `params.len()` by at most this many is padded from here.
+    pub defaults: Rc<Vec<Value>>,
     /// The name this was DECLARED under by a top-level `fn` statement (`None`
     /// for a `=>` lambda). Drives the walker's tail-call optimization: a tail
     /// call is frame-reused only when it targets an unshadowed top-level `fn`
