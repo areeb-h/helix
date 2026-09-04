@@ -21,9 +21,12 @@ cd "$(dirname "$0")/.."
 
 PROFILE="${1:-gate}"
 case "$PROFILE" in
-  gate)    TEST_ARGS=(--profile gate); BIN=./target/gate/helix ;;
-  dev)     TEST_ARGS=();               BIN=./target/debug/helix ;;
-  release) TEST_ARGS=(--release);      BIN=./target/release/helix ;;
+  # `postgres` is built into the gate (2026-09-04) so its wire-protocol tests — a fake
+  # server proving what the client sends — run in every gate. It was the one feature whose
+  # tests ran nowhere: not here, not in CI. It adds rustls to the build, once.
+  gate)    TEST_ARGS=(--profile gate --features postgres); BIN=./target/gate/helix ;;
+  dev)     TEST_ARGS=(--features postgres);               BIN=./target/debug/helix ;;
+  release) TEST_ARGS=(--release --features postgres);      BIN=./target/release/helix ;;
   *) echo "unknown profile '$PROFILE' (use gate|dev|release)"; exit 2 ;;
 esac
 
@@ -47,7 +50,7 @@ log() {
 # still the only thing allowed to call a change done.
 if [ "${GATE_QUICK:-0}" = "1" ]; then
   echo "== QUICK LOOP: lib tests only — NOT the merge bar =="
-  cargo clippy --all-targets -- -D warnings 2>&1 | tail -2 || rc=1
+  cargo clippy --all-targets --features postgres -- -D warnings 2>&1 | tail -2 || rc=1
   cargo test "${TEST_ARGS[@]}" --lib 2>&1 | grep -E "test result:|FAILED|panicked" | tail -6 || rc=1
   echo "QUICK_RC=$rc (run the full gate before calling it done)"
   exit "$rc"
@@ -59,7 +62,7 @@ fi
 # CI, and the local gate had said RC=0. A gate that disagrees with the gate is not a gate.
 log "clippy (--all-targets -D warnings)"
 CLOG=$(mktemp)
-cargo clippy --all-targets -- -D warnings >"$CLOG" 2>&1 || rc=1
+cargo clippy --all-targets --features postgres -- -D warnings >"$CLOG" 2>&1 || rc=1
 grep -E "^error|^warning:" "$CLOG" | tail -8 || true
 tail -1 "$CLOG"
 rm -f "$CLOG"

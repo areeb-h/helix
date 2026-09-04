@@ -40,7 +40,7 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
                 walk_expr(v, f);
             }
         }
-        Expr::Field { recv, .. } => walk_expr(recv, f),
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => walk_expr(recv, f),
         Expr::Unary { expr, .. } | Expr::Try { expr, .. } => walk_expr(expr, f),
         Expr::Binary { left, right, .. } => {
             walk_expr(left, f);
@@ -129,6 +129,7 @@ pub fn expr_pos(e: &Expr) -> Option<(usize, usize)> {
             | Expr::Column { line, col, .. }
             | Expr::RecordUpdate { line, col, .. }
             | Expr::Field { line, col, .. }
+            | Expr::FieldOrMissing { line, col, .. }
             | Expr::Unary { line, col, .. }
             | Expr::Binary { line, col, .. }
             | Expr::Call { line, col, .. }

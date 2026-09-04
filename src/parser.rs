@@ -34,6 +34,9 @@ struct FnSig {
 /// A parsed call's arguments: positional expressions and `name: value` named pairs.
 type CallArgs = (Vec<Expr>, Vec<(String, Expr)>);
 
+/// A parsed parameter list: `(name, annotation)` pairs and their parallel defaults.
+type Params = (Vec<(String, Option<TypeAnn>)>, Vec<Option<Expr>>);
+
 /// True for the literal-constant expressions allowed as a parameter default. The
 /// default is inserted at each call site, so it must not reference anything (no
 /// params, no globals) — a literal (optionally negated/notted) guarantees that.
@@ -69,7 +72,6 @@ fn parse_expression(
     depth: usize,
     sigs: &HashMap<String, FnSig>,
     imports: &std::collections::HashSet<String>,
-    fn_names: &std::collections::HashSet<String>,
 ) -> Result<(Expr, Vec<DoBinding>), HelixError> {
     let tokens = crate::lexer::lex(src)?;
     let mut p = Parser {
@@ -83,7 +85,6 @@ fn parse_expression(
         // Threaded for the same reason `imports` is, and recorded above: a hole's
         // parser that does not inherit an enclosing rule makes that rule hold outside
         // strings and not inside them, which is where people meet it first.
-        fn_names: fn_names.clone(),
     };
     p.skip_newlines();
     let e = p.expr()?;
@@ -238,7 +239,7 @@ fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Ex
     let order = Expr::Method { recv: Box::new(keys), name: "argsort".into(), args: vec![], named: vec![], ufcs: None, line: l, col: c };
     let gather = Expr::Lambda {
         params: vec!["$si".to_string()],
-        body: Box::new(Expr::Index {
+        body: std::rc::Rc::new(Expr::Index {
             recv: Box::new(s()),
             index: Box::new(Expr::Ident { name: "$si".to_string(), line: l, col: c }),
             line: l,
@@ -378,7 +379,7 @@ fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Exp
         },
         _ => return args,
     };
-    vec![Expr::Lambda { params: vec!["it".to_string()], body: Box::new(body) }]
+    vec![Expr::Lambda { params: vec!["it".to_string()], body: std::rc::Rc::new(body) }]
 }
 
 /// Is this dotted path rooted at the implicit binder `it` (`it.a.b`)? Such a path is a
@@ -452,7 +453,7 @@ fn desugar_order_by(
         // `(k, n) => K`, or an implicit-`it` bare expression).
         let (params, key) = match args.len() {
             1 => match args.pop().unwrap() {
-                Expr::Lambda { params, body } if !params.is_empty() => (params, *body),
+                Expr::Lambda { params, body } if !params.is_empty() => (params, std::rc::Rc::unwrap_or_clone(body)),
                 Expr::Lambda { .. } => {
                     return Err(HelixError::new(
                         format!("`{name}` needs a key function with at least one parameter"),
@@ -498,7 +499,7 @@ fn desugar_order_by(
         let keys = Expr::Method {
             recv: Box::new(ident("$obe")),
             name: "map".to_string(),
-            args: vec![Expr::Lambda { params, body: Box::new(key) }],
+            args: vec![Expr::Lambda { params, body: std::rc::Rc::new(key) }],
             named: vec![],
             ufcs: None,
             line,
@@ -593,7 +594,7 @@ fn desugar_order_by(
     // ($a, $b) => if $b[key] OP $a[key] then $b else $a
     let cmp = Expr::Lambda {
         params: vec!["$ob_a".to_string(), "$ob_b".to_string()],
-        body: Box::new(Expr::If {
+        body: std::rc::Rc::new(Expr::If {
             cond: Box::new(Expr::Binary {
                 op,
                 left: Box::new(index(ident("$ob_b"), key_idx)),
@@ -758,7 +759,7 @@ fn desugar_order_by(
                             // the branch can never run for strings. `!=` is defined on
                             // every type and is true only for a NaN, which is exactly
                             // the test the guard one level up already uses.
-                            body: Box::new(Expr::Binary {
+                            body: std::rc::Rc::new(Expr::Binary {
                                 op: BinOp::Ne,
                                 left: Box::new(ident("$nanq")),
                                 right: Box::new(ident("$nanq")),
@@ -827,16 +828,6 @@ fn mut_inside_a_body(line: usize, col: usize) -> HelixError {
 }
 
 pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
-    // Every `fn NAME` in the file, before a line of it is parsed. A function may be
-    // called above its definition, so the UFCS fallback cannot wait for the definition
-    // to be reached; the scan is lexical and needs no structure.
-    let fn_names: std::collections::HashSet<String> = tokens
-        .windows(2)
-        .filter_map(|w| match (&w[0].tok, &w[1].tok) {
-            (Tok::Fn, Tok::Ident(n)) => Some(n.clone()),
-            _ => None,
-        })
-        .collect();
     let mut p = Parser {
         toks: tokens,
         pos: 0,
@@ -845,8 +836,10 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
         do_bindings: Vec::new(),
         imports: std::collections::HashSet::new(),
         selected_imports: std::collections::HashSet::new(),
-        fn_names,
     };
+    // EVERY SIGNATURE BEFORE THE FIRST CALL IS PARSED — a function may be called above
+    // its definition, and its defaults and parameter names must be known there too.
+    p.prescan_signatures();
     let program = p.program()?;
     reject_do_binding_over_mut_global(&program, &p.do_bindings)?;
     Ok(program)
@@ -932,17 +925,6 @@ struct Parser {
     /// lives in the imported module), and the error should say so, not call `f`
     /// a builtin.
     selected_imports: std::collections::HashSet<String>,
-    /// Every name introduced by a `fn` anywhere in this file, pre-scanned from the
-    /// token stream before parsing begins.
-    ///
-    /// A function may be called above its definition, so the UFCS fallback below
-    /// cannot wait until the definition is parsed to know the name exists. The scan is
-    /// purely lexical — `fn` followed by an identifier — and deliberately
-    /// over-approximates by including nested functions: the cost of doing so is that
-    /// `x.f()` for an out-of-scope `f` reports "`f` is not defined" instead of "no
-    /// method `f`", and the cost of under-approximating would be a call that works in
-    /// one file and not in another.
-    fn_names: std::collections::HashSet<String>,
 }
 
 impl Parser {
@@ -1201,59 +1183,9 @@ impl Parser {
             let (l, c) = self.pos();
             self.advance();
             let name = self.ident_name("after `fn`")?;
-            self.eat(&Tok::LParen, "to start the parameter list")
-                .map_err(|e| e.hint("functions look like `fn area(w, h) = w * h`."))?;
-            let mut params: Vec<(String, Option<TypeAnn>)> = Vec::new();
-            let mut defaults: Vec<Option<Expr>> = Vec::new();
-            if !matches!(self.peek(), Tok::RParen) {
-                loop {
-                    let (pl, pc) = self.pos();
-                    let pname = self.ident_name("as a parameter")?;
-                    // optional `: Type` annotation
-                    let ann = if matches!(self.peek(), Tok::Colon) {
-                        self.advance();
-                        Some(self.parse_type_ann()?)
-                    } else {
-                        None
-                    };
-                    // optional `= literal` default value
-                    let default = if matches!(self.peek(), Tok::Eq) {
-                        self.advance();
-                        let d = self.expr()?;
-                        if !is_const_default(&d) {
-                            return Err(HelixError::new(
-                                format!("the default for parameter `{pname}` must be a literal constant"),
-                                pl,
-                                pc,
-                            )
-                            .hint("defaults like `= 0`, `= -5`, `= \"\"`, `= true`, or `= missing` are allowed."));
-                        }
-                        Some(d)
-                    } else {
-                        None
-                    };
-                    // Parameters with defaults must come last, so positional binding is
-                    // unambiguous.
-                    if default.is_none() && defaults.iter().any(|d| d.is_some()) {
-                        return Err(HelixError::new(
-                            format!("parameter `{pname}` has no default but follows one that does"),
-                            pl,
-                            pc,
-                        )
-                        .hint("put parameters with defaults after those without."));
-                    }
-                    params.push((pname, ann));
-                    defaults.push(default);
-                    if matches!(self.peek(), Tok::Comma) {
-                        self.advance();
-                    } else {
-                        break;
-                    }
-                }
-            }
-            self.eat(&Tok::RParen, "to close the parameter list")?;
-            // Record the signature BEFORE parsing the body, so a recursive call inside
-            // it resolves named arguments and defaults against this function.
+            let (params, defaults) = self.parse_params()?;
+            // `prescan_signatures` already recorded this signature; recording it again
+            // keeps the definition authoritative, and costs one small insert.
             self.fn_sigs.insert(
                 name.clone(),
                 FnSig {
@@ -1439,6 +1371,184 @@ impl Parser {
         }
     }
 
+    /// A parameter list, `(` to `)`: names, optional `: Type` annotations, optional
+    /// literal defaults. One parser for the definition AND for `prescan_signatures`, so a
+    /// signature reads the same from both.
+    fn parse_params(&mut self) -> Result<Params, HelixError> {
+        self.eat(&Tok::LParen, "to start the parameter list")
+            .map_err(|e| e.hint("functions look like `fn area(w, h) = w * h`."))?;
+        let mut params: Vec<(String, Option<TypeAnn>)> = Vec::new();
+        let mut defaults: Vec<Option<Expr>> = Vec::new();
+        if !matches!(self.peek(), Tok::RParen) {
+            loop {
+                let (pl, pc) = self.pos();
+                let pname = self.ident_name("as a parameter")?;
+                // optional `: Type` annotation
+                let ann = if matches!(self.peek(), Tok::Colon) {
+                    self.advance();
+                    Some(self.parse_type_ann()?)
+                } else {
+                    None
+                };
+                // optional `= literal` default value
+                let default = if matches!(self.peek(), Tok::Eq) {
+                    self.advance();
+                    let d = self.expr()?;
+                    if !is_const_default(&d) {
+                        return Err(HelixError::new(
+                            format!("the default for parameter `{pname}` must be a literal constant"),
+                            pl,
+                            pc,
+                        )
+                        .hint("defaults like `= 0`, `= -5`, `= \"\"`, `= true`, or `= missing` are allowed."));
+                    }
+                    Some(d)
+                } else {
+                    None
+                };
+                // Parameters with defaults must come last, so positional binding is
+                // unambiguous.
+                if default.is_none() && defaults.iter().any(|d| d.is_some()) {
+                    return Err(HelixError::new(
+                        format!("parameter `{pname}` has no default but follows one that does"),
+                        pl,
+                        pc,
+                    )
+                    .hint("put parameters with defaults after those without."));
+                }
+                params.push((pname, ann));
+                defaults.push(default);
+                if matches!(self.peek(), Tok::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.eat(&Tok::RParen, "to close the parameter list")?;
+        Ok((params, defaults))
+    }
+
+    /// Record the signature of every `fn NAME(…)` in the file before any of it is parsed,
+    /// with `parse_params` — the definition's own parameter parser — so a call written
+    /// ABOVE its definition fills omitted arguments from the defaults and places named
+    /// arguments exactly as one written below it does. Until this scan, `fn_sigs` was
+    /// filled as each definition was reached, and a forward call found nothing: its
+    /// defaults were never filled, so the checker and both engines refused it for arity,
+    /// and its named arguments were refused as "only supported for user-defined
+    /// functions" — about a function three lines down. The same program with the
+    /// definition moved above the call was fine.
+    ///
+    /// One pass is enough: a default is a literal constant (`is_const_default`), never a
+    /// call that would need another signature first. A parameter list that does not
+    /// parse is skipped here, silently, because the definition's own parse reports it —
+    /// at the right place, in the right words. The cursor and depth are restored after.
+    fn prescan_signatures(&mut self) {
+        let saved = (self.pos, self.depth);
+        for i in 0..self.toks.len().saturating_sub(2) {
+            if !matches!(self.toks[i].tok, Tok::Fn) || !matches!(self.toks[i + 2].tok, Tok::LParen) {
+                continue;
+            }
+            let Tok::Ident(name) = &self.toks[i + 1].tok else { continue };
+            let name = name.clone();
+            self.pos = i + 2;
+            self.depth = 0;
+            if let Ok((params, defaults)) = self.parse_params() {
+                self.fn_sigs.insert(
+                    name,
+                    FnSig { params: params.into_iter().map(|(n, _)| n).collect(), defaults },
+                );
+            }
+        }
+        (self.pos, self.depth) = saved;
+    }
+
+    /// `{a, b} = value` — one binding per named field. The value is bound ONCE to a
+    /// throwaway name (`$rec<N>`; `$` cannot appear in user code, so it shadows nothing)
+    /// and each field is read from it through `FieldOrMissing`: the value, or `missing`
+    /// for a field the record does not have — the answer `get` gives, and what makes a
+    /// destructure fit a spec record whose keys are optional by nature. The reads are
+    /// field reads, not `get` calls: one symbol scan per name, no method dispatch.
+    fn destructure_record(&mut self, bindings: &mut Vec<(String, Expr)>) -> Result<(), HelixError> {
+        let shape = "destructuring looks like `let {where, limit} = spec in …`.";
+        self.eat(&Tok::LBrace, "to start the fields to destructure")?;
+        let mut names: Vec<(String, usize, usize)> = Vec::new();
+        loop {
+            self.skip_newlines();
+            if matches!(self.peek(), Tok::RBrace) && !names.is_empty() {
+                break; // a trailing comma
+            }
+            let (nl, nc) = self.pos();
+            let name = self.ident_name("as a field to destructure")?;
+            if matches!(self.peek(), Tok::Colon) {
+                return Err(HelixError::new(
+                    format!("`{name}:` — a destructured field binds under its own name"),
+                    nl,
+                    nc,
+                )
+                .hint(format!("to bind it under another name, read it directly: `x = spec.{name}`.")));
+            }
+            names.push((name, nl, nc));
+            self.skip_newlines();
+            if matches!(self.peek(), Tok::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.skip_newlines();
+        self.eat(&Tok::RBrace, "to close the fields to destructure").map_err(|e| e.hint(shape))?;
+        self.eat(&Tok::Eq, "after the fields to destructure").map_err(|e| e.hint(shape))?;
+        let value = self.expr()?;
+        let tmp = format!("$rec{}", bindings.len());
+        bindings.push((tmp.clone(), value));
+        for (name, nl, nc) in names {
+            let recv = Box::new(Expr::Ident { name: tmp.clone(), line: nl, col: nc });
+            bindings.push((name.clone(), Expr::FieldOrMissing { recv, name, line: nl, col: nc }));
+        }
+        Ok(())
+    }
+
+    /// Whether the `{` at the cursor opens a destructuring binder — `{a, b} = …` — rather
+    /// than a record expression: names and commas up to `}`, then a single `=`. A record
+    /// literal has a `:` after its first name and `==` is its own token, so nothing that
+    /// is an expression matches. Decided by looking, not parsing, so a record that merely
+    /// begins a `do` block's result expression is left alone.
+    fn record_binder_ahead(&self) -> bool {
+        let tok = |i: usize| self.toks.get(i).map(|t| &t.tok);
+        let mut i = self.pos + 1;
+        loop {
+            while matches!(tok(i), Some(Tok::Newline)) {
+                i += 1;
+            }
+            if !matches!(tok(i), Some(Tok::Ident(_))) {
+                return false;
+            }
+            i += 1;
+            while matches!(tok(i), Some(Tok::Newline)) {
+                i += 1;
+            }
+            match tok(i) {
+                Some(Tok::Comma) => {
+                    i += 1;
+                    while matches!(tok(i), Some(Tok::Newline)) {
+                        i += 1;
+                    }
+                    if matches!(tok(i), Some(Tok::RBrace)) {
+                        i += 1;
+                        break;
+                    }
+                }
+                Some(Tok::RBrace) => {
+                    i += 1;
+                    break;
+                }
+                _ => return false,
+            }
+        }
+        matches!(tok(i), Some(Tok::Eq))
+    }
+
     /// Parse a function-signature type annotation: one capitalized type word.
     fn parse_type_ann(&mut self) -> Result<TypeAnn, HelixError> {
         let (l, c) = self.pos();
@@ -1523,7 +1633,7 @@ impl Parser {
                 self.depth = saved;
                 return Ok(Some(Expr::Lambda {
                     params: vec![name],
-                    body: Box::new(body),
+                    body: std::rc::Rc::new(body),
                 }));
             }
             return Ok(None);
@@ -1573,7 +1683,7 @@ impl Parser {
             self.depth = saved;
             return Ok(Some(Expr::Lambda {
                 params,
-                body: Box::new(body),
+                body: std::rc::Rc::new(body),
             }));
         }
 
@@ -2586,6 +2696,17 @@ impl Parser {
                 self.skip_newlines();
                 continue;
             }
+            // `{a, b} = value` — the same destructure `let` accepts, as a block binding.
+            if matches!(self.peek(), Tok::LBrace) && self.record_binder_ahead() {
+                let (bl, bc) = self.pos();
+                let first = bindings.len();
+                self.destructure_record(&mut bindings)?;
+                for (name, _) in &bindings[first + 1..] {
+                    self.do_bindings.push((name.clone(), bl, bc));
+                }
+                self.skip_newlines();
+                continue;
+            }
             if matches!(self.peek(), Tok::RBrace) {
                 return Err(HelixError::new("a `do` block must end with a result expression", l, c)
                     .hint("add a final line that produces the block's value, e.g. `do { x = 1\\n  x + 1 }`."));
@@ -2659,7 +2780,7 @@ impl Parser {
                     Self::relocate(v, l, c);
                 }
             }
-            Expr::Field { recv, line, col, .. } => {
+            Expr::Field { recv, line, col, .. } | Expr::FieldOrMissing { recv, line, col, .. } => {
                 *line = l;
                 *col = c;
                 Self::relocate(recv, l, c);
@@ -2715,7 +2836,7 @@ impl Parser {
                     Self::relocate(o, l, c);
                 }
             }
-            Expr::Lambda { body, .. } => Self::relocate(body, l, c),
+            Expr::Lambda { body, .. } => Self::relocate(std::rc::Rc::make_mut(body), l, c),
             Expr::Let { bindings, body, .. } => {
                 for (_, v) in bindings {
                     Self::relocate(v, l, c);
@@ -2775,7 +2896,7 @@ impl Parser {
                             // Relocate it to the interpolated string's real position so
                             // the caret points at the user's actual source, not line 1.
                             let (mut e, hole_do_bindings) =
-                                parse_expression(&src, self.depth, &self.fn_sigs, &self.imports, &self.fn_names)
+                                parse_expression(&src, self.depth, &self.fn_sigs, &self.imports)
                                     .map_err(|err| HelixError { line: l, col: c, ..err })?;
                             // Fold the hole's `do {}` bindings into this parser's list, at
                             // the string's real position for the same reason the error and
@@ -2847,11 +2968,15 @@ impl Parser {
                         let (ml, mc) = self.pos();
                         return Err(mut_inside_a_body(ml, mc));
                     }
-                    let name = self.ident_name("as a `let` binding")?;
-                    self.eat(&Tok::Eq, "in a `let` binding")
-                        .map_err(|e| e.hint("`let` looks like `let a = 1, b = 2 in a + b`."))?;
-                    let value = self.expr()?;
-                    bindings.push((name, value));
+                    if matches!(self.peek(), Tok::LBrace) {
+                        self.destructure_record(&mut bindings)?;
+                    } else {
+                        let name = self.ident_name("as a `let` binding")?;
+                        self.eat(&Tok::Eq, "in a `let` binding")
+                            .map_err(|e| e.hint("`let` looks like `let a = 1, b = 2 in a + b`."))?;
+                        let value = self.expr()?;
+                        bindings.push((name, value));
+                    }
                     if matches!(self.peek(), Tok::Comma) {
                         self.advance();
                     } else {

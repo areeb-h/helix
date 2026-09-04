@@ -940,6 +940,33 @@ pub(crate) fn values_equal(l: &Value, r: &Value) -> bool {
             a.len() == b.len()
                 && a.iter().all(|(k, v)| b.get(k).is_some_and(|v2| values_equal(v, v2)))
         }
+        // A FUNCTION IS EQUAL TO ITSELF — and to any function of the same code whose
+        // captured values are equal. That is the one definition both engines compute the
+        // same way: the walker keeps the free names it captured by value, the VM keeps
+        // them as upvalues, and a top-level `fn` captures nothing on either. Identity by
+        // pointer alone was not available (the VM's non-capturing lambda is an inline
+        // index, not an allocation), and "same code" alone would make two closures over
+        // different values equal. Before these arms every function fell through to
+        // `false`: `f == f` was false, `[w].contains(w)` was false, `[w, w].unique()`
+        // had two elements, and `assert_eq(f, f)` failed — on all three engines.
+        (Value::Function(a), Value::Function(b)) => {
+            Rc::ptr_eq(a, b)
+                || (Rc::ptr_eq(&a.body, &b.body)
+                    && a.captured.len() == b.captured.len()
+                    && a.captured
+                        .iter()
+                        .zip(b.captured.iter())
+                        .all(|((n, v), (m, w))| n == m && values_equal(v, w)))
+        }
+        (Value::VmFunc { idx: a, .. }, Value::VmFunc { idx: b, .. }) => a == b,
+        (Value::Closure(a), Value::Closure(b)) => {
+            Rc::ptr_eq(a, b)
+                || (a.idx == b.idx
+                    && a.upvalues.len() == b.upvalues.len()
+                    && a.upvalues.iter().zip(b.upvalues.iter()).all(|(v, w)| values_equal(v, w)))
+        }
+        (Value::VmFunc { idx, .. }, Value::Closure(c))
+        | (Value::Closure(c), Value::VmFunc { idx, .. }) => c.idx == *idx && c.upvalues.is_empty(),
         _ => false,
     }
 }

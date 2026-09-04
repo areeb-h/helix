@@ -277,6 +277,45 @@ with mechanisms so nothing has to be rediscovered:
   indexing landed with the bridge; the `.exp()` asymmetry is now its own entry
   below, because the bridge made it reachable by an ordinary spelling.)*
 
+### PostgreSQL writes — `postgres_execute`, `postgres_open(url, "write")` (2026-09-04)
+
+**DONE** (ADR 0047), the largest functional gap the field build filed. A write is a
+different session (the startup packet omits the read-only default) and spends `db-write`
+as well as `net`. `{affected, rows}` always, `RETURNING` rows in the same round trip,
+`execute` refused on a read-only connection before a byte is sent. The gate now builds
+`--features postgres` and a fake wire server proves the startup packet and the completion
+tag; live verification is the field build's. Open: a transaction spanning statements.
+
+### Record destructuring — `let {where, limit} = spec in …` (2026-09-04)
+
+**DONE** (ADR 0046). The field build's number-one performance ask: six `Record.get` calls
+were 38% of a render. Desugared in the parser to one temp binding and one
+absence-tolerant field read per name (`Expr::FieldOrMissing` → `Op::GetFieldOrMissing`, a
+symbol scan like `.a`); absent is `missing`; the checker refuses a name a known record
+cannot have. Also inside `do { }`. Renames, nesting and the top-level statement form are
+not in the decision. Measured: six lookups 392 → 358 ns per call (1.10×, same binary,
+min-of-7) — the `get` dispatch on a small record is ~40 ns, so the field profile's 38%
+came from a shape this does not reproduce; the one-line spelling is the win.
+
+### A function was never equal to anything, itself included (2026-09-04)
+
+**DONE.** Field build 1.38. Same code + equal captures, on every engine; the lambda body
+is shared (`Rc`) so the walker can say "same site" — and stops deep-copying a body per
+closure. Pinned by `a_function_is_equal_to_itself_on_every_engine`.
+
+### A default parameter was invisible to a call above its definition (2026-09-04)
+
+**DONE.** Field build 1.39 — the same "decided before the information exists" shape as
+the parser's UFCS rewrite: `fn_sigs` was filled as definitions were parsed and read while
+calls were parsed. `prescan_signatures` now records every signature with the definition's
+own `parse_params` before the first call is parsed; the interpolation sub-parser inherits
+the complete table. Lambdas still cannot declare defaults — open.
+
+### `"s".map(it)` blamed `it` while `(5).map(it)` blamed the method (2026-09-04)
+
+**DONE.** Field build 1.40. The String/Dna/Tuple/Tensor arms decide the method exists
+before reading the arguments, as the scalar arm always did.
+
 ### The parser's UFCS rewrite — the last parse-time decision — is gone (2026-09-02)
 
 **DONE**, and it closes the PyObject residue recorded under "UFCS after the PyObject
@@ -571,6 +610,8 @@ wish, because an undecided list is what a later reader has to re-litigate.
   and lambda parameters destructure tuples, so the gap is narrower than it looks:
   `let [a, b] = …` and `fn f([a, b])`. Medium cost, and the statement form covers most
   of what the corpus wanted.
+  **STATUS: the RECORD form landed 2026-09-04** (ADR 0046) — `let {a, b} = rec in …`, and
+  `{a, b} = rec` inside `do { }`. The tuple/array forms remain open.
 
 **Needs a decision before it can be built.**
 

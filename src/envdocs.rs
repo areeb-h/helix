@@ -71,6 +71,13 @@ pub static ENV: &[EnvDoc] = &[
         notes: "Until 2026-08-28 this could not be granted AT ALL — the env path hardcoded process authority to false, so turning the sandbox on broke every program that shells out and the only remedy was turning it back off. Note what the grant cannot promise: the child is a separate program with its own permissions, so this is a boundary EXIT rather than confinement (ADR 0037 D3). Keywords: sandbox, subprocess, spawn, shell, exec, grant. Granting it is closer to granting everything than it looks: run(\"sh\", …) reaches whatever the child may reach, including the fs and net you just declined.",
     },
     EnvDoc {
+        name: "HELIX_ALLOW_DB",
+        values: "write | all",
+        default: "deny — when a mode is set, nothing is granted",
+        doc: "Grants database WRITE authority (`postgres_execute`, `postgres_open(url, \"write\")`) under `HELIX_CAP=audit|enforce`.",
+        notes: "A write is its own grant (ADR 0047): `postgres_query` spends `net`, and a session that can write spends `db-write` AS WELL, so `HELIX_ALLOW_NET=on` alone keeps a program read-only against every database it can reach — the server holds a query session read-only from its first byte, and only this grant lets a session be opened without that default. `execute` on a connection is gated by the same name. There is no `read` value: reads are the `net` grant. A value that does not parse is REFUSED at startup. Keywords: sandbox, database, postgres, write, insert, update, delete, permission, grant.",
+    },
+    EnvDoc {
         name: "HELIX_NOJIT",
         values: "any value (presence is what counts)",
         default: "unset — the JIT runs where the build supports it",

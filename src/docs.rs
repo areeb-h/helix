@@ -718,12 +718,20 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         notes: "Opens READ-ONLY, so the fs-read capability label is the truth and a typo in the path fails instead of creating an empty database. Parameters bind as VALUES to `?`; there is no way to splice text into the statement, which is what makes injection unrepresentable rather than merely discouraged.",
     },
     DocEntry {
+        name: "postgres_execute",
+        sig: "postgres_execute(url, sql, params?)",
+        doc: "Run one SQL statement that may write — INSERT, UPDATE, DELETE, DDL — and return {affected, rows}.",
+        example: "postgres_execute(\"postgres://me:pw@localhost/app\", \"insert into users (name) values ($1)\", [\"Ada\"]).affected",
+        example_out: "",
+        notes: "The write verb (ADR 0047), and the only way a Helix program changes a database: `postgres_query` runs in a session the SERVER holds read-only from its first byte, so this verb opens a session without that default and spends the `db-write` capability (`HELIX_ALLOW_DB=write`, alongside `HELIX_ALLOW_NET=on`) where `postgres_query` spends `net`. Parameters bind as VALUES to $1, $2, …, exactly as in `postgres_query` — no text is ever spliced into the statement. `affected` is the row count from the server's completion tag (0 for DDL); `rows` is a DataFrame of what the statement returned — empty unless it has a `RETURNING` clause, which is how an inserted id comes back in the same round trip. One statement is one transaction: it commits when it completes, and a failed one changed nothing; a transaction spanning statements is not offered yet. Through a connection, `postgres_open(url, \"write\").execute(sql, params?)` is the same verb on a reused socket. Keywords: postgres, insert, update, delete, write, execute, returning, affected, ddl, transaction, mutate.",
+    },
+    DocEntry {
         name: "postgres_open",
-        sig: "postgres_open(url)",
+        sig: "postgres_open(url, mode?)",
         doc: "Open one PostgreSQL connection and reuse it for every query made through it.",
         example: "postgres_open(\"postgres://me:pw@localhost/app\")",
         example_out: "",
-        notes: "The connection is opened ONCE and reused for every query inside, which is the whole point: a connection costs a TCP handshake plus a SCRAM exchange — measured at 4.7 ms against PostgreSQL 19, the same for `select 1` as for a full table — so five queries through `postgres_query` spend ~24 ms before doing any work. There is no close to forget: Helix values are reference-counted, so the socket shuts when the last handle to it goes. The connection answers `query(sql, params?)`, with the same parameter discipline and the same server-enforced read-only session as `postgres_query`. Keywords: postgres, connection, pool, reuse, handshake, scope, transaction.",
+        notes: "The connection is opened ONCE and reused for every query inside, which is the whole point: a connection costs a TCP handshake plus a SCRAM exchange — measured at 4.7 ms against PostgreSQL 19, the same for `select 1` as for a full table — so five queries through `postgres_query` spend ~24 ms before doing any work. There is no close to forget: Helix values are reference-counted, so the socket shuts when the last handle to it goes. The connection answers `query(sql, params?)`, with the same parameter discipline and the same server-enforced read-only session as `postgres_query`. Opened with mode `\"write\"` — which spends the `db-write` capability (ADR 0047) — it also answers `execute(sql, params?)`, `{affected, rows}` exactly as `postgres_execute` does, on the reused socket. Keywords: postgres, connection, pool, reuse, handshake, scope, transaction, write.",
     },
     DocEntry {
         name: "postgres_query",

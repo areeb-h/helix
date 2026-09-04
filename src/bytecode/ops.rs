@@ -105,6 +105,8 @@ pub enum Op {
     /// Pop a receiver; push `recv.<name>` (record field access). The field name is
     /// an interned `Symbol`, so the lookup compares a `u32` against the record keys.
     GetField(crate::symbol::Symbol),
+    /// A destructured field: the value, or `missing` for a field the record does not have.
+    GetFieldOrMissing(crate::symbol::Symbol),
     /// Slice a receiver. The bitmask says which of start/stop/step were supplied
     /// (bit 0/1/2); those bound values were pushed after the receiver, in order.
     Slice(u8),

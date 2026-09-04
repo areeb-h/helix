@@ -581,7 +581,7 @@ fn unsupported_op(opx: &Op) -> String {
         Op::MakeArray(_) | Op::Index | Op::Slice(_) => "arrays / indexing / slicing",
         Op::Interp(_) => "string interpolation",
         Op::MakeTuple(_) => "tuples",
-        Op::MakeRecord(_) | Op::UpdateRecord(_) | Op::GetField(_) => "records",
+        Op::MakeRecord(_) | Op::UpdateRecord(_) | Op::GetField(_) | Op::GetFieldOrMissing(_) => "records",
         Op::Destructure(_) | Op::DestructureBind(_) => "destructuring",
         Op::Method(_) => "value methods",
         _ => "this operation",

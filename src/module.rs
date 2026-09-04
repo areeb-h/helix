@@ -920,6 +920,7 @@ fn offset_expr_line(e: &mut Expr, off: usize) {
     match e {
         Expr::Ident { line, .. }
         | Expr::Field { line, .. }
+        | Expr::FieldOrMissing { line, .. }
         | Expr::Unary { line, .. }
         | Expr::Binary { line, .. }
         | Expr::Call { line, .. }
@@ -1161,7 +1162,7 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
                 rw(v, ctx, bound)?;
             }
         }
-        Expr::Field { recv, .. } => rw(recv, ctx, bound)?,
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => rw(recv, ctx, bound)?,
         Expr::Unary { expr, .. } => rw(expr, ctx, bound)?,
         Expr::Binary { left, right, .. } => {
             rw(left, ctx, bound)?;
@@ -1250,7 +1251,7 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
         Expr::Lambda { params, body } => {
             let mut b = bound.clone();
             b.extend(params.iter().cloned());
-            rw(body, ctx, &b)?;
+            rw(std::rc::Rc::make_mut(body), ctx, &b)?;
         }
         Expr::Let { bindings, body, .. } => {
             let mut b = bound.clone();

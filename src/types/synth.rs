@@ -323,27 +323,52 @@ impl super::Checker {
             Type::DataFrame => df_method_type(name, line, col),
             Type::GroupBy => groupby_method_type(name, line, col),
             Type::Array(el) => self.synth_array_method(el, name, args, line, col),
-            Type::Tensor => {
-                self.synth_simple_args(args)?;
-                tensor_method_type(name, args.len(), line, col)
-            }
+            // THE RECEIVER ANSWERS FIRST. Whether the type has the method is decided
+            // before the arguments are read, so `"s".map(it)` says a String has no `map`
+            // rather than that `it` is unbound: the argument is only wrong because the
+            // method is not there, and the message must name the mistake that was made.
+            // `(5).map(it)` already read that way — the scalar arm below never looked at
+            // the arguments — and a field report noticed the two disagreeing.
+            //
+            // The refusal is a VALUE, not an early return: it flows on to the UFCS
+            // fallbacks below exactly as it always did, which is how `tensor.to_array()`,
+            // `"abc".sqrt()` and `"abc".f(1)` (a declared `fn f`) still type. A `?` here
+            // hid all three from those fallbacks.
+            Type::Tensor => match tensor_method_type(name, args.len(), line, col) {
+                Ok(t) => {
+                    self.synth_simple_args(args)?;
+                    Ok(t)
+                }
+                Err(e) => Err(e),
+            },
             Type::String => {
                 mangled_quantifier(name, args, line, col)?;
-                self.synth_simple_args(args)?;
-                string_method_type(name, line, col)
+                match string_method_type(name, line, col) {
+                    Ok(t) => {
+                        self.synth_simple_args(args)?;
+                        Ok(t)
+                    }
+                    Err(e) => Err(e),
+                }
             }
-            Type::Dna => {
-                self.synth_simple_args(args)?;
-                dna_method_type(name, line, col)
-            }
+            Type::Dna => match dna_method_type(name, line, col) {
+                Ok(t) => {
+                    self.synth_simple_args(args)?;
+                    Ok(t)
+                }
+                Err(e) => Err(e),
+            },
             // A tuple answers the two STRUCTURAL questions about itself. Without this arm
             // the checker refused them before the runtime could answer, and the refusal
             // was invisible whenever the receiver's type was Unknown — so
             // `{a: 1}.items().map(it.count())` worked while `(1, 2).count()` did not.
-            Type::Tuple(ts) => {
-                self.synth_simple_args(args)?;
-                tuple_method_type(name, ts, line, col)
-            }
+            Type::Tuple(ts) => match tuple_method_type(name, ts, line, col) {
+                Ok(t) => {
+                    self.synth_simple_args(args)?;
+                    Ok(t)
+                }
+                Err(e) => Err(e),
+            },
             // Records get dynamic-access methods (`get`/`has`/`keys`/…) on top of static
             // `rec.field` access — the escape hatch for runtime-unknown shapes (parsed JSON).
             Type::Record(fields) => {

@@ -514,6 +514,10 @@ impl Interp {
                 let r = self.eval(recv)?;
                 eval_field(&r, Symbol::intern(name), *line, *col)
             }
+            Expr::FieldOrMissing { recv, name, line, col } => {
+                let r = self.eval(recv)?;
+                eval_field_or_missing(&r, Symbol::intern(name), *line, *col)
+            }
             Expr::Unary { op, expr, line, col } => {
                 let v = self.eval(expr)?;
                 self.eval_unary(op, v, *line, *col)
@@ -854,9 +858,12 @@ impl Interp {
                         self.env.get(&n).map(|b| (n.clone(), b.value.clone()))
                     })
                     .collect();
+                // The body is SHARED with the AST, so this is a pointer copy, not a tree
+                // copy — and it is how two closures from one site are told apart from two
+                // sites: `values_equal` compares that pointer.
                 Ok(Value::Function(Rc::new(crate::value::FuncVal {
                     params: Rc::new(params.clone()),
-                    body: Rc::new((**body).clone()),
+                    body: Rc::clone(body),
                     captured: Rc::new(captured),
                     decl_name: None,
                 })))

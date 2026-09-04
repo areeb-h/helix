@@ -202,3 +202,11 @@ visible in `describe`, which is where a reader can see the trade.
   with no `/etc/ssl` trusts nothing at all.
 - **`fs-read` for symmetry with SQLite.** Rejected: it would be false. The label has to
   name the authority actually spent.
+
+## Addendum 2026-09-04 — writes
+
+The capability this ADR deferred writes behind exists: [ADR 0047](0047-database-writes.md).
+D3 stands unchanged for the read verbs — a query session is read-only from its first byte —
+and a session that can write is a *different* session, opened by `postgres_execute` or
+`postgres_open(url, "write")`, spending `db-write` as well as `net`.
+

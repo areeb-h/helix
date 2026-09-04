@@ -308,7 +308,7 @@ fn mentions_column(e: &Expr) -> bool {
         Expr::RecordUpdate { base, fields, .. } => {
             mentions_column(base) || fields.iter().any(|(_, v)| mentions_column(v))
         }
-        Expr::Field { recv, .. } => mentions_column(recv),
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => mentions_column(recv),
         Expr::Unary { expr, .. } => mentions_column(expr),
         Expr::Binary { left, right, .. } => mentions_column(left) || mentions_column(right),
         Expr::Call { args, .. } => args.iter().any(mentions_column),
@@ -1691,6 +1691,10 @@ impl Compiler {
             Expr::Field { recv, name, line, col } => {
                 self.compile_expr(b, recv)?;
                 b.emit(Op::GetField(crate::symbol::Symbol::intern(name)), *line, *col);
+            }
+            Expr::FieldOrMissing { recv, name, line, col } => {
+                self.compile_expr(b, recv)?;
+                b.emit(Op::GetFieldOrMissing(crate::symbol::Symbol::intern(name)), *line, *col);
             }
             Expr::Method { recv, name, args, ufcs, line, col, .. } => {
                 use crate::types::Type;

@@ -187,6 +187,17 @@ pub enum Expr {
         line: usize,
         col: usize,
     },
+    /// A DESTRUCTURED field — `let {a, b} = e in …` reads `a` and `b` through this node.
+    /// The value if the record has the field, `missing` if it does not: the answer `get`
+    /// gives, and the reason a destructure can name an optional key. A plain `.a` refuses
+    /// instead, which is right for an access and wrong here. Written only by the parser's
+    /// `destructure_record`; there is no surface spelling for it.
+    FieldOrMissing {
+        recv: Box<Expr>,
+        name: String,
+        line: usize,
+        col: usize,
+    },
     Unary {
         op: UnOp,
         expr: Box<Expr>,
@@ -264,7 +275,12 @@ pub enum Expr {
     /// implicit one-parameter shorthand.
     Lambda {
         params: Vec<String>,
-        body: Box<Expr>,
+        /// SHARED, not owned. Every closure the walker creates from this site holds this
+        /// node, so "same code" is a pointer comparison — the fact function equality is
+        /// built on (`values_equal`) — and creating a closure copies a pointer, not a
+        /// tree. Passes that rewrite in place go through `Rc::make_mut`, which is free
+        /// while the count is one, as it is until a program runs.
+        body: std::rc::Rc<Expr>,
     },
     /// `let a = x, b = y in body` — local bindings scoped to `body` (an
     /// expression). Bindings are sequential: later ones can use earlier ones.
@@ -317,6 +333,7 @@ impl Expr {
             Expr::Ident { line, col, .. }
             | Expr::Column { line, col, .. }
             | Expr::Field { line, col, .. }
+            | Expr::FieldOrMissing { line, col, .. }
             | Expr::Unary { line, col, .. }
             | Expr::Binary { line, col, .. }
             | Expr::Call { line, col, .. }

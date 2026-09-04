@@ -1,0 +1,30 @@
+# Record destructuring — `let {a, b} = e in …`, and `{a, b} = e` inside `do { }` — must
+# mean the same thing on every engine, including what an ABSENT field answers.
+#
+# Absent is `missing`, the answer `get` gives, because the fields of a spec record are
+# optional by nature: a renderer that reads `where`, `limit` and `order` from whichever
+# subset the caller passed is the use this was built for (ADR 0046). The reads are field
+# reads — one symbol scan per name — not `get` dispatches, so the desugar is also the
+# faster spelling.
+fn render(spec) = let {where, limit, order} = spec in "w={where} l={limit} o={order}"
+print(render({where: "id = 1", limit: 10}))
+print(render({order: "name"}))
+print(render({other: 1}))
+
+# The same binding inside a `do` block — and a record that merely BEGINS the block's
+# result expression is still a record, not a binder.
+fn r2(spec) = do {
+  {where, limit} = spec
+  {sql: "select * where {where}", limit: limit}
+}
+print(r2({where: "x", limit: 3}).sql)
+
+# A dict destructures by key, and the value is evaluated ONCE however many names are read.
+fn spec() = do {
+  print("evaluated once")
+  [["a", 1], ["b", 2]].to_dict()
+}
+print(let {a, b, c} = spec() in [a, b, c])
+
+# Several binders in one `let`, beside a plain binding.
+print(let {a} = {a: 1, b: 2}, k = 10, {b} = {b: 5} in a + b + k)

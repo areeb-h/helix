@@ -95,7 +95,7 @@ pub fn category_of(name: &str) -> &'static str {
         "source_path" => "io",
         // Its own category: a query is neither a file reader nor a network verb, and
         // an agent asking "how do I reach a database" should find it by name.
-        "sqlite_query" | "postgres_query" | "postgres_open" => "db",
+        "sqlite_query" | "postgres_query" | "postgres_open" | "postgres_execute" => "db",
         _ => "core",
     }
 }
@@ -129,7 +129,7 @@ pub fn feature_of(name: &str) -> Option<&'static str> {
         // PostgreSQL over its own wire protocol — a separate feature from `db` because it
         // shares no code with SQLite. It adds no DEPENDENCY, so the only thing the flag
         // buys back is code size.
-        "postgres_query" | "postgres_open" => Some("postgres"),
+        "postgres_query" | "postgres_open" | "postgres_execute" => Some("postgres"),
         // The spec-compliant genomics readers. `read_bed` is hand-rolled, and `dna` /
         // `align` are pure computation, so none of those three appear here.
         "read_vcf" | "read_bcf" | "read_sam" | "read_bam" | "read_gff" | "read_fasta"
@@ -162,6 +162,7 @@ pub static BUILTINS: &[BuiltinDef] = &[
     BuiltinDef { path: "sqlite_query", pure: false },
     BuiltinDef { path: "postgres_query", pure: false },
     BuiltinDef { path: "postgres_open", pure: false },
+    BuiltinDef { path: "postgres_execute", pure: false },
     BuiltinDef { path: "read_parquet", pure: false },
     BuiltinDef { path: "read_text", pure: false },
     BuiltinDef { path: "read_json", pure: false },
@@ -629,13 +630,13 @@ mod tests {
         //
         // Adding a builtin? Decide whether it needs a feature, put it in `feature_of` if so,
         // and bump this. The bump is the point.
-        // 162 as of `has_feature`, which needs NO feature and must not have one: a build
+        // 163 as of `postgres_execute`; 162 as of `has_feature`, which needs NO feature and must not have one: a build
             // without regex is exactly where a program needs to ask, so gating the question
             // on the thing being asked about would make it unanswerable precisely when it
             // matters. That is the decision this count exists to force.
             assert_eq!(
             BUILTINS.len(),
-            162,
+            163,
             "a builtin was added or removed — decide whether it needs a Cargo feature, add it \
              to `feature_of` if it does, and update this count in the same change"
         );
@@ -653,6 +654,7 @@ mod tests {
             ("http_post", "http"),
             ("http_request", "http"),
             ("http_stream", "http"),
+            ("postgres_execute", "postgres"),
             ("postgres_open", "postgres"),
             ("postgres_query", "postgres"),
 

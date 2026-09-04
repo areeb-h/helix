@@ -31,6 +31,11 @@ pub enum Effect {
     /// runs as a separate program with its own permissions, so it is a boundary exit
     /// rather than confinement.
     Process,
+    /// A database session that can WRITE — `postgres_execute`, `postgres_open(url, "write")`
+    /// and `execute` on such a connection (ADR 0047). Finer than `Net`, which every
+    /// PostgreSQL verb spends: this is the authority to change the far end, and it needs
+    /// `net` as well, because the database is reached over the network.
+    DbWrite,
     #[allow(dead_code)]
     Env,
 }
@@ -48,6 +53,7 @@ impl Effect {
             Effect::FsWrite => "fs-write",
             Effect::Net => "net",
             Effect::Process => "process",
+            Effect::DbWrite => "db-write",
             Effect::Env => "env",
         }
     }
@@ -86,6 +92,7 @@ pub fn effect_of(name: &str) -> Effect {
         // itself is granting everything. The label is honest about that rather than
         // implying a guarantee the process model cannot keep.
         "run" => Effect::Process,
+        "postgres_execute" => Effect::DbWrite,
         _ => Effect::Pure,
     }
 }
@@ -103,6 +110,8 @@ pub fn method_effect_of(name: &str) -> Effect {
         // the same authority. Missing a name here is not a slow path, it is an UNGATED
         // one — the gate keys on the name alone.
         "accept" | "poll" | "respond" | "sse" | "stream" | "send" => Effect::Net,
+        // A write through a connection value spends what `postgres_execute` spends.
+        "execute" => Effect::DbWrite,
         _ => Effect::Pure,
     }
 }
@@ -126,6 +135,7 @@ pub struct Authority {
     pub fs_write: bool,
     pub net: bool,
     pub process: bool,
+    pub db_write: bool,
     pub env: bool,
 }
 
@@ -140,6 +150,7 @@ impl Authority {
             fs_write: true,
             net: true,
             process: true,
+            db_write: true,
             env: true,
         }
     }
@@ -151,6 +162,8 @@ impl Authority {
             Effect::FsWrite => self.fs_write,
             Effect::Net => self.net,
             Effect::Process => self.process,
+            // A write is also a network access; both grants must hold.
+            Effect::DbWrite => self.net && self.db_write,
             Effect::Env => self.env,
         }
     }
@@ -218,6 +231,7 @@ pub fn current() -> Authority {
         fs_write: narrow(c.fs_write(), env.fs_write),
         net: narrow(c.net_on(), env.net),
         process: narrow(c.process_on(), env.process),
+        db_write: narrow(c.db_write(), env.db_write),
         env: false,
     }
 }
@@ -292,6 +306,10 @@ pub fn install_from_env() -> Result<(), String> {
         // only remedy was to turn it back off. A category you cannot grant is not a
         // sandbox, it is a wall.
         process: on(grant("HELIX_ALLOW_PROCESS", &["on", "all"])?),
+        // A DATABASE WRITE IS ITS OWN GRANT (ADR 0047). `postgres_query` spends `net`; a
+        // session that can write spends this as well, so `HELIX_ALLOW_NET=on` alone keeps a
+        // program read-only against every database it can reach.
+        db_write: on(grant("HELIX_ALLOW_DB", &["write", "all"])?),
         // `Effect::Env` is classified but no builtin carries it yet (ADR 0037 D2 leaves
         // `env` with zero builtins), so there is nothing to grant and no variable for it.
         // It gains one in the same change that gives `env` a builtin.
@@ -326,7 +344,7 @@ pub fn gate_method(name: &str, args: &[Value], line: usize, col: usize) -> Resul
 /// Shared decision for the builtin and method gates. `Pure` effects and `Off` mode are
 /// no-ops; a granted access is silent. In `Audit` an ungranted access is logged (stderr) and
 /// allowed; in `Enforce` it is a `HelixError`.
-fn gate_effect(eff: Effect, name: &str, args: &[Value], line: usize, col: usize) -> Result<(), HelixError> {
+pub fn gate_effect(eff: Effect, name: &str, args: &[Value], line: usize, col: usize) -> Result<(), HelixError> {
     if !eff.gated() {
         return Ok(());
     }
@@ -396,6 +414,11 @@ fn gate_effect(eff: Effect, name: &str, args: &[Value], line: usize, col: usize)
                      you declined here (ADR 0037 D3)."
                 }
                 // No builtin carries `Env` yet, and `Pure` never reaches a denial.
+                Effect::DbWrite => {
+                    "grant it for this run with `HELIX_ALLOW_DB=write` (or `all`), together with \
+                     `HELIX_ALLOW_NET=on` — the database is reached over the network, and a \
+                     write is more than a network access."
+                }
                 Effect::Env | Effect::Pure => {
                     "this effect has no grant variable yet; it is classified but ungranted."
                 }
@@ -416,6 +439,21 @@ mod tests {
         assert!(!effect_of("emit").gated());
         assert!(!effect_of("sleep").gated());
         assert!(!effect_of("aes_keygen").gated());
+    }
+
+    #[test]
+    fn a_database_write_is_its_own_effect() {
+        assert!(matches!(effect_of("postgres_execute"), Effect::DbWrite));
+        assert!(matches!(effect_of("postgres_query"), Effect::Net));
+        assert!(matches!(method_effect_of("execute"), Effect::DbWrite));
+        assert_eq!(Effect::DbWrite.label(), "db-write");
+        let mut a = Authority::unconfined();
+        a.net = false;
+        assert!(!a.allows(Effect::DbWrite), "a write is also a network access");
+        let mut a = Authority::unconfined();
+        a.db_write = false;
+        assert!(!a.allows(Effect::DbWrite));
+        assert!(a.allows(Effect::Net), "net alone still reads");
     }
 
     #[test]
@@ -508,7 +546,7 @@ mod tests {
     #[test]
     fn enforce_denies_ungranted_and_allows_granted() {
         let denied =
-            Authority { mode: Mode::Enforce, fs_read: false, fs_write: false, net: false, process: false, env: false };
+            Authority { mode: Mode::Enforce, fs_read: false, fs_write: false, net: false, process: false, db_write: false, env: false };
         assert!(!denied.allows(Effect::FsRead));
         let granted = Authority { fs_read: true, ..denied.clone() };
         assert!(granted.allows(Effect::FsRead));

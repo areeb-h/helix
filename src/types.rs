@@ -259,6 +259,22 @@ fn arity_err(name: &str, want: usize, got: usize, line: usize, col: usize) -> He
     )
 }
 
+/// `record has no field …`, with a did-you-mean or the field list — the refusal a static
+/// field read and a destructure share.
+fn record_has_no_field(fields: &[(String, Type)], name: &str, line: usize, col: usize) -> HelixError {
+    let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+    let mut err = HelixError::new(format!("record has no field `{}`", name), line, col);
+    if let Some(s) = suggest(name, &keys) {
+        err = err.hint(format!("did you mean `{}`?", s));
+    } else {
+        // Canonical order, matching how the record itself prints.
+        let mut keys = keys;
+        keys.sort_unstable();
+        err = err.hint(format!("fields: {}", keys.join(", ")));
+    }
+    err
+}
+
 /// Field access `x.name` on something that isn't a record. If `name` is actually
 /// a method of that type, nudge the user to call it with `()`.
 fn field_on_non_record(t: &Type, name: &str, line: usize, col: usize) -> HelixError {
@@ -839,25 +855,34 @@ impl Checker {
                         .iter()
                         .find(|(k, _)| k == name)
                         .map(|(_, t)| t.clone())
-                        .ok_or_else(|| {
-                            let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
-                            let mut err = HelixError::new(
-                                format!("record has no field `{}`", name),
-                                *line,
-                                *col,
-                            );
-                            if let Some(s) = suggest(name, &keys) {
-                                err = err.hint(format!("did you mean `{}`?", s));
-                            } else {
-                                // Canonical order, matching how the record itself prints.
-                                let mut keys = keys;
-                                keys.sort_unstable();
-                                err = err.hint(format!("fields: {}", keys.join(", ")));
-                            }
-                            err
-                        }),
+                        .ok_or_else(|| record_has_no_field(fields, name, *line, *col)),
                     Type::Unknown | Type::Missing => Ok(Type::Unknown),
                     other => Err(field_on_non_record(other, name, *line, *col)),
+                }
+            }
+            // A destructured field (`let {a} = e in …`; see the parser's `destructure_record`).
+            // Where the record's shape is KNOWN, a name it cannot have is a mistake and is
+            // refused in the words `.a` uses; where it is not, the read is `Unknown` and
+            // answers `missing` at run time for an absent field. A receiver the checker can
+            // prove has no fields at all is refused here rather than at run time.
+            Expr::FieldOrMissing { recv, name, line, col } => {
+                let rt = self.synth(recv)?;
+                match &rt {
+                    Type::Record(fields) => fields
+                        .iter()
+                        .find(|(k, _)| k == name)
+                        .map(|(_, t)| t.clone())
+                        .ok_or_else(|| record_has_no_field(fields, name, *line, *col)),
+                    Type::Unknown | Type::Missing => Ok(Type::Unknown),
+                    other => Err(HelixError::new(
+                        format!(
+                            "cannot destructure {}: it has no fields",
+                            crate::value::with_article(&other.to_string())
+                        ),
+                        *line,
+                        *col,
+                    )
+                    .hint("destructuring reads the fields of a record, or the keys of a dict.")),
                 }
             }
             Expr::Unary {

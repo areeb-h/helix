@@ -9,7 +9,7 @@ use super::*;
 // `it` by default, or the single lambda param. Body is the (sole) arg expr.
 pub(super) fn comprehension_params(args: &[Expr]) -> (Vec<String>, &Expr) {
     match args.first() {
-        Some(Expr::Lambda { params, body }) => (params.clone(), body),
+        Some(Expr::Lambda { params, body }) => (params.clone(), body.as_ref()),
         Some(e) => (vec!["it".to_string()], e),
         None => (vec!["it".to_string()], &Expr::Missing),
     }
@@ -190,9 +190,9 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
         // is the body's and cannot be named here. The arity is still checked, which is
         // the part a caller gets wrong.
         "postgres_open" => {
-            if args.len() != 1 {
+            if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(
-                    format!("`postgres_open` takes a URL, got {} arguments", args.len()),
+                    format!("`postgres_open` takes a URL and an optional mode, got {} arguments", args.len()),
                     line,
                     col,
                 ));
@@ -214,6 +214,25 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                 ));
             }
             Ok(Type::DataFrame)
+        }
+        // `postgres_execute(url, sql, params?)` — the write verb (ADR 0047). Its answer has a
+        // fixed shape, so the checker knows it: `.affected` is an Int, `.rows` a frame, and
+        // `let {affected, rows} = postgres_execute(…) in …` type-checks.
+        "postgres_execute" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(HelixError::new(
+                    format!(
+                        "`postgres_execute` takes a URL, a SQL string and optional parameters, got {} arguments",
+                        args.len()
+                    ),
+                    line,
+                    col,
+                ));
+            }
+            Ok(Type::Record(vec![
+                ("affected".to_string(), Type::Int),
+                ("rows".to_string(), Type::DataFrame),
+            ]))
         }
         "sqlite_query" => {
             if args.len() < 2 || args.len() > 3 {

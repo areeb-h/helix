@@ -406,11 +406,21 @@ The SHA-256 digest of the string's UTF-8 bytes, as 64 lowercase hex chars.
 
 ## db
 
-### `postgres_open(url)`
+### `postgres_execute(url, sql, params?)`
+
+Run one SQL statement that may write — INSERT, UPDATE, DELETE, DDL — and return {affected, rows}.
+
+**Note:** The write verb (ADR 0047), and the only way a Helix program changes a database: `postgres_query` runs in a session the SERVER holds read-only from its first byte, so this verb opens a session without that default and spends the `db-write` capability (`HELIX_ALLOW_DB=write`, alongside `HELIX_ALLOW_NET=on`) where `postgres_query` spends `net`. Parameters bind as VALUES to $1, $2, …, exactly as in `postgres_query` — no text is ever spliced into the statement. `affected` is the row count from the server's completion tag (0 for DDL); `rows` is a DataFrame of what the statement returned — empty unless it has a `RETURNING` clause, which is how an inserted id comes back in the same round trip. One statement is one transaction: it commits when it completes, and a failed one changed nothing; a transaction spanning statements is not offered yet. Through a connection, `postgres_open(url, "write").execute(sql, params?)` is the same verb on a reused socket. Keywords: postgres, insert, update, delete, write, execute, returning, affected, ddl, transaction, mutate.
+
+```
+>>> postgres_execute("postgres://me:pw@localhost/app", "insert into users (name) values ($1)", ["Ada"]).affected
+```
+
+### `postgres_open(url, mode?)`
 
 Open one PostgreSQL connection and reuse it for every query made through it.
 
-**Note:** The connection is opened ONCE and reused for every query inside, which is the whole point: a connection costs a TCP handshake plus a SCRAM exchange — measured at 4.7 ms against PostgreSQL 19, the same for `select 1` as for a full table — so five queries through `postgres_query` spend ~24 ms before doing any work. There is no close to forget: Helix values are reference-counted, so the socket shuts when the last handle to it goes. The connection answers `query(sql, params?)`, with the same parameter discipline and the same server-enforced read-only session as `postgres_query`. Keywords: postgres, connection, pool, reuse, handshake, scope, transaction.
+**Note:** The connection is opened ONCE and reused for every query inside, which is the whole point: a connection costs a TCP handshake plus a SCRAM exchange — measured at 4.7 ms against PostgreSQL 19, the same for `select 1` as for a full table — so five queries through `postgres_query` spend ~24 ms before doing any work. There is no close to forget: Helix values are reference-counted, so the socket shuts when the last handle to it goes. The connection answers `query(sql, params?)`, with the same parameter discipline and the same server-enforced read-only session as `postgres_query`. Opened with mode `"write"` — which spends the `db-write` capability (ADR 0047) — it also answers `execute(sql, params?)`, `{affected, rows}` exactly as `postgres_execute` does, on the reused socket. Keywords: postgres, connection, pool, reuse, handshake, scope, transaction, write.
 
 ```
 >>> postgres_open("postgres://me:pw@localhost/app")
@@ -1586,6 +1596,15 @@ Grants subprocess authority (`run`) under `HELIX_CAP=audit|enforce`.
 - **Unset:** deny — when a mode is set, nothing is granted
 
 **Note:** Until 2026-08-28 this could not be granted AT ALL — the env path hardcoded process authority to false, so turning the sandbox on broke every program that shells out and the only remedy was turning it back off. Note what the grant cannot promise: the child is a separate program with its own permissions, so this is a boundary EXIT rather than confinement (ADR 0037 D3). Keywords: sandbox, subprocess, spawn, shell, exec, grant. Granting it is closer to granting everything than it looks: run("sh", …) reaches whatever the child may reach, including the fs and net you just declined.
+
+### `HELIX_ALLOW_DB`
+
+Grants database WRITE authority (`postgres_execute`, `postgres_open(url, "write")`) under `HELIX_CAP=audit|enforce`.
+
+- **Values:** write | all
+- **Unset:** deny — when a mode is set, nothing is granted
+
+**Note:** A write is its own grant (ADR 0047): `postgres_query` spends `net`, and a session that can write spends `db-write` AS WELL, so `HELIX_ALLOW_NET=on` alone keeps a program read-only against every database it can reach — the server holds a query session read-only from its first byte, and only this grant lets a session be opened without that default. `execute` on a connection is gated by the same name. There is no `read` value: reads are the `net` grant. A value that does not parse is REFUSED at startup. Keywords: sandbox, database, postgres, write, insert, update, delete, permission, grant.
 
 ### `HELIX_NOJIT`
 

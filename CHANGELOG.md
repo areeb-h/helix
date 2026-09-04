@@ -4,6 +4,52 @@
 
 ### Added
 
+- **PostgreSQL writes: `postgres_execute(url, sql, params?)`, and `postgres_open(url,
+  "write")` with `execute(sql, params?)` on the connection** (ADR 0047). The answer is
+  always `{affected, rows}`: the count from the server's completion tag, and a frame of
+  what the statement returned — empty unless it has a `RETURNING`, which is how an inserted
+  id comes back in the same round trip. Parameters bind as values, exactly as in
+  `postgres_query`. A write is a different SESSION — the startup packet omits the read-only
+  default only for one opened to write — and spends a grant of its own, `db-write`
+  (`HELIX_ALLOW_DB=write`, or `db = "write"` in `[capabilities]`), alongside `net`: granting
+  the network still keeps a program read-only against every database it can reach. `execute`
+  on a read-only connection is refused before a byte is sent, with the spelling that opens a
+  writable one. One statement is one transaction; a transaction spanning statements is the
+  open item.
+
+  Verified here against a fake wire server that checks what the client sends — the
+  read-only parameter present for a query, absent for a write — and answers rows and a tag;
+  the gate now builds `--features postgres`, so those tests run in every gate (they were the
+  one feature whose tests ran nowhere). Live verification is the field build's.
+
+  ```helix
+  db = postgres_open(url, "write")
+  db.execute("insert into people (name) values ($1) returning id", ["Ada"]).rows
+  postgres_execute(url, "delete from people where age < $1", [18]).affected
+  ```
+
+- **Record destructuring: `let {where, limit} = spec in …`** — and `{where, limit} = spec`
+  inside a `do { }` block (ADR 0046). One binding per named field; an absent field is
+  `missing`, the answer `get` gives, because a spec record's fields are optional by nature.
+  The reads are field reads — one symbol scan per name — not `get` dispatches: a renderer
+  that read six keys through `Record.get` per call (38% of the call, a field report
+  measured) reads them in one line and one scan each. The checker refuses a name a KNOWN
+  record cannot have (`record has no field `limt`` — `did you mean `limit`?`), both layers
+  refuse a receiver without fields in one sentence, and `{a: x}` is refused with the
+  spelling that does what was meant. Pinned on both DataFrame backends by the corpus
+  program `rec_destructure`.
+
+  Measured on one binary, interleaved min-of-7, 2M calls, six lookups of which three are
+  present: **392 → 358 ns per call (1.10×)**. Honest reading: on a three-field record the
+  `get` dispatch itself is ~40 ns, so the 38% a field profile attributed to six of them
+  must come from a different shape (larger records, or dict-backed specs) that this
+  measurement does not reproduce. The line is the point; the speed is a bonus.
+
+  ```helix
+  fn render(spec) = let {where, limit, order} = spec in …
+  render({where: "id = $1"})     # limit and order are `missing`
+  ```
+
 - **`rec.f(args)` calls a function held in field `f`.** Both halves refused it — with a
   hint that said, in its own words, "the object-API spelling `r.go(3)` is what everyone
   writes first". The language knew what people wanted and declined it; it was the single
@@ -132,6 +178,28 @@
 
 ### Fixed
 
+- **A function is equal to itself.** `f == f` was false, `[w].contains(w)` was false,
+  `[w, w].unique()` had two elements and `assert_eq(f, f)` failed — every function fell
+  through equality to `false`, on all three engines. A function now equals a function of
+  the same code with equal captured values: the one definition both engines compute the
+  same way (the walker captures free names by value, the VM keeps them as upvalues; a
+  top-level `fn` captures nothing on either). So `mk(1) == mk(1)`, `mk(1) != mk(2)`, and
+  two lambdas from two sites are never equal. The walker needed the lambda body SHARED
+  with the AST (`Rc`) to say "same site" — which also stopped every closure creation from
+  deep-copying its body.
+- **A default parameter is visible to a call written above its definition.** The parser
+  filled defaults while parsing a CALL, from a table that knew only the functions parsed
+  so far, so `fn use(x) = g(x)` above `fn g(a, b = 10)` was refused for arity by the
+  checker and both engines, and `g(x, b: 5)` was refused as "only supported for
+  user-defined functions" — about a function three lines down. Signatures are now
+  pre-scanned with the definition's own parameter parser before the first call is parsed,
+  inside interpolations too; the lexical `fn`-name scan that only ever fed a since-removed
+  rewrite is gone with it.
+- **The receiver answers before the arguments are read.** `"s".map(it)` said `it` was
+  unbound while `(5).map(it)` said an Int has no `map` — the String, Dna, Tuple and Tensor
+  arms of the checker read the arguments before deciding whether the method existed. All
+  four now decide first, so the same mistake reads the same way whatever the receiver's
+  type.
 - **`a Array has no method`.** The runtime's no-method error built its sentence with a
   hardcoded `"a {}"`, while every other runtime mention of a type went through
   `value::with_article`:

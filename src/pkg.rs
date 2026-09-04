@@ -78,6 +78,10 @@ pub struct Capabilities {
     pub net: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<String>,
+    /// `write` or `all`: the program may open database sessions that can write
+    /// (ADR 0047). Reads are `net`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db: Option<String>,
 }
 
 impl Capabilities {
@@ -109,6 +113,7 @@ impl Capabilities {
         check("fs", &self.fs, &["read", "write", "all"])?;
         check("net", &self.net, &["on"])?;
         check("process", &self.process, &["on"])?;
+        check("db", &self.db, &["write", "all"])?;
         Ok(())
     }
 
@@ -123,6 +128,9 @@ impl Capabilities {
     }
     pub fn process_on(&self) -> bool {
         self.process.is_some()
+    }
+    pub fn db_write(&self) -> bool {
+        matches!(self.db.as_deref(), Some("write") | Some("all"))
     }
 }
 

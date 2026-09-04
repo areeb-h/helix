@@ -1,0 +1,10 @@
+exit: 0
+--- stdout ---
+w=id = 1 l=10 o=missing
+w=missing l=missing o=name
+w=missing l=missing o=missing
+select * where x
+evaluated once
+[1, 2, missing]
+16
+--- stderr ---

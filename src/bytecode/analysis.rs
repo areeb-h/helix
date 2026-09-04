@@ -153,7 +153,7 @@ fn any_call(e: &Expr, pred: &dyn Fn(&str) -> bool) -> bool {
         Expr::RecordUpdate { base, fields, .. } => {
             any_call(base, pred) || fields.iter().any(|(_, v)| any_call(v, pred))
         }
-        Expr::Field { recv, .. } => any_call(recv, pred),
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => any_call(recv, pred),
         Expr::Unary { expr, .. } => any_call(expr, pred),
         Expr::Binary { left, right, .. } => any_call(left, pred) || any_call(right, pred),
         Expr::Method { recv, args, .. } => {
@@ -251,7 +251,7 @@ fn children(e: &Expr) -> Vec<&Expr> {
             v.extend(fields.iter().map(|(_, e)| e));
             v
         }
-        Expr::Field { recv, .. } => vec![recv],
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => vec![recv],
         Expr::Unary { expr, .. } => vec![expr],
         Expr::Binary { left, right, .. } => vec![left, right],
         Expr::Call { args, .. } => args.iter().collect(),
@@ -399,7 +399,7 @@ fn collect_free<'a>(e: &'a Expr, bound: &mut Vec<&'a str>, free: &mut Vec<String
                 collect_free(v, bound, free);
             }
         }
-        Expr::Field { recv, .. } => collect_free(recv, bound, free),
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => collect_free(recv, bound, free),
         Expr::Index { recv, index, .. } => {
             collect_free(recv, bound, free);
             collect_free(index, bound, free);

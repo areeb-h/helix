@@ -112,7 +112,7 @@ fn walk(e: &mut Expr, cx: &Cx, bound: &HashSet<String>) {
                 walk(v, cx, bound);
             }
         }
-        Expr::Field { recv, .. } => walk(recv, cx, bound),
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => walk(recv, cx, bound),
         Expr::Unary { expr, .. } => walk(expr, cx, bound),
         Expr::Binary { left, right, .. } => {
             walk(left, cx, bound);
@@ -142,7 +142,7 @@ fn walk(e: &mut Expr, cx: &Cx, bound: &HashSet<String>) {
         Expr::Lambda { params, body } => {
             let mut b = bound.clone();
             b.extend(params.iter().cloned());
-            walk(body, cx, &b);
+            walk(std::rc::Rc::make_mut(body), cx, &b);
         }
         Expr::Let { bindings, body, .. } => {
             let mut b = bound.clone();

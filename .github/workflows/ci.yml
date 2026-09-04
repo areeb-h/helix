@@ -65,7 +65,7 @@ jobs:
       - name: rustfmt (report only — see the comment above)
         run: cargo fmt --all --check || true
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --features postgres -- -D warnings
 
   # The real gate. `--profile gate` is opt-level 3 without LTO: the differential fuzzers
   # and perf-sensitive tests run at full speed, but a rebuild does not pay the ~20-minute
@@ -82,9 +82,9 @@ jobs:
         with:
           shared-key: helix-ci
       - name: Build the binary the parity diff needs
-        run: cargo build --profile gate --bin helix
+        run: cargo build --profile gate --features postgres --bin helix
       - name: Test suite
-        run: cargo test --profile gate
+        run: cargo test --profile gate --features postgres
       # JIT vs tree-walker over every example. Full THREE-engine agreement is covered
       # inside `cargo test` above (the pinned corpus and the doc-example gate both run
       # all three); this script is the end-to-end diff across real programs.

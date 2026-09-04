@@ -5487,7 +5487,9 @@ fn no_new_panicking_calls_on_user_reachable_paths() {
         // 60: the argument pops of `Op::ConcatIntoLocal` (1) and `Op::InsertIntoLocal` (2),
         // proved at each site — the compiler emits those argument expressions immediately
         // before the op, the same stack-shape invariant the other 57 rely on.
-        ("src/vm.rs", 64),
+        // 65 as of `Op::GetFieldOrMissing` (2026-09-04): one more `stack.pop().unwrap()`
+        // under the same invariant, proven at the site.
+        ("src/vm.rs", 65),
         ("src/bytecode.rs", 1),
         ("src/bytecode/comprehensions.rs", 0),
         ("src/bytecode/ops.rs", 0),
@@ -15334,4 +15336,181 @@ fn ufcs_is_decided_by_the_receiver_at_every_layer() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// A function is equal to itself — and to a function of the same code with equal
+/// captures — on all three engines (field build 1.38).
+///
+/// Every function used to fall through `values_equal` to `false`: `f == f` was false,
+/// `[w].contains(w)` was false, `[w, w].unique()` had two elements and `assert_eq(f, f)`
+/// failed. The definition is the one both engines can compute the same way — the walker
+/// captures free names by value, the VM keeps them as upvalues, and a top-level `fn`
+/// captures nothing on either — so `mk(1) == mk(1)` holds and `mk(1) == mk(2)` does not,
+/// and two lambdas from two sites are never equal. For the walker that needed the lambda
+/// body to be SHARED with the AST (`Rc`), so "same site" is a pointer comparison — which
+/// also stopped a closure creation from deep-copying its body.
+#[test]
+fn a_function_is_equal_to_itself_on_every_engine() {
+    let src = "fn f(x) = x\nprint(f == f)\nw = {f: (x) => x}\nprint(w == w, [w].contains(w), [w, w].unique().count())\ng = (x) => x\nprint(f == g, ((x) => x) == ((x) => x))\nfn mk(a) = () => a\nprint(mk(1) == mk(1), mk(1) == mk(2), mk(1) == mk(1.0))\nfn mk2() = () => 1\nprint(mk2() == mk2())\nassert_eq(f, f)\nprint(\"assert ok\")\n";
+    let want = "true\ntrue true 1\nfalse false\ntrue false true\ntrue\nassert ok\n";
+    for (label, env) in [
+        ("jit", &[][..]),
+        ("vm", &[("HELIX_NOJIT", "1")][..]),
+        ("walker", &[("HELIX_NOVM", "1")][..]),
+    ] {
+        let (out, err, code) = run_source(src, env, "fn_eq");
+        assert_eq!(code, Some(0), "{label}: {err}");
+        assert_eq!(out, want, "{label}");
+    }
+}
+
+/// A default parameter is visible to a call written above its definition (1.39).
+///
+/// `fn_sigs` was filled as each definition was PARSED and consulted while a call was
+/// parsed, so a call above its definition found no signature: its omitted argument was
+/// never filled from the default, the checker and both engines refused it for arity, and
+/// a named argument was refused as "only supported for user-defined functions" — about a
+/// function three lines down. The same program with the definition moved above the call
+/// was fine. Signatures are now pre-scanned with the definition's own parameter parser,
+/// so a signature reads the same from both directions — inside an interpolation too.
+#[test]
+fn a_default_parameter_is_visible_above_its_definition() {
+    let below = "fn use(x) = g(x)\nfn g(a, b = 10) = a + b\nprint(use(1))\n";
+    let named = "fn use(x) = g(x, b: 5)\nfn g(a, b = 10) = a + b\nprint(use(1))\n";
+    let interp = "fn use(x) = \"{g(x)}\"\nfn g(a, b = 10) = a + b\nprint(use(1))\n";
+    for (src, want) in [(below, "11\n"), (named, "6\n"), (interp, "11\n")] {
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (out, err, code) = run_source(src, env, "fwd_default");
+            assert_eq!(code, Some(0), "{src}: {err}");
+            assert_eq!(out, want, "{src}");
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("hx_fwd_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("f.helix");
+    // The checker agrees.
+    std::fs::write(&p, below).unwrap();
+    let (_, err, code) = run(&["check", p.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    // A default that is not a literal is still refused at the definition — the pre-scan
+    // skips what it cannot parse and leaves the report to the definition's own parse.
+    std::fs::write(&p, "fn use(x) = g(x)\nfn g(a, b = a) = a + b\n").unwrap();
+    let (_, err, code) = run(&["check", p.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("must be a literal constant"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `let {a, b} = e in …` destructures a record (or a dict) — and `{a, b} = e` inside a
+/// `do` block is the same binding (ADR 0046). An absent field is `missing`, the answer
+/// `get` gives, because the fields of a spec record are optional by nature; a field a KNOWN
+/// record type cannot have is refused by the checker in the words `.a` uses; anything
+/// without fields is refused at both layers with one sentence; a rename is refused with
+/// the spelling that does what was meant. The reads are field reads — one symbol scan per
+/// name, no `get` dispatch — which is the point for a renderer that read six keys through
+/// `Record.get` per call. (The corpus program `rec_destructure` pins the outputs across
+/// both DataFrame backends as well.)
+#[test]
+fn record_destructuring_reads_fields_and_answers_missing_for_absent_ones() {
+    let src = "fn render(spec) = let {where, limit, order} = spec in \"w={where} l={limit} o={order}\"\nprint(render({where: \"id = 1\", limit: 10}))\nprint(render({order: \"name\"}))\nfn r2(spec) = do {\n  {where, limit} = spec\n  \"{where}/{limit}\"\n}\nprint(r2({where: \"x\", limit: 3}))\nd = [[\"where\", \"q\"]].to_dict()\nprint(let {where, nope} = d in \"{where} {nope}\")\nprint(let {a} = {a: 1, b: 2}, {b} = {b: 5} in a + b)\nfn f() = do {\n  x = 1\n  {a: x, b: 2}\n}\nprint(f().a + f().b)\n";
+    let want = "w=id = 1 l=10 o=missing\nw=missing l=missing o=name\nx/3\nq missing\n6\n3\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "destructure");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, want, "{env:?}");
+    }
+    let (_, err, code) = run_source("print(let {limt} = {limit: 1} in limt)\n", &[], "destructure_typo");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("record has no field `limt`") && err.contains("did you mean `limit`?"), "{err}");
+    let (_, err, code) = run_source("print(let {a} = 5 in a)\n", &[], "destructure_int");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("cannot destructure an Int: it has no fields"), "{err}");
+    for env in [&[][..], &[("HELIX_NOVM", "1")][..]] {
+        let (_, err, code) =
+            run_source("fn f(v) = let {a} = v in a\nprint(f(5))\n", env, "destructure_int_dyn");
+        assert_ne!(code, Some(0));
+        assert!(err.contains("cannot destructure an Int: it has no fields"), "{env:?}: {err}");
+    }
+    let (_, err, code) = run_source("print(let {a: x} = {a: 1} in x)\n", &[], "destructure_rename");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("binds under its own name") && err.contains("`x = spec.a`"), "{err}");
+}
+
+/// The receiver answers before the arguments are read (1.40): `"s".map(it)` says a String
+/// has no `map`, not that `it` is unbound. The scalar arm already read that way; the
+/// String/Dna/Tuple/Tensor arms synthesized the arguments first, so the same mistake was
+/// described two ways depending on the receiver's type.
+#[test]
+fn the_receiver_answers_before_the_arguments_are_read() {
+    for (src, want) in [
+        ("print(\"s\".map(it))\n", "a String has no method `map`"),
+        ("print((5).map(it))\n", "an Int has no method `map`"),
+        ("print((1, 2).nope(it))\n", "a Tuple has no method `nope`"),
+        ("print(dna(\"ACGT\").nope(it))\n", "a Dna has no method `nope`"),
+    ] {
+        let (_, err, code) = run_source(src, &[], "recv_first");
+        assert_ne!(code, Some(0), "{src}");
+        assert!(err.contains(want), "{src}: {err}");
+        assert!(!err.contains("`it`"), "the argument must not be blamed: {err}");
+    }
+}
+
+/// Writes spend `db-write`, a grant of their own (ADR 0047). `postgres_execute` under
+/// `HELIX_CAP=enforce` is refused without `HELIX_ALLOW_DB=write`; `net` alone is not enough
+/// (a write is more than a network access); with both, the gate opens — in a build without
+/// the feature the verb then says so, and with it nothing answers on port 1, but either way
+/// the sentence is no longer a denial, which is the proof the gate was passed.
+/// `postgres_open(url, "write")` is the same authority checked at open, after the mode is
+/// validated and before any network; a grant that does not parse is refused at startup, like
+/// the others; and `describe` reports the effect and the shape. None of this needs a server
+/// or the feature — the wire itself is proven against a fake server in `src/pg`.
+#[test]
+fn postgres_writes_spend_the_db_write_grant() {
+    let exec = "postgres_execute(\"postgres://u:pw@127.0.0.1:1/db?sslmode=disable\", \"delete from t\")\n";
+    let (_, err, code) = run_source(exec, &[("HELIX_CAP", "enforce")], "pg_exec_deny");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("capability denied: `postgres_execute` needs `db-write` authority"), "{err}");
+    assert!(err.contains("HELIX_ALLOW_DB=write") && err.contains("HELIX_ALLOW_NET=on"), "{err}");
+    let (_, err, code) =
+        run_source(exec, &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_NET", "on")], "pg_exec_net_only");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("needs `db-write` authority"), "net alone must not write: {err}");
+    let (_, err, _) = run_source(
+        exec,
+        &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_NET", "on"), ("HELIX_ALLOW_DB", "write")],
+        "pg_exec_grant",
+    );
+    assert!(!err.contains("capability denied"), "{err}");
+    // The connection form: the grant is checked at open, once the mode is validated.
+    let open_w = "postgres_open(\"postgres://u:pw@127.0.0.1:1/db?sslmode=disable\", \"write\")\n";
+    let (_, err, code) =
+        run_source(open_w, &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_NET", "on")], "pg_open_w_deny");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("capability denied: `postgres_open` needs `db-write` authority"), "{err}");
+    let (_, err, code) =
+        run_source("postgres_open(\"postgres://u:pw@127.0.0.1:1/db\", \"rw\")\n", &[], "pg_open_mode");
+    assert_ne!(code, Some(0));
+    assert!(
+        err.contains("optional mode, `\"read\"` (the default) or `\"write\"`, got `\"rw\"`"),
+        "{err}"
+    );
+    let (_, err, code) =
+        run_source("print(1)\n", &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_DB", "rw")], "pg_grant_bad");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("HELIX_ALLOW_DB is `rw`, which is not a grant"), "{err}");
+    let (out, _, code) = run(&["describe", "postgres_execute"], &[], "");
+    assert_eq!(code, Some(0));
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v[0]["effect"], "db-write", "a write spends its own authority");
+    assert_eq!(v[0]["category"], "db");
+    assert!(v[0]["sig"].as_str().unwrap().contains("params?"), "{out}");
+    // The checker knows the answer's shape.
+    let (out, err, code) = run_source(
+        "fn f(u) = let {affected, rows} = postgres_execute(u, \"delete from t\") in affected + rows.count()\nprint(type_of(f))\n",
+        &[],
+        "pg_exec_shape",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("Function"), "{out}");
 }

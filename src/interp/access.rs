@@ -410,6 +410,39 @@ pub(crate) fn eval_field(r: &Value, name: Symbol, line: usize, col: usize) -> Re
     }
 }
 
+/// A destructured field: the value, or `missing` when the record — or the dict — has no
+/// such field. That is the answer `get` gives, and the reason a destructure can name a
+/// key that is optional. Anything without fields is refused, in the words the checker
+/// uses when it can see the receiver's type.
+pub(crate) fn eval_field_or_missing(
+    r: &Value,
+    name: Symbol,
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    match r {
+        Value::Record(fields) => Ok(fields
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::Missing)),
+        Value::Dict(d) => {
+            let key = crate::value::DictKey::Str(std::rc::Rc::new(name.as_str().to_string()));
+            Ok(d.map().get(&key).cloned().unwrap_or(Value::Missing))
+        }
+        Value::Missing => Ok(Value::Missing),
+        other => Err(HelixError::new(
+            format!(
+                "cannot destructure {}: it has no fields",
+                crate::value::with_article(other.type_name())
+            ),
+            line,
+            col,
+        )
+        .hint("destructuring reads the fields of a record, or the keys of a dict.")),
+    }
+}
+
 /// Resolve one slice bound value to an optional index (shared by both engines):
 /// an `Int` is the bound, `missing` means omitted, anything else is an error.
 pub(crate) fn slice_bound(v: &Value, line: usize, col: usize) -> Result<Option<i64>, HelixError> {

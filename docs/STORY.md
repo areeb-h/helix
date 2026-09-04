@@ -36,7 +36,8 @@ Each stage delivered working, tested code. The test count grew from 44 to the **
    dot-chain method dispatch, caret-and-hint errors, file runner and REPL.
 2. **Syntax additions** (drawn from Python and TypeScript) — string interpolation, `??`
    coalescing, records and `.field`, Python-style slicing, tuples and destructuring,
-   lambda-param destructuring, `let … in` local bindings, `if/then/else` as an
+   lambda-param destructuring, record destructuring (`let {a, b} = r in …`, ADR 0046),
+   `let … in` local bindings, `if/then/else` as an
    expression, comprehension verbs `map`/`filter`/`where`/`reduce` with `it`/`acc`.
 3. **`missing` model** ([ADR-0001](adr/0001-missing-data.md)) — a bottom value with
    Julia-style propagation and three-valued logic; `.is_missing()`, `.drop_missing()`.

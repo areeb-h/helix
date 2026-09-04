@@ -86,7 +86,8 @@ that outlives the release.
 
 ### PostgreSQL, and TLS the server cannot turn off (ADR 0044)
 
-`postgres_query(url, sql, params?)` and `postgres_open(url)` behind `--features postgres`,
+`postgres_query(url, sql, params?)`, `postgres_open(url, mode?)` and — since 2026-09-04,
+ADR 0047 — `postgres_execute(url, sql, params?)` behind `--features postgres`,
 hand-rolled against the v3 wire protocol, **zero new crates**. Verified against a live
 PostgreSQL 19 Beta 3: typed columns, `NULL` -> `missing`, parameters as values, read-only
 enforced by the server (SQLSTATE 25006 on a write), SCRAM-SHA-256 with the server's own
@@ -111,13 +112,21 @@ password included -- into the error for an unparseable URL, which is the most wi
 text a program produces. Fixed, and `the_password_never_appears_in_an_error` goes red
 against the old line.
 
-The URL policy lives in `src/pg/conninfo.rs`, deliberately OUTSIDE the feature gate: the
-gate does not build `--features postgres`, so a policy test inside it would be a test that
-never runs. `sslmode`'s accepted values are the security policy, and they are now pinned by
+The URL policy lives in `src/pg/conninfo.rs`, deliberately OUTSIDE the feature gate, so a
+build without the feature (the appliance) still runs its tests. Since 2026-09-04 the gate
+builds `--features postgres` as well, so the wire-protocol tests — a fake server proving what
+the client sends — run in every gate; until then they were the one feature whose tests ran
+nowhere. `sslmode`'s accepted values are the security policy, and they are now pinned by
 tests that run in every build.
 
-**Still open:** `SCRAM-SHA-256-PLUS` channel binding, and writes/transactions behind an
-explicit capability.
+**Writes (ADR 0047, 2026-09-04).** `postgres_execute(url, sql, params?)` and
+`postgres_open(url, "write").execute(sql, params?)` answer `{affected, rows}`. A writable
+session omits the read-only startup default and spends `db-write` (`HELIX_ALLOW_DB=write`)
+as well as `net`, so granting the network alone still keeps a program read-only. Verified
+here against a fake wire server; live verification is the field build's.
+
+**Still open:** `SCRAM-SHA-256-PLUS` channel binding, and a transaction spanning
+statements (each `execute` is its own).
 
 ### A method call is resolved by its receiver (ADR 0045)
 

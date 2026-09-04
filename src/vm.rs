@@ -1599,6 +1599,13 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let recv = stack.pop().unwrap();
                 stack.push(crate::interp::eval_field(&recv, *name, line, col)?);
             }
+            Op::GetFieldOrMissing(name) => {
+                // Cannot panic: the compiler emits the receiver immediately before this
+                // op — the stack-shape invariant `GetField` relies on. Counted in the
+                // panic budget (`no_new_panicking_calls_on_user_reachable_paths`).
+                let recv = stack.pop().unwrap();
+                stack.push(crate::interp::eval_field_or_missing(&recv, *name, line, col)?);
+            }
             Op::Slice(mask) => {
                 // Bounds were pushed after the receiver in start/stop/step order;
                 // pop the raw values back off in reverse, then resolve them in

@@ -122,6 +122,9 @@ print("adjusted mean: {mean_score}")
 # `if` is an expression; functions are single expressions (recursion supported).
 fn variance(xs) = let m = xs.mean(), n = xs.count() in xs.map((it - m) ** 2).sum() / n
 
+# Records destructure by field; an absent field is `missing`, so an optional spec reads in one line.
+fn render(spec) = let {where, limit} = spec in {where: where ?? "true", limit: limit ?? 100}
+
 # Native-speed numeric kernels — this reduce JIT-compiles to a native loop.
 dot = (range(0, n)).reduce(0.0, (acc, j) => acc + a[j] * b[j])
 
@@ -140,6 +143,11 @@ db = postgres_open("postgres://user:pw@host/db")   # TLS on by default, verified
 db.query("select name, age from people where age > $1", [40])
     .where(@age < 55)
     .select(@name)
+
+# A write is a different session and a different grant (ADR 0047): `db-write`, never just `net`.
+db = postgres_open("postgres://user:pw@host/db", "write")
+db.execute("insert into people (name, age) values ($1, $2) returning id", ["Ada", 36]).rows
+postgres_execute("postgres://user:pw@host/db", "delete from people where age < $1", [18]).affected
 
 # First-class genomics.
 seq = dna("ATGCGTAC")
@@ -163,7 +171,8 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
 ### The language
 - **Expression-oriented** — `if/then/else`, `match`, `let … in`, and comprehensions are all
   expressions that yield values. No statements-vs-expressions friction, no truthiness coercion.
-- **Records, tuples, destructuring** — `{name: "Ada", age: 41}` with `.field` access;
+- **Records, tuples, destructuring** — `{name: "Ada", age: 41}` with `.field` access, and
+  `let {name, age} = person in …` to read fields (an absent one is `missing`, ADR 0046);
   `(a, b)` tuples that unpack (`q, r = divmod(17, 5)`) and destructure in lambda params
   (`pairs.map((k, v) => …)`). Record spread/update: `{ ...base, status: 500 }`.
 - **Pattern matching** — `match` with literal, range (half-open, matched by magnitude), or-,
@@ -309,7 +318,7 @@ tests of the same one. Details in [docs/execution-engine.md](docs/execution-engi
 ## Status & roadmap
 
 A mature implementation, **not a prototype**: **848 tests** (481 library + 332 CLI + 3 native-df
-+ 32 dual-engine differential), plus 139 programs run under both DataFrame backends and a
++ 32 dual-engine differential), plus 140 programs run under both DataFrame backends and a
 whole-tree type-check over 98 files — zero compiler warnings, with a differential oracle and a VM/tree-walker
 parity gate on every change. Phase status (full plan in
 [docs/ROADMAP.md](docs/ROADMAP.md)):

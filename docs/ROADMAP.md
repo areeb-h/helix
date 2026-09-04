@@ -111,6 +111,10 @@ Lexer → parser → AST → tree-walking interpreter.
 - [x] **`let a = x, b = y in body`** — local bindings as expressions (sequential,
       scoped). Selected over indented blocks because indentation collides
       with multi-line dot-chains (see [ADR-0004](adr/0004-functions-errors-mutability.md)).
+- [x] **`let {a, b} = rec in body`** — record destructuring, and `{a, b} = rec` inside
+      `do { }`: one binding per named field, `missing` for an absent one, the checker
+      refusing a name a known record cannot have. See
+      [ADR-0046](adr/0046-record-destructuring.md).
 - [x] **`do { … }` blocks** — a sequence of `name = expr` bindings and a final result
       expression, desugared at parse time to the `let … in` chain (zero run-time cost).
       The idiomatic multi-step body; also used for multi-step lambda bodies. See
@@ -293,7 +297,8 @@ estimators they require.
       `missing` (the safe/optional accessor; `.field` stays the typo-catching one). Plus
       `r.get(k)`/`r.has(k)`/`r.keys()` for unknown-shape (parsed-JSON) records.
 - [x] **SQL databases, returning frames** — `sqlite_query` bundled
-      ([ADR 0038](adr/0038-database-access.md)) and `postgres_query` / `postgres_open`
+      ([ADR 0038](adr/0038-database-access.md)) and `postgres_query` / `postgres_open` /
+      `postgres_execute` (writes, ADR 0047)
       spoken directly over the v3 wire protocol
       ([ADR 0044](adr/0044-postgresql.md), `--features postgres`) with **zero new
       dependencies**: the protocol has been frozen since 2003 and SCRAM-SHA-256 needs

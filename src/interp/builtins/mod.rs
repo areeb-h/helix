@@ -157,6 +157,7 @@ impl super::Interp {
                     .map(|df| Value::DataFrame(std::rc::Rc::new(df)));
             }
             "postgres_open" => return crate::pg::postgres_open(&args, line, col),
+            "postgres_execute" => return crate::pg::postgres_execute(&args, line, col),
             "postgres_query" => {
                 return crate::pg::postgres_query(&args, line, col)
                     .map(|df| Value::DataFrame(std::rc::Rc::new(df)));
