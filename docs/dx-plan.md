@@ -288,6 +288,12 @@ Every family takes the split now, fn or not, and the walker checks the field fir
 `call(...).field` in a comprehension stays a projection (`is_bound_path`); `where {a} =
 spec`; `= {}`/`= []` defaults; `try` → `{ok, value, error, help}`; a refusal names the
 MISSING grant; `helix doc Connection` lists `execute`. Recorded in ADR 0045's addendum.
+Their re-verification narrowed one more: `R.all(U)` handed the field the wrapper lambda
+the parser synthesizes for `xs.map(double)` — the same "decided before the receiver
+exists" shape. The wrapper now keeps its origin (`Lambda.bound`) and the readings that
+hand the argument to a function value use it; fusion of `xs.map(double)` is pinned by
+`jit-explain` in the test. Also a tuple default on a lambda. `where` not seeing the
+body's `let` is by design (ADR 0035: the clause scaffolds the body, evaluated before it).
 
 ### Lambda defaults, function values keep defaults, one arity sentence (2026-09-04)
 

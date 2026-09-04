@@ -773,7 +773,7 @@ impl Interp {
                     let h = h.clone();
                     let mut vals = Vec::with_capacity(args.len());
                     for a in args {
-                        vals.push(self.eval(a)?);
+                        vals.push(self.eval(a.bound_origin())?);
                     }
                     return self.call_function(name, &h, vals, *line, *col);
                 }
@@ -790,7 +790,8 @@ impl Interp {
                 }
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
-                    vals.push(self.eval(a)?);
+                    // A function value receives the origin of a synthesized lambda.
+                    vals.push(self.eval(a.bound_origin())?);
                 }
                 // UFCS, RUN-TIME half. A method call that fails dispatch retries as
                 // `name(recv, args…)` — first against a declared `fn` of that name,
@@ -899,7 +900,7 @@ impl Interp {
                 }
                 eval_slice(&recv_v, s, e, st, *line, *col)
             }
-            Expr::Lambda { params, defaults, body } => {
+            Expr::Lambda { params, defaults, body, .. } => {
                 // Capture the lambda's free *local* variables by value — its
                 // lexical environment — so a returned or stored closure still sees
                 // them after the defining call has returned.

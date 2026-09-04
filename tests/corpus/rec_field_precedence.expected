@@ -2,6 +2,8 @@ exit: 0
 --- stdout ---
 10 20 30 40 50 60
 ["keys"] 99 20
+String String u
+[2, 4] true
 true [2, 4, 6]
 3 2
 --- stderr ---

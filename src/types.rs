@@ -1039,7 +1039,7 @@ impl Checker {
                     }
                 })
             }
-            Expr::Lambda { params, defaults, body } => {
+            Expr::Lambda { params, defaults, body, .. } => {
                 // Standalone lambda: params default to Unknown. Like a `fn`
                 // body (see `check_func`), the lambda body is deferred — a
                 // `mut` global read inside it types as Unknown, since the

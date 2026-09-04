@@ -10,6 +10,15 @@ print(Q.all(1), Q.map(1), Q.where(1), Q.select(1), Q.count(1), Q.join(1))
 fn all(q, n) = 99
 print({keys: (x) => 0}.keys(), {x: 1}.all(1), Q.all(2))
 
+# A bare bound name as the argument reaches a FIELD as the value it names — not as the
+# lambda the array reading synthesizes from it (`xs.map(double)` = `(it) => double(it)`).
+T = {all: (t) => type_of(t), map: (t) => t}
+U = "u"
+print(T.all(U), T.all("lit"), T.map(U))
+fn double(x) = x * 2
+fn pos(x) = x > 0
+print([1, 2].map(double), [1, 2].all(pos))
+
 # Arrays and frames keep their verbs.
 print([1, 2, 3].all(it > 0), [1, 2, 3].map(it * 2))
 df = dataframe({a: [1, 2, 3]})

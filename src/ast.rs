@@ -285,6 +285,15 @@ pub enum Expr {
         /// tree. Passes that rewrite in place go through `Rc::make_mut`, which is free
         /// while the count is one, as it is until a program runs.
         body: std::rc::Rc<Expr>,
+        /// `Some(path)` when this lambda was SYNTHESIZED from a bare bound function —
+        /// `xs.map(double)` reads as `(it) => double(it)` — and `path` is the `double` it
+        /// came from. The array reading uses the lambda, so kernels, the checker and the
+        /// walker see what they always saw; a reading that hands the argument to a
+        /// FUNCTION VALUE — a record's field, a free fn via UFCS — uses the path
+        /// (`bound_origin`), so the value arrives rather than a wrapper. `R.all(U)` gave
+        /// the field a lambda (a field build's finding) because the parser decided before
+        /// the receiver existed; the decision is now carried to the consumer that knows it.
+        bound: Option<Box<Expr>>,
     },
     /// `let a = x, b = y in body` — local bindings scoped to `body` (an
     /// expression). Bindings are sequential: later ones can use earlier ones.
@@ -435,4 +444,15 @@ pub enum Stmt {
         col: usize,
     },
     Expr(Expr),
+}
+
+impl Expr {
+    /// The argument a FUNCTION VALUE should receive: the bound path a synthesized lambda
+    /// came from (`Lambda.bound`), or the expression itself.
+    pub fn bound_origin(&self) -> &Expr {
+        match self {
+            Expr::Lambda { bound: Some(origin), .. } => origin,
+            e => e,
+        }
+    }
 }

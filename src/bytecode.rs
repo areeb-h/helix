@@ -823,8 +823,10 @@ impl Compiler {
         col: usize,
     ) -> R<()> {
         b.emit(Op::LoadLocal(slot), line, col);
+        // The origin of a synthesized bound-function lambda, not the lambda: this op is
+        // the reading that may hand the argument to a record's field or a free fn.
         for a in args {
-            self.compile_expr(b, a)?;
+            self.compile_expr(b, a.bound_origin())?;
         }
         b.emit(
             Op::Method(std::rc::Rc::new(MethodData {
@@ -2050,7 +2052,7 @@ impl Compiler {
                 }
                 b.emit(Op::Slice(mask), *line, *col);
             }
-            Expr::Lambda { params, defaults, body } => {
+            Expr::Lambda { params, defaults, body, .. } => {
                 // A standalone lambda → a first-class function value. Its body is
                 // compiled into its own chunk; free variables that name enclosing
                 // locals become upvalues captured here, anything else resolves to a

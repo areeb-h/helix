@@ -254,3 +254,11 @@ a function-valued field — on a record whose type does not own the name — bef
 comprehension shortcut. One rule, stated once per engine, pinned by the corpus program
 `rec_field_precedence` under both DataFrame backends.
 
+The same rule reached the arguments the same day. `xs.map(double)` is read as
+`(it) => double(it)` for the array reading, and that wrapper used to be handed to a
+record's `map` field as well — a decision made before the receiver existed, again. The
+synthesized lambda now carries the path it came from, and the readings that hand the
+argument to a function value (the split's field branch, a free fn via UFCS) use the path.
+The array reading is untouched, so the JIT fuses `xs.map(double)` exactly as before,
+typed or through a parameter — pinned by `jit-explain` in the test.
+

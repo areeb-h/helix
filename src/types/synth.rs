@@ -365,7 +365,10 @@ impl super::Checker {
             // `rec.field` access — the escape hatch for runtime-unknown shapes (parsed JSON).
             Type::Record(fields) => {
                 let fields = fields.clone();
-                self.synth_simple_args(args)?;
+                // A field holding a function receives the ORIGIN of a synthesized
+                // bound-function lambda — `R.all(U)` gives it `U` — so that is what is typed.
+                let origins: Vec<Expr> = args.iter().map(|a| a.bound_origin().clone()).collect();
+                self.synth_simple_args(&origins)?;
                 record_method_type(name, &fields, line, col)
             }
             // A scalar receiver (Int/Float/Bool/…) — no method table at all. This is
@@ -410,7 +413,7 @@ impl super::Checker {
             let mut ats = Vec::with_capacity(args.len() + 1);
             ats.push(rt.clone());
             for a in args {
-                ats.push(self.synth(a)?);
+                ats.push(self.synth(a.bound_origin())?);
             }
             // The function's own answer, including its own arity and argument errors,
             // which name the real mismatch where the method error could only say that

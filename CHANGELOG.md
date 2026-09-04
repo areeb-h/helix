@@ -229,6 +229,15 @@
 - **A capability refusal names the grant that is missing.** A write needs `db-write` and
   `net`; with `HELIX_ALLOW_DB=write` set and the network not granted, the refusal said
   `db-write` — the grant the program had. It says `net` now, with `net`'s help.
+- **A bare bound name as a `map`/`any`/`all` argument reaches a function value as the
+  value.** The parser reads `xs.map(double)` as `(it) => double(it)` for the array reading
+  and used to hand that wrapper to a record's field too: `R.all(U)` gave `all` a function
+  where `U` belonged, and the checker refused it as "`U` is a String, not a function"
+  (the field build's narrowed finding, after the precedence fix). The wrapper keeps its
+  origin now, and a record's field or a free fn via UFCS receives the origin; arrays keep
+  the rewrite, and the JIT keeps fusing `xs.map(double)`, typed or through a parameter.
+- **A tuple default on a lambda.** `(x, t = (1, 2)) => …` was refused as an unclosed
+  tuple: the lambda lookahead ended the default at the first comma, inside the parentheses.
 - **`helix doc Connection` lists `execute`.** The write verb was undiscoverable from the
   type; the method table had `query` alone.
 - **Two things the new `help` field found on its first day.** The frame's own

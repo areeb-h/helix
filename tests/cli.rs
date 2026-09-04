@@ -15723,3 +15723,42 @@ fn a_capability_refusal_names_the_missing_grant() {
     assert_eq!(code, Some(0));
     assert!(out.contains("execute(sql, params?)") && out.contains("query(sql, params?)"), "{out}");
 }
+
+/// A bare bound name as the argument of `map`/`any`/`all` reaches a FUNCTION VALUE as the
+/// value it names. The parser reads `xs.map(double)` as `(it) => double(it)` for the
+/// array reading, and used to hand that wrapper to a record's field too — `R.all(U)` gave
+/// `all` a function where `U` belonged, and the checker refused it as "`U` is a String,
+/// not a function" (field build, narrowed finding). The wrapper now keeps its origin, and
+/// the field, or a free fn via UFCS, receives the origin. Arrays keep the rewrite — and
+/// the JIT keeps fusing `xs.map(double)`, typed or through a parameter.
+#[test]
+fn a_bound_argument_reaches_a_function_value_as_the_value() {
+    let src = "R = {all: (t) => type_of(t), map: (t) => t}\nU = \"u\"\nprint(R.all(U), R.all(\"lit\"), R.map(U))\nfn go(r, u) = r.all(u)\nprint(go(R, U), go(R, 7))\nM = {all: (url) => url}\ndb = \"postgres://x\"\nprint(M.all(db))\nfn all(q, n) = type_of(n)\nprint({x: 1}.all(U))\nfn double(x) = x * 2\nfn pos(x) = x > 0\nprint([1, 2].map(double), [1, 2].all(pos), [1, 2].any(pos))\nutil = {double: (x) => x * 3}\nprint([1, 2].map(util.double))\n";
+    let want = "String String u\nString Int\npostgres://x\nString\n[2, 4] true true\n[3, 6]\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "bound_origin");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, want, "{env:?}");
+    }
+    // Fusion is unchanged for the array reading, typed and through a parameter.
+    let dir = std::env::temp_dir().join(format!("hx_bound_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("k.helix");
+    for src in [
+        "fn double(x) = x * 2\nprint(range(0, 20).map(double).sum())\n",
+        "fn double(x) = x * 2\nfn total(xs) = xs.map(double).sum()\nprint(total(range(0, 20)))\n",
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let (out, err, code) = run(&["jit-explain", prog.to_str().unwrap()], &[], "");
+        assert_eq!(code, Some(0), "{err}");
+        assert!(out.contains("1 kernel site(s) offered to the JIT, 1 compiled"), "{src}\n{out}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    // A tuple default on a lambda: the comma inside it no longer ends the lookahead.
+    let src = "k = (x, t = (1, 2)) => t[0] + t[1] + x\nprint(k(1), k(1, (10, 20)))\nfn f(x, t = (1, 2)) = t[1]\nprint(f(0))\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "lambda_tuple_default");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, "4 31\n2\n", "{env:?}");
+    }
+}

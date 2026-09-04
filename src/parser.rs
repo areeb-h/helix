@@ -244,6 +244,7 @@ fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Ex
     let gather = Expr::Lambda {
         params: vec!["$si".to_string()],
         defaults: Vec::new(),
+        bound: None,
         body: std::rc::Rc::new(Expr::Index {
             recv: Box::new(s()),
             index: Box::new(Expr::Ident { name: "$si".to_string(), line: l, col: c }),
@@ -364,6 +365,11 @@ fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize
 /// `df.where(strong)` is a bare *column* reference, not a function — and parse time can't
 /// tell the receiver apart. For an array `filter`/`where` with a named predicate, use an
 /// explicit lambda (`xs.filter(x => is_valid(x))`).
+///
+/// THE WRAPPER KEEPS ITS ORIGIN (`Lambda.bound`). A record whose field `all` holds a
+/// function, called `R.all(U)`, must receive `U` — the parser cannot know the receiver,
+/// so it no longer decides: the array reading takes the lambda, and the readings that
+/// hand the argument to a function value take the path it came from.
 fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Expr> {
     if !matches!(name, "map" | "any" | "all") || args.len() != 1 {
         return args;
@@ -384,7 +390,15 @@ fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Exp
         },
         _ => return args,
     };
-    vec![Expr::Lambda { params: vec!["it".to_string()],defaults: Vec::new(), body: std::rc::Rc::new(body) }]
+    // The origin rides along: a reading that hands this argument to a function VALUE
+    // (a record's field, a free fn) passes the path, not the wrapper — see `Lambda.bound`.
+    let origin = args.into_iter().next().map(Box::new);
+    vec![Expr::Lambda {
+        params: vec!["it".to_string()],
+        defaults: Vec::new(),
+        bound: origin,
+        body: std::rc::Rc::new(body),
+    }]
 }
 
 /// A dotted path of NAMES not rooted at `it` — `util.double`, `String.upper` — the one
@@ -508,7 +522,7 @@ fn desugar_order_by(
         let keys = Expr::Method {
             recv: Box::new(ident("$obe")),
             name: "map".to_string(),
-            args: vec![Expr::Lambda { params,defaults: Vec::new(), body: std::rc::Rc::new(key) }],
+            args: vec![Expr::Lambda { params,defaults: Vec::new(), bound: None, body: std::rc::Rc::new(key) }],
             named: vec![],
             ufcs: None,
             line,
@@ -604,6 +618,7 @@ fn desugar_order_by(
     let cmp = Expr::Lambda {
         params: vec!["$ob_a".to_string(), "$ob_b".to_string()],
         defaults: Vec::new(),
+        bound: None,
         body: std::rc::Rc::new(Expr::If {
             cond: Box::new(Expr::Binary {
                 op,
@@ -770,6 +785,7 @@ fn desugar_order_by(
                             // every type and is true only for a NaN, which is exactly
                             // the test the guard one level up already uses.
                             defaults: Vec::new(),
+                            bound: None,
                             body: std::rc::Rc::new(Expr::Binary {
                                 op: BinOp::Ne,
                                 left: Box::new(ident("$nanq")),
@@ -1712,6 +1728,7 @@ impl Parser {
                 return Ok(Some(Expr::Lambda {
                     params: vec![name],
                     defaults: Vec::new(),
+                    bound: None,
                     body: std::rc::Rc::new(body),
                 }));
             }
@@ -1745,7 +1762,11 @@ impl Parser {
                             match &self.toks[k].tok {
                                 Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
                                 Tok::RParen | Tok::RBracket | Tok::RBrace if depth > 0 => depth -= 1,
-                                Tok::RParen | Tok::Comma => break,
+                                Tok::RParen => break,
+                                // A comma ends the default only at depth 0: `t = (1, 2)`
+                                // has one inside its parentheses (a tuple default on a
+                                // lambda was refused as an unclosed tuple — field build).
+                                Tok::Comma if depth == 0 => break,
                                 Tok::Newline | Tok::Eof => return Ok(None),
                                 _ => {}
                             }
@@ -1774,6 +1795,7 @@ impl Parser {
             return Ok(Some(Expr::Lambda {
                 params: params.into_iter().map(|(n, _)| n).collect(),
                 defaults: defaults.into_iter().flatten().collect(),
+                bound: None,
                 body: std::rc::Rc::new(body),
             }));
         }
