@@ -172,7 +172,8 @@ More in [`examples/`](examples/), the full [stdlib reference](docs/reference.md)
 - **Expression-oriented** — `if/then/else`, `match`, `let … in`, and comprehensions are all
   expressions that yield values. No statements-vs-expressions friction, no truthiness coercion.
 - **Records, tuples, destructuring** — `{name: "Ada", age: 41}` with `.field` access, and
-  `let {name, age} = person in …` to read fields (an absent one is `missing`, ADR 0046);
+  `let {name, age} = person in …` — or `{name, age} = person` as a statement — to read
+  fields (an absent one is `missing`, ADR 0046);
   `(a, b)` tuples that unpack (`q, r = divmod(17, 5)`) and destructure in lambda params
   (`pairs.map((k, v) => …)`). Record spread/update: `{ ...base, status: 500 }`.
 - **Pattern matching** — `match` with literal, range (half-open, matched by magnitude), or-,

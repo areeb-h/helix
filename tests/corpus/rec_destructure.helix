@@ -28,3 +28,11 @@ print(let {a, b, c} = spec() in [a, b, c])
 
 # Several binders in one `let`, beside a plain binding.
 print(let {a} = {a: 1, b: 2}, k = 10, {b} = {b: 5} in a + b + k)
+
+# The same destructure as a STATEMENT: one assignment per field, so `mut` and reassignment
+# follow the assignment rules.
+{sql, limit} = r2({where: "y", limit: 4})
+print(sql, limit)
+mut {a, b} = {a: 10, b: 20}
+a = a + b
+print(a, b)

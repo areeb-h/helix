@@ -7,4 +7,6 @@ select * where x
 evaluated once
 [1, 2, missing]
 16
+select * where y 4
+30 20
 --- stderr ---

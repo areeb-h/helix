@@ -15514,3 +15514,41 @@ fn postgres_writes_spend_the_db_write_grant() {
     assert_eq!(code, Some(0), "{err}");
     assert!(out.contains("Function"), "{out}");
 }
+
+/// `{a, b} = r` at the top level is the same destructure as the `let` form, spread over
+/// assignments (ADR 0046 addendum): `mut {a, b} = r` declares mutable names, `export
+/// {a, b} = r` exports each field and only the fields, an immutable field binding cannot be
+/// reassigned, a typo against a known shape is refused by the checker, and a receiver
+/// without fields is refused at both layers — because each field binding IS an assignment,
+/// every assignment rule applies unchanged on every engine. A record literal as a plain
+/// statement is still an expression statement.
+#[test]
+fn record_destructuring_is_also_a_statement() {
+    // `spec` comes through a parameter so its shape is unknown to the checker; a literal
+    // here would be refused for `order`, rightly (`destructure_stmt_typo` below).
+    let src = "fn pick(s) = s\nspec = pick({where: \"w\", limit: 3})\n{where, limit, order} = spec\nprint(where, limit, order)\nmut {a, b} = {a: 1, b: 2}\na = a + b\nprint(a, b)\n{x} = [[\"x\", 9]].to_dict()\nprint(x)\n";
+    let want = "w 3 missing\n3 2\n9\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "destructure_stmt");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, want, "{env:?}");
+    }
+    let (_, err, code) = run_source("{a} = {a: 1}\na = 2\n", &[], "destructure_stmt_immut");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`a`"), "{err}");
+    let (_, err, code) = run_source("{limt} = {limit: 1}\n", &[], "destructure_stmt_typo");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("record has no field `limt`"), "{err}");
+    let (_, err, code) = run_source("{a} = 5\n", &[], "destructure_stmt_int");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("cannot destructure an Int: it has no fields"), "{err}");
+    let lib = "export {host, port} = {host: \"db\", port: 5432}\n";
+    let main = "import cfg\nprint(cfg.host, cfg.port)\n";
+    let (out, err, code) =
+        run_modules(&[("cfg.helix", lib), ("main.helix", main)], "main.helix", &[], "destructure_export");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "db 5432", "{out}");
+    let (out, err, code) = run_source("{a: 1}\nprint(1)\n", &[], "destructure_stmt_literal");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "1");
+}

@@ -82,9 +82,8 @@ fn parse_expression(
         do_bindings: Vec::new(),
         imports: imports.clone(),
         selected_imports: std::collections::HashSet::new(),
-        // Threaded for the same reason `imports` is, and recorded above: a hole's
-        // parser that does not inherit an enclosing rule makes that rule hold outside
-        // strings and not inside them, which is where people meet it first.
+        pending: Vec::new(),
+        temps: 0,
     };
     p.skip_newlines();
     let e = p.expr()?;
@@ -836,6 +835,8 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
         do_bindings: Vec::new(),
         imports: std::collections::HashSet::new(),
         selected_imports: std::collections::HashSet::new(),
+        pending: Vec::new(),
+        temps: 0,
     };
     // EVERY SIGNATURE BEFORE THE FIRST CALL IS PARSED — a function may be called above
     // its definition, and its defaults and parameter names must be known there too.
@@ -925,6 +926,14 @@ struct Parser {
     /// lives in the imported module), and the error should say so, not call `f`
     /// a builtin.
     selected_imports: std::collections::HashSet<String>,
+    /// Statements one source statement expanded into, appended by `program` after it:
+    /// `{a, b} = r` at the top level is an assignment of the value to a throwaway name and
+    /// one assignment per field (`destructure_record_stmt`).
+    pending: Vec<Stmt>,
+    /// Counter for those throwaway names, so every statement-level destructure binds its
+    /// own IMMUTABLE temp — immutable because a `mut` global reads as `Unknown` in the
+    /// checker, and the field reads would lose the record's shape with it.
+    temps: usize,
 }
 
 impl Parser {
@@ -1083,6 +1092,7 @@ impl Parser {
             let opened_with = self.peek().clone();
             let s = self.statement()?;
             stmts.push(s);
+            stmts.append(&mut self.pending);
             if self.at_end() {
                 break;
             }
@@ -1167,11 +1177,13 @@ impl Parser {
         }
         // Optional leading `export` (ADR 0019) — contextual: it's a keyword only
         // directly before a definition (`export fn …`, `export x = …`, `export a, b = …`,
-        // `export mut …`), so `export` stays a usable identifier everywhere else.
+        // `export mut …`, `export {a, b} = …`), so `export` stays a usable identifier
+        // everywhere else.
         let exported = matches!(self.peek(), Tok::Ident(n) if n == "export")
             && match self.peek_at(1) {
                 Tok::Fn | Tok::Mut => true,
                 Tok::Ident(_) => matches!(self.peek_at(2), Tok::Eq | Tok::Comma),
+                Tok::LBrace => self.record_binder_from(self.pos + 1),
                 _ => false,
             };
         if exported {
@@ -1226,6 +1238,9 @@ impl Parser {
         if matches!(self.peek(), Tok::Mut) {
             let (l, c) = self.pos();
             self.advance();
+            if matches!(self.peek(), Tok::LBrace) {
+                return self.destructure_record_stmt(true, exported, l, c);
+            }
             let first = self.ident_name("after `mut`")?;
             if matches!(self.peek(), Tok::Comma) {
                 let names = self.finish_target_list(first)?;
@@ -1243,6 +1258,11 @@ impl Parser {
                 line: l,
                 col: c,
             });
+        }
+        // `{a, b} = …` — record destructuring as a statement (ADR 0046 addendum).
+        if matches!(self.peek(), Tok::LBrace) && self.record_binder_ahead() {
+            let (l, c) = self.pos();
+            return self.destructure_record_stmt(false, exported, l, c);
         }
         // `a, b = ...` — destructuring (2+ names ending in `=`)
         if self.at_destructure() {
@@ -1469,7 +1489,11 @@ impl Parser {
     /// for a field the record does not have — the answer `get` gives, and what makes a
     /// destructure fit a spec record whose keys are optional by nature. The reads are
     /// field reads, not `get` calls: one symbol scan per name, no method dispatch.
-    fn destructure_record(&mut self, bindings: &mut Vec<(String, Expr)>) -> Result<(), HelixError> {
+    fn destructure_record(
+        &mut self,
+        bindings: &mut Vec<(String, Expr)>,
+        tmp: String,
+    ) -> Result<(), HelixError> {
         let shape = "destructuring looks like `let {where, limit} = spec in …`.";
         self.eat(&Tok::LBrace, "to start the fields to destructure")?;
         let mut names: Vec<(String, usize, usize)> = Vec::new();
@@ -1500,7 +1524,6 @@ impl Parser {
         self.eat(&Tok::RBrace, "to close the fields to destructure").map_err(|e| e.hint(shape))?;
         self.eat(&Tok::Eq, "after the fields to destructure").map_err(|e| e.hint(shape))?;
         let value = self.expr()?;
-        let tmp = format!("$rec{}", bindings.len());
         bindings.push((tmp.clone(), value));
         for (name, nl, nc) in names {
             let recv = Box::new(Expr::Ident { name: tmp.clone(), line: nl, col: nc });
@@ -1509,14 +1532,50 @@ impl Parser {
         Ok(())
     }
 
+    /// `{a, b} = value` as a STATEMENT: the `let` desugar spread over assignments —
+    /// `$rec<N> = value` (immutable, its own name), then `a = $rec<N>.a`, `b = …` through
+    /// `FieldOrMissing` — the first returned, the rest queued in `pending` for `program` to
+    /// append. Every rule an assignment has — `mut`, `export`, rebinding an immutable, the
+    /// module's export list, the checker's shape refusal — applies to each field binding
+    /// unchanged, on every engine, because each IS an assignment. The temp is never
+    /// exported and never `mut`.
+    fn destructure_record_stmt(
+        &mut self,
+        mutable: bool,
+        exported: bool,
+        l: usize,
+        c: usize,
+    ) -> Result<Stmt, HelixError> {
+        let tmp = format!("$rec{}", self.temps);
+        self.temps += 1;
+        let mut bindings = Vec::new();
+        self.destructure_record(&mut bindings, tmp)?;
+        let mut it = bindings.into_iter();
+        // `destructure_record` binds the value first, always; the `ok_or_else` is a
+        // refusal rather than a panic on purpose.
+        let (name, value) =
+            it.next().ok_or_else(|| HelixError::new("destructuring binds nothing", l, c))?;
+        let first = Stmt::Assign { name, mutable: false, exported: false, value, line: l, col: c };
+        self.pending.extend(
+            it.map(|(name, value)| Stmt::Assign { name, mutable, exported, value, line: l, col: c }),
+        );
+        Ok(first)
+    }
+
     /// Whether the `{` at the cursor opens a destructuring binder — `{a, b} = …` — rather
     /// than a record expression: names and commas up to `}`, then a single `=`. A record
     /// literal has a `:` after its first name and `==` is its own token, so nothing that
     /// is an expression matches. Decided by looking, not parsing, so a record that merely
     /// begins a `do` block's result expression is left alone.
     fn record_binder_ahead(&self) -> bool {
+        self.record_binder_from(self.pos)
+    }
+
+    /// `record_binder_ahead` for a `{` at token index `at` — `export {a, b} = …` asks it
+    /// about the token after `export`.
+    fn record_binder_from(&self, at: usize) -> bool {
         let tok = |i: usize| self.toks.get(i).map(|t| &t.tok);
-        let mut i = self.pos + 1;
+        let mut i = at + 1;
         loop {
             while matches!(tok(i), Some(Tok::Newline)) {
                 i += 1;
@@ -2700,7 +2759,8 @@ impl Parser {
             if matches!(self.peek(), Tok::LBrace) && self.record_binder_ahead() {
                 let (bl, bc) = self.pos();
                 let first = bindings.len();
-                self.destructure_record(&mut bindings)?;
+                let tmp = format!("$rec{first}");
+                self.destructure_record(&mut bindings, tmp)?;
                 for (name, _) in &bindings[first + 1..] {
                     self.do_bindings.push((name.clone(), bl, bc));
                 }
@@ -2969,7 +3029,8 @@ impl Parser {
                         return Err(mut_inside_a_body(ml, mc));
                     }
                     if matches!(self.peek(), Tok::LBrace) {
-                        self.destructure_record(&mut bindings)?;
+                        let tmp = format!("$rec{}", bindings.len());
+                        self.destructure_record(&mut bindings, tmp)?;
                     } else {
                         let name = self.ident_name("as a `let` binding")?;
                         self.eat(&Tok::Eq, "in a `let` binding")

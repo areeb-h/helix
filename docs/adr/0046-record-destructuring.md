@@ -54,9 +54,10 @@ fn render(spec) = do {
   words `.a` uses. Where the shape is `Unknown`, the read is `Unknown`. A receiver the
   checker can prove has no fields (`let {a} = 5`) is refused there; one it cannot see is
   refused by both engines at run time, with the same sentence.
-- **No renames, no nesting, no top-level statement form.** `{a: x}` is refused with the
-  spelling that does what was meant (`x = spec.a`); the field binds under its own name.
-  Nested patterns and `{a, b} = spec` at the top level are not in this decision.
+- **No renames, no nesting.** `{a: x}` is refused with the spelling that does what was
+  meant (`x = spec.a`); the field binds under its own name. Nested patterns are not in this
+  decision. (The top-level statement form was excluded at first and landed the same day —
+  see the addendum.)
 
 ## Consequences
 
@@ -83,3 +84,15 @@ fn render(spec) = do {
 - **Require an explicit optional marker (`{limit?}`).** More to write for the common case,
   and the checker already catches the case a marker would protect against — a typo against
   a known shape.
+
+## Addendum 2026-09-04 — the statement form
+
+`{where, limit} = spec` at the top level, with `mut` and `export` in front as for any
+assignment. It is the `let` desugar spread over assignments: `$rec<N> = value` (an
+immutable temp with its own name, so the checker keeps the record's shape through it —
+a `mut` global would read as `Unknown`), then one assignment per field through
+`FieldOrMissing`. The parser queues the extra statements and `program` appends them. Every
+rule an assignment has — `mut`, `export` (each field, never the temp), rebinding an
+immutable, the module's export list, the checker's shape refusal — applies per field on
+every engine, because each field binding *is* an assignment. Pinned by
+`record_destructuring_is_also_a_statement` and the corpus program.

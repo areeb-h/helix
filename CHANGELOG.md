@@ -29,7 +29,8 @@
   ```
 
 - **Record destructuring: `let {where, limit} = spec in …`** — and `{where, limit} = spec`
-  inside a `do { }` block (ADR 0046). One binding per named field; an absent field is
+  inside a `do { }` block or as a top-level statement, where `mut` and `export` apply per
+  field (ADR 0046). One binding per named field; an absent field is
   `missing`, the answer `get` gives, because a spec record's fields are optional by nature.
   The reads are field reads — one symbol scan per name — not `get` dispatches: a renderer
   that read six keys through `Record.get` per call (38% of the call, a field report

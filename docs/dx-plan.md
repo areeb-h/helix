@@ -292,8 +292,9 @@ tag; live verification is the field build's. Open: a transaction spanning statem
 were 38% of a render. Desugared in the parser to one temp binding and one
 absence-tolerant field read per name (`Expr::FieldOrMissing` → `Op::GetFieldOrMissing`, a
 symbol scan like `.a`); absent is `missing`; the checker refuses a name a known record
-cannot have. Also inside `do { }`. Renames, nesting and the top-level statement form are
-not in the decision. Measured: six lookups 392 → 358 ns per call (1.10×, same binary,
+cannot have. Also inside `do { }`, and as a top-level statement (the `let` desugar spread
+over assignments, so `mut`/`export`/rebind rules apply per field). Renames and nesting
+are not in the decision. Measured: six lookups 392 → 358 ns per call (1.10×, same binary,
 min-of-7) — the `get` dispatch on a small record is ~40 ns, so the field profile's 38%
 came from a shape this does not reproduce; the one-line spelling is the win.
 

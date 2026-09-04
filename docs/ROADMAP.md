@@ -112,8 +112,9 @@ Lexer → parser → AST → tree-walking interpreter.
       scoped). Selected over indented blocks because indentation collides
       with multi-line dot-chains (see [ADR-0004](adr/0004-functions-errors-mutability.md)).
 - [x] **`let {a, b} = rec in body`** — record destructuring, and `{a, b} = rec` inside
-      `do { }`: one binding per named field, `missing` for an absent one, the checker
-      refusing a name a known record cannot have. See
+      `do { }` or at the top level (`mut`/`export` per field): one binding per named
+      field, `missing` for an absent one, the checker refusing a name a known record
+      cannot have. See
       [ADR-0046](adr/0046-record-destructuring.md).
 - [x] **`do { … }` blocks** — a sequence of `name = expr` bindings and a final result
       expression, desugared at parse time to the `let … in` chain (zero run-time cost).
