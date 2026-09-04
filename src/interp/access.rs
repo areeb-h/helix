@@ -370,7 +370,11 @@ pub(crate) fn df_value_method(
                 );
             Err(match crate::suggest::hint(name, crate::suggest::Site::Method, &methods) {
                 Some(h) => err.hint(h),
-                None => err.hint(format!("DataFrame methods: {}", methods.join(", "))),
+                // The same fallback as `unknown_method` — a dump is a haystack, `helix doc
+                // DataFrame` is an answer. This arm listed every method while the general
+                // builder pointed at the doc command; the message agreed and the help did
+                // not, and nothing could see it until `try` carried the help (field build).
+                None => err.hint("no similar method — `helix doc DataFrame` lists all DataFrame methods."),
             })
         }
     }

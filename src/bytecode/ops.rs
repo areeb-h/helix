@@ -369,6 +369,11 @@ pub enum RecvClass {
     /// and something else on everything else, so the two must not share a class: a group
     /// sent down the column-verb route is a different wrong answer, not none.
     GroupByOnly,
+    /// A record holding a FUNCTION under this name — the one receiver for which a
+    /// type-directed family's other reading is "call the field" (ADR 0045's order) when
+    /// no free fn of the name is declared. Any other receiver takes the family's own
+    /// reading, and its own error.
+    FieldFn(crate::symbol::Symbol),
 }
 
 impl RecvClass {
@@ -382,6 +387,13 @@ impl RecvClass {
             RecvClass::Iterable => matches!(v, Value::Array(_) | Value::Missing),
             RecvClass::DataFrameOnly => matches!(v, Value::DataFrame(_)),
             RecvClass::GroupByOnly => matches!(v, Value::GroupBy(_)),
+            RecvClass::FieldFn(sym) => matches!(
+                v,
+                Value::Record(fields)
+                    if fields.iter().any(|(s, held)| {
+                        *s == sym && matches!(held, Value::VmFunc { .. } | Value::Closure(_))
+                    })
+            ),
         }
     }
 }
