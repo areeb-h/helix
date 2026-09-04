@@ -4087,7 +4087,7 @@
         let (tw, vm) = (run_tw(arity), run_vm(arity));
         assert_eq!(tw, vm, "engines disagree on `{arity}`");
         let msg = vm.unwrap_err();
-        assert!(msg.contains("`take` expects 3 arguments, got 2"), "got: {msg}");
+        assert!(msg.contains("`take` takes 3 arguments, got 2"), "got: {msg}");
 
         // WHAT STILL DECLINES, and why each one must. The compiler stops at a local, an
         // upvalue, or a global before it ever reaches a `fn` slot; the walker's

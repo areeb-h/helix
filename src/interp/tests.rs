@@ -1579,7 +1579,7 @@
     #[test]
     fn function_arity_error() {
         let err = last("fn f(a, b) = a + b\nf(1)").unwrap_err();
-        assert!(err.message.contains("expects 2 arguments"));
+        assert!(err.message.contains("takes 2 arguments"));
     }
 
     #[test]
