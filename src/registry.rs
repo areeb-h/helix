@@ -458,7 +458,7 @@ pub static TUPLE_METHODS: &[&str] = &["count", "length", "values"];
 /// over: `helix doc Connection` answers everywhere, and `type_owns_method` answers TRUE,
 /// which is what stops a user's `fn query(c, sql)` from silently taking a call meant for
 /// the database (ADR 0045's fallback declines for any type that owns the name).
-pub static CONNECTION_METHODS: &[&str] = &["query"];
+pub static CONNECTION_METHODS: &[&str] = &["query", "execute"];
 
 pub static NET_METHODS: &[&str] = &[
     "accept", "poll", "request", "respond", "sse", "stream", "send", "next", "status",

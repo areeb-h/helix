@@ -56,7 +56,7 @@ Grounded in the current source, not aspirations:
    versioned dependencies, reproducible environments — without which a third-party
    ecosystem cannot form.
 3. **Error handling has a v1.** `try EXPR` evaluates `EXPR` and catches any runtime
-   error, yielding a record `{ok, value, error}`, so failures are recoverable
+   error, yielding a record `{ok, value, error, help}`, so failures are recoverable
    instead of aborting the program. Error recovery is **native in the VM** since
    v0.7.0 (`Op::TryBegin`/`TryOk`/`TryErr` and a handler unwind), so a `try` anywhere
    no longer demotes the program to the tree-walker — verified with `jit-explain`: a

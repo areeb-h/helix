@@ -209,7 +209,7 @@ error: python error: ModuleNotFoundError: No module named 'no_such_module_xyz'
 
 A Python exception is an ordinary Helix runtime error, so `try EXPR` recovers it
 like any other: `try python.import("no_such_module_xyz")` returns a record
-`{ok: false, value: missing, error: "…"}` with the message in `error`, instead of
+`{ok: false, value: missing, error: "…", help: …}` with the message in `error` and the hint in `help`, instead of
 aborting.
 
 ## Performance: cross the boundary once

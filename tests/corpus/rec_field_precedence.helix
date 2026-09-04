@@ -1,0 +1,16 @@
+# ADR 0045's order — method, then a function-valued field, then a free fn — must hold for
+# EVERY name on every engine, including the names the compiler routes as comprehension and
+# frame-verb families (`all`, `map`, `where`, `select`, `filter`, `join`, …). A field build
+# found `count` reaching the field and `all` refused; `select` answered by one engine and
+# refused by another. The corpus pins the order under both DataFrame backends too.
+Q = {all: (n) => n * 10, map: (n) => n * 20, where: (n) => n * 30, select: (n) => n * 40, count: (n) => n * 50, join: (n) => n * 60}
+print(Q.all(1), Q.map(1), Q.where(1), Q.select(1), Q.count(1), Q.join(1))
+
+# A record's real method beats a same-named field; a free fn answers a record without it.
+fn all(q, n) = 99
+print({keys: (x) => 0}.keys(), {x: 1}.all(1), Q.all(2))
+
+# Arrays and frames keep their verbs.
+print([1, 2, 3].all(it > 0), [1, 2, 3].map(it * 2))
+df = dataframe({a: [1, 2, 3]})
+print(df.select(@a).count(), df.where(@a > 1).count())

@@ -277,6 +277,18 @@ with mechanisms so nothing has to be rediscovered:
   indexing landed with the bridge; the `.exp()` asymmetry is now its own entry
   below, because the bridge made it reachable by an ordinary spelling.)*
 
+### The field build's nine findings on the ORM (2026-09-04)
+
+**DONE**, all nine, one commit. The one that mattered: ADR 0045's order (method, field,
+free fn) was missing in the compiled families — `compile_comprehension_split` /
+`compile_recv_split` were taken only with a declared fn, so a record's `all`/`map`/
+`where`/`select`/`join` field was refused on the VM ("a Record has no method"), and the
+walker's comprehension shortcut skipped the field too; `select` diverged between engines.
+Every family takes the split now, fn or not, and the walker checks the field first. Also:
+`call(...).field` in a comprehension stays a projection (`is_bound_path`); `where {a} =
+spec`; `= {}`/`= []` defaults; `try` → `{ok, value, error, help}`; a refusal names the
+MISSING grant; `helix doc Connection` lists `execute`. Recorded in ADR 0045's addendum.
+
 ### Lambda defaults, function values keep defaults, one arity sentence (2026-09-04)
 
 **DONE.** The limitation the field build noted alongside 1.39. `(x, n = 10) => …` parses

@@ -154,7 +154,7 @@ Lexer → parser → AST → tree-walking interpreter.
       `.is_missing()`, `.drop_missing()`, propagating aggregations.
 - [x] Elementwise broadcasting for arithmetic (`xs - xs.mean()`, `xs + ys`).
 - [x] Additional array methods: `take`, `drop`, `zip`, `enumerate`, `any`, `all`.
-- [~] Error handling: `try EXPR` yields `{ok, value, error}` and catches runtime
+- [~] Error handling: `try EXPR` yields `{ok, value, error, help}` and catches runtime
       errors (done; runs on the tree-walker). A `Result` + `?` form
       ([ADR 0004](adr/0004-functions-errors-mutability.md)) and VM support remain.
 - [x] A test suite (~135 in-crate unit tests + ~42 CLI integration tests), including a
@@ -1258,7 +1258,7 @@ motivates this phase.
       dependencies buildable locally; a registry requires hosting). The Python
       environment should be pinned here as well (related to the bundled-CPython work).
 - [ ] **Jupyter kernel** — to support scientists in their existing environment.
-- [~] **Error handling.** `try EXPR` -> `{ok, value, error}` is implemented (runs on
+- [~] **Error handling.** `try EXPR` -> `{ok, value, error, help}` is implemented (runs on
       the tree-walker). Remaining: a `Result` + `?` form
       ([ADR 0004](adr/0004-functions-errors-mutability.md)), VM support, and
       catching it across the Python-interop boundary (recoverable Python errors).

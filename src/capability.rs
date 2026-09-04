@@ -155,6 +155,16 @@ impl Authority {
         }
     }
 
+    /// The grant a refusal should NAME: the one that is missing. `db-write` needs `net`
+    /// as well, so a program that set `HELIX_ALLOW_DB=write` and not the network was told
+    /// it lacked `db-write` — the grant it had (field build). Name the absent one.
+    fn missing_grant(&self, e: Effect) -> Effect {
+        match e {
+            Effect::DbWrite if self.db_write && !self.net => Effect::Net,
+            other => other,
+        }
+    }
+
     fn allows(&self, e: Effect) -> bool {
         match e {
             Effect::Pure => true,
@@ -352,6 +362,7 @@ pub fn gate_effect(eff: Effect, name: &str, args: &[Value], line: usize, col: us
     if auth.mode == Mode::Off || auth.allows(eff) {
         return Ok(());
     }
+    let eff = auth.missing_grant(eff);
     match auth.mode {
         Mode::Audit => {
             eprintln!(

@@ -304,7 +304,7 @@ through rather than invent near-misses of it:
 
 ```
 try(1 + 1)   =>  {ok: true,  value: 2,       error: missing}
-try(1 / 0)   =>  {ok: false, value: missing, error: "division by zero"}
+try(1 / 0)   =>  {ok: false, value: missing, error: "division by zero", help: …}
 ```
 
 Two rules matter and are easy to get wrong from another language's prior:

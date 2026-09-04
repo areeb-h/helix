@@ -15606,3 +15606,120 @@ fn an_arity_refusal_reads_takes_at_every_layer() {
         assert_eq!(out, "`fun` takes 2 arguments, got 1\ntrue\n", "{env:?}");
     }
 }
+
+/// A function-valued field answers before the comprehension and frame-verb families, on
+/// every engine, whether or not a free fn of the name is declared — ADR 0045's order
+/// (method, field, free fn) for EVERY name. `q.count(1)` reached the field while `q.all(1)`
+/// was refused ("a Record has no method `all`") because the compiled families never
+/// reached the dynamic method op without a declared fn, and the walker's comprehension
+/// shortcut fired first; `q.select(1)` was refused on the VM and answered by the walker.
+/// A record's real methods still win over a same-named field (`{keys: f}.keys()`).
+#[test]
+fn a_function_valued_field_answers_before_the_comprehension_families() {
+    let fields = "Q = {all: (n) => n * 10, map: (n) => n * 20, where: (n) => n * 30, select: (n) => n * 40, count: (n) => n * 50, filter: (n) => n * 60, any: (n) => n * 70, reduce: (n) => n * 80, group: (n) => n * 90, with: (n) => n * 100, join: (n) => n * 110}\nprint(Q.all(1), Q.map(1), Q.where(1), Q.select(1), Q.count(1), Q.filter(1), Q.any(1), Q.reduce(1), Q.group(1), Q.with(1), Q.join(1))\nprint({keys: (x) => 0}.keys())\n";
+    let want = "10 20 30 40 50 60 70 80 90 100 110\n[\"keys\"]\n";
+    let declared = "fn all(q, n) = 99\nfn map(q, n) = 99\nfn where(q, n) = 99\nfn select(q, n) = 99\nfn join(q, n) = 99\n";
+    for (label, src, want) in [
+        ("field only", fields.to_string(), want.to_string()),
+        ("field beside free fns", format!("{declared}{fields}R = {{x: 1}}\nprint(R.all(1), R.select(1), R.join(1))\n"), format!("{want}99 99 99\n")),
+        ("through a parameter", "fn go(q) = q.all(1) + q.select(2) + q.map(3)\nprint(go({all: (n) => n, select: (n) => n * 10, map: (n) => n * 100}))\n".to_string(), "321\n".to_string()),
+    ] {
+        for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+            let (out, err, code) = run_source(&src, env, "field_families");
+            assert_eq!(code, Some(0), "{label} {env:?}: {err}");
+            assert_eq!(out, want, "{label} {env:?}");
+        }
+    }
+    // Arrays and frames keep their own verbs — the split's first reading is unchanged.
+    let (out, err, code) = run_source("print([1, 2, 3].map(it * 2), [1, 2, 3].all(it > 0), [3, 1, 2].where(it > 1))\n", &[], "field_families_arrays");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "[2, 4, 6] true [3, 2]\n");
+}
+
+/// `xs.map(mk(0, it).sql)` — a projection off a CALL stays a projection in a comprehension
+/// body. The implicit-`it` rewrite that turns a bound path (`xs.map(util.double)`) into
+/// `util.double(it)` also fired on any receiver not rooted at `it`, so `mk(0, it).sql`
+/// became `mk(0, it).sql(it)` and was refused as "`sql` is a field of this record, not a
+/// method" — on every engine and in the checker. Only a path of names is a bound function.
+#[test]
+fn a_projection_off_a_call_stays_a_projection_in_a_comprehension() {
+    let src = "fn mk(m, s) = {sql: s * 10, m: m}\nprint([1, 2].map(mk(0, it).sql))\nutil = {double: (x) => x * 2}\nprint([1, 2].map(util.double))\nfn triple(x) = x * 3\nprint([1, 2].map(triple))\nrecs = [{a: {b: 5}}]\nprint(recs.map(it.a.b))\n";
+    let want = "[10, 20]\n[2, 4]\n[3, 6]\n[5]\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "projection_off_call");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, want, "{env:?}");
+    }
+}
+
+/// `where {w, l} = spec` — the record binder in a `where` clause (ADR 0035 meets ADR 0046),
+/// on every engine; a malformed clause is named as one, with the destructuring shape in
+/// its help, instead of the statement-boundary error it used to fall into.
+#[test]
+fn a_where_clause_destructures_a_record() {
+    let src = "fn sql(spec) = \"w={w} l={l}\" where {w, l} = spec\nprint(sql({w: 1, l: 2}))\nprint(sql({w: 3}))\nfn both(spec) = a + w where a = 1, {w} = spec\nprint(both({w: 10}))\n";
+    let want = "w=1 l=2\nw=3 l=missing\n11\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "where_destructure");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, want, "{env:?}");
+    }
+    let (_, err, code) = run_source("fn f(s) = 1 where {a: 1} = s\n", &[], "where_malformed");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("malformed `where` clause"), "{err}");
+    assert!(err.contains("where {a, b} = record"), "{err}");
+    assert!(!err.contains("expected end of line"), "{err}");
+}
+
+/// A default may be a literal container of literals — `= {}`, `= []`, `= (1, 2)`,
+/// `= {retries: 3}` — on a `fn` and on a lambda, and a call omitting it gets its own copy
+/// of the value on every engine. Anything not a literal inside is still refused.
+#[test]
+fn a_default_may_be_a_literal_container() {
+    let src = "fn g(x, opts = {}) = opts.keys().count()\nfn h(x, xs = [1, 2]) = xs.sum()\nfn t(x, p = (1, 2)) = p[0] + p[1]\nfn r(x, o = {retries: 3, tags: [\"a\"]}) = o.retries + o.tags.count()\nk = (x, o = {}) => o.keys().count()\nprint(g(1), g(1, {a: 1}), h(1), h(1, [5]), t(1), r(1), k(1))\n";
+    let want = "0 1 3 5 3 4 0\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "container_default");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, want, "{env:?}");
+    }
+    let (_, err, code) = run_source("fn g(x, o = {a: x}) = o\n", &[], "container_default_nonlit");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("must be a literal constant") && err.contains("`= {}`"), "{err}");
+}
+
+/// `try` carries the help: `{ok, value, error, help}`, `help` the hint or `missing`. Every
+/// actionable spelling lives in the help, and no program could read it (field build) — so
+/// no test could assert that the guidance exists. Same record on every engine.
+#[test]
+fn a_try_result_carries_the_help() {
+    // `record has no field` carries a hint at run time (the field list); a method error
+    // with no near miss carries none, and then `help` is `missing` — honestly.
+    let src = "fn f(r) = r.zz\nr = try f({alpha: 1})\nprint(r.ok, r.error)\nprint(r.help)\nfn g(v) = v.nope()\nq = try g(5)\nprint(q.help.is_missing())\ns = try 1\nprint(s.ok, s.help.is_missing(), s.keys())\n";
+    let want = "false record has no field `zz`\nfields: alpha\ntrue\ntrue true [\"ok\", \"value\", \"error\", \"help\"]\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "try_help");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, want, "{env:?}");
+    }
+}
+
+/// A capability refusal names the grant that is MISSING. A write needs `db-write` and
+/// `net`; with `HELIX_ALLOW_DB=write` set and the network not granted, the refusal used
+/// to say `db-write` — the grant the program had (field build).
+#[test]
+fn a_capability_refusal_names_the_missing_grant() {
+    let exec = "postgres_execute(\"postgres://u:pw@127.0.0.1:1/db?sslmode=disable\", \"delete from t\")\n";
+    let (_, err, code) = run_source(exec, &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_DB", "write")], "grant_missing_net");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("needs `net` authority, which is not granted"), "{err}");
+    assert!(err.contains("HELIX_ALLOW_NET=on"), "{err}");
+    let (_, err, _) = run_source(exec, &[("HELIX_CAP", "enforce"), ("HELIX_ALLOW_NET", "on")], "grant_missing_db");
+    assert!(err.contains("needs `db-write` authority"), "{err}");
+    let (_, err, _) = run_source(exec, &[("HELIX_CAP", "enforce")], "grant_missing_both");
+    assert!(err.contains("needs `db-write` authority"), "{err}");
+    // The type's method list names the write verb.
+    let (out, _, code) = run(&["doc", "Connection"], &[], "");
+    assert_eq!(code, Some(0));
+    assert!(out.contains("execute(sql, params?)") && out.contains("query(sql, params?)"), "{out}");
+}

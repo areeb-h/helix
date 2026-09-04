@@ -44,6 +44,11 @@ fn is_const_default(e: &Expr) -> bool {
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing => true,
         Expr::Unary { expr, .. } => is_const_default(expr),
+        // A literal container of literals is a literal: `= {}`, `= []`, `= (1, 2)`,
+        // `= {retries: 3}`. An options record could not have an empty default before
+        // (field build), and there was no reading under which `{}` is not a constant.
+        Expr::Array(items) | Expr::Tuple(items) => items.iter().all(is_const_default),
+        Expr::Record(fields) => fields.iter().all(|(_, v)| is_const_default(v)),
         _ => false,
     }
 }
@@ -202,7 +207,7 @@ fn statement_boundary_hint(opened_with: &Tok, before: &Tok, found: &Tok) -> &'st
     // destructuring as flatly open without noticing. Naming the half that works turns a
     // dead end into a workaround.
     if matches!(opened_with, Tok::LParen) && matches!(found, Tok::Eq) {
-        return "a binding takes one name — destructure by indexing (`p.0` / `p.1`), or in a \
+        return "a binding takes one name — destructure by indexing (`p[0]` / `p[1]`), or in a \
                 lambda parameter, where it DOES work: `xs.map((a, b) => a + b)`.";
     }
     // `x := 1` — Go's short declaration. The `x` parses as an expression and the `:` is the
@@ -368,7 +373,7 @@ fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Exp
         Expr::Ident { name: f, .. } if f != "it" => {
             Expr::Call { name: f.clone(), args: vec![it()], line: l, col: c }
         }
-        Expr::Field { recv, name: f, .. } if !path_rooted_at_it(recv) => Expr::Method {
+        Expr::Field { recv, name: f, .. } if is_bound_path(recv) => Expr::Method {
             recv: recv.clone(),
             name: f.clone(),
             args: vec![it()],
@@ -382,12 +387,16 @@ fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Exp
     vec![Expr::Lambda { params: vec!["it".to_string()],defaults: Vec::new(), body: std::rc::Rc::new(body) }]
 }
 
-/// Is this dotted path rooted at the implicit binder `it` (`it.a.b`)? Such a path is a
-/// projection out of each element, not a function to apply — see [`wrap_bound_fn_arg`].
-fn path_rooted_at_it(e: &Expr) -> bool {
+/// A dotted path of NAMES not rooted at `it` — `util.double`, `String.upper` — the one
+/// shape [`wrap_bound_fn_arg`] may read as a bound function. A path rooted at `it`
+/// (`it.a.b`) is a projection out of each element; and a receiver that is a call, an
+/// index, or any other expression makes `.f` the projection it says: `xs.map(mk(0, it).sql)`
+/// stays `mk(0, it).sql` rather than becoming `mk(0, it).sql(it)`, which every engine and
+/// the checker refused as "`sql` is a field of this record, not a method".
+fn is_bound_path(e: &Expr) -> bool {
     match e {
-        Expr::Ident { name, .. } => name == "it",
-        Expr::Field { recv, .. } => path_rooted_at_it(recv),
+        Expr::Ident { name, .. } => name != "it",
+        Expr::Field { recv, .. } => is_bound_path(recv),
         _ => false,
     }
 }
@@ -962,18 +971,20 @@ impl Parser {
         while matches!(self.peek_at(k), Tok::Newline) {
             k += 1;
         }
-        let gate = matches!(self.peek_at(k), Tok::Ident(n) if n == "where")
-            && matches!(self.peek_at(k + 1), Tok::Ident(_))
-            && matches!(self.peek_at(k + 2), Tok::Eq);
+        let is_where = matches!(self.peek_at(k), Tok::Ident(n) if n == "where");
+        // `where NAME =`, or `where {a, b} =` — the record binder ADR 0046 gave `let`.
+        let gate = is_where
+            && ((matches!(self.peek_at(k + 1), Tok::Ident(_))
+                && matches!(self.peek_at(k + 2), Tok::Eq))
+                || (matches!(self.peek_at(k + 1), Tok::LBrace)
+                    && self.record_binder_from(self.pos + k + 1)));
         if !gate {
             // NEAR-MISS teaching (the sweep's three natural mistakes all fell
             // through to a generic "no `;`" error that misdescribed them):
             // `where` followed by a NAME but no `=` is a malformed clause —
             // a missing `=`, an attempted destructure, or a stray token —
             // never two statements.
-            if matches!(self.peek_at(k), Tok::Ident(n) if n == "where")
-                && matches!(self.peek_at(k + 1), Tok::Ident(_))
-            {
+            if is_where && matches!(self.peek_at(k + 1), Tok::Ident(_) | Tok::LBrace) {
                 for _ in 0..=k {
                     self.advance();
                 }
@@ -984,8 +995,8 @@ impl Parser {
                     c,
                 )
                 .hint(
-                    "a binding is `where NAME = value`; several separate with commas \
-                     (`where a = 1, b = a + 2`). One `where` per fn, and no destructuring.",
+                    "a binding is `where NAME = value` or `where {a, b} = record`; several \
+                     separate with commas (`where a = 1, b = a + 2`). One `where` per fn.",
                 ));
             }
             return Ok(body);
@@ -995,11 +1006,16 @@ impl Parser {
         }
         let mut bindings: Vec<(String, Expr)> = Vec::new();
         loop {
-            let name = self.ident_name("after `where`")?;
-            self.eat(&Tok::Eq, "after the `where` binding's name")
-                .map_err(|e| e.hint("a `where` binding looks like `where LOOKUP = {…}`."))?;
-            let value = self.expr()?;
-            bindings.push((name, value));
+            if matches!(self.peek(), Tok::LBrace) {
+                let tmp = format!("$rec{}", bindings.len());
+                self.destructure_record(&mut bindings, tmp)?;
+            } else {
+                let name = self.ident_name("after `where`")?;
+                self.eat(&Tok::Eq, "after the `where` binding's name")
+                    .map_err(|e| e.hint("a `where` binding looks like `where LOOKUP = {…}`."))?;
+                let value = self.expr()?;
+                bindings.push((name, value));
+            }
             if matches!(self.peek(), Tok::Comma) {
                 let (cl, cc) = self.pos();
                 self.advance();
@@ -1010,8 +1026,8 @@ impl Parser {
                 // swallow the next statement's first token as a binding name
                 // and caret a perfectly well-formed line (the sweep's
                 // trailing-comma finding).
-                if !(matches!(self.peek(), Tok::Ident(_))
-                    && matches!(self.peek_at(1), Tok::Eq))
+                if !((matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Eq))
+                    || matches!(self.peek(), Tok::LBrace))
                 {
                     return Err(HelixError::new(
                         "expected another binding after the comma in this `where` clause",
@@ -1032,7 +1048,7 @@ impl Parser {
             k2 += 1;
         }
         if matches!(self.peek_at(k2), Tok::Ident(n) if n == "where")
-            && matches!(self.peek_at(k2 + 1), Tok::Ident(_))
+            && matches!(self.peek_at(k2 + 1), Tok::Ident(_) | Tok::LBrace)
         {
             for _ in 0..=k2 {
                 self.advance();
@@ -1423,7 +1439,7 @@ impl Parser {
                             pl,
                             pc,
                         )
-                        .hint("defaults like `= 0`, `= -5`, `= \"\"`, `= true`, or `= missing` are allowed."));
+                        .hint("defaults like `= 0`, `= -5`, `= \"\"`, `= true`, `= missing`, `= []` or `= {}` are allowed — literals, and literal containers of literals."));
                     }
                     Some(d)
                 } else {

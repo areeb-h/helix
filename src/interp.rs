@@ -109,6 +109,18 @@ pub(crate) fn const_default_value(e: &Expr) -> Option<Value> {
             Value::Float(f) => Value::Float(-f),
             _ => return None,
         },
+        Expr::Array(items) => {
+            Value::array(items.iter().map(const_default_value).collect::<Option<Vec<_>>>()?)
+        }
+        Expr::Tuple(items) => Value::Tuple(Rc::new(
+            items.iter().map(const_default_value).collect::<Option<Vec<_>>>()?,
+        )),
+        Expr::Record(fields) => Value::Record(Rc::new(
+            fields
+                .iter()
+                .map(|(k, v)| Some((Symbol::intern(k), const_default_value(v)?)))
+                .collect::<Option<Vec<_>>>()?,
+        )),
         _ => return None,
     })
 }
@@ -748,6 +760,23 @@ impl Interp {
                 // `position` is excluded because it has no second reading to offer: the
                 // parser desugars it (`desugar_position`) before a `fn position` could be
                 // seen here, so the VM emits no split for it and this must not either.
+                // A FUNCTION-VALUED FIELD ANSWERS FIRST on a record whose type does not own
+                // the name — method, then field, then free fn (ADR 0045), for EVERY name.
+                // The comprehension shortcut below used to take `q.all(1)` to the
+                // comprehension evaluator whenever no free `fn all` existed, and refuse it
+                // there, while `q.count(1)` reached the field: one rule, missing in one place.
+                if let Value::Record(fields) = &recv_v
+                    && !crate::registry::type_owns_method("Record", name)
+                    && let Some((_, Value::Function(h))) =
+                        fields.iter().find(|(s, _)| s.as_str() == name)
+                {
+                    let h = h.clone();
+                    let mut vals = Vec::with_capacity(args.len());
+                    for a in args {
+                        vals.push(self.eval(a)?);
+                    }
+                    return self.call_function(name, &h, vals, *line, *col);
+                }
                 let comp = matches!(
                     name.as_str(),
                     "map" | "filter" | "where" | "reduce" | "scan" | "any" | "all"
@@ -804,13 +833,6 @@ impl Interp {
                 if let Some(g) = self.ufcs_decl_fn(free)
                     && ufcs_fallback_applies(&recv_v, name)
                 {
-                    if let Value::Record(fields) = &recv_v
-                        && let Some((_, Value::Function(h))) =
-                            fields.iter().find(|(s, _)| s.as_str() == name)
-                    {
-                        let h = h.clone();
-                        return self.call_function(name, &h, vals, *line, *col);
-                    }
                     let mut fargs = Vec::with_capacity(vals.len() + 1);
                     fargs.push(recv_v);
                     fargs.extend(vals);
@@ -823,18 +845,10 @@ impl Interp {
                     Err(e) if ufcs_fallback_applies(&recv_v, name) => {
                         // Dispatch failed on a type that does not own the name, and NO
                         // `fn` of this name is declared — that case never gets here, the
-                        // route above took it. What is left: a function-valued FIELD with
-                        // no free `fn` to compete with, then a builtin of the name, then
-                        // the method error with its did-you-mean intact. The receiver is
-                        // not prepended for a field: a field-held function is a plain
-                        // value, not a method.
-                        if let Value::Record(fields) = &recv_v
-                            && let Some((_, Value::Function(g))) =
-                                fields.iter().find(|(s, _)| s.as_str() == name)
-                        {
-                            let g = g.clone();
-                            return self.call_function(name, &g, vals, *line, *col);
-                        }
+                        // route above took it. What is left: a builtin of the name, then
+                        // the method error with its did-you-mean intact. A function-valued
+                        // FIELD was answered before the comprehension route, above — the
+                        // one place the rule lives now.
                         if crate::registry::is_builtin_name(name) {
                             let mut bargs = Vec::with_capacity(vals.len() + 1);
                             bargs.push(recv_v);
@@ -978,7 +992,7 @@ impl Interp {
             // `try EXPR` — evaluate `EXPR`, catching any runtime error into a record.
             Expr::Try { expr, .. } => Ok(match self.eval(expr) {
                 Ok(v) => try_ok(v),
-                Err(e) => try_err(e.message),
+                Err(e) => try_err(e.message, e.hint),
             }),
             Expr::Match { scrutinee, arms, line, col } => {
                 let v = self.eval(scrutinee)?;
@@ -1571,11 +1585,13 @@ struct TryKeys {
     ok: Symbol,
     value: Symbol,
     error: Symbol,
+    help: Symbol,
 }
 static TRY_KEYS: std::sync::LazyLock<TryKeys> = std::sync::LazyLock::new(|| TryKeys {
     ok: Symbol::intern("ok"),
     value: Symbol::intern("value"),
     error: Symbol::intern("error"),
+    help: Symbol::intern("help"),
 });
 
 /// The result record of `try EXPR` on success: `{ok: true, value: v, error: missing}`.
@@ -1586,17 +1602,22 @@ pub(crate) fn try_ok(v: Value) -> Value {
         (k.ok, Value::Bool(true)),
         (k.value, v),
         (k.error, Value::Missing),
+        (k.help, Value::Missing),
     ]))
 }
 
 /// The result record of `try EXPR` on a runtime error:
 /// `{ok: false, value: missing, error: <message>}`.
-pub(crate) fn try_err(message: String) -> Value {
+/// `help` is the error's hint — where every actionable spelling lives — or `missing`. A
+/// program could read the message and not the help, so no test could assert that the
+/// guidance exists (field build); now it can.
+pub(crate) fn try_err(message: String, help: Option<String>) -> Value {
     let k = &*TRY_KEYS;
     Value::Record(Rc::new(vec![
         (k.ok, Value::Bool(false)),
         (k.value, Value::Missing),
         (k.error, Value::Str(Rc::new(message))),
+        (k.help, help.map(|h| Value::Str(Rc::new(h))).unwrap_or(Value::Missing)),
     ]))
 }
 

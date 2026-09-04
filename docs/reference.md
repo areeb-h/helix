@@ -4098,6 +4098,16 @@ Blocks until a client arrives, any conn in conns is readable, or the timeout end
 
 ## Connection methods
 
+### `execute(sql, params?)`
+
+Run one statement that may write on a connection opened with "write"; returns {affected, rows}.
+
+**Note:** The same verb as `postgres_execute`, on the reused socket (ADR 0047): `affected` is the count from the server's completion tag, `rows` a DataFrame of what a `RETURNING` clause returned. On a connection opened without "write" it is refused BEFORE a byte is sent — the session is read-only from its first byte — and the help names the spelling that opens a writable one: `postgres_open(url, "write")`, which needs the `db-write` capability. One statement is one transaction. Keywords: sql, postgres, insert, update, delete, write, returning, affected.
+
+```
+>>> postgres_open(url, "write").execute("insert into people (name) values ($1) returning id", ["Ada"]).affected
+```
+
 ### `query(sql, params?)`
 
 Run one read-only statement on this connection; returns a DataFrame.

@@ -4,6 +4,11 @@
 
 ### Added
 
+- **A default may be a literal container of literals** — `= {}`, `= []`, `= (1, 2)`,
+  `= {retries: 3}` — on a `fn` and on a lambda. An options record could not have an empty
+  default before, and there was no reading under which `{}` is not a constant. Anything
+  not a literal inside is still refused, with the same sentence.
+
 - **Lambda defaults, and function values that keep them.** `(x, n = 10) => x + n` declares
   a trailing default exactly as a `fn` does — a literal constant, defaults last, parsed by
   the same parameter parser — and a call short of the parameters by at most that many is
@@ -200,6 +205,38 @@
 
 ### Fixed
 
+- **A function-valued field answers before the comprehension and frame-verb families, on
+  every engine.** ADR 0045's order — method, field, free fn — held for `count`, `find`,
+  `save`, and not for `all`, `map`, `where`, `filter`, `any`, `reduce`, `select`, `group`,
+  `with`, `join`: the compiled families only reached the dynamic method op when a free fn
+  of the name was declared, and the walker's comprehension shortcut fired first. So
+  `User.all(db)` was refused on all three engines with "a Record has no method `all`", and
+  `q.select(1)` was refused by the VM and answered by the walker — a three-engine divergence
+  a field build caught. Every family now takes the receiver split whether or not a fn is
+  declared, and the walker consults the field before its shortcut. Pinned by the corpus
+  program `rec_field_precedence` under both DataFrame backends.
+- **`xs.map(mk(0, it).sql)` stays a projection.** The implicit-`it` rewrite that reads a
+  bound path (`xs.map(util.double)`) as `util.double(it)` also fired on a receiver that is
+  a call, so `.sql` became `.sql(it)` and was refused as "a field, not a method" — on every
+  engine and in the checker. Only a path of names is a bound function now.
+- **`where {a, b} = spec` destructures** in a `where` clause (ADR 0035 meets ADR 0046), and
+  a malformed clause is named as one — with the destructuring shape in its help — rather
+  than falling into "expected end of line after statement".
+- **`try` carries the help.** `{ok, value, error, help}`: `help` is the error's hint, where
+  every actionable spelling lives, or `missing`. No program could read it (field build), so
+  no test could assert the guidance existed. The record is one field wider; a program that
+  printed a whole `try` record shows it.
+- **A capability refusal names the grant that is missing.** A write needs `db-write` and
+  `net`; with `HELIX_ALLOW_DB=write` set and the network not granted, the refusal said
+  `db-write` — the grant the program had. It says `net` now, with `net`'s help.
+- **`helix doc Connection` lists `execute`.** The write verb was undiscoverable from the
+  type; the method table had `query` alone.
+- **Two things the new `help` field found on its first day.** The frame's own
+  unknown-method arm answered "DataFrame methods: …" (every name) where the general
+  builder answers "no similar method — `helix doc DataFrame` lists all DataFrame methods",
+  and the two engines reached different arms for `df.map(1)` through a parameter: the
+  message agreed, the help did not, and nothing could see it. One wording now. And a parser
+  hint recommended `p.0` / `p.1` for a tuple, which is not a spelling Helix has — `p[0]`.
 - **A function is equal to itself.** `f == f` was false, `[w].contains(w)` was false,
   `[w, w].unique()` had two elements and `assert_eq(f, f)` failed — every function fell
   through equality to `false`, on all three engines. A function now equals a function of

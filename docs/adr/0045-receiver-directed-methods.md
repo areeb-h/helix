@@ -239,3 +239,18 @@ a field wins over a same-named free fn, and a shadowed name is not the fn. Tests
 `ufcs_is_decided_by_the_receiver_at_every_layer` and
 `a_function_valued_field_is_callable_with_method_syntax`.
 
+## Addendum 2026-09-04 — the order holds for the compiled families too
+
+The Decision's order — a real method, then a function-valued field, then a free `fn` —
+was implemented in the dynamic method op and reached by the compiled families (comprehension
+verbs, frame verbs, `join`) only when a free `fn` of the name was declared: the receiver
+split that hands a non-matching receiver to that op was taken on that condition alone. So
+`q.count(1)` reached a record's field while `q.all(1)` did not, and `q.select(1)` was
+refused by the VM and answered by the walker, whose own comprehension shortcut skipped the
+field in a different way. A field build writing `User.all(db)` found it.
+
+Every family now takes the split whether or not a fn is declared, and the walker consults
+a function-valued field — on a record whose type does not own the name — before its
+comprehension shortcut. One rule, stated once per engine, pinned by the corpus program
+`rec_field_precedence` under both DataFrame backends.
+

@@ -3037,11 +3037,16 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::TryErr => {
                 // Reached via an unwind, which pushed the error message: wrap it in
                 // the err-record. (The handler was already popped during the unwind.)
+                // The unwind pushed the message, then the help (or `missing`).
+                let help = match stack.pop() {
+                    Some(Value::Str(s)) => Some((*s).clone()),
+                    _ => None,
+                };
                 let msg = match stack.pop().unwrap() {
                     Value::Str(s) => (*s).clone(),
                     other => other.to_string(),
                 };
-                stack.push(crate::interp::try_err(msg));
+                stack.push(crate::interp::try_err(msg, help));
             }
             Op::Pop => {
                 stack.pop();
@@ -3062,6 +3067,10 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     let tf = frames.len() - 1;
                     frames[tf].ip = h.catch_ip;
                     stack.push(Value::Str(std::rc::Rc::new(e.message)));
+                    stack.push(match e.hint {
+                        Some(h) => Value::Str(std::rc::Rc::new(h)),
+                        None => Value::Missing,
+                    });
                 }
                 // No active `try`: propagate out of the VM as a real error.
                 None => return Err(e),

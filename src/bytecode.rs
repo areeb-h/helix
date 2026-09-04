@@ -744,7 +744,7 @@ impl Compiler {
         recv: &Expr,
         name: &str,
         args: &[Expr],
-        fidx: u32,
+        ufcs: Option<u32>,
         line: usize,
         col: usize,
     ) -> R<()> {
@@ -754,6 +754,7 @@ impl Compiler {
         b.emit(Op::LoadLocal(slot), line, col);
         b.emit(Op::ReceiverIs(RecvClass::Iterable), line, col);
         let jufcs = b.emit(Op::JumpIfFalse(0), line, col);
+        let class_at = b.code.len() as u32;
         // The comprehension reading, over the receiver already in the local: a
         // synthesized `Ident` resolves to that slot by name, so the receiver expression
         // is compiled ONCE and its side effects happen once whichever branch runs.
@@ -769,9 +770,33 @@ impl Compiler {
         // The ordinary path, not a direct call — see `method_with_fallback`. A receiver
         // that is not iterable may still OWN this name (a String's `map`, a Dict's
         // `filter`), and the tree-walker gives it its own method here.
-        self.method_with_fallback(b, slot, name, args, Some(fidx), line, col)?;
+        let mut jends = vec![jend];
+        if ufcs.is_some() {
+            self.method_with_fallback(b, slot, name, args, ufcs, line, col)?;
+        } else {
+            // NO FREE FN: the method op only for a record holding a function under this
+            // name — where ADR 0045's order says the field answers. Any other receiver
+            // jumps BACK to the first reading, which raises its own error for it: the
+            // walker's sentence, unchanged. (Compiling the arguments for the method op
+            // regardless turned `x.where(it > 1)` on an Int into "`it` is not defined"
+            // on this engine alone — the corpus caught it.)
+            b.emit(Op::LoadLocal(slot), line, col);
+            b.emit(
+                Op::ReceiverIs(RecvClass::FieldFn(crate::symbol::Symbol::intern(name))),
+                line,
+                col,
+            );
+            let jplain = b.emit(Op::JumpIfFalse(0), line, col);
+            self.method_with_fallback(b, slot, name, args, None, line, col)?;
+            jends.push(b.emit(Op::Jump(0), line, col));
+            let plain_at = b.code.len() as u32;
+            b.code[jplain] = Op::JumpIfFalse(plain_at);
+            b.emit(Op::Jump(class_at), line, col);
+        }
         let end = b.code.len() as u32;
-        b.code[jend] = Op::Jump(end);
+        for j in jends {
+            b.code[j] = Op::Jump(end);
+        }
         Ok(())
     }
 
@@ -877,7 +902,7 @@ impl Compiler {
         name: &str,
         args: &[Expr],
         class: RecvClass,
-        fidx: u32,
+        ufcs: Option<u32>,
         line: usize,
         col: usize,
         on_class: &mut dyn FnMut(&mut Self, &mut Builder, u32) -> R<()>,
@@ -888,13 +913,38 @@ impl Compiler {
         b.emit(Op::LoadLocal(slot), line, col);
         b.emit(Op::ReceiverIs(class), line, col);
         let jufcs = b.emit(Op::JumpIfFalse(0), line, col);
+        let class_at = b.code.len() as u32;
         on_class(self, b, slot)?;
         let jend = b.emit(Op::Jump(0), line, col);
         let ufcs_at = b.code.len() as u32;
         b.code[jufcs] = Op::JumpIfFalse(ufcs_at);
-        self.method_with_fallback(b, slot, name, args, Some(fidx), line, col)?;
+        let mut jends = vec![jend];
+        if ufcs.is_some() {
+            self.method_with_fallback(b, slot, name, args, ufcs, line, col)?;
+        } else {
+            // NO FREE FN: the method op only for a record holding a function under this
+            // name — where ADR 0045's order says the field answers. Any other receiver
+            // jumps BACK to the first reading, which raises its own error for it: the
+            // walker's sentence, unchanged. (Compiling the arguments for the method op
+            // regardless turned `x.where(it > 1)` on an Int into "`it` is not defined"
+            // on this engine alone — the corpus caught it.)
+            b.emit(Op::LoadLocal(slot), line, col);
+            b.emit(
+                Op::ReceiverIs(RecvClass::FieldFn(crate::symbol::Symbol::intern(name))),
+                line,
+                col,
+            );
+            let jplain = b.emit(Op::JumpIfFalse(0), line, col);
+            self.method_with_fallback(b, slot, name, args, None, line, col)?;
+            jends.push(b.emit(Op::Jump(0), line, col));
+            let plain_at = b.code.len() as u32;
+            b.code[jplain] = Op::JumpIfFalse(plain_at);
+            b.emit(Op::Jump(class_at), line, col);
+        }
         let end = b.code.len() as u32;
-        b.code[jend] = Op::Jump(end);
+        for j in jends {
+            b.code[j] = Op::Jump(end);
+        }
         Ok(())
     }
 
@@ -1747,59 +1797,24 @@ impl Compiler {
                     // mentions a `@column`, which can only be a frame operation, while a
                     // join key may be written bare (`samples.join(meta, sample_id)`), so
                     // this route fires on ordinary arguments too.
-                    if let Some(fidx) = self.ufcs_fn_slot(b, free) {
-                        let (ar, l, c) = (args.to_vec(), *line, *col);
-                        return self.compile_recv_split(
-                            b,
-                            recv,
-                            name,
-                            args,
-                            RecvClass::Frame,
-                            fidx,
-                            l,
-                            c,
-                            &mut move |s: &mut Self, b: &mut Builder, slot: u32| {
-                                s.df_join_from_slot(b, slot, &ar, l, c)
-                            },
-                        );
-                    }
-                    // Evaluate the receiver first (matching the tree-walker's order, so
-                    // its side effects run before any error).
-                    self.compile_expr(b, recv)?;
-                    match args.first() {
-                        Some(other) => {
-                            self.compile_expr(b, other)?;
-                            let jl = std::rc::Rc::new(b.in_scope_locals());
-                            let ju = std::rc::Rc::new(Builder::column_arg_captures(b, &args[1..]));
-                            b.emit(
-                                Op::DfJoin(std::rc::Rc::new(DfJoinData {
-                                    spec: std::rc::Rc::new(args[1..].to_vec()),
-                                    locals: jl,
-                                    upvals: ju,
-                                })),
-                                *line,
-                                *col,
-                            );
-                        }
-                        // No operand to join with. Emit the same diagnostic the
-                        // tree-walker produces, keeping the compiler total (no
-                        // `Unsupported` for a type-checked program).
-                        None => {
-                            b.emit(
-                                Op::raise(
-                                    std::rc::Rc::new(
-                                        "`join` needs a DataFrame to join with".to_string(),
-                                    ),
-                                    std::rc::Rc::new(
-                                        "e.g. `samples.join(meta, sample_id)`.".to_string(),
-                                    ),
-                                ),
-                                *line,
-                                *col,
-                            );
-                        }
-                    }
-                    return Ok(());
+                    // As the other families: the split, fn declared or not. A receiver
+                    // that is not a frame reaches the dynamic method op, where a record's
+                    // `join` field answers before a free fn.
+                    let ufcs = self.ufcs_fn_slot(b, free);
+                    let (ar, l, c) = (args.to_vec(), *line, *col);
+                    return self.compile_recv_split(
+                        b,
+                        recv,
+                        name,
+                        args,
+                        RecvClass::Frame,
+                        ufcs,
+                        l,
+                        c,
+                        &mut move |s: &mut Self, b: &mut Builder, slot: u32| {
+                            s.df_join_from_slot(b, slot, &ar, l, c)
+                        },
+                    );
                 }
                 // Same Unknown-receiver rule as step 1: `g.mean(@v)` through an
                 // untyped parameter is unambiguously a GroupBy aggregation (the
@@ -1911,12 +1926,7 @@ impl Compiler {
                     if matches!(n, "where" | "filter") {
                         let held =
                             Expr::Ident { name: Self::SPLIT_RECV.to_string(), line: l, col: c };
-                        match ufcs {
-                            Some(fidx) => {
-                                self.compile_comprehension_split(b, &held, &nm, &ar, fidx, l, c)?
-                            }
-                            None => self.compile_comprehension(b, &held, &nm, &ar, l, c)?,
-                        }
+                        self.compile_comprehension_split(b, &held, &nm, &ar, ufcs, l, c)?;
                     } else {
                         self.method_with_fallback(b, slot, &nm, &ar, ufcs, l, c)?;
                     }
@@ -1933,7 +1943,7 @@ impl Compiler {
                     && let Some(fidx) = self.ufcs_fn_slot(b, free)
                 {
                     return self
-                        .compile_comprehension_split(b, recv, name, args, fidx, *line, *col);
+                        .compile_comprehension_split(b, recv, name, args, Some(fidx), *line, *col);
                 }
                 if !self.no_fuse
                     && matches!(n, "map" | "filter" | "where" | "reduce" | "count")
@@ -1941,11 +1951,29 @@ impl Compiler {
                 {
                     return self.compile_fused(b, e, plan, *line, *col);
                 }
-                if matches!(n, "map" | "filter" | "where" | "reduce" | "scan") {
-                    return self.compile_comprehension(b, recv, name, args, *line, *col);
-                }
-                if matches!(n, "any" | "all") {
-                    return self.compile_any_all(b, recv, name, args, *line, *col);
+                // ALWAYS THE SPLIT, fn declared or not: a receiver that is not iterable goes
+                // to the dynamic method op, where a record's function-valued field answers
+                // before a free fn (ADR 0045's order). The plain comprehension refused
+                // `q.all(1)` on a record holding an `all` field — "a Record has no method
+                // `all`" — on the VM, and the walker refused it in its own shortcut, which
+                // is how a field build found `count` reaching the field and `all` not.
+                if matches!(n, "map" | "filter" | "where" | "reduce" | "scan" | "any" | "all") {
+                    // A receiver KNOWN to be an array — by the checker, or by its shape
+                    // (`range(…)`, an array literal) — takes the plain route: the split
+                    // would answer "iterable" every time, and the JIT's native folds
+                    // (`reduce`/`scan` over a range) read the receiver EXPRESSION, which
+                    // the split hides behind a slot. Six VM tests said so.
+                    let known_array = matches!(self.recv_type(recv), Some(Type::Array(_)))
+                        || matches!(&**recv, Expr::Array(_))
+                        || matches!(&**recv, Expr::Call { name: rn, .. } if rn == "range");
+                    if known_array {
+                        if matches!(n, "any" | "all") {
+                            return self.compile_any_all(b, recv, name, args, *line, *col);
+                        }
+                        return self.compile_comprehension(b, recv, name, args, *line, *col);
+                    }
+                    return self
+                        .compile_comprehension_split(b, recv, name, args, None, *line, *col);
                 }
                 if n == "position" {
                     return self.compile_position(b, recv, args, *line, *col);
@@ -1959,30 +1987,26 @@ impl Compiler {
                 // works; anything else raises). The type checker already rejects
                 // `array.select(...)`, so a wrong concrete type can't reach here.
                 if matches!(n, "select" | "group" | "with") {
-                    // …unless the program declares `fn select`/`fn group`/`fn with`, in
-                    // which case the receiver decides and only run time knows it. The
-                    // comment above used to say the checker rejects every other concrete
-                    // type; it accepts a record now, because a user's own verb is a real
-                    // reading of this call.
-                    if let Some(fidx) = self.ufcs_fn_slot(b, free) {
-                        let (nm, ar) = (name.to_string(), args.to_vec());
-                        let (l, c) = (*line, *col);
-                        return self.compile_recv_split(
-                            b,
-                            recv,
-                            name,
-                            args,
-                            RecvClass::Frame,
-                            fidx,
-                            l,
-                            c,
-                            &mut move |s: &mut Self, b: &mut Builder, slot: u32| {
-                                s.df_verb_from_slot(b, slot, &nm, &ar, false, true, l, c)
-                            },
-                        );
-                    }
-                    return self
-                        .compile_df_verb_guarded(b, recv, name, args, false, true, *line, *col);
+                    // The split whether or not a fn is declared: a receiver that is not a
+                    // frame reaches the dynamic method op, where a record's `select` field
+                    // answers. The guarded verb alone refused it on the VM while the walker
+                    // answered — a three-engine divergence a field build caught.
+                    let ufcs = self.ufcs_fn_slot(b, free);
+                    let (nm, ar) = (name.to_string(), args.to_vec());
+                    let (l, c) = (*line, *col);
+                    return self.compile_recv_split(
+                        b,
+                        recv,
+                        name,
+                        args,
+                        RecvClass::Frame,
+                        ufcs,
+                        l,
+                        c,
+                        &mut move |s: &mut Self, b: &mut Builder, slot: u32| {
+                            s.df_verb_from_slot(b, slot, &nm, &ar, false, true, l, c)
+                        },
+                    );
                 }
 
                 // 4. Everything else is a value-method with evaluated args —

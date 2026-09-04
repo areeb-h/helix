@@ -1171,6 +1171,7 @@ impl Checker {
                     ("ok".to_string(), Type::Bool),
                     ("value".to_string(), vt),
                     ("error".to_string(), Type::String),
+                    ("help".to_string(), Type::String),
                 ]))
             }
             Expr::Match { scrutinee, arms, .. } => {
