@@ -547,16 +547,34 @@ pub fn type_owns_method(type_name: &str, method: &str) -> bool {
         || map.get(type_name).is_some_and(|m| m.contains(method))
 }
 
-/// Is this name a method on ANY receiver type (including the universal ones)?
+/// The receiver types that OWN `name` as a real method — and so never fall back to a free
+/// `fn` of that name in method position — as a list a call site can keep.
 ///
-/// The gate on the UFCS fallback in the parser: a name that some type answers must keep
-/// meaning "method call", so a misspelled or wrong-receiver method still produces the
-/// method error and its did-you-mean, and no call that resolves today changes meaning.
-/// Only a name no type claims can be a free function called in method position.
-pub fn is_any_method(name: &str) -> bool {
-    UNIVERSAL_METHODS.contains(&name)
-        || type_method_tables().iter().any(|(_, t)| t.contains(&name))
+/// ONE DEFINITION, TWO READERS. `interp::ufcs_fallback_applies` answers per call for the
+/// walker and for the VM's failure arm, where cost does not matter. The VM's
+/// before-dispatch route keeps this list in its `MethodData` and scans it — a few short
+/// string compares — because the alternative was `type_owns_method`'s two hash lookups on
+/// every method-position call to a declared fn, measured as most of a 40 ns gap on a
+/// Record receiver.
+///
+/// `None` means the name is universal (`is_missing`, `to_json`): every type owns it, so
+/// there is no receiver for which UFCS could apply. `Node` is listed when the name is one
+/// of the autodiff tape's, for the reason the walker used to check `is_tape_method`.
+pub fn ufcs_owners(name: &str) -> Option<std::rc::Rc<[&'static str]>> {
+    if UNIVERSAL_METHODS.contains(&name) {
+        return None;
+    }
+    let mut owners: Vec<&'static str> = type_method_tables()
+        .iter()
+        .filter(|(_, methods)| methods.contains(&name))
+        .map(|(t, _)| *t)
+        .collect();
+    if crate::autodiff::is_tape_method(name) {
+        owners.push("Node");
+    }
+    Some(owners.into())
 }
+
 
 #[cfg(test)]
 mod tests {

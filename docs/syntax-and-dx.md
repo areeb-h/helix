@@ -257,13 +257,20 @@ req2    = { ...req, headers: merged, query: parsed }     # add/replace several
 ## Proposal 8 — Function values are callable `(rec.handler)(x)` ✅ *shipped*
 
 A function stored in a record/array field, or a `=>` lambda in a variable, is a
-first-class value and is **called with ordinary call syntax**. When the callee is an
-expression rather than a bare name, parenthesise it so it isn't read as a method call:
+first-class value and is **called with ordinary call syntax**. Since 0.9.1 the field form
+needs no parentheses: `rec.f(args)` calls the function held in field `f`.
 ```helix
 route = { path: "/x", handler: req => { status: 200, text: req.path } }
-resp  = (route.handler)(req)          # call the function in the field …
-resp  = route.handler(req)            # … vs. this: a *method* `handler` on `route`
+resp  = route.handler(req)            # calls the function in the field
+resp  = (route.handler)(req)          # the same call, parenthesised — still valid
 ```
+**Precedence** is what makes this safe, and it is fixed: a *real* Record method
+(`get`/`expect`/`has`/`keys`/`values`/`items`) wins over a same-named field, so
+`{keys: f}.keys()` is still the key list; then a function-valued field; then a free `fn`
+of that name (UFCS). A field holding a non-function is still refused, with the hint to read
+it without parentheses. Until 0.9.1 both halves refused `rec.f(args)` outright, with a hint
+that said, in its own words, "the object-API spelling `r.go(3)` is what everyone writes
+first" — the rule that blocked `User.find(1)` in a library without importing every verb.
 This is what makes record-of-handlers dispatch (a router, a plugin table, a strategy
 map) expressible in-model. Full rationale and the method-vs-value disambiguation are in
 [ADR 0005](adr/0005-syntax-conventions.md); the VM path (`Op::CallValue`,

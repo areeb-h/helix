@@ -204,3 +204,38 @@ read from `env`, which already answers it.
   the first as an outright VM-vs-tree-walker divergence. The first version of the
   once-only check did NOT go red, because it watched only the branch that never received
   the duplicate; it watches both sides now. A guard that has never failed is a claim.
+
+## Addendum 2026-09-02 — the last parse-time decision, removed
+
+The Decision above ruled that a method call is resolved by its receiver at run time, and
+the implementation left one exception standing: the parser still rewrote `x.f(a)` into
+`f(x, a)` whenever `f` was a declared fn that no type owned. That was correct for every
+program it could see and wrong for the one it could not — a record whose own field `f`
+holds a function could never win against a free `fn f` — and it was blind to a PyObject
+receiver, which the parser's own comment recorded as "the narrow residue".
+
+That rewrite is gone. What replaced it, layer by layer:
+
+- **The parser decides nothing.** Every method call is a method node.
+- **After the checker** (`src/ufcs.rs`): where the receiver's type is PROVEN and rules the
+  method reading out — not `Unknown`, not a `Record` (a field of that name may hold a
+  function), not a frame, and not a type that owns the name as a real method — the call
+  becomes the free call it is. The same rewrite, made where the receiver is actually known.
+  This is what keeps the JIT fusing: its kernel analysis admits a `Call` and not a
+  `Method`, and `range(0, n).map(it.f(1))` measured **25 → 108 ns per element** with the
+  rewrite removed and nothing in its place. `helix jit-explain` now reports "1 kernel site
+  offered, 1 compiled" for both spellings.
+- **At run time**, both engines, same order: a real method of the receiver's type; else a
+  function-valued field; else the declared fn with the receiver as its first argument. The
+  VM decides by *peeking* at the receiver before dispatch — no failed dispatch, no error
+  object built — scans a per-site list of the types that own the name (no hashing),
+  compares field names as interned symbols (one `u32` per field, the way `Record` was
+  designed), and enters through the same entry a direct call takes. Measured on one
+  binary, interleaved min-of-15: Int receiver **0.976×**, Record receiver **1.021×** —
+  `x.f(y)` costs what `f(x, y)` costs.
+
+Precedence is fixed and pinned from both sides: `{keys: f}.keys()` is still the key list,
+a field wins over a same-named free fn, and a shadowed name is not the fn. Tests:
+`ufcs_is_decided_by_the_receiver_at_every_layer` and
+`a_function_valued_field_is_callable_with_method_syntax`.
+

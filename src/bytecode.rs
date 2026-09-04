@@ -661,6 +661,8 @@ impl Compiler {
                 // Synthesized, and `is_missing` is universal: dispatch cannot fail, so
                 // there is nothing for a fallback to catch.
                 ufcs_fn: None,
+                ufcs_owners: None,
+                name_sym: crate::symbol::Symbol::intern("is_missing"),
             })),
             line,
             col,
@@ -803,6 +805,8 @@ impl Compiler {
                 nargs: args.len() as u32,
                 ufcs_name: std::cell::OnceCell::new(),
                 ufcs_fn,
+                ufcs_owners: crate::registry::ufcs_owners(name),
+                name_sym: crate::symbol::Symbol::intern(name),
             })),
             line,
             col,
@@ -966,7 +970,7 @@ impl Compiler {
     /// [`Self::resolve`]'s precedence, made read-only and narrowed to `NameRef::Func`: a
     /// declared top-level `fn`, shadowed by nothing. The narrowing is the point — a
     /// local, an upvalue, or a global holding a function VALUE is deliberately refused,
-    /// because the parse-time rewrite refuses it too (`self.fn_names.contains`), and the
+    /// because the type-directed pass refuses it too (`src/ufcs.rs`), and the
     /// rule stays "a declared function can be called in method position" rather than
     /// widening to "anything callable can". An alias (`h = id`) is a global, so `x.h()`
     /// declines here exactly as the walker's `decl_name` test declines it.
@@ -1988,6 +1992,8 @@ impl Compiler {
                         nargs: args.len() as u32,
                         ufcs_name: std::cell::OnceCell::new(),
                         ufcs_fn: self.ufcs_fn_slot(b, free),
+                        ufcs_owners: crate::registry::ufcs_owners(name),
+                        name_sym: crate::symbol::Symbol::intern(name),
                     })),
                     *line,
                     *col,

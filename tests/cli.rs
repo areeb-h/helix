@@ -4735,10 +4735,18 @@ fn day_one_paper_cuts_point_at_the_spelling_that_works() {
     // (a) `r.go(3)` — the object-API spelling everyone writes first. The old error named
     // `get`/`has`/`keys`/`values`/`items`, none of which is the fix.
     let rec = "r = {go: (n => n * 2), size: 3}\n";
-    let (_, err, code) = run_source(&format!("{rec}print(r.go(3))\n"), &[], "rec_fn_field");
-    assert_eq!(code, Some(1), "stderr: {err}");
-    assert!(err.contains("`go` is a field of this record, not a method"), "{err}");
-    assert!(err.contains("(rec.go)(…)"), "the help must name a working spelling: {err}");
+    // THIS PAPER CUT IS CLOSED. `r.go(3)` used to exit 1 with a hint naming `(rec.go)(…)`
+    // — the language admitting that the object-API spelling everyone writes first did
+    // not work. Since 0.9.1 a function-valued field is callable in method position, so
+    // the assertion is that it answers, and answers what the parenthesised spelling
+    // answers. (`a_function_valued_field_is_callable_with_method_syntax` holds the
+    // precedence that makes that safe.)
+    let (out, err, code) =
+        run_source(&format!("{rec}print(r.go(3), (r.go)(3))\n"), &[], "rec_fn_field");
+    assert_eq!(code, Some(0), "stderr: {err}");
+    let parts: Vec<&str> = out.split_whitespace().collect();
+    assert_eq!(parts.len(), 2, "{out}");
+    assert_eq!(parts[0], parts[1], "the two spellings must be the same call: {out}");
     // A non-function field says the other true thing: drop the parentheses.
     let (_, err, code) = run_source(&format!("{rec}print(r.size())\n"), &[], "rec_val_field");
     assert_eq!(code, Some(1), "stderr: {err}");
@@ -15150,6 +15158,180 @@ fn dict_get_takes_a_default_and_agrees_with_record_on_absence() {
             "{label}: {err}"
         );
     }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// `rec.f(args)` calls a function held in field `f` — with the precedence that makes it
+/// safe, on all three engines.
+///
+/// Both halves refused this with a hint that said, in its own words, "the object-API
+/// spelling `r.go(3)` is what everyone writes first". It is the single rule that blocked
+/// `User.find(1)` in a library without importing every verb.
+///
+/// PRECEDENCE IS THE WHOLE TEST. The order is: a real Record method, then a function-valued
+/// field, then a free `fn` of that name (UFCS). Each boundary is asserted from both sides,
+/// because the failure on either side is silent — `{keys: f}.keys()` quietly returning
+/// `f()` instead of the key list, or a field quietly losing to a free function that happens
+/// to share its name.
+///
+/// The VM has two representations of a stored function — a plain `VmFunc` and a `Closure`
+/// carrying upvalues — and they take different paths in the fallback, so a capturing
+/// lambda is a separate case rather than a variation.
+#[test]
+fn a_function_valued_field_is_callable_with_method_syntax() {
+    let dir = std::env::temp_dir().join(format!("hx_fc_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("f.helix");
+
+    for (label, src, want) in [
+        // The reported case.
+        ("lambda-field", "w = {f: (x) => x + 1}\nprint(w.f(1))\n", "2"),
+        // A declared fn stored in a field — a `VmFunc` on the VM.
+        ("named-fn-field", "fn inc(x) = x + 1\nw = {f: inc}\nprint(w.f(1))\n", "2"),
+        // A CAPTURING lambda — a `Closure` with upvalues on the VM, the other path.
+        ("closure-field", "fn mk(k) = {f: (x) => x + k}\nprint(mk(10).f(1))\n", "11"),
+        ("two-args", "w = {f: (a, b) => a * b}\nprint(w.f(3, 4))\n", "12"),
+        ("zero-args", "w = {f: () => 7}\nprint(w.f())\n", "7"),
+        // The two spellings are the same call.
+        ("same-as-parenthesised", "w = {f: (x) => x * 2}\nprint(w.f(4) == (w.f)(4))\n", "true"),
+        // Through a parameter, so the checker sees Unknown and the RUNTIME decides —
+        // the library shape, and the path where the two engines' arms actually run.
+        ("via-parameter", "fn call(r) = r.f(5)\nprint(call({f: (x) => x - 1}))\n", "4"),
+        // PRECEDENCE, side 1: a REAL Record method wins over a same-named field. If the
+        // field won, this would print `0` — a silent change of meaning for every record
+        // that happens to have a field called `keys`.
+        ("real-method-wins", "w = {keys: (x) => 0}\nprint(w.keys())\n", "[\"keys\"]"),
+        ("real-method-wins-get", "w = {get: (k) => 0, a: 9}\nprint(w.get(\"a\"))\n", "9"),
+        // PRECEDENCE, side 2: the field wins over a FREE function of the same name. UFCS
+        // would pass the record as the first argument and answer 100.
+        ("field-beats-ufcs", "fn f(r, x) = 100\nw = {f: (x) => x + 1}\nprint(w.f(1))\n", "2"),
+        // …and UFCS still works when there is no such field.
+        ("ufcs-still-works", "fn area(r) = r.w * r.h\nprint({w: 2, h: 3}.area())\n", "6"),
+        // The field's function may itself use the record, passed explicitly.
+        ("explicit-self", "w = {n: 3, f: (r) => r.n * 2}\nprint(w.f(w))\n", "6"),
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "{label}: jit vs vm: {ej} / {ev}");
+        assert_eq!((cv, &vm), (ct, &tw), "{label}: vm vs tree-walker: {ev} / {et}");
+        assert_eq!(cj, Some(0), "{label}: {ej}");
+        assert_eq!(jit.trim(), want, "{label}");
+    }
+
+    // The refusals — and the engines must agree on each sentence.
+    for (label, src, needle) in [
+        // A field holding a VALUE is still not callable, with the existing hint.
+        ("non-function-field", "w = {f: 5}\nprint(w.f(1))\n", "read it without parentheses"),
+        // Arity is the callee's business, in the callee's own words — the same sentence
+        // `(w.f)(1, 2)` gets.
+        ("arity", "w = {f: (x) => x}\nprint(w.f(1, 2))\n", "expects 1 argument, got 2"),
+        ("arity-via-parameter", "fn c(r) = r.f(1, 2)\nprint(c({f: (x) => x}))\n",
+         "expects 1 argument, got 2"),
+        // No such field AND no such function: the ordinary no-method refusal.
+        ("nothing-at-all", "w = {a: 1}\nprint(w.nope(1))\n", "a Record has no method `nope`"),
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (out, ej, cj) = run(&[p], &[], "");
+        let (_, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (_, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_ne!(cj, Some(0), "{label} should be REFUSED, got: {out}");
+        assert_eq!((cj, cv), (ct, ct), "{label}: engines disagree on the exit code");
+        for (engine, err) in [("jit", &ej), ("vm", &ev), ("tree-walker", &et)] {
+            assert!(err.contains(needle), "{label} on {engine}: must say `{needle}`, got: {err}");
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+/// UFCS is decided by the receiver at every layer that knows it — and the JIT still fuses.
+///
+/// The parser used to rewrite `x.f(a)` into `f(x, a)` at parse time by NAME, which lost
+/// the field reading and could not see a PyObject. Removing it alone measured `it.f(1)`
+/// going 25 -> 108 ns per element: the JIT's kernel analysis admits a `Call` and not a
+/// `Method`, so the comprehension stopped fusing. `src/ufcs.rs` now makes the same rewrite
+/// after the checker, only where the receiver's type is PROVEN and rules the method reading
+/// out; `Unknown` and `Record` receivers keep the method node and the engines decide.
+///
+/// THE FUSION ASSERTION IS `jit-explain`, NOT A TIMING: the direct spelling reports
+/// "1 kernel site(s) offered to the JIT, 1 compiled", and the method spelling must report
+/// the same. Before this pass it reported "0 kernel site(s) offered".
+#[test]
+fn ufcs_is_decided_by_the_receiver_at_every_layer() {
+    let dir = std::env::temp_dir().join(format!("hx_layer_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("u.helix");
+
+    // Values: the method spelling and the direct spelling are the same program, on all
+    // three engines, for receivers the checker can prove and ones it cannot.
+    for (label, src, want) in [
+        // An Int receiver in a range-map — the shape the JIT fuses.
+        ("int-in-map", "fn f(r, x) = r + x\nprint(range(0, 20).map(it.f(1)).sum())\n", "210"),
+        ("int-in-map-direct", "fn f(r, x) = r + x\nprint(range(0, 20).map(f(it, 1)).sum())\n", "210"),
+        // A String receiver — proven, rewritten by the pass.
+        ("string-recv", "fn f(s, n) = s.count() + n\nprint(\"abc\".f(1))\n", "4"),
+        // A Record receiver whose FIELD holds the function, inside a kernel-shaped map:
+        // stays a method node, the field wins at run time.
+        ("record-field-in-map", "w = {f: (x) => x * 2}\nprint(range(0, 3).map(w.f(it)).sum())\n", "6"),
+        // A Record receiver with no such field and a declared fn: UFCS at run time.
+        ("record-ufcs-in-map", "fn f(r, x) = r.a + x\nprint(range(0, 3).map({a: it}.f(1)).sum())\n", "6"),
+        // A type that OWNS the name keeps its method even beside a same-named fn.
+        ("owner-keeps-method", "fn count(xs) = 99\nprint([1, 2, 3].count())\n", "3"),
+        // Through an Unknown parameter — the runtime route, receiver first.
+        ("via-parameter", "fn f(r, x) = r * x\nfn g(v) = v.f(3)\nprint(g(7))\n", "21"),
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let p = prog.to_str().unwrap();
+        let (jit, ej, cj) = run(&[p], &[], "");
+        let (vm, ev, cv) = run(&[p], &[("HELIX_NOJIT", "1")], "");
+        let (tw, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+        assert_eq!((cj, &jit), (cv, &vm), "{label}: jit vs vm: {ej} / {ev}");
+        assert_eq!((cv, &vm), (ct, &tw), "{label}: vm vs tree-walker: {ev} / {et}");
+        assert_eq!(cj, Some(0), "{label}: {ej}");
+        assert_eq!(jit.trim(), want, "{label}");
+    }
+
+    // FUSION. Both spellings of the Int-receiver map must be offered to the JIT and
+    // compiled — the method spelling used to report 0 offered.
+    for (label, src) in [
+        ("direct", "fn f(r, x) = r + x\nprint(range(0, 20).map(f(it, 1)).sum())\n"),
+        ("method", "fn f(r, x) = r + x\nprint(range(0, 20).map(it.f(1)).sum())\n"),
+    ] {
+        std::fs::write(&prog, src).unwrap();
+        let (out, err, code) = run(&["jit-explain", prog.to_str().unwrap()], &[], "");
+        assert_eq!(code, Some(0), "{label}: {err}");
+        assert!(
+            out.contains("1 kernel site(s) offered to the JIT, 1 compiled"),
+            "{label} spelling must fuse into a kernel; jit-explain said:\n{out}"
+        );
+    }
+
+    // A SHADOWED name is not the fn. A parameter named `f` — even one holding a function —
+    // is what `x.f(a)` reaches, and a local function VALUE is not callable in method
+    // position; that is the rule `ufcs_fn_slot`, `ufcs_decl_fn` and the pass all keep.
+    std::fs::write(
+        &prog,
+        "fn f(r, x) = r + x\nfn g(f) = (5).f(1)\nprint(g((a, b) => 0))\n",
+    )
+    .unwrap();
+    let p = prog.to_str().unwrap();
+    let (out, ej, cj) = run(&[p], &[], "");
+    let (_, et, ct) = run(&[p], &[("HELIX_NOVM", "1")], "");
+    assert_ne!(cj, Some(0), "a shadowed name must not resolve to the fn, got: {out}");
+    assert_eq!(cj, ct, "engines disagree on the shadowed case");
+    assert!(
+        ej.contains("an Int has no method `f`") && et.contains("an Int has no method `f`"),
+        "jit: {ej}\ntree-walker: {et}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

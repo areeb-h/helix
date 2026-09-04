@@ -4018,7 +4018,8 @@
 
     /// A method call is resolved by its RECEIVER, not by its name — on both engines.
     ///
-    /// UFCS shipped gated at PARSE time on `registry::is_any_method`: a global name test
+    /// UFCS shipped gated at PARSE time on a global name test (the since-removed
+    /// `registry::is_any_method`): a test
     /// with no idea what the receiver is. Every good verb name is some type's method, so
     /// `fn where(q, c)` beside `q.where(c)` on a record was invisible and the call died
     /// with "type Record has no method `where`" — which made a fluent library (a query

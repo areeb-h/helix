@@ -407,6 +407,19 @@ pub struct MethodData {
     /// reaches the same decision from `FuncVal::decl_name`, which is what keeps the two
     /// engines from disagreeing about which `where` a program meant.
     pub ufcs_fn: Option<u32>,
+    /// The receiver types that own `name` as a real method, kept per call site so the
+    /// before-dispatch UFCS route in `Op::Method` can answer "does THIS receiver keep its
+    /// method?" with a few short string compares instead of `type_owns_method`'s two hash
+    /// lookups on every such call. `None` means the name is universal and no receiver
+    /// ever falls back. Derived from the name by `registry::ufcs_owners`, so it costs the
+    /// `.hbc` container nothing — a decoder recomputes it.
+    pub ufcs_owners: Option<std::rc::Rc<[&'static str]>>,
+    /// The method name as an interned symbol, so the before-dispatch route can ask a
+    /// Record receiver "do you hold a function under this name?" the way the language
+    /// designed field lookup to work: one `u32` compare per field, never a string. The
+    /// string-compare scan this replaced measured 1.065x on a one-field record against the
+    /// direct call the parser used to emit. Interned at compile time; a decoder reinterns.
+    pub name_sym: crate::symbol::Symbol,
 }
 
 /// Payload of [`Op::CallValue`] — a function-value call's argument count and the

@@ -287,17 +287,13 @@ pub(crate) fn record_method(
                     line,
                     col,
                 );
-                Err(if held.type_name() == "Function" {
-                    e.hint(format!(
-                        "it holds a function, so call it through the field: `(rec.{name})(…)` \
-                         — or bind it first, `f = rec.{name}`, then `f(…)`."
-                    ))
-                } else {
-                    e.hint(format!(
-                        "read it without parentheses: `rec.{name}` (it holds {}).",
-                        crate::value::with_article(held.type_name())
-                    ))
-                })
+                // A field holding a FUNCTION never reaches here any more: both engines
+                // call it before falling back to UFCS (see the Method arms). What is left
+                // is a field holding a value, and the hint says how to read it.
+                Err(e.hint(format!(
+                    "read it without parentheses: `rec.{name}` (it holds {}).",
+                    crate::value::with_article(held.type_name())
+                )))
             }
             None => Err(unknown_method(
                 "Record",

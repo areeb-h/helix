@@ -831,12 +831,15 @@ pub(super) fn tracked_fold_gate(
 }
 
 pub(crate) fn ufcs_fallback_applies(recv: &Value, name: &str) -> bool {
+    // ONE DEFINITION with the VM's before-dispatch route: `registry::ufcs_owners` is the
+    // list of types that keep their own method, and this is that list applied to one
+    // receiver. The tape-method case for a `Node` receiver lives in the list.
     match recv {
-        Value::PyObject(_)
-        | Value::DataFrame(_)
-        | Value::GroupBy(_) => false,
-        Value::Node(_) => !crate::autodiff::is_tape_method(name),
-        other => !crate::registry::type_owns_method(other.type_name(), name),
+        Value::PyObject(_) | Value::DataFrame(_) | Value::GroupBy(_) => false,
+        other => match crate::registry::ufcs_owners(name) {
+            None => false,
+            Some(owners) => !owners.iter().any(|t| *t == other.type_name()),
+        },
     }
 }
 

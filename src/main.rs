@@ -72,6 +72,7 @@ mod jitexplain;
 mod json;
 mod lattice;
 mod lexer;
+mod ufcs;
 mod managed;
 mod module;
 mod namespace;
@@ -900,7 +901,7 @@ fn cli_jit_explain(args: &[String]) -> ExitCode {
     };
     let shown = path.display().to_string();
     run_on_big_stack(move || {
-        let loaded = match module::load(&path) {
+        let mut loaded = match module::load(&path) {
             Ok(l) => l,
             Err(rendered) => {
                 eprint!("{rendered}");
@@ -914,6 +915,7 @@ fn cli_jit_explain(args: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+        ufcs::resolve_by_type(&mut loaded.stmts, &types);
         let Ok(prog) = bytecode::compile_with_types(&loaded.stmts, Some(types)) else {
             eprintln!("internal error: the compiler could not lower a type-checked program (please report)");
             return ExitCode::FAILURE;
@@ -1207,7 +1209,7 @@ fn run_source(code: &str, filename: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let program = match parser::parse(tokens) {
+    let mut program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
             eprint!("{}", e.render(code, filename));
@@ -1223,7 +1225,7 @@ fn run_source(code: &str, filename: &str) -> ExitCode {
         // it, kept honest rather than left blank.
         key: filename.to_string(),
     }];
-    match run_program(&program, &spans, false) {
+    match run_program(&mut program, &spans, false) {
         Ok(()) => ExitCode::SUCCESS,
         Err(rendered) => {
             eprint!("{}", rendered);
@@ -1851,7 +1853,7 @@ fn run_emit_hbc(args: &[String]) -> ExitCode {
     run_on_big_stack(move || {
         let entry_path = std::path::PathBuf::from(&entry);
         // Load (read + lex + parse + namespace-resolve the import graph).
-        let loaded = match module::load(&entry_path) {
+        let mut loaded = match module::load(&entry_path) {
             Ok(l) => l,
             Err(rendered) => {
                 eprint!("{rendered}");
@@ -1867,6 +1869,7 @@ fn run_emit_hbc(args: &[String]) -> ExitCode {
             }
         };
         // Compile to bytecode (total for any type-checked program).
+        ufcs::resolve_by_type(&mut loaded.stmts, &types);
         let program = match bytecode::compile_with_types(&loaded.stmts, Some(types)) {
             Ok(p) => p,
             Err(_) => {
@@ -2192,7 +2195,7 @@ fn run_file_capture_args(
     }
     // Errors render against the spans the loader produced, so a cross-module error
     // points at the dependency's own source and line (not the entry file).
-    run_program(&stmts, &loaded.spans, loaded.multi_module)
+    run_program(&mut stmts, &loaded.spans, loaded.multi_module)
 }
 
 /// Load, namespace-resolve and type-check a file WITHOUT running it, returning the
@@ -3248,7 +3251,7 @@ fn strip_mangling(s: &str) -> String {
 
 /// Type-check and run an already-loaded program. On failure returns the rendered,
 /// caret-annotated error (with namespacing prefixes stripped for multi-file runs).
-fn run_program(program: &[ast::Stmt], spans: &[module::Span], multi: bool) -> Result<(), String> {
+fn run_program(program: &mut [ast::Stmt], spans: &[module::Span], multi: bool) -> Result<(), String> {
     // Publish "which file is this line in?" for `source_path`, which a builtin cannot work
     // out for itself: it is dispatched by name and receives only its call position.
     module::set_file_lines(
@@ -3257,6 +3260,9 @@ fn run_program(program: &[ast::Stmt], spans: &[module::Span], multi: bool) -> Re
     // The inferred receiver types feed the compiler so it can route
     // receiver-polymorphic methods (DataFrame/Tensor column-verbs) correctly.
     let types = types::check(program).map_err(|e| render_err(e, spans, multi))?;
+    // The receiver decides where it is known (src/ufcs.rs); every engine below runs
+    // the same rewritten program, the JIT included.
+    ufcs::resolve_by_type(program, &types);
 
     // The tree-walker now runs only under `HELIX_NOVM=1` (A/B benchmarking and the
     // engine-agreement oracle). `try` used to force the whole program here — and with

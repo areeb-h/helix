@@ -4,6 +4,31 @@
 
 ### Added
 
+- **`rec.f(args)` calls a function held in field `f`.** Both halves refused it — with a
+  hint that said, in its own words, "the object-API spelling `r.go(3)` is what everyone
+  writes first". The language knew what people wanted and declined it; it was the single
+  rule blocking `User.find(1)` in a library without importing every verb.
+
+  ```helix
+  w = {f: (x) => x + 1}
+  w.f(1)        # 2 — used to be: `f` is a field of this record, not a method
+  (w.f)(1)      # 2 — still valid, the same call
+  ```
+
+  **Precedence is the whole decision, and it was already settled by construction.** The
+  five real Record methods are matched *before* the field fallback in both halves, so
+  `{get: f}.get(k)` keeps its meaning. The order is: a real method, then a function-valued
+  field, then a free `fn` of that name (UFCS) — a field is more specific than a free name,
+  so it wins that tie. Each boundary is asserted from both sides, because the failure on
+  either side is silent.
+
+  Engines: the walker calls the `FuncVal` through `call_function`; the VM extracts the chunk
+  index and upvalues from a `VmFunc` or a `Closure` and pushes a frame — `Op::CallValue`
+  step for step, minus the function value on the stack. A capturing lambda is the second
+  VM path and is tested as its own case. Arity is checked at run time exactly as for
+  `(rec.f)(args)`: the checker's record arm receives no argument types, and checking there
+  for one spelling would make the two spellings disagree.
+
 - **`Dict.get(k, default?)`**, the shape `Record.get` has always had. Two sibling types
   answering the same question, and only one of them could say "or this instead" — so
   `?? default` was a workaround for something the other simply had. Reported from the field
@@ -34,6 +59,37 @@
   function ("expects N arguments") and a builtin ("takes N arguments"). Both are internally
   consistent, so no program sees two answers for one refusal — which is the property under
   test. Making them one word is a separate change with its own pins.
+
+- **UFCS is decided by the receiver at every layer.** The parser still rewrote `x.f(a)`
+  into `f(x, a)` at parse time — by NAME — whenever `f` was a declared fn no type owned.
+  That was the last parse-time decision ADR 0045 left standing, and it is why a record's
+  own function-valued field could never win against a same-named free fn: the rewrite
+  fired before either engine saw a method. It is gone.
+
+  What replaced it, because removing it alone was not enough: with nothing in its place,
+  `range(0, n).map(it.f(1))` measured **25 → 108 ns per element** — the JIT's kernel
+  analysis admits a `Call` and not a `Method`, so the comprehension stopped fusing. So the
+  decision now lives at the layer that knows the receiver:
+
+  - a pass after the checker (`src/ufcs.rs`) makes the call a call where the receiver's
+    type is PROVEN and rules the method reading out — `jit-explain` reports "1 kernel
+    site offered, 1 compiled" for both spellings again;
+  - both engines decide the rest at run time, same order: real method, then a
+    function-valued field, then the declared fn with the receiver first. The VM peeks at
+    the receiver before dispatch (no failed dispatch, no error object), scans a per-site
+    list of the types that own the name, compares field names as interned symbols, and
+    enters through `CallFn`'s own entry — memo, JIT specializations and all.
+
+  Measured on one binary, interleaved min-of-15, method spelling against direct:
+
+  | receiver | ratio (min / median) |
+  |---|---|
+  | Int, in a range-map | 0.976× / 1.042× |
+  | Record | 1.021× / 1.019× |
+
+  `x.f(y)` costs what `f(x, y)` costs. A shadowed name is still not the fn, a type that
+  owns the name still keeps its method, and `registry::is_any_method` — the rewrite's only
+  caller — is gone with it.
 
 - **One refusal, one sentence.** The checker said `type Int has no method \`nope\`` where
   the runtime said `an Int has no method \`nope\`` — the same rejection reached by two

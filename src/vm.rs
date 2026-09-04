@@ -788,6 +788,210 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
         // they're equivalent); a `return Err(..)` becomes the closure's error. LLVM
         // inlines this single-call closure, so the dispatch loop stays zero-overhead.
         let step: Result<(), HelixError> = (|| {
+        // ONE ENTRY FOR A CALL TO A DECLARED FUNCTION, shared by `Op::CallFn` and the
+        // receiver-decided UFCS route in `Op::Method`. A macro rather than a function
+        // because the entry IS the loop's state — stack, locals, frames, memo, the JIT
+        // tables — and a function would have to be handed all of it. Every
+        // specialization (memo, i64/f64/mixed JIT, captured-Int) is therefore reached from
+        // a method-position call exactly as from a direct one, which is what keeps
+        // `x.f(y)` at the cost of `f(x, y)`: the parser's rewrite used to guarantee that
+        // by construction, and it no longer exists (ADR 0045 — the receiver decides).
+        //
+        // `$name` is what an arity error calls the function: its declared name for a
+        // direct call, the SOURCE spelling for a method-position call (`where`, never
+        // `m0$where`). Branches that finish the call `return Ok(())`; the plain frame push
+        // falls through, exactly as the arm this body came from did.
+        macro_rules! enter_call {
+            ($idx:expr, $nargs:expr, $name:expr) => {{
+                let idx: usize = $idx;
+                let nargs: usize = $nargs;
+                let start = stack.len() - nargs;
+
+                // Memoization fast path (preferred over the JIT for the pure,
+                // overlapping-recursive functions the analysis flagged): a cache
+                // hit returns instantly; a miss runs the bytecode body so its
+                // recursive calls also hit this path, then stores the result on
+                // return. This turns exponential recursion (e.g. `fib`) linear —
+                // for integer *and* float arguments.
+                if program.memoizable[idx]
+                    && let Some(key) = memo_key_for(idx, &stack[start..])
+                {
+                    if let Some(cached) = memo.get(&key) {
+                        let cached = cached.clone();
+                        stack.truncate(start);
+                        stack.push(cached);
+                        return Ok(());
+                    }
+                    let callee = &program.funcs[idx];
+                    if nargs != callee.n_params as usize {
+                        let np = callee.n_params as usize;
+                        return Err(HelixError::new(
+                            format!(
+                                "`{}` expects {} argument{}, got {}",
+                                $name,
+                                np,
+                                if np == 1 { "" } else { "s" },
+                                nargs
+                            ),
+                            line,
+                            col,
+                        ));
+                    }
+                    if frames.len() > VM_MAX_DEPTH {
+                        return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
+                    }
+                    let base = locals.len();
+                    locals.extend(stack.drain(start..));
+                    locals.resize(base + callee.n_locals as usize, Value::Unit);
+                    frames.push(Frame {
+                        func: idx,
+                        ip: 0,
+                        base,
+                        memo_key: Some(Box::new(key)),
+                        upvalues: no_upvalues.clone(),
+                    });
+                    return Ok(());
+                }
+
+                // Native fast path: dispatch to the specialization matching the
+                // argument types. All-Int + an i64 version → native i64 (Int
+                // result). Otherwise all-numeric + an f64 version → native f64
+                // (Float result; the float-only or mixed/float case). All of the
+                // function's internal recursion then stays native.
+                if let Some(nf) = jit_for_idx[idx]
+                    && nargs == nf.arity
+                {
+                    let tail = &stack[start..];
+                    // The f64 specialization always returns Float, so it is only
+                    // valid when EVERY argument is Float (then every op, and
+                    // returning a param, yields Float — matching the interpreter).
+                    // For MIXED Int/Float args the result type depends on what the
+                    // function does (e.g. `f(a,b)=b` keeps an Int `b`), so those
+                    // fall through to the VM, which handles type-mixing correctly.
+                    // These scans live here (not at the top of CallFn) so the
+                    // common non-JIT / memoized call pays nothing for them.
+                    let all_int = tail.iter().all(|v| matches!(v, Value::Int(_)));
+                    let all_float = tail.iter().all(|v| matches!(v, Value::Float(_)));
+                    if all_int && let Some(ptr) = nf.i64_ptr {
+                        let iargs: Vec<i64> = tail
+                            .iter()
+                            .map(|v| if let Value::Int(n) = v { *n } else { 0 })
+                            .collect();
+                        stack.truncate(start);
+                        let r = unsafe { crate::jit::call_i64(ptr, &iargs) };
+                        stack.push(Value::Int(r));
+                        return Ok(());
+                    }
+                    if all_float && let Some(ptr) = nf.f64_ptr {
+                        let fargs: Vec<f64> = tail.iter().map(|v| v.as_f64().unwrap()).collect();
+                        stack.truncate(start);
+                        let r = unsafe { crate::jit::call_f64(ptr, &fargs) };
+                        stack.push(Value::Float(r));
+                        return Ok(());
+                    }
+                    // MIXED per-parameter specialization (annotation-typed tail-loop
+                    // fns): taken only when every argument's RUNTIME type matches the
+                    // compiled pattern — Float params cross the FFI as raw f64 bits in
+                    // i64 slots, and a Float result comes back as bits (pure bit moves,
+                    // bit-exact). Any other type pattern falls through to the VM, which
+                    // handles dynamic mixing (and ignores annotations) as always. The
+                    // trailing slot is the NaN-poison out-param (see `MixedFn`): the
+                    // native code bails there on an unordered float compare, in which
+                    // case the result is DISCARDED (stack untouched) and the ordinary
+                    // bytecode call below re-runs and raises the interpreter's exact
+                    // "cannot compare these values (NaN?)" error.
+                    if let Some(m) = nf.mixed
+                        && tail.iter().enumerate().all(|(j, v)| {
+                            if m.float_mask >> j & 1 == 1 {
+                                matches!(v, Value::Float(_))
+                            } else {
+                                matches!(v, Value::Int(_))
+                            }
+                        })
+                    {
+                        let mut iargs: Vec<i64> = tail
+                            .iter()
+                            .map(|v| match v {
+                                Value::Int(n) => *n,
+                                Value::Float(x) => x.to_bits() as i64,
+                                _ => unreachable!("pattern checked above"),
+                            })
+                            .collect();
+                        let mut poison: i8 = 0;
+                        iargs.push(&raw mut poison as i64);
+                        let r = unsafe { crate::jit::call_i64(m.ptr, &iargs) };
+                        if poison == 0 {
+                            stack.truncate(start);
+                            stack.push(if m.ret_float {
+                                Value::Float(f64::from_bits(r as u64))
+                            } else {
+                                Value::Int(r)
+                            });
+                            return Ok(());
+                        }
+                    }
+                }
+                // A tail loop that reads globals. Tried after the capture-free
+                // specializations, so a function that compiled without captures keeps its
+                // cheaper entry point. Every argument must be `Int` (same rule as the i64
+                // path) AND every captured global must be `Int` right now — a global that
+                // is missing, a Float, or not yet initialized declines to the VM, which
+                // handles it correctly as always. Reading the globals HERE is what makes
+                // this sound: nothing else runs during the native call, so a capture is
+                // loop-invariant for the whole loop.
+                if let Some((ptr, slots, arity)) = &cap_for_idx[idx]
+                    && nargs == *arity
+                {
+                    let tail = &stack[start..];
+                    if tail.iter().all(|v| matches!(v, Value::Int(_))) {
+                        let mut iargs: Vec<i64> = Vec::with_capacity(nargs + slots.len());
+                        for v in tail {
+                            if let Value::Int(n) = v {
+                                iargs.push(*n);
+                            }
+                        }
+                        let all_int_caps = slots.iter().all(|s| {
+                            if let Some(Value::Int(n)) = globals.get(*s) {
+                                iargs.push(*n);
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        if all_int_caps {
+                            stack.truncate(start);
+                            let r = unsafe { crate::jit::call_i64(*ptr, &iargs) };
+                            stack.push(Value::Int(r));
+                            return Ok(());
+                        }
+                    }
+                }
+                let callee = &program.funcs[idx];
+                if nargs != callee.n_params as usize {
+                    let np = callee.n_params as usize;
+                    return Err(HelixError::new(
+                        format!(
+                            "`{}` expects {} argument{}, got {}",
+                            $name,
+                            np,
+                            if np == 1 { "" } else { "s" },
+                            nargs
+                        ),
+                        line,
+                        col,
+                    ));
+                }
+                if frames.len() > VM_MAX_DEPTH {
+                    return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
+                }
+                let base = locals.len();
+                // `drain` moves the args straight into the callee's locals with
+                // no intermediate allocation (vs `split_off`'s fresh `Vec`).
+                locals.extend(stack.drain(start..));
+                locals.resize(base + callee.n_locals as usize, Value::Unit);
+                frames.push(Frame { func: idx, ip: 0, base, memo_key: None, upvalues: no_upvalues.clone() });
+            }};
+        }
         match op {
             Op::Const(k) => stack.push(chunk.consts[*k as usize].clone()),
             Op::LoadLocal(slot) => {
@@ -1078,193 +1282,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 stack.push(v);
             }
             Op::CallFn { idx, nargs } => {
-                let idx = *idx as usize;
-                let nargs = *nargs as usize;
-                let start = stack.len() - nargs;
-
-                // Memoization fast path (preferred over the JIT for the pure,
-                // overlapping-recursive functions the analysis flagged): a cache
-                // hit returns instantly; a miss runs the bytecode body so its
-                // recursive calls also hit this path, then stores the result on
-                // return. This turns exponential recursion (e.g. `fib`) linear —
-                // for integer *and* float arguments.
-                if program.memoizable[idx]
-                    && let Some(key) = memo_key_for(idx, &stack[start..])
-                {
-                    if let Some(cached) = memo.get(&key) {
-                        let cached = cached.clone();
-                        stack.truncate(start);
-                        stack.push(cached);
-                        return Ok(());
-                    }
-                    let callee = &program.funcs[idx];
-                    if nargs != callee.n_params as usize {
-                        let np = callee.n_params as usize;
-                        return Err(HelixError::new(
-                            format!(
-                                "`{}` expects {} argument{}, got {}",
-                                program.func_names[idx],
-                                np,
-                                if np == 1 { "" } else { "s" },
-                                nargs
-                            ),
-                            line,
-                            col,
-                        ));
-                    }
-                    if frames.len() > VM_MAX_DEPTH {
-                        return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
-                    }
-                    let base = locals.len();
-                    locals.extend(stack.drain(start..));
-                    locals.resize(base + callee.n_locals as usize, Value::Unit);
-                    frames.push(Frame {
-                        func: idx,
-                        ip: 0,
-                        base,
-                        memo_key: Some(Box::new(key)),
-                        upvalues: no_upvalues.clone(),
-                    });
-                    return Ok(());
-                }
-
-                // Native fast path: dispatch to the specialization matching the
-                // argument types. All-Int + an i64 version → native i64 (Int
-                // result). Otherwise all-numeric + an f64 version → native f64
-                // (Float result; the float-only or mixed/float case). All of the
-                // function's internal recursion then stays native.
-                if let Some(nf) = jit_for_idx[idx]
-                    && nargs == nf.arity
-                {
-                    let tail = &stack[start..];
-                    // The f64 specialization always returns Float, so it is only
-                    // valid when EVERY argument is Float (then every op, and
-                    // returning a param, yields Float — matching the interpreter).
-                    // For MIXED Int/Float args the result type depends on what the
-                    // function does (e.g. `f(a,b)=b` keeps an Int `b`), so those
-                    // fall through to the VM, which handles type-mixing correctly.
-                    // These scans live here (not at the top of CallFn) so the
-                    // common non-JIT / memoized call pays nothing for them.
-                    let all_int = tail.iter().all(|v| matches!(v, Value::Int(_)));
-                    let all_float = tail.iter().all(|v| matches!(v, Value::Float(_)));
-                    if all_int && let Some(ptr) = nf.i64_ptr {
-                        let iargs: Vec<i64> = tail
-                            .iter()
-                            .map(|v| if let Value::Int(n) = v { *n } else { 0 })
-                            .collect();
-                        stack.truncate(start);
-                        let r = unsafe { crate::jit::call_i64(ptr, &iargs) };
-                        stack.push(Value::Int(r));
-                        return Ok(());
-                    }
-                    if all_float && let Some(ptr) = nf.f64_ptr {
-                        let fargs: Vec<f64> = tail.iter().map(|v| v.as_f64().unwrap()).collect();
-                        stack.truncate(start);
-                        let r = unsafe { crate::jit::call_f64(ptr, &fargs) };
-                        stack.push(Value::Float(r));
-                        return Ok(());
-                    }
-                    // MIXED per-parameter specialization (annotation-typed tail-loop
-                    // fns): taken only when every argument's RUNTIME type matches the
-                    // compiled pattern — Float params cross the FFI as raw f64 bits in
-                    // i64 slots, and a Float result comes back as bits (pure bit moves,
-                    // bit-exact). Any other type pattern falls through to the VM, which
-                    // handles dynamic mixing (and ignores annotations) as always. The
-                    // trailing slot is the NaN-poison out-param (see `MixedFn`): the
-                    // native code bails there on an unordered float compare, in which
-                    // case the result is DISCARDED (stack untouched) and the ordinary
-                    // bytecode call below re-runs and raises the interpreter's exact
-                    // "cannot compare these values (NaN?)" error.
-                    if let Some(m) = nf.mixed
-                        && tail.iter().enumerate().all(|(j, v)| {
-                            if m.float_mask >> j & 1 == 1 {
-                                matches!(v, Value::Float(_))
-                            } else {
-                                matches!(v, Value::Int(_))
-                            }
-                        })
-                    {
-                        let mut iargs: Vec<i64> = tail
-                            .iter()
-                            .map(|v| match v {
-                                Value::Int(n) => *n,
-                                Value::Float(x) => x.to_bits() as i64,
-                                _ => unreachable!("pattern checked above"),
-                            })
-                            .collect();
-                        let mut poison: i8 = 0;
-                        iargs.push(&raw mut poison as i64);
-                        let r = unsafe { crate::jit::call_i64(m.ptr, &iargs) };
-                        if poison == 0 {
-                            stack.truncate(start);
-                            stack.push(if m.ret_float {
-                                Value::Float(f64::from_bits(r as u64))
-                            } else {
-                                Value::Int(r)
-                            });
-                            return Ok(());
-                        }
-                    }
-                }
-                // A tail loop that reads globals. Tried after the capture-free
-                // specializations, so a function that compiled without captures keeps its
-                // cheaper entry point. Every argument must be `Int` (same rule as the i64
-                // path) AND every captured global must be `Int` right now — a global that
-                // is missing, a Float, or not yet initialized declines to the VM, which
-                // handles it correctly as always. Reading the globals HERE is what makes
-                // this sound: nothing else runs during the native call, so a capture is
-                // loop-invariant for the whole loop.
-                if let Some((ptr, slots, arity)) = &cap_for_idx[idx]
-                    && nargs == *arity
-                {
-                    let tail = &stack[start..];
-                    if tail.iter().all(|v| matches!(v, Value::Int(_))) {
-                        let mut iargs: Vec<i64> = Vec::with_capacity(nargs + slots.len());
-                        for v in tail {
-                            if let Value::Int(n) = v {
-                                iargs.push(*n);
-                            }
-                        }
-                        let all_int_caps = slots.iter().all(|s| {
-                            if let Some(Value::Int(n)) = globals.get(*s) {
-                                iargs.push(*n);
-                                true
-                            } else {
-                                false
-                            }
-                        });
-                        if all_int_caps {
-                            stack.truncate(start);
-                            let r = unsafe { crate::jit::call_i64(*ptr, &iargs) };
-                            stack.push(Value::Int(r));
-                            return Ok(());
-                        }
-                    }
-                }
-                let callee = &program.funcs[idx];
-                if nargs != callee.n_params as usize {
-                    let np = callee.n_params as usize;
-                    return Err(HelixError::new(
-                        format!(
-                            "`{}` expects {} argument{}, got {}",
-                            program.func_names[idx],
-                            np,
-                            if np == 1 { "" } else { "s" },
-                            nargs
-                        ),
-                        line,
-                        col,
-                    ));
-                }
-                if frames.len() > VM_MAX_DEPTH {
-                    return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
-                }
-                let base = locals.len();
-                // `drain` moves the args straight into the callee's locals with
-                // no intermediate allocation (vs `split_off`'s fresh `Vec`).
-                locals.extend(stack.drain(start..));
-                locals.resize(base + callee.n_locals as usize, Value::Unit);
-                frames.push(Frame { func: idx, ip: 0, base, memo_key: None, upvalues: no_upvalues.clone() });
+                enter_call!(*idx as usize, *nargs as usize, program.func_names[*idx as usize]);
             }
             Op::TailCallFn { idx, nargs } => {
                 let idx = *idx as usize;
@@ -1638,6 +1656,59 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 //
                 // The per-element cost that does matter is the comprehension floor
                 // itself: `xs.map(0)` — no method call at all — is ~39 ns/element.
+                // THE RECEIVER DECIDES, AND DECIDES BEFORE DISPATCH, BY PEEKING. When this
+                // site names a declared fn (a compile-time fact, so every other method call
+                // pays nothing here) and the receiver does not keep its own method, the
+                // stack is ALREADY in a direct call layout - receiver, then arguments - so
+                // the declared fn enters through the same entry a direct call takes with no
+                // values popped or pushed. Only the rare field branch, whose callee does not
+                // take the receiver, materializes the arguments. The pop-then-push version
+                // of this measured 24 ns slower on a Record receiver than the direct call
+                // the parser used to emit; this is what closes that.
+                if let Some(fidx) = d.ufcs_fn
+                    && let Some(owners) = &d.ufcs_owners
+                    && let recv = &stack[split - 1]
+                    && !matches!(recv, Value::PyObject(_) | Value::DataFrame(_) | Value::GroupBy(_))
+                    && !owners.iter().any(|t| *t == recv.type_name())
+                {
+                    // A function-valued FIELD first: its chunk index and upvalues, taken
+                    // while the receiver is only borrowed, so the stack can then be edited.
+                    let field_fn = if let Value::Record(fields) = recv
+                        && let Some((_, held)) = fields.iter().find(|(s, _)| *s == d.name_sym)
+                    {
+                        match held {
+                            Value::VmFunc { idx, .. } => Some((*idx as usize, no_upvalues.clone())),
+                            Value::Closure(c) => Some((c.idx as usize, c.upvalues.clone())),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some((idx, ups)) = field_fn {
+                        let args: Vec<Value> = stack.split_off(split);
+                        stack.pop();
+                        let callee = &program.funcs[idx];
+                        if args.len() != callee.n_params as usize {
+                            return Err(crate::interp::arity_err(
+                                name,
+                                callee.n_params as usize,
+                                args.len(),
+                                line,
+                                col,
+                            ));
+                        }
+                        if frames.len() > VM_MAX_DEPTH {
+                            return Err(crate::error::recursion_depth_err(VM_MAX_DEPTH, line, col));
+                        }
+                        let base = locals.len();
+                        locals.extend(args);
+                        locals.resize(base + callee.n_locals as usize, Value::Unit);
+                        frames.push(Frame { func: idx, ip: 0, base, memo_key: None, upvalues: ups });
+                        return Ok(());
+                    }
+                    enter_call!(fidx as usize, *nargs as usize + 1, name);
+                    return Ok(());
+                }
                 let args: Vec<Value> = stack.split_off(split);
                 let recv = stack.pop().unwrap();
                 // `is_missing` is universal; DataFrame/GroupBy receivers bypass the
@@ -1657,32 +1728,41 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         Value::GroupBy(_) => {
                             Err(crate::interp::no_such_aggregation(name, line, col))
                         }
-                        // UFCS, RUN-TIME half — the tree-walker's arm, step for step:
-                        // a method call that fails dispatch retries as
-                        // `name(recv, args…)`, against a declared `fn` first and a
-                        // builtin of the same name second. Same predicate, same order,
-                        // same hosts, so the engines cannot disagree about what a
-                        // fallback produced. See `src/interp.rs` for why the receiver —
-                        // and therefore run time — is the only thing that can decide it.
+                        // Dispatch, then — on failure, for a type that does not own the
+                        // name — the walker's fallback, step for step: a function-valued
+                        // FIELD (no declared fn to compete with; that case took the route
+                        // above), then a builtin of the name, then the method error with
+                        // its did-you-mean intact. Same predicate, same order, same hosts,
+                        // so the engines cannot disagree about what a fallback produced.
                         _ => match crate::interp::call_method(&recv, name, &args, line, col) {
                             Ok(v) => Ok(v),
                             Err(e) if crate::interp::ufcs_fallback_applies(&recv, name) => {
-                                if let Some(fidx) = d.ufcs_fn {
-                                    // Enter the function with the receiver as its first
-                                    // argument. Deliberately the plain bytecode entry:
-                                    // the memoization and native specializations
-                                    // `CallFn` reaches for first all key on all-Int or
-                                    // all-Float arguments, and a receiver that just
-                                    // failed method dispatch is neither — the callee's
-                                    // own body still reaches every one of them.
-                                    let fidx = fidx as usize;
-                                    let callee = &program.funcs[fidx];
-                                    let nargs = args.len() + 1;
-                                    if nargs != callee.n_params as usize {
+                                // A FUNCTION-VALUED FIELD IS CALLABLE AS `rec.f(args)` —
+                                // the walker's arm, step for step, so the engines cannot
+                                // disagree about what a fallback produced. After the real
+                                // Record methods, before UFCS. The body is `Op::CallValue`
+                                // minus the function value on the stack: extract the chunk
+                                // index and upvalues from a `VmFunc` or a `Closure`, check
+                                // arity with the callee's own sentence, guard depth, push
+                                // the frame. The receiver is not an argument.
+                                if let Value::Record(fields) = &recv
+                                    && let Some((_, held)) = fields.iter().find(|(s, _)| *s == d.name_sym)
+                                    && let Some((idx, ups)) = match held {
+                                        Value::VmFunc { idx, .. } => {
+                                            Some((*idx as usize, no_upvalues.clone()))
+                                        }
+                                        Value::Closure(c) => {
+                                            Some((c.idx as usize, c.upvalues.clone()))
+                                        }
+                                        _ => None,
+                                    }
+                                {
+                                    let callee = &program.funcs[idx];
+                                    if args.len() != callee.n_params as usize {
                                         return Err(crate::interp::arity_err(
                                             name,
                                             callee.n_params as usize,
-                                            nargs,
+                                            args.len(),
                                             line,
                                             col,
                                         ));
@@ -1694,22 +1774,18 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                             col,
                                         ));
                                     }
-                                    stack.push(recv);
-                                    stack.extend(args);
-                                    let start = stack.len() - nargs;
                                     let base = locals.len();
-                                    locals.extend(stack.drain(start..));
+                                    locals.extend(args);
                                     locals.resize(base + callee.n_locals as usize, Value::Unit);
                                     frames.push(Frame {
-                                        func: fidx,
+                                        func: idx,
                                         ip: 0,
                                         base,
                                         memo_key: None,
-                                        upvalues: no_upvalues.clone(),
+                                        upvalues: ups,
                                     });
                                     // The callee's `Return` pushes where this method's
-                                    // result would have gone, so there is nothing to
-                                    // push here.
+                                    // result would have gone.
                                     return Ok(());
                                 }
                                 if *d

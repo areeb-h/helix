@@ -1991,61 +1991,22 @@ impl Parser {
                         // `min_by`/`max_by`/`argmin`/`argmax` are sugar — desugared here
                         // into `map`/`enumerate` + `reduce` + index, so both engines get
                         // them for free (no new ops, parity by construction).
-                        // UFCS: a name that is NO type's method, but IS a function,
-                        // is a function called in method position — `x.f(a)` means
-                        // `f(x, a)`. This is what lets a user's own function chain
-                        // (`layer.forward(x)` on a record) without the language
-                        // growing a second way to define behaviour, and it removes
-                        // the method-vs-function split rather than documenting it.
-                        //
-                        // Strictly additive: gated on the name belonging to no type,
-                        // so every call that resolves today still means what it meant,
-                        // and a misspelled method (`xs.lenght()`) still gets the
-                        // method error with its did-you-mean rather than being turned
-                        // into an undefined-function one. Named arguments decline —
-                        // a free call resolves those against the callee's signature,
-                        // which is not this rewrite's business.
-                        // A REMOVED NAMESPACE (`stats`, `json`, …) is never a UFCS
-                        // receiver: `stats.t_test(xs, ys)` must keep reporting that
-                        // the namespace is gone and naming the function that replaced
-                        // it, not become `t_test(stats, …)` and report that `stats` is
-                        // undefined. The migration hint is the whole point of the
-                        // error, and it is the reader's only pointer to the new
-                        // spelling.
-                        let ns_recv = matches!(
-                            &e,
-                            Expr::Ident { name: r, .. } if crate::namespace::is_namespace(r)
-                        );
-                        // USER-DEFINED functions only — deliberately NOT builtins.
-                        //
-                        // `is_any_method` knows the nine types that have static method
-                        // tables. A PyObject has none: its attributes are resolved by
-                        // Python at run time, so the gate cannot see them. A builtin's
-                        // name is precisely what collides with them (`sqrt`, `range`,
-                        // `round`, `sum`, `exp`, `sort` are all both), and
-                        // `m = python.import("math")` then `m.sqrt(16.0)` was being
-                        // rewritten to `sqrt(m, 16.0)` with no shadowing at all —
-                        // `np.round(1.5)` even type-checked clean, because
-                        // `round(x, digits)` is a real two-argument builtin.
-                        //
-                        // A user's own function can only collide with a Python attribute
-                        // they also call, which is a name they chose and can see. That is
-                        // the narrow residue; the complete answer is to decide on the
-                        // RECEIVER at run time so a PyObject always takes the method
-                        // path, and it is recorded in docs/dx-plan.md rather than
-                        // approximated here.
-                        if !ns_recv
-                            && !crate::registry::is_any_method(&name)
-                            && named.is_empty()
-                            && self.fn_names.contains(&name)
-                            && crate::registry::lookup(&name).is_none()
-                        {
-                            let mut call_args = Vec::with_capacity(args.len() + 1);
-                            call_args.push(e);
-                            call_args.extend(args);
-                            e = Expr::Call { name, args: call_args, line: l, col: c };
-                            continue;
-                        }
+                        // UFCS IS DECIDED AT RUN TIME, BY THE RECEIVER (ADR 0045). This used
+                        // to rewrite `x.f(a)` into `f(x, a)` here whenever `f` was a declared
+                        // fn no type owned — a parse-time decision that was right for every
+                        // program it could see and wrong for the one it could not: a record
+                        // whose own field `f` holds a function could never win against a
+                        // free `fn f`, and a PyObject receiver was invisible to the gate.
+                        // Both engines now route a method call whose name is also a declared
+                        // fn ON THE RECEIVER: a real method of its type, else a
+                        // function-valued field, else the free fn with the receiver first —
+                        // through the same entry a direct call takes, so `x.f(a)` costs what
+                        // `f(x, a)` costs. A removed namespace (`stats.t_test(..)`) reports
+                        // its migration hint from that route too. Where the checker PROVES the
+                        // receiver's type and it rules the method reading out, a pass after the
+                        // checker (src/ufcs.rs) makes the call a call before the compiler and
+                        // the JIT see it — the same decision, made where it is cheapest and
+                        // where the JIT can fuse it.
                         e = match name.as_str() {
                             "min_by" | "max_by" | "argmin" | "argmax" => {
                                 desugar_order_by(e, &name, args, l, c)?

@@ -723,15 +723,17 @@ impl Interp {
                 // the same order, so the engines cannot disagree about what a fallback
                 // produced.
                 //
-                // WHY THE DECISION CANNOT LIVE IN THE PARSER. The parse-time rewrite is
-                // gated on `!registry::is_any_method(name)` — a global name test with no
+                // WHY THE DECISION CANNOT LIVE IN THE PARSER. The parse-time rewrite WAS
+                // gated on no type owning the name — a global name test with no
                 // idea what the receiver is. That makes every good verb name unusable by
                 // a user's own library: `where`, `select`, `first`, `count`, `all`,
                 // `join`, `sort`, `take`, `get`, `sum`, `min`, `max`, `unique` are all
                 // some type's method, so `fn where(q, c)` beside `q.where(c)` on a record
                 // failed with "type Record has no method `where`" while the function sat
                 // two lines above it. Only the receiver settles it, and only run time
-                // has the receiver.
+                // has the receiver. The name-directed rewrite is gone. A TYPE-directed one runs
+                // after the checker (src/ufcs.rs) for receivers it can prove; both engines
+                // decide the rest here.
                 //
                 // `ufcs_fallback_applies` is what makes retrying safe: a type that OWNS
                 // the name never falls back, so a DataFrame's `where` is still the frame
@@ -743,28 +745,57 @@ impl Interp {
                 // `call_method` only borrows, so the retry can move what is still there,
                 // and the whole question moves inside the error arm, which a working
                 // method call never reaches.
+                // THE RECEIVER DECIDES, AND DECIDES BEFORE DISPATCH. When a `fn` of this
+                // name is declared and the receiver's type does not own the name, dispatch
+                // could only fail — so it is not attempted, and no error object is built
+                // on the way to the answer. A function-valued FIELD is more specific than
+                // a free name and goes first; then the free `fn`, with the receiver as its
+                // first argument. The parser used to make this decision at parse time by
+                // rewriting `x.f(y)` into `f(x, y)` for any declared `f` no type owned —
+                // which lost the field reading entirely and could not see a PyObject
+                // receiver. ADR 0045: only the receiver can settle it. The VM's arm is the
+                // same route in the same order.
+                if let Some(g) = self.ufcs_decl_fn(free)
+                    && ufcs_fallback_applies(&recv_v, name)
+                {
+                    if let Value::Record(fields) = &recv_v
+                        && let Some((_, Value::Function(h))) =
+                            fields.iter().find(|(s, _)| s.as_str() == name)
+                    {
+                        let h = h.clone();
+                        return self.call_function(name, &h, vals, *line, *col);
+                    }
+                    let mut fargs = Vec::with_capacity(vals.len() + 1);
+                    fargs.push(recv_v);
+                    fargs.extend(vals);
+                    // Reported under the name the SOURCE says, not the namespaced one, so
+                    // an arity error names `where` rather than `m0$where`.
+                    return self.call_function(name, &g, fargs, *line, *col);
+                }
                 match call_method(&recv_v, name, &vals, *line, *col) {
                     Ok(v) => Ok(v),
                     Err(e) if ufcs_fallback_applies(&recv_v, name) => {
-                        match self.ufcs_decl_fn(free) {
-                            Some(g) => {
-                                let mut fargs = Vec::with_capacity(vals.len() + 1);
-                                fargs.push(recv_v);
-                                fargs.extend(vals);
-                                // Reported under the name the SOURCE says, not the
-                                // namespaced one, so an arity error names `where` rather
-                                // than `m0$where`.
-                                self.call_function(name, &g, fargs, *line, *col)
-                            }
-                            None if crate::registry::is_builtin_name(name) => {
-                                let mut bargs = Vec::with_capacity(vals.len() + 1);
-                                bargs.push(recv_v);
-                                bargs.extend(vals);
-                                self.call_builtin(name, bargs, *line, *col)
-                            }
-                            // No free spelling of this name: the method error stands,
-                            // with its did-you-mean intact.
-                            None => Err(e),
+                        // Dispatch failed on a type that does not own the name, and NO
+                        // `fn` of this name is declared — that case never gets here, the
+                        // route above took it. What is left: a function-valued FIELD with
+                        // no free `fn` to compete with, then a builtin of the name, then
+                        // the method error with its did-you-mean intact. The receiver is
+                        // not prepended for a field: a field-held function is a plain
+                        // value, not a method.
+                        if let Value::Record(fields) = &recv_v
+                            && let Some((_, Value::Function(g))) =
+                                fields.iter().find(|(s, _)| s.as_str() == name)
+                        {
+                            let g = g.clone();
+                            return self.call_function(name, &g, vals, *line, *col);
+                        }
+                        if crate::registry::is_builtin_name(name) {
+                            let mut bargs = Vec::with_capacity(vals.len() + 1);
+                            bargs.push(recv_v);
+                            bargs.extend(vals);
+                            self.call_builtin(name, bargs, *line, *col)
+                        } else {
+                            Err(e)
                         }
                     }
                     Err(e) => Err(e),

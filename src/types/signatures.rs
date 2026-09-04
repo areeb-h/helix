@@ -1319,22 +1319,19 @@ pub(super) fn record_method_type(
         // runtime; this arm is the one users hit, because the checker runs first.)
         other => {
             return match fields.iter().find(|(f, _)| f == other) {
-                Some((_, held)) => {
-                    let e = HelixError::new(
+                Some((_, held)) => match held {
+                    // A FUNCTION-VALUED FIELD IS CALLABLE AS `rec.f(args)`, and its type
+                    // is the function's return type. Arity is left to the runtime on
+                    // purpose: this arm receives no argument types, and checking here for
+                    // one spelling would make `rec.f(x)` and `(rec.f)(x)` disagree.
+                    Type::Function { ret, .. } => Ok((**ret).clone()),
+                    _ => Err(HelixError::new(
                         format!("`{other}` is a field of this record, not a method"),
                         line,
                         col,
-                    );
-                    Err(if matches!(held, Type::Function { .. }) {
-                        e.hint(format!(
-                            "it holds a function, so call it through the field: \
-                             `(rec.{other})(…)` — or bind it first, `f = rec.{other}`, \
-                             then `f(…)`."
-                        ))
-                    } else {
-                        e.hint(format!("read it without parentheses: `rec.{other}`."))
-                    })
-                }
+                    )
+                    .hint(format!("read it without parentheses: `rec.{other}`."))),
+                },
                 None => Err(HelixError::new(
                     format!("{} has no method `{other}`", crate::value::with_article("Record")),
                     line,

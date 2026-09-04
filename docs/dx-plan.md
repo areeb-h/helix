@@ -277,6 +277,34 @@ with mechanisms so nothing has to be rediscovered:
   indexing landed with the bridge; the `.exp()` asymmetry is now its own entry
   below, because the bridge made it reachable by an ordinary spelling.)*
 
+### The parser's UFCS rewrite — the last parse-time decision — is gone (2026-09-02)
+
+**DONE**, and it closes the PyObject residue recorded under "UFCS after the PyObject
+narrowing" below: the receiver decides, so a PyObject receiver takes the method path
+because it is one.
+
+What the removal taught, in the order it was learned. Deleting the rewrite alone fixed
+every semantic edge — the field reading, precedence, three engines agreeing — and measured
+`it.f(1)` at **108 ns against 25**: the JIT's kernel analysis admits a `Call` and not a
+`Method`, so the comprehension stopped fusing. The layer that KNOWS the receiver's type has
+to decide there, not defer to run time out of principle. `src/ufcs.rs` runs after the
+checker and rewrites only what the type proves; `jit-explain` went from "0 kernel sites
+offered" back to 1. The runtime route then had a 40 ns tail on a Record receiver — a
+fallback predicate hashing two strings per call for a fact fixed per call site — which
+became a per-site owner list, a peek instead of a pop, and an interned name. Same binary,
+interleaved min-of-15: Int 0.976×, Record 1.021×. Recorded in ADR 0045's addendum.
+
+### A function-valued field was not callable as `rec.f(x)` (2026-09-02)
+
+**FIXED.** `(rec.f)(x)` worked; `rec.f(x)` was refused by both halves with a hint that
+named the problem exactly ("the object-API spelling `r.go(3)` is what everyone writes
+first"). Reported from the field as §1.27 #2 — the rule that blocked `User.find(1)`.
+
+The only real question was precedence, and the code had already answered it: the five
+real Record methods are matched before any field fallback, in both the checker and the
+runtime. So the order is real method → function-valued field → UFCS, each boundary pinned
+from both sides in `a_function_valued_field_is_callable_with_method_syntax`.
+
 ### A join type could not come from a binding (2026-09-02)
 
 **FIXED.** `join` read the type only as a trailing string LITERAL, so a bare name was
