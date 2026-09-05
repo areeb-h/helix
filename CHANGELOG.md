@@ -256,6 +256,21 @@
   builds (both sources, both roots) take `it * s`, `it + s`, `to_int(it * s)`: measured
   1.0× → 16× on 3M elements. An Int capture at the same site still takes the i64 build and
   wraps as the walker wraps.
+- **The transcendentals and `**` reach native code.** `exp`, `ln`, `log2`, `log10`, `sin`,
+  `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `cbrt`, `degrees`, `radians`,
+  `erf`, `normal_cdf`, `normal_pdf`, `relu`, `sigmoid` and `a ** b` in a `map`, a `reduce`
+  or a Float function compiled whole. The coverage doc called them a "permanent exclusion" —
+  a kernel's result had to match the host libm bit for bit, and Cranelift has no instruction
+  for them. They match by construction: each kernel call reaches an `extern "C"` shim that IS
+  the Rust function the walker applies, one function compiled once and executed by both
+  engines on the same bits; `**` is the walker's own `powi`/`powf` rule. `Int ** Int` declines
+  (an Int unless it overflows, when the walker answers a Float — a kind no typed kernel can
+  promise per element), and a NaN result is a value in both engines, never a raise. The
+  array-source scalar float reduce (`xs.reduce(0.0, (acc, x) => …)`) lowers through the typed
+  pair the tuple form always used, so it takes these too — and its old untyped gate admitted an
+  Int-ROOTED body (`(acc, x) => 2`) for a kernel that wrote `2.0` into an accumulator the walker
+  turns into an `Int`; the typed gate declines it, and the engines agree. Pinned by
+  `transcendentals_and_pow_in_kernels_agree_and_engage` on three engines, every name.
 - **A conditional in a map body reaches native code.** `xs.map(if it > 5.0 then it else 0.0)`
   — relu, the commonest activation — was never offered to the JIT (field build, 1.31; the
   coverage doc's listed cliff): the i64 analysis rejects a Float literal, and neither the

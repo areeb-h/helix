@@ -321,10 +321,22 @@ typing with the binder a Float; `mapft`/`mapfti`/`mapftv`/`mapftiv`) close it: 2
 five shapes. `jit-explain` names each site's specializations and the source kind it cannot
 serve. A CONDITIONAL in a map body (relu) followed the same day: the typed analyses admit
 `and`/`or` over comparisons with both branches of one kind, the typed codegen branches and
-merges, an ordering comparison poisons on NaN. STILL OPEN from the same table: `**` and the
-transcendentals are never offered — the next increment (`pow`/`exp`/`log`/`sin`/… through a
-host-symbol call to the very Rust function the walker calls, bit-identical by construction,
-which retires the coverage doc's "permanent exclusion"); and `clamp` (raises when `lo > hi`).
+merges, an ordering comparison poisons on NaN. `**` and the transcendentals followed: host
+calls (`jit_host_*` in `src/jit/ffi.rs`) to the very Rust functions the walker applies —
+bit-identical by construction, which retired the coverage doc's "permanent exclusion"; the
+analyses admit them in every typed body and a Float function compiled whole. STILL OPEN from
+that table: `clamp` (raises when `lo > hi`) and the two-argument `log(x, base)`/`hypot`.
+
+**do_later — the perf gate measures a profile that moves by itself.** `scripts/perf-verify.sh`
+compares two `gate`-profile builds: opt-3, no LTO, 16 codegen units, incremental. Between two
+builds of code that does not touch the VM's call path, that profile has read the 3M-tail-call loop
+under `HELIX_NOJIT=1` at +5% (2026-09-05, `420f4e7`) and at **+38%** (the same day, the JIT
+transcendentals) — while one-codegen-unit builds of the same two sources were at 1.000–1.023 both
+times. The placement of code across units (which helpers the interpreter loop can inline) moves
+with unrelated module sizes; the shipped `release` profile (LTO fat, one unit) has no such
+partition. The honest arbiter is a one-unit build of BOTH sides (`CARGO_PROFILE_GATE_CODEGEN_UNITS=1
+CARGO_PROFILE_GATE_INCREMENTAL=false`, ~4 min each); perf-verify should build its two binaries that
+way, or measure the release profile, before its verdict can be trusted on VM-only paths.
 
 **do_later — captures of MIXED runtime kinds in a map body.** Each marshal assumes one kind for
 every capture: all `Int` (the Int-proven builds), all `Float` (the Float-proven builds, 2026-09-05),

@@ -62,6 +62,7 @@ pub fn build(
     }
 
     let mut module = make_module()?;
+    let host = HostFns::declare(&mut module)?;
     let mut compiled: Vec<(String, NumKind, FuncId, usize)> = Vec::new();
 
     // Only the i64 specialization is type-safe: with all-`Int` args every op (and
@@ -376,6 +377,7 @@ pub fn build(
                 poison_ptr,
                 sigs: &mixed_sigs,
                 ids: &mixed_ids,
+                host: &host,
             };
             gen_tail_mixed(&mut builder, f.body, &mut vars, &mut env, &mut module, &tl);
             builder.seal_block(hdr);
@@ -443,7 +445,7 @@ pub fn build(
                 }
             };
             let mixed_tables = MixedTables { sigs: &msig_table, ids: &mixed_ids };
-            match define_reduce_loop(&mut module, &mut ctx, &mut bctx, id, rl, &fn_ids, &mixed_tables) {
+            match define_reduce_loop(&mut module, &mut ctx, &mut bctx, id, rl, &fn_ids, &mixed_tables, &host) {
                 Some(()) => reduce_ids.push(Some(id)),
                 None => reduce_ids.push(None),
             }
@@ -457,37 +459,37 @@ pub fn build(
     // the VM picks by the array's element type at runtime. `filter`/fused stay `Int`.
     let map_ids = define_array_kernels(
         &mut module, map_kernels, "map", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        None, false, false, &msig_table, &mixed_ids,
+        None, false, false, &msig_table, &mixed_ids, &host,
     );
     let map_f64_ids = define_array_kernels(
         &mut module, map_kernels, "mapf", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
-        None, false, false, &msig_table, &mixed_ids,
+        None, false, false, &msig_table, &mixed_ids, &host,
     );
     // The mixed `Int`-source → `Float` specialization (`range.map(j => j*0.001)`): reads
     // `i64`, writes `f64`. `elem_kind` is ignored when mixed (the body is typed per node).
     let map_mixed_ids = define_array_kernels(
         &mut module, map_kernels, "mapm", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        Some(NumKind::Float), false, false, &msig_table, &mixed_ids,
+        Some(NumKind::Float), false, false, &msig_table, &mixed_ids, &host,
     );
     // Its VALUE-SCALAR variant: the same stored kernels, with captures riding as f64 bits —
     // dispatched when a runtime `Float` capture makes the Int-proven marshal decline.
     let map_mixed_value_ids = define_array_kernels(
         &mut module, map_kernels, "mapmv", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        Some(NumKind::Float), true, false, &msig_table, &mixed_ids,
+        Some(NumKind::Float), true, false, &msig_table, &mixed_ids, &host,
     );
     // The Int-ROOTED mixed specialization: i64 in, i64 OUT, Float intermediates
     // (`to_int(to_float(i) * 1.5)`). Same ABI as the plain i64 kernel, so it rides the same
     // FFI wrappers, dispatch marshalling, and in-place reuse.
     let map_mixed_int_ids = define_array_kernels(
         &mut module, map_kernels, "mapmi", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        Some(NumKind::Int), false, false, &msig_table, &mixed_ids,
+        Some(NumKind::Int), false, false, &msig_table, &mixed_ids, &host,
     );
     // Its VALUE-SCALAR variant — the last cell of the matrix: `range(…).map(floor(it / s))`
     // with a Float `s` had no build at all (the Int-proven marshal declined the capture, and
     // the value-scalar pass built Float roots only). Same ABI as "mapmi".
     let map_mixed_int_value_ids = define_array_kernels(
         &mut module, map_kernels, "mapmiv", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        Some(NumKind::Int), true, false, &msig_table, &mixed_ids,
+        Some(NumKind::Int), true, false, &msig_table, &mixed_ids, &host,
     );
     // The FLOATS-source typed maps — four passes from the same stored kernels: Int-proven
     // captures / value-scalar captures, each with a Float root (`f64` out) or an Int root
@@ -495,42 +497,42 @@ pub fn build(
     // the monomorphic `f64` kernel first and these when it has none.
     let map_fsrc_ids = define_array_kernels(
         &mut module, map_kernels, "mapft", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
-        Some(NumKind::Float), false, false, &msig_table, &mixed_ids,
+        Some(NumKind::Float), false, false, &msig_table, &mixed_ids, &host,
     );
     let map_fsrc_int_ids = define_array_kernels(
         &mut module, map_kernels, "mapfti", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
-        Some(NumKind::Int), false, false, &msig_table, &mixed_ids,
+        Some(NumKind::Int), false, false, &msig_table, &mixed_ids, &host,
     );
     let map_fsrc_value_ids = define_array_kernels(
         &mut module, map_kernels, "mapftv", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
-        Some(NumKind::Float), true, false, &msig_table, &mixed_ids,
+        Some(NumKind::Float), true, false, &msig_table, &mixed_ids, &host,
     );
     let map_fsrc_int_value_ids = define_array_kernels(
         &mut module, map_kernels, "mapftiv", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
-        Some(NumKind::Int), true, false, &msig_table, &mixed_ids,
+        Some(NumKind::Int), true, false, &msig_table, &mixed_ids, &host,
     );
     // FLOAT-PROVEN captures, the third marshal (`float_caps_map_eligible`): an Int or a Float
     // source, a Float or an Int root, every capture a runtime Float. `range(…).map(it * s)`
     // with a Float `s` had NO build that could enter — 1.0x against 16x for the literal.
     let map_mixed_fc_ids = define_array_kernels(
         &mut module, map_kernels, "mapmF", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        Some(NumKind::Float), false, true, &msig_table, &mixed_ids,
+        Some(NumKind::Float), false, true, &msig_table, &mixed_ids, &host,
     );
     let map_mixed_fc_int_ids = define_array_kernels(
         &mut module, map_kernels, "mapmFi", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        Some(NumKind::Int), false, true, &msig_table, &mixed_ids,
+        Some(NumKind::Int), false, true, &msig_table, &mixed_ids, &host,
     );
     let map_fsrc_fc_ids = define_array_kernels(
         &mut module, map_kernels, "mapftF", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
-        Some(NumKind::Float), false, true, &msig_table, &mixed_ids,
+        Some(NumKind::Float), false, true, &msig_table, &mixed_ids, &host,
     );
     let map_fsrc_fc_int_ids = define_array_kernels(
         &mut module, map_kernels, "mapftFi", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
-        Some(NumKind::Int), false, true, &msig_table, &mixed_ids,
+        Some(NumKind::Int), false, true, &msig_table, &mixed_ids, &host,
     );
     let filter_ids = define_array_kernels(
         &mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
-        None, false, false, &msig_table, &mixed_ids,
+        None, false, false, &msig_table, &mixed_ids, &host,
     );
     // The f64 (`Floats`-source) filter specialization — the same dual-build pattern as
     // "map"/"mapf", from the same stored kernels. The predicate compiles under the
@@ -539,9 +541,9 @@ pub fn build(
     // the interpreter's exact error.
     let filter_f64_ids = define_array_kernels(
         &mut module, filter_kernels, "filterf", true, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
-        None, false, false, &msig_table, &mixed_ids,
+        None, false, false, &msig_table, &mixed_ids, &host,
     );
-    let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns);
+    let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns, &host);
 
     // `scan` (prefix-fold) loops — SERIAL kernels (see `define_scan_loop`). Same defensive
     // re-check discipline as the reduce loops: re-derive the capture list from the body with
@@ -723,6 +725,7 @@ fn define_fused_kernels(
     fn_ids: &HashMap<&str, FuncId>,
     eligible: &HashSet<&str>,
     user_fns: &HashSet<&str>,
+    host: &HostFns,
 ) -> Vec<Option<FuncId>> {
     let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
     let mut ctx = module.make_context();
@@ -754,7 +757,7 @@ fn define_fused_kernels(
                 continue;
             }
         };
-        ids.push(define_fused_kernel(module, &mut ctx, &mut bctx, id, k, fn_ids).map(|()| id));
+        ids.push(define_fused_kernel(module, &mut ctx, &mut bctx, id, k, fn_ids, host).map(|()| id));
     }
     ids
 }
@@ -783,6 +786,7 @@ fn define_array_kernels(
     // The mixed specializations a kernel body may CALL, and their codegen identities.
     msigs: &MixedSigTable,
     mixed_ids: &HashMap<&str, FuncId>,
+    host: &HostFns,
 ) -> Vec<Option<FuncId>> {
     let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
     let mut ctx = module.make_context();
@@ -938,7 +942,7 @@ fn define_array_kernels(
         };
         let done = define_array_kernel(
             module, &mut ctx, &mut bctx, id, k, is_filter, fn_ids, elem_kind, mixed_root,
-            value_scalars, float_caps, msigs, mixed_ids,
+            value_scalars, float_caps, msigs, mixed_ids, host,
         );
         ids.push(done.map(|()| id));
     }
@@ -948,6 +952,60 @@ fn define_array_kernels(
 /// Build the JIT module, or `None` on any setup failure (so the caller falls
 /// back to the VM instead of aborting — these `unwrap`s previously turned a
 /// renamed Cranelift flag or an unsupported host into a hard process abort).
+/// The host functions a kernel body may CALL, declared once per module as imports: the
+/// transcendentals (`f64 -> f64`) by Helix name, and `**` (`(f64, f64) -> f64`). They are the
+/// very Rust functions the walker applies (`crate::jit::ffi`), so a kernel's answer is the
+/// interpreter's answer bit for bit. Threaded to every typed lowering through its context.
+struct HostFns {
+    unary: HashMap<&'static str, FuncId>,
+    pow: FuncId,
+}
+
+impl HostFns {
+    fn declare(module: &mut JITModule) -> Option<HostFns> {
+        let mut sig1 = module.make_signature();
+        sig1.call_conv = CallConv::SystemV;
+        sig1.params.push(AbiParam::new(F64));
+        sig1.returns.push(AbiParam::new(F64));
+        let mut unary: HashMap<&'static str, FuncId> = HashMap::new();
+        for (name, _) in crate::jit::JIT_HOST_UNARY {
+            let id = module.declare_function(&format!("jit_host_{name}"), Linkage::Import, &sig1).ok()?;
+            unary.insert(name, id);
+        }
+        let mut sig2 = module.make_signature();
+        sig2.call_conv = CallConv::SystemV;
+        sig2.params.push(AbiParam::new(F64));
+        sig2.params.push(AbiParam::new(F64));
+        sig2.returns.push(AbiParam::new(F64));
+        let pow = module.declare_function("jit_host_pow", Linkage::Import, &sig2).ok()?;
+        Some(HostFns { unary, pow })
+    }
+
+    /// Call the unary host function for `name` on an `f64`. The analyses admit only names
+    /// in `JIT_HOST_UNARY`, which is exactly what `declare` imported.
+    fn call_unary(
+        &self,
+        module: &mut JITModule,
+        b: &mut FunctionBuilder,
+        name: &str,
+        x: ClValue,
+    ) -> ClValue {
+        let Some(&fid) = self.unary.get(name) else {
+            unreachable!("a host builtin the analyses did not admit reached codegen")
+        };
+        let fref = module.declare_func_in_func(fid, b.func);
+        let call = b.ins().call(fref, &[x]);
+        b.inst_results(call)[0]
+    }
+
+    /// `a ** b` on two `f64`s, the walker's rule (`jit_host_pow`).
+    fn call_pow(&self, module: &mut JITModule, b: &mut FunctionBuilder, a: ClValue, e: ClValue) -> ClValue {
+        let fref = module.declare_func_in_func(self.pow, b.func);
+        let call = b.ins().call(fref, &[a, e]);
+        b.inst_results(call)[0]
+    }
+}
+
 fn make_module() -> Option<JITModule> {
     let mut flag_builder = settings::builder();
     flag_builder.set("use_colocated_libcalls", "false").ok()?;
@@ -958,7 +1016,12 @@ fn make_module() -> Option<JITModule> {
     flag_builder.set("opt_level", "speed").ok()?;
     let isa_builder = cranelift_native::builder().ok()?;
     let isa = isa_builder.finish(settings::Flags::new(flag_builder)).ok()?;
-    let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    // The host functions kernels call by name (`HostFns`): the transcendentals and `**`.
+    for (name, f) in crate::jit::JIT_HOST_UNARY {
+        builder.symbol(format!("jit_host_{name}"), *f as usize as *const u8);
+    }
+    builder.symbol("jit_host_pow", crate::jit::jit_host_pow as *const () as *const u8);
     Some(JITModule::new(builder))
 }
 
@@ -1064,6 +1127,8 @@ fn define_scan_loop<'a>(
 /// `acc=init; x=start; while x<end { acc=body(acc,x); x+=1 } return acc`.
 /// Integer arithmetic wraps (`iadd`/`imul`), matching the interpreter's release
 /// semantics, and the empty range returns `init` — identical to the VM loop.
+// Eight parameters: the builder's five plus the three tables a body may call into.
+#[allow(clippy::too_many_arguments)]
 fn define_reduce_loop(
     module: &mut JITModule,
     ctx: &mut cranelift_codegen::Context,
@@ -1072,6 +1137,7 @@ fn define_reduce_loop(
     rl: &crate::bytecode::ReduceLoop,
     fn_ids: &HashMap<&str, FuncId>,
     mixed: &MixedTables,
+    host: &HostFns,
 ) -> Option<()> {
     // Scalar accumulator (1 body): `fn(start, end, init) -> i64`. Tuple accumulator
     // (N bodies): `fn(start, end, acc_ptr)` — the N `i64` slots are loaded from / stored
@@ -1384,6 +1450,7 @@ fn define_reduce_loop(
             fn_ids,
             module,
             mixed: mixed_ctx.as_ref(),
+            host,
         };
         for body in &rl.bodies {
             new_vals.push(gen_f64_typed(&mut b, body, &mut cx).0);
@@ -1452,6 +1519,7 @@ fn define_array_kernel<'a>(
     float_caps: bool,
     msigs: &MixedSigTable,
     mixed_ids: &HashMap<&str, FuncId>,
+    host: &HostFns,
 ) -> Option<()> {
     // Element + capture values are `i64` (map over an `Int` array) or `f64` (map over a
     // `Float` array); the buffer pointers and length are always `i64`. Filter is `Int`.
@@ -1636,6 +1704,7 @@ fn define_array_kernel<'a>(
                 module,
                 mixed: &mixed_ctx,
                 poison: poison_var,
+                host,
             };
             let (r, kind) = gen_value_typed(&mut b, &k.body, &mut cx);
             // The build gate re-derived the root via the same analysis this codegen mirrors,
@@ -1705,6 +1774,7 @@ fn define_fused_kernel<'a>(
     fid: FuncId,
     k: &'a crate::bytecode::FusedKernel,
     fn_ids: &HashMap<&'a str, FuncId>,
+    host: &HostFns,
 ) -> Option<()> {
     use crate::bytecode::{FusionSink, FusionStage};
     let is_reduce = matches!(k.sink, FusionSink::Reduce { .. });
@@ -1876,6 +1946,7 @@ fn define_fused_kernel<'a>(
                     fn_ids,
                     module,
                     mixed: None,
+                    host,
                 };
                 let new_vals: Vec<ClValue> =
                     bodies.iter().map(|body| gen_f64_typed(&mut b, body, &mut cx).0).collect();
@@ -1896,13 +1967,31 @@ fn define_fused_kernel<'a>(
                 for (k2, &v) in acc_vars.iter().enumerate() {
                     b.def_var(v, new_vals[k2]);
                 }
+            } else if float_reduce {
+                // The scalar `f64` accumulator: typed per node over `{pa (Float), pb (Float
+                // element)}` — the same lowering the tuple form uses, and the twin of the
+                // `infer_f64_typed` gate that admitted the body, so the transcendentals, `**`,
+                // `let` and negation compile here too. No poison: the gate admits no `/`.
+                let mut binders: HashMap<&str, (Variable, NumKind)> = HashMap::new();
+                binders.insert(pa.as_str(), (sink_var, NumKind::Float));
+                binders.insert(pb.as_str(), (cur_var, NumKind::Float));
+                let no_arrays: HashMap<&str, Variable> = HashMap::new();
+                let mut cx = F64Ctx {
+                    binders: &mut binders,
+                    arrays: &no_arrays,
+                    poison: None,
+                    fn_ids,
+                    module,
+                    mixed: None,
+                    host,
+                };
+                let (nacc, _) = gen_f64_typed(&mut b, &bodies[0], &mut cx);
+                b.def_var(sink_var, nacc);
             } else {
                 let mut vars: HashMap<&'a str, Variable> = HashMap::new();
                 vars.insert(pa.as_str(), sink_var);
                 vars.insert(pb.as_str(), cur_var);
-                // `f64` body for a float reduce (`fadd`/`fmul`/`fcmp`+`select`/`fsqrt`); else i64.
-                let kind = if float_reduce { NumKind::Float } else { NumKind::Int };
-                let nacc = gen_value(&mut b, &bodies[0], &mut vars, fn_ids, module, kind);
+                let nacc = gen_value(&mut b, &bodies[0], &mut vars, fn_ids, module, NumKind::Int);
                 b.def_var(sink_var, nacc);
             }
         }
@@ -2084,7 +2173,7 @@ fn gen_value_env<'a>(
             let (rv, rk) = gen_value_env(b, right, vars, env, module, tl);
             // `/` is ALWAYS float division in Helix (`10 / 2 == 5.0`), so it takes the f64
             // branch even for two `Int` operands.
-            if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div) {
+            if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div | BinOp::Pow) {
                 let v = match op {
                     BinOp::Add => b.ins().iadd(lv, rv),
                     BinOp::Sub => b.ins().isub(lv, rv),
@@ -2170,6 +2259,8 @@ fn gen_value_env<'a>(
                         b.seal_block(cont);
                         b.ins().fdiv(lf, rf)
                     }
+                    // `**`: the walker's `powi`/`powf` rule, as a host call. Never raises.
+                    BinOp::Pow => tl.host.call_pow(module, b, lf, rf),
                     _ => unreachable!("ineligible operator reached mixed-env codegen"),
                 };
                 (v, NumKind::Float)
@@ -2220,6 +2311,13 @@ fn gen_value_env<'a>(
                     let af =
                         if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                     (b.ins().sqrt(af), NumKind::Float)
+                }
+                // The transcendentals: a host call to the walker's own function.
+                n if crate::jit::jit_host_unary(n).is_some() => {
+                    let (av, ak) = gen_value_env(b, &args[0], vars, env, module, tl);
+                    let af =
+                        if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
+                    (tl.host.call_unary(module, b, n, af), NumKind::Float)
                 }
                 // `to_float` IS that promotion with nothing applied after it: an `i64` becomes
                 // `f64` via `fcvt_from_sint` (the interpreter's `*i as f64`), and an `f64`
@@ -2393,6 +2491,8 @@ struct MixedTail<'p> {
     /// Their codegen identities, keyed by the same names — parallel to `sigs`, which is
     /// id-free so its inference can also run at bytecode-compile time.
     ids: &'p HashMap<&'p str, FuncId>,
+    /// The host functions a body may call: the transcendentals and `**`.
+    host: &'p HostFns,
 }
 
 /// Generate a mixed tail-recursive body as a native loop — [`gen_tail`]'s typed sibling,
@@ -2803,6 +2903,8 @@ struct TypedCtx<'a, 'c> {
     /// it on any out-of-i64-range result; every kernel declares the variable (a non-raising
     /// body just never touches it) so this needs no `Option` plumbing.
     poison: Variable,
+    /// The host functions a body may call: the transcendentals and `**`.
+    host: &'c HostFns,
 }
 
 fn gen_value_typed<'a>(
@@ -2864,7 +2966,7 @@ fn gen_value_typed<'a>(
             let (rv, rk) = gen_value_typed(b, right, cx);
             // `/` is ALWAYS float division in Helix (`10 / 2 == 5.0`), so it takes the f64
             // branch even for two `Int` operands.
-            if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div) {
+            if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div | BinOp::Pow) {
                 // Integer subexpression — identical codegen to `gen_value`'s i64 arms (euclidean
                 // `%`/`//` by a positive const, bitwise, const shifts), so a mixed body's integer
                 // part is bit-exact to the interpreter, same as the i64 map/reduce.
@@ -2925,6 +3027,11 @@ fn gen_value_typed<'a>(
                         let npv = b.ins().bor(pv, bad);
                         b.def_var(cx.poison, npv);
                         b.ins().fdiv(lf, rf)
+                    }
+                    // `**`: the walker's `powi`/`powf` rule, as a host call. Never raises.
+                    BinOp::Pow => {
+                        let host = cx.host;
+                        host.call_pow(cx.module, b, lf, rf)
                     }
                     _ => unreachable!("ineligible operator reached cx.mixed codegen"),
                 };
@@ -3027,6 +3134,13 @@ fn gen_value_typed<'a>(
                 let (av, ak) = gen_value_typed(b, &args[0], cx);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
+            }
+            // The transcendentals: a host call to the walker's own function (`HostFns`).
+            n if crate::jit::jit_host_unary(n).is_some() => {
+                let (av, ak) = gen_value_typed(b, &args[0], cx);
+                let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
+                let host = cx.host;
+                (host.call_unary(cx.module, b, n, af), NumKind::Float)
             }
             // `to_float` IS that promotion with nothing applied after it: an `i64` becomes
             // `f64` via `fcvt_from_sint` (the interpreter's `*i as f64`), and an `f64`
@@ -3344,6 +3458,8 @@ struct F64Ctx<'a, 'c> {
     module: &'c mut JITModule,
     /// Present only when the kernel carries poison — see the call arm.
     mixed: Option<&'c MixedCallCtx<'c>>,
+    /// The host functions a body may call: the transcendentals and `**`.
+    host: &'c HostFns,
 }
 
 fn gen_f64_typed<'a>(
@@ -3466,6 +3582,16 @@ fn gen_f64_typed<'a>(
             (v, *ret)
         }
         Expr::Float(f) => (b.ins().f64const(*f), NumKind::Float),
+        // Negation preserves its operand's kind: `ineg` wraps like the walker's
+        // `wrapping_neg`, `fneg` is its exact IEEE sign flip (the twin of
+        // `infer_f64_typed`'s `Neg` arm).
+        Expr::Unary { op: UnOp::Neg, expr, .. } => {
+            let (v, k) = gen_f64_typed(b, expr, cx);
+            match k {
+                NumKind::Int => (b.ins().ineg(v), NumKind::Int),
+                NumKind::Float => (b.ins().fneg(v), NumKind::Float),
+            }
+        }
         Expr::Ident { name, .. } => {
             let (var, kind) = cx.binders[name.as_str()];
             (b.use_var(var), kind)
@@ -3490,7 +3616,7 @@ fn gen_f64_typed<'a>(
             let (rv, rk) = gen_f64_typed(b, right, cx);
             // `/` is always float division in Helix, so it forces the f64 path even for `Int/Int`
             // (matching the interpreter); `+ - *` stay `i64` when both operands are `Int`.
-            if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div) {
+            if lk == NumKind::Int && rk == NumKind::Int && !matches!(op, BinOp::Div | BinOp::Pow) {
                 let v = match op {
                     BinOp::Add => b.ins().iadd(lv, rv),
                     BinOp::Sub => b.ins().isub(lv, rv),
@@ -3522,6 +3648,11 @@ fn gen_f64_typed<'a>(
                         }
                         b.ins().fdiv(lf, rf)
                     }
+                    // `**`: the walker's `powi`/`powf` rule, as a host call. Never raises.
+                    BinOp::Pow => {
+                        let host = cx.host;
+                        host.call_pow(cx.module, b, lf, rf)
+                    }
                     _ => unreachable!("ineligible operator reached f64 tuple codegen"),
                 };
                 (v, NumKind::Float)
@@ -3532,6 +3663,13 @@ fn gen_f64_typed<'a>(
                 let (av, ak) = gen_f64_typed(b, &args[0], cx);
                 let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
                 (b.ins().sqrt(af), NumKind::Float)
+            }
+            // The transcendentals: a host call to the walker's own function (`HostFns`).
+            n if crate::jit::jit_host_unary(n).is_some() => {
+                let (av, ak) = gen_f64_typed(b, &args[0], cx);
+                let af = if ak == NumKind::Int { b.ins().fcvt_from_sint(F64, av) } else { av };
+                let host = cx.host;
+                (host.call_unary(cx.module, b, n, af), NumKind::Float)
             }
             // `to_float` IS that promotion with nothing applied after it: an `i64` becomes
             // `f64` via `fcvt_from_sint` (the interpreter's `*i as f64`), and an `f64`

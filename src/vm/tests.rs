@@ -811,6 +811,105 @@
         assert_eq!(tw, run_vm_jit(src));
     }
 
+    /// The transcendentals and `**` in kernels. The coverage doc called them a "permanent
+    /// exclusion": a kernel's result had to match the host libm bit for bit, and Cranelift has
+    /// no instruction for them. They match BY CONSTRUCTION now — each kernel call reaches an
+    /// `extern "C"` shim that IS the Rust function the walker applies (`f64::exp`,
+    /// `crate::stats::erf`, the `**` arm's `powi`/`powf` rule): one function, compiled once,
+    /// executed by both engines on the same bits. Every shape agrees; a NaN result is a value in
+    /// both (no raise, no poison); `Int ** Int` declines (its kind is the run time's); and the
+    /// kernels engage — a map over both sources, a reduce, a Float function compiled whole.
+    #[test]
+    fn transcendentals_and_pow_in_kernels_agree_and_engage() {
+        let pre = "xs = [0.5, 1.5, 2.25, 0.1, 0.9]\ns = 0.5\nn = 3\n";
+        let unary = [
+            "cbrt", "exp", "ln", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan",
+            "sinh", "cosh", "tanh", "degrees", "radians", "erf", "normal_cdf", "normal_pdf",
+            "relu", "sigmoid",
+        ];
+        for f in unary {
+            let src = format!("{pre}xs.map({f}(it))");
+            let tw = run_tw(&src);
+            assert!(tw.is_ok(), "`{f}`: {tw:?}");
+            assert_eq!(tw, run_vm(&src), "tw vs vm: {f}");
+            assert_eq!(tw, run_vm_jit(&src), "tw vs jit: {f}");
+            crate::jit::reset_native_call_count();
+            assert_eq!(run_vm_jit(&format!("{src}.count()")).unwrap(), "5", "{f}");
+            assert!(crate::jit::native_call_count() > 0, "`{f}` over a Floats source did not engage");
+        }
+        for body in [
+            "it ** 2.0", "it ** 0.5", "2.0 ** it", "it ** n", "it ** s", "it ** 2",
+            "exp(it) ** 2.0 + sin(it * s)", "tanh(it ** 3)", "if it > 1.0 then ln(it) else exp(it)",
+        ] {
+            let src = format!("{pre}xs.map({body})");
+            let tw = run_tw(&src);
+            assert!(tw.is_ok(), "`{body}`: {tw:?}");
+            assert_eq!(tw, run_vm(&src), "tw vs vm: {body}");
+            assert_eq!(tw, run_vm_jit(&src), "tw vs jit: {body}");
+            crate::jit::reset_native_call_count();
+            assert_eq!(run_vm_jit(&format!("{src}.count()")).unwrap(), "5", "{body}");
+            assert!(crate::jit::native_call_count() > 0, "`{body}` over a Floats source did not engage");
+        }
+        // An Int source: promoted through `to_float`, or through a Float exponent.
+        for body in ["exp(to_float(it) * 0.1)", "it ** 2.0", "sigmoid(to_float(it) - 3.0)", "it ** s", "2.0 ** it"] {
+            let src = format!("s = 0.5\nrange(0, 6).map({body})");
+            let tw = run_tw(&src);
+            assert!(tw.is_ok(), "`{body}`: {tw:?}");
+            assert_eq!(tw, run_vm(&src), "tw vs vm: {body}");
+            assert_eq!(tw, run_vm_jit(&src), "tw vs jit: {body}");
+            crate::jit::reset_native_call_count();
+            assert_eq!(run_vm_jit(&format!("{src}.count()")).unwrap(), "6", "{body}");
+            assert!(crate::jit::native_call_count() > 0, "`{body}` over a range did not engage");
+        }
+        // `Int ** Int`: an Int unless it overflows, when the walker answers a Float — per element.
+        // No typed kernel can promise that kind, so it declines; the engines still agree.
+        for src in ["range(0, 6).map(it ** 2)", "range(0, 3).map(10 ** (it * 20))", "n = 3\n[2, 3].map(it ** n)"] {
+            assert_eq!(run_tw(src), run_vm(src), "tw vs vm: {src}");
+            assert_eq!(run_tw(src), run_vm_jit(src), "tw vs jit: {src}");
+        }
+        // A NaN result is a VALUE in both engines — no raise, no poison.
+        for src in ["[0.5, -1.0].map(ln(it))", "[2.0, 0.5].map(asin(it))", "[0.0].map(0.0 ** -1.0)"] {
+            let tw = run_tw(src);
+            assert!(tw.is_ok(), "{src}: {tw:?}");
+            assert_eq!(tw, run_vm(src), "tw vs vm: {src}");
+            assert_eq!(tw, run_vm_jit(src), "tw vs jit: {src}");
+        }
+        // The array-source float reduce now lowers through the typed pair the tuple form always
+        // used: every shape its untyped gate compiled still engages, plus `let`, negation, the
+        // transcendentals and `**`.
+        for body in [
+            "acc + x * x", "min(acc, x)", "max(acc, x) * 1.0", "acc + sqrt(x)", "acc + abs(-x)",
+            "let d = x - 1.0 in acc + d * d", "acc + x ** 2.0", "acc + to_float(to_int(x))",
+        ] {
+            let src = format!("xs = [0.5, 1.5, 2.25, 4.0]\nxs.reduce(0.0, (acc, x) => {body})");
+            let tw = run_tw(&src);
+            assert!(tw.is_ok(), "`{body}`: {tw:?}");
+            assert_eq!(tw, run_vm(&src), "tw vs vm: {body}");
+            crate::jit::reset_native_call_count();
+            assert_eq!(tw, run_vm_jit(&src), "tw vs jit: {body}");
+            assert!(crate::jit::native_call_count() > 0, "`{body}` array float reduce did not engage");
+        }
+        // An Int-ROOTED body: the walker's accumulator becomes an `Int` at the first element; the
+        // untyped gate admitted it for a kernel that wrote `2.0`. It declines now — the engines agree.
+        let src = "xs = [0.5, 1.5]\nxs.reduce(0.0, (acc, x) => 2)";
+        assert_eq!(run_tw(src), run_vm(src));
+        assert_eq!(run_tw(src), run_vm_jit(src));
+        // A reduce, and a Float function compiled whole.
+        for src in [
+            "xs = [0.5, 1.5, 2.25]\nxs.reduce(0.0, (acc, x) => acc + exp(x))",
+            "range(0, 100).reduce(0.0, (acc, i) => acc + sin(to_float(i) * 0.01))",
+            "fn f(x: Float) -> Float = exp(x) * 2.0 + x ** 2.0\nf(1.5)",
+            "fn g(x: Float) -> Float = tanh(x)\nxs = [0.5, 1.5]\nxs.map(g(it))",
+        ] {
+            let tw = run_tw(src);
+            assert!(tw.is_ok(), "{src}: {tw:?}");
+            assert_eq!(tw, run_vm(src), "tw vs vm: {src}");
+            crate::jit::reset_native_call_count();
+            assert_eq!(tw, run_vm_jit(src), "tw vs jit: {src}");
+            assert!(crate::jit::native_call_count() > 0, "did not engage: {src}");
+        }
+    }
+
     /// MIXED (per-parameter `Int`/`Float`, annotation-typed) tail-recursive functions now
     /// JIT as native loops over the bits ABI (`MixedFn`): Float params cross the FFI as
     /// raw f64 bits, a Float result returns as bits — pure bit moves, so all three

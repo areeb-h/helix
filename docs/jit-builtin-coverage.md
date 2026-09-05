@@ -35,8 +35,9 @@ A **conditional in a map body** (`if it > 5.0 then it else 0.0` — relu) is off
 every typed body: `and`/`or` over the six comparisons, both branches of one kind (an `if`
 whose branches differ yields an Int or a Float per element, which no packed buffer can hold, so
 it declines), and a NaN meeting an ordering comparison poisons to the walker's "cannot
-compare". Still never offered: **`**`** and the transcendentals — the next increment, a
-host-symbol call to the very Rust function the walker calls, bit-identical by construction.
+compare". **`**`** and the transcendentals followed the same day — see the retired "libm
+exactness" note below. `clamp` (raises when `lo > hi`) and the two-argument `log`/`hypot` are
+what remains off the native path.
 
 Helix's JIT compiles a *subset* of expressions. A builtin outside that subset does not merely
 run slower — it **forces the entire enclosing loop onto the bytecode VM**, because eligibility is
@@ -59,9 +60,10 @@ every builtin's cost is `JIT time ≈ NOJIT time` (it blocks) versus a large rat
 | `sign` | Int | **yes** | two compares + selects; NaN falls through to 0 |
 | `floor`, `ceil`, `round`, `trunc` | Int | **yes** (since the poison out-param) | the kernel sets poison on an out-of-i64-range result; the VM discards the output and the bytecode loop raises the exact error — Int source (`mapm`/`mapmi`) and, since 2026-09-05, Float source (`mapft`) |
 | `clamp` | preserves | **no** | **raises** when `lo > hi` |
-| `exp`, `ln`, `log`, `log2`, `log10` | Float | **no** | libm — see below |
-| `sin`, `cos`, `tan`, `atan` | Float | **no** | libm |
-| `hypot`, `cbrt` | Float | **no** | libm |
+| `exp`, `ln`, `log2`, `log10` | Float | **yes** (2026-09-05) | a host call to the very Rust function the walker applies — same machine code, same bits |
+| `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh` | Float | **yes** (2026-09-05) | host call, as above |
+| `cbrt`, `degrees`, `radians`, `erf`, `normal_cdf`, `normal_pdf`, `relu`, `sigmoid`, `**` | Float | **yes** (2026-09-05) | host call; `**` reproduces the walker's `powi`/`powf` rule; `Int ** Int` declines (its kind is the run time's) |
+| `log(x, base)`, `hypot` | Float | **no** | two-argument forms, not yet admitted |
 
 ## Why the excluded ones are excluded
 
@@ -84,10 +86,14 @@ line is not "converts to an integer", it is "can fail".
 for `round(2.5)`, so lowering `round` to it would be silently wrong on every tie — a class of bug
 that no small-input test would catch. Whoever adds `round` must synthesize half-away-from-zero.
 
-**libm exactness.** The transcendentals are a deliberate, permanent exclusion, not a gap. Their
+**libm exactness — retired (2026-09-05).** The transcendentals were a deliberate exclusion: their
 results must match the host libm *bit for bit* or the three-engine oracle breaks, and Cranelift
-has no instruction for them — they would need an external call to the very libm the interpreter
-uses, pinned per platform. The correctness risk outweighs the win.
+has no instruction for them. They match BY CONSTRUCTION now: a kernel calls an `extern "C"`
+shim (`src/jit/ffi.rs`, `jit_host_*`) that *is* the Rust function the walker applies —
+`f64::exp`, `crate::stats::erf`, the `**` arm's `powi`/`powf` rule — one function, compiled
+once into this binary, executed by both engines on the same bits. Not "the same libm, pinned
+per platform": the same machine code. Pinned by
+`transcendentals_and_pow_in_kernels_agree_and_engage`, which runs every name on three engines.
 
 ## A shape that used to block regardless of builtins — closed
 

@@ -362,43 +362,20 @@ pub(crate) fn float_reduce_body_eligible<'e>(
     locals: &HashSet<&'e str>,
     user_fns: &HashSet<&str>,
 ) -> bool {
-    match e {
-        Expr::Int(_) | Expr::Float(_) => true,
-        Expr::Ident { name, .. } => {
-            name == pa || name == pb || locals.contains(name.as_str())
-        }
-        Expr::Binary { op, left, right, .. } => {
-            matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
-                && float_reduce_body_eligible(left, pa, pb, locals, user_fns)
-                && float_reduce_body_eligible(right, pa, pb, locals, user_fns)
-        }
-        Expr::Call { name, args, .. } => {
-            jit_float_builtin_arity(name) == Some(args.len())
-                && !user_fns.contains(name.as_str())
-                && args.iter().all(|a| float_reduce_body_eligible(a, pa, pb, locals, user_fns))
-        }
-        // A `let` binds one more local per binding — scoped exactly as the walker
-        // scopes it, and as `gen_f64_typed`'s `Let` arm scopes the Cranelift variable.
-        // Rebinding the accumulator or the counter declines: those names are the
-        // kernel's wiring, and a decline costs only the fast path (ADR 0029: slow-but-
-        // correct is acceptable, wrong is not). This closes the field's ~19-23× trap:
-        // `let d = xs[j] - t[j] in acc + d*d` fell to the interpreter while the
-        // written-twice spelling compiled.
-        Expr::Let { bindings, body, .. } => {
-            let mut inner = locals.clone();
-            for (n, v) in bindings {
-                if n == pa || n == pb {
-                    return false;
-                }
-                if !float_reduce_body_eligible(v, pa, pb, &inner, user_fns) {
-                    return false;
-                }
-                inner.insert(n.as_str());
-            }
-            float_reduce_body_eligible(body, pa, pb, &inner, user_fns)
-        }
-        _ => false,
-    }
+    // THE TYPED ANALYSIS, over `{pa, pb}` as Floats — the same pair (`infer_f64_typed` /
+    // `gen_f64_typed`) the tuple-accumulator reduce has always used, so the scalar array-source
+    // float reduce takes every shape that pair takes: the transcendentals and `**` (host
+    // calls), `let`, negation, `to_int`/`sign` inside a promotion. Two things the untyped
+    // subset this replaced could not do: (1) an Int-ROOTED body — `(acc, x) => 2` — used to be
+    // admitted and wrote `2.0` into an accumulator the walker turns into an `Int`; requiring a
+    // Float root declines it, so the engines agree; (2) `min(x, 2)` with an Int literal used to
+    // be admitted for a lowering that compared a float against an `i64`. The gate and the
+    // lowering are one analysis now, so no admitted shape can fail to build.
+    let _ = locals; // every caller passes the empty set; `let` locals are scoped inside
+    let mut binders: HashMap<&str, NumKind> = HashMap::new();
+    binders.insert(pa, NumKind::Float);
+    binders.insert(pb, NumKind::Float);
+    infer_f64_typed(e, &binders, user_fns) == Some(NumKind::Float)
 }
 
 /// Decide whether `reduce(init, (pa, pb) => body)` can JIT as a **scalar `f64`** fold — a
@@ -500,9 +477,24 @@ fn infer_reduce_f64_kind<'e>(
             infer_reduce_f64_kind(right, pa, pb, locals, fns, user_fns, msigs)?;
             Some(NumKind::Float)
         }
+        // `**` on floats: a host call to the walker's own rule (`jit_host_pow`); never raises.
+        // Two `Int` operands decline — `Int ** Int` is an Int unless it overflows, when the
+        // walker answers a Float: a kind no typed kernel can promise per element.
+        Expr::Binary { op: BinOp::Pow, left, right, .. } => {
+            let lk = infer_reduce_f64_kind(left, pa, pb, locals, fns, user_fns, msigs)?;
+            let rk = infer_reduce_f64_kind(right, pa, pb, locals, fns, user_fns, msigs)?;
+            (lk == NumKind::Float || rk == NumKind::Float).then_some(NumKind::Float)
+        }
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
+                    infer_reduce_f64_kind(&args[0], pa, pb, locals, fns, user_fns, msigs)?;
+                    Some(NumKind::Float)
+                }
+                // The transcendentals (`exp`, `ln`, `sin`, `tanh`, …): a host call to the very
+                // Rust function the walker applies — bit-identical by construction — always a
+                // Float, never raising (`ln(-1.0)` is a NaN value in both engines).
+                (n, 1) if crate::jit::jit_host_unary(n).is_some() => {
                     infer_reduce_f64_kind(&args[0], pa, pb, locals, fns, user_fns, msigs)?;
                     Some(NumKind::Float)
                 }
@@ -762,6 +754,11 @@ fn infer_f64_indexed<'e>(
             match (name.as_str(), args.len()) {
                 // `sqrt` promotes its argument in BOTH engines → an `SFloat` arg is safe.
                 ("sqrt", 1) => {
+                    infer_f64_indexed(&args[0], pa, pb, locals, out, fns, user_fns)?;
+                    Some(MixT::GFloat)
+                }
+                // The transcendentals — host calls, promoting their argument as `sqrt` does.
+                (n, 1) if crate::jit::jit_host_unary(n).is_some() => {
                     infer_f64_indexed(&args[0], pa, pb, locals, out, fns, user_fns)?;
                     Some(MixT::GFloat)
                 }
@@ -1035,6 +1032,11 @@ pub(crate) fn infer_f64_typed(e: &Expr, binders: &HashMap<&str, NumKind>, user_f
                     infer_f64_typed(&args[0], binders, user_fns)?;
                     Some(NumKind::Float)
                 }
+                // The transcendentals — host calls (see `jit_host_unary`).
+                (n, 1) if crate::jit::jit_host_unary(n).is_some() => {
+                    infer_f64_typed(&args[0], binders, user_fns)?;
+                    Some(NumKind::Float)
+                }
                 // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
                 // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
                 // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
@@ -1060,6 +1062,30 @@ pub(crate) fn infer_f64_typed(e: &Expr, binders: &HashMap<&str, NumKind>, user_f
                 }
                 _ => None,
             }
+        }
+        // Negation preserves its operand's kind (`ineg`/`fneg` in `gen_f64_typed`).
+        Expr::Unary { op: UnOp::Neg, expr, .. } => infer_f64_typed(expr, binders, user_fns),
+        // `**`: a host call to the walker's rule; Float when either side is (two Ints decline —
+        // see `infer_reduce_f64_kind`'s arm). Never raises, so no poison is needed here.
+        Expr::Binary { op: BinOp::Pow, left, right, .. } => {
+            let lk = infer_f64_typed(left, binders, user_fns)?;
+            let rk = infer_f64_typed(right, binders, user_fns)?;
+            (lk == NumKind::Float || rk == NumKind::Float).then_some(NumKind::Float)
+        }
+        // A `let` scope: each binding typed by its init and visible to the ones after it and to
+        // the body (the walker's sequential semantics). Rebinding an existing binder declines —
+        // `gen_f64_typed`'s `Let` arm relies on that. Admitted so the array-source float
+        // reduce, which the untyped gate used to admit with a `let`, keeps that shape.
+        Expr::Let { bindings, body, .. } => {
+            let mut inner: HashMap<&str, NumKind> = binders.iter().map(|(k, v)| (*k, *v)).collect();
+            for (n, v) in bindings {
+                if inner.contains_key(n.as_str()) {
+                    return None;
+                }
+                let k = infer_f64_typed(v, &inner, user_fns)?;
+                inner.insert(n.as_str(), k);
+            }
+            infer_f64_typed(body, &inner, user_fns)
         }
         _ => None,
     }
@@ -2021,6 +2047,12 @@ fn infer_mixed_kind(
                     infer_mixed_kind(&args[0], binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
                     Some(NumKind::Float) // sqrt always returns Float
                 }
+                // The transcendentals — host calls to the walker's own functions (see
+                // `jit_host_unary`), promoting their argument as `sqrt` does; never raising.
+                (n, 1) if crate::jit::jit_host_unary(n).is_some() => {
+                    infer_mixed_kind(&args[0], binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+                    Some(NumKind::Float)
+                }
                 // `to_float` is the explicit Int->Float conversion: always Float, and the typed
                 // codegen emits the same `fcvt_from_sint` promotion it already emits for `sqrt`.
                 ("to_float", 1) => {
@@ -2092,6 +2124,13 @@ fn infer_mixed_kind(
             infer_mixed_kind(left, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
             infer_mixed_kind(right, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
             Some(NumKind::Float)
+        }
+        // `**`: a host call to the walker's own rule (`jit_host_pow`); Float when either
+        // operand is (two Ints decline — see `infer_reduce_f64_kind`'s arm).
+        Expr::Binary { op: BinOp::Pow, left, right, .. } => {
+            let lk = infer_mixed_kind(left, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+            let rk = infer_mixed_kind(right, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+            (lk == NumKind::Float || rk == NumKind::Float).then_some(NumKind::Float)
         }
         // The i64-closed integer ops (`%`, `//`, bitwise, shifts) — the SAME safe subset as
         // `value_eligible`, so an integer subexpression like `j % 97` in a float-producing map
@@ -2392,6 +2431,11 @@ fn infer_mixed_kind_indexed(
                     infer_mixed_kind_indexed(&args[0], binder, bk, out, fns, user_fns, msigs)?;
                     Some(MixT::GFloat)
                 }
+                // The transcendentals — host calls, promoting their argument as `sqrt` does.
+                (n, 1) if crate::jit::jit_host_unary(n).is_some() => {
+                    infer_mixed_kind_indexed(&args[0], binder, bk, out, fns, user_fns, msigs)?;
+                    Some(MixT::GFloat)
+                }
                 // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
                 // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
                 // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
@@ -2519,6 +2563,14 @@ fn infer_mixed_kind_indexed(
             infer_mixed_kind_indexed(left, binder, bk, out, fns, user_fns, msigs)?;
             infer_mixed_kind_indexed(right, binder, bk, out, fns, user_fns, msigs)?;
             Some(MixT::GFloat)
+        }
+        // `**` under the `MixT` rule: a GENUINE float on either side promotes the other in
+        // both engines; anything else — two Ints, or a value scalar that may be an Int — has
+        // a kind only the run time knows, so it declines.
+        Expr::Binary { op: BinOp::Pow, left, right, .. } => {
+            let l = infer_mixed_kind_indexed(left, binder, bk, out, fns, user_fns, msigs)?;
+            let r = infer_mixed_kind_indexed(right, binder, bk, out, fns, user_fns, msigs)?;
+            (l == MixT::GFloat || r == MixT::GFloat).then_some(MixT::GFloat)
         }
         Expr::Binary {
             op: op @ (BinOp::Mod | BinOp::FloorDiv | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr),
@@ -3194,6 +3246,8 @@ fn infer_typed_env(
                 // `/0` error cannot wait for an accumulate-and-store. The VM then discards
                 // the result and re-runs on bytecode, raising the exact error.
                 BinOp::Div => Some(NumKind::Float),
+                // `**`: Float when either side is; two Ints decline (see `infer_mixed_kind`).
+                BinOp::Pow => (lk == NumKind::Float || rk == NumKind::Float).then_some(NumKind::Float),
                 // Any `Int` divisor, literal or not. A zero divisor — and the
                 // `(i64::MIN, -1)` pair, which does not raise but WRAPS where native
                 // `srem`/`sdiv` would trap — bail to the poison block, exactly like the
@@ -3236,6 +3290,11 @@ fn infer_typed_env(
             }
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
+                    infer_typed_env(&args[0], env, sigs, user_fns)?;
+                    Some(NumKind::Float)
+                }
+                // The transcendentals — host calls (see `jit_host_unary`).
+                (n, 1) if crate::jit::jit_host_unary(n).is_some() => {
                     infer_typed_env(&args[0], env, sigs, user_fns)?;
                     Some(NumKind::Float)
                 }

@@ -838,3 +838,77 @@ pub unsafe fn call_f64(ptr: *const u8, args: &[f64]) -> f64 {
         }
     }
 }
+
+// ---------- host functions the kernels CALL ----------
+//
+// The transcendentals and `**`. Cranelift has no instruction for them, and the coverage doc
+// called them a "permanent exclusion" because a kernel's result had to match the host libm
+// bit for bit. It does, BY CONSTRUCTION: each shim is the very Rust function the walker's
+// `a_sqrt` table applies (`f64::exp`, `crate::stats::erf`, …) and `eval_binary`'s `**` arm
+// computes, compiled once into this binary — the kernel and the interpreter execute the same
+// machine code on the same bits. `extern "C"` so Cranelift's SystemV call reaches them;
+// registered by name with the JIT builder in `codegen::make_module` and declared as imports by
+// `codegen::HostFns`. None of them raises: `ln(-1.0)` is a NaN VALUE in both engines.
+
+pub extern "C" fn jit_host_cbrt(x: f64) -> f64 { x.cbrt() }
+pub extern "C" fn jit_host_exp(x: f64) -> f64 { x.exp() }
+pub extern "C" fn jit_host_ln(x: f64) -> f64 { x.ln() }
+pub extern "C" fn jit_host_log10(x: f64) -> f64 { x.log10() }
+pub extern "C" fn jit_host_log2(x: f64) -> f64 { x.log2() }
+pub extern "C" fn jit_host_sin(x: f64) -> f64 { x.sin() }
+pub extern "C" fn jit_host_cos(x: f64) -> f64 { x.cos() }
+pub extern "C" fn jit_host_tan(x: f64) -> f64 { x.tan() }
+pub extern "C" fn jit_host_asin(x: f64) -> f64 { x.asin() }
+pub extern "C" fn jit_host_acos(x: f64) -> f64 { x.acos() }
+pub extern "C" fn jit_host_atan(x: f64) -> f64 { x.atan() }
+pub extern "C" fn jit_host_sinh(x: f64) -> f64 { x.sinh() }
+pub extern "C" fn jit_host_cosh(x: f64) -> f64 { x.cosh() }
+pub extern "C" fn jit_host_tanh(x: f64) -> f64 { x.tanh() }
+pub extern "C" fn jit_host_degrees(x: f64) -> f64 { x.to_degrees() }
+pub extern "C" fn jit_host_radians(x: f64) -> f64 { x.to_radians() }
+pub extern "C" fn jit_host_erf(x: f64) -> f64 { crate::stats::erf(x) }
+pub extern "C" fn jit_host_normal_cdf(x: f64) -> f64 { crate::stats::normal_cdf(x) }
+pub extern "C" fn jit_host_normal_pdf(x: f64) -> f64 { crate::stats::normal_pdf(x) }
+pub extern "C" fn jit_host_relu(x: f64) -> f64 { x.max(0.0) }
+pub extern "C" fn jit_host_sigmoid(x: f64) -> f64 { 1.0 / (1.0 + (-x).exp()) }
+
+/// `a ** b` on floats: the walker's `eval_binary` rule verbatim (`src/interp/ops.rs`) — an
+/// integral exponent within `i32` is `powi` (strength-reduced, as numpy does), anything else
+/// `powf`. Two `Int` operands never reach a kernel (the analyses decline them: `Int ** Int`
+/// is an Int unless it overflows, when the walker answers a Float — a kind no typed kernel
+/// can promise per element).
+pub extern "C" fn jit_host_pow(a: f64, b: f64) -> f64 {
+    if b.fract() == 0.0 && b.abs() <= i32::MAX as f64 { a.powi(b as i32) } else { a.powf(b) }
+}
+
+/// The unary host functions by the Helix name a body calls — the walker's `a_sqrt` table
+/// minus `sqrt` (a native `fsqrt`). The analyses admit exactly these names; `HostFns`
+/// declares exactly these imports; `make_module` registers exactly these symbols.
+pub const JIT_HOST_UNARY: &[(&str, extern "C" fn(f64) -> f64)] = &[
+    ("cbrt", jit_host_cbrt),
+    ("exp", jit_host_exp),
+    ("ln", jit_host_ln),
+    ("log10", jit_host_log10),
+    ("log2", jit_host_log2),
+    ("sin", jit_host_sin),
+    ("cos", jit_host_cos),
+    ("tan", jit_host_tan),
+    ("asin", jit_host_asin),
+    ("acos", jit_host_acos),
+    ("atan", jit_host_atan),
+    ("sinh", jit_host_sinh),
+    ("cosh", jit_host_cosh),
+    ("tanh", jit_host_tanh),
+    ("degrees", jit_host_degrees),
+    ("radians", jit_host_radians),
+    ("erf", jit_host_erf),
+    ("normal_cdf", jit_host_normal_cdf),
+    ("normal_pdf", jit_host_normal_pdf),
+    ("relu", jit_host_relu),
+    ("sigmoid", jit_host_sigmoid),
+];
+
+/// The host function for a Helix unary name, if a kernel may call it.
+pub fn jit_host_unary(name: &str) -> Option<extern "C" fn(f64) -> f64> {
+    JIT_HOST_UNARY.iter().find(|(n, _)| *n == name).map(|(_, f)| *f)
+}
