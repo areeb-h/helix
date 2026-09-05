@@ -443,6 +443,27 @@ pub unsafe fn run_map_kernel_mixed(ptr: *const u8, src: &[i64], caps: &[i64]) ->
     unsafe { run_map_chunked::<i64, f64, i64>(ptr, src, caps) }
 }
 
+/// The FLOATS-source typed map kernels (`float_source_map_eligible`): `f64` elements in, and
+/// out `f64` or `i64` by the body's root; captures as `i64` slots (Int-proven values, or f64
+/// bits for the value-scalar build). SAFETY: as [`run_map_kernel`], with an
+/// `fn(*const f64, *mut f64, i64, *const i64)` contract.
+pub unsafe fn run_map_kernel_fsrc_f64(ptr: *const u8, src: &[f64], caps: &[i64]) -> Vec<f64> {
+    unsafe { run_map_chunked::<f64, f64, i64>(ptr, src, caps) }
+}
+
+/// SAFETY: as [`run_map_kernel_fsrc_f64`], with an `fn(*const f64, *mut i64, i64, *const i64)`
+/// contract (an Int root: `to_int`, `sign`, the rounders).
+pub unsafe fn run_map_kernel_fsrc_int(ptr: *const u8, src: &[f64], caps: &[i64]) -> Vec<i64> {
+    unsafe { run_map_chunked::<f64, i64, i64>(ptr, src, caps) }
+}
+
+/// The Floats-source typed map run IN PLACE over a uniquely-owned buffer — a Float root and a
+/// non-raising body only, exactly the cases [`run_map_kernel_f64_inplace`] covers. SAFETY: as
+/// that, with `i64` captures.
+pub unsafe fn run_map_kernel_fsrc_inplace(ptr: *const u8, buf: &mut [f64], caps: &[i64]) {
+    unsafe { run_map_inplace::<f64, i64>(ptr, buf, caps) }
+}
+
 /// Run a native filter kernel over `src`, returning the kept elements in order. SAFETY:
 /// `ptr` is a finalized `extern "C" fn(*const i64,*mut i64,i64)->i64` (kept count) from
 /// [`define_array_kernel`].
@@ -556,6 +577,25 @@ pub unsafe fn run_map_kernel_mixed_poison(
     caps: &[i64],
 ) -> Option<Vec<f64>> {
     unsafe { run_map_poison::<i64, f64>(ptr, src, caps) }
+}
+
+/// The raising Floats-source typed map kernels (a `/`, or a rounder, in the body). SAFETY:
+/// as [`run_map_poison`] with `S = f64` and the matching `D`.
+pub unsafe fn run_map_kernel_fsrc_f64_poison(
+    ptr: *const u8,
+    src: &[f64],
+    caps: &[i64],
+) -> Option<Vec<f64>> {
+    unsafe { run_map_poison::<f64, f64>(ptr, src, caps) }
+}
+
+/// SAFETY: as [`run_map_kernel_fsrc_f64_poison`] with `D = i64`.
+pub unsafe fn run_map_kernel_fsrc_int_poison(
+    ptr: *const u8,
+    src: &[f64],
+    caps: &[i64],
+) -> Option<Vec<i64>> {
+    unsafe { run_map_poison::<f64, i64>(ptr, src, caps) }
 }
 
 /// The RANGE-source twin of [`run_map_poison`]: counter values are generated per chunk into

@@ -1731,7 +1731,7 @@ pub fn mixed_map_eligible(
 ) -> Option<Vec<Capture>> {
     let mut uses_binder = false;
     let mut caps: Vec<Capture> = Vec::new();
-    let root = infer_mixed_kind(body, binder, &mut uses_binder, &mut caps, fns, user_fns, msigs)?;
+    let root = infer_mixed_kind(body, binder, NumKind::Int, NumKind::Int, &mut uses_binder, &mut caps, fns, user_fns, msigs)?;
     (root == NumKind::Float && uses_binder && caps.len() <= MAX_CAPTURES).then_some(caps)
 }
 
@@ -1818,8 +1818,86 @@ pub fn mixed_map_int_root_eligible(
 ) -> Option<Vec<Capture>> {
     let mut uses_binder = false;
     let mut caps: Vec<Capture> = Vec::new();
-    let root = infer_mixed_kind(body, binder, &mut uses_binder, &mut caps, fns, user_fns, msigs)?;
+    let root = infer_mixed_kind(body, binder, NumKind::Int, NumKind::Int, &mut uses_binder, &mut caps, fns, user_fns, msigs)?;
     (root == NumKind::Int && uses_binder && caps.len() <= MAX_CAPTURES).then_some(caps)
+}
+
+/// The FLOATS-source typed map: the same per-node typing as [`mixed_map_eligible`] with the
+/// binder a `Float` — `xs.map(to_int(it))`, `xs.map(it / 2.0)`, `xs.map(floor(it))` over a
+/// `Floats` array, which the monomorphic `f64` kernel (`+ - *` only) declines and the
+/// Int-source families cannot serve. Those sites read "compiled" in `jit-explain` (an
+/// Int-source build existed) and ran at interpreter speed (field build, 1.31/1.32).
+/// Returns the captures — typed `Int`, marshalled from `Value::Int` at dispatch, the mixed
+/// family's runtime proof — and the ROOT kind, which decides the output buffer: `Float`
+/// writes `f64`, `Int` writes `i64` (`to_int`, `sign`, the rounders).
+pub fn float_source_map_eligible(
+    body: &Expr,
+    binder: &str,
+    fns: &HashSet<&str>,
+    user_fns: &HashSet<&str>,
+    msigs: &MixedSigTable,
+) -> Option<(Vec<Capture>, NumKind)> {
+    let mut uses_binder = false;
+    let mut caps: Vec<Capture> = Vec::new();
+    let root =
+        infer_mixed_kind(body, binder, NumKind::Float, NumKind::Int, &mut uses_binder, &mut caps, fns, user_fns, msigs)?;
+    (uses_binder && caps.len() <= MAX_CAPTURES).then_some((caps, root))
+}
+
+/// FLOAT-PROVEN captures — the third marshal, for either source. Every capture is a runtime
+/// `Value::Float` (the dispatch proves it: `float_scalar_caps` declines an Int), so each is
+/// typed a GENUINE Float and promotes the integer side it meets exactly where the walker
+/// does. This is what `range(…).map(it * s)` with a Float `s` needed: the Int-proven build
+/// types `s` an Int and its marshal declines the Float at dispatch, and the value-scalar
+/// build refuses `Int * SFloat` because a capture that MIGHT be an Int must not promote
+/// early — sound, and 1.0x for the commonest map there is (the literal `it * 0.5` ran
+/// 16x). A capture that IS a Float promotes there in both engines. Requires a capture (else
+/// the plain build already serves the body) and the binder used.
+pub fn float_caps_map_eligible(
+    body: &Expr,
+    binder: &str,
+    source: NumKind,
+    fns: &HashSet<&str>,
+    user_fns: &HashSet<&str>,
+    msigs: &MixedSigTable,
+) -> Option<(Vec<Capture>, NumKind)> {
+    let mut uses_binder = false;
+    let mut caps: Vec<Capture> = Vec::new();
+    let root =
+        infer_mixed_kind(body, binder, source, NumKind::Float, &mut uses_binder, &mut caps, fns, user_fns, msigs)?;
+    (uses_binder && !caps.is_empty() && caps.len() <= MAX_CAPTURES).then_some((caps, root))
+}
+
+/// Its VALUE-SCALAR twin: captures ride as `f64` bits, admitted by the `MixT` proof — each
+/// only where a genuine float promotes it, and the element IS a genuine float here, so
+/// `it * scale` and `floor(it / s)` qualify with a runtime `Float` capture.
+pub fn float_source_map_value_scalar_eligible(
+    body: &Expr,
+    binder: &str,
+    fns: &HashSet<&str>,
+    user_fns: &HashSet<&str>,
+    msigs: &MixedSigTable,
+) -> Option<(Vec<Capture>, NumKind)> {
+    let mut acc = IndexedOut::default();
+    let root = infer_mixed_kind_indexed(body, binder, MixT::GFloat, &mut acc, fns, user_fns, msigs)?;
+    let IndexedOut { mut caps, bounds, synth } = acc;
+    let root = match root {
+        MixT::Int => NumKind::Int,
+        MixT::GFloat => NumKind::Float,
+        // A bare capture as the whole body has no promoting float: not this kernel's.
+        MixT::SFloat => return None,
+    };
+    if bounds.is_empty()
+        && synth.is_empty()
+        && !caps.is_empty()
+        && caps.len() <= MAX_CAPTURES
+        && caps.iter().all(|c| c.kind == CaptureKind::Scalar)
+    {
+        relabel_value_scalars(&mut caps, &bounds, &synth);
+        Some((caps, root))
+    } else {
+        None
+    }
 }
 
 /// Bottom-up type of a mixed-map node, or `None` if it contains anything outside the
@@ -1828,9 +1906,21 @@ pub fn mixed_map_int_root_eligible(
 /// `min`/`max` are typed like the interpreter: `sqrt` is always `Float`; `abs` preserves
 /// its arg kind; `min`/`max` need both args the **same** kind (a mixed `min(int, float)`
 /// returns whichever original operand wins, so its type is runtime-dependent — rejected).
+// Nine parameters: the walker's five tables plus the two kinds the specializations vary
+// (binder, captures) — the same shape `check_func` carries, and for the same reason: a
+// context struct would bury the two arguments that differ per call under seven that do not.
+#[allow(clippy::too_many_arguments)]
 fn infer_mixed_kind(
     e: &Expr,
     binder: &str,
+    // The binder's kind: `Int` for every Int-source family, `Float` for the FLOATS-source
+    // typed map (`float_source_map_eligible`) — the one place a Float element differs.
+    bk: NumKind,
+    // The CAPTURES' kind: `Int` for the Int-proven builds (every capture a `Value::Int` at
+    // dispatch, so an integer subexpression containing one wraps like the walker's), `Float`
+    // for the FLOAT-PROVEN builds (every capture a `Value::Float` at dispatch, so it promotes
+    // the integer side it meets exactly where the walker promotes it).
+    ck: NumKind,
     uses_binder: &mut bool,
     caps: &mut Vec<Capture>,
     fns: &HashSet<&str>,
@@ -1849,7 +1939,7 @@ fn infer_mixed_kind(
         // `Neg`; this path had NEITHER, and admitting a shape the codegen cannot emit is
         // how this area was reverted three times before.
         Expr::Unary { op: UnOp::Neg, expr, .. } => {
-            infer_mixed_kind(expr, binder, uses_binder, caps, fns, user_fns, msigs)
+            infer_mixed_kind(expr, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)
         }
         // A USER function with an `i64` specialization. Tried BEFORE the builtin arm, so a
         // user function shadowing `abs`/`min`/`max` dispatches to the user's function — the
@@ -1903,7 +1993,7 @@ fn infer_mixed_kind(
         Expr::Call { name, args, .. } if user_fns.contains(name.as_str()) => {
             let mut kinds = Vec::with_capacity(args.len());
             for a in args {
-                kinds.push(infer_mixed_kind(a, binder, uses_binder, caps, fns, user_fns, msigs)?);
+                kinds.push(infer_mixed_kind(a, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?);
             }
             let all_int = kinds.iter().all(|k| *k == NumKind::Int);
             if all_int && fns.contains(name.as_str()) {
@@ -1924,16 +2014,16 @@ fn infer_mixed_kind(
         Expr::Call { name, args, .. } if !user_fns.contains(name.as_str()) => {
             match (name.as_str(), args.len()) {
                 ("sqrt", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs)?;
+                    infer_mixed_kind(&args[0], binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
                     Some(NumKind::Float) // sqrt always returns Float
                 }
                 // `to_float` is the explicit Int->Float conversion: always Float, and the typed
                 // codegen emits the same `fcvt_from_sint` promotion it already emits for `sqrt`.
                 ("to_float", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs)?;
+                    infer_mixed_kind(&args[0], binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
                     Some(NumKind::Float)
                 }
-                ("abs", 1) => infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs), // preserves kind
+                ("abs", 1) => infer_mixed_kind(&args[0], binder, bk, ck, uses_binder, caps, fns, user_fns, msigs), // preserves kind
                 // `to_int` and `sign` always yield `Int` and NEVER raise, which is what makes them safe
                 // to lower with no bail machinery: `to_int` SATURATES (NaN -> 0, +-inf -> i64::MAX/MIN,
                 // exactly Rust's `as i64` and Cranelift's `fcvt_to_sint_sat`), and `sign` is two
@@ -1941,7 +2031,7 @@ fn infer_mixed_kind(
                 // returns 0 for NaN rather than propagating it. Contrast floor/ceil/round/trunc, which
                 // RAISE when the result leaves i64 range and therefore still need a poison path.
                 ("to_int" | "sign", 1) => {
-                    infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs)?;
+                    infer_mixed_kind(&args[0], binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
                     Some(NumKind::Int)
                 }
                 // The RAISING rounders: `Float` in, `Int` out, and an out-of-i64-range result
@@ -1954,14 +2044,14 @@ fn infer_mixed_kind(
                 // analysis types every operand `Int` or genuine `Float` — value scalars ride
                 // as `i64` here — so there is no unpromoted-scalar case to refuse.)
                 ("floor" | "ceil" | "round" | "trunc", 1) => {
-                    match infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs)? {
+                    match infer_mixed_kind(&args[0], binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)? {
                         NumKind::Int => Some(NumKind::Int), // identity on Int
                         NumKind::Float => Some(NumKind::Int),
                     }
                 }
                 ("min" | "max", 2) => {
-                    let ka = infer_mixed_kind(&args[0], binder, uses_binder, caps, fns, user_fns, msigs)?;
-                    let kb = infer_mixed_kind(&args[1], binder, uses_binder, caps, fns, user_fns, msigs)?;
+                    let ka = infer_mixed_kind(&args[0], binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+                    let kb = infer_mixed_kind(&args[1], binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
                     if ka == kb { Some(ka) } else { None }
                 }
                 _ => None,
@@ -1970,19 +2060,19 @@ fn infer_mixed_kind(
         Expr::Ident { name, .. } => {
             if name == binder {
                 *uses_binder = true;
-                Some(NumKind::Int) // the `i64` element
+                Some(bk) // the element: `i64` for an Int source, `f64` for a Floats one
             } else {
                 // A free scalar, typed `Int` and loaded `i64` — sound ONLY because the VM
                 // proves the value really is a `Value::Int` before dispatch (see
                 // [`mixed_map_eligible`]); a `Float` there declines to the bytecode loop.
                 // Typing it `Int` is what keeps an integer subexpression containing it
                 // wrapping exactly like the interpreter's.
-                record_cap(caps, name, CaptureKind::Scalar).then_some(NumKind::Int)
+                record_cap(caps, name, CaptureKind::Scalar).then_some(ck)
             }
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns, msigs)?;
-            let rk = infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns, msigs)?;
+            let lk = infer_mixed_kind(left, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+            let rk = infer_mixed_kind(right, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
             Some(if lk == NumKind::Float || rk == NumKind::Float {
                 NumKind::Float
             } else {
@@ -1995,8 +2085,8 @@ fn infer_mixed_kind(
         // interpreter raises on `/0` where native `fdiv` yields inf). This is what lets
         // `ceil(to_float(i) / 4.0)` compile instead of forcing the `* 0.25` spelling.
         Expr::Binary { op: BinOp::Div, left, right, .. } => {
-            infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns, msigs)?;
-            infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns, msigs)?;
+            infer_mixed_kind(left, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+            infer_mixed_kind(right, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
             Some(NumKind::Float)
         }
         // The i64-closed integer ops (`%`, `//`, bitwise, shifts) — the SAME safe subset as
@@ -2018,8 +2108,8 @@ fn infer_mixed_kind(
             if !op_ok {
                 return None;
             }
-            let lk = infer_mixed_kind(left, binder, uses_binder, caps, fns, user_fns, msigs)?;
-            let rk = infer_mixed_kind(right, binder, uses_binder, caps, fns, user_fns, msigs)?;
+            let lk = infer_mixed_kind(left, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+            let rk = infer_mixed_kind(right, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
             if lk == NumKind::Int && rk == NumKind::Int {
                 Some(NumKind::Int)
             } else {
@@ -2061,7 +2151,7 @@ pub fn mixed_map_captures_indexed(
     msigs: &MixedSigTable,
 ) -> Option<MapIndexAnalysis> {
     let mut acc = IndexedOut::default();
-    let root = infer_mixed_kind_indexed(body, binder, &mut acc, fns, user_fns, msigs)?;
+    let root = infer_mixed_kind_indexed(body, binder, MixT::Int, &mut acc, fns, user_fns, msigs)?;
     let IndexedOut { mut caps, bounds, synth } = acc;
     // GFloat root: a genuine `f64` the kernel writes to the output buffer (a bare-`SFloat` root
     // — an un-promoted value scalar — is rejected, matching the interpreter). Non-empty bounds:
@@ -2095,19 +2185,26 @@ pub fn mixed_map_value_scalar_eligible(
     fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
     msigs: &MixedSigTable,
-) -> Option<Vec<Capture>> {
+) -> Option<(Vec<Capture>, NumKind)> {
     let mut acc = IndexedOut::default();
-    let root = infer_mixed_kind_indexed(body, binder, &mut acc, fns, user_fns, msigs)?;
+    let root = infer_mixed_kind_indexed(body, binder, MixT::Int, &mut acc, fns, user_fns, msigs)?;
     let IndexedOut { mut caps, bounds, synth } = acc;
-    if root == MixT::GFloat
-        && bounds.is_empty()
+    // The ROOT decides the output buffer — `Float` an `f64` one ("mapmv"), `Int` an `i64`
+    // one ("mapmiv", `range(…).map(floor(it / s))` with a Float `s`, which had no build).
+    // A bare capture as the whole body has no promoting float: not this kernel's.
+    let root = match root {
+        MixT::Int => NumKind::Int,
+        MixT::GFloat => NumKind::Float,
+        MixT::SFloat => return None,
+    };
+    if bounds.is_empty()
         && synth.is_empty()
         && !caps.is_empty()
         && caps.len() <= MAX_CAPTURES
         && caps.iter().all(|c| c.kind == CaptureKind::Scalar)
     {
         relabel_value_scalars(&mut caps, &bounds, &synth);
-        Some(caps)
+        Some((caps, root))
     } else {
         None
     }
@@ -2159,6 +2256,8 @@ fn mix_combine(l: MixT, r: MixT) -> Option<MixT> {
 fn infer_mixed_kind_indexed(
     e: &Expr,
     binder: &str,
+    // `Int` for a range element, `GFloat` for the Floats-source value-scalar build.
+    bk: MixT,
     out: &mut IndexedOut,
     fns: &HashSet<&str>,
     user_fns: &HashSet<&str>,
@@ -2169,7 +2268,7 @@ fn infer_mixed_kind_indexed(
         Expr::Float(_) => Some(MixT::GFloat),
         Expr::Ident { name, .. } => {
             if name == binder {
-                Some(MixT::Int) // the i64 range element
+                Some(bk) // the element: `Int` for a range, `GFloat` for a Floats source
             } else {
                 // A value scalar — recorded `Scalar` here, relabeled to `ScalarValue` by
                 // `relabel_value_scalars` once the bounds show it is not an index. It rides as
@@ -2223,14 +2322,14 @@ fn infer_mixed_kind_indexed(
                 // `sqrt` promotes its argument to `f64` in BOTH engines, so an `SFloat` arg is
                 // safe here and the result is a genuine float.
                 ("sqrt", 1) => {
-                    infer_mixed_kind_indexed(&args[0], binder, out, fns, user_fns, msigs)?;
+                    infer_mixed_kind_indexed(&args[0], binder, bk, out, fns, user_fns, msigs)?;
                     Some(MixT::GFloat)
                 }
                 // `to_float` is the explicit Int->Float conversion. Like `sqrt` it always yields a
                 // float, and the typed codegen emits exactly the `fcvt_from_sint` promotion it
                 // already emits for `sqrt`'s argument -- so this is `sqrt` with nothing applied after.
                 ("to_float", 1) => {
-                    infer_mixed_kind_indexed(&args[0], binder, out, fns, user_fns, msigs)?;
+                    infer_mixed_kind_indexed(&args[0], binder, bk, out, fns, user_fns, msigs)?;
                     Some(MixT::GFloat)
                 }
                 // `abs`/`min`/`max` do NOT promote (interp `abs(Int)` is `iabs`, `min(Int,Int)`
@@ -2244,17 +2343,28 @@ fn infer_mixed_kind_indexed(
                 // RAISE when the result leaves i64 range and therefore still need a poison path.
                 // An unpromoted value scalar is refused for the same reason `abs` refuses one:
                 // its runtime type is not yet pinned, and `to_int`/`sign` read it directly.
-                ("to_int" | "sign", 1) => match infer_mixed_kind_indexed(&args[0], binder, out, fns, user_fns, msigs)? {
+                ("to_int" | "sign", 1) => match infer_mixed_kind_indexed(&args[0], binder, bk, out, fns, user_fns, msigs)? {
                     MixT::SFloat => None,
                     _ => Some(MixT::Int),
                 },
-("abs", 1) => match infer_mixed_kind_indexed(&args[0], binder, out, fns, user_fns, msigs)? {
+                // The RAISING rounders — `Float` in, `Int` out; `body_raises` counts them, so a
+                // rounding kernel always carries the poison out-param the typed codegen's
+                // rounder arm sets on an out-of-i64-range result. An `Int` argument is the
+                // identity. An unpromoted value scalar is refused as `to_int` refuses one.
+                // This arm was MISSING while the unindexed walker had it, so no value-scalar
+                // (or indexed) build existed for any body with a rounder — `floor(it / s)`
+                // with a Float `s` declined to the bytecode loop on every source kind.
+                ("floor" | "ceil" | "round" | "trunc", 1) => match infer_mixed_kind_indexed(&args[0], binder, bk, out, fns, user_fns, msigs)? {
+                    MixT::SFloat => None,
+                    _ => Some(MixT::Int),
+                },
+("abs", 1) => match infer_mixed_kind_indexed(&args[0], binder, bk, out, fns, user_fns, msigs)? {
                     MixT::SFloat => None,
                     k => Some(k),
                 },
                 ("min" | "max", 2) => {
-                    let ka = infer_mixed_kind_indexed(&args[0], binder, out, fns, user_fns, msigs)?;
-                    let kb = infer_mixed_kind_indexed(&args[1], binder, out, fns, user_fns, msigs)?;
+                    let ka = infer_mixed_kind_indexed(&args[0], binder, bk, out, fns, user_fns, msigs)?;
+                    let kb = infer_mixed_kind_indexed(&args[1], binder, bk, out, fns, user_fns, msigs)?;
                     if ka == kb && ka != MixT::SFloat { Some(ka) } else { None }
                 }
                 _ => None,
@@ -2303,7 +2413,7 @@ fn infer_mixed_kind_indexed(
         Expr::Call { name, args, .. } if user_fns.contains(name.as_str()) => {
             let mut kinds = Vec::with_capacity(args.len());
             for a in args {
-                kinds.push(infer_mixed_kind_indexed(a, binder, out, fns, user_fns, msigs)?);
+                kinds.push(infer_mixed_kind_indexed(a, binder, bk, out, fns, user_fns, msigs)?);
             }
             if kinds.iter().all(|k| *k == MixT::Int) && fns.contains(name.as_str()) {
                 return jit_builtin_arity_ok(name, args.len()).then_some(MixT::Int);
@@ -2328,8 +2438,8 @@ fn infer_mixed_kind_indexed(
             })
         }
         Expr::Binary { op: BinOp::Add | BinOp::Sub | BinOp::Mul, left, right, .. } => {
-            let lk = infer_mixed_kind_indexed(left, binder, out, fns, user_fns, msigs)?;
-            let rk = infer_mixed_kind_indexed(right, binder, out, fns, user_fns, msigs)?;
+            let lk = infer_mixed_kind_indexed(left, binder, bk, out, fns, user_fns, msigs)?;
+            let rk = infer_mixed_kind_indexed(right, binder, bk, out, fns, user_fns, msigs)?;
             mix_combine(lk, rk)
         }
         // `/` promotes BOTH operands in BOTH engines (even `Int / Int` is a float divide,
@@ -2339,8 +2449,8 @@ fn infer_mixed_kind_indexed(
         // (`body_raises` counts every `/`, so a dividing kernel always carries the
         // poison accumulator `gen_value_typed`'s Div arm ORs into).
         Expr::Binary { op: BinOp::Div, left, right, .. } => {
-            infer_mixed_kind_indexed(left, binder, out, fns, user_fns, msigs)?;
-            infer_mixed_kind_indexed(right, binder, out, fns, user_fns, msigs)?;
+            infer_mixed_kind_indexed(left, binder, bk, out, fns, user_fns, msigs)?;
+            infer_mixed_kind_indexed(right, binder, bk, out, fns, user_fns, msigs)?;
             Some(MixT::GFloat)
         }
         Expr::Binary {
@@ -2357,8 +2467,8 @@ fn infer_mixed_kind_indexed(
             if !op_ok {
                 return None;
             }
-            let lk = infer_mixed_kind_indexed(left, binder, out, fns, user_fns, msigs)?;
-            let rk = infer_mixed_kind_indexed(right, binder, out, fns, user_fns, msigs)?;
+            let lk = infer_mixed_kind_indexed(left, binder, bk, out, fns, user_fns, msigs)?;
+            let rk = infer_mixed_kind_indexed(right, binder, bk, out, fns, user_fns, msigs)?;
             // The i64-closed ops require both operands `Int` — a genuine float or a value
             // scalar is not even valid Helix here (`x[i] % 3` on an f64 array is a type error).
             if lk == MixT::Int && rk == MixT::Int {

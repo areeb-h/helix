@@ -448,6 +448,19 @@ fn value_scalar_caps(cap_vals: &[Value]) -> Option<Vec<i64>> {
         .collect()
 }
 
+/// Marshal captures for a FLOAT-PROVEN kernel: every one must be a `Value::Float` (its bits
+/// pass through); an `Int` — or anything else — declines. The proof `float_caps_map_eligible`
+/// typed the body under: a capture that IS a Float promotes where the walker promotes it.
+fn float_scalar_caps(cap_vals: &[Value]) -> Option<Vec<i64>> {
+    cap_vals
+        .iter()
+        .map(|v| match v {
+            Value::Float(f) => Some(f.to_bits() as i64),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The lazy-range `map` fast path: run the kernel over counter values GENERATED per chunk instead
 /// of over a materialized buffer. `None` means no specialization matched, and the caller falls
 /// back to the ordinary route (which materializes, exactly as before).
@@ -542,6 +555,48 @@ fn try_map_range(
         }
         let out = unsafe { crate::jit::run_map_kernel_range(p, start, step, len, &c) };
         return Some(Value::int_array(out));
+    }
+    // Its VALUE-SCALAR twin ("mapmiv"): an `i64` result with a runtime Float capture.
+    if let Some(p) = j.map_kernel_mixed_int_value(kidx)
+        && k.index_bounds.is_empty()
+        && let Some(c) = value_scalar_caps(cap_vals)
+    {
+        if k.raises {
+            let out =
+                unsafe { crate::jit::run_map_kernel_range_int_poison(p, start, step, len, &c) };
+            return out.map(Value::int_array);
+        }
+        let out = unsafe { crate::jit::run_map_kernel_range(p, start, step, len, &c) };
+        return Some(Value::int_array(out));
+    }
+    // FLOAT-PROVEN captures, the third marshal: every capture a runtime Float, either root
+    // (`range.map(it * s)`). A Float root rides the mixed range runners, an Int root the i64
+    // ones — the same ABIs as the builds above, so nothing new crosses the FFI.
+    if let Some((p, root)) = j.map_kernel_mixed_fcaps(kidx)
+        && k.index_bounds.is_empty()
+        && let Some(c) = float_scalar_caps(cap_vals)
+    {
+        use crate::jit::NumKind;
+        return match (root, k.raises) {
+            (NumKind::Float, true) => {
+                let out = unsafe {
+                    crate::jit::run_map_kernel_range_mixed_poison(p, start, step, len, &c)
+                };
+                out.map(Value::float_array)
+            }
+            (NumKind::Float, false) => Some(Value::float_array(unsafe {
+                crate::jit::run_map_kernel_mixed_range(p, start, step, len, &c)
+            })),
+            (NumKind::Int, true) => {
+                let out = unsafe {
+                    crate::jit::run_map_kernel_range_int_poison(p, start, step, len, &c)
+                };
+                out.map(Value::int_array)
+            }
+            (NumKind::Int, false) => Some(Value::int_array(unsafe {
+                crate::jit::run_map_kernel_range(p, start, step, len, &c)
+            })),
+        };
     }
     None
 }
@@ -2287,6 +2342,9 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         I64(*const u8, Vec<i64>),
                         F64(*const u8, Vec<f64>),
                         Mixed(*const u8, Vec<i64>),
+                        /// A Floats-source TYPED kernel: `f64` in, and out by the root it
+                        /// carries (`Float` → an `f64` buffer, `Int` → an `i64` one).
+                        Fsrc(*const u8, Vec<i64>, crate::jit::NumKind),
                         No,
                     }
                     let pick = match (jit, stack.last()) {
@@ -2311,6 +2369,40 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     };
                                     caps.map(|c| Pick::I64(p, c))
                                 });
+                                // The fallbacks once the Int-proven marshal declines (some
+                                // capture is a runtime `Float`): the VALUE-SCALAR builds —
+                                // Float root (the mixed ABI), then Int root ("mapmiv", the
+                                // i64 ABI, so `Pick::I64` with its dead-buffer reuse) — the
+                                // Int-ROOTED Int-proven build, then the FLOAT-PROVEN builds
+                                // (every capture a runtime Float, either root). Reached from
+                                // BOTH places that marshal can decline: with no Float-root
+                                // build at all, and — the case that used to answer `No`
+                                // outright — with one whose captures turned out Float,
+                                // `(it * s) / 2.0` with a Float `s`.
+                                let value_fallbacks = |j: &crate::jit::Jit| -> Pick {
+                                    let vs = j
+                                        .map_kernel_mixed_value(kidx)
+                                        .zip(value_scalar_caps(&cap_vals));
+                                    let mi = j
+                                        .map_kernel_mixed_int(kidx)
+                                        .zip(int_scalar_caps(&cap_vals));
+                                    let miv = j
+                                        .map_kernel_mixed_int_value(kidx)
+                                        .zip(value_scalar_caps(&cap_vals));
+                                    match (vs, mi, miv) {
+                                        (Some((p, c)), _, _) => Pick::Mixed(p, c),
+                                        (None, Some((p, c)), _) => Pick::I64(p, c),
+                                        (None, None, Some((p, c))) => Pick::I64(p, c),
+                                        (None, None, None) => match j
+                                            .map_kernel_mixed_fcaps(kidx)
+                                            .zip(float_scalar_caps(&cap_vals))
+                                        {
+                                            Some(((p, crate::jit::NumKind::Float), c)) => Pick::Mixed(p, c),
+                                            Some(((p, crate::jit::NumKind::Int), c)) => Pick::I64(p, c),
+                                            None => Pick::No,
+                                        },
+                                    }
+                                };
                                 match (i64_pick, j.map_kernel_mixed(kidx)) {
                                     (Some(pk), _) => pk,
                                     // unindexed mixed (`range.map(j => j*0.001)`), with or
@@ -2318,7 +2410,7 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                     (None, Some(p)) if k.index_bounds.is_empty() => {
                                         match int_scalar_caps(&cap_vals) {
                                             Some(c) => Pick::Mixed(p, c),
-                                            None => Pick::No,
+                                            None => value_fallbacks(j),
                                         }
                                     }
                                     // indexed mixed: f64-array caps, the same bounds discharge.
@@ -2329,32 +2421,35 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         }
                                     }
                                     _ if !k.index_bounds.is_empty() => Pick::No,
-                                    // Unindexed, and the Int-proven marshal declined (some
-                                    // capture is a runtime `Float`). Try the VALUE-SCALAR
-                                    // variant — same ABI as the mixed kernel, caps as f64
-                                    // bits — then the Int-ROOTED one, which shares the i64
-                                    // kernel's ABI and so rides `Pick::I64`, dead-buffer
-                                    // reuse included.
-                                    _ => {
-                                        let vs = j
-                                            .map_kernel_mixed_value(kidx)
-                                            .zip(value_scalar_caps(&cap_vals));
-                                        let mi = j
-                                            .map_kernel_mixed_int(kidx)
-                                            .zip(int_scalar_caps(&cap_vals));
-                                        match (vs, mi) {
-                                            (Some((p, c)), _) => Pick::Mixed(p, c),
-                                            (None, Some((p, c))) => Pick::I64(p, c),
-                                            (None, None) => Pick::No,
-                                        }
-                                    }
+                                    _ => value_fallbacks(j),
                                 }
                             }
                             ArrayData::Floats(_) => {
                                 let caps: Option<Vec<f64>> = cap_vals.iter().map(|v| v.as_f64()).collect();
                                 match (caps, j.map_kernel_f64(kidx)) {
                                     (Some(c), Some(p)) => Pick::F64(p, c),
-                                    _ => Pick::No,
+                                    // No monomorphic `f64` build (the body is outside `+ - *`):
+                                    // the TYPED Floats-source kernels — Int-proven captures
+                                    // first (every capture a `Value::Int`, the mixed family's
+                                    // proof), then the value-scalar build (captures as f64
+                                    // bits) — else the bytecode loop.
+                                    _ => match (j.map_kernel_fsrc(kidx), int_scalar_caps(&cap_vals)) {
+                                        (Some((p, root)), Some(c)) => Pick::Fsrc(p, c, root),
+                                        _ => match (
+                                            j.map_kernel_fsrc_value(kidx),
+                                            value_scalar_caps(&cap_vals),
+                                        ) {
+                                            (Some((p, root)), Some(c)) => Pick::Fsrc(p, c, root),
+                                            // Float-proven captures, the third marshal.
+                                            _ => match j
+                                                .map_kernel_fsrc_fcaps(kidx)
+                                                .zip(float_scalar_caps(&cap_vals))
+                                            {
+                                                Some(((p, root), c)) => Pick::Fsrc(p, c, root),
+                                                None => Pick::No,
+                                            },
+                                        },
+                                    },
                                 }
                             }
                             _ => Pick::No,
@@ -2467,6 +2562,72 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                 }
                             } else {
                                 stack.push(arr);
+                            }
+                        }
+                        Pick::Fsrc(ptr, caps, root) => {
+                            use crate::jit::NumKind;
+                            // The receiver was matched on the stack top to pick this arm, so
+                            // the pop cannot fail; ADR 0024 still forbids a host abort on any
+                            // path a program reaches, so an impossible empty stack is an error.
+                            let Some(mut arr) = stack.pop() else {
+                                return Err(HelixError::new(
+                                    "internal: the map receiver left the stack before its kernel ran",
+                                    line,
+                                    col,
+                                ));
+                            };
+                            let raises = program.map_kernels[kidx].raises;
+                            // A dead temporary with a Float root and a non-raising body is
+                            // written back in place, exactly as `Pick::F64` does; a raising
+                            // body never is (the fall-back needs the source intact).
+                            let ran = if root == NumKind::Float
+                                && !raises
+                                && let Value::Array(a) = &mut arr
+                                && let Some(ArrayData::Floats(v)) = std::rc::Rc::get_mut(a)
+                            {
+                                unsafe { crate::jit::run_map_kernel_fsrc_inplace(ptr, v, &caps) };
+                                true
+                            } else if let Value::Array(a) = &arr
+                                && let ArrayData::Floats(v) = &**a
+                            {
+                                match (root, raises) {
+                                    (NumKind::Float, false) => {
+                                        let out =
+                                            unsafe { crate::jit::run_map_kernel_fsrc_f64(ptr, v, &caps) };
+                                        arr = Value::float_array(out);
+                                        true
+                                    }
+                                    (NumKind::Float, true) => match unsafe {
+                                        crate::jit::run_map_kernel_fsrc_f64_poison(ptr, v, &caps)
+                                    } {
+                                        Some(out) => {
+                                            arr = Value::float_array(out);
+                                            true
+                                        }
+                                        None => false,
+                                    },
+                                    (NumKind::Int, false) => {
+                                        let out =
+                                            unsafe { crate::jit::run_map_kernel_fsrc_int(ptr, v, &caps) };
+                                        arr = Value::int_array(out);
+                                        true
+                                    }
+                                    (NumKind::Int, true) => match unsafe {
+                                        crate::jit::run_map_kernel_fsrc_int_poison(ptr, v, &caps)
+                                    } {
+                                        Some(out) => {
+                                            arr = Value::int_array(out);
+                                            true
+                                        }
+                                        None => false,
+                                    },
+                                }
+                            } else {
+                                false
+                            };
+                            stack.push(arr);
+                            if ran {
+                                frames[fi].ip = *after as usize;
                             }
                         }
                         Pick::No => {} // fall through to the bytecode loop

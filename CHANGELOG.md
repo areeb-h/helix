@@ -229,6 +229,38 @@
 - **A capability refusal names the grant that is missing.** A write needs `db-write` and
   `net`; with `HELIX_ALLOW_DB=write` set and the network not granted, the refusal said
   `db-write` — the grant the program had. It says `net` now, with `net`'s help.
+- **A `Floats` array's `map` reaches native code for every body the Int-source kernels
+  take.** `xs.map(to_int(it))`, `sign`, `floor`/`ceil`/`round`/`trunc`, `it / 2.0`,
+  `it * (1.0 / 2.0)`, `min(it, 2.0)`, a `let`, a user `Float` function — over a `Floats`
+  array — ran at interpreter speed while `jit-explain` said "compiled" (field build,
+  1.31/1.32): the Int-source specialization existed, the Float-source one did not, and a
+  `Floats` receiver had only the monomorphic `+ - *` kernel. The mixed family's per-node
+  typing now builds with the element a Float — four passes, Int-proven or value-scalar
+  captures × a Float or an Int root, the poison out-param carrying `/` and the rounders
+  exactly as it does for an Int source. Measured on 2M floats, JIT on against off: `to_int`
+  2.1× → 26×, `sign` 2.0× → 25×, `floor` 2.0× → 25×, `it / 2.0` 2.4× → 22×,
+  `it * (1.0 / 2.0)` 1.9× → 25× (`abs`, the control, 22–26× throughout). Every shape agrees
+  with the walker bit-for-bit and a raising body poisons to the walker's exact error, pinned
+  by `float_source_typed_map_kernels_agree_and_engage`, which also asserts the native
+  counter moved. Pinning `floor(it / s)` with a Float `s` found a second gap on the way: the
+  analysis behind every value-scalar and indexed build had no arm for the four rounders
+  while its unindexed twin did, so no such build existed for any rounding body on ANY
+  source — `range(…).map(floor(it / s))` declined to the bytecode loop too. It has the arm,
+  and the matrix its last cell: an Int source with a runtime Float capture and an Int root
+  builds ("mapmiv"), so that range map runs native as well. And a third marshal closes the
+  cliff under the commonest map there is: `range(…).map(it * s)` with a Float `s` ran at
+  1.0× against 16× for the literal `it * 0.5`, because the Int-proven build declines a Float
+  capture at dispatch and the value-scalar analysis must refuse `Int * capture` for a capture
+  that might be an Int. Every capture a runtime Float is a proof the dispatch can make, and
+  under it a capture promotes exactly where the walker promotes it — so the FLOAT-PROVEN
+  builds (both sources, both roots) take `it * s`, `it + s`, `to_int(it * s)`: measured
+  1.0× → 16× on 3M elements. An Int capture at the same site still takes the i64 build and
+  wraps as the walker wraps.
+- **`jit-explain` names each `map` site's specializations, and says when a source kind has
+  none.** "compiled" counted any specialization, so a site with an Int-source build and no
+  Float-source one read the same as one with both. A row now reads `compiled (i64) — a
+  Float source runs the bytecode loop`; the JSON carries `specializations`,
+  `serves_int_source` and `serves_float_source`.
 - **A bare bound function is the argument of EVERY verb that takes one.** `xs.filter(pos)`
   and `xs.where(pos)` were refused ("`filter` expects a yes/no test, but the expression
   produces a value of type Function") while `xs.all(pos)` was accepted — a field build's

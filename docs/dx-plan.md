@@ -312,6 +312,27 @@ refusals say `count_where`. 1.40: `{a: 1}.nonexistent(it * 2)` said "`it` is not
 here" — Array and Record now answer before their arguments are read, as String/Tensor/Tuple
 did. Recorded in ADR 0045's addendum.
 
+**1.31/1.32 (2026-09-05) — the JIT's "compiled" over a Float source.** Their table was right and
+the coverage doc was right, about different sources: `to_int`/`sign`/`floor`/`/` compiled for
+an Int source (range) and had no Float-source build, so `xs.map(to_int(it))` over a `Floats`
+array read "compiled" and ran interpreted (measured 2.1× against `abs`'s 22×). The
+Floats-source typed map kernels (`float_source_map_eligible` — the mixed family's per-node
+typing with the binder a Float; `mapft`/`mapfti`/`mapftv`/`mapftiv`) close it: 21–26× on the
+five shapes. `jit-explain` names each site's specializations and the source kind it cannot
+serve. STILL OPEN from the same table: a CONDITIONAL in a map body (relu) and `**` are never
+offered — the next increments (a `select`/branch lowering in the typed codegen; `pow` and the
+transcendentals through a host-symbol call to the very Rust function the walker calls, which
+is bit-identical by construction and retires the coverage doc's "permanent exclusion").
+
+**do_later — captures of MIXED runtime kinds in a map body.** Each marshal assumes one kind for
+every capture: all `Int` (the Int-proven builds), all `Float` (the Float-proven builds, 2026-09-05),
+or the `MixT` proof (any mix, each capture used only where a genuine float promotes it). A body
+whose Float capture meets an Int subexpression while another capture is an Int — `it * s + k`
+with `s = 0.5`, `k = 2` — is admitted by none and runs the bytecode loop. The general form is a
+build per capture-KIND VECTOR, dispatched by matching the runtime kinds against the assumed ones
+(the three marshals today are three points of that space); `MAX_CAPTURES` bounds it. Parity is
+pinned in `float_source_typed_map_kernels_agree_and_engage`.
+
 **do_later — a parser-desugared verb never reaches a record's FIELD of that name**: ADR
 0045's "method, then field, then free fn, for every name" holds for the names the engines
 dispatch, and not for the ones the parser expands before any receiver exists — `R.sort_by(U)`

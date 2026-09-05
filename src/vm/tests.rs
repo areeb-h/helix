@@ -639,6 +639,113 @@
         assert!(crate::jit::native_call_count() > 0, "tail fn did not engage the JIT");
     }
 
+    /// The FLOATS-source typed map kernels. `xs.map(to_int(it))`, `xs.map(it / 2.0)` and
+    /// `xs.map(floor(it))` over a `Floats` array had NO native build: `jit-explain` said
+    /// "compiled" (the Int-source specialization existed) and the loop ran at interpreter
+    /// speed — measured 2.1×, 2.4×, 2.0× against `abs`'s 22× (field build, 1.31/1.32). The
+    /// mixed family's per-node typing now builds with the binder a Float, in both capture
+    /// variants and both roots. Every shape agrees with the walker bit-for-bit, a raising
+    /// body poisons and re-runs to the walker's exact error, and the kernels ENGAGE (the
+    /// native counter moves). Measured after: 21–26× on the five shapes that were 2×.
+    #[test]
+    fn float_source_typed_map_kernels_agree_and_engage() {
+        let pre = "xs = [1.5, -2.5, 3.25, 0.5, -0.75]\nn = 3\ns = 0.5\nfn sq(x: Float) -> Float = x * x + 1.0\n";
+        let bodies = [
+            "to_int(it)", "sign(it)", "floor(it)", "ceil(it)", "round(it)", "trunc(it)",
+            "it / 2.0", "it * (1.0 / 2.0)", "to_int(it) % 3", "it / n", "floor(it / s)",
+            "min(it, 2.0)", "max(it, n)", "let y = it * 2.0 in y / 4.0", "sq(it)",
+            "abs(it) / 3.0", "to_float(to_int(it)) + 0.25", "-it / 4.0", "sqrt(abs(it)) + n",
+            "round(it * s) + n", "to_int(it * 2.0) // 2",
+        ];
+        for body in bodies {
+            let src = format!("{pre}xs.map({body})");
+            let tw = run_tw(&src);
+            assert!(tw.is_ok(), "`{body}`: {tw:?}");
+            assert_eq!(tw, run_vm(&src), "tw vs vm: {body}");
+            assert_eq!(tw, run_vm_jit(&src), "tw vs jit: {body}");
+        }
+        // A raising body: the poison path discards the native output and the bytecode loop
+        // re-runs to the walker's exact error — identical on every engine.
+        for src in [
+            "xs = [1.0, 0.0, 2.0]\nxs.map(1.0 / it)",
+            "xs = [1.0e30, 2.0]\nxs.map(floor(it))",
+            "xs = [1.5, 2.5]\nd = 0.0\nxs.map(it / d)",
+            "xs = [1.5, 2.5]\nn = 0\nxs.map(it / n)",
+        ] {
+            let tw = run_tw(src);
+            assert!(tw.is_err(), "{src}");
+            assert_eq!(tw, run_vm(src), "tw vs vm: {src}");
+            assert_eq!(tw, run_vm_jit(src), "tw vs jit: {src}");
+        }
+        // ENGAGEMENT, per shape: nothing else in these programs can run native, so a moving
+        // counter is this kernel. Both capture variants (an Int `n`, a Float `s`) and both
+        // roots are among them.
+        for body in ["to_int(it)", "sign(it)", "floor(it)", "it / 2.0", "it / n", "floor(it / s)", "sq(it)"] {
+            crate::jit::reset_native_call_count();
+            let src = format!("{pre}xs.map({body}).count()");
+            assert_eq!(run_vm_jit(&src).unwrap(), "5", "{body}");
+            assert!(crate::jit::native_call_count() > 0, "`{body}` over a Floats source did not engage");
+        }
+        // The last cell of the matrix, found while pinning the row above: an INT source with a
+        // runtime Float capture and an Int root — `range(…).map(floor(it / s))` — had no build
+        // (the Int-proven marshal declined `s`, and the value-scalar pass built Float roots
+        // only). It agrees, raises identically, and engages.
+        for body in ["floor(it / s)", "to_int(it * s)", "round(it / s) % 2"] {
+            let src = format!("s = 0.5\nrange(0, 6).map({body})");
+            let tw = run_tw(&src);
+            assert!(tw.is_ok(), "`{body}`: {tw:?}");
+            assert_eq!(tw, run_vm(&src), "tw vs vm: {body}");
+            assert_eq!(tw, run_vm_jit(&src), "tw vs jit: {body}");
+            crate::jit::reset_native_call_count();
+            assert_eq!(run_vm_jit(&format!("{src}.count()")).unwrap(), "6", "{body}");
+            assert!(crate::jit::native_call_count() > 0, "`{body}` over a range with a Float capture did not engage");
+        }
+        let src = "s = 0.0\nrange(0, 6).map(floor(it / s))";
+        let tw = run_tw(src);
+        assert!(tw.is_err(), "{src}");
+        assert_eq!(tw, run_vm(src));
+        assert_eq!(tw, run_vm_jit(src));
+        // FLOAT-PROVEN captures, the third marshal, found the same way: `range(…).map(it * s)`
+        // with a Float `s` — the commonest map there is — ran at 1.0x (the Int-proven build
+        // declines the capture at dispatch; the value-scalar analysis must refuse `Int *
+        // capture` for a capture that might be an Int). Every capture a runtime Float is a
+        // proof the dispatch can make, and under it the capture promotes exactly where the
+        // walker promotes it. Both sources, both roots, and an Int capture still declines to
+        // the Int-proven build (the answer must not change with the capture's type).
+        for body in ["it * s", "it + s", "to_int(it * s)", "(it * s) / 2.0", "sign(it - s)", "it * s + 2.0"] {
+            let src = format!("s = 0.5\nrange(0, 6).map({body})");
+            let tw = run_tw(&src);
+            assert!(tw.is_ok(), "`{body}`: {tw:?}");
+            assert_eq!(tw, run_vm(&src), "tw vs vm: {body}");
+            assert_eq!(tw, run_vm_jit(&src), "tw vs jit: {body}");
+            crate::jit::reset_native_call_count();
+            assert_eq!(run_vm_jit(&format!("{src}.count()")).unwrap(), "6", "{body}");
+            assert!(crate::jit::native_call_count() > 0, "`{body}` over a range with a Float capture did not engage");
+        }
+        // Captures of MIXED runtime kinds where the Float one meets an Int subexpression —
+        // `it * s + k` with `s` a Float and `k` an Int — have no build: each marshal assumes
+        // one kind for every capture (all Int, all Float, or the `MixT` proof, which must
+        // refuse `Int * capture`). Parity holds; the gap is recorded in dx-plan.
+        let src = "s = 0.5\nk = 2\nrange(0, 6).map(it * s + k)";
+        assert_eq!(run_tw(src), run_vm(src));
+        assert_eq!(run_tw(src), run_vm_jit(src));
+        for body in ["to_int(it) * s", "to_int(it) + s", "sign(to_int(it) - s)"] {
+            let src = format!("s = 0.5\nxs = [1.5, -2.5, 3.25, 0.5, -0.75]\nxs.map({body})");
+            let tw = run_tw(&src);
+            assert!(tw.is_ok(), "`{body}`: {tw:?}");
+            assert_eq!(tw, run_vm(&src), "tw vs vm: {body}");
+            assert_eq!(tw, run_vm_jit(&src), "tw vs jit: {body}");
+            crate::jit::reset_native_call_count();
+            assert_eq!(run_vm_jit(&format!("{src}.count()")).unwrap(), "5", "{body}");
+            assert!(crate::jit::native_call_count() > 0, "`{body}` over a Floats source with a Float capture did not engage");
+        }
+        // The SAME site with an Int capture: the i64 build answers, in i64 — the wrapping
+        // answer the walker gives, which a Float-typed capture would not.
+        let src = "s = 4611686018427387904\nrange(0, 3).map(it + (s + s))";
+        assert_eq!(run_tw(src), run_vm_jit(src));
+        assert_eq!(run_vm_jit(src).unwrap(), "[-9223372036854775808, -9223372036854775807, -9223372036854775806]");
+    }
+
     /// MIXED (per-parameter `Int`/`Float`, annotation-typed) tail-recursive functions now
     /// JIT as native loops over the bits ABI (`MixedFn`): Float params cross the FFI as
     /// raw f64 bits, a Float result returns as bits — pure bit moves, so all three

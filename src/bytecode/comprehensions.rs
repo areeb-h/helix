@@ -146,6 +146,20 @@ impl super::Compiler {
                     crate::jit::mixed_map_int_root_eligible(body, &params[0], &fns, &user_fns, &self.mixed_sigs)
                         .map(|c| (c, Vec::new(), Vec::new()))
                 })
+                // A body only the FLOATS-source typing admits — `min(it, 2.0)`, whose kinds
+                // differ with an Int element — so the "mapft" passes have a kernel to build
+                // from. Last, so it stores nothing the Int-source analyses already store.
+                .or_else(|| {
+                    crate::jit::float_source_map_eligible(body, &params[0], &fns, &user_fns, &self.mixed_sigs)
+                        .map(|(c, _)| (c, Vec::new(), Vec::new()))
+                })
+                // ...and a body only the FLOAT-PROVEN-captures typing admits (`sign(it * s)` on
+                // an Int source with `s` a Float — the Int-proven typing makes it `sign(Int)`,
+                // also admissible, so this arm rarely fires; kept so the matrix is total).
+                .or_else(|| {
+                    crate::jit::float_caps_map_eligible(body, &params[0], crate::jit::NumKind::Int, &fns, &user_fns, &self.mixed_sigs)
+                        .map(|(c, _)| (c, Vec::new(), Vec::new()))
+                })
         } else {
             // A `filter` predicate may capture free `i64` scalars, same as a `map` body — the
             // VM proves each is an `Int` at dispatch and passes them as a `caps` slice.

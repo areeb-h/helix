@@ -137,6 +137,28 @@ pub struct Jit {
     /// (an `Int` promoted at marshal, a `Float` passed through), dispatched when a runtime
     /// `Float` capture makes the Int-proven marshal decline. Same ABI as `map_ptrs_mixed`.
     map_ptrs_mixed_value: Vec<Option<*const u8>>,
+    /// The Int-ROOTED value-scalar mixed specialization ("mapmiv"): i64 in, i64 out, captures
+    /// as f64 bits. Same ABI as `map_ptrs_mixed_int`; dispatched when a runtime `Float`
+    /// capture makes the Int-proven marshal decline. Same index as `map_ptrs`.
+    map_ptrs_mixed_int_value: Vec<Option<*const u8>>,
+    /// The FLOATS-source typed map specializations (`float_source_map_eligible`): `f64` in,
+    /// `f64` out (`fsrc`) or `i64` out (`fsrc_int`), captures Int-proven — and the
+    /// value-scalar twins (`_value`), captures as f64 bits. Same index as `map_ptrs`; a body
+    /// has one root, so at most one of each pair holds code. Tried by a `Floats` receiver
+    /// when the monomorphic `f64` kernel declined the body.
+    map_ptrs_fsrc: Vec<Option<*const u8>>,
+    map_ptrs_fsrc_int: Vec<Option<*const u8>>,
+    map_ptrs_fsrc_value: Vec<Option<*const u8>>,
+    map_ptrs_fsrc_int_value: Vec<Option<*const u8>>,
+    /// FLOAT-PROVEN captures (`float_caps_map_eligible`), the third marshal: every capture a
+    /// runtime `Value::Float`, loaded `f64` and typed a genuine Float. An Int source with a
+    /// Float root (`mixed_fc`, the "mapm" ABI) or an Int root (`mixed_fc_int`, the i64 ABI);
+    /// a Floats source with either root (`fsrc_fc*`, the "mapft" ABIs). Same index as
+    /// `map_ptrs`; dispatched when the Int-proven and value-scalar marshals both declined.
+    map_ptrs_mixed_fc: Vec<Option<*const u8>>,
+    map_ptrs_mixed_fc_int: Vec<Option<*const u8>>,
+    map_ptrs_fsrc_fc: Vec<Option<*const u8>>,
+    map_ptrs_fsrc_fc_int: Vec<Option<*const u8>>,
     /// Native `extern "C" fn(*const i64 src, *mut i64 dst, i64 len) -> i64` (kept count)
     /// filter kernels, indexed by [`crate::bytecode::Op::TryJitFilter`]'s `kernel_idx`.
     filter_ptrs: Vec<Option<*const u8>>,
@@ -186,6 +208,43 @@ impl Jit {
     /// The value-scalar variant of the mixed map kernel for site `idx`.
     pub fn map_kernel_mixed_value(&self, idx: usize) -> Option<*const u8> {
         self.map_ptrs_mixed_value.get(idx).copied().flatten()
+    }
+    /// The Int-rooted value-scalar mixed map kernel for site `idx`.
+    pub fn map_kernel_mixed_int_value(&self, idx: usize) -> Option<*const u8> {
+        self.map_ptrs_mixed_int_value.get(idx).copied().flatten()
+    }
+    /// The Floats-source typed map kernel for site `idx` with Int-proven captures, and the
+    /// kind of what it writes (`Float`: an `f64` buffer; `Int`: an `i64` one).
+    pub fn map_kernel_fsrc(&self, idx: usize) -> Option<(*const u8, NumKind)> {
+        if let Some(p) = self.map_ptrs_fsrc.get(idx).copied().flatten() {
+            Some((p, NumKind::Float))
+        } else {
+            self.map_ptrs_fsrc_int.get(idx).copied().flatten().map(|p| (p, NumKind::Int))
+        }
+    }
+    /// Its value-scalar twin (captures as f64 bits).
+    pub fn map_kernel_fsrc_value(&self, idx: usize) -> Option<(*const u8, NumKind)> {
+        if let Some(p) = self.map_ptrs_fsrc_value.get(idx).copied().flatten() {
+            Some((p, NumKind::Float))
+        } else {
+            self.map_ptrs_fsrc_int_value.get(idx).copied().flatten().map(|p| (p, NumKind::Int))
+        }
+    }
+    /// The Int-source FLOAT-PROVEN-captures kernel for site `idx`, and what it writes.
+    pub fn map_kernel_mixed_fcaps(&self, idx: usize) -> Option<(*const u8, NumKind)> {
+        if let Some(p) = self.map_ptrs_mixed_fc.get(idx).copied().flatten() {
+            Some((p, NumKind::Float))
+        } else {
+            self.map_ptrs_mixed_fc_int.get(idx).copied().flatten().map(|p| (p, NumKind::Int))
+        }
+    }
+    /// The Floats-source FLOAT-PROVEN-captures kernel for site `idx`, and what it writes.
+    pub fn map_kernel_fsrc_fcaps(&self, idx: usize) -> Option<(*const u8, NumKind)> {
+        if let Some(p) = self.map_ptrs_fsrc_fc.get(idx).copied().flatten() {
+            Some((p, NumKind::Float))
+        } else {
+            self.map_ptrs_fsrc_fc_int.get(idx).copied().flatten().map(|p| (p, NumKind::Int))
+        }
     }
     /// The native filter kernel for site `idx`, if one compiled.
     pub fn filter_kernel(&self, idx: usize) -> Option<*const u8> {

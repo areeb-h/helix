@@ -15882,3 +15882,31 @@ fn a_bound_origin_resolves_through_the_module_loader() {
         assert!(err.contains("main.helix:3:13"), "{env:?}: {err}");
     }
 }
+
+/// `jit-explain` names the SPECIALIZATIONS a `map` site holds, and says when a source kind
+/// has none. A site read "compiled" while a Float source ran the bytecode loop (field build,
+/// 1.32): the Int-source build existed, the Float-source one did not, and the report could
+/// not tell them apart. Now `to_int(it)` over a Floats literal lists its Float-source typed
+/// build, and an Int-only body says so.
+#[test]
+fn jit_explain_names_the_source_kinds_a_map_site_serves() {
+    let dir = std::env::temp_dir().join(format!("hx_jx_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("k.helix");
+    std::fs::write(&prog, "xs = [1.5, 2.5]\nprint(xs.map(to_int(it)))\nprint((0..10).map(it % 3))\nprint(xs.map(it / 2.0))\n").unwrap();
+    let (out, err, code) = run(&["jit-explain", prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("3 kernel site(s) offered to the JIT, 3 compiled"), "{out}");
+    let row = |line: &str| out.lines().find(|l| l.trim_start().starts_with(line)).unwrap_or("").to_string();
+    assert!(row("2:").contains("f64-typed-int"), "{out}");
+    assert!(row("3:").contains("a Float source runs the bytecode loop"), "{out}");
+    assert!(row("4:").contains("f64-typed") && !row("4:").contains("bytecode loop"), "{out}");
+    let (out, _, code) = run(&["jit-explain", "--json", prog.to_str().unwrap()], &[], "");
+    if code == Some(0) {
+        assert!(out.contains("\"serves_float_source\""), "{out}");
+    }
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "[1, 2]\n[0, 1, 2, 0, 1, 2, 0, 1, 2, 0]\n[0.75, 1.25]\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}

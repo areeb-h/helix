@@ -48,20 +48,79 @@ pub struct Site {
     pub col: u32,
     /// Did native code get generated for this site?
     pub compiled: bool,
+    /// Which specializations hold code, for a `map` site — the reader's real question is
+    /// not "did it compile" but "will MY source run native", and a site with an Int-source
+    /// build and no Float-source one read "compiled" while a Float array ran the bytecode
+    /// loop (field build, 1.32). Empty for the other families.
+    pub specs: Vec<&'static str>,
+}
+
+/// The specializations a `map` site holds, by name. Int-source builds: `i64`, `mixed`
+/// (Float out), `mixed-int`, `mixed-value` and `mixed-int-value` (value-scalar captures),
+/// `mixed-fcaps` and `mixed-int-fcaps` (Float-proven captures). Float-source builds:
+/// `f64` (the monomorphic `+ - *` kernel), `f64-typed` / `f64-typed-int` and their
+/// `-value` twins (the per-node typed kernels, Float or Int out).
+fn map_specs(jit: &Jit, i: usize) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if jit.map_kernel(i).is_some() {
+        v.push("i64");
+    }
+    if jit.map_kernel_mixed(i).is_some() {
+        v.push("mixed");
+    }
+    if jit.map_kernel_mixed_int(i).is_some() {
+        v.push("mixed-int");
+    }
+    if jit.map_kernel_mixed_value(i).is_some() {
+        v.push("mixed-value");
+    }
+    if jit.map_kernel_mixed_int_value(i).is_some() {
+        v.push("mixed-int-value");
+    }
+    if jit.map_kernel_f64(i).is_some() {
+        v.push("f64");
+    }
+    match jit.map_kernel_fsrc(i) {
+        Some((_, crate::jit::NumKind::Float)) => v.push("f64-typed"),
+        Some((_, crate::jit::NumKind::Int)) => v.push("f64-typed-int"),
+        None => {}
+    }
+    match jit.map_kernel_fsrc_value(i) {
+        Some((_, crate::jit::NumKind::Float)) => v.push("f64-typed-value"),
+        Some((_, crate::jit::NumKind::Int)) => v.push("f64-typed-int-value"),
+        None => {}
+    }
+    match jit.map_kernel_mixed_fcaps(i) {
+        Some((_, crate::jit::NumKind::Float)) => v.push("mixed-fcaps"),
+        Some((_, crate::jit::NumKind::Int)) => v.push("mixed-int-fcaps"),
+        None => {}
+    }
+    match jit.map_kernel_fsrc_fcaps(i) {
+        Some((_, crate::jit::NumKind::Float)) => v.push("f64-typed-fcaps"),
+        Some((_, crate::jit::NumKind::Int)) => v.push("f64-typed-int-fcaps"),
+        None => {}
+    }
+    v
+}
+
+/// Which source kinds a `map` site's specializations serve.
+fn serves(specs: &[&str]) -> (bool, bool) {
+    let int_src = specs
+        .iter()
+        .any(|s| matches!(*s, "i64" | "mixed" | "mixed-int" | "mixed-value" | "mixed-int-value" | "mixed-fcaps" | "mixed-int-fcaps"));
+    let float_src = specs.iter().any(|s| s.starts_with("f64"));
+    (int_src, float_src)
 }
 
 /// Whether a `map` site compiled, across every specialization.
 ///
-/// A map kernel has five: plain `i64`, `f64`, and three mixed forms picked by the
-/// receiver's element type and its captures at run time. The question a reader is
-/// asking is "did this site get native code", so ANY specialization counts — reporting
-/// "declined" because the `f64` variant is absent would be false for an Int array.
+/// A map kernel has nine: plain `i64`, `f64`, three mixed forms and four Floats-source
+/// typed forms, picked by the receiver's element type and its captures at run time. The
+/// question a reader is asking is "did this site get native code", so ANY specialization
+/// counts — reporting "declined" because the `f64` variant is absent would be false for
+/// an Int array. The listing then NAMES them, and says which source kind has none.
 fn map_compiled(jit: &Jit, i: usize) -> bool {
-    jit.map_kernel(i).is_some()
-        || jit.map_kernel_f64(i).is_some()
-        || jit.map_kernel_mixed(i).is_some()
-        || jit.map_kernel_mixed_int(i).is_some()
-        || jit.map_kernel_mixed_value(i).is_some()
+    !map_specs(jit, i).is_empty()
 }
 
 /// Every site the compiler offered, in source order per chunk.
@@ -77,6 +136,7 @@ pub fn sites(prog: &Program, jit: Option<&Jit>) -> Vec<Site> {
             // The position side-table is parallel to `code`; a missing entry would mean
             // a compiler bug, so fall back to 0 rather than panicking in a diagnostic.
             let (line, col) = chunk.pos.get(pc).copied().unwrap_or((0, 0));
+            let mut specs: Vec<&'static str> = Vec::new();
             let (family, idx, compiled) = match op {
                 Op::TryJitReduce { loop_idx, .. } => (
                     "reduce",
@@ -89,11 +149,16 @@ pub fn sites(prog: &Program, jit: Option<&Jit>) -> Vec<Site> {
                     *inner_loop_idx,
                     jit.is_some_and(|j| j.reduce_loop(*inner_loop_idx as usize).is_some()),
                 ),
-                Op::TryJitMap { kernel_idx, .. } => (
-                    "map",
-                    *kernel_idx,
-                    jit.is_some_and(|j| map_compiled(j, *kernel_idx as usize)),
-                ),
+                Op::TryJitMap { kernel_idx, .. } => {
+                    if let Some(j) = jit {
+                        specs = map_specs(j, *kernel_idx as usize);
+                    }
+                    (
+                        "map",
+                        *kernel_idx,
+                        jit.is_some_and(|j| map_compiled(j, *kernel_idx as usize)),
+                    )
+                }
                 Op::TryJitFilter { kernel_idx, .. } => (
                     "filter",
                     *kernel_idx,
@@ -114,7 +179,7 @@ pub fn sites(prog: &Program, jit: Option<&Jit>) -> Vec<Site> {
                 ),
                 _ => continue,
             };
-            out.push(Site { family, idx, line, col, compiled });
+            out.push(Site { family, idx, line, col, compiled, specs });
         }
     }
     out.sort_by_key(|s| (s.line, s.col, s.family));
@@ -280,7 +345,21 @@ pub fn render(
             (Engine::Live, true) => "compiled",
             (Engine::Live, false) => "DECLINED",
         };
-        s.push_str(&format!("  {at:<w$}  {:<14} {verdict}\n", x.family));
+        // A `map` site names what it holds, and which source kind it cannot serve — the
+        // difference between "compiled" and "runs native for the array you have".
+        let detail = if x.compiled && !x.specs.is_empty() {
+            let (int_src, float_src) = serves(&x.specs);
+            let mut d = format!(" ({})", x.specs.join(", "));
+            if !float_src {
+                d.push_str(" — a Float source runs the bytecode loop");
+            } else if !int_src {
+                d.push_str(" — an Int source runs the bytecode loop");
+            }
+            d
+        } else {
+            String::new()
+        };
+        s.push_str(&format!("  {at:<w$}  {:<14} {verdict}{detail}\n", x.family));
     }
     s.push_str(
         "\nA comprehension whose line is not listed was never offered to the JIT: the \
@@ -335,6 +414,11 @@ pub fn to_json(
                 "merged_line": x.line,
                 "col": x.col,
                 "compiled": x.compiled,
+                // The specializations a map site holds (empty for other families), and
+                // which source kinds they serve.
+                "specializations": x.specs,
+                "serves_int_source": serves(&x.specs).0,
+                "serves_float_source": serves(&x.specs).1,
             })
         }).collect::<Vec<_>>(),
     })
