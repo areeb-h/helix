@@ -500,6 +500,16 @@
 
 ### Performance
 
+- **`Record.keys()` / `items()` allocate nothing per key.** Enumerating a record handed out a
+  fresh `String` and `Rc` per field name on every call — each behind the interner's read lock —
+  so `keys()` on a two-field record cost 105–240 ns and `items()` 155–335 ns, ~575 ns of a
+  3000 ns render in the field (1.46.3). The interned name is now shared as one `Rc<String>` per
+  distinct name from a per-thread cache (`Symbol::as_rc_string`), which `keys`, `items` and
+  the record-to-dict key conversion clone. Measured on a 300k-call loop over a three-field record: keys 45 -> 40 ms (1.12x), items 52 -> 46 ms (1.13x) — the
+  allocations were a slice of the per-call cost, not the bulk of it; what remains is the
+  result array and the dispatch, which only iterating without materialising (1.46c)
+  removes. Output is byte-identical.
+
 - **`any`/`all` run as native searches.** Over 200k Ints the two ran the bytecode loop at
   1.0× while `filter` and `count_where` ran 16× native (field build, 1.46.4: `all` measured
   0.8×, slower with the JIT on). The predicate is the shape a filter admits, so it is now

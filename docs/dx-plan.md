@@ -335,6 +335,28 @@ along; the documented signature `std()` made the checker refuse the argument —
 generated from `docs.rs`, so the fix was the entry. A quoted key in a record brace is a field
 (printed back quoted when not an identifier; `field_key_display`), the query-builder shape.
 
+**1.44 / 1.46b (2026-09-05) — an argument-dependent record shape through a call.** MEASURED,
+not fixed: on a clean build, `fn mk(s) = let m = {c: s.columns} in {...m, f: (x) => x}` followed
+by `mk({columns: {id: 1, name: 2}}).c.nmae` passes `helix check` SAME-FILE too (the field's
+"verified same-file: yes" did not reproduce — `target/bench/f54_probe.sh`), while a literal
+return (`fn lit() = {a: 1}`; `lit().b`) is refused same-file and through `import` alike. The
+checker types a function ONCE at its definition, with an unannotated parameter as `Unknown`,
+and `synth_call` answers the stored return type — there is no call-site specialization, so
+nothing crosses the module boundary that did not already fail to cross a call. The ask is
+therefore a checker feature — re-synthesizing an unannotated function's body with the call
+site's argument types (memoized per argument-type tuple, recursion-guarded, with the body's
+errors reported at the call site) — not a loader fix. Worth doing: it is what makes a
+library constructor's shape checkable; queued behind the perf items with a design note to
+write first (where a body error surfaces, and how deep re-synthesis goes).
+
+**1.46.3 (2026-09-05) — Record enumeration cost.** DONE for the allocation half:
+`Symbol::as_rc_string` (a per-thread `FxHashMap<u32, Rc<String>>`) shares one allocation per
+distinct name, so `keys()`/`items()` allocate only their result array (and `items`' tuples).
+Measured on 300k calls over a three-field record: keys 45 -> 40 ms (1.12x), items 52 -> 46 ms (1.13x) — the names were a
+slice of the cost; the result array and the dispatch remain. The other half of the ask — iterating a record without
+materialising anything (`for (k, v) in rec`) — is a language feature (a Record comprehension
+source) and is open.
+
 **1.46.4 (2026-09-05) — `any`/`all` native.** DONE: `Op::TryJitSearch` + `search_kernels`
 (the filter analyses admit the predicate; `KernelShape::Search` in codegen returns the first
 index whose predicate equals `want`, or `len`; f64 twin poisons to -1). Measured on the

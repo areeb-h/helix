@@ -18,6 +18,8 @@
 //! are deterministic within a single program run; because every user-visible path
 //! resolves back to text, the particular integers never leak into output.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{LazyLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use rustc_hash::FxHashMap;
@@ -117,6 +119,32 @@ impl Symbol {
             return "<overflow>";
         }
         read_interner().names.get(self.0 as usize).copied().unwrap_or("<unknown-symbol>")
+    }
+
+    /// The text as a shared `Rc<String>` — the shape a `Value::Str` holds — from a per-thread
+    /// cache filled on first use, so `r.keys()` / `r.items()` hand out a clone of ONE
+    /// allocation per distinct name instead of taking the interner's read lock and allocating
+    /// a fresh `String` and `Rc` per key per call (field build, 1.46.3: `keys()` + `items()`
+    /// on a two-field record cost ~575 ns of a 3000 ns render). Thread-local because `Rc` is
+    /// not `Sync`; Helix runs a program on one thread, and a worker thread simply fills its
+    /// own cache. A map rather than a table indexed by id, so a program that interned millions
+    /// of JSON keys pays for the names it actually converts, not for the highest id it holds.
+    pub fn as_rc_string(self) -> Rc<String> {
+        thread_local! {
+            static RC_NAMES: RefCell<FxHashMap<u32, Rc<String>>> = RefCell::new(FxHashMap::default());
+        }
+        if self == Symbol::OVERFLOW {
+            return Rc::new(self.as_str().to_string());
+        }
+        RC_NAMES.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if let Some(rc) = cache.get(&self.0) {
+                return rc.clone();
+            }
+            let rc = Rc::new(self.as_str().to_string());
+            cache.insert(self.0, rc.clone());
+            rc
+        })
     }
 }
 

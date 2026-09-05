@@ -431,7 +431,7 @@ pub(crate) fn eval_field_or_missing(
             .map(|(_, v)| v.clone())
             .unwrap_or(Value::Missing)),
         Value::Dict(d) => {
-            let key = crate::value::DictKey::Str(std::rc::Rc::new(name.as_str().to_string()));
+            let key = crate::value::DictKey::Str(name.as_rc_string());
             Ok(d.map().get(&key).cloned().unwrap_or(Value::Missing))
         }
         Value::Missing => Ok(Value::Missing),

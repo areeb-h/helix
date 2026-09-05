@@ -251,11 +251,11 @@ pub(crate) fn record_method(
             let k = key(&args[0])?;
             Ok(Value::Bool(fields.iter().any(|(s, _)| s.as_str() == k)))
         }
+        // The name text is the interner's, shared: no lock and no allocation per key (field
+        // build, 1.46.3 — the two enumerations were ~575 ns of a 3000 ns render).
         "keys" => {
             arity(0)?;
-            Ok(Value::array(
-                fields.iter().map(|(s, _)| Value::Str(Rc::new(s.as_str().to_string()))).collect(),
-            ))
+            Ok(Value::array(fields.iter().map(|(s, _)| Value::Str(s.as_rc_string())).collect()))
         }
         "values" => {
             arity(0)?;
@@ -267,10 +267,7 @@ pub(crate) fn record_method(
                 fields
                     .iter()
                     .map(|(s, v)| {
-                        Value::Tuple(Rc::new(vec![
-                            Value::Str(Rc::new(s.as_str().to_string())),
-                            v.clone(),
-                        ]))
+                        Value::Tuple(Rc::new(vec![Value::Str(s.as_rc_string()), v.clone()]))
                     })
                     .collect(),
             ))
