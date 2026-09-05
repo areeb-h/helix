@@ -16037,3 +16037,114 @@ fn a_float_of_extreme_magnitude_prints_in_exponent_form() {
         );
     }
 }
+
+/// `import lib.*` brings every export in unqualified — so a module's verbs chain in method
+/// position without an import list that grows with the library (field build, 1.27.3) — and
+/// `except {…}` declines some. A builtin's name comes through only when the file also names
+/// it, in either order; declined, the builtin stays. Two globs on one name resolve by `except`.
+#[test]
+fn a_glob_import_brings_every_export_unqualified() {
+    let lib = "export fn triple(x) = x * 3\nexport fn quad(x) = x * 4\nexport K = 7\nfn hidden(x) = x\n";
+    let main = "import lib.*\nprint(triple(5), quad(2), K)\nprint([1, 2].map(triple), 5.triple())\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_modules(
+            &[("lib.helix", lib), ("main.helix", main)],
+            "main.helix",
+            env,
+            &format!("glob_{name}"),
+        );
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "15 8 7\n[3, 6] 15\n", "{name}");
+    }
+    // `except` declines (a trailing comma is fine); the declined name is not defined here.
+    let main = "import lib.* except {quad,}\nprint(triple(1))\nprint(quad(1))\n";
+    let (_, err, code) =
+        run_modules(&[("lib.helix", lib), ("main.helix", main)], "main.helix", &[], "glob_except");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`quad` is not a known function"), "{err}");
+    // A builtin's name comes through when the file names it beside the glob — either order.
+    let lib2 = "export fn abs(x) = 99\nexport fn triple(x) = x * 3\n";
+    for (i, main) in [
+        "import lib.{abs}\nimport lib.*\nprint(abs(-1), triple(2))\n",
+        "import lib.*\nimport lib.{abs}\nprint(abs(-1), triple(2))\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (out, err, code) = run_modules(
+            &[("lib.helix", lib2), ("main.helix", main)],
+            "main.helix",
+            &[],
+            &format!("glob_named_{i}"),
+        );
+        assert_eq!(code, Some(0), "{err}");
+        assert_eq!(out, "99 6\n", "{main}");
+    }
+    // ...or is declined, and the builtin stays.
+    let main = "import lib.* except {abs}\nprint(abs(-1), triple(2))\n";
+    let (out, err, code) =
+        run_modules(&[("lib.helix", lib2), ("main.helix", main)], "main.helix", &[], "glob_declined");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "1 6\n");
+    // Two globs; the collision is resolved by declining one side.
+    let a = "export fn f() = 1\nexport fn g() = 10\n";
+    let b = "export fn f() = 2\nexport fn h() = 20\n";
+    let main = "import a.*\nimport b.* except {f}\nprint(f(), g(), h())\n";
+    let (out, err, code) = run_modules(
+        &[("a.helix", a), ("b.helix", b), ("main.helix", main)],
+        "main.helix",
+        &[],
+        "glob_two",
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "1 10 20\n");
+}
+
+/// The glob's refusals, each in words that name the fix: a builtin's name without the file's
+/// consent, an `except` of a name the module does not export, a glob that brings in nothing,
+/// `as` after a names-binding import, a named-argument call on a glob-imported function, and
+/// two globs supplying one name.
+#[test]
+fn a_glob_import_is_refused_where_it_would_surprise() {
+    let lib = "export fn abs(x) = 99\nexport fn triple(x) = x * 3\n";
+    for (i, (main, want)) in [
+        ("import lib.*\nprint(abs(-1))\n", "`abs` from `import lib.*` would shadow the builtin `abs`"),
+        ("import lib.*\nprint(abs(-1))\n", "except {abs}"),
+        ("import lib.* except {nope}\nprint(1)\n", "`nope` is not exported by module `lib`, so `except` has nothing to decline"),
+        ("import lib.* except {abs, triple}\nprint(1)\n", "brings in no names"),
+        ("import lib.* as l\nprint(1)\n", "takes no alias"),
+        ("import lib.{triple} as l\nprint(1)\n", "takes no alias"),
+        ("import lib.* except {abs}\nprint(triple(1, x: 2))\n", "parameter names are not visible here"),
+        ("import lib.* except {abs}\nprint(hidden(1))\n", "`hidden` is not a known function"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (_, err, code) = run_modules(
+            &[("lib.helix", lib), ("main.helix", main)],
+            "main.helix",
+            &[],
+            &format!("glob_refused_{i}"),
+        );
+        assert_ne!(code, Some(0), "{main}");
+        assert!(err.contains(want), "{main}\n--- wanted `{want}` in ---\n{err}");
+    }
+    // Two globs supplying one name.
+    let (_, err, code) = run_modules(
+        &[("a.helix", "export fn f() = 1\n"), ("b.helix", "export fn f() = 2\n"), ("main.helix", "import a.*\nimport b.*\nprint(f())\n")],
+        "main.helix",
+        &[],
+        "glob_collide",
+    );
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`f` is already imported from another module") && err.contains("except {f}"), "{err}");
+    // A module exporting nothing.
+    let (_, err, code) = run_modules(
+        &[("e.helix", "fn p(x) = x\n"), ("main.helix", "import e.*\nprint(1)\n")],
+        "main.helix",
+        &[],
+        "glob_empty",
+    );
+    assert_ne!(code, Some(0));
+    assert!(err.contains("exports nothing"), "{err}");
+}

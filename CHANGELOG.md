@@ -4,6 +4,19 @@
 
 ### Added
 
+- **`import lib.*`, and `import lib.* except {a, b}`.** Every export of a module, unqualified,
+  minus the names declined — so a library that chains through unqualified imports (the only
+  way a module's verbs reach method position) no longer costs an import list that grows with
+  the library (field build, 1.27.3). The glob is still the caller opting in, in one place;
+  two guards keep it honest: a glob name that is a builtin is refused unless the file also
+  imports that name by itself (`import lib.{abs}` beside the glob) or declines it
+  (`except {abs}`), and an `except` name must be an export. A glob that brings in nothing is
+  refused; two globs supplying one name is the existing collision error, with `except` in the
+  hint. `import lib.{a} as x` and `import lib.* as x` are refused in words (the names bind
+  directly; before, the `as x` failed as the next statement). Pinned by
+  `a_glob_import_brings_every_export_unqualified` and
+  `a_glob_import_is_refused_where_it_would_surprise`; ADR 0019 addendum.
+
 - **A default may be a literal container of literals** — `= {}`, `= []`, `= (1, 2)`,
   `= {retries: 3}` — on a `fn` and on a lambda. An options record could not have an empty
   default before, and there was no reading under which `{}` is not a constant. Anything

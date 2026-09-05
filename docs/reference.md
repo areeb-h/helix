@@ -1887,11 +1887,11 @@ A rebindable top-level binding — the only mutable state in the language.
 
 ### `import`
 
-Bring in another module: whole, aliased, or specific names.
+Bring in another module: whole, aliased, specific names, or every export.
 
 `import lib.stats as st`
 
-**Note:** `import lib.stats` for `lib/stats.helix`, `as st` to alias, or `import lib.stats.{mean, sd}` to bring names in unqualified. Not `use`, not `from … import …`. Keywords: module, use, require, include, package, library, namespace, dependency.
+**Note:** `import lib.stats` for `lib/stats.helix`, `as st` to alias, `import lib.stats.{mean, sd}` to bring names in unqualified, or `import lib.stats.*` for every export — `import lib.stats.* except {mean}` declines some. A glob name that is a builtin is refused unless the file also imports it by name or declines it; an `except` name must be an export. Not `use`, not `from … import …`. Keywords: module, use, require, include, package, library, namespace, dependency, glob, star, wildcard.
 
 ```
 >>> print(1)

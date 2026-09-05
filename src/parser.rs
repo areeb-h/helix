@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{BinOp, Expr, InterpPart, Stmt, TypeAnn, UnOp};
+use crate::ast::{ImportNames, BinOp, Expr, InterpPart, Stmt, TypeAnn, UnOp};
 use crate::error::{suggest, HelixError};
 use crate::token::{StrSeg, Tok, Token};
 
@@ -87,6 +87,7 @@ fn parse_expression(
         do_bindings: Vec::new(),
         imports: imports.clone(),
         selected_imports: std::collections::HashSet::new(),
+        glob_import: false,
         pending: Vec::new(),
         temps: 0,
     };
@@ -912,6 +913,7 @@ pub fn parse(tokens: Vec<Token>) -> Result<Vec<Stmt>, HelixError> {
         do_bindings: Vec::new(),
         imports: std::collections::HashSet::new(),
         selected_imports: std::collections::HashSet::new(),
+        glob_import: false,
         pending: Vec::new(),
         temps: 0,
     };
@@ -1003,6 +1005,10 @@ struct Parser {
     /// lives in the imported module), and the error should say so, not call `f`
     /// a builtin.
     selected_imports: std::collections::HashSet<String>,
+    /// Whether this file has a glob import (`import m.*`) — for the same diagnostic: a
+    /// named-argument call on a name that is neither local nor a builtin may come from it,
+    /// and this parser cannot know which names the glob brings.
+    glob_import: bool,
     /// Statements one source statement expanded into, appended by `program` after it:
     /// `{a, b} = r` at the top level is an assignment of the value to a throwaway name and
     /// one assignment per field (`destructure_record_stmt`).
@@ -1211,37 +1217,57 @@ impl Parser {
                 .ident_name("after `import`")
                 .map_err(|e| e.hint("import a module by name, e.g. `import stats` or `import lib.stats`."))?;
             let mut segments = vec![first];
-            let mut selected: Option<Vec<String>> = None;
+            let mut names = ImportNames::Module;
             // Dotted path: `import lib.stats` → `lib/stats.helix`. A `.{a, b}` tail
-            // instead selects names to bring into scope unqualified.
+            // instead selects names to bring into scope unqualified; a `.*` tail brings
+            // EVERY export in, minus an optional `except {a, b}` (field build, 1.27.3: a
+            // library chains only through an unqualified import, so every verb a caller
+            // might chain had to be named up front, and the list grew with the library).
             while matches!(self.peek(), Tok::Dot) {
                 self.advance();
                 if matches!(self.peek(), Tok::LBrace) {
                     self.advance(); // consume `{`
-                    let mut names = Vec::new();
-                    loop {
-                        names.push(self.ident_name("to import inside `{ }`")?);
-                        if matches!(self.peek(), Tok::Comma) {
-                            self.advance();
-                            if matches!(self.peek(), Tok::RBrace) {
-                                break; // trailing comma
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    self.eat(&Tok::RBrace, "to close the import list").map_err(|e| {
-                        e.hint("a selective import looks like `import lib.stats.{mean, std}`.")
-                    })?;
-                    selected = Some(names);
+                    names = ImportNames::Selected(self.import_name_list(
+                        "to import inside `{ }`",
+                        "a selective import looks like `import lib.stats.{mean, std}`.",
+                    )?);
                     break; // nothing follows a selective list
+                }
+                if matches!(self.peek(), Tok::Star) {
+                    self.advance(); // consume `*`
+                    // `except` is contextual, exactly like `as`: special only right here.
+                    let except = if matches!(self.peek(), Tok::Ident(n) if n == "except") {
+                        self.advance();
+                        let glob_hint =
+                            "decline names from a glob import with `import lib.stats.* except {mean, std}`.";
+                        self.eat(&Tok::LBrace, "after `except`").map_err(|e| e.hint(glob_hint))?;
+                        self.import_name_list("to decline inside `except { }`", glob_hint)?
+                    } else {
+                        Vec::new()
+                    };
+                    names = ImportNames::Glob { except };
+                    break; // nothing follows a glob
                 }
                 segments.push(self.ident_name("after `.` in the module path")?);
             }
             // Optional `as alias` — `as` is contextual (only special here), so it
-            // stays usable as an ordinary identifier everywhere else. A selective
-            // import binds its names directly, so it takes no alias.
-            let alias = if selected.is_none() && matches!(self.peek(), Tok::Ident(n) if n == "as") {
+            // stays usable as an ordinary identifier everywhere else. A selective or glob
+            // import binds its names directly, so it takes no alias — and says so, rather
+            // than leaving `as x` to fail as the next statement.
+            let alias = if matches!(self.peek(), Tok::Ident(n) if n == "as") {
+                if !matches!(names, ImportNames::Module) {
+                    let (al, ac) = self.pos();
+                    return Err(HelixError::new(
+                        "this import binds names directly, so it takes no alias",
+                        al,
+                        ac,
+                    )
+                    .hint(format!(
+                        "`import {0}.{{…}}` and `import {0}.*` bring names in unqualified; \
+                         `import {0} as <name>` keeps them under a name.",
+                        segments.join(".")
+                    )));
+                }
                 self.advance();
                 self.ident_name("after `as`")
                     .map_err(|e| e.hint("give the module an alias, e.g. `import lib.stats as stats`."))?
@@ -1250,14 +1276,17 @@ impl Parser {
                 segments.last().unwrap().clone()
             };
             // Record the bound namespace so the comprehension-sugar desugars know a
-            // method on it is a qualified module call. Selective imports bind function
-            // names directly and create no namespace, so they are not recorded.
-            if let Some(names) = &selected {
-                self.selected_imports.extend(names.iter().cloned());
-            } else {
-                self.imports.insert(alias.clone());
+            // method on it is a qualified module call. Selective and glob imports bind
+            // names directly and create no namespace, so they are not recorded as one;
+            // what they bind is recorded for the named-argument diagnostic.
+            match &names {
+                ImportNames::Selected(list) => self.selected_imports.extend(list.iter().cloned()),
+                ImportNames::Glob { .. } => self.glob_import = true,
+                ImportNames::Module => {
+                    self.imports.insert(alias.clone());
+                }
             }
-            return Ok(Stmt::Import { segments, alias, selected, line: l, col: c });
+            return Ok(Stmt::Import { segments, alias, names, line: l, col: c });
         }
         // Optional leading `export` (ADR 0019) — contextual: it's a keyword only
         // directly before a definition (`export fn …`, `export x = …`, `export a, b = …`,
@@ -1414,6 +1443,25 @@ impl Parser {
             self.advance();
             names.push(self.ident_name("as a destructuring target")?);
         }
+        Ok(names)
+    }
+
+    /// The `{a, b,}` body of a selective import or of an `except` list, after its `{`: one
+    /// or more names, an optional trailing comma, the closing brace.
+    fn import_name_list(&mut self, ctx: &str, hint: &str) -> Result<Vec<String>, HelixError> {
+        let mut names = Vec::new();
+        loop {
+            names.push(self.ident_name(ctx)?);
+            if matches!(self.peek(), Tok::Comma) {
+                self.advance();
+                if matches!(self.peek(), Tok::RBrace) {
+                    break; // trailing comma
+                }
+            } else {
+                break;
+            }
+        }
+        self.eat(&Tok::RBrace, "to close the import list").map_err(|e| e.hint(hint))?;
         Ok(names)
     }
 
@@ -2513,6 +2561,25 @@ impl Parser {
                         format!(
                             "`{name}` was imported selectively, so its parameter \
                              names are not visible here"
+                        ),
+                        line,
+                        col,
+                    )
+                    .hint(format!(
+                        "import the module under its name and call `m.{name}(...)` \
+                         qualified — qualified calls support named arguments — or \
+                         pass the arguments positionally."
+                    )));
+                }
+                // A glob-imported function is user-defined too — and this parser cannot
+                // even know its NAME, only that a glob exists. A name that is not a
+                // builtin can only have come from it (or be undefined, which the loader
+                // reports in its own words).
+                if self.glob_import && !crate::registry::is_builtin_name(name) {
+                    return Err(HelixError::new(
+                        format!(
+                            "`{name}` may come from a glob import (`import ….*`), so its \
+                             parameter names are not visible here"
                         ),
                         line,
                         col,

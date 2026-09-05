@@ -335,6 +335,16 @@ along; the documented signature `std()` made the checker refuse the argument —
 generated from `docs.rs`, so the fix was the entry. A quoted key in a record brace is a field
 (printed back quoted when not an identifier; `field_key_display`), the query-builder shape.
 
+**1.27.3 (2026-09-05) — glob import.** DONE: `import m.*` and `import m.* except {…}`
+(parser: a `.*` tail, `except` contextual like `as`; loader: the glob expands at load time into
+the selected-name table the named form fills, so nothing downstream changed). Guards: a builtin
+name needs the file's own name on it (`import m.{abs}` beside the glob, either order) or an
+`except`; an `except` name must be an export; an empty glob is refused; two globs on one name is
+the collision error with `except` in the hint. A local definition wins over a glob name
+silently (Rust's rule, and the named form's today). Open, for both forms: a named-argument call
+on an imported function is refused in the parser (the signature lives in another file); the
+loader has that signature and could place named arguments as `resolve_qualified_call` does.
+
 **1.34 (2026-09-05) — exponent form.** DONE: `fmt_float` (value.rs) prints |x| ≥ 1e16 and
 0 < |x| < 1e-4 as `{x:e}` — Python's `repr` window, Rust's spelling (`1e16`, `2.5e-7`); the
 REPL's grouped printer (`fmt_float_rich`) takes the decision from it, so the two switch at the

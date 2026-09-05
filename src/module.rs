@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Expr, InterpPart, Stmt};
+use crate::ast::{ImportNames, Expr, InterpPart, Stmt};
 use crate::error::HelixError;
 
 /// One source file's place in the flattened program: the global line it starts at
@@ -446,7 +446,8 @@ struct Module {
     stmts: Vec<Stmt>,
     /// Each whole-module import's alias mapped to the loaded module's index.
     imports: Vec<(String, usize)>,
-    /// Each selectively-imported name mapped to the module it came from.
+    /// Each selectively-imported name mapped to the module it came from (a glob import
+    /// expands to every export it brings in, here).
     selected: Vec<(String, usize)>,
     /// The names this module marks `export` — its public surface (ADR 0019). Only these
     /// are reachable from an importer (qualified `alias.name` or selective import).
@@ -571,7 +572,7 @@ impl Loader {
         // resolver below never hunts for a `python/...helix` file). `python` itself
         // is a predefined global, so the lowered assign just calls a method on it.
         for s in stmts.iter_mut() {
-            if let Stmt::Import { segments, alias, selected: _, line, col } = s
+            if let Stmt::Import { segments, alias, names: _, line, col } = s
                 && segments.first().map(|x| x.as_str()) == Some("python") {
                     if segments.len() < 2 {
                         return Err(HelixError::new(
@@ -607,8 +608,20 @@ impl Loader {
         let dir = canon.parent().unwrap_or_else(|| Path::new("."));
         let mut imports = Vec::new();
         let mut selected_names = Vec::new();
+        // Names this file imports BY NAME from any module, in any order — a glob may bring
+        // in a builtin's name only when the file has named it somewhere (the glob arm).
+        let named_here: HashSet<&str> = stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Import { names: ImportNames::Selected(ns), .. } => {
+                    Some(ns.iter().map(|n| n.as_str()))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
         for s in &stmts {
-            if let Stmt::Import { segments, alias, selected, line, col } = s {
+            if let Stmt::Import { segments, alias, names, line, col } = s {
                 // Resolve `import a.b.c` → `a/b/c.helix`, trying this module's own
                 // directory first (local imports win), then each search root (stdlib /
                 // `HELIX_PATH`).
@@ -705,12 +718,12 @@ impl Loader {
                     return Err(err.into_diag(&src, &fname));
                 };
                 let dep_idx = self.load_file(&dep_path, dep_key, false)?;
-                match selected {
+                match names {
                     // Selective: each chosen name resolves to the dependency directly —
                     // but only if that module actually `export`s it (ADR 0019). Validate
                     // here, at the import, so the error names the module instead of
                     // surfacing later as a bare "not defined" at the use site.
-                    Some(names) => {
+                    ImportNames::Selected(names) => {
                         for n in names {
                             if !self.modules[dep_idx].exports.contains(n) {
                                 let shown = segments.join(".");
@@ -760,8 +773,84 @@ impl Loader {
                             selected_names.push((n.clone(), dep_idx));
                         }
                     }
+                    // Glob: every export, unqualified, minus `except`. The consent argument
+                    // for unqualified imports holds — the caller opts in, in one place,
+                    // visibly — with two guards the named form does not need. A name the
+                    // glob would bring that is a BUILTIN is refused unless this file also
+                    // names it (`import m.{abs}` beside the glob) or declines it (`except
+                    // {abs}`): a library growing an export must never rewrite every
+                    // `abs(...)` in a file silently. And each `except` name must be an
+                    // export, so a typo declines nothing silently. The names land in the
+                    // same table the named form fills, so nothing downstream is new.
+                    ImportNames::Glob { except } => {
+                        let shown = segments.join(".");
+                        let exports = &self.modules[dep_idx].exports;
+                        for n in except {
+                            if !exports.contains(n) {
+                                return Err(HelixError::new(
+                                    format!(
+                                        "`{n}` is not exported by module `{shown}`, so `except` has nothing to decline"
+                                    ),
+                                    *line,
+                                    *col,
+                                )
+                                .hint("`except` lists names the glob would otherwise bring in — check the spelling.")
+                                .into_diag(&src, &fname));
+                            }
+                        }
+                        let mut brought: Vec<&String> =
+                            exports.iter().filter(|n| !except.contains(*n)).collect();
+                        brought.sort();
+                        if brought.is_empty() {
+                            let why = if exports.is_empty() {
+                                "exports nothing"
+                            } else {
+                                "exports only what `except` declined"
+                            };
+                            return Err(HelixError::new(
+                                format!("`import {shown}.*` brings in no names: the module {why}"),
+                                *line,
+                                *col,
+                            )
+                            .hint("mark definitions `export` in that module, or drop the import.")
+                            .into_diag(&src, &fname));
+                        }
+                        for n in brought {
+                            if crate::registry::is_builtin_name(n) && !named_here.contains(n.as_str()) {
+                                return Err(HelixError::new(
+                                    format!("`{n}` from `import {shown}.*` would shadow the builtin `{n}`"),
+                                    *line,
+                                    *col,
+                                )
+                                .hint(format!(
+                                    "a glob brings in every export, so shadowing a builtin needs your \
+                                     name on it: add `import {shown}.{{{n}}}` beside the glob, or \
+                                     decline it with `import {shown}.* except {{{n}}}`."
+                                ))
+                                .into_diag(&src, &fname));
+                            }
+                            if let Some((_, prev)) = selected_names.iter().find(|(m, _)| m == n)
+                                && *prev != dep_idx
+                            {
+                                return Err(HelixError::new(
+                                    format!("`{n}` is already imported from another module"),
+                                    *line,
+                                    *col,
+                                )
+                                .hint(format!(
+                                    "two modules cannot supply the same name — decline one with \
+                                     `import {shown}.* except {{{n}}}`, or import that module itself \
+                                     and qualify the use."
+                                ))
+                                .into_diag(&src, &fname));
+                            }
+                            if !selected_names.iter().any(|(m, d)| m == n && *d == dep_idx) {
+                                selected_names.push((n.clone(), dep_idx));
+                            }
+                        }
+                    }
                     // Whole module: reached through the alias (`alias.member`).
-                    None => {
+                    ImportNames::Module => {
                         // `import a.shared` + `import b.shared` both bind `shared` — the
                         // LAST one silently won, so `shared.who()` returned B's answer with
                         // no diagnostic, and swapping the two import lines changed the

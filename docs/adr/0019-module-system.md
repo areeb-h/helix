@@ -105,3 +105,20 @@ definitions-only rule bans stray side-effect *statements*, not side-effecting
 *initializers*. The clean fix is **lazy module bindings** (compute on first access, in the
 consumer's context) — deferred; it needs the evaluator to thunk globals. Until then, keep
 expensive/effectful setup behind an `export fn` the consumer calls.
+
+### Addendum 2026-09-05 — the glob form
+`import a.b.*` brings every export in unqualified, and `import a.b.* except {x, y}` declines
+some (field build, 1.27.3: a library chains only through an unqualified import — that is how
+a module's verbs reach method position — so every verb a caller might chain had to be named
+at the top of the file, and the list grew with the library). The consent argument holds: the
+glob is still the caller opting in, in one place, visibly. Two guards the named form does not
+need keep it honest. A glob name that is a **builtin** is refused unless the file also names
+it (`import a.b.{abs}` beside the glob, in either order) or declines it (`except {abs}`), so a
+library growing an export can never rewrite every `abs(...)` in a file silently. Each
+`except` name must be an export, so a typo declines nothing silently; a glob that brings in
+nothing is refused too. Two globs supplying one name is the existing collision error, resolved
+by `except` on one side; a local definition wins over an imported name silently, as it does
+for the named form (Rust's rule). The glob expands at load time into the same selected-name
+table the named form fills, so the rewrite, the checker and the engines see nothing new. A
+names-binding import (`{…}` or `*`) followed by `as x` is refused in words rather than left
+to fail as the next statement.

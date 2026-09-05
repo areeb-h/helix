@@ -438,9 +438,9 @@ pub enum Stmt {
         /// last path segment when no `as` clause is given. Unused for a selective
         /// import, which binds the chosen names directly rather than a namespace.
         alias: String,
-        /// A selective import (`import math.stats.{mean, std}`) brings these names
-        /// into scope unqualified; `None` imports the whole module as `alias`.
-        selected: Option<Vec<String>>,
+        /// What the import binds: the whole module under `alias`, a chosen list of
+        /// names unqualified, or every export unqualified (the glob form).
+        names: ImportNames,
         line: usize,
         col: usize,
     },
@@ -456,4 +456,15 @@ impl Expr {
             e => e,
         }
     }
+}
+
+/// What an `import` binds (ADR 0019, and its 2026-09-05 addendum for the glob form).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportNames {
+    /// `import a.b [as alias]` — the whole module, reached through the alias.
+    Module,
+    /// `import a.b.{x, y}` — these names, unqualified.
+    Selected(Vec<String>),
+    /// `import a.b.*` [`except {x, y}`] — every exported name but those, unqualified.
+    Glob { except: Vec<String> },
 }

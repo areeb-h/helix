@@ -941,9 +941,15 @@ fn cook_newlines(raw: Vec<Token>) -> Vec<Token> {
             .map(|x| &x.tok)
             .find(|x| **x != Tok::Newline);
 
+        // `import m.*` ENDS a statement: `.*` is only ever the glob tail (a `.` is otherwise
+        // followed by a name or `{`), so a `*` right after a `.` is not a binary operator
+        // waiting for its right operand on the next line.
+        let glob_tail = matches!(prev, Some(Tok::Star))
+            && out.len() >= 2
+            && out[out.len() - 2].tok == Tok::Dot;
         let drop = match (prev, next) {
             (None, _) => true,                                   // leading blank lines
-            (Some(p), _) if continues_before(p) => true,         // line ends mid-expression
+            (Some(p), _) if continues_before(p) && !glob_tail => true, // line ends mid-expression
             (_, Some(nx)) if continues_after(nx) => true,        // next line starts with `.`/`)`/`]`
             (_, Some(Tok::Eof)) => true,
             (Some(Tok::Newline), _) => true,                     // collapse runs
