@@ -2720,7 +2720,7 @@ e
 
 ### `chars()`
 
-The string as an array of one-character strings, for map/filter/reduce.
+The string as an array of one-code-point strings, for map/filter/reduce (a combining mark is its own element — see `normalize`).
 
 ```
 >>> "abc".chars()
@@ -2747,7 +2747,7 @@ true
 
 ### `count()`
 
-The number of characters (Unicode scalars, not bytes).
+The number of Unicode scalar values (code points) — not bytes, and not grapheme clusters: a letter plus a combining accent counts 2, so `normalize()` first if two spellings of one text must agree.
 
 ```
 >>> "hello".count()
@@ -2796,7 +2796,7 @@ Where the needle LAST starts, as a character index; missing when absent.
 
 ### `length()`
 
-The number of characters; alias of count.
+The number of Unicode scalar values (code points) — not bytes, and not grapheme clusters: a letter plus a combining accent counts 2, so `normalize()` first if two spellings of one text must agree; alias of count.
 
 ```
 >>> "hello".length()
@@ -2819,6 +2819,17 @@ The string with every letter lowercased.
 ```
 >>> "AbC".lower()
 abc
+```
+
+### `normalize(form?)`
+
+The string in a Unicode normal form — NFC by default, so a letter written as one code point and as a base letter plus a combining mark become the SAME string; `"nfd"` decomposes instead, `"nfkc"`/`"nfkd"` also fold compatibility characters (ligatures, full-width digits).
+
+**Note:** Two spellings of one text — typed on different keyboards or produced by different programs — compare UNEQUAL, hash differently and dedupe apart until normalized; normalize at the boundary where text comes in (a form field, a file, a cookie) and compare afterwards. `length()`, `chars()`, `[a:b]` and `index_of` all count code points, never grapheme clusters, so an un-normalized "é" may be 2 of them. Keywords: unicode, NFC, NFD, NFKC, NFKD, combining, accent, canonical, equivalence, dedupe.
+
+```
+>>> "e".concat(chr(769)).normalize().length()
+1
 ```
 
 ### `parse_json()`

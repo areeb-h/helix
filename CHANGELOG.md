@@ -256,6 +256,14 @@
   builds (both sources, both roots) take `it * s`, `it + s`, `to_int(it * s)`: measured
   1.0× → 16× on 3M elements. An Int capture at the same site still takes the i64 build and
   wraps as the walker wraps.
+- **`String.normalize(form?)`.** A String is indexed by code point, which sets the expectation
+  that "é" is one thing — and two spellings of it, precomposed or `e` plus a combining acute,
+  compared unequal, hashed apart and deduped apart, with no way to repair that in the language
+  (field build, 1.35: a name typed on macOS did not equal the same name typed on Linux, and a
+  lookup missed with no error anywhere). `s.normalize()` is NFC; `"nfd"`, `"nfkc"`, `"nfkd"` on
+  request; an unknown form is refused by name. The String docs now say what `length`, `count`
+  and `chars` count: Unicode scalar values — not bytes, not grapheme clusters. The
+  `unicode-normalization` crate (pure Rust) is the one new dependency.
 - **`std(ddof?)` and `var(ddof?)`.** `[1, 2, 3, 4].std(1)` is the sample standard deviation
   (divide by n−1), `std()` the population one it always was; the same for `var`. The walker
   already parsed the argument — only the documented signature `std()` stood in the way, and the

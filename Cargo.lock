@@ -1708,6 +1708,7 @@ dependencies = [
  "tar",
  "toml",
  "toml_edit",
+ "unicode-normalization",
  "ureq",
  "url",
  "webpki-roots 1.0.8",

@@ -15987,3 +15987,29 @@ fn std_and_var_take_a_ddof() {
         }
     }
 }
+
+/// `normalize()`: Unicode normal forms on a String. A String is indexed by code point, which
+/// sets the expectation that "é" is one thing — and two spellings of it (precomposed, or `e`
+/// plus a combining acute) compared unequal, hashed apart and deduped apart with no way to
+/// repair that in the language (field build, 1.35). NFC by default; `"nfd"`, `"nfkc"`,
+/// `"nfkd"` on request; the form is checked; the counts say what they count.
+#[test]
+fn normalize_makes_two_spellings_of_one_text_equal() {
+    let src = "d = \"e\".concat(chr(769))\np = chr(233)\nprint(d.length(), p.length(), d == p, d.normalize() == p, d.normalize().length(), p.normalize(\"nfd\").length(), d.normalize(\"nfd\") == d)\nprint([[d, 1], [p, 2]].to_dict().count(), [[d.normalize(), 1], [p.normalize(), 2]].to_dict().count())\nprint(\"abc\".normalize(), \"abc\".normalize(\"nfkc\"), \"\".normalize().length())\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("normalize_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "2 1 false true 1 2 true\n2 1\nabc abc 0\n", "{name}");
+    }
+    for (src, want) in [
+        ("print(\"a\".normalize(\"x\"))\n", "knows the forms"),
+        ("print(\"a\".normalize(1))\n", "a form name"),
+        ("print(\"a\".normalize(\"nfc\", \"nfd\"))\n", "takes 0 to 1 arguments"),
+    ] {
+        for (name, env) in ENGINES {
+            let (_, err, code) = run_source(src, env, &format!("normalize_err_{name}"));
+            assert_ne!(code, Some(0), "{name}: {src}");
+            assert!(err.contains(want), "{name}: {src}: {err}");
+        }
+    }
+}

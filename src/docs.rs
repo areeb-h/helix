@@ -2300,9 +2300,17 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         notes: "",
     }),
     ("String", DocEntry {
+        name: "normalize",
+        sig: "normalize(form?)",
+        doc: "The string in a Unicode normal form — NFC by default, so a letter written as one code point and as a base letter plus a combining mark become the SAME string; `\"nfd\"` decomposes instead, `\"nfkc\"`/`\"nfkd\"` also fold compatibility characters (ligatures, full-width digits).",
+        example: "\"e\".concat(chr(769)).normalize().length()",
+        example_out: "1",
+        notes: "Two spellings of one text — typed on different keyboards or produced by different programs — compare UNEQUAL, hash differently and dedupe apart until normalized; normalize at the boundary where text comes in (a form field, a file, a cookie) and compare afterwards. `length()`, `chars()`, `[a:b]` and `index_of` all count code points, never grapheme clusters, so an un-normalized \"é\" may be 2 of them. Keywords: unicode, NFC, NFD, NFKC, NFKD, combining, accent, canonical, equivalence, dedupe.",
+    }),
+    ("String", DocEntry {
         name: "count",
         sig: "count()",
-        doc: "The number of characters (Unicode scalars, not bytes).",
+        doc: "The number of Unicode scalar values (code points) — not bytes, and not grapheme clusters: a letter plus a combining accent counts 2, so `normalize()` first if two spellings of one text must agree.",
         example: "\"hello\".count()",
         example_out: "5",
         notes: "",
@@ -2310,7 +2318,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
     ("String", DocEntry {
         name: "length",
         sig: "length()",
-        doc: "The number of characters; alias of count.",
+        doc: "The number of Unicode scalar values (code points) — not bytes, and not grapheme clusters: a letter plus a combining accent counts 2, so `normalize()` first if two spellings of one text must agree; alias of count.",
         example: "\"hello\".length()",
         example_out: "5",
         notes: "",
@@ -2318,7 +2326,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
     ("String", DocEntry {
         name: "chars",
         sig: "chars()",
-        doc: "The string as an array of one-character strings, for map/filter/reduce.",
+        doc: "The string as an array of one-code-point strings, for map/filter/reduce (a combining mark is its own element — see `normalize`).",
         example: "\"abc\".chars()",
         example_out: "[\"a\", \"b\", \"c\"]",
         notes: "",

@@ -335,6 +335,13 @@ along; the documented signature `std()` made the checker refuse the argument —
 generated from `docs.rs`, so the fix was the entry. A quoted key in a record brace is a field
 (printed back quoted when not an identifier; `field_key_display`), the query-builder shape.
 
+**1.35 (2026-09-05) — `normalize`.** DONE for the two asks of value: `s.normalize()` (NFC;
+`nfd`/`nfkc`/`nfkd`) via the `unicode-normalization` crate, and the docs saying that `length`,
+`count`, `chars`, slices and `index_of` count code points. Still open from the same finding: a
+grapheme-aware `graphemes()` and a width-aware `ljust`/`fit` for terminal columns (the same
+shape as the braille-width bug `HELIX_PLOT` exists for; needs `unicode-segmentation` and
+`unicode-width`), and `bytes()`.
+
 **OPEN, a design question, not a bug:** the Array `std`/`var` default is the POPULATION
 estimator (÷n) and the grouped `DataFrame.group(k).std(@v)` is the SAMPLE one (÷(n−1)); the
 field build noted pandas, R and Excel default to the sample and NumPy to the population. Helix

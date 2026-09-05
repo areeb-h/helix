@@ -1227,6 +1227,8 @@ pub(super) fn string_method_type(name: &str, line: usize, col: usize) -> Result<
         // One character, as a String — or `missing` past the end, the shape
         // `index_of` already uses for absent (ADR 0001).
         "char_at" => Type::String,
+        // A Unicode normal form of the string (NFC by default).
+        "normalize" => Type::String,
         // `Bytes` is RUNTIME-TYPED (like Dict and Net), so the checker sees `Unknown` and
         // resolves its methods when they run. The arm still has to exist: the registry
         // knowing a method and the checker not is how you get "type String has no method

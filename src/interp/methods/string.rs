@@ -36,6 +36,44 @@ pub(crate) fn string_method(
             arity(0)?;
             Ok(Value::Str(Rc::new(s.to_uppercase())))
         }
+        // Unicode normal forms. NFC by default — the form under which "é" typed as one code
+        // point and as `e` + a combining acute are the SAME string, so a name typed on one
+        // machine equals the same name typed on another (field build, 1.35: a form/cookie
+        // lookup missed and a dedupe split, with no error anywhere and no repair possible in
+        // the language). `"nfd"` decomposes; the `nfk*` forms also fold compatibility
+        // characters (ligatures, full-width digits).
+        "normalize" => {
+            use unicode_normalization::UnicodeNormalization;
+            if args.len() > 1 {
+                return Err(HelixError::new(
+                    format!("`normalize` takes an optional form name, got {} arguments", args.len()),
+                    line,
+                    col,
+                )
+                .hint("`s.normalize()` is NFC; `s.normalize(\"nfd\")`, `\"nfkc\"` or `\"nfkd\"` for the others."));
+            }
+            let form = match args.first() {
+                None => "nfc",
+                Some(Value::Str(f)) => f.as_str(),
+                Some(other) => {
+                    return Err(type_err(name, "a form name (\"nfc\", \"nfd\", \"nfkc\" or \"nfkd\")", other, line, col))
+                }
+            };
+            let out: String = match form {
+                "nfc" => s.nfc().collect(),
+                "nfd" => s.nfd().collect(),
+                "nfkc" => s.nfkc().collect(),
+                "nfkd" => s.nfkd().collect(),
+                other => {
+                    return Err(HelixError::new(
+                        format!("`normalize` knows the forms \"nfc\", \"nfd\", \"nfkc\" and \"nfkd\", not \"{other}\""),
+                        line,
+                        col,
+                    ))
+                }
+            };
+            Ok(Value::Str(Rc::new(out)))
+        }
         "lower" => {
             arity(0)?;
             Ok(Value::Str(Rc::new(s.to_lowercase())))

@@ -51,6 +51,11 @@ num-traits = "0.2"
 # ureq transitive dep; made direct because credential-stripping correctness must not
 # rest on a hand-rolled scheme/host/port parser — that is exactly where these bugs live.
 url = "2"
+# Unicode normalization for `String.normalize` (NFC/NFD/NFKC/NFKD). Pure Rust, no I/O. A
+# String is indexed by code point, which sets the expectation that "é" is one thing — and
+# two spellings of it (precomposed, or `e` plus a combining acute) compared unequal with no
+# way to repair that in the language (field build, 1.35).
+unicode-normalization = "0.1"
 # The Public Suffix List (Mozilla), embedded as a generated match tree — the supercookie
 # defence for the ADR 0031 cookie jar. "embed a snapshot" per the ADR; the crate carries
 # the list revision, so its staleness is visible rather than silent.
