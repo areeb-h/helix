@@ -9530,7 +9530,7 @@ fn a_quoted_key_makes_a_brace_a_dict() {
                 {\"a\" => 1}\n\
                 text/html\n\
                 {\"model\":\"x\",\"n\":2}\n\
-                {Content-Type: \"text/html\", extra: 1}\n";
+                {\"Content-Type\": \"text/html\", extra: 1}\n";
     for (name, env) in ENGINES {
         let (out, err, code) = run_source(src, env, &format!("dictlit_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
@@ -9545,11 +9545,30 @@ fn a_quoted_key_makes_a_brace_a_dict() {
         assert_eq!(code, Some(1), "{name}");
         assert!(err.contains("duplicate key `a` in dict literal"), "{name}: {err}");
 
+        // A QUOTED key in a record brace is a field whose spelling is not an identifier — the
+        // query-builder shape `{city: "oslo", "age >=": 18}` (field build, 1.27.4). It stays a
+        // record: printed back quoted (bare when it is an identifier), reachable by `get`, in
+        // `to_json`. A bare key in a DICT brace is still the mixing that is refused, and a
+        // quoted duplicate of a bare field is still a duplicate.
+        let (out, err, code) = run_source(
+            "r = {city: \"oslo\", \"age >=\": 18, name: 1, \"b\": 2}\nprint(r, r.get(\"age >=\"), r.has(\"age >=\"))\nprint(r.to_json())\n",
+            env,
+            &format!("dictlit_quoted_{name}"),
+        );
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(
+            out,
+            "{\"age >=\": 18, b: 2, city: \"oslo\", name: 1} 18 true\n{\"age >=\":18,\"b\":2,\"city\":\"oslo\",\"name\":1}\n",
+            "{name}"
+        );
         let (_, err, code) =
-            run_source("print({name: 1, \"b\": 2})\n", env, &format!("dictlit_mixed_{name}"));
+            run_source("print({\"a\": 1, b: 2})\n", env, &format!("dictlit_mixed_{name}"));
         assert_eq!(code, Some(1), "{name}");
-        assert!(err.contains("began as a record"), "{name}: {err}");
-        assert!(err.contains("Quote every key, or none"), "{name}: {err}");
+        assert!(err.contains("expected a quoted key in this dict"), "{name}: {err}");
+        let (_, err, code) =
+            run_source("print({a: 1, \"a\": 2})\n", env, &format!("dictlit_dupq_{name}"));
+        assert_eq!(code, Some(1), "{name}");
+        assert!(err.contains("duplicate field `a` in record literal"), "{name}: {err}");
     }
 }
 
@@ -15909,4 +15928,62 @@ fn jit_explain_names_the_source_kinds_a_map_site_serves() {
     assert_eq!(code, Some(0), "{err}");
     assert_eq!(out, "[1, 2]\n[0, 1, 2, 0, 1, 2, 0, 1, 2, 0]\n[0.75, 1.25]\n");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A negative count is refused on every `take`/`drop`, in one sentence. Array clamped it to 0
+/// — `[1, 2, 3].take(-1)` was `[]` and `drop(-1)` the whole array, silently — while String
+/// raised (field build, 1.33); Bytes clamped too. `xs[-1]` counts from the end, which is
+/// exactly why a reader might expect a count to, and only the refusal says otherwise. Zero and
+/// past-the-end still clamp, as documented.
+#[test]
+fn a_negative_take_or_drop_count_is_refused_everywhere() {
+    for src in [
+        "print([1, 2, 3].take(-1))",
+        "print([1, 2, 3].drop(-1))",
+        "print(range(0, 5).take(-2))",
+        "print(range(0, 5).drop(-2))",
+        "print([1.5, 2.5].take(-1))",
+        "print([1.5, 2.5].drop(-3))",
+        "print([{a: 1}, {a: 2}].take(-1))",
+        "print(from_hex(\"00ff10\").take(-1))",
+        "print(from_hex(\"00ff10\").drop(-1))",
+        "print(\"abc\".take(-1))",
+    ] {
+        for (name, env) in ENGINES {
+            let (_, err, code) = run_source(src, env, &format!("negcount_{name}"));
+            assert_ne!(code, Some(0), "{name}: {src}");
+            assert!(err.contains("needs a non-negative count"), "{name}: {src}: {err}");
+        }
+    }
+    let src = "print([1, 2, 3].take(0), [1, 2, 3].take(9), [1, 2, 3].drop(9), range(0, 3).drop(5), \"ab\".take(5), from_hex(\"00ff\").drop(7))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("negcount_ok_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "[] [1, 2, 3] [] [] ab b\"\"\n", "{name}");
+    }
+}
+
+/// `std`/`var` take an optional `ddof`: population (÷n) by default, `std(1)` the sample
+/// estimate (÷(n−1)). The walker parsed the argument already (`parse_ddof`); the documented
+/// signature `std()` made the checker refuse `std(1)` as "takes no arguments" (field build,
+/// 1.36), so the feature existed and was unreachable.
+#[test]
+fn std_and_var_take_a_ddof() {
+    let src = "xs = [1, 2, 3, 4]\nprint(xs.std(), xs.std(0), xs.std(1), xs.var(), xs.var(1))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("ddof_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "1.118033988749895 1.118033988749895 1.2909944487358056 1.25 1.6666666666666667\n", "{name}");
+    }
+    for (src, want) in [
+        ("print([1, 2].std(2))\n", "needs more than 2 value(s)"),
+        ("print([1, 2].var(-1))\n", "ddof must be >= 0"),
+        ("print([1, 2].std(1, 2))\n", "`std` takes 0 to 1 arguments"),
+    ] {
+        for (name, env) in ENGINES {
+            let (_, err, code) = run_source(src, env, &format!("ddof_err_{name}"));
+            assert_ne!(code, Some(0), "{name}: {src}");
+            assert!(err.contains(want), "{name}: {src}: {err}");
+        }
+    }
 }

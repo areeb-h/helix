@@ -256,6 +256,22 @@
   builds (both sources, both roots) take `it * s`, `it + s`, `to_int(it * s)`: measured
   1.0× → 16× on 3M elements. An Int capture at the same site still takes the i64 build and
   wraps as the walker wraps.
+- **`std(ddof?)` and `var(ddof?)`.** `[1, 2, 3, 4].std(1)` is the sample standard deviation
+  (divide by n−1), `std()` the population one it always was; the same for `var`. The walker
+  already parsed the argument — only the documented signature `std()` stood in the way, and the
+  checker refused `std(1)` as "takes no arguments" (field build, 1.36). `helix doc Array.std`
+  and the reference say which one you get.
+- **A negative `take`/`drop` count is an error, on every type.** Array clamped it to 0 —
+  `[1, 2, 3].take(-1)` was `[]` and `drop(-1)` the whole array, silently — while String raised
+  "`take` needs a non-negative count" (field build, 1.33); Bytes clamped too. One sentence
+  everywhere now. Zero and past-the-end still clamp, as documented.
+- **A quoted key in a record brace.** `{city: "oslo", "age >=": 18}` is a record whose second
+  field is spelled with an operator — the query-builder shape the field build's ORM lands on
+  (1.27.4) — where it used to be refused as a mixing of the two brace forms, so adding one
+  operator re-spelled every key of the clause and turned the record into a Dict (a different
+  type, iterated in a different order). The brace stays a record: written order kept, the field
+  reachable as `rec.get("age >=")`, printed back quoted when its spelling is not an identifier
+  (`{"age >=": 18, city: "oslo"}` re-parses). A bare key in a Dict brace is still refused.
 - **The transcendentals and `**` reach native code.** `exp`, `ln`, `log2`, `log10`, `sin`,
   `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh`, `cbrt`, `degrees`, `radians`,
   `erf`, `normal_cdf`, `normal_pdf`, `relu`, `sigmoid` and `a ** b` in a `map`, a `reduce`

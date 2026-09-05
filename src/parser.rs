@@ -3434,23 +3434,23 @@ impl Parser {
                         // Field names may be keywords (`match`, `in`, `if`, …) — they
                         // are contextual here, never ambiguous before a `:`.
                         let (kl, kc) = self.pos();
-                        // A quoted key here means the two brace forms got mixed: the
-                        // first key was a bare name, so this is a record, and a record
-                        // field is a name. Say what the two forms are — the reader is
-                        // one keystroke from either.
-                        if matches!(self.peek(), Tok::Str(_)) {
-                            return Err(HelixError::new(
-                                "this brace began as a record, so its keys must be bare names",
-                                kl,
-                                kc,
-                            )
-                            .hint(
-                                "a brace is one of two things: a RECORD with bare-name fields \
-                                 (`{name: \"Ada\"}`), or a DICT with quoted keys \
-                                 (`{\"Content-Type\": \"text/html\"}`). Quote every key, or none.",
-                            ));
-                        }
-                        let key = self.member_name("as a record field name")?;
+                        // A QUOTED key in a record brace names a field whose spelling is not an
+                        // identifier — `{city: "oslo", "age >=": 18}`, the query-builder shape
+                        // where the operator rides in the key (field build, 1.27.4). The brace
+                        // stays a record (its first key was bare): written order kept, the field
+                        // reachable as `rec.get("age >=")`, printed back quoted. It used to be
+                        // refused as a mixing of the two brace forms, which made adding one
+                        // operator re-spell every key of the clause and turn it into a Dict — a
+                        // different type with a different iteration order. A bare key in a DICT
+                        // brace is still refused (a quoted key is only ever a key; a bare one in
+                        // that position is the ambiguity the two forms exist to avoid).
+                        let key = if let Tok::Str(s) = self.peek() {
+                            let s = s.clone();
+                            self.advance();
+                            s
+                        } else {
+                            self.member_name("as a record field name")?
+                        };
                         // A duplicate field would break `==`'s substitutability
                         // (order-independent equality assumes one entry per key:
                         // two "equal" records could disagree on `.a`), so reject

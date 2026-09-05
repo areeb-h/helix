@@ -100,12 +100,22 @@ pub(crate) fn array_numeric_fast(
     if let Some(d) = ad.densified() {
         return array_numeric_fast(&d, name, args, line, col);
     }
+    // A NEGATIVE count is refused, in the String twin's words, before either fast path below
+    // can clamp it to 0: `[1, 2, 3].take(-1)` answered `[]` and `drop(-1)` the whole array,
+    // silently, while `"abc".take(-1)` raised — one verb, two answers (field build, 1.33). A
+    // negative count is a caller's bug, and `xs[-1]` counting from the end is exactly why a
+    // reader might expect a count to; only the refusal says it does not.
+    if let ("take" | "drop", [Value::Int(n)]) = (name, args)
+        && *n < 0
+    {
+        return Err(HelixError::new(format!("`{name}` needs a non-negative count"), line, col));
+    }
     // Lazy-Range `take`/`drop`: O(1) re-slicing of the arithmetic progression — the
     // whole point of the lazy representation (`range(100000000).take(1)` previously
     // materialized ~1.6 GB of boxed Values to keep one element, contradicting the
-    // documented O(1)). Int counts only, mirroring the general path exactly (negative
-    // clamps to 0, over-take/-drop clamps to the length); float/missing counts defer
-    // so the general path's errors stay identical. A fully-dropped range keeps an
+    // documented O(1)). Int counts only, mirroring the general path exactly (a negative
+    // count was refused above; over-take/-drop clamps to the length); float/missing counts
+    // defer so the general path's errors stay identical. A fully-dropped range keeps an
     // empty representation rather than computing `start + step*len`, which the Range
     // invariant does not guarantee to fit i64.
     if let ("take" | "drop", [Value::Int(n)], ArrayData::Range { start, step, len }) =
@@ -132,9 +142,9 @@ pub(crate) fn array_numeric_fast(
     // 503 MB against 190 MB for the array alone, i.e. 320 MB of `Vec<Value>` to keep three
     // numbers. One defect, fixed for one representation and not its neighbour.
     //
-    // Counts are clamped exactly as the arm above and the general path do (negative → 0,
-    // over-take/-drop → the length), and a non-`Int` count defers so the general path's
-    // errors stay identical.
+    // Counts are clamped exactly as the arm above and the general path do (a negative count
+    // was refused above; over-take/-drop → the length), and a non-`Int` count defers so the
+    // general path's errors stay identical.
     if let ("take" | "drop", [Value::Int(n)]) = (name, args) {
         let slice_ints = |v: &Vec<i64>| -> Value {
             let k = (*n).max(0).min(v.len() as i64) as usize;
@@ -949,13 +959,21 @@ pub(crate) fn array_method(
         }
         "take" => {
             arity("take", args, 1, line, col)?;
-            let n = as_int(&args[0], "take", line, col)?.max(0) as usize;
+            let n = as_int(&args[0], "take", line, col)?;
+            if n < 0 {
+                return Err(HelixError::new("`take` needs a non-negative count", line, col));
+            }
+            let n = n as usize;
             let out: Vec<Value> = items.iter().take(n).cloned().collect();
             Ok(Value::array(out))
         }
         "drop" => {
             arity("drop", args, 1, line, col)?;
-            let n = as_int(&args[0], "drop", line, col)?.max(0) as usize;
+            let n = as_int(&args[0], "drop", line, col)?;
+            if n < 0 {
+                return Err(HelixError::new("`drop` needs a non-negative count", line, col));
+            }
+            let n = n as usize;
             let out: Vec<Value> = items.iter().skip(n).cloned().collect();
             Ok(Value::array(out))
         }

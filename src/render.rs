@@ -438,7 +438,11 @@ fn render_compact(v: &Value, opts: &RenderOpts) -> String {
             // order, so `print(r)` and `"{r}"` disagreed in one session.
             let inner: Vec<String> = sorted_fields(fields)
                 .map(|(k, val)| {
-                    format!("{}: {}", opts.paint(Role::Key, k.as_str()), render_compact(val, opts))
+                    format!(
+                        "{}: {}",
+                        opts.paint(Role::Key, &crate::value::field_key_display(k.as_str())),
+                        render_compact(val, opts)
+                    )
                 })
                 .collect();
             format!("{}{}{}", opts.paint(Role::Dim, "{"), inner.join(", "), opts.paint(Role::Dim, "}"))

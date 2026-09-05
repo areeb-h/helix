@@ -1025,6 +1025,20 @@ impl Value {
     }
 }
 
+/// A record field as it is written back: bare when it is an identifier, quoted otherwise —
+/// `{city: "oslo", "age >=": 18}` (a quoted key in a record brace, field build 1.27.4). The
+/// quoted form re-parses to the same record, which is what a printed value owes its reader.
+pub fn field_key_display(k: &str) -> std::borrow::Cow<'_, str> {
+    let mut chars = k.chars();
+    let bare = matches!(chars.next(), Some(c) if c == '_' || c.is_alphabetic())
+        && chars.all(|c| c == '_' || c.is_alphanumeric());
+    if bare {
+        std::borrow::Cow::Borrowed(k)
+    } else {
+        std::borrow::Cow::Owned(format!("\"{k}\""))
+    }
+}
+
 /// Format a float so integral values still read as floats (`2.0`, not `2`).
 pub fn fmt_float(x: f64) -> String {
     if x.is_finite() && x == x.trunc() {
@@ -1157,9 +1171,10 @@ impl fmt::Display for Value {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
+                    let key = field_key_display(k.as_str());
                     match v {
-                        Value::Str(s) => write!(f, "{}: \"{}\"", k, s)?,
-                        other => write!(f, "{}: {}", k, other)?,
+                        Value::Str(s) => write!(f, "{}: \"{}\"", key, s)?,
+                        other => write!(f, "{}: {}", key, other)?,
                     }
                 }
                 write!(f, "}}")
@@ -1247,7 +1262,7 @@ pub fn display_value(v: &Value, line: usize, col: usize) -> Result<String, Helix
                 if i > 0 {
                     s.push_str(", ");
                 }
-                s.push_str(k.as_str());
+                s.push_str(&field_key_display(k.as_str()));
                 s.push_str(": ");
                 s.push_str(&display_elem(val, line, col)?);
             }

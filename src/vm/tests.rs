@@ -7126,12 +7126,10 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             ("[1, 2, 3, 4, 5].take(2)", "[1, 2]"),
             ("[1, 2, 3, 4, 5].take(5)", "[1, 2, 3, 4, 5]"),
             ("[1, 2, 3, 4, 5].take(99)", "[1, 2, 3, 4, 5]"),
-            ("[1, 2, 3, 4, 5].take(-1)", "[]"),
             ("[1, 2, 3, 4, 5].drop(0)", "[1, 2, 3, 4, 5]"),
             ("[1, 2, 3, 4, 5].drop(2)", "[3, 4, 5]"),
             ("[1, 2, 3, 4, 5].drop(5)", "[]"),
             ("[1, 2, 3, 4, 5].drop(99)", "[]"),
-            ("[1, 2, 3, 4, 5].drop(-1)", "[1, 2, 3, 4, 5]"),
             // Floats take the same path
             ("[1.5, 2.5, 3.5].take(2)", "[1.5, 2.5]"),
             ("[1.5, 2.5, 3.5].drop(2)", "[3.5]"),
@@ -7155,8 +7153,14 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             assert_eq!(tw, vm, "engines disagree on `{src}`");
             assert_eq!(vm, Ok(want.to_string()), "`{src}`");
         }
-        // A non-Int count defers to the general path so its errors are unchanged.
-        for src in ["[1, 2].take(1.5)", "[1, 2].drop(1.5)", "[1, 2].take(\"x\")"] {
+        // A non-Int count defers to the general path so its errors are unchanged — and a
+        // NEGATIVE count is refused before either fast path can clamp it (it used to answer
+        // `[]` / the whole array; the String twin raised; field build 1.33), on both engines.
+        for src in [
+            "[1, 2].take(1.5)", "[1, 2].drop(1.5)", "[1, 2].take(\"x\")",
+            "[1, 2, 3, 4, 5].take(-1)", "[1, 2, 3, 4, 5].drop(-1)", "[1.5, 2.5].take(-1)",
+            "(0..5).drop(-1)",
+        ] {
             let (tw, vm) = (run_tw(src), run_vm(src));
             assert_eq!(tw, vm, "engines disagree on `{src}`");
             assert!(vm.is_err(), "`{src}` should error");

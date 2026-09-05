@@ -327,6 +327,21 @@ bit-identical by construction, which retired the coverage doc's "permanent exclu
 analyses admit them in every typed body and a Float function compiled whole. STILL OPEN from
 that table: `clamp` (raises when `lo > hi`) and the two-argument `log(x, base)`/`hypot`.
 
+### 1.33, 1.36, 1.27.4 — three small ones, one commit (2026-09-05)
+
+**DONE.** A negative `take`/`drop` count is refused on Array and Bytes in the String twin's
+sentence (it clamped to 0 silently). `std(ddof?)`/`var(ddof?)`: the walker had `parse_ddof` all
+along; the documented signature `std()` made the checker refuse the argument — the reference is
+generated from `docs.rs`, so the fix was the entry. A quoted key in a record brace is a field
+(printed back quoted when not an identifier; `field_key_display`), the query-builder shape.
+
+**OPEN, a design question, not a bug:** the Array `std`/`var` default is the POPULATION
+estimator (÷n) and the grouped `DataFrame.group(k).std(@v)` is the SAMPLE one (÷(n−1)); the
+field build noted pandas, R and Excel default to the sample and NumPy to the population. Helix
+now lets you ask for either on arrays, but the two defaults disagree with each other. Aligning
+them is a semantic change to one of them; decide before 1.0. Also absent: `DataFrame.std()`
+(ungrouped), `corr`, `cov`, `percentile`, `diff`, `mode`, `rank`.
+
 **do_later — the perf gate measures a profile that moves by itself.** `scripts/perf-verify.sh`
 compares two `gate`-profile builds: opt-3, no LTO, 16 codegen units, incremental. Between two
 builds of code that does not touch the VM's call path, that profile has read the 3M-tail-call loop

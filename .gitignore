@@ -25,3 +25,6 @@ COMMIT_MSG.tmp
 **/target/
 **/.next/
 **/__pycache__/
+
+# One-codegen-unit control builds for perf comparisons (see docs/dx-plan.md)
+/target-*

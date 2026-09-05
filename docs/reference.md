@@ -2065,7 +2065,7 @@ The dot product with an equal-length numeric array; all-Int stays Int.
 
 ### `drop(n)`
 
-The array without its first n elements.
+The array without its first n elements (empty if n is the length or more). A negative n is an error, on every type.
 
 ```
 >>> [1, 2, 3, 4].drop(2)
@@ -2454,9 +2454,9 @@ The standard error of the mean: population std divided by sqrt(n).
 0.7071067811865475
 ```
 
-### `std()`
+### `std(ddof?)`
 
-The population standard deviation of the numeric values.
+The standard deviation of the numeric values: population (divide by n) by default; `std(1)` divides by n−1 for the sample estimate — `ddof` is the delta degrees of freedom, as in NumPy.
 
 **Note:** POPULATION std (divide by n), not the sample std (n-1) most stats libraries default to. The underlying summation is COMPENSATED, as in `sum()`.
 
@@ -2503,7 +2503,7 @@ An SVG line chart of the values, returned as a string.
 
 ### `take(n)`
 
-The first n elements (fewer if the array is shorter).
+The first n elements (fewer if the array is shorter). A negative n is an error, on every type.
 
 ```
 >>> [1, 2, 3, 4].take(2)
@@ -2590,9 +2590,9 @@ The distinct values, in first-seen order.
 [1, 2, 3]
 ```
 
-### `var()`
+### `var(ddof?)`
 
-The population variance (divide by n) of the numeric values.
+The variance of the numeric values: population (divide by n) by default; `var(1)` divides by n−1 for the sample estimate — `ddof` is the delta degrees of freedom, as in NumPy.
 
 **Note:** POPULATION variance (divide by n), matching `Array.std()` and unlike the DataFrame aggregates, which use n-1. Both passes use the same COMPENSATED summation as `sum()`, so this is not the naive two-pass formula.
 
@@ -3260,7 +3260,7 @@ The number of bytes; alias of length.
 
 All but the first n bytes.
 
-**Note:** Saturating: past the end is empty. Keywords: suffix, tail, skip, slice.
+**Note:** Saturating: past the end is empty. A negative count is an error, on every type. Keywords: suffix, tail, skip, slice.
 
 ```
 >>> from_hex("00ff10").drop(1)
@@ -3302,7 +3302,7 @@ b"ff10"
 
 The first n bytes.
 
-**Note:** Saturating like the String twin: past the end is the whole value, never an error — which is how a final partial page reads. Keywords: prefix, head, slice, page.
+**Note:** Saturating like the String twin: past the end is the whole value, not an error — which is how a final partial page reads. A negative count IS an error, on every type. Keywords: prefix, head, slice, page.
 
 ```
 >>> from_hex("00ff10").take(2)

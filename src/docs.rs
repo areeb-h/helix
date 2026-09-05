@@ -1562,7 +1562,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         DocEntry {
             name: "drop",
             sig: "drop(n)",
-            doc: "The array without its first n elements.",
+            doc: "The array without its first n elements (empty if n is the length or more). A negative n is an error, on every type.",
             example: "[1, 2, 3, 4].drop(2)",
             example_out: "[3, 4]",
             notes: "",
@@ -2023,8 +2023,8 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         "Array",
         DocEntry {
             name: "std",
-            sig: "std()",
-            doc: "The population standard deviation of the numeric values.",
+            sig: "std(ddof?)",
+            doc: "The standard deviation of the numeric values: population (divide by n) by default; `std(1)` divides by n−1 for the sample estimate — `ddof` is the delta degrees of freedom, as in NumPy.",
             example: "[2, 4, 4, 4, 5, 5, 7, 9].std()",
             example_out: "2.0",
             notes: "POPULATION std (divide by n), not the sample std (n-1) most stats libraries default to. The underlying summation is COMPENSATED, as in `sum()`.",
@@ -2079,7 +2079,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         DocEntry {
             name: "take",
             sig: "take(n)",
-            doc: "The first n elements (fewer if the array is shorter).",
+            doc: "The first n elements (fewer if the array is shorter). A negative n is an error, on every type.",
             example: "[1, 2, 3, 4].take(2)",
             example_out: "[1, 2]",
             notes: "",
@@ -2166,8 +2166,8 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         "Array",
         DocEntry {
             name: "var",
-            sig: "var()",
-            doc: "The population variance (divide by n) of the numeric values.",
+            sig: "var(ddof?)",
+            doc: "The variance of the numeric values: population (divide by n) by default; `var(1)` divides by n−1 for the sample estimate — `ddof` is the delta degrees of freedom, as in NumPy.",
             example: "[2, 4, 4, 4, 5, 5, 7, 9].var()",
             example_out: "4.0",
             notes: "POPULATION variance (divide by n), matching `Array.std()` and unlike the DataFrame aggregates, which use n-1. Both passes use the same COMPENSATED summation as `sum()`, so this is not the naive two-pass formula.",
@@ -2609,7 +2609,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         doc: "The first n bytes.",
         example: "from_hex(\"00ff10\").take(2)",
         example_out: "b\"00ff\"",
-        notes: "Saturating like the String twin: past the end is the whole value, never an error — which is how a final partial page reads. Keywords: prefix, head, slice, page.",
+        notes: "Saturating like the String twin: past the end is the whole value, not an error — which is how a final partial page reads. A negative count IS an error, on every type. Keywords: prefix, head, slice, page.",
     }),
     ("Bytes", DocEntry {
         name: "drop",
@@ -2617,7 +2617,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         doc: "All but the first n bytes.",
         example: "from_hex(\"00ff10\").drop(1)",
         example_out: "b\"ff10\"",
-        notes: "Saturating: past the end is empty. Keywords: suffix, tail, skip, slice.",
+        notes: "Saturating: past the end is empty. A negative count is an error, on every type. Keywords: suffix, tail, skip, slice.",
     }),
     ("Bytes", DocEntry {
         name: "slice",

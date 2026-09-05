@@ -57,11 +57,15 @@ pub(crate) fn bytes_method(
         }
         // Saturating like the String twins: `take` past the end is the whole value, and
         // `drop` past the end is empty. Neither is an error, because a slice that runs off
-        // the end is how a final partial page reads.
+        // the end is how a final partial page reads. A NEGATIVE count is refused, as the
+        // String and Array twins refuse it (field build, 1.33: one verb, one rule).
         "take" | "drop" => {
             arity(name, args, 1, line, col)?;
             let n = int_arg(&args[0], name, "an Int count", line, col)?;
-            let n = n.max(0).min(b.len() as i64) as usize;
+            if n < 0 {
+                return Err(HelixError::new(format!("`{name}` needs a non-negative count"), line, col));
+            }
+            let n = n.min(b.len() as i64) as usize;
             let out = if name == "take" { b[..n].to_vec() } else { b[n..].to_vec() };
             Ok(Value::Bytes(Rc::new(out)))
         }

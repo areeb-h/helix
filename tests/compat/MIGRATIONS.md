@@ -104,3 +104,20 @@ no entry. A source edit is not a behavior change.
 - **`count_where` names itself** (2026-09-05). "`filter` expects a yes/no test" and "an Int
   has no method `filter`" from a `count_where` call now say `count_where`, on every engine
   and from the checker. Message-only; no golden pinned the old text.
+
+- **A negative `take`/`drop` count is an error on Array and Bytes** (2026-09-05). `[1, 2, 3].take(-1)`
+  answered `[]` and `drop(-1)` the whole array; `from_hex("00ff").take(-1)` answered `b""`. Both
+  raise "`take` needs a non-negative count" now — the String twin's sentence, which had raised all
+  along. Zero and past-the-end still clamp. No corpus program or golden used a negative count.
+
+- **A quoted key is accepted in a record brace** (2026-09-05). `{city: "oslo", "age >=": 18}` used
+  to be refused ("this brace began as a record, so its keys must be bare names"); it is a record
+  with a field spelled `age >=`, printed back quoted. A program that relied on the refusal (none
+  known) would now run. `{"a": 1, b: 2}` is still refused. The one PRINTING change: a record
+  field whose spelling is not an identifier — reachable before only by spreading a Dict into a
+  record, `{...headers, extra: 1}` — printed bare (`{Content-Type: "text/html", extra: 1}`, a
+  form that does not re-parse) and prints quoted now (`{"Content-Type": "text/html", extra: 1}`).
+  One CLI pin moved (`a_quoted_key_makes_a_brace_a_dict`); no corpus program or compat golden did.
+
+- **`std(1)`/`var(1)` are accepted** (2026-09-05). Additive: the documented signature said
+  `std()`, so the checker refused any argument; `std()`/`var()` are unchanged.
