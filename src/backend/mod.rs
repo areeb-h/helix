@@ -437,6 +437,12 @@ pub fn ast_to_colexpr(
         Ast::Str(s) => Ok(ColExpr::Lit(Value::Str(Rc::new(s.clone())))),
         Ast::Bool(b) => Ok(ColExpr::Lit(Value::Bool(*b))),
         Ast::Missing => Ok(ColExpr::Lit(Value::Missing)),
+        // A bare bound name the parser read as a function for the ARRAY reading —
+        // `df.where(strong)` is `(it) => strong(it)` there — is the column, or the
+        // variable, it names here: the frame reading takes the path the wrapper came from.
+        // This is the one place both engines resolve a column expression, which is what
+        // let the parser stop holding `filter`/`where` out of that reading.
+        Ast::Lambda { bound: Some(origin), .. } => ast_to_colexpr(origin, columns, resolve_var),
         // `@name` is *always* a column — never falls back to a variable, so a column
         // and a same-named local can never be confused (the point of the sigil).
         Ast::Column { name, line, col } => {

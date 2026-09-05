@@ -779,7 +779,7 @@ impl Interp {
                 }
                 let comp = matches!(
                     name.as_str(),
-                    "map" | "filter" | "where" | "reduce" | "scan" | "any" | "all"
+                    "map" | "filter" | "where" | "count_where" | "reduce" | "scan" | "any" | "all"
                 );
                 if (comp
                     && (crate::bytecode::RecvClass::Iterable.holds(&recv_v)

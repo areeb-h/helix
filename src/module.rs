@@ -1248,7 +1248,20 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
                 rw(x, ctx, bound)?;
             }
         }
-        Expr::Lambda { params, body, .. } => {
+        Expr::Lambda { params, defaults, bound: origin, body } => {
+            // The origin of a synthesized bound-function lambda (`xs.map(double)` reads as
+            // `(it) => double(it)`; `R.all(U)` keeps `U`) and the defaults belong to the
+            // ENCLOSING scope: a top-level name there mangles like any other reference and
+            // lands in this module's global line range. Neither was visited once, so
+            // `R.all(U)` was "`U` is not defined" in a multi-file program only — reported at
+            // a position the offset never reached, in another file's range — and
+            // `L.map(u.twice)` could not name a module's function (field build, 1.41).
+            for d in defaults.iter_mut() {
+                rw(d, ctx, bound)?;
+            }
+            if let Some(o) = origin {
+                rw(o, ctx, bound)?;
+            }
             let mut b = bound.clone();
             b.extend(params.iter().cloned());
             rw(std::rc::Rc::make_mut(body), ctx, &b)?;

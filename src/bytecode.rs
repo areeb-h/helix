@@ -45,6 +45,10 @@ pub enum CompKind {
     /// a separate variant only so runtime errors quote the method the user
     /// actually wrote (the walker threads the surface name the same way).
     Where,
+    /// `count_where` — `filter` as well: the parser spells `xs.count_where(p)` as
+    /// `xs.count_where(p).count()` with this node the filter, and it is a variant for the
+    /// reason `Where` is one — its refusals said `filter`, a verb the user never wrote.
+    CountWhere,
     Reduce,
     Any,
     All,
@@ -63,6 +67,7 @@ impl CompKind {
             CompKind::Map => "map",
             CompKind::Filter => "filter",
             CompKind::Where => "where",
+            CompKind::CountWhere => "count_where",
             CompKind::Reduce => "reduce",
             CompKind::Any => "any",
             CompKind::All => "all",
@@ -1941,14 +1946,14 @@ impl Compiler {
                 // readings, and only the receiver settles it — see
                 // `compile_comprehension_split`. Ahead of fusion because a fused chain
                 // cannot be half-taken.
-                if matches!(n, "map" | "filter" | "where" | "reduce" | "scan" | "any" | "all")
+                if matches!(n, "map" | "filter" | "where" | "count_where" | "reduce" | "scan" | "any" | "all")
                     && let Some(fidx) = self.ufcs_fn_slot(b, free)
                 {
                     return self
                         .compile_comprehension_split(b, recv, name, args, Some(fidx), *line, *col);
                 }
                 if !self.no_fuse
-                    && matches!(n, "map" | "filter" | "where" | "reduce" | "count")
+                    && matches!(n, "map" | "filter" | "where" | "count_where" | "reduce" | "count")
                     && let Some(plan) = self.collect_fusion_chain(b, recv, n, args)
                 {
                     return self.compile_fused(b, e, plan, *line, *col);
@@ -1959,7 +1964,7 @@ impl Compiler {
                 // `q.all(1)` on a record holding an `all` field — "a Record has no method
                 // `all`" — on the VM, and the walker refused it in its own shortcut, which
                 // is how a field build found `count` reaching the field and `all` not.
-                if matches!(n, "map" | "filter" | "where" | "reduce" | "scan" | "any" | "all") {
+                if matches!(n, "map" | "filter" | "where" | "count_where" | "reduce" | "scan" | "any" | "all") {
                     // A receiver KNOWN to be an array — by the checker, or by its shape
                     // (`range(…)`, an array literal) — takes the plain route: the split
                     // would answer "iterable" every time, and the JIT's native folds

@@ -2221,10 +2221,14 @@ confidently wrong claim: that Helix had no unary minus. It has one. What it lack
       "one obvious way" — recorded so the decision is explicit rather than accidental.
       *Update (v0.3.0): `String.concat` (plus `split_once`/`index_of`) shipped; `+` on
       strings still raises, by design.*
-- [ ] **A bare named predicate binds inconsistently.** `xs.map(f)`/`any(f)`/`all(f)` wrap `f`
+- [x] **A bare named predicate binds inconsistently.** `xs.map(f)`/`any(f)`/`all(f)` wrap `f`
       into `it => f(it)`; `xs.position(f)`, `take_while(f)`, `min_by(f)` do not, and return
       `missing` instead of erroring. `wrap_bound_fn_arg` (src/parser.rs) only reaches the
       general method branch, not the desugared verbs. A silent wrong answer.
+      *Update (2026-09-05): one rule for every verb that takes a function — the wrap runs
+      before the desugars, `filter`/`where` included (the frame reading takes the wrapper's
+      origin), and `zipmap`'s pair function too. A field build reached the same item from
+      `filter(P)` vs `all(P)`.*
 
 CONFIRMED PRESENT, so nobody re-derives them: unary `-` and `not`, `**`, `//`, `%`, `and`/`or`,
 `??`, tuple/array/string indexing INCLUDING negative indices, slices with open ends, record

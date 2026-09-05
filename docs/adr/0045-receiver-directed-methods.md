@@ -262,3 +262,16 @@ argument to a function value (the split's field branch, a free fn via UFCS) use 
 The array reading is untouched, so the JIT fuses `xs.map(double)` exactly as before,
 typed or through a parameter — pinned by `jit-explain` in the test.
 
+The next day the rule reached EVERY verb that takes a function, and every file. The wrapper
+had covered `map`/`any`/`all` alone: `filter`/`where` were held out because `df.where(strong)`
+names a column and parse time cannot tell the receiver apart, and the verbs the parser
+desugars were never reached — so `filter(P)` refused the predicate `all(P)` accepted, and
+`position(f)`, `take_while(f)`, `flat_map(f)`, `zipmap(ys, f)`, `min_by(f)` answered
+silently wrong. The origin is what retires the exemption: the one place both engines resolve
+a column expression takes the path, so a frame's `where` still names its column, and the
+array reading takes the lambda. And the module loader — which renames every top-level name
+and offsets every line — visits the origin and a lambda's defaults now, so the rule holds in
+a program with an `import` (a field build found `R.all(U)` "not defined" there, and only
+there). `count_where` keeps its own name through the desugar, as a third spelling of the
+filter family, so its refusals name it.
+

@@ -295,6 +295,40 @@ hand the argument to a function value use it; fusion of `xs.map(double)` is pinn
 `jit-explain` in the test. Also a tuple default on a lambda. `where` not seeing the
 body's `let` is by design (ADR 0035: the clause scaffolds the body, evaluated before it).
 
+Their third round (2026-09-05) found the origin's last two gaps and the rest of the family.
+1.41: in a MULTI-FILE program `R.all(U)` was "`U` is not defined", at a position in another
+file — the module loader's walker (mangle every top-level name, offset every line) never
+visited `Lambda.bound`, so the origin kept the un-mangled name and the un-offset line; nor did
+the UFCS pass, the generic visitor or the parser's relocation. All four visit the origin and
+a lambda's defaults now. 1.42: `filter(P)` refused the predicate `all(P)` accepted — the
+wrapper covered `map`/`any`/`all` alone, `filter`/`where` held out for the frame's bare column,
+and the desugared verbs never reached it: `position(f)` was `missing`, `take_while(f)` the
+whole array, `flat_map(f)`/`zipmap(ys, f)` arrays of function values, `min_by(f)` a comparison
+error — the roadmap's "bare named predicate binds inconsistently" item. One verb list now
+(`BOUND_FN_VERBS`), applied before the desugars; the frame reading takes the origin in
+`ast_to_colexpr`, the one place both engines resolve a column expression. `count_where` keeps
+its name through the desugar (a third spelling of the filter family, like `where`) so its
+refusals say `count_where`. 1.40: `{a: 1}.nonexistent(it * 2)` said "`it` is not defined
+here" — Array and Record now answer before their arguments are read, as String/Tensor/Tuple
+did. Recorded in ADR 0045's addendum.
+
+**do_later — a parser-desugared verb never reaches a record's FIELD of that name**: ADR
+0045's "method, then field, then free fn, for every name" holds for the names the engines
+dispatch, and not for the ones the parser expands before any receiver exists — `R.sort_by(U)`
+on a record whose `sort_by` field holds a function is "a Record has no method `map`", and
+`R.count_where(U)` calls the field and then counts its result. Predates the verb rule (the
+field build's ORM uses none of these names); found while pinning that rule. The fix is the
+desugar moving behind the receiver — a shared expansion each engine applies on demand, as the
+compiled split does for the family verbs — not a parse-time test the parser cannot make.
+
+**do_later — the other desugared verbs still leak their expansion in a RECEIVER refusal**:
+`f(5).take_while(it > 0)` says "no method `position`" (statically, `take`), `flat_map` and
+`sort_by` say `map`, `min_by` says `count`. Same class as `count_where` was; the fix that
+worked there — the surface verb as a spelling of the family it expands to — does not apply,
+because those expand into several nodes. A surface annotation on `Expr::Method` (the way a
+compiler's desugared HIR carries its desugaring kind) would name all of them; ~26
+construction sites, one message site per engine.
+
 ### Lambda defaults, function values keep defaults, one arity sentence (2026-09-04)
 
 **DONE.** The limitation the field build noted alongside 1.39. `(x, n = 10) => …` parses

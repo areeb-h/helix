@@ -15762,3 +15762,123 @@ fn a_bound_argument_reaches_a_function_value_as_the_value() {
         assert_eq!(out, "4 31\n2\n", "{env:?}");
     }
 }
+
+/// A bare bound function is the argument of EVERY verb that takes one — `filter`/`where`/
+/// `count_where`, `flat_map`, `take_while`/`drop_while`/`position`, `sort_by`/`min_by`/
+/// `max_by`, `zipmap` — with the reading `map`/`any`/`all` had. `xs.filter(pos)` was refused
+/// ("`filter` expects a yes/no test … Function") while `xs.all(pos)` was accepted (field
+/// build, 1.42), and the desugared verbs never saw the rule at all: `position(f)` answered
+/// `missing`, `take_while(f)` everything, `flat_map(f)` and `zipmap(ys, f)` arrays of
+/// function values, `min_by(f)` a comparison error. A frame's `where`/`filter` keeps reading
+/// a bare name as its column — through a parameter and a closure too — because the frame
+/// reading takes the path the wrapper came from.
+#[test]
+fn a_bound_function_is_the_argument_of_every_verb_that_takes_one() {
+    let src = "fn pos(x) = x > 0\nfn dup(x) = [x, x]\nfn key(x) = 0 - x\nfn add(a, b) = a + b\nxs = [1, -2, 3]\nprint(xs.filter(pos), xs.where(pos), xs.count_where(pos))\nprint(xs.flat_map(dup), xs.take_while(pos), xs.drop_while(pos), xs.position(pos))\nprint(xs.sort_by(key), xs.min_by(key), xs.max_by(key), xs.zipmap([10, 20, 30], add))\nutil = {pos: (x) => x < 0, add: (a, b) => a * b}\nprint(xs.filter(util.pos), xs.count_where(util.pos), xs.zipmap([2, 2, 2], util.add))\nP = (x) => x > 0\nprint(xs.filter(P), xs.count_where(P), xs.all(P))\ndf = dataframe({q: [10, 60, 70]}).with({strong: q > 50})\nfn n(frame, strong) = frame.where(strong).count()\nmk = (flag) => (frame) => frame.filter(flag).count()\nprint(df.where(strong).count(), df.filter(strong).count(), n(df, true), mk(false)(df))\n";
+    let want = "[1, 3] [1, 3] 2\n[1, 1, -2, -2, 3, 3] [1] [-2, 3] 0\n[3, 1, -2] 3 -2 [11, 18, 33]\n[-2] 1 [2, -4, 6]\n[1, 3] 2 false\n2 2 3 0\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_source(src, env, "bound_fn_verbs");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, want, "{env:?}");
+    }
+    // A bare name that is not a function is refused as one — as `map` always refused it.
+    let (_, err, code) = run_source("flag = true\nprint([1, 2].where(flag))\n", &[], "bound_fn_notfn");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`flag` is a Bool, not a function"), "{err}");
+}
+
+/// `count_where` refuses in its own name. The parser spells `xs.count_where(p)` as a filter
+/// followed by a count, and its refusals said `filter` — a verb the user never wrote (field
+/// build, 1.42). The inner node keeps the verb's name now, and every engine reads it as a
+/// third spelling of the filter family: the same loop and the same fusion (`jit-explain`
+/// reports the two sites the explicit spelling reports), its own name in every sentence.
+#[test]
+fn count_where_refuses_in_its_own_name() {
+    let (_, err, code) = run_source("xs = [1, 2]\nprint(xs.count_where(it * 2))\n", &[], "cw_static");
+    assert_ne!(code, Some(0));
+    assert!(
+        err.contains("`count_where` expects a yes/no test, but the expression produces a value of type Int"),
+        "{err}"
+    );
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (_, err, code) =
+            run_source("fn f(x) = x\nxs = [1, 2]\nprint(f(xs).count_where(it * 2))\n", env, "cw_runtime");
+        assert_ne!(code, Some(0), "{env:?}");
+        assert!(
+            err.contains("`count_where` expects a yes/no test, but the expression produced an Int"),
+            "{env:?}: {err}"
+        );
+        let (_, err, code) = run_source("fn f(x) = x\nprint(f(5).count_where(it > 0))\n", env, "cw_recv");
+        assert_ne!(code, Some(0), "{env:?}");
+        assert!(err.contains("an Int has no method `count_where`"), "{env:?}: {err}");
+    }
+    let (_, err, _) = run_source("print((5).count_where(it > 0))\n", &[], "cw_recv_static");
+    assert!(err.contains("an Int has no method `count_where`"), "{err}");
+    // Still the fused pipeline: the same two sites the explicit spelling offers.
+    let dir = std::env::temp_dir().join(format!("hx_cw_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prog = dir.join("k.helix");
+    std::fs::write(&prog, "print(range(0, 300).count_where(it % 3 == 0))\n").unwrap();
+    let (out, err, code) = run(&["jit-explain", prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("2 kernel site(s) offered to the JIT, 2 compiled"), "{out}");
+    let (out, err, code) = run(&[prog.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "100\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A method that does not exist is reported before its argument is read.
+/// `{a: 1}.nonexistent(it * 2)` and `[1].nonexistent(it * 2)` said "`it` is not defined
+/// here" (field build, 1.40): the checker read the argument before the receiver answered.
+/// Array and Record answer first now, as String, Tensor and Tuple did — and the refusal
+/// still flows on to the UFCS fallbacks as a value.
+#[test]
+fn an_unknown_method_is_reported_before_its_it_argument() {
+    for (src, want) in [
+        ("print({a: 1}.nonexistent(it * 2))\n", "a Record has no method `nonexistent`"),
+        ("print([1].nonexistent(it * 2))\n", "an Array has no method `nonexistent`"),
+        ("r = {a: 1}\nprint(r.map_values(it * 2))\n", "a Record has no method `map_values`"),
+    ] {
+        let (_, err, code) = run_source(src, &[], "unknown_first");
+        assert_ne!(code, Some(0), "{src}");
+        assert!(err.contains(want), "{src}: {err}");
+        assert!(!err.contains("`it` is not defined"), "{src}: {err}");
+    }
+    let src = "fn nonexistent(r, n) = n + r.a\nfn twice(xs, k) = xs.map(it * k)\nprint({a: 1}.nonexistent(2), [1, 2].twice(3))\n";
+    let (out, err, code) = run_source(src, &[], "unknown_fallback");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "3 [3, 6]\n");
+}
+
+/// The module loader resolves the origin of a synthesized lambda. It renames every
+/// top-level name to its module and offsets every line into the flat program, and never
+/// visited the origin: `R.all(U)` was "`U` is not defined" in a program with an `import` —
+/// and only there — reported at a position the offset never reached, and `L.map(u.twice)`
+/// could not name a module's function (field build, 1.41). Every walker that rewrites or
+/// reads an expression visits the origin and the defaults now.
+#[test]
+fn a_bound_origin_resolves_through_the_module_loader() {
+    let lib = (
+        "u.helix",
+        "export fn all(r, x) = \"free all got {type_of(x)}\"\nexport fn twice(x) = x * 2\nexport fn pos(x) = x > 1\n",
+    );
+    let main = "import u\nL = {all: (t) => type_of(t), map: (t) => type_of(t), any: (t) => t}\nU = \"a string\"\nprint(L.all(U), L.map(U), L.any(U))\nprint([1, 2].map(u.twice), L.map(u.twice), [1, 2].count_where(u.pos))\n";
+    let selective = "import u.{all}\nR = {k: 1}\nU = \"a string\"\nprint(R.all(U))\n";
+    let undefined = "import u\nL = {all: (t) => t}\nprint(L.all(NOPE))\n";
+    for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
+        let (out, err, code) = run_modules(&[lib, ("main.helix", main)], "main.helix", env, "origin_plain");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, "String String a string\n[2, 4] Function 1\n", "{env:?}");
+        let (out, err, code) =
+            run_modules(&[lib, ("main.helix", selective)], "main.helix", env, "origin_selective");
+        assert_eq!(code, Some(0), "{env:?}: {err}");
+        assert_eq!(out, "free all got String\n", "{env:?}");
+        // The refusal names the argument, at its own position, in the entry file.
+        let (_, err, code) =
+            run_modules(&[lib, ("main.helix", undefined)], "main.helix", env, "origin_undefined");
+        assert_ne!(code, Some(0), "{env:?}");
+        assert!(err.contains("`NOPE` is not defined"), "{env:?}: {err}");
+        assert!(err.contains("main.helix:3:13"), "{env:?}: {err}");
+    }
+}

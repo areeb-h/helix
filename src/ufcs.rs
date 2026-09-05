@@ -139,7 +139,14 @@ fn walk(e: &mut Expr, cx: &Cx, bound: &HashSet<String>) {
                 walk(x, cx, bound);
             }
         }
-        Expr::Lambda { params, body, .. } => {
+        Expr::Lambda { params, defaults, bound: origin, body } => {
+            // The origin and the defaults are the enclosing scope's (see `module::rw`).
+            for d in defaults.iter_mut() {
+                walk(d, cx, bound);
+            }
+            if let Some(o) = origin {
+                walk(o, cx, bound);
+            }
             let mut b = bound.clone();
             b.extend(params.iter().cloned());
             walk(std::rc::Rc::make_mut(body), cx, &b);

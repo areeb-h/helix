@@ -1,0 +1,24 @@
+# A bare bound function is the argument of EVERY verb that takes one — the reading
+# `map`/`any`/`all` had, now for `filter`/`where`/`count_where`, `flat_map`,
+# `take_while`/`drop_while`/`position`, `sort_by`/`min_by`/`max_by` and `zipmap` — and a
+# frame's `where`/`filter` keeps reading a bare name as its column.
+fn pos(x) = x > 0
+fn dup(x) = [x, x]
+fn key(x) = 0 - x
+fn add(a, b) = a + b
+xs = [1, -2, 3]
+print(xs.filter(pos), xs.where(pos), xs.count_where(pos))
+print(xs.flat_map(dup), xs.take_while(pos), xs.drop_while(pos), xs.position(pos))
+print(xs.sort_by(key), xs.min_by(key), xs.max_by(key), xs.zipmap([10, 20, 30], add))
+util = {pos: (x) => x < 0, add: (a, b) => a * b}
+print(xs.filter(util.pos), xs.count_where(util.pos), xs.zipmap([2, 2, 2], util.add))
+print(xs.map(pos), xs.any(pos), xs.all(pos))
+# a record's field still receives the value the name names
+R = {filter: (t) => type_of(t), where: (t) => t}
+U = "a string"
+print(R.filter(U), R.where(U))
+# a frame's where/filter: the column, through a parameter and a closure too
+df = dataframe({q: [10, 60, 70]}).with({strong: q > 50})
+fn n(frame, strong) = frame.where(strong).count()
+mk = (flag) => (frame) => frame.filter(flag).count()
+print(df.where(strong).count(), df.filter(strong).count(), n(df, true), mk(false)(df))

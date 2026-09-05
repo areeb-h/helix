@@ -289,7 +289,8 @@ pub enum Expr {
         /// `xs.map(double)` reads as `(it) => double(it)` — and `path` is the `double` it
         /// came from. The array reading uses the lambda, so kernels, the checker and the
         /// walker see what they always saw; a reading that hands the argument to a
-        /// FUNCTION VALUE — a record's field, a free fn via UFCS — uses the path
+        /// FUNCTION VALUE — a record's field, a free fn via UFCS — or that resolves a
+        /// COLUMN NAME (a frame's `where`, in `ast_to_colexpr`) uses the path
         /// (`bound_origin`), so the value arrives rather than a wrapper. `R.all(U)` gave
         /// the field a lambda (a field build's finding) because the parser decided before
         /// the receiver existed; the decision is now carried to the consumer that knows it.

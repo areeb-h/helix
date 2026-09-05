@@ -51,7 +51,7 @@ fn comp_shape_check(
             "(it * 2)",
             "e.g. `xs.map(it * 2)` or `xs.map((a, b) => ...)`.",
         ),
-        "filter" | "where" => one(
+        "filter" | "where" | "count_where" => one(
             "(it > 0)",
             "e.g. `xs.map(it * 2)` or `xs.map((a, b) => ...)`.",
         ),
@@ -166,7 +166,9 @@ impl super::Interp {
                 })?;
                 Ok(out.finish())
             }
-            "filter" | "where" => {
+            // `count_where` is the filter half of the parser's `count_where(p).count()`, kept
+            // under its own name so a refusal here says `count_where`.
+            "filter" | "where" | "count_where" => {
                 if args.len() != 1 {
                     return Err(comp_arity(name, "(it > 0)", line, col));
                 }

@@ -229,6 +229,42 @@
 - **A capability refusal names the grant that is missing.** A write needs `db-write` and
   `net`; with `HELIX_ALLOW_DB=write` set and the network not granted, the refusal said
   `db-write` — the grant the program had. It says `net` now, with `net`'s help.
+- **A bare bound function is the argument of EVERY verb that takes one.** `xs.filter(pos)`
+  and `xs.where(pos)` were refused ("`filter` expects a yes/no test, but the expression
+  produces a value of type Function") while `xs.all(pos)` was accepted — a field build's
+  finding — and the verbs the parser desugars never saw the rule at all: `xs.position(f)`
+  answered `missing`, `take_while(f)` everything, `flat_map(f)` and `zipmap(ys, f)` arrays
+  of function values, `min_by(f)` a comparison error, exit 0 (a roadmap item had recorded
+  the class). One rule now, for `map`/`any`/`all`, `filter`/`where`/`count_where`,
+  `flat_map`, `take_while`/`drop_while`/`position`, `sort_by`/`min_by`/`max_by` and
+  `zipmap`: a bare name is the function it names — and a record's field or a free fn still
+  receives the value it names. A frame's `where`/`filter` keeps reading a bare name as its
+  column (`df.where(strong)`), through a parameter or a closure too: the frame reading
+  takes the path the wrapper came from, at the one place both engines resolve a column
+  expression (`ast_to_colexpr`), which is what retired the parser's exemption for those two
+  verbs. Pinned by `a_bound_function_is_the_argument_of_every_verb_that_takes_one` and the
+  corpus program `verbs_bound_fn` under both DataFrame backends.
+- **A multi-file program resolves the origin too.** The module loader — which renames every
+  top-level name to its module and offsets every line into the flat program — never visited
+  the origin of a synthesized lambda: `R.all(U)` was "`U` is not defined" in a program with
+  an `import`, and only there, reported at a position the offset never reached (the field
+  build read it as "the wrong file"), and `L.map(u.twice)` could not name a module's
+  function (field build, 1.41). Every walker that rewrites or reads an expression visits the
+  origin and the defaults now: the loader, the UFCS pass, the generic visitor (which also
+  collects a frame predicate's captures) and the parser's relocation. Pinned by
+  `a_bound_origin_resolves_through_the_module_loader`, on three engines, including the
+  selective-import UFCS spelling and the refusal's position.
+- **`count_where` refuses in its own name.** Its refusals said `filter`, a verb the user
+  never wrote: the parser spells `xs.count_where(p)` as a filter followed by a count, and
+  the inner node now keeps the verb's name, which every engine reads as a third spelling of
+  the filter family (as `where` is) — the same loop, the same fusion, `jit-explain` reporting
+  the same two sites — so "`count_where` expects a yes/no test" and "an Int has no method
+  `count_where`", on every engine and from the checker (field build, 1.42).
+- **A method that does not exist is reported before its argument.** `{a: 1}.nonexistent(it
+  * 2)` and `[1].nonexistent(it * 2)` said "`it` is not defined here" (field build, 1.40):
+  the checker read the argument before the receiver answered. Array and Record answer first
+  now, as String, Tensor and Tuple already did; the refusal flows on to the UFCS fallbacks
+  as a value, exactly as theirs does.
 - **A bare bound name as a `map`/`any`/`all` argument reaches a function value as the
   value.** The parser reads `xs.map(double)` as `(it) => double(it)` for the array reading
   and used to hand that wrapper to a record's field too: `R.all(U)` gave `all` a function

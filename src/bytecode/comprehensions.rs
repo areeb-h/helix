@@ -63,6 +63,7 @@ impl super::Compiler {
         let kind = match name {
             "map" => CompKind::Map,
             "where" => CompKind::Where,
+            "count_where" => CompKind::CountWhere,
             _ => CompKind::Filter,
         };
 
@@ -1615,7 +1616,7 @@ impl super::Compiler {
         // Walk inward, collecting stages (outermost-first) until a non-stage receiver.
         let mut cur = recv;
         while let Expr::Method { recv: inner, name: m, args: margs, .. } = cur {
-            if !matches!(m.as_str(), "map" | "filter" | "where") {
+            if !matches!(m.as_str(), "map" | "filter" | "where" | "count_where") {
                 break;
             }
             match self.fusion_stage(m, margs) {

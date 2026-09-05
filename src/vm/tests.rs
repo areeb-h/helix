@@ -6061,13 +6061,12 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             // multi-parameter binders, and a named predicate as a bare identifier
             ("[[1, 2], [3, 4]].position((a, b) => b == 4)", "1"),
             ("[[1, 2], [3, 4]].position((a, b) => a > 9)", "missing"),
-            // A BARE named predicate does not bind here, and did not before either:
-            // `wrap_bound_fn_arg` only reaches the general method branch, not the
-            // desugared verbs, so `big` is the implicit-`it` body — the function VALUE,
-            // which is not `Bool(true)`, so nothing ever matches. Recorded as it is
-            // rather than quietly fixed: making it bind is a separate change from making
-            // it fast, and `map`/`any`/`all` accepting it is the inconsistency to settle.
-            ("fn big(x) = x > 5\n[1, 9, 2].position(big)", "missing"),
+            // A BARE named predicate BINDS here, as it does for `map`/`any`/`all`: the
+            // bound-function reading runs before the desugars now (`BOUND_FN_VERBS`), so
+            // `big` is `(it) => big(it)`. This line pinned `missing` — the function VALUE
+            // as the implicit-`it` body, never `Bool(true)` — until the inconsistency it
+            // recorded was settled for every verb that takes a function.
+            ("fn big(x) = x > 5\n[1, 9, 2].position(big)", "1"),
             ("fn big(x) = x > 5\n[1, 9, 2].position(x => big(x))", "1"),
             // ---- take_while / drop_while
             ("[1, 2, 3, 9, 4].take_while(it < 5)", "[1, 2, 3]"),

@@ -76,7 +76,19 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
                 walk_expr(o, f);
             }
         }
-        Expr::Lambda { body, .. } => walk_expr(body, f),
+        Expr::Lambda { defaults, bound, body, .. } => {
+            // The defaults and the origin of a synthesized bound-function lambda are
+            // expressions of the enclosing scope — a frame predicate's captures
+            // (`column_arg_captures`) are collected through this walk, and `df.where(flag)`
+            // inside a closure names `flag` only through the origin.
+            for d in defaults {
+                walk_expr(d, f);
+            }
+            if let Some(origin) = bound {
+                walk_expr(origin, f);
+            }
+            walk_expr(body, f);
+        }
         Expr::Let { bindings, body, .. } => {
             for (_, v) in bindings {
                 walk_expr(v, f);

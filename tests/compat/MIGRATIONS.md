@@ -87,3 +87,20 @@ no entry. A source edit is not a behavior change.
   — except the builtins routed through the shared helper, which said `expects` too. One
   helper, one sentence, and the range form (`takes 1 to 2 arguments`) lambda defaults
   needed anyway. Message-only.
+
+- **A bare bound name as the one argument of a function-taking verb is the function it
+  names — for EVERY such verb** (2026-09-05). `xs.filter(pos)`, `where`, `count_where`,
+  `flat_map`, `take_while`, `drop_while`, `position`, `sort_by`, `min_by`, `max_by` and
+  `zipmap(ys, f)` read a bare name as `map`/`any`/`all` always did. Two observable changes
+  for a program that ran before: a bare name that is NOT a function — `xs.where(flag)` with
+  `flag = true`, a constant predicate — is refused as "`flag` is a Bool, not a function"
+  where it used to filter by the constant (`map` has refused that shape since the rewrite
+  existed); and the desugared verbs answer instead of silently missing — `xs.position(f)`
+  was `missing`, `xs.take_while(f)` the whole array, `xs.flat_map(f)` and `xs.zipmap(ys, f)`
+  arrays of function values, `xs.min_by(f)` a comparison error. A frame's `where`/`filter`
+  is unchanged: `df.where(strong)` still names the column, through a parameter or a closure.
+  No corpus program or golden moved.
+
+- **`count_where` names itself** (2026-09-05). "`filter` expects a yes/no test" and "an Int
+  has no method `filter`" from a `count_where` call now say `count_where`, on every engine
+  and from the checker. Message-only; no golden pinned the old text.

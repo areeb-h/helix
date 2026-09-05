@@ -306,7 +306,11 @@ fn desugar_filter_compose(
     };
     Ok(match name {
         "flat_map" => m(m(recv, "map", vec![f]), "flatten", vec![]),
-        _ => m(m(recv, "filter", vec![f]), "count", vec![]),
+        // The inner node keeps the verb's own name: every engine reads `count_where` as
+        // `filter` (a third spelling of that family, as `where` is), so a refusal — a body
+        // that is not a yes/no test, a receiver that is not an array — names the verb the
+        // user wrote rather than the one it expands to (field build, 1.42).
+        _ => m(m(recv, "count_where", vec![f]), "count", vec![]),
     })
 }
 
@@ -343,6 +347,13 @@ fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize
     Ok(Expr::Let { bindings: vec![("$w".to_string(), recv)], body: Box::new(body), from_do: false })
 }
 
+/// The verbs whose single argument is a function: a bare bound name there is the function
+/// it names (`wrap_bound_fn_arg`), for the array reading of every one of them.
+const BOUND_FN_VERBS: &[&str] = &[
+    "map", "any", "all", "filter", "where", "count_where", "flat_map", "take_while",
+    "drop_while", "position", "sort_by", "min_by", "max_by",
+];
+
 /// Let a higher-order method take a *named function* as its single argument:
 /// `xs.map(normalize)` / `xs.any(is_valid)` → `xs.map(it => normalize(it))`. Without this, a
 /// bare identifier is the implicit-`it` body, so `map(g)` maps every element to the *value*
@@ -360,18 +371,23 @@ fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize
 /// A path ROOTED AT `it` is never wrapped, because that is a real body: `xs.map(it.name)`
 /// projects a field out of each element and must stay a projection.
 ///
-/// Restricted to the array-EXCLUSIVE higher-order methods (`map`/`any`/`all`). `filter`/
-/// `where` are deliberately NOT wrapped: they are also DataFrame column-verbs, where
-/// `df.where(strong)` is a bare *column* reference, not a function — and parse time can't
-/// tell the receiver apart. For an array `filter`/`where` with a named predicate, use an
-/// explicit lambda (`xs.filter(x => is_valid(x))`).
+/// EVERY verb whose one argument is a function reads it this way — [`BOUND_FN_VERBS`]. It
+/// used to be `map`/`any`/`all` alone: `filter`/`where` were held out because
+/// `df.where(strong)` is a bare *column* reference and parse time cannot tell the receiver
+/// apart, and the verbs the parser desugars were never reached at all — so `filter(P)`
+/// refused the predicate `all(P)` accepted (a field build's finding), and `position(f)`,
+/// `take_while(f)`, `flat_map(f)`, `min_by(f)` answered `missing`, everything, an array of
+/// function values, a comparison error: silent wrong answers a roadmap item had recorded.
+/// The origin below is what retires the exemption: the frame reading takes the path
+/// (`ast_to_colexpr`), the array reading takes the lambda.
 ///
 /// THE WRAPPER KEEPS ITS ORIGIN (`Lambda.bound`). A record whose field `all` holds a
 /// function, called `R.all(U)`, must receive `U` — the parser cannot know the receiver,
 /// so it no longer decides: the array reading takes the lambda, and the readings that
-/// hand the argument to a function value take the path it came from.
+/// hand the argument to a function value, or resolve a column name, take the path it
+/// came from.
 fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Expr> {
-    if !matches!(name, "map" | "any" | "all") || args.len() != 1 {
+    if !BOUND_FN_VERBS.contains(&name) || args.len() != 1 {
         return args;
     }
     let it = || Expr::Ident { name: "it".to_string(), line: l, col: c };
@@ -399,6 +415,39 @@ fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Exp
         bound: origin,
         body: std::rc::Rc::new(body),
     }]
+}
+
+/// `xs.zipmap(ys, add)` with a bare bound function: the PAIR reaches it as two arguments —
+/// `($za, $zb) => add($za, $zb)`, the shape `zipmap`'s own example writes, `(x, y) => x + y`.
+/// The `map` the desugar builds took `add` as a body and answered an array of function
+/// values, exit 0: the last silent member of the family [`wrap_bound_fn_arg`] reads, and
+/// the same rule — a bare name is the function it names. The origin rides along as there.
+fn wrap_bound_pair_fn(f: Expr, l: usize, c: usize) -> Expr {
+    let binder = |n: &str| Expr::Ident { name: n.to_string(), line: l, col: c };
+    let body = match &f {
+        Expr::Ident { name, .. } if name != "it" => Expr::Call {
+            name: name.clone(),
+            args: vec![binder("$za"), binder("$zb")],
+            line: l,
+            col: c,
+        },
+        Expr::Field { recv, name, .. } if is_bound_path(recv) => Expr::Method {
+            recv: recv.clone(),
+            name: name.clone(),
+            args: vec![binder("$za"), binder("$zb")],
+            named: vec![],
+            ufcs: None,
+            line: l,
+            col: c,
+        },
+        _ => return f,
+    };
+    Expr::Lambda {
+        params: vec!["$za".to_string(), "$zb".to_string()],
+        defaults: Vec::new(),
+        bound: Some(Box::new(f)),
+        body: std::rc::Rc::new(body),
+    }
 }
 
 /// A dotted path of NAMES not rooted at `it` — `util.double`, `String.upper` — the one
@@ -2230,6 +2279,9 @@ impl Parser {
                         // checker (src/ufcs.rs) makes the call a call before the compiler and
                         // the JIT see it — the same decision, made where it is cheapest and
                         // where the JIT can fuse it.
+                        // A bare bound function as the one argument, for EVERY verb that
+                        // takes one — before the desugars, which build on `args`.
+                        let args = wrap_bound_fn_arg(&name, args, l, c);
                         e = match name.as_str() {
                             "min_by" | "max_by" | "argmin" | "argmax" => {
                                 desugar_order_by(e, &name, args, l, c)?
@@ -2257,7 +2309,7 @@ impl Parser {
                                 }
                                 let mut it = args.into_iter();
                                 let other = it.next().unwrap();
-                                let f = it.next().unwrap();
+                                let f = wrap_bound_pair_fn(it.next().unwrap(), l, c);
                                 let zipped = Expr::Method {
                                     recv: Box::new(e),
                                     name: "zip".into(),
@@ -2280,7 +2332,7 @@ impl Parser {
                             _ => Expr::Method {
                                 recv: Box::new(e),
                                 name: name.clone(),
-                                args: wrap_bound_fn_arg(&name, args, l, c),
+                                args,
                                 named: vec![],
                                 ufcs: None,
                                 line: l,
@@ -2950,7 +3002,15 @@ impl Parser {
                     Self::relocate(o, l, c);
                 }
             }
-            Expr::Lambda { body, .. } => Self::relocate(std::rc::Rc::make_mut(body), l, c),
+            Expr::Lambda { defaults, bound, body, .. } => {
+                for d in defaults.iter_mut() {
+                    Self::relocate(d, l, c);
+                }
+                if let Some(origin) = bound {
+                    Self::relocate(origin, l, c);
+                }
+                Self::relocate(std::rc::Rc::make_mut(body), l, c);
+            }
             Expr::Let { bindings, body, .. } => {
                 for (_, v) in bindings {
                     Self::relocate(v, l, c);

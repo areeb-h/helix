@@ -365,11 +365,21 @@ impl super::Checker {
             // `rec.field` access — the escape hatch for runtime-unknown shapes (parsed JSON).
             Type::Record(fields) => {
                 let fields = fields.clone();
-                // A field holding a function receives the ORIGIN of a synthesized
-                // bound-function lambda — `R.all(U)` gives it `U` — so that is what is typed.
-                let origins: Vec<Expr> = args.iter().map(|a| a.bound_origin().clone()).collect();
-                self.synth_simple_args(&origins)?;
-                record_method_type(name, &fields, line, col)
+                // The receiver answers first here too (field build, 1.40): a name that is
+                // neither a record method nor a field is refused before its arguments are
+                // read, so `{a: 1}.nonexistent(it * 2)` names the method, not `it`.
+                match record_method_type(name, &fields, line, col) {
+                    Ok(t) => {
+                        // A field holding a function receives the ORIGIN of a synthesized
+                        // bound-function lambda — `R.all(U)` gives it `U` — so that is what
+                        // is typed.
+                        let origins: Vec<Expr> =
+                            args.iter().map(|a| a.bound_origin().clone()).collect();
+                        self.synth_simple_args(&origins)?;
+                        Ok(t)
+                    }
+                    Err(e) => Err(e),
+                }
             }
             // A scalar receiver (Int/Float/Bool/…) — no method table at all. This is
             // where `(-1).abs()` lands, so cross the namespace and say that `abs` is
@@ -510,12 +520,14 @@ impl super::Checker {
     ) -> Result<Type, HelixError> {
         // Comprehension methods take UNEVALUATED bodies with `it` / lambda binders.
         match name {
-            "map" | "filter" | "where" | "any" | "all" => {
+            "map" | "filter" | "where" | "count_where" | "any" | "all" => {
                 let (params, body) = comprehension_params(args);
                 let body_t = self.with_pattern(&params, el.clone(), body)?;
                 match name {
                     "map" => Ok(Type::Array(Box::new(body_t))),
-                    "filter" | "where" => {
+                    // `count_where` is the filter half of the parser's `count_where(p).count()`,
+                    // spelled by its own name so this refusal says `count_where`.
+                    "filter" | "where" | "count_where" => {
                         require_boolish(&body_t, name, line, col)?;
                         Ok(Type::Array(Box::new(el.clone())))
                     }
@@ -556,10 +568,18 @@ impl super::Checker {
                     }
                 Ok(Type::Unknown)
             }
-            _ => {
-                self.synth_simple_args(args)?;
-                array_method_type(name, el, line, col)
-            }
+            // THE RECEIVER ANSWERS FIRST, as it does for a String or a Tensor: whether an
+            // Array has the method is decided before the arguments are read, so
+            // `[1].nonexistent(it * 2)` says an Array has no `nonexistent` rather than that
+            // `it` is unbound (field build, 1.40). The refusal flows on to the UFCS
+            // fallbacks as a value, exactly as theirs does.
+            _ => match array_method_type(name, el, line, col) {
+                Ok(t) => {
+                    self.synth_simple_args(args)?;
+                    Ok(t)
+                }
+                Err(e) => Err(e),
+            },
         }
     }
 
