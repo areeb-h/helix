@@ -363,6 +363,7 @@ pub struct Compiler {
     /// Accumulated JIT `map`/`filter` kernel requests (see [`Program::map_kernels`]).
     map_kernels: Vec<ArrayKernel>,
     filter_kernels: Vec<ArrayKernel>,
+    search_kernels: Vec<ArrayKernel>,
     /// Accumulated fuseable pipelines (see [`Program::fused_kernels`]).
     fused_kernels: Vec<FusedKernel>,
     /// Accumulated JIT `scan` (prefix-fold) requests (see [`Program::scan_loops`]).
@@ -420,6 +421,7 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         reduce_loops: Vec::new(),
         map_kernels: Vec::new(),
         filter_kernels: Vec::new(),
+        search_kernels: Vec::new(),
         fused_kernels: Vec::new(),
         scan_loops: Vec::new(),
         no_fuse: false,
@@ -514,6 +516,7 @@ pub fn compile_with_types(program: &[Stmt], types: Option<crate::types::TypeMap>
         reduce_loops: c.reduce_loops,
         map_kernels: c.map_kernels,
         filter_kernels: c.filter_kernels,
+        search_kernels: c.search_kernels,
         fused_kernels: c.fused_kernels,
         scan_loops: c.scan_loops,
         global_names: std::rc::Rc::new(c.globals),

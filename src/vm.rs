@@ -2634,6 +2634,56 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                     }
                 }
             }
+            Op::TryJitSearch { kernel_idx, want, after } => {
+                // `any`/`all` as a native SEARCH: the first element whose predicate equals
+                // `want` decides (`any` wants a true, `all` a false); none found is `len`. The
+                // same predicate shapes, capture proofs and f64 poison protocol as
+                // `TryJitFilter`, with the receiver consumed and a Bool pushed. Every other
+                // case — a Value array (which may hold `missing`), a non-Int capture, a NaN
+                // meeting an ordering comparison — falls through to the bytecode loop below,
+                // the oracle-matched three-valued path.
+                let skidx = *kernel_idx as usize;
+                let n_caps = program.search_kernels[skidx].captures.len();
+                let split = stack.len() - n_caps;
+                let cap_vals = stack.split_off(split);
+                let icaps = int_scalar_caps(&cap_vals);
+                // `Some(Some(hit))`: the kernel answered; `Some(None)`: it poisoned; `None`:
+                // nothing native for this receiver.
+                let found: Option<Option<bool>> = match (jit, stack.last()) {
+                    (Some(j), Some(Value::Array(a))) => match &**a {
+                        crate::value::ArrayData::Range { start, step, len } => {
+                            match (j.search_kernel(skidx), icaps.as_deref()) {
+                                (Some(p), Some(c)) => Some(Some(unsafe {
+                                    crate::jit::run_search_kernel_range(p, *start, *step, *len, c, *want)
+                                })),
+                                _ => None,
+                            }
+                        }
+                        crate::value::ArrayData::Ints(v) => match (j.search_kernel(skidx), icaps.as_deref()) {
+                            (Some(p), Some(c)) => {
+                                Some(Some(unsafe { crate::jit::run_search_kernel(p, v, c, *want) }))
+                            }
+                            _ => None,
+                        },
+                        crate::value::ArrayData::Floats(v) => match (
+                            j.search_kernel_f64(skidx),
+                            cap_vals.iter().map(|x| x.as_f64()).collect::<Option<Vec<f64>>>(),
+                        ) {
+                            (Some(p), Some(fc)) => {
+                                Some(unsafe { crate::jit::run_search_kernel_f64(p, v, &fc, *want) })
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(Some(hit)) = found {
+                    stack.pop(); // the receiver
+                    stack.push(Value::Bool(if *want { hit } else { !hit }));
+                    frames[fi].ip = *after as usize;
+                }
+            }
             Op::TryJitFilter { kernel_idx, after } => {
                 // Same fast path as `TryJitMap`: a lazy range's elements are `start + step*j`, so
                 // the kernel can be fed generated values instead of a materialized buffer that

@@ -33,6 +33,7 @@ pub fn build(
     reduce_loops: &[crate::bytecode::ReduceLoop],
     map_kernels: &[crate::bytecode::ArrayKernel],
     filter_kernels: &[crate::bytecode::ArrayKernel],
+    search_kernels: &[crate::bytecode::ArrayKernel],
     fused_kernels: &[crate::bytecode::FusedKernel],
     scan_loops: &[crate::bytecode::ReduceLoop],
 ) -> Option<Jit> {
@@ -55,6 +56,7 @@ pub fn build(
         && reduce_loops.is_empty()
         && map_kernels.is_empty()
         && filter_kernels.is_empty()
+        && search_kernels.is_empty()
         && fused_kernels.is_empty()
         && scan_loops.is_empty()
     {
@@ -458,37 +460,37 @@ pub fn build(
     // `map` compiles two specializations — `i64` (Int source) and `f64` (Float source);
     // the VM picks by the array's element type at runtime. `filter`/fused stay `Int`.
     let map_ids = define_array_kernels(
-        &mut module, map_kernels, "map", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        &mut module, map_kernels, "map", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
         None, false, false, &msig_table, &mixed_ids, &host,
     );
     let map_f64_ids = define_array_kernels(
-        &mut module, map_kernels, "mapf", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
+        &mut module, map_kernels, "mapf", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
         None, false, false, &msig_table, &mixed_ids, &host,
     );
     // The mixed `Int`-source → `Float` specialization (`range.map(j => j*0.001)`): reads
     // `i64`, writes `f64`. `elem_kind` is ignored when mixed (the body is typed per node).
     let map_mixed_ids = define_array_kernels(
-        &mut module, map_kernels, "mapm", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        &mut module, map_kernels, "mapm", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
         Some(NumKind::Float), false, false, &msig_table, &mixed_ids, &host,
     );
     // Its VALUE-SCALAR variant: the same stored kernels, with captures riding as f64 bits —
     // dispatched when a runtime `Float` capture makes the Int-proven marshal decline.
     let map_mixed_value_ids = define_array_kernels(
-        &mut module, map_kernels, "mapmv", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        &mut module, map_kernels, "mapmv", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
         Some(NumKind::Float), true, false, &msig_table, &mixed_ids, &host,
     );
     // The Int-ROOTED mixed specialization: i64 in, i64 OUT, Float intermediates
     // (`to_int(to_float(i) * 1.5)`). Same ABI as the plain i64 kernel, so it rides the same
     // FFI wrappers, dispatch marshalling, and in-place reuse.
     let map_mixed_int_ids = define_array_kernels(
-        &mut module, map_kernels, "mapmi", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        &mut module, map_kernels, "mapmi", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
         Some(NumKind::Int), false, false, &msig_table, &mixed_ids, &host,
     );
     // Its VALUE-SCALAR variant — the last cell of the matrix: `range(…).map(floor(it / s))`
     // with a Float `s` had no build at all (the Int-proven marshal declined the capture, and
     // the value-scalar pass built Float roots only). Same ABI as "mapmi".
     let map_mixed_int_value_ids = define_array_kernels(
-        &mut module, map_kernels, "mapmiv", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        &mut module, map_kernels, "mapmiv", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
         Some(NumKind::Int), true, false, &msig_table, &mixed_ids, &host,
     );
     // The FLOATS-source typed maps — four passes from the same stored kernels: Int-proven
@@ -496,42 +498,42 @@ pub fn build(
     // (`i64` out). A body has one root, so at most one of each pair builds; the VM tries
     // the monomorphic `f64` kernel first and these when it has none.
     let map_fsrc_ids = define_array_kernels(
-        &mut module, map_kernels, "mapft", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
+        &mut module, map_kernels, "mapft", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
         Some(NumKind::Float), false, false, &msig_table, &mixed_ids, &host,
     );
     let map_fsrc_int_ids = define_array_kernels(
-        &mut module, map_kernels, "mapfti", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
+        &mut module, map_kernels, "mapfti", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
         Some(NumKind::Int), false, false, &msig_table, &mixed_ids, &host,
     );
     let map_fsrc_value_ids = define_array_kernels(
-        &mut module, map_kernels, "mapftv", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
+        &mut module, map_kernels, "mapftv", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
         Some(NumKind::Float), true, false, &msig_table, &mixed_ids, &host,
     );
     let map_fsrc_int_value_ids = define_array_kernels(
-        &mut module, map_kernels, "mapftiv", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
+        &mut module, map_kernels, "mapftiv", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
         Some(NumKind::Int), true, false, &msig_table, &mixed_ids, &host,
     );
     // FLOAT-PROVEN captures, the third marshal (`float_caps_map_eligible`): an Int or a Float
     // source, a Float or an Int root, every capture a runtime Float. `range(…).map(it * s)`
     // with a Float `s` had NO build that could enter — 1.0x against 16x for the literal.
     let map_mixed_fc_ids = define_array_kernels(
-        &mut module, map_kernels, "mapmF", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        &mut module, map_kernels, "mapmF", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
         Some(NumKind::Float), false, true, &msig_table, &mixed_ids, &host,
     );
     let map_mixed_fc_int_ids = define_array_kernels(
-        &mut module, map_kernels, "mapmFi", false, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        &mut module, map_kernels, "mapmFi", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
         Some(NumKind::Int), false, true, &msig_table, &mixed_ids, &host,
     );
     let map_fsrc_fc_ids = define_array_kernels(
-        &mut module, map_kernels, "mapftF", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
+        &mut module, map_kernels, "mapftF", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
         Some(NumKind::Float), false, true, &msig_table, &mixed_ids, &host,
     );
     let map_fsrc_fc_int_ids = define_array_kernels(
-        &mut module, map_kernels, "mapftFi", false, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
+        &mut module, map_kernels, "mapftFi", KernelShape::Map, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
         Some(NumKind::Int), false, true, &msig_table, &mixed_ids, &host,
     );
     let filter_ids = define_array_kernels(
-        &mut module, filter_kernels, "filter", true, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        &mut module, filter_kernels, "filter", KernelShape::Filter, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
         None, false, false, &msig_table, &mixed_ids, &host,
     );
     // The f64 (`Floats`-source) filter specialization — the same dual-build pattern as
@@ -540,7 +542,19 @@ pub fn build(
     // time (the kernel returns -1) and the dispatch falls back to the bytecode loop for
     // the interpreter's exact error.
     let filter_f64_ids = define_array_kernels(
-        &mut module, filter_kernels, "filterf", true, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
+        &mut module, filter_kernels, "filterf", KernelShape::Filter, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
+        None, false, false, &msig_table, &mixed_ids, &host,
+    );
+    // `any`/`all` as SEARCH kernels, from the same predicate analyses as the two filter passes
+    // (the i64 comparison subset; the F64Proof twin for a `Floats` source with the same NaN
+    // poison protocol) — lowered to "first index whose predicate equals `want`" instead of a
+    // compaction (field build, 1.46.4).
+    let search_ids = define_array_kernels(
+        &mut module, search_kernels, "search", KernelShape::Search, &fn_ids, &int_eligible, &user_fns, NumKind::Int,
+        None, false, false, &msig_table, &mixed_ids, &host,
+    );
+    let search_f64_ids = define_array_kernels(
+        &mut module, search_kernels, "searchf", KernelShape::Search, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
         None, false, false, &msig_table, &mixed_ids, &host,
     );
     let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns, &host);
@@ -655,6 +669,8 @@ pub fn build(
     let map_ptrs_fsrc_fc_int = finalize(map_fsrc_fc_int_ids, &module);
     let filter_ptrs = finalize(filter_ids, &module);
     let filter_ptrs_f64 = finalize(filter_f64_ids, &module);
+    let search_ptrs = finalize(search_ids, &module);
+    let search_ptrs_f64 = finalize(search_f64_ids, &module);
     let fused_ptrs = finalize(fused_ids, &module);
     let scan_ptrs = finalize(scan_ids, &module);
 
@@ -679,6 +695,8 @@ pub fn build(
         map_ptrs_fsrc_fc_int,
         filter_ptrs,
         filter_ptrs_f64,
+        search_ptrs,
+        search_ptrs_f64,
         fused_ptrs,
         scan_ptrs,
     })
@@ -762,15 +780,26 @@ fn define_fused_kernels(
     ids
 }
 
-/// Declare + define a batch of `map`/`filter` kernels, returning one slot per kernel
-/// (`None` for any the JIT declined). `is_filter` selects the predicate/compaction
-/// codegen and the `-> i64` (kept-count) signature.
+/// What an array kernel does with each element.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KernelShape {
+    /// `dst[i] = body(src[i])`.
+    Map,
+    /// Compaction: keep `src[i]` where the predicate holds; returns the kept count.
+    Filter,
+    /// Search (`any`/`all`): return the first `i` whose predicate equals `want`, else `len`.
+    Search,
+}
+
+/// Declare + define a batch of `map`/`filter`/search kernels, returning one slot per kernel
+/// (`None` for any the JIT declined). `shape` selects the codegen; the two predicate shapes
+/// share the filter analyses and the `-> i64` signature (kept count, or found index).
 #[allow(clippy::too_many_arguments)]
 fn define_array_kernels(
     module: &mut JITModule,
     kernels: &[crate::bytecode::ArrayKernel],
     tag: &str,
-    is_filter: bool,
+    shape: KernelShape,
     fn_ids: &HashMap<&str, FuncId>,
     eligible: &HashSet<&str>,
     user_fns: &HashSet<&str>,
@@ -791,6 +820,9 @@ fn define_array_kernels(
     let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
     let mut ctx = module.make_context();
     let mut bctx = FunctionBuilderContext::new();
+    // A search is a predicate kernel: admitted by the filter analyses, and returning an i64
+    // (the found index) as the filter returns its kept count — the same 4 × i64 signature.
+    let is_filter = matches!(shape, KernelShape::Filter | KernelShape::Search);
     for (i, k) in kernels.iter().enumerate() {
         // Eligibility per kind: filter (Int comparison), mixed map (Int source, float body
         // — `mixed_map_eligible`), Float map (the safe `+ - *` subset over a Floats source
@@ -941,7 +973,7 @@ fn define_array_kernels(
             }
         };
         let done = define_array_kernel(
-            module, &mut ctx, &mut bctx, id, k, is_filter, fn_ids, elem_kind, mixed_root,
+            module, &mut ctx, &mut bctx, id, k, shape, fn_ids, elem_kind, mixed_root,
             value_scalars, float_caps, msigs, mixed_ids, host,
         );
         ids.push(done.map(|()| id));
@@ -1500,10 +1532,14 @@ fn define_reduce_loop(
 
 /// Emit a native per-element kernel over a packed `i64` buffer:
 /// - **map** `extern "C" fn(src,dst,len)`: `for i in 0..len { dst[i] = body(src[i]) }`.
-/// - **filter** `extern "C" fn(src,dst,len)->i64`: a branchless compaction —
+/// - **filter** `extern "C" fn(src,dst,len,caps)->i64`: a branchless compaction —
 ///   `store dst[w]=src[i]; w += pred(src[i])` — returning `w` (kept count), so
 ///   `dst[0..w]` holds the kept elements in order. Integer arithmetic wraps, matching
 ///   the interpreter's release semantics and the bytecode loop byte-for-byte.
+/// - **search** `extern "C" fn(src,len,caps,want)->i64`: the first `i` whose predicate
+///   equals `want`, else `len` — `any` (want 1) and `all` (want 0) in one kernel, stopping
+///   exactly where the bytecode loop short-circuits. The f64 pass reports a NaN poison met
+///   on the way as -1, and the dispatch falls back to the loop that raises.
 #[allow(clippy::too_many_arguments)]
 fn define_array_kernel<'a>(
     module: &mut JITModule,
@@ -1511,7 +1547,7 @@ fn define_array_kernel<'a>(
     bctx: &mut FunctionBuilderContext,
     fid: FuncId,
     k: &'a crate::bytecode::ArrayKernel,
-    is_filter: bool,
+    shape: KernelShape,
     fn_ids: &HashMap<&'a str, FuncId>,
     elem_kind: NumKind,
     mixed_root: Option<NumKind>,
@@ -1526,6 +1562,8 @@ fn define_array_kernel<'a>(
     // A `mixed` map reads `i64` elements through a per-node-typed body; its ROOT decides
     // what it writes — `Some(Float)` stores the `f64` result, `Some(Int)` the `i64` one
     // (float intermediates, integer output — `to_int(to_float(i) * 1.5)`).
+    let is_filter = shape == KernelShape::Filter;
+    let is_search = shape == KernelShape::Search;
     let mixed = mixed_root.is_some();
     // The FLOATS-source typed map: the mixed family's per-node typing over an `f64` element
     // (`float_source_map_eligible`) — reads `f64`, writes what its root says.
@@ -1550,7 +1588,7 @@ fn define_array_kernel<'a>(
     if raising {
         ctx.func.signature.params.push(AbiParam::new(I64)); // poison out-cell ptr
     }
-    if is_filter {
+    if is_filter || is_search {
         ctx.func.signature.returns.push(AbiParam::new(I64));
     }
 
@@ -1559,13 +1597,16 @@ fn define_array_kernel<'a>(
     b.append_block_params_for_function_params(entry);
     b.switch_to_block(entry);
     b.seal_block(entry);
-    let src = b.block_params(entry)[0];
-    let dst = b.block_params(entry)[1];
-    let len = b.block_params(entry)[2];
-    // The caps pointer (loop-invariant captured `i64` values), bound below. Present for both
-    // map and filter.
-    let caps_ptr = Some(b.block_params(entry)[3]);
-    let poison_ptr = raising.then(|| b.block_params(entry)[4]);
+    let params = b.block_params(entry).to_vec();
+    // The same four `i64` params read two ways: map/filter take `(src, dst, len, caps)`; a
+    // search has no output buffer and takes `(src, len, caps, want)` — its `dst` slot below
+    // is a dead alias of `src`.
+    let (src, dst, len, caps_ptr, want_v) = if is_search {
+        (params[0], params[0], params[1], Some(params[2]), Some(params[3]))
+    } else {
+        (params[0], params[1], params[2], Some(params[3]), None)
+    };
+    let poison_ptr = raising.then(|| params[4]);
 
     let i_var = b.declare_var(I64); // read cursor
     let w_var = b.declare_var(I64); // write cursor (filter); == i for map
@@ -1671,6 +1712,33 @@ fn define_array_kernel<'a>(
         let wv2 = b.use_var(w_var);
         let nw = b.ins().iadd(wv2, keep64);
         b.def_var(w_var, nw);
+    } else if is_search {
+        // `pred(elem) == want` ends the search with this index — after checking the poison
+        // accumulated so far, because a NaN met on the way means the interpreter would have
+        // raised BEFORE reaching this element, and the fall-through must get to do that.
+        let pred = gen_cond(&mut b, &k.body, &mut vars, fn_ids, module, elem_kind, Some(poison_var));
+        let pred64 = b.ins().uextend(I64, pred);
+        // Present by construction (the search shape read it from the 4th param); a missing
+        // one declines the kernel rather than panicking inside codegen.
+        let want_val = want_v?;
+        let hit = b.ins().icmp(IntCC::Equal, pred64, want_val);
+        let hit_blk = b.create_block();
+        let cont_blk = b.create_block();
+        b.ins().brif(hit, hit_blk, &[], cont_blk, &[]);
+        b.switch_to_block(hit_blk);
+        b.seal_block(hit_blk);
+        let iv_hit = b.use_var(i_var);
+        let ret = if matches!(elem_kind, NumKind::Float) {
+            let pv = b.use_var(poison_var);
+            let bad = b.ins().icmp_imm(IntCC::NotEqual, pv, 0);
+            let neg1 = b.ins().iconst(I64, -1);
+            b.ins().select(bad, neg1, iv_hit)
+        } else {
+            iv_hit
+        };
+        b.ins().return_(&[ret]);
+        b.switch_to_block(cont_blk);
+        b.seal_block(cont_blk);
     } else {
         // dst[i] = body(elem). A mixed map types the body node-by-node (i64 element in,
         // root kind out); the plain map uses the monomorphized `elem_kind` codegen.
@@ -1735,7 +1803,20 @@ fn define_array_kernel<'a>(
         let pv = b.use_var(poison_var);
         b.ins().store(MemFlags::trusted(), pv, pp, 0);
     }
-    if is_filter {
+    if is_search {
+        // Exhausted without a hit: `len` — or -1 when the f64 predicate met a NaN, so the
+        // dispatch falls back to the loop that raises at the exact element.
+        let lv = b.use_var(len_var);
+        let ret = if matches!(elem_kind, NumKind::Float) {
+            let pv = b.use_var(poison_var);
+            let bad = b.ins().icmp_imm(IntCC::NotEqual, pv, 0);
+            let neg1 = b.ins().iconst(I64, -1);
+            b.ins().select(bad, neg1, lv)
+        } else {
+            lv
+        };
+        b.ins().return_(&[ret]);
+    } else if is_filter {
         let wv = b.use_var(w_var);
         // The f64 filter reports an accumulated NaN poison as -1 — the runner maps it to
         // `None` and the dispatch falls back to the bytecode loop, which raises the

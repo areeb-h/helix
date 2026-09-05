@@ -166,6 +166,12 @@ pub struct Jit {
     /// predicate POISONS (returns -1) when an ordering comparison meets a NaN, because
     /// the interpreter raises there; the dispatch then falls back to the bytecode loop.
     filter_ptrs_f64: Vec<Option<*const u8>>,
+    /// Native `extern "C" fn(*const i64 src, i64 len, *const i64 caps, i64 want) -> i64`
+    /// SEARCH kernels (`any`/`all`), indexed by [`crate::bytecode::Op::TryJitSearch`]'s
+    /// `kernel_idx`: the first index whose predicate equals `want`, else `len`.
+    search_ptrs: Vec<Option<*const u8>>,
+    /// The f64 (`Floats`-source) search kernels — same index; -1 reports a NaN poison.
+    search_ptrs_f64: Vec<Option<*const u8>>,
     /// Native fused-pipeline kernels (one of three signatures by shape — see
     /// [`define_fused_kernel`]), indexed by [`crate::bytecode::Op::TryJitFused`]'s
     /// `kernel_idx`.
@@ -254,6 +260,14 @@ impl Jit {
     pub fn filter_kernel_f64(&self, idx: usize) -> Option<*const u8> {
         self.filter_ptrs_f64.get(idx).copied().flatten()
     }
+    /// The native search kernel (`any`/`all`) for site `idx`, if one compiled.
+    pub fn search_kernel(&self, idx: usize) -> Option<*const u8> {
+        self.search_ptrs.get(idx).copied().flatten()
+    }
+    /// The native f64 (`Floats`-source) search kernel for site `idx`, if one compiled.
+    pub fn search_kernel_f64(&self, idx: usize) -> Option<*const u8> {
+        self.search_ptrs_f64.get(idx).copied().flatten()
+    }
     /// The native fused-pipeline kernel for site `idx`, if one compiled.
     pub fn fused_kernel(&self, idx: usize) -> Option<*const u8> {
         self.fused_ptrs.get(idx).copied().flatten()
@@ -294,9 +308,10 @@ pub fn build(
     reduce_loops: &[crate::bytecode::ReduceLoop],
     map_kernels: &[crate::bytecode::ArrayKernel],
     filter_kernels: &[crate::bytecode::ArrayKernel],
+    search_kernels: &[crate::bytecode::ArrayKernel],
     fused_kernels: &[crate::bytecode::FusedKernel],
     scan_loops: &[crate::bytecode::ReduceLoop],
 ) -> Option<Jit> {
-    let _ = (program, reduce_loops, map_kernels, filter_kernels, fused_kernels, scan_loops);
+    let _ = (program, reduce_loops, map_kernels, filter_kernels, search_kernels, fused_kernels, scan_loops);
     None
 }

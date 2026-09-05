@@ -500,6 +500,18 @@
 
 ### Performance
 
+- **`any`/`all` run as native searches.** Over 200k Ints the two ran the bytecode loop at
+  1.0× while `filter` and `count_where` ran 16× native (field build, 1.46.4: `all` measured
+  0.8×, slower with the JIT on). The predicate is the shape a filter admits, so it is now
+  offered to the JIT on the same terms — the i64 comparison subset, and the F64Proof twin for a
+  `Floats` source with the same NaN poison protocol — and lowered to a SEARCH: the first
+  element whose predicate is the deciding value ends the loop, exactly where the bytecode
+  short-circuits; a lazy range is generated a chunk at a time and stops at the first chunk
+  that decides. [measured: all 12.50x, any 12.58x over 200k Ints, 20 repetitions]. A Value
+  array — the one that can hold `missing` — keeps three-valued logic on the oracle path, and
+  `jit-explain` lists the sites as `any`/`all`. Pinned by `any_and_all_search_natively_and_agree`
+  and `jit_explain_lists_any_and_all_sites`.
+
 - **A call frame was 72 bytes, and 40 of them were a memo key most calls never use.**
   Every call pushes a `Frame`, and it carried `Option<MemoKey>` inline — the automatic
   cache's key, on every call including the ones that can never memoize. Boxed, the field

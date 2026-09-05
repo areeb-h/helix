@@ -335,6 +335,16 @@ along; the documented signature `std()` made the checker refuse the argument —
 generated from `docs.rs`, so the fix was the entry. A quoted key in a record brace is a field
 (printed back quoted when not an identifier; `field_key_display`), the query-builder shape.
 
+**1.46.4 (2026-09-05) — `any`/`all` native.** DONE: `Op::TryJitSearch` + `search_kernels`
+(the filter analyses admit the predicate; `KernelShape::Search` in codegen returns the first
+index whose predicate equals `want`, or `len`; f64 twin poisons to -1). Measured on the
+field's shape (200k Ints): [all 12.50x, any 12.58x]; `reduce` over an array was already 15.8×
+here through the fused pipeline — the field's 1.0× must be a body shape the fusion declines
+(a Float init, a call, a captured index); ask for the program. Still open from 1.46: const
+folding of pure calls with literal arguments (1.46.1 — a language decision: when a call is
+foldable, what a fold-time error becomes; presented to the user), record shapes across the
+module boundary (1.44), Record iteration without materialising `keys()`/`items()` (1.46.3).
+
 **1.29 + 1.47 (2026-09-05) — `effects` in two buckets, `unknown` where syntax runs out.** DONE:
 `src/effects.rs` rewritten. Per function, DOES (its own calls closed over the call graph, plus
 every function it hands to a callee that calls it — parameter callees are computed to a

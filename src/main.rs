@@ -931,6 +931,7 @@ fn cli_jit_explain(args: &[String]) -> ExitCode {
                 &prog.reduce_loops,
                 &prog.map_kernels,
                 &prog.filter_kernels,
+                &prog.search_kernels,
                 &prog.fused_kernels,
                 &prog.scan_loops,
             )
@@ -3345,6 +3346,7 @@ fn run_program(program: &mut [ast::Stmt], spans: &[module::Span], multi: bool) -
                     &prog.reduce_loops,
                     &prog.map_kernels,
                     &prog.filter_kernels,
+                    &prog.search_kernels,
                     &prog.fused_kernels,
                     &prog.scan_loops,
                 )

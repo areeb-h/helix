@@ -888,6 +888,11 @@ pub const JIT_HOST_UNARY: &[(&str, extern "C" fn(f64) -> f64)] = &[
     ("cbrt", jit_host_cbrt),
     ("exp", jit_host_exp),
     ("ln", jit_host_ln),
+    // `log(x)` is Helix's natural log (`a_log`, one argument — the same `f64::ln`); it was
+    // simply absent here while `ln`/`log10`/`log2` were present (field build, 1.46d). The
+    // two-argument `log(x, base)` stays interpreted: the analysis admits one-argument host
+    // calls only.
+    ("log", jit_host_ln),
     ("log10", jit_host_log10),
     ("log2", jit_host_log2),
     ("sin", jit_host_sin),
@@ -911,4 +916,67 @@ pub const JIT_HOST_UNARY: &[(&str, extern "C" fn(f64) -> f64)] = &[
 /// The host function for a Helix unary name, if a kernel may call it.
 pub fn jit_host_unary(name: &str) -> Option<extern "C" fn(f64) -> f64> {
     JIT_HOST_UNARY.iter().find(|(n, _)| *n == name).map(|(_, f)| *f)
+}
+
+/// Run a native SEARCH kernel (`any`/`all`) over a packed `i64` buffer: `true` when some
+/// element's predicate equals `want` — the kernel returns the first such index, or `len` —
+/// short-circuiting exactly where the bytecode loop does.
+///
+/// SAFETY: `ptr` is a finalized `extern "C" fn(*const i64, i64, *const i64, i64) -> i64` from a
+/// `Search`-shaped `define_array_kernel` over an `Int` element.
+pub unsafe fn run_search_kernel(ptr: *const u8, src: &[i64], caps: &[i64], want: bool) -> bool {
+    note_native_call();
+    if src.is_empty() {
+        return false;
+    }
+    let f: extern "C" fn(*const i64, i64, *const i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    f(src.as_ptr(), src.len() as i64, caps.as_ptr(), want as i64) < src.len() as i64
+}
+
+/// The RANGE-source twin of [`run_search_kernel`]: values are generated into a reused scratch
+/// a chunk at a time (as [`run_filter_kernel_range`] does) and the search stops at the first
+/// chunk that hits, so a `(0..n).any(...)` that decides early never materializes the rest.
+///
+/// SAFETY: as [`run_search_kernel`].
+pub unsafe fn run_search_kernel_range(
+    ptr: *const u8,
+    start: i64,
+    step: i64,
+    len: usize,
+    caps: &[i64],
+    want: bool,
+) -> bool {
+    note_native_call();
+    if len == 0 {
+        return false;
+    }
+    let f: extern "C" fn(*const i64, i64, *const i64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    const CH: usize = 1 << 14;
+    let at = |j: usize| -> i64 { (start as i128 + step as i128 * j as i128) as i64 };
+    let mut scratch: Vec<i64> = Vec::with_capacity(CH.min(len));
+    for base in (0..len).step_by(CH) {
+        let n = CH.min(len - base);
+        scratch.clear();
+        scratch.extend((0..n).map(|k| at(base + k)));
+        if f(scratch.as_ptr(), n as i64, caps.as_ptr(), want as i64) < n as i64 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Run the f64 (`Floats`-source) SEARCH kernel. `None` means the predicate POISONED — an
+/// ordering comparison met a NaN on the way to the answer — and the dispatch falls back to the
+/// bytecode loop, which raises the interpreter's exact error at the exact element.
+///
+/// SAFETY: `ptr` is a finalized `extern "C" fn(*const f64, i64, *const f64, i64) -> i64` from a
+/// `Search`-shaped `define_array_kernel` over a `Float` element.
+pub unsafe fn run_search_kernel_f64(ptr: *const u8, src: &[f64], caps: &[f64], want: bool) -> Option<bool> {
+    note_native_call();
+    if src.is_empty() {
+        return Some(false);
+    }
+    let f: extern "C" fn(*const f64, i64, *const f64, i64) -> i64 = unsafe { std::mem::transmute(ptr) };
+    let r = f(src.as_ptr(), src.len() as i64, caps.as_ptr(), want as i64);
+    if r < 0 { None } else { Some(r < src.len() as i64) }
 }

@@ -118,3 +118,11 @@ Two traps in reading the result. Take **min-of-N** — a single cold run is wort
 watch the JIT column for sub-timer-resolution times: a ratio computed against `0.00s` is
 meaningless, so raise N until the compiled time is measurable rather than concluding from a
 divide-by-almost-zero.
+
+## 2026-09-05 (later) — `any`/`all`
+
+`xs.any(pred)` and `xs.all(pred)` over a packed `Int`/`Float` array or a lazy range run as a
+native SEARCH kernel — the same predicate shapes the filter kernels admit, returning the first
+index whose predicate equals the wanted value. They had no JIT site at all (field build,
+1.46.4: 1.0× where `filter` ran 16×). A Value array keeps the bytecode loop's three-valued
+logic; a NaN meeting an ordering comparison poisons the f64 kernel and the loop raises.

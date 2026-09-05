@@ -314,6 +314,45 @@ impl super::Compiler {
         let kind = if is_all { CompKind::All } else { CompKind::Any };
 
         self.compile_expr(b, recv)?;
+        // THE NATIVE SEARCH (field build, 1.46.4: `all`/`any` over 200k Ints ran this loop at
+        // 1.0× while `filter`/`count_where` ran 16× native). The predicate is the shape a
+        // filter admits, so it is offered on the same terms — the i64 comparison subset,
+        // then the F64Proof twin for a `Floats` source — and lowered to a search for the first
+        // element whose predicate is the deciding value, which is exactly where this loop
+        // short-circuits. Emitted as a GUARD whose fall-through is the loop below: a Value
+        // array (the one that can hold `missing`), a non-Int capture, a NaN meeting an
+        // ordering comparison and a disabled JIT all take the oracle-matched path.
+        let search_captures = if params.len() == 1 {
+            let fns = self.jit_fn_set();
+            let user_fns = self.user_fn_set();
+            crate::jit::filter_kernel_eligible(body, &params[0], &fns)
+                .or_else(|| crate::jit::filter_kernel_eligible_f64(body, &params[0], &user_fns))
+        } else {
+            None
+        };
+        let search_raises = {
+            let user_fns = self.user_fn_set();
+            crate::jit::body_raises(body, &user_fns, &self.mixed_sigs)
+        };
+        let search_guard: Option<(usize, u32)> = if let Some(caps) = search_captures {
+            // Captures ride above the receiver, in capture order; the VM pops them whether
+            // or not it takes the kernel (the same protocol as `TryJitFilter`).
+            for cap in &caps {
+                self.compile_expr(b, &Expr::Ident { name: cap.name.clone(), line, col })?;
+            }
+            let kernel = ArrayKernel {
+                binder: params[0].clone(),
+                body: body.clone(),
+                captures: caps,
+                index_bounds: Vec::new(),
+                raises: search_raises,
+            };
+            let idx = self.search_kernels.len() as u32;
+            self.search_kernels.push(kernel);
+            Some((b.emit(Op::TryJitSearch { kernel_idx: idx, want: !is_all, after: 0 }, line, col), idx))
+        } else {
+            None
+        };
         let init_at = b.emit(Op::CompInit(kind, 0), line, col);
 
         b.scopes.push(Vec::new());
@@ -369,6 +408,11 @@ impl super::Compiler {
         b.code[jdone1] = Op::Jump(done);
         b.code[jdone2] = Op::Jump(done);
         b.code[jdone3] = Op::Jump(done);
+        // The native search pushes its Bool and lands here, where every path converges with
+        // the result on the stack.
+        if let Some((at, idx)) = search_guard {
+            b.code[at] = Op::TryJitSearch { kernel_idx: idx, want: !is_all, after: done };
+        }
 
         b.scopes.pop();
         b.next_slot = saved_next;

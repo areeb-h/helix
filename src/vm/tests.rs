@@ -475,6 +475,7 @@
             &prog.reduce_loops,
             &prog.map_kernels,
             &prog.filter_kernels,
+            &prog.search_kernels,
             &prog.fused_kernels,
             &prog.scan_loops,
         );
@@ -3238,6 +3239,7 @@
             &prog.reduce_loops,
             &prog.map_kernels,
             &prog.filter_kernels,
+            &prog.search_kernels,
             &prog.fused_kernels,
             &prog.scan_loops,
         );
@@ -4652,6 +4654,7 @@
                 &prog.reduce_loops,
                 &prog.map_kernels,
                 &prog.filter_kernels,
+                &prog.search_kernels,
                 &prog.fused_kernels,
                 &prog.scan_loops,
             );
@@ -4711,6 +4714,7 @@
                 &prog.reduce_loops,
                 &prog.map_kernels,
                 &prog.filter_kernels,
+                &prog.search_kernels,
                 &prog.fused_kernels,
                 &prog.scan_loops,
             );
@@ -4760,6 +4764,7 @@
             &prog.reduce_loops,
             &prog.map_kernels,
             &prog.filter_kernels,
+            &prog.search_kernels,
             &prog.fused_kernels,
             &prog.scan_loops,
         );
@@ -4796,6 +4801,7 @@
             &prog.reduce_loops,
             &prog.map_kernels,
             &prog.filter_kernels,
+            &prog.search_kernels,
             &prog.fused_kernels,
             &prog.scan_loops,
         );
@@ -8337,4 +8343,73 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             let msg = vm.expect_err(&format!("`{src}` should error"));
             assert!(msg.contains(want), "`{src}` said: {msg}");
         }
+    }
+
+    /// `any`/`all` over a packed array run as a native SEARCH — the first element whose
+    /// predicate is the deciding value ends the loop — where they ran the bytecode loop at
+    /// 1.0× while `filter`/`count_where` ran 16× native (field build, 1.46.4). Agreement on
+    /// every engine over Ints, Floats, a lazy range and captures; the empty array keeps its
+    /// vacuous answers; a Value array holding `missing` keeps three-valued logic, and a NaN
+    /// meeting an ordering comparison keeps the interpreter's error — both on the oracle path.
+    #[test]
+    fn any_and_all_search_natively_and_agree() {
+        crate::jit::reset_native_call_count();
+        for (src, want) in [
+            ("xs = (0..200000).map(it)\nxs.all(it >= 0)", "true"),
+            ("xs = (0..200000).map(it)\nxs.any(it < 0)", "false"),
+            ("xs = (0..200000).map(it)\nxs.any(it == 199999)", "true"),
+            ("xs = (0..200000).map(it)\nxs.all(it < 199999)", "false"),
+            ("k = 5\nxs = (0..10).map(it)\nxs.any(it > k)", "true"),
+            ("k = 50\nxs = (0..10).map(it)\nxs.all(it < k)", "true"),
+            ("k = 5\nxs = (0..10).map(it)\nxs.all(it % 2 == 0 or it > k)", "false"),
+            ("(0..10).all(it >= 0)", "true"),
+            ("(0..10).any(it == 7)", "true"),
+            ("(0..100000).any(it == 3)", "true"),
+            ("ys = (0..10).map(it * 0.5)\nys.all(it < 5.0)", "true"),
+            ("ys = (0..10).map(it * 0.5)\nys.any(it > 4.4)", "true"),
+            ("ys = (0..10).map(it * 0.5)\nys.any(it > 4.5)", "false"),
+            ("[].all(it > 0)", "true"),
+            ("[].any(it > 0)", "false"),
+            ("[1, missing, 3].all(it > 0)", "missing"),
+            ("[1, missing, 3].any(it > 2)", "true"),
+            ("[1, missing].any(it > 2)", "missing"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            assert_eq!(jit, Ok(want.to_string()), "`{src}`");
+        }
+        assert!(crate::jit::native_call_count() > 0, "the search never ran natively");
+        // A NaN meeting an ordering comparison raises on every engine: the f64 kernel
+        // poisons, and the bytecode loop reports the interpreter's error.
+        for src in [
+            "ys = [1.0, to_float(\"nan\"), 3.0]\nys.all(it > 0.0)",
+            "ys = [to_float(\"nan\")]\nys.any(it < 1.0)",
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert!(tw.is_err(), "`{src}` should raise");
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+        }
+    }
+
+    /// `log(x)` — Helix's natural log, one argument — reaches native code exactly as `ln`
+    /// does (the field's table had it "still blocked" beside `exp` and `sin`; it was simply
+    /// missing from the host table). `log(x, base)` stays interpreted, and agrees.
+    #[test]
+    fn log_reaches_native_code_like_ln() {
+        crate::jit::reset_native_call_count();
+        for (src, want) in [
+            ("(1..4).map(log(to_float(it)))", Some("[0.0, 0.6931471805599453, 1.0986122886681098]")),
+            ("(1..4).map(log(to_float(it)) - ln(to_float(it)))", Some("[0.0, 0.0, 0.0]")),
+            ("(1..4).map(log(to_float(it) * 100.0, 10.0))", None),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            if let Some(w) = want {
+                assert_eq!(jit, Ok(w.to_string()), "`{src}`");
+            }
+        }
+        assert!(crate::jit::native_call_count() > 0, "`log` never ran natively");
     }

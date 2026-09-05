@@ -259,6 +259,13 @@ pub enum Op {
     /// as `TryJitMap`, but the native kernel evaluates the boolean predicate per
     /// element and keeps the elements for which it holds (order preserved).
     TryJitFilter { kernel_idx: u32, after: u32 },
+    /// Fast path for a JIT-eligible `arr.any(pred)` / `arr.all(pred)`: a native SEARCH for
+    /// the first element whose predicate equals `want` (`any` wants a true, `all` a false),
+    /// short-circuiting exactly where the bytecode loop does. The receiver is consumed and a
+    /// Bool pushed. Anything that is not a packed `Int`/`Float` buffer or a lazy range — a
+    /// Value array, which may hold `missing` — falls through to the three-valued loop
+    /// (field build, 1.46.4: the two ran at 1.0× while `filter` ran 16× native).
+    TryJitSearch { kernel_idx: u32, want: bool, after: u32 },
     /// Fast path for a fuseable `map`/`filter`/`reduce` chain (see [`FusedKernel`]). The
     /// pipeline's source operands are on the stack (an `Int` array, or `[start,end]` for
     /// a range; plus the `init` for a `Reduce` sink). If they are all `Int` (range within
@@ -644,7 +651,8 @@ pub struct ReduceLoop {
 /// native per-element kernel over a packed `&[i64]`. For `map` the JIT lowers `body`
 /// to a fused loop `dst[i] = body(src[i])`; for `filter` to a compaction loop keeping
 /// `src[i]` where `body(src[i])` holds. Indexed by the `kernel_idx` of the matching
-/// [`Op::TryJitMap`] / [`Op::TryJitFilter`].
+/// [`Op::TryJitMap`] / [`Op::TryJitFilter`] / [`Op::TryJitSearch`] (a search: the first index
+/// whose predicate equals the wanted value).
 #[derive(Debug, Clone)]
 #[cfg_attr(not(feature = "jit"), allow(dead_code))]
 pub struct ArrayKernel {
@@ -787,6 +795,10 @@ pub struct Program {
     /// JIT-eligible `filter`/`where` predicates, indexed by
     /// [`Op::TryJitFilter::kernel_idx`].
     pub filter_kernels: Vec<ArrayKernel>,
+    /// JIT-eligible `any`/`all` predicates, indexed by [`Op::TryJitSearch::kernel_idx`] —
+    /// the same predicate shapes as `filter_kernels`, lowered to a search instead of a
+    /// compaction.
+    pub search_kernels: Vec<ArrayKernel>,
     /// Fuseable `map`/`filter`/`reduce` pipelines, indexed by [`Op::TryJitFused`]'s
     /// `kernel_idx` — each lowered to a single intermediate-free native loop.
     pub fused_kernels: Vec<FusedKernel>,

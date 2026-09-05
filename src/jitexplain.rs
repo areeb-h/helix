@@ -159,6 +159,14 @@ pub fn sites(prog: &Program, jit: Option<&Jit>) -> Vec<Site> {
                         jit.is_some_and(|j| map_compiled(j, *kernel_idx as usize)),
                     )
                 }
+                Op::TryJitSearch { kernel_idx, want, .. } => (
+                    if *want { "any" } else { "all" },
+                    *kernel_idx,
+                    jit.is_some_and(|j| {
+                        j.search_kernel(*kernel_idx as usize).is_some()
+                            || j.search_kernel_f64(*kernel_idx as usize).is_some()
+                    }),
+                ),
                 Op::TryJitFilter { kernel_idx, .. } => (
                     "filter",
                     *kernel_idx,

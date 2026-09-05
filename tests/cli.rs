@@ -16244,3 +16244,23 @@ fn effects_refuses_a_program_check_rejects() {
     assert!(out.trim().is_empty(), "a rejected program got a verdict:\n{out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `jit-explain` lists an `any`/`all` site under its own family — the two used to have no
+/// site at all, so a reader had no way to see they ran the bytecode loop (field build, 1.46.4).
+#[test]
+fn jit_explain_lists_any_and_all_sites() {
+    let dir = std::env::temp_dir().join(format!("hx_jx_search_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("s.helix");
+    std::fs::write(&f, "xs = (0..10).map(it)\nprint(xs.all(it >= 0))\nprint(xs.any(it > 5))\n").unwrap();
+    let (out, err, code) = run(&["jit-explain", f.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let all_line = out.lines().find(|l| l.contains(" all ")).unwrap_or_else(|| panic!("no `all` site:\n{out}"));
+    let any_line = out.lines().find(|l| l.contains(" any ")).unwrap_or_else(|| panic!("no `any` site:\n{out}"));
+    if out.contains("compiled") {
+        assert!(all_line.contains("compiled"), "{out}");
+        assert!(any_line.contains("compiled"), "{out}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
