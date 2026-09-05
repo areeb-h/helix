@@ -16148,3 +16148,99 @@ fn a_glob_import_is_refused_where_it_would_surprise() {
     assert_ne!(code, Some(0));
     assert!(err.contains("exports nothing"), "{err}");
 }
+
+/// `helix effects` in two buckets. A function that received an effectful function by NAME used
+/// to read `no authority, reproducible` while the function itself read `fs-read` one line above
+/// (field build, 1.29): a callee that arrived as a value contributed nothing, so unknown
+/// collapsed to pure. And a constructor returning closures reported their authority as its own
+/// (1.47). DOES is what a call reaches — with a parameter callee discharged by what the call
+/// site passes — and CARRIES is what the values it builds can do; where syntax runs out the
+/// verdict is `unknown`, with the call that forced it.
+#[test]
+fn effects_reaches_through_a_function_value_and_says_unknown_where_it_cannot() {
+    let dir = std::env::temp_dir().join(format!("hx_effects2_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("p.helix");
+    std::fs::write(
+        &f,
+        "fn apply1(f, x) = f(x)\n\
+         fn slurp(p) = read_text(p)\n\
+         fn certified_pure(p) = apply1(slurp, p)\n\
+         fn via_map(f, xs) = xs.map(f)\n\
+         fn caller(p) = via_map(slurp, [p])\n\
+         fn opaque(f, p) = apply1(f, p)\n\
+         fn inline(p) = apply1((q) => read_text(q), p)\n\
+         fn pure_apply(x) = apply1((q) => q + 1, x)\n\
+         fn define(table) = {persist: (row) => row.write_to(table), name: table}\n\
+         fn use_it(p) = define(\"t\").persist(p)\n\
+         fn by_ufcs(p) = p.slurp()\n\
+         fn stored(p) = {go: slurp, p: p}\n\
+         fn local_lambda(p) = let g = (q) => read_text(q) in g(p)\n\
+         fn folded(xs) = xs.reduce(0, (acc, x) => acc + x)\n",
+    )
+    .unwrap();
+    let (out, err, code) = run(&["effects", f.to_str().unwrap()], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    for want in [
+        // The function passed by name is CALLED by the callee, so its authority is the caller's.
+        "certified_pure: fs-read",
+        "via certified_pure -> slurp -> read_text",
+        "caller: fs-read",
+        "via caller -> slurp -> read_text",
+        "by_ufcs: fs-read",
+        "local_lambda: fs-read",
+        // A callee nobody can see is UNKNOWN, with the call that forced it.
+        "apply1: unknown authority, reproducibility unknown",
+        "calls `f` via apply1 -> f",
+        "via_map: unknown authority",
+        "opaque: unknown authority",
+        "calls `f` via opaque -> f",
+        "use_it: unknown authority",
+        "calls `persist` via use_it -> persist",
+        // Discharged by a lambda at the call site: nothing unknown remains.
+        "inline: fs-read, not reproducible",
+        "pure_apply: no authority, reproducible",
+        "folded: no authority, reproducible",
+        // A constructor DOES nothing; the record it returns CARRIES the write.
+        "define: no authority, reproducible",
+        "define carries: fs-write",
+        "fs-write via define -> write_to",
+        "stored: no authority, reproducible",
+        "stored carries: fs-read",
+    ] {
+        assert!(out.contains(want), "missing `{want}` in:\n{out}");
+    }
+    assert!(!out.contains("inline: unknown") && !out.contains("inline carries"), "{out}");
+    assert!(!out.contains("certified_pure carries"), "{out}");
+    assert!(!out.contains('\u{b7}'), "plain output carries the rich separator:\n{out}");
+
+    let (js, err, code) = run(&["effects", f.to_str().unwrap(), "--json"], &[], "");
+    assert_eq!(code, Some(0), "{err}");
+    let v: serde_json::Value = serde_json::from_str(&js).expect("valid JSON");
+    let by = |n: &str| v.as_array().unwrap().iter().find(|f| f["name"] == n).cloned().expect(n);
+    assert_eq!(by("apply1")["unknown_via"]["name"], serde_json::json!("f"));
+    assert_eq!(by("apply1")["deterministic"], serde_json::json!(false));
+    assert_eq!(by("certified_pure")["effects"][0]["effect"], serde_json::json!("fs-read"));
+    assert!(by("certified_pure")["unknown_via"].is_null(), "{js}");
+    assert_eq!(by("define")["effects"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(by("define")["carries"]["effects"][0]["effect"], serde_json::json!("fs-write"));
+    assert_eq!(by("pure_apply")["deterministic"], serde_json::json!(true));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A program `check` rejects gets no verdict: an unresolvable callee contributes no effects, so
+/// a misspelled builtin read as pure (field build, 1.29a). The refusal is `check`'s own.
+#[test]
+fn effects_refuses_a_program_check_rejects() {
+    let dir = std::env::temp_dir().join(format!("hx_effects3_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("z.helix");
+    std::fs::write(&f, "fn ghost(x) = totally_made_up_builtin(x)\n").unwrap();
+    let (out, err, code) = run(&["effects", f.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0), "{out}");
+    assert!(err.contains("totally_made_up_builtin"), "{err}");
+    assert!(out.trim().is_empty(), "a rejected program got a verdict:\n{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

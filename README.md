@@ -90,7 +90,7 @@ helix repl                   # interactive session
 helix check script.helix     # type-check without running (takes many paths; `--lint` for advice)
 helix test [path]            # run *_test.helix files and `##` doc examples (`--engines` cross-checks all 3)
 helix fmt script.helix       # format — no options, and it cannot change your program
-helix effects script.helix   # what each function reaches: authority, and whether it is reproducible
+helix effects script.helix   # what each function does and what it carries: authority (or unknown), reproducibility
 helix doc [Type]             # a type's methods (Array/String/Dna/Connection/…) or `builtins`
 helix search <term>          # find a capability by what it does, not by its name
 helix describe [what]        # the whole API as JSON — a name, a Type, or everything
@@ -279,7 +279,8 @@ end-to-end in pure Helix.
   self-generated code gets a *narrower* grant. It is off unless asked for, and asking is a
   `[capabilities]` table in `helix.toml`: **present means enforced**, it is a ceiling rather than
   a request, a dependency cannot widen it, and `helix build` bakes it into the artifact where no
-  environment variable can reopen it. `helix effects` reports what a program actually reaches, so
+  environment variable can reopen it. `helix effects` reports what each function does and what
+  the values it builds can do — `unknown` where a callee cannot be seen, never silently pure — so
   the ceiling can be measured before it is declared. See
   [docs/memory-safety.md](docs/memory-safety.md).
 

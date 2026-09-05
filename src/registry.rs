@@ -530,6 +530,23 @@ pub fn is_builtin_name(name: &str) -> bool {
     SET.get_or_init(|| BUILTINS.iter().map(|b| b.path).collect()).contains(name)
 }
 
+/// Does ANY receiver type claim this method name? For `helix effects`, where a method call on
+/// a statically unknown receiver is a known verb only if some type owns the name — a name no
+/// type owns can only be a record field holding a function (a value call the tool cannot see
+/// through) or a mistake `check` reports. O(1), built once.
+pub fn any_type_owns_method(method: &str) -> bool {
+    use std::sync::OnceLock;
+    static SET: OnceLock<std::collections::HashSet<&'static str>> = OnceLock::new();
+    SET.get_or_init(|| {
+        type_method_tables()
+            .iter()
+            .flat_map(|(_, methods)| methods.iter().copied())
+            .chain(UNIVERSAL_METHODS.iter().copied())
+            .collect()
+    })
+    .contains(method)
+}
+
 /// Does this receiver TYPE claim this method in its static table? O(1), same reasoning
 /// as [`is_builtin_name`] — consulted only for builtin-named methods, where it decides
 /// whether the method owns the name (and the fallback must stay out) or does not (and a

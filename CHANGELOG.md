@@ -233,6 +233,26 @@
 
 ### Fixed
 
+- **`helix effects` no longer fails open, and separates what a function does from what it
+  carries.** A function that received an effectful function by name (`apply1(slurp, p)` with
+  `apply1(f, x) = f(x)`) reported `no authority, reproducible` while `slurp` one line above read
+  `fs-read`: a callee that arrived as a value contributed nothing, so unknown collapsed to pure —
+  the dangerous direction for an audit tool (field build, 1.29). And a constructor that returns
+  closures (`define(table) = {save: (row) => row.write_to(table)}`) reported the closures'
+  authority as its own (1.47). The report now has two buckets per function. **does** — its own
+  calls closed over the call graph, plus every function it hands to a callee that calls it: a
+  parameter callee is discharged at a call site that passes a named function or a lambda, so
+  `apply1(slurp, p)` is `fs-read` and `apply1((q) => q + 1, x)` is pure. **carries** — what the
+  lambdas it returns or stores and the functions it passes on can do, on its own row. Where a
+  callee cannot be seen — a parameter called with nothing passed yet, a method no type owns (a
+  record field holding a function), a local not bound to a lambda — the verdict is `unknown
+  authority` with the call that forced it, never `no authority`. UFCS calls (`p.slurp()`) and
+  top-level lambda bindings (`handler = (r) => …`) resolve; a program `check` rejects gets no
+  verdict at all (1.29a: a misspelled builtin read as pure). JSON adds `unknown_via` and
+  `carries`; `deterministic` is false while a callee is unknown. Pinned by
+  `effects_reaches_through_a_function_value_and_says_unknown_where_it_cannot` and
+  `effects_refuses_a_program_check_rejects`.
+
 - **A function-valued field answers before the comprehension and frame-verb families, on
   every engine.** ADR 0045's order — method, field, free fn — held for `count`, `find`,
   `save`, and not for `all`, `map`, `where`, `filter`, `any`, `reduce`, `select`, `group`,

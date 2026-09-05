@@ -1529,7 +1529,11 @@ fn run_effects(args: &[String]) -> ExitCode {
         }
     };
     run_on_big_stack(move || {
-        let loaded = match module::load(&path) {
+        // A PROGRAM `check` REJECTS GETS NO VERDICT. An unresolvable callee contributes no
+        // effects, so a file with a misspelled builtin read as pure (field build, 1.29a); a
+        // report is only meaningful for a program that would run, and the refusal is
+        // `check`'s own sentence.
+        let loaded = match check_file_capture(&path) {
             Ok(l) => l,
             Err(rendered) => {
                 eprint!("{rendered}");
@@ -1545,34 +1549,47 @@ fn run_effects(args: &[String]) -> ExitCode {
         if loaded.multi_module {
             for f in &mut all {
                 f.name = strip_mangling(&f.name);
-                for (_, path) in &mut f.effects {
-                    for step in path.iter_mut() {
-                        *step = strip_mangling(step);
+                for reach in [&mut f.does, &mut f.carries] {
+                    for (_, path) in &mut reach.effects {
+                        for step in path.iter_mut() {
+                            *step = strip_mangling(step);
+                        }
                     }
-                }
-                if let Some((who, path)) = &mut f.nondeterministic {
-                    *who = strip_mangling(who);
-                    for step in path.iter_mut() {
-                        *step = strip_mangling(step);
+                    for (who, path) in [&mut reach.nondeterministic, &mut reach.unknown].into_iter().flatten() {
+                        *who = strip_mangling(who);
+                        for step in path.iter_mut() {
+                            *step = strip_mangling(step);
+                        }
                     }
                 }
             }
         }
         if json {
+            let reach_json = |r: &effects::Reach| {
+                serde_json::json!({
+                    "effects": r.effects.iter().map(|(e, p)| serde_json::json!({
+                        "effect": e.label(),
+                        "via": p,
+                    })).collect::<Vec<_>>(),
+                    "nondeterministic_via": r.nondeterministic.as_ref().map(|(n, p)| {
+                        serde_json::json!({ "name": n, "via": p })
+                    }),
+                    "unknown_via": r.unknown.as_ref().map(|(n, p)| {
+                        serde_json::json!({ "name": n, "via": p })
+                    }),
+                })
+            };
+            // The top level is what the function DOES (the keys a consumer already reads);
+            // `carries` is the second bucket, and `deterministic` is false while any callee
+            // is unknown — the failure direction an audit tool must have.
             let out: Vec<serde_json::Value> = all
                 .iter()
                 .map(|f| {
-                    serde_json::json!({
-                        "name": f.name,
-                        "effects": f.effects.iter().map(|(e, p)| serde_json::json!({
-                            "effect": e.label(),
-                            "via": p,
-                        })).collect::<Vec<_>>(),
-                        "deterministic": f.deterministic(),
-                        "nondeterministic_via": f.nondeterministic.as_ref().map(|(n, p)| {
-                            serde_json::json!({ "name": n, "via": p })
-                        }),
-                    })
+                    let mut v = reach_json(&f.does);
+                    v["name"] = serde_json::json!(f.name);
+                    v["deterministic"] = serde_json::json!(f.deterministic());
+                    v["carries"] = reach_json(&f.carries);
+                    v
                 })
                 .collect();
             println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
@@ -1583,28 +1600,65 @@ fn run_effects(args: &[String]) -> ExitCode {
             return ExitCode::SUCCESS;
         }
         let opts = render::RenderOpts::auto();
+        let sep = report::Report::sep(&opts);
         let mut r = report::Report::new(
             "effects",
             format!("{} function(s) in {}", all.len(), path.display()),
         );
+        let via = |p: &[String]| p.join(" -> ");
         for f in &all {
-            let labels: Vec<&str> = f.effects.iter().map(|(e, _)| e.label()).collect();
-            let authority =
-                if labels.is_empty() { "no authority".to_string() } else { report::Report::list(&opts, &labels) };
-            match &f.nondeterministic {
-                Some((who, via)) => {
-                    r = r.note_owned(
-                        f.name.clone(),
-                        format!("{authority}{}not reproducible", report::Report::sep(&opts)),
-                        format!("`{who}` via {}", via.join(" -> ")),
-                    )
+            // What the function DOES when called.
+            let labels: Vec<&str> = f.does.effects.iter().map(|(e, _)| e.label()).collect();
+            let authority = match (labels.is_empty(), f.does.unknown.is_some()) {
+                (true, false) => "no authority".to_string(),
+                (true, true) => "unknown authority".to_string(),
+                (false, false) => report::Report::list(&opts, &labels),
+                (false, true) => format!("{} + unknown authority", report::Report::list(&opts, &labels)),
+            };
+            let repro = if f.does.nondeterministic.is_some() {
+                "not reproducible"
+            } else if f.does.unknown.is_some() {
+                "reproducibility unknown"
+            } else {
+                "reproducible"
+            };
+            let mut notes: Vec<String> =
+                f.does.effects.iter().map(|(e, p)| format!("{} via {}", e.label(), via(p))).collect();
+            if let Some((who, p)) = &f.does.nondeterministic {
+                notes.push(format!("`{who}` via {}", via(p)));
+            }
+            if let Some((who, p)) = &f.does.unknown {
+                notes.push(format!("calls `{who}` via {}", via(p)));
+            }
+            let value = format!("{authority}{sep}{repro}");
+            r = if notes.is_empty() {
+                r.field_owned(f.name.clone(), value)
+            } else {
+                r.note_owned(f.name.clone(), value, notes.join("; "))
+            };
+            // What the values it builds or hands on CAN do — its own row, because a
+            // constructor that returns closures does nothing itself (field build, 1.47).
+            if !f.carries.is_empty() {
+                let labels: Vec<&str> = f.carries.effects.iter().map(|(e, _)| e.label()).collect();
+                let mut parts: Vec<String> = Vec::new();
+                if !labels.is_empty() {
+                    parts.push(report::Report::list(&opts, &labels));
                 }
-                None => {
-                    r = r.field_owned(
-                        f.name.clone(),
-                        format!("{authority}{}reproducible", report::Report::sep(&opts)),
-                    )
+                if f.carries.unknown.is_some() {
+                    parts.push("unknown authority".to_string());
                 }
+                if f.carries.nondeterministic.is_some() {
+                    parts.push("not reproducible".to_string());
+                }
+                let mut notes: Vec<String> =
+                    f.carries.effects.iter().map(|(e, p)| format!("{} via {}", e.label(), via(p))).collect();
+                if let Some((who, p)) = &f.carries.nondeterministic {
+                    notes.push(format!("`{who}` via {}", via(p)));
+                }
+                if let Some((who, p)) = &f.carries.unknown {
+                    notes.push(format!("calls `{who}` via {}", via(p)));
+                }
+                r = r.note_owned(format!("{} carries", f.name), parts.join(sep), notes.join("; "));
             }
         }
         r.print(&opts);

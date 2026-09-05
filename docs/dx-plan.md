@@ -335,6 +335,20 @@ along; the documented signature `std()` made the checker refuse the argument —
 generated from `docs.rs`, so the fix was the entry. A quoted key in a record brace is a field
 (printed back quoted when not an identifier; `field_key_display`), the query-builder shape.
 
+**1.29 + 1.47 (2026-09-05) — `effects` in two buckets, `unknown` where syntax runs out.** DONE:
+`src/effects.rs` rewritten. Per function, DOES (its own calls closed over the call graph, plus
+every function it hands to a callee that calls it — parameter callees are computed to a
+fixpoint, so `apply1(slurp, p)` reads and `apply1((q) => q + 1, x)` is pure) and CARRIES (a
+lambda is `does` only at a position whose receiver calls it — a value call's callee, the
+function argument of a higher-order verb, an argument at a parameter the callee calls, or bound
+to a name a does-context site calls — and `carries` otherwise; a named function used as a value
+likewise). UFCS `p.slurp()` and top-level `handler = (r) => …` resolve; a method no type owns
+is `unknown`; `helix effects` refuses a program `check` rejects. Still syntactic, and honest
+about it: a function stored in a variable and called later (`g = slurp; g(p)`) is `unknown`,
+not `fs-read` — the next precision step if the field needs it. The field's 1.46 asks (const
+folding, record shapes across modules, Record iteration cost, `reduce`/`all`/`any` JIT) are
+queued below.
+
 **1.27.3 (2026-09-05) — glob import.** DONE: `import m.*` and `import m.* except {…}`
 (parser: a `.*` tail, `except` contextual like `as`; loader: the glob expands at load time into
 the selected-name table the named form fills, so nothing downstream changed). Guards: a builtin

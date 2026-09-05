@@ -350,7 +350,7 @@ fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize
 
 /// The verbs whose single argument is a function: a bare bound name there is the function
 /// it names (`wrap_bound_fn_arg`), for the array reading of every one of them.
-const BOUND_FN_VERBS: &[&str] = &[
+pub(crate) const BOUND_FN_VERBS: &[&str] = &[
     "map", "any", "all", "filter", "where", "count_where", "flat_map", "take_while",
     "drop_while", "position", "sort_by", "min_by", "max_by",
 ];
