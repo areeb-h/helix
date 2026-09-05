@@ -38,7 +38,7 @@ Cranelift's `sdiv`/`srem` raise a hardware trap (SIGFPE) on divide-by-zero **and
 | `x // 0`, divisor arriving as array data | `error: integer division by zero` |
 | `MIN // -1` | `-9223372036854775808` (wraps, consistent with `*`) |
 | `MIN % -1` | `0` |
-| `MIN / -1` | `9223372036854775808.0` (true division promotes to `Float`) |
+| `MIN / -1` | `9.223372036854776e18` (true division promotes to `Float`; a Float of that magnitude prints in exponent form) |
 
 The divide-by-zero rows were verified with the divisor supplied as **array data**, so
 constant folding cannot mask them, and in `map`, `reduce` and compiled-function positions
@@ -50,7 +50,7 @@ wraps). That is why `MIN / -1` is exact and `MIN // -1` is not.
 ## Known divergence: `.sum()` promotes, `.reduce()` wraps
 
 ```
-[9223372036854775807, 1].sum()                    => 9223372036854775808.0
+[9223372036854775807, 1].sum()                    => 9.223372036854776e18
 [9223372036854775807, 1].reduce(0, (s, x) => s + x) => -9223372036854775808
 ```
 
@@ -90,7 +90,7 @@ two spellings it is sugar for.
 
 | expression | result |
 |---|---|
-| `to_float(9223372036854775807)` | `9223372036854775808.0` (nearest `f64`; `i64::MAX` is not representable) |
+| `to_float(9223372036854775807)` | `9.223372036854776e18` (nearest `f64`, 2^63; `i64::MAX` is not representable) |
 | `to_int(9.3e18)` | `9223372036854775807` (saturates at `i64::MAX`) |
 
 `to_int` **saturates** rather than wrapping or trapping, so it is total for every finite

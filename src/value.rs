@@ -1039,13 +1039,30 @@ pub fn field_key_display(k: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Format a float so integral values still read as floats (`2.0`, not `2`).
+/// Format a float so integral values still read as floats (`2.0`, not `2`) — and so a value
+/// of extreme magnitude reads in exponent form (`2.702159776422298e16`, `1e-5`) instead of as
+/// a wall of digits: `print(1e21)` used to print `1000000000000000000000.0`, `"{1.5e300}"` was
+/// a 303-character string, and a value past 2^53 printed positional digits the double does not
+/// hold (field build, 1.34). Positional form is kept exactly while every printed digit is
+/// significant — |x| in [1e-4, 1e16), the window Python's `repr` uses; beyond it, the
+/// shortest round-trip digits and a plain exponent, Rust's `{:e}` spelling, which re-parses
+/// as a Float literal because the exponent alone makes a literal a Float. `inf` and `NaN`
+/// print as they always did. Every printer — `print`, interpolation, the REPL's grouped form,
+/// frame cells, CSV, the PostgreSQL parameter text — comes through here, so they agree. JSON
+/// (`to_json`) is the one exception on purpose: serde's own shortest spelling, a wire format
+/// that already switched to an exponent at 1e16 (`1e+16`) and round-trips bit-identically.
 pub fn fmt_float(x: f64) -> String {
-    if x.is_finite() && x == x.trunc() {
-        format!("{:.1}", x)
+    if !x.is_finite() {
+        return format!("{x}");
+    }
+    let a = x.abs();
+    if a != 0.0 && !(1e-4..1e16).contains(&a) {
+        return format!("{x:e}");
+    }
+    if x == x.trunc() {
+        format!("{x:.1}")
     } else {
-        let s = format!("{}", x);
-        s
+        format!("{x}")
     }
 }
 

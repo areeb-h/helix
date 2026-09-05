@@ -109,6 +109,21 @@
 
 ### Changed
 
+- **A Float of extreme magnitude prints in exponent form.** `print(1e21)` printed
+  `1000000000000000000000.0`, `"{1.5e300}"` was a 303-character string, and a value past 2^53
+  printed positional digits the double does not hold (`27021597764222980.0`); Helix parsed
+  `1.5e300` and `to_float("1e400")` but could not print one (field build, 1.34). Every printer —
+  `print`, interpolation, the REPL's grouped form, frame cells, CSV, the PostgreSQL parameter
+  text — goes through one function, which now prints |x| ≥ 1e16 and 0 < |x| < 1e-4
+  as `2.702159776422298e16` / `1e-5`: the shortest round-trip digits and a plain exponent, the
+  window Python's `repr` uses, so positional form is kept exactly while every printed digit is
+  significant. The form re-parses as the same Float; `2.0` still reads as a Float; `inf` and
+  `NaN` are unchanged. The REPL's grouped printer used to switch to exponent form at 1e15 on its
+  own; it takes the decision from the same function now. `to_json` is left as serde's own
+  spelling — a wire format that already switched at 1e16 and round-trips bit-identically. Pinned by
+  `a_float_of_extreme_magnitude_prints_in_exponent_form`; six compat baselines and four corpus
+  goldens moved (`tests/compat/MIGRATIONS.md`).
+
 - **An arity refusal reads `takes` at every layer, for every kind of function.** User
   functions said `expects` (checker, VM, walker) while builtins said `takes` — except the
   builtins routed through the shared helper, which said `expects` too. One helper now:

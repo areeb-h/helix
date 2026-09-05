@@ -121,3 +121,16 @@ no entry. A source edit is not a behavior change.
 
 - **`std(1)`/`var(1)` are accepted** (2026-09-05). Additive: the documented signature said
   `std()`, so the checker refused any argument; `std()`/`var()` are unchanged.
+
+- **A Float of extreme magnitude prints in exponent form** (2026-09-05). |x| ≥ 1e16, or
+  0 < |x| < 1e-4, prints as `2.702159776422298e16` / `1e-5` — the shortest round-trip digits
+  and a plain exponent, the window Python's `repr` uses — where it used to print every
+  positional digit (`27021597764222980.0`, `0.00001`, and `"{1.5e300}"` as 303 characters).
+  Positional form is unchanged inside the window, `2.0` still reads as a Float, and the new
+  form re-parses as the same Float. Six programs moved, at the v0.5.1 and v0.6.0 baselines
+  alike: `tests__corpus__j4_map_index_saxpy`, `tests__corpus__j5_reduce_value_scalars`,
+  `tests__corpus__j7_captured_mixed_map` and `tests__corpus__t11_diag` (values past 2^53,
+  chosen to expose an i64/f64 divergence — the exponent form shows the 16 significant
+  digits the positional form padded), `examples__numerics__autodiff` (a loss of 4.4e-11) and
+  `examples__statistics__statistics` (a p-value of 6.8e-5). The four corpus goldens were
+  regenerated.

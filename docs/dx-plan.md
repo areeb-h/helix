@@ -95,7 +95,7 @@ The doc/describe lines are copied **verbatim** from `print_help()` (same `\\n   
 **Complete the truncated 'Footguns — wrong answers, not errors' section** from the five live-verified footguns:
 1. **missing-filter:** `where(@v == missing)` → 0 rows silently (because `missing == missing` is `missing`); `.is_missing()` unsupported inside queries; no `drop_missing`; the working keep-non-missing idiom is `where(@v == @v)`. (Fix slated 'work or error' in docs/v0.2.1-fix-plan.md:224-247.)
 2. **Silent i64 wrap:** `9223372036854775807 + 1` → min-i64, rc=0 — deliberate per docs/integer-semantics.md:12-27.
-3. **sum vs reduce divergence:** `[i64::MAX, 1].sum()` → `9223372036854775808.0` (float) but the reduce spelling wraps — documented 'Known divergence', integer-semantics.md:50-62.
+3. **sum vs reduce divergence:** `[i64::MAX, 1].sum()` → `9.223372036854776e18` (float) but the reduce spelling wraps — documented 'Known divergence', integer-semantics.md:50-62.
 4. **Float `==`:** `[0.1,0.2].sum() == 0.3` → false; use `assert_close`.
 5. **JIT cliff is silent perf, never wrong answers** — `--explain-jit` lands v0.2.2 (fix-plan STATUS item 5).
 **Risk:** rot only — footguns 1 and 5 are scheduled to be fixed and nothing fails if AGENTS.md isn't updated. Mitigation is the do-later rot-pin test; item 1's banner test covers discoverability now.
@@ -334,6 +334,15 @@ sentence (it clamped to 0 silently). `std(ddof?)`/`var(ddof?)`: the walker had `
 along; the documented signature `std()` made the checker refuse the argument — the reference is
 generated from `docs.rs`, so the fix was the entry. A quoted key in a record brace is a field
 (printed back quoted when not an identifier; `field_key_display`), the query-builder shape.
+
+**1.34 (2026-09-05) — exponent form.** DONE: `fmt_float` (value.rs) prints |x| ≥ 1e16 and
+0 < |x| < 1e-4 as `{x:e}` — Python's `repr` window, Rust's spelling (`1e16`, `2.5e-7`); the
+REPL's grouped printer (`fmt_float_rich`) takes the decision from it, so the two switch at the
+same value (it used to switch at 1e15 on its own). One function feeds `print`, interpolation,
+frame cells, CSV and the PostgreSQL parameter text, so they cannot disagree; `to_json` keeps
+serde's spelling (`1e+16`), a wire format that already switched at 1e16. Not done:
+the finding's other shape, a significant-digits control (`format(x, {sig: 6})`) — `round(x,
+digits)` is what exists; a `sig` option is a small, separate addition if the field asks again.
 
 **1.35 (2026-09-05) — `normalize`.** DONE for the two asks of value: `s.normalize()` (NFC;
 `nfd`/`nfkc`/`nfkd`) via the `unicode-normalization` crate, and the docs saying that `length`,

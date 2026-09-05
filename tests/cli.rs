@@ -16013,3 +16013,27 @@ fn normalize_makes_two_spellings_of_one_text_equal() {
         }
     }
 }
+
+/// A Float of extreme magnitude prints in exponent form — `1e21`, `2.5e-7`,
+/// `-9.223372036854776e18` — on every engine, in `print` and interpolation alike, because every
+/// printer goes through `fmt_float` (JSON keeps serde's own spelling, a wire format that
+/// round-trips bit-identically — pinned here as a round trip). Positional form is kept exactly while every printed
+/// digit is significant: |x| in [1e-4, 1e16), the window Python's `repr` uses. Before this,
+/// `"{1.5e300}"` was a 303-character string and `print(1e21)` a wall of zeros (field build,
+/// 1.34). The form re-parses as the same Float; `inf` is unchanged.
+#[test]
+fn a_float_of_extreme_magnitude_prints_in_exponent_form() {
+    let src = "print(1e16, 1e15, 9007199254740992.0, 12345678901234567890.0, 1.5e300, -1e21)\nprint(0.0001, 0.00001, 2.5e-7, -1e-300, 0.0, -0.0, 1e16 / 1e16)\nprint(\"{1e21} and {0.00001}\", \"{1.5e300}\".length(), to_float(\"1e400\"))\nr = {x: 1e16, y: 0.00001}\nd = r.to_json().parse_json()\nprint(d.x == 1e16, d.y == 0.00001, \"{1e16} {2.5e-7}\".length())\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("exp_form_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(
+            out,
+            "1e16 1000000000000000.0 9007199254740992.0 1.2345678901234567e19 1.5e300 -1e21\n\
+             0.0001 1e-5 2.5e-7 -1e-300 0.0 -0.0 1.0\n\
+             1e21 and 1e-5 7 inf\n\
+             true true 11\n",
+            "{name}"
+        );
+    }
+}

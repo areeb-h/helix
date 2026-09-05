@@ -2200,13 +2200,14 @@ fast spelling at all, while making the gate look repaired.
 Written down because inferring the language from the STYLE of older tests produced a
 confidently wrong claim: that Helix had no unary minus. It has one. What it lacks:
 
-- [ ] **`-9223372036854775808` is a FLOAT, not `i64::MIN`.** The magnitude exceeds
-      `i64::MAX`, so the lexer degrades the literal to `f64` (src/lexer.rs:386, deliberately)
-      and the negation applies to a float. `-9223372036854775807 - 1` gives the correct Int.
-      It prints as `-9223372036854775808.0`, so the type change is visible but easy to miss —
-      the same silent-boundary shape as the `dot` defect. Fix: fold a unary minus into a bare
-      integer literal at parse time. The subtlety is that the fold must happen AFTER the
-      operand is parsed, or `-1.abs()` would become `(-1).abs()` instead of `-(1.abs())`.
+- [x] **`-9223372036854775808` is `i64::MIN`, not a Float** (fixed). The magnitude exceeds
+      `i64::MAX`, so the lexer keeps the literal as a distinct `Tok::BigInt` and the parser
+      folds a unary minus into it — AFTER the operand is parsed, so `-1.abs()` is still
+      `-(1.abs())`. `-9223372036854775807 - 1` gives the same Int. A magnitude past the
+      boundary (`-9223372036854775809`, `9223372036854775808`) still degrades to a Float, and
+      since 2026-09-05 it prints in exponent form, `-9.223372036854776e18`, so the type change
+      is visible — the old positional `-9223372036854775808.0` was the same silent-boundary
+      shape as the `dot` defect.
 - [ ] **No tuple field access.** `(1, 2).0` is "expected a name after `.`, found a number".
       `(1, 2)[0]` DOES work, so this is pure sugar, but records use `.name` and the asymmetry
       surprises.

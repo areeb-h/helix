@@ -2159,11 +2159,11 @@
             ("to_float(9007199254740993)", "9007199254740992.0"),
             (
                 "(9007199254740990..9007199254740995).map(to_float(it)).reduce(0.0, (s, x) => s + x)",
-                "45035996273704960.0",
+                "4.503599627370496e16",
             ),
             // the i64 extremes
-            ("to_float(9223372036854775807)", "9223372036854775808.0"),
-            ("to_float(0 - 9223372036854775807)", "-9223372036854775808.0"),
+            ("to_float(9223372036854775807)", "9.223372036854776e18"),
+            ("to_float(0 - 9223372036854775807)", "-9.223372036854776e18"),
             // negatives, nesting, composition with sqrt, and to_float of a Float (identity)
             ("((-5)..5).map(to_float(it) * 1.5).reduce(0.0, (s, x) => s + x)", "-7.5"),
             ("(0..5).map(to_float(to_float(it))).reduce(0.0, (s, x) => s + x)", "10.0"),
@@ -5258,7 +5258,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             // value-scalar path; the Int capture must stay `i64` inside `c * i`.
             (
                 "c = 9007199254740993\nd = 2.5\n(0..5).map(i => to_float(c * i) + d)",
-                "[2.5, 9007199254740994.0, 18014398509481988.0, 27021597764222984.0, 36028797018963968.0]",
+                "[2.5, 9007199254740994.0, 1.8014398509481988e16, 2.7021597764222984e16, 3.602879701896397e16]",
             ),
             // Degenerate and non-range sources.
             ("d = 4.0\n(0..0).map(i => to_float(i) / d)", "[]"),
@@ -5599,7 +5599,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             // Past 2^53, where an `i64` product and an `f64` one diverge.
             (
                 "c = 9007199254740993\n(0..3).reduce(0.0, (s, i) => s + to_float(c * i))",
-                "27021597764222976.0",
+                "2.7021597764222976e16",
             ),
             // User calls: capture-free path, then the captured path.
             ("fn f(x) = x * 2\n(0..6).reduce(0.0, (s, i) => s + to_float(f(i)))", "30.0"),
@@ -5852,10 +5852,10 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
                 "c = 9223372036854775807\n(0..4).map(j => ((c * j) % 100) * 0.5)",
                 "[0.0, 3.5, 49.0, 2.5]",
             ),
-            ("c = 9223372036854775807\n(0..3).map(j => (c + j) * 1.0)", "[9223372036854775808.0, -9223372036854775808.0, -9223372036854775808.0]"),
+            ("c = 9223372036854775807\n(0..3).map(j => (c + j) * 1.0)", "[9.223372036854776e18, -9.223372036854776e18, -9.223372036854776e18]"),
             ("c = -7\n(0..4).map(j => ((c * j) % 100) * 0.5)", "[0.0, 46.5, 43.0, 39.5]"),
             // Exact in `i64` past `f64`'s 2^53: promotion happens once, at the end.
-            ("c = 9007199254740993\n(1..3).map(j => (c * j) * 1.0)", "[9007199254740992.0, 18014398509481984.0]"),
+            ("c = 9007199254740993\n(1..3).map(j => (c * j) * 1.0)", "[9007199254740992.0, 1.8014398509481984e16]"),
             ("c = 9007199254740992\n(1..4).map(j => (c + j) * 1.0)", "[9007199254740992.0, 9007199254740994.0, 9007199254740996.0]"),
             // A FLOAT capture must decline to the bytecode loop, not promote early.
             ("c = 2.5\n(0..4).map(j => (c * j) * 0.5)", "[0.0, 1.25, 2.5, 3.75]"),
@@ -5914,11 +5914,11 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             // `/` is true division: it always promotes to `f64`, so it never wraps — but
             // promotion is not exactness. `MAX / 1` rounds to 2^63 because `i64::MAX` has
             // no `f64` representation. Both failure modes are real and they are different.
-            ("9223372036854775807 / 1", "9223372036854775808.0"),
+            ("9223372036854775807 / 1", "9.223372036854776e18"),
             // `to_int` saturates rather than wrapping or trapping: total for finite input.
             ("to_int(9.3e18)", "9223372036854775807"),
             // `i64::MAX` is not representable as `f64`; the nearest is 2^63.
-            ("to_float(9223372036854775807)", "9223372036854775808.0"),
+            ("to_float(9223372036854775807)", "9.223372036854776e18"),
         ] {
             let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
             assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
@@ -5929,7 +5929,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         for (expr, want) in [
             (format!("{MIN} // (0 - 1)"), "-9223372036854775808"),
             (format!("{MIN} % (-1)"), "0"),
-            (format!("{MIN} / (0 - 1)"), "9223372036854775808.0"),
+            (format!("{MIN} / (0 - 1)"), "9.223372036854776e18"),
         ] {
             let (tw, vm, jit) = (run_tw(&expr), run_vm(&expr), run_vm_jit(&expr));
             assert_eq!(tw, vm, "tree-walker and VM disagree on `{expr}`");
@@ -6661,7 +6661,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
         ] {
             let (tw, vm) = (run_tw(src), run_vm(src));
             assert_eq!(tw, vm, "engines disagree on `{src}`");
-            assert_eq!(vm, Ok("18446744061852497920.0".to_string()), "`{src}`");
+            assert_eq!(vm, Ok("1.8446744061852498e19".to_string()), "`{src}`");
         }
 
         // Errors keep their exact wording AND their precedence: a non-numeric element is
@@ -6843,12 +6843,13 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             ("-9223372036854775807 - 1", "-9223372036854775808"),
             ("-9223372036854775808 == -9223372036854775807 - 1", "true"),
             // an EXPLICIT float keeps its type — the fold reads the digits, not the value
-            ("-9223372036854775808.0", "-9223372036854775808.0"),
+            // (and a Float of that magnitude prints in exponent form)
+            ("-9223372036854775808.0", "-9.223372036854776e18"),
             // ...and a magnitude PAST i64::MIN is still a Float, even though it rounds to
             // the same f64. Deciding from the `f64` would have accepted this one.
-            ("-9223372036854775809", "-9223372036854775808.0"),
+            ("-9223372036854775809", "-9.223372036854776e18"),
             // a positive over-large literal is unchanged
-            ("9223372036854775808", "9223372036854775808.0"),
+            ("9223372036854775808", "9.223372036854776e18"),
             // ordinary negatives
             ("-1", "-1"),
             ("-1.5", "-1.5"),
@@ -6952,7 +6953,7 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             // shifts in range
             ("sl(0, 3, 0.0)", "8.0"),
             ("sl(0, 0, 0.0)", "1.0"),
-            ("sl(0, 63, 0.0)", "-9223372036854775808.0"),
+            ("sl(0, 63, 0.0)", "-9.223372036854776e18"),
             ("sr(0, 4, 0.0)", "16.0"),
             ("sr(0, 63, 0.0)", "0.0"),
             // `i64::MIN` with -1 does NOT raise — it WRAPS — even though the native
@@ -7583,23 +7584,23 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             // interpreter's (i64-wrapped) answer, now produced by every engine.
             (
                 "k = 4611686018427387904\nys = (0..100000).map(it * 1.0)\nys.map(it + (k + k)).first()",
-                "-9223372036854775808.0",
+                "-9.223372036854776e18",
             ),
             (
                 "k = 3037000500\nys = (0..100000).map(it * 1.0)\nys.map(it + k * k).first()",
-                "-9223372036709301248.0",
+                "-9.223372036709301e18",
             ),
             (
                 "k = -9223372036854775808\nys = (0..100000).map(it * 1.0)\nys.map(-k + it).first()",
-                "-9223372036854775808.0",
+                "-9.223372036854776e18",
             ),
             (
                 "ys = (0..100000).map(it * 1.0)\nys.map(it + (9223372036854775807 + 1)).first()",
-                "-9223372036854775808.0",
+                "-9.223372036854776e18",
             ),
             (
                 "k = -9223372036854775808\nys = (0..100000).map(it * 1.0)\nys.map(it + abs(k)).first()",
-                "-9223372036854775808.0",
+                "-9.223372036854776e18",
             ),
             // The SOUND shapes keep their values (and, asserted below, their kernel).
             ("k = 3\nys = (0..100000).map(it * 1.0)\nys.map(it * k).take(3)", "[0.0, 3.0, 6.0]"),
@@ -8118,7 +8119,7 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             // would keep it and end at `1.0`; that difference is the point of this case.
             (
                 "[1e16, 1.0, -1e16].cumsum()",
-                "[10000000000000000.0, 10000000000000000.0, 0.0]",
+                "[1e16, 1e16, 0.0]",
             ),
             ("[1.5, 2.5, 3.5].cumsum()", "[1.5, 4.0, 7.5]"),
             (

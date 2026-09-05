@@ -142,6 +142,9 @@ Scientific results must be accurate to full precision. Two guarantees apply:
 
 - **Output is exact to `f64`.** Floats print via Rust's shortest round-tripping
   representation — for example, `0.5916666666666667` is the exact value, not a truncation.
+  Outside `1e-4 ≤ |x| < 1e16` (the window Python's `repr` uses) the same digits print in
+  exponent form — `2.702159776422298e16`, `1e-5` — so a printed value never shows a digit the
+  double does not hold, and `"{1.5e300}"` is seven characters, not 303.
 - **Aggregations use Neumaier compensated summation.** Naive left-to-right `f64`
   summation silently loses low-order bits when magnitudes differ; `sum`/`mean`/`std`/
   `normalize` all route through Neumaier, accurate to the last ulp even for large or

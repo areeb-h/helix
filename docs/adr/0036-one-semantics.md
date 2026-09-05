@@ -226,7 +226,7 @@ Two remain, both narrow, both recorded so a test can prove the divergence is exa
 the decided one:
 
 - **`**` on Int columns that overflows i64 is an ERROR naming the row, on both
-  backends, where the SCALAR promotes to Float.** `2 ** 63` is `9223372036854775808.0`
+  backends, where the SCALAR promotes to Float.** `2 ** 63` is `9.223372036854776e18`
   on scalars and an error in a frame. The reason is structural: a column has one
   dtype, so the scalar's promote-when-it-does-not-fit rule would make a column's TYPE
   data-dependent per row, which is unrepresentable. The frame refuses what a column

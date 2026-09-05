@@ -381,17 +381,14 @@ pub(crate) fn fmt_int(i: i64) -> String {
     }
 }
 
-/// Like [`fmt_float`] but with grouped integer digits, and scientific notation for
-/// extreme magnitudes (where separators would be noise).
+/// Like [`fmt_float`] but with grouped integer digits. The exponent form for an extreme
+/// magnitude (where separators would be noise) is `fmt_float`'s own decision, so the two
+/// printers switch at the same value — this one used to switch at 1e15 on its own.
 pub(crate) fn fmt_float_rich(x: f64) -> String {
-    if !x.is_finite() {
-        return fmt_float(x);
-    }
-    let a = x.abs();
-    if a != 0.0 && !(1e-4..1e15).contains(&a) {
-        return format!("{x:e}");
-    }
     let base = fmt_float(x);
+    if !x.is_finite() || base.contains('e') {
+        return base;
+    }
     match base.find('.') {
         Some(dot) => {
             let (intp, frac) = base.split_at(dot);
@@ -892,6 +889,13 @@ mod tests {
         assert_eq!(fmt_float_rich(2.0), "2.0");
         assert!(fmt_float_rich(1e20).contains('e'));
         assert!(fmt_float_rich(0.00001).contains('e'));
+        // One rule with `fmt_float`: grouped up to the last value with 16 integer digits,
+        // exponent form from 1e16 — and the exponent form is never grouped.
+        assert_eq!(fmt_float_rich(1e15), "1_000_000_000_000_000.0");
+        assert_eq!(fmt_float_rich(1e16), "1e16");
+        assert_eq!(fmt_float_rich(-2.5e-7), "-2.5e-7");
+        assert_eq!(fmt_float_rich(0.0001), "0.0001");
+        assert_eq!(fmt_float_rich(f64::INFINITY), fmt_float(f64::INFINITY));
     }
 
     #[test]
