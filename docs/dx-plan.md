@@ -319,10 +319,12 @@ array read "compiled" and ran interpreted (measured 2.1× against `abs`'s 22×).
 Floats-source typed map kernels (`float_source_map_eligible` — the mixed family's per-node
 typing with the binder a Float; `mapft`/`mapfti`/`mapftv`/`mapftiv`) close it: 21–26× on the
 five shapes. `jit-explain` names each site's specializations and the source kind it cannot
-serve. STILL OPEN from the same table: a CONDITIONAL in a map body (relu) and `**` are never
-offered — the next increments (a `select`/branch lowering in the typed codegen; `pow` and the
-transcendentals through a host-symbol call to the very Rust function the walker calls, which
-is bit-identical by construction and retires the coverage doc's "permanent exclusion").
+serve. A CONDITIONAL in a map body (relu) followed the same day: the typed analyses admit
+`and`/`or` over comparisons with both branches of one kind, the typed codegen branches and
+merges, an ordering comparison poisons on NaN. STILL OPEN from the same table: `**` and the
+transcendentals are never offered — the next increment (`pow`/`exp`/`log`/`sin`/… through a
+host-symbol call to the very Rust function the walker calls, bit-identical by construction,
+which retires the coverage doc's "permanent exclusion"); and `clamp` (raises when `lo > hi`).
 
 **do_later — captures of MIXED runtime kinds in a map body.** Each marshal assumes one kind for
 every capture: all `Int` (the Int-proven builds), all `Float` (the Float-proven builds, 2026-09-05),

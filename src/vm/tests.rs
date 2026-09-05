@@ -746,6 +746,71 @@
         assert_eq!(run_vm_jit(src).unwrap(), "[-9223372036854775808, -9223372036854775807, -9223372036854775806]");
     }
 
+    /// A CONDITIONAL in a typed map body. `xs.map(if it > 5.0 then it else 0.0)` — relu, the
+    /// commonest activation — was never offered (field build, 1.31; the coverage doc's listed
+    /// cliff): the i64 analysis rejects a Float literal, and neither the monomorphic f64 kernel
+    /// nor the typed analyses had an `if`. The typed analyses admit `and`/`or` over comparisons
+    /// with both branches of one kind; an `if` whose branches differ (an Int or a Float PER
+    /// ELEMENT) declines; a NaN meeting an ordering comparison poisons and re-runs to the
+    /// walker's "cannot compare". Every shape agrees bit-for-bit and engages.
+    #[test]
+    fn a_conditional_in_a_typed_map_body_agrees_and_engages() {
+        let pre = "xs = [1.5, -2.5, 7.25, 0.5, 6.0]\ns = 2.0\nn = 3\n";
+        for body in [
+            "if it > 5.0 then it else 0.0",
+            "if it >= 0.0 then it else -it",
+            "if it > s then it * 2.0 else it",
+            "if it > 1.0 and it < 7.0 then 1.0 else 0.0",
+            "if it > n then to_int(it) else 0",
+            "if it == 0.5 or it > 6.5 then 1 else 2",
+            "if it > 0.0 then sqrt(it) else 0.0 - it",
+            "if it > s then floor(it) else to_int(it)",
+        ] {
+            let src = format!("{pre}xs.map({body})");
+            let tw = run_tw(&src);
+            assert!(tw.is_ok(), "`{body}`: {tw:?}");
+            assert_eq!(tw, run_vm(&src), "tw vs vm: {body}");
+            assert_eq!(tw, run_vm_jit(&src), "tw vs jit: {body}");
+            crate::jit::reset_native_call_count();
+            assert_eq!(run_vm_jit(&format!("{src}.count()")).unwrap(), "5", "{body}");
+            assert!(crate::jit::native_call_count() > 0, "`{body}` over a Floats source did not engage");
+        }
+        // An Int source through the typed builds (a Float root, an Int comparison), and the
+        // value-scalar/Float-proven marshals with a Float capture in the condition.
+        for body in [
+            "if it > 2 then to_float(it) * 0.5 else 0.0",
+            "if it % 2 == 0 then it * s else 0.0",
+            "if it > s then it * s else s",
+            "if it > 2 then it else 0",
+        ] {
+            let src = format!("s = 2.0\nrange(0, 6).map({body})");
+            let tw = run_tw(&src);
+            assert!(tw.is_ok(), "`{body}`: {tw:?}");
+            assert_eq!(tw, run_vm(&src), "tw vs vm: {body}");
+            assert_eq!(tw, run_vm_jit(&src), "tw vs jit: {body}");
+            crate::jit::reset_native_call_count();
+            assert_eq!(run_vm_jit(&format!("{src}.count()")).unwrap(), "6", "{body}");
+            assert!(crate::jit::native_call_count() > 0, "`{body}` over a range did not engage");
+        }
+        // Branches of DIFFERENT kinds: the walker answers an Int or a Float per element; the
+        // kernel declines; the three engines agree.
+        let src = "xs = [1.5, -2.5]\nxs.map(if it > 0.0 then it else 0)";
+        assert_eq!(run_tw(src), run_vm(src));
+        assert_eq!(run_tw(src), run_vm_jit(src));
+        // A NaN meets an ordering comparison: the walker raises, and the poison path re-runs
+        // to the same error. `==` on a NaN is IEEE in both worlds — no raise, no poison.
+        let src = "xs = [1.0, sqrt(0.0 - 1.0), 2.0]\nxs.map(if it > 0.5 then it else 0.0)";
+        let tw = run_tw(src);
+        assert!(tw.is_err(), "{src}: {tw:?}");
+        assert_eq!(tw, run_vm(src));
+        assert_eq!(tw, run_vm_jit(src));
+        let src = "xs = [1.0, sqrt(0.0 - 1.0)]\nxs.map(if it == it then 1.0 else 0.0)";
+        let tw = run_tw(src);
+        assert!(tw.is_ok(), "{src}: {tw:?}");
+        assert_eq!(tw, run_vm(src));
+        assert_eq!(tw, run_vm_jit(src));
+    }
+
     /// MIXED (per-parameter `Int`/`Float`, annotation-typed) tail-recursive functions now
     /// JIT as native loops over the bits ABI (`MixedFn`): Float params cross the FFI as
     /// raw f64 bits, a Float result returns as bits — pure bit moves, so all three

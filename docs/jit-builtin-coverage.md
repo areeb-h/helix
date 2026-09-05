@@ -31,8 +31,12 @@ Found while pinning `floor(it / s)` with a Float `s`: the analysis behind every
 value-scalar and indexed build had no arm for the four rounders (its unindexed twin did),
 so no such build existed for a rounding body on any source. It does now.
 
-Still at interpreter speed, and never offered: a **conditional in a map body**
-(`if it > 5.0 then it else 0.0` — relu) and **`**`**; both are the next increments.
+A **conditional in a map body** (`if it > 5.0 then it else 0.0` — relu) is offered now, in
+every typed body: `and`/`or` over the six comparisons, both branches of one kind (an `if`
+whose branches differ yields an Int or a Float per element, which no packed buffer can hold, so
+it declines), and a NaN meeting an ordering comparison poisons to the walker's "cannot
+compare". Still never offered: **`**`** and the transcendentals — the next increment, a
+host-symbol call to the very Rust function the walker calls, bit-identical by construction.
 
 Helix's JIT compiles a *subset* of expressions. A builtin outside that subset does not merely
 run slower — it **forces the entire enclosing loop onto the bytecode VM**, because eligibility is

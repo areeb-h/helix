@@ -1788,8 +1788,12 @@ pub fn body_raises(e: &Expr, user_fns: &HashSet<&str>, msigs: &MixedSigTable) ->
         Expr::Index { recv, index, .. } => {
             body_raises(recv, user_fns, msigs) || body_raises(index, user_fns, msigs)
         }
+        // A conditional's ORDERING comparison can meet a NaN, where the walker raises
+        // "cannot compare"; `==`/`!=` are IEEE in both worlds. Counted without typing — an
+        // Int comparison cannot raise and then carries a dead poison slot, one store at exit.
         Expr::If { cond, then_branch, else_branch, .. } => {
-            body_raises(cond, user_fns, msigs)
+            cond_has_ordering(cond)
+                || body_raises(cond, user_fns, msigs)
                 || body_raises(then_branch, user_fns, msigs)
                 || body_raises(else_branch, user_fns, msigs)
         }
@@ -2116,7 +2120,70 @@ fn infer_mixed_kind(
                 None // an i64-only op with a Float operand is not a valid Helix expression
             }
         }
+        // A CONDITIONAL. `xs.map(if it > 5.0 then it else 0.0)` — relu, the commonest
+        // activation — was never offered (field build, 1.31; the coverage doc's listed cliff):
+        // the i64 analysis rejects a Float literal, and neither the monomorphic f64 kernel nor
+        // this typing had an `if`. The condition is `and`/`or` over the six comparisons
+        // (`typed_cond_ok`, the twin of `gen_cond_typed`); both branches must have the SAME
+        // kind, because an `if` whose branches differ yields an Int or a Float PER ELEMENT in
+        // the walker — an array no packed buffer can hold — so that shape declines. A Float
+        // ordering comparison can meet a NaN, where the walker RAISES "cannot compare";
+        // `body_raises` counts the conditional, so the kernel carries the poison accumulator
+        // `gen_cond_typed` ORs `fcmp Unordered` into, and the VM re-runs the bytecode loop.
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            typed_cond_ok(cond, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+            let t = infer_mixed_kind(then_branch, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+            let e = infer_mixed_kind(else_branch, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+            (t == e).then_some(t)
+        }
         _ => None,
+    }
+}
+
+/// A typed map body's CONDITION: `and`/`or` over the six comparisons, each comparing two
+/// typed operands — an Int against a Float promotes, as the walker's comparison does. The
+/// twin of `gen_cond_typed`, which emits exactly these and nothing else.
+#[allow(clippy::too_many_arguments)]
+fn typed_cond_ok(
+    e: &Expr,
+    binder: &str,
+    bk: NumKind,
+    ck: NumKind,
+    uses_binder: &mut bool,
+    caps: &mut Vec<Capture>,
+    fns: &HashSet<&str>,
+    user_fns: &HashSet<&str>,
+    msigs: &MixedSigTable,
+) -> Option<()> {
+    match e {
+        Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
+            typed_cond_ok(left, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+            typed_cond_ok(right, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)
+        }
+        Expr::Binary {
+            op: BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne,
+            left,
+            right,
+            ..
+        } => {
+            infer_mixed_kind(left, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+            infer_mixed_kind(right, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+/// Whether a condition holds an ORDERING comparison (`<`, `<=`, `>`, `>=`) — the one
+/// place a NaN makes the walker raise, so a body containing it needs the poison slot.
+/// `==`/`!=` are IEEE in both worlds.
+fn cond_has_ordering(e: &Expr) -> bool {
+    match e {
+        Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
+            cond_has_ordering(left) || cond_has_ordering(right)
+        }
+        Expr::Binary { op: BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge, .. } => true,
+        _ => false,
     }
 }
 
@@ -2476,6 +2543,51 @@ fn infer_mixed_kind_indexed(
             } else {
                 None
             }
+        }
+        // A conditional, under the `MixT` rule: a comparison may not pit a value scalar
+        // against an `Int` or another value scalar (the walker would compare in i64 where the
+        // kernel compares in f64); both branches one kind, never a bare value scalar — as in
+        // the unindexed twin (`infer_mixed_kind`'s `If` arm).
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            mixt_cond_ok(cond, binder, bk, out, fns, user_fns, msigs)?;
+            let t = infer_mixed_kind_indexed(then_branch, binder, bk, out, fns, user_fns, msigs)?;
+            let e = infer_mixed_kind_indexed(else_branch, binder, bk, out, fns, user_fns, msigs)?;
+            (t == e && t != MixT::SFloat).then_some(t)
+        }
+        _ => None,
+    }
+}
+
+/// The `MixT` condition rule: `and`/`or` over the six comparisons, where a value scalar
+/// compares safely only against a GENUINE float.
+fn mixt_cond_ok(
+    e: &Expr,
+    binder: &str,
+    bk: MixT,
+    out: &mut IndexedOut,
+    fns: &HashSet<&str>,
+    user_fns: &HashSet<&str>,
+    msigs: &MixedSigTable,
+) -> Option<()> {
+    match e {
+        Expr::Binary { op: BinOp::And | BinOp::Or, left, right, .. } => {
+            mixt_cond_ok(left, binder, bk, out, fns, user_fns, msigs)?;
+            mixt_cond_ok(right, binder, bk, out, fns, user_fns, msigs)
+        }
+        Expr::Binary {
+            op: BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne,
+            left,
+            right,
+            ..
+        } => {
+            let l = infer_mixed_kind_indexed(left, binder, bk, out, fns, user_fns, msigs)?;
+            let r = infer_mixed_kind_indexed(right, binder, bk, out, fns, user_fns, msigs)?;
+            let ok = match (l, r) {
+                (MixT::SFloat, MixT::GFloat) | (MixT::GFloat, MixT::SFloat) => true,
+                (MixT::SFloat, _) | (_, MixT::SFloat) => false,
+                _ => true,
+            };
+            ok.then_some(())
         }
         _ => None,
     }

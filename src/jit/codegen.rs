@@ -3151,7 +3151,94 @@ fn gen_value_typed<'a>(
             }
             _ => unreachable!("ineligible call reached cx.mixed codegen"),
         },
+        // A conditional: the twin of `infer_mixed_kind`'s `If` arm. Both branches have the
+        // SAME kind (the analysis requires it), so one variable of that type merges them —
+        // the shape `gen_value`'s monomorphic `If` uses; the else branch's kind is asserted.
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            let then_b = b.create_block();
+            let else_b = b.create_block();
+            let merge_b = b.create_block();
+            let cv = gen_cond_typed(b, cond, cx);
+            b.ins().brif(cv, then_b, &[], else_b, &[]);
+            b.switch_to_block(then_b);
+            b.seal_block(then_b);
+            let (tv, tk) = gen_value_typed(b, then_branch, cx);
+            let rvar = b.declare_var(tk.cl_type());
+            b.def_var(rvar, tv);
+            b.ins().jump(merge_b, &[]);
+            b.switch_to_block(else_b);
+            b.seal_block(else_b);
+            let (ev, ek) = gen_value_typed(b, else_branch, cx);
+            debug_assert!(ek == tk, "if-branch kinds drifted between analysis and codegen");
+            b.def_var(rvar, ev);
+            b.ins().jump(merge_b, &[]);
+            b.switch_to_block(merge_b);
+            b.seal_block(merge_b);
+            (b.use_var(rvar), tk)
+        }
         _ => unreachable!("ineligible node reached cx.mixed codegen"),
+    }
+}
+
+/// A typed body's condition (`typed_cond_ok` / `mixt_cond_ok` admitted it): `and`/`or` as
+/// non-short-circuit `band`/`bor` over i1s — exact for i64 comparisons and CONSERVATIVE for
+/// Float ones, as in `gen_cond` — and each comparison typed per operand: two `Int`s compare
+/// as `i64`, anything else promotes the Int side and compares as `f64`. An ordering
+/// comparison on floats ORs `fcmp Unordered` into the kernel's poison accumulator, because
+/// the walker RAISES on a NaN there; `==`/`!=` are IEEE in both worlds and need no poison.
+fn gen_cond_typed<'a>(
+    b: &mut FunctionBuilder,
+    e: &'a Expr,
+    cx: &mut TypedCtx<'a, '_>,
+) -> ClValue {
+    match e {
+        Expr::Binary { op: BinOp::And, left, right, .. } => {
+            let l = gen_cond_typed(b, left, cx);
+            let r = gen_cond_typed(b, right, cx);
+            b.ins().band(l, r)
+        }
+        Expr::Binary { op: BinOp::Or, left, right, .. } => {
+            let l = gen_cond_typed(b, left, cx);
+            let r = gen_cond_typed(b, right, cx);
+            b.ins().bor(l, r)
+        }
+        Expr::Binary { op, left, right, .. } => {
+            let (lv, lk) = gen_value_typed(b, left, cx);
+            let (rv, rk) = gen_value_typed(b, right, cx);
+            if lk == NumKind::Int && rk == NumKind::Int {
+                let cc = match op {
+                    BinOp::Lt => IntCC::SignedLessThan,
+                    BinOp::Gt => IntCC::SignedGreaterThan,
+                    BinOp::Le => IntCC::SignedLessThanOrEqual,
+                    BinOp::Ge => IntCC::SignedGreaterThanOrEqual,
+                    BinOp::Eq => IntCC::Equal,
+                    BinOp::Ne => IntCC::NotEqual,
+                    _ => unreachable!("only comparisons reach typed cond codegen"),
+                };
+                b.ins().icmp(cc, lv, rv)
+            } else {
+                let lf = if lk == NumKind::Int { b.ins().fcvt_from_sint(F64, lv) } else { lv };
+                let rf = if rk == NumKind::Int { b.ins().fcvt_from_sint(F64, rv) } else { rv };
+                let cc = match op {
+                    BinOp::Lt => FloatCC::LessThan,
+                    BinOp::Gt => FloatCC::GreaterThan,
+                    BinOp::Le => FloatCC::LessThanOrEqual,
+                    BinOp::Ge => FloatCC::GreaterThanOrEqual,
+                    BinOp::Eq => FloatCC::Equal,
+                    BinOp::Ne => FloatCC::NotEqual,
+                    _ => unreachable!("only comparisons reach typed cond codegen"),
+                };
+                if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
+                    let uno = b.ins().fcmp(FloatCC::Unordered, lf, rf);
+                    let uno64 = b.ins().uextend(I64, uno);
+                    let pv = b.use_var(cx.poison);
+                    let npv = b.ins().bor(pv, uno64);
+                    b.def_var(cx.poison, npv);
+                }
+                b.ins().fcmp(cc, lf, rf)
+            }
+        }
+        _ => unreachable!("ineligible condition reached typed cond codegen"),
     }
 }
 

@@ -256,6 +256,15 @@
   builds (both sources, both roots) take `it * s`, `it + s`, `to_int(it * s)`: measured
   1.0× → 16× on 3M elements. An Int capture at the same site still takes the i64 build and
   wraps as the walker wraps.
+- **A conditional in a map body reaches native code.** `xs.map(if it > 5.0 then it else 0.0)`
+  — relu, the commonest activation — was never offered to the JIT (field build, 1.31; the
+  coverage doc's listed cliff): the i64 analysis rejects a Float literal, and neither the
+  monomorphic `f64` kernel nor the typed analyses had an `if`. Every typed body takes one
+  now — `and`/`or` over the six comparisons, both branches of one kind (an `if` whose branches
+  differ yields an Int or a Float per element, which no packed buffer can hold, so it declines
+  and the walker answers), a NaN meeting an ordering comparison poisoning to the walker's
+  "cannot compare", `==` on a NaN staying IEEE. Pinned by
+  `a_conditional_in_a_typed_map_body_agrees_and_engages` on three engines.
 - **`jit-explain` names each `map` site's specializations, and says when a source kind has
   none.** "compiled" counted any specialization, so a site with an Int-source build and no
   Float-source one read the same as one with both. A row now reads `compiled (i64) — a
