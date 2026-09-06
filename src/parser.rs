@@ -1632,9 +1632,13 @@ impl Parser {
         bindings: &mut Vec<(String, Expr)>,
         tmp: String,
     ) -> Result<(), HelixError> {
-        let shape = "destructuring looks like `let {where, limit} = spec in …`.";
+        let shape = "destructuring looks like `let {where, limit: lim} = spec in …`.";
         self.eat(&Tok::LBrace, "to start the fields to destructure")?;
-        let mut names: Vec<(String, usize, usize)> = Vec::new();
+        // (field, binder, line, col) — the binder is the field's own name, or the name
+        // after a colon: `{select: sel}` reads the field `select` and binds `sel`, so a
+        // module that DEFINES `select` can still destructure a spec that names it (field
+        // build, 1.43; ADR 0046's addendum).
+        let mut names: Vec<(String, String, usize, usize)> = Vec::new();
         loop {
             self.skip_newlines();
             if matches!(self.peek(), Tok::RBrace) && !names.is_empty() {
@@ -1642,15 +1646,14 @@ impl Parser {
             }
             let (nl, nc) = self.pos();
             let name = self.ident_name("as a field to destructure")?;
-            if matches!(self.peek(), Tok::Colon) {
-                return Err(HelixError::new(
-                    format!("`{name}:` — a destructured field binds under its own name"),
-                    nl,
-                    nc,
-                )
-                .hint(format!("to bind it under another name, read it directly: `x = spec.{name}`.")));
-            }
-            names.push((name, nl, nc));
+            let binder = if matches!(self.peek(), Tok::Colon) {
+                self.advance();
+                self.ident_name("to bind the field under")
+                    .map_err(|e| e.hint(format!("`{{{name}: other}}` reads the field `{name}` and binds `other`.")))?
+            } else {
+                name.clone()
+            };
+            names.push((name, binder, nl, nc));
             self.skip_newlines();
             if matches!(self.peek(), Tok::Comma) {
                 self.advance();
@@ -1663,9 +1666,9 @@ impl Parser {
         self.eat(&Tok::Eq, "after the fields to destructure").map_err(|e| e.hint(shape))?;
         let value = self.expr()?;
         bindings.push((tmp.clone(), value));
-        for (name, nl, nc) in names {
+        for (name, binder, nl, nc) in names {
             let recv = Box::new(Expr::Ident { name: tmp.clone(), line: nl, col: nc });
-            bindings.push((name.clone(), Expr::FieldOrMissing { recv, name, line: nl, col: nc }));
+            bindings.push((binder, Expr::FieldOrMissing { recv, name, line: nl, col: nc }));
         }
         Ok(())
     }
@@ -1724,6 +1727,23 @@ impl Parser {
             i += 1;
             while matches!(tok(i), Some(Tok::Newline)) {
                 i += 1;
+            }
+            // `field: binder` — the rename form (ADR 0046 addendum). A record LITERAL
+            // `{a: 1}` has a value after the colon, not a name, so it still reads as one;
+            // `{a: b}` with a name is a destructure only when `=` follows, which the check
+            // below still requires.
+            if matches!(tok(i), Some(Tok::Colon)) {
+                i += 1;
+                while matches!(tok(i), Some(Tok::Newline)) {
+                    i += 1;
+                }
+                if !matches!(tok(i), Some(Tok::Ident(_))) {
+                    return false;
+                }
+                i += 1;
+                while matches!(tok(i), Some(Tok::Newline)) {
+                    i += 1;
+                }
             }
             match tok(i) {
                 Some(Tok::Comma) => {

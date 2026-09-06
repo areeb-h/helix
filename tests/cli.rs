@@ -15452,9 +15452,10 @@ fn record_destructuring_reads_fields_and_answers_missing_for_absent_ones() {
         assert_ne!(code, Some(0));
         assert!(err.contains("cannot destructure an Int: it has no fields"), "{env:?}: {err}");
     }
-    let (_, err, code) = run_source("print(let {a: x} = {a: 1} in x)\n", &[], "destructure_rename");
-    assert_ne!(code, Some(0));
-    assert!(err.contains("binds under its own name") && err.contains("`x = spec.a`"), "{err}");
+    // `{a: x}` is the rename form (ADR 0046 addendum; `a_destructure_may_rename_a_field`).
+    let (out, err, code) = run_source("print(let {a: x} = {a: 1} in x)\n", &[], "destructure_rename");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "1\n");
 }
 
 /// The receiver answers before the arguments are read (1.40): `"s".map(it)` says a String
@@ -16351,4 +16352,28 @@ fn the_pair_statistics_and_based_to_int_refuse_in_words() {
             assert!(err.contains(want), "{name}: {src}\n--- wanted `{want}` in ---\n{err}");
         }
     }
+}
+
+/// A destructure may rename: `{select: sel}` reads the field `select` and binds `sel`, so a
+/// module that defines `select` can destructure a spec that names it (field build, 1.43). In
+/// `let`, in `do`, and at the top level; an absent field is `missing` under the new name.
+#[test]
+fn a_destructure_may_rename_a_field() {
+    let src = "fn select(a, b) = a + b\nfn build(spec) = let {select: sel, limit: lim} = spec in select(lim, sel)\nfn twice(r) = do {\n  {a: first, b} = r\n  first * 2 + b\n}\n{a: x, b} = {a: 1, b: 2}\nprint(build({select: 1, limit: 2}), build({limit: 5}), twice({a: 4, b: 1}), x, b)\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("rename_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "3 missing 9 1 2\n", "{name}");
+    }
+    // A literal written right there is refused for a name it lacks, under either binder;
+    // a known shape reached any other way answers `missing` (ADR 0046's 2026-09-06 addendum).
+    let (_, err, code) = run_source("let {b: x} = {a: 1} in x\n", &[], "rename_bad");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("no field `b`"), "{err}");
+    let (out, err, code) = run_source("r = {a: 1}\nprint(let {b: x} = r in x)\n", &[], "rename_absent");
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out, "missing\n");
+    let (_, err, code) = run_source("let {a: 5} = {a: 1} in 1\n", &[], "rename_bad2");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("to bind the field under"), "{err}");
 }

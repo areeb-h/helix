@@ -4,6 +4,14 @@
 
 ### Added
 
+- **A destructure may rename a field: `let {select: sel, limit} = spec in …`.** `{a: x}` was
+  refused and pointed at `x = spec.a`; in the module that defines the verbs a spec names,
+  `let {select} = spec` bound the Array over the function, so the query builder shaped
+  exactly like ADR 0046's motivating example could not use the form (field build, 1.43). The
+  rename is the same desugar with the binder chosen, in `let`, in `do` and at the top level.
+  The reference gained a `destructure` entry (it had none). Pinned by
+  `a_destructure_may_rename_a_field`; ADR 0046 addendum.
+
 - **`to_int(s, base)`, `xs.corr(ys)` / `xs.cov(ys, ddof?)`, `df.records()` / `df.schema()`.** Four
   primitives the field's fifth report listed as absent, verified absent on main. `to_int("ff",
   16)` reads a string's digits in a base from 2 to 36 (a leading `-` allowed, a `0x` prefix

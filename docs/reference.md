@@ -1832,6 +1832,20 @@ Define a function. Parameter and return annotations are optional, checked by `he
 12
 ```
 
+### `destructure`
+
+Bind fields of a record by name; an absent field is `missing`, and `field: name` binds it under another name.
+
+`let {where, limit: lim} = spec in expr`
+
+**Note:** The statement form `{where, limit} = spec` works at the top level and inside `do { }` (with `mut` and `export` as for any assignment). The value is evaluated once; each read is `spec.field` that answers `missing` instead of refusing an absent field. Where the checker knows the record's shape, a name it cannot have is refused. Rename a field when the name is taken — a module that defines `select` destructures a spec's `select` as `{select: sel}`. Keywords: pattern, unpack, fields, spec, options record, rename, alias.
+
+```
+>>> fn build(spec) = let {where, limit: lim} = spec in "{where} {lim}"
+>>> print(build({where: "x"}), build({where: "y", limit: 3}))
+x missing y 3
+```
+
 ### `lambda`
 
 An anonymous function value, bindable to a name or passed to a method.

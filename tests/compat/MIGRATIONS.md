@@ -160,3 +160,7 @@ no entry. A source edit is not a behavior change.
   `{order} = spec`) of a known shape answers `missing` for an absent field, and is refused for
   a name only when the record is a literal written right there — so a spec built by a
   constructor destructures as it always did. No corpus program or golden moved.
+
+- **`{a: x}` in a destructure is the rename form** (2026-09-06). It was refused ("`a:` — a
+  destructured field binds under its own name"); it reads `a` and binds `x` now. Additive: no
+  program that ran used the spelling.

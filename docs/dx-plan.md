@@ -335,6 +335,10 @@ along; the documented signature `std()` made the checker refuse the argument —
 generated from `docs.rs`, so the fix was the entry. A quoted key in a record brace is a field
 (printed back quoted when not an identifier; `field_key_display`), the query-builder shape.
 
+**1.43 (2026-09-06) — destructure rename.** DONE: `destructure_record` reads an optional
+`: binder` per field (both the `let` and the statement form share it); a syntax entry
+`destructure` documents the form, which the reference had never listed. Nesting stays out.
+
 **The absent primitives (2026-09-06).** DONE: `to_int(s, base)` (free + String method;
 `parse_str_int_radix`), `corr`/`cov` Array methods (`stats::covariance`; `corr` errors on a
 constant series exactly as `correlation` does), `df.records()` (via `writers::tabular`) and

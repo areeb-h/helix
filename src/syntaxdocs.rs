@@ -130,6 +130,19 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed.",
     },
     SyntaxDoc {
+        name: "destructure",
+        form: "let {where, limit: lim} = spec in expr",
+        doc: "Bind fields of a record by name; an absent field is `missing`, and `field: name` binds it under another name.",
+        example: "fn build(spec) = let {where, limit: lim} = spec in \"{where} {lim}\"\nprint(build({where: \"x\"}), build({where: \"y\", limit: 3}))",
+        example_out: "x missing y 3",
+        notes: "The statement form `{where, limit} = spec` works at the top level and inside `do { }` \
+                (with `mut` and `export` as for any assignment). The value is evaluated once; each read is \
+                `spec.field` that answers `missing` instead of refusing an absent field. Where the checker \
+                knows the record's shape, a name it cannot have is refused. Rename a field when the name \
+                is taken — a module that defines `select` destructures a spec's `select` as `{select: sel}`. \
+                Keywords: pattern, unpack, fields, spec, options record, rename, alias.",
+    },
+    SyntaxDoc {
         name: "lambda",
         form: "(x) => expr",
         doc: "An anonymous function value, bindable to a name or passed to a method.",

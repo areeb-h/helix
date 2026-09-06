@@ -54,10 +54,9 @@ fn render(spec) = do {
   words `.a` uses. Where the shape is `Unknown`, the read is `Unknown`. A receiver the
   checker can prove has no fields (`let {a} = 5`) is refused there; one it cannot see is
   refused by both engines at run time, with the same sentence.
-- **No renames, no nesting.** `{a: x}` is refused with the spelling that does what was
-  meant (`x = spec.a`); the field binds under its own name. Nested patterns are not in this
-  decision. (The top-level statement form was excluded at first and landed the same day —
-  see the addendum.)
+- **No nesting.** Nested patterns are not in this decision. (The top-level statement form
+  was excluded at first and landed the same day; the rename form `{a: x}` was excluded and
+  landed two days later — see the addenda.)
 
 ## Consequences
 
@@ -107,3 +106,15 @@ a destructure of a record LITERAL written right there is refused for a name it l
 typo, `limt` for `limit`, still caught with the did-you-mean); a destructure of any other
 known shape answers `missing` for an absent field, exactly as the form promises. The checker
 tracks the `$rec<N>` temporaries bound to a literal (`literal_temps`); nothing else changes.
+
+## Addendum 2026-09-06 — the rename form
+
+`let {select: sel, limit} = spec in …` reads the field `select` and binds `sel`. The
+decision above refused `{a: x}` and pointed at `x = spec.a`; the field build's query builder
+— this ADR's own motivating example — showed why that is not enough: in the module that
+DEFINES the verbs, `let {select} = spec in select(q, [c])` binds the Array over the function
+(`db/pg.helix` exports `from`, `where`, `select`, `order`, `limit`, `offset`, `join`, all
+also spec keys), so the module shaped exactly like the example was the one that could not
+use the form (1.43). The rename is the same desugar with the binder chosen — one
+`FieldOrMissing` read per field, bound under the name after the colon — in `let` and in the
+statement form alike, so the engines and the checker see nothing new. Nesting stays out.
