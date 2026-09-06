@@ -1,0 +1,11 @@
+# to_int(s, base), corr/cov, df.records()/df.schema() — the primitives the field's fifth report
+# found absent; the frame ones on both backends (dfdiff).
+print(to_int("ff", 16), to_int("-1011", 2), "zz".to_int(36), to_int("42"), to_int(" 7 ", 8))
+xs = [1, 2, 3, 4]
+ys = [2, 4, 6, 9]
+print(xs.corr(ys), xs.cov(ys), xs.cov(ys, 1), [1, missing].corr([1, 2]))
+d = dataframe({a: [1, 2], b: ["x", "y"], c: [1.5, missing], f: [true, false]})
+print(d.records())
+print(d.schema())
+print(d.records().map(it.a * 10), d.schema().map(it.type))
+print(dataframe({n: [missing, missing]}).schema())

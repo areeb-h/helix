@@ -16332,3 +16332,23 @@ fn an_argument_dependent_shape_crosses_the_module_boundary() {
         assert_eq!(out, "2 user\n", "{name}");
     }
 }
+
+/// The primitives' refusals, in words, on every engine: a bad base, a prefixed string in a base,
+/// unequal lengths for `corr`, a constant series, a ddof too large for `cov`.
+#[test]
+fn the_pair_statistics_and_based_to_int_refuse_in_words() {
+    for (src, want) in [
+        ("print(to_int(\"ff\", 1))\n", "needs a base from 2 to 36"),
+        ("print(to_int(\"0xff\", 16))\n", "in base 16"),
+        ("print(to_int(3, 16))\n", "a string when a base is given"),
+        ("print([1, 2].corr([1, 2, 3]))\n", "same length"),
+        ("print([1, 1].corr([1, 2]))\n", "zero variance"),
+        ("print([1, 2].cov([1, 2], 2))\n", "ddof"),
+    ] {
+        for (name, env) in ENGINES {
+            let (_, err, code) = run_source(src, env, &format!("prims_{name}"));
+            assert_ne!(code, Some(0), "{name}: {src}");
+            assert!(err.contains(want), "{name}: {src}\n--- wanted `{want}` in ---\n{err}");
+        }
+    }
+}

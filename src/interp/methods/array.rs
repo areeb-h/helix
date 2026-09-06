@@ -684,6 +684,57 @@ pub(crate) fn array_method(
             empty_guard(&xs, "quantile", line, col)?;
             Ok(Value::Float(crate::stats::quantile(&xs, p)))
         }
+        // `xs.corr(ys)` and `xs.cov(ys, ddof?)` — the pair statistics, as methods, beside the
+        // free `correlation(xs, ys)`: the same missing rule as `dot` (a missing anywhere makes
+        // the answer missing), the same length rule as `correlation`, and `cov` takes the ddof
+        // `var` takes (population by default, `cov(ys, 1)` for the sample estimator).
+        "corr" | "cov" => {
+            let max_args = if name == "cov" { 2 } else { 1 };
+            if args.is_empty() || args.len() > max_args {
+                return Err(HelixError::new(
+                    if name == "cov" {
+                        format!("`cov` takes an array and an optional ddof, got {} arguments", args.len())
+                    } else {
+                        format!("`corr` takes one array, got {} arguments", args.len())
+                    },
+                    line,
+                    col,
+                )
+                .hint("e.g. `xs.corr(ys)`, `xs.cov(ys)`, `xs.cov(ys, 1)`."));
+            }
+            let other = match &args[0] {
+                Value::Array(a) => a.to_values(),
+                Value::Missing => return Ok(Value::Missing),
+                o => return Err(type_err(name, "an array", o, line, col)),
+            };
+            let ddof = if name == "cov" { parse_ddof(name, &args[1..], line, col)? } else { 0 };
+            if items.iter().chain(other.iter()).any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            let xs = numeric_vec(items, name, line, col)?;
+            let ys = numeric_vec(&other, name, line, col)?;
+            if xs.len() != ys.len() {
+                return Err(HelixError::new(
+                    format!("`{name}` needs two arrays of the same length, got {} and {}", xs.len(), ys.len()),
+                    line,
+                    col,
+                ));
+            }
+            empty_guard(&xs, name, line, col)?;
+            if name == "corr" {
+                return match crate::stats::pearson(&xs, &ys) {
+                    Some(r) => Ok(Value::Float(r)),
+                    None => Err(HelixError::new(
+                        "correlation is undefined: one of the series has zero variance",
+                        line,
+                        col,
+                    )
+                    .hint("a constant series has no spread to correlate.")),
+                };
+            }
+            ddof_fits(&xs, ddof, name, line, col)?;
+            Ok(Value::Float(crate::stats::covariance(&xs, &ys, ddof)))
+        }
         "summary" => {
             no_args(name)?;
             if let Some(v) = degenerate_reduction(items) {

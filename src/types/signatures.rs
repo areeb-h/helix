@@ -868,8 +868,9 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             Ok(Type::Float)
         }
         "to_int" => {
-            if args.len() != 1 {
-                return Err(arity_err("to_int", 1, 1, args.len(), line, col));
+            // `to_int(x)`, or `to_int(s, base)`.
+            if args.is_empty() || args.len() > 2 {
+                return Err(arity_err("to_int", 1, 2, args.len(), line, col));
             }
             Ok(Type::Int)
         }
@@ -1113,7 +1114,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
 
 pub(super) fn array_method_type(name: &str, el: &Type, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "mean" | "std" | "median" | "var" | "quantile" => Type::Float,
+        "mean" | "std" | "median" | "var" | "quantile" | "corr" | "cov" => Type::Float,
         // A descriptive overview record (the `describe()` analogue).
         "summary" => Type::Record(vec![
             ("count".to_string(), Type::Int),
@@ -1402,6 +1403,12 @@ pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type
         "group" => Type::GroupBy,
         "count" => Type::Int,
         "columns" => Type::Array(Box::new(Type::String)),
+        // Rows as records (the frame's schema is a runtime boundary, so the shape is open).
+        "records" => Type::Array(Box::new(Type::AnyRecord)),
+        "schema" => Type::Array(Box::new(Type::Record(vec![
+            ("name".to_string(), Type::String),
+            ("type".to_string(), Type::String),
+        ]))),
         // One column's values as an array; element type is the runtime schema boundary.
         "column" => array_of_unknown(),
         // serialize/write the frame

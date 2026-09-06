@@ -109,7 +109,22 @@ pub(super) fn a_dict(args: Vec<Value>, line: usize, col: usize) -> Result<Value,
 
 #[inline]
 pub(super) fn a_to_int(name: &str, args: Vec<Value>, line: usize, col: usize) -> Result<Value, HelixError> {
-        arity(name, &args, 1, line, col)?;
+        if args.is_empty() || args.len() > 2 {
+            return Err(crate::interp::arity_err(name, 1, 2, args.len(), line, col));
+        }
+        // `to_int(s, base)` — a base names how a STRING's digits read (field build: the one
+        // conversion a config or hex id needs); a number takes no base.
+        if args.len() == 2 {
+            let base = match &args[1] {
+                Value::Int(b) => *b,
+                other => return Err(type_err("to_int", "a base (an Int from 2 to 36)", other, line, col)),
+            };
+            return match &args[0] {
+                Value::Str(s) => super::parse_str_int_radix(s, base, line, col),
+                Value::Missing => Ok(Value::Missing),
+                other => Err(type_err("to_int", "a string when a base is given", other, line, col)),
+            };
+        }
         use num_traits::ToPrimitive;
         match &args[0] {
             Value::Int(i) => Ok(Value::Int(*i)),

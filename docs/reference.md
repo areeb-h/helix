@@ -310,13 +310,15 @@ Parse a string as a Float (an error names the offending text).
 2.5
 ```
 
-### `to_int(s)`
+### `to_int(s, base?)`
 
-Parse a string as an Int (an error names the offending text).
+Parse a string as an Int (an error names the offending text); with a base from 2 to 36, read the digits in that base.
+
+**Note:** `to_int(x)` also truncates a Float toward zero. In a named base the letters a-z stand for the digits past 9, a leading `-` is allowed, and a `0x`/`0b` prefix is refused. Keywords: parse, hex, binary, octal, radix, base, integer.
 
 ```
->>> to_int("42")
-42
+>>> to_int("ff", 16)
+255
 ```
 
 ## crypto
@@ -2041,6 +2043,17 @@ Whether any element equals x (structural equality).
 true
 ```
 
+### `corr(ys)`
+
+The Pearson correlation of this array with another of the same length.
+
+**Note:** The method spelling of `correlation(xs, ys)`: a missing anywhere makes the answer missing, a constant series is an error (no spread to correlate). Keywords: pearson, correlation coefficient, r, relationship.
+
+```
+>>> [1, 2, 3].corr([2, 4, 6])
+1.0
+```
+
 ### `count()`
 
 The number of elements, counting missing slots too.
@@ -2057,6 +2070,17 @@ The number of elements for which the predicate is true.
 ```
 >>> [1, -2, 3].count_where(x => x > 0)
 2
+```
+
+### `cov(ys, ddof?)`
+
+The covariance of this array with another of the same length: population (divide by n) by default; `cov(ys, 1)` divides by n−1 for the sample estimator.
+
+**Note:** The same ddof rule as `var`; a missing anywhere makes the answer missing. Keywords: covariance, joint variance, spread, relationship.
+
+```
+>>> [1, 2, 3].cov([2, 4, 6], 1)
+2.0
 ```
 
 ### `cumsum()`
@@ -3033,13 +3057,13 @@ Parse a numeric string as a Float.
 3.14
 ```
 
-### `to_int()`
+### `to_int(base?)`
 
-Parse an integer string as an Int.
+Parse an integer string as an Int; with a base from 2 to 36, read the digits in that base.
 
 ```
->>> "42".to_int()
-42
+>>> "ff".to_int(16)
+255
 ```
 
 ### `trim()`
@@ -3659,6 +3683,17 @@ Join with another frame on key column(s); a trailing string or options record pi
 1
 ```
 
+### `records()`
+
+The rows as an array of records, one field per column.
+
+**Note:** The shape `to_json` serializes, without the round trip. Keywords: rows, to_records, iterate, each row, dicts.
+
+```
+>>> dataframe({a: [1, 2], b: ["x", "y"]}).records()
+[{a: 1, b: "x"}, {a: 2, b: "y"}]
+```
+
 ### `rename(old, new)`
 
 The same column under a different name, in the same position.
@@ -3668,6 +3703,17 @@ The same column under a different name, in the same position.
 ```
 >>> dataframe({a: [1, 2], b: [3, 4]}).rename("a", "z").columns()
 ["z", "b"]
+```
+
+### `schema()`
+
+Each column's name and Helix type — `Int`, `Float`, `Bool`, `String`, or `Missing` for a column with no present value — as records.
+
+**Note:** The names `type_of` uses, on both frame engines. Keywords: dtypes, columns, types, describe, introspect.
+
+```
+>>> dataframe({a: [1, 2], b: ["x", "y"]}).schema()
+[{name: "a", type: "Int"}, {name: "b", type: "String"}]
 ```
 
 ### `select(@col, ...)`

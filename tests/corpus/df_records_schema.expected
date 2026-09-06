@@ -1,0 +1,13 @@
+exit: 1
+--- stdout ---
+255 -11 1295 42 7
+0.9943767126843689 2.875 3.8333333333333335 missing
+[{a: 1, b: "x", c: 1.5, f: true}, {a: 2, b: "y", c: missing, f: false}]
+[{name: "a", type: "Int"}, {name: "b", type: "String"}, {name: "c", type: "Float"}, {name: "f", type: "Bool"}]
+[10, 20] ["Int", "String", "Float", "Bool"]
+--- stderr ---
+error: cannot infer the type of column `n` (empty or all `missing`)
+  --> <src>:11:7
+   |
+11 | print(dataframe({n: [missing, missing]}).schema())
+   |       ^

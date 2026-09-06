@@ -385,6 +385,10 @@ pub trait DataHandle {
     fn as_any(&self) -> &dyn std::any::Any;
 
     fn column_names(&self, line: usize, col: usize) -> Result<Vec<String>, HelixError>;
+    /// Each column's name and its Helix type name — `Int`, `Float`, `Bool`, `String`, or
+    /// `Missing` for a column with no present value — the answer `df.schema()` gives. Both
+    /// backends name the types the way `type_of` does, so a script can branch on them.
+    fn column_kinds(&self, line: usize, col: usize) -> Result<Vec<(String, String)>, HelixError>;
     fn filter(&self, pred: &ColExpr, line: usize, col: usize) -> Result<Df, HelixError>;
     fn select(&self, names: &[String], line: usize, col: usize) -> Result<Df, HelixError>;
 

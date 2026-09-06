@@ -363,7 +363,7 @@ pub static UNIVERSAL_METHODS: &[&str] = &["is_missing", "to_json"];
 /// Array methods (comprehension verbs, aggregations, statistics, transforms,
 /// descriptive stats, charts, and tabular export/write).
 pub static ARRAY_METHODS: &[&str] = &[
-    "mean", "std", "median", "var", "quantile", "summary", "sum", "min", "max", "count", "length",
+    "mean", "std", "median", "var", "quantile", "corr", "cov", "summary", "sum", "min", "max", "count", "length",
     "index_of", "normalize", "sort", "reverse", "first", "last", "map", "filter", "where", "reduce",
     "scan", "any",
     "all", "take", "drop", "take_while", "drop_while", "position", "zip", "enumerate", "top",
@@ -418,7 +418,7 @@ pub static TENSOR_METHODS: &[&str] = &[
 /// DataFrame methods (column verbs + value methods + serialize/write).
 pub static DF_METHODS: &[&str] = &[
     "where", "filter", "drop_missing", "drop_nan", "select", "sort", "group", "with", "join", "vstack", "unique", "column", "rename",
-    "head", "tail", "slice", "count", "columns", "cache", "write_csv", "write_tsv", "write_json", "write_parquet",
+    "head", "tail", "slice", "count", "columns", "records", "schema", "cache", "write_csv", "write_tsv", "write_json", "write_parquet",
     "to_html", "to_markdown", "to_table",
 ];
 

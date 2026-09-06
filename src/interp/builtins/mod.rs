@@ -744,6 +744,21 @@ pub(crate) fn parse_str_float(s: &str, line: usize, col: usize) -> Result<Value,
 
 /// Parse a string to an integer for `to_int(s)` and `String.to_int()`. Strict: a decimal
 /// string like "3.5" is rejected (use `to_float`), so an integer field never rounds silently.
+/// `to_int(s, base)`: digits in `base` (2 to 36), letters for the digits past 9, a leading
+/// sign allowed, no prefix — `to_int("ff", 16)` is 255 and `to_int("0xff", 16)` is refused,
+/// so a string means one thing whatever base is named.
+pub(crate) fn parse_str_int_radix(s: &str, base: i64, line: usize, col: usize) -> Result<Value, HelixError> {
+    if !(2..=36).contains(&base) {
+        return Err(HelixError::new(format!("`to_int` needs a base from 2 to 36, got {base}"), line, col)
+            .hint("e.g. `to_int(\"ff\", 16)`, `to_int(\"1011\", 2)`."));
+    }
+    let t = s.trim();
+    i64::from_str_radix(t, base as u32).map(Value::Int).map_err(|_| {
+        HelixError::new(format!("could not parse {t:?} as an integer in base {base}"), line, col)
+            .hint("digits 0-9 and letters a-z up to the base, with an optional leading `-`; no `0x` prefix.")
+    })
+}
+
 pub(crate) fn parse_str_int(s: &str, line: usize, col: usize) -> Result<Value, HelixError> {
     let t = s.trim();
     t.parse::<i64>().map(Value::Int).map_err(|_| {

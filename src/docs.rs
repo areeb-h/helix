@@ -111,11 +111,11 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
     },
     DocEntry {
         name: "to_int",
-        sig: "to_int(s)",
-        doc: "Parse a string as an Int (an error names the offending text).",
-        example: "to_int(\"42\")",
-        example_out: "42",
-        notes: "",
+        sig: "to_int(s, base?)",
+        doc: "Parse a string as an Int (an error names the offending text); with a base from 2 to 36, read the digits in that base.",
+        example: "to_int(\"ff\", 16)",
+        example_out: "255",
+        notes: "`to_int(x)` also truncates a Float toward zero. In a named base the letters a-z stand for the digits past 9, a leading `-` is allowed, and a `0x`/`0b` prefix is refused. Keywords: parse, hex, binary, octal, radix, base, integer.",
     },
     DocEntry {
         name: "lll",
@@ -2165,6 +2165,28 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
     (
         "Array",
         DocEntry {
+            name: "corr",
+            sig: "corr(ys)",
+            doc: "The Pearson correlation of this array with another of the same length.",
+            example: "[1, 2, 3].corr([2, 4, 6])",
+            example_out: "1.0",
+            notes: "The method spelling of `correlation(xs, ys)`: a missing anywhere makes the answer missing, a constant series is an error (no spread to correlate). Keywords: pearson, correlation coefficient, r, relationship.",
+        },
+    ),
+    (
+        "Array",
+        DocEntry {
+            name: "cov",
+            sig: "cov(ys, ddof?)",
+            doc: "The covariance of this array with another of the same length: population (divide by n) by default; `cov(ys, 1)` divides by n−1 for the sample estimator.",
+            example: "[1, 2, 3].cov([2, 4, 6], 1)",
+            example_out: "2.0",
+            notes: "The same ddof rule as `var`; a missing anywhere makes the answer missing. Keywords: covariance, joint variance, spread, relationship.",
+        },
+    ),
+    (
+        "Array",
+        DocEntry {
             name: "var",
             sig: "var(ddof?)",
             doc: "The variance of the numeric values: population (divide by n) by default; `var(1)` divides by n−1 for the sample estimate — `ddof` is the delta degrees of freedom, as in NumPy.",
@@ -2461,10 +2483,10 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
     }),
     ("String", DocEntry {
         name: "to_int",
-        sig: "to_int()",
-        doc: "Parse an integer string as an Int.",
-        example: "\"42\".to_int()",
-        example_out: "42",
+        sig: "to_int(base?)",
+        doc: "Parse an integer string as an Int; with a base from 2 to 36, read the digits in that base.",
+        example: "\"ff\".to_int(16)",
+        example_out: "255",
         notes: "",
     }),
     ("String", DocEntry {
@@ -3230,6 +3252,28 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             example: "dataframe({a: [1, 2], b: [3.0, 4.5]}).columns()",
             example_out: "[\"a\", \"b\"]",
             notes: "",
+        },
+    ),
+    (
+        "DataFrame",
+        DocEntry {
+            name: "records",
+            sig: "records()",
+            doc: "The rows as an array of records, one field per column.",
+            example: "dataframe({a: [1, 2], b: [\"x\", \"y\"]}).records()",
+            example_out: "[{a: 1, b: \"x\"}, {a: 2, b: \"y\"}]",
+            notes: "The shape `to_json` serializes, without the round trip. Keywords: rows, to_records, iterate, each row, dicts.",
+        },
+    ),
+    (
+        "DataFrame",
+        DocEntry {
+            name: "schema",
+            sig: "schema()",
+            doc: "Each column's name and Helix type — `Int`, `Float`, `Bool`, `String`, or `Missing` for a column with no present value — as records.",
+            example: "dataframe({a: [1, 2], b: [\"x\", \"y\"]}).schema()",
+            example_out: "[{name: \"a\", type: \"Int\"}, {name: \"b\", type: \"String\"}]",
+            notes: "The names `type_of` uses, on both frame engines. Keywords: dtypes, columns, types, describe, introspect.",
         },
     ),
     (

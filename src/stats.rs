@@ -88,6 +88,19 @@ pub fn pearson(xs: &[f64], ys: &[f64]) -> Option<f64> {
     }
 }
 
+/// Covariance of two equal-length series: `sum((x - mx)(y - my)) / (n - ddof)` — population
+/// with `ddof = 0`, the sample estimator with `ddof = 1`. Precondition: equal, non-empty
+/// length and `ddof < n`.
+pub fn covariance(xs: &[f64], ys: &[f64], ddof: usize) -> f64 {
+    let mx = mean(xs);
+    let my = mean(ys);
+    let mut sxy = 0.0;
+    for (&x, &y) in xs.iter().zip(ys) {
+        sxy += (x - mx) * (y - my);
+    }
+    sxy / (xs.len() - ddof) as f64
+}
+
 /// Sample variance (divides by `n - 1`, Bessel's correction). Used by inferential
 /// statistics, where the data is a sample of a larger population. Precondition:
 /// `xs` has at least two elements.

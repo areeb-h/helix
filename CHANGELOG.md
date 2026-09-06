@@ -4,6 +4,17 @@
 
 ### Added
 
+- **`to_int(s, base)`, `xs.corr(ys)` / `xs.cov(ys, ddof?)`, `df.records()` / `df.schema()`.** Four
+  primitives the field's fifth report listed as absent, verified absent on main. `to_int("ff",
+  16)` reads a string's digits in a base from 2 to 36 (a leading `-` allowed, a `0x` prefix
+  refused), free and as `"ff".to_int(16)`. `corr` is the method spelling of `correlation`
+  and `cov` takes the ddof `var` takes; a missing anywhere makes either missing. `records()`
+  is the rows as records — the shape `to_json` serializes, without the round trip — and
+  `schema()` is each column's name and Helix type (`Int`, `Float`, `Bool`, `String`,
+  `Missing`), the same names on both frame engines. Pinned by the corpus program
+  `df_records_schema` (three engines, both backends) and
+  `the_pair_statistics_and_based_to_int_refuse_in_words`.
+
 - **`group(@k).agg({n: count(), m: mean(@v), hi: max(@v * 2)})`, and grouped `median`,
   `first`, `nunique`.** A GroupBy computed one aggregate of one column per call, so the ordinary
   analytics query — count, mean and max of a group — was three group-bys and two joins (field

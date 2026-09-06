@@ -338,6 +338,23 @@ impl DataHandle for NativeFrame {
         Ok(self.cols.iter().map(|(n, _)| n.clone()).collect())
     }
 
+    fn column_kinds(&self, line: usize, col: usize) -> Result<Vec<(String, String)>, HelixError> {
+        // A column is decoded on first use (`LazyCol::get`); naming its dtype is a use, and
+        // `schema()` is a one-shot introspection, so decoding here is the honest cost.
+        let mut out = Vec::with_capacity(self.cols.len());
+        for (n, lc) in self.cols.iter() {
+            let kind = match lc.get(line, col)?.dtype_name() {
+                "int" => "Int",
+                "float" => "Float",
+                "bool" => "Bool",
+                "str" => "String",
+                _ => "Missing",
+            };
+            out.push((n.clone(), kind.to_string()));
+        }
+        Ok(out)
+    }
+
     fn filter(&self, pred: &ColExpr, line: usize, col: usize) -> Result<Df, HelixError> {
         verbs::filter(self, pred, line, col).map(|f| Rc::new(f) as Df)
     }

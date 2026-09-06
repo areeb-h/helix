@@ -386,8 +386,19 @@ pub(crate) fn string_method(
             crate::interp::builtins::parse_str_float(s, line, col)
         }
         "to_int" => {
-            arity(0)?;
-            crate::interp::builtins::parse_str_int(s, line, col)
+            // `s.to_int()` in base 10, `s.to_int(16)` in a named base (2 to 36).
+            if args.len() > 1 {
+                return Err(HelixError::new(
+                    format!("`to_int` takes an optional base, got {} arguments", args.len()),
+                    line,
+                    col,
+                ));
+            }
+            match args.first() {
+                None => crate::interp::builtins::parse_str_int(s, line, col),
+                Some(Value::Int(b)) => crate::interp::builtins::parse_str_int_radix(s, *b, line, col),
+                Some(other) => Err(type_err(name, "a base (an Int from 2 to 36)", other, line, col)),
+            }
         }
         // `text.write_to(path)` / `append_to(path)`: the receiver is the text and the
         // argument is the path (the reverse of the underlying `writers` arg order).

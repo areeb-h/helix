@@ -335,6 +335,14 @@ along; the documented signature `std()` made the checker refuse the argument —
 generated from `docs.rs`, so the fix was the entry. A quoted key in a record brace is a field
 (printed back quoted when not an identifier; `field_key_display`), the query-builder shape.
 
+**The absent primitives (2026-09-06).** DONE: `to_int(s, base)` (free + String method;
+`parse_str_int_radix`), `corr`/`cov` Array methods (`stats::covariance`; `corr` errors on a
+constant series exactly as `correlation` does), `df.records()` (via `writers::tabular`) and
+`df.schema()` (a `column_kinds` trait method on both backends, the `type_of` names). Still
+absent, by design or size: `percentile` (`quantile(p)` is the one way), `String.fit`,
+`graphemes()`/`bytes()`, destructure rename (1.43 — a parser + two-engine change, queued), a
+date/time type, an exact decimal literal.
+
 **1.37 (2026-09-05) — `GroupBy.agg`.** DONE: `AggKind`/`AggSpec` in `backend/mod.rs`, a
 `group_agg_many` trait method on both backends (native: groups discovered once, each spec's
 expression evaluated once through the `with` evaluator, `aggregate_kind` adds median/first/

@@ -922,6 +922,18 @@ impl DataHandle for PolarsFrame {
         schema_names(&self.lf, line, col)
     }
 
+    fn column_kinds(&self, line: usize, col: usize) -> Result<Vec<(String, String)>, HelixError> {
+        Ok(schema_fields(&self.lf, line, col)?
+            .into_iter()
+            .map(|(n, d)| {
+                // The names `type_of` uses; a column with no present value is `Missing`,
+                // exactly as the native engine answers for its `Null` column.
+                let kind = if matches!(d, DataType::Null) { "Missing" } else { dtype_type_name(&d) };
+                (n, kind.to_string())
+            })
+            .collect())
+    }
+
     fn filter(&self, pred: &ColExpr, line: usize, col: usize) -> Result<Df, HelixError> {
         let fields = schema_fields(&self.lf, line, col)?;
         let e = lower(pred, &fields, line, col)?;

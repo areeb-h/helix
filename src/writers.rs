@@ -499,7 +499,7 @@ fn as_record<'a>(
 
 /// Extract `(headers, rows)` from a DataFrame (full materialization through the
 /// seam) or a homogeneous array of records.
-fn tabular(
+pub(crate) fn tabular(
     who: &str,
     v: &Value,
     line: usize,

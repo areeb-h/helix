@@ -249,6 +249,42 @@ pub(crate) fn df_value_method(
                 .collect();
             Ok(Value::array(names))
         }
+        // `df.records()` — the rows as an array of records, the shape `to_json` builds and
+        // the one a script that walks rows wants without a JSON round trip.
+        "records" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`records` takes no arguments", line, col));
+            }
+            let (headers, rows) =
+                crate::writers::tabular("records", &Value::dataframe(lf.clone()), line, col)?;
+            let keys: Vec<crate::symbol::Symbol> =
+                headers.iter().map(|h| crate::symbol::Symbol::intern(h)).collect();
+            Ok(Value::array(
+                rows.into_iter()
+                    .map(|r| Value::Record(Rc::new(keys.iter().copied().zip(r).collect())))
+                    .collect(),
+            ))
+        }
+        // `df.schema()` — each column's name and Helix type, as records, so a script can
+        // branch on a frame's shape without reading a value.
+        "schema" => {
+            if !args.is_empty() {
+                return Err(HelixError::new("`schema` takes no arguments", line, col));
+            }
+            let (kname, ktype) =
+                (crate::symbol::Symbol::intern("name"), crate::symbol::Symbol::intern("type"));
+            Ok(Value::array(
+                lf.column_kinds(line, col)?
+                    .into_iter()
+                    .map(|(n, t)| {
+                        Value::Record(Rc::new(vec![
+                            (kname, Value::Str(Rc::new(n))),
+                            (ktype, Value::Str(Rc::new(t))),
+                        ]))
+                    })
+                    .collect(),
+            ))
+        }
         "cache" => {
             if !args.is_empty() {
                 return Err(HelixError::new("`cache` takes no arguments", line, col)
