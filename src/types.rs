@@ -43,6 +43,16 @@ pub enum Type {
         /// refused outside `required..=params.len()`, in the runtime's words.
         required: usize,
     },
+    /// The OPEN kinds an annotation names (field build, 1.45a): a record, dict, tuple or
+    /// function whose shape is not known statically. Compatible with every value of that
+    /// kind and with nothing else, so a wrong KIND is refused at the call; inside a body the
+    /// value's fields, elements and methods answer `Unknown`, as an unannotated
+    /// parameter's do. `Dict` has no structural twin: a dict literal is `Unknown` to the
+    /// checker (the opaque-type pattern), so the annotation is the only place it appears.
+    AnyRecord,
+    Dict,
+    AnyTuple,
+    AnyFunction,
     Unit,
     /// Absent data. BOTTOM: compatible with everything; drops under `join`.
     Missing,
@@ -66,6 +76,10 @@ impl fmt::Display for Type {
             Type::GroupBy => write!(f, "GroupBy"),
             Type::Dna => write!(f, "Dna"),
             Type::Function { .. } => write!(f, "Function"),
+            Type::AnyRecord => write!(f, "Record"),
+            Type::Dict => write!(f, "Dict"),
+            Type::AnyTuple => write!(f, "Tuple"),
+            Type::AnyFunction => write!(f, "Function"),
             Type::Unit => write!(f, "Unit"),
             Type::Missing => write!(f, "Missing"),
             Type::Unknown => write!(f, "Unknown"),
@@ -103,7 +117,22 @@ pub fn ann_to_type(a: &TypeAnn) -> Type {
         TypeAnn::Tensor => Type::Tensor,
         TypeAnn::DataFrame => Type::DataFrame,
         TypeAnn::Dna => Type::Dna,
+        TypeAnn::Record => Type::AnyRecord,
+        TypeAnn::Dict => Type::Dict,
+        TypeAnn::Tuple => Type::AnyTuple,
+        TypeAnn::Function => Type::AnyFunction,
+        TypeAnn::Any => Type::Unknown,
     }
+}
+
+/// Whether a value of type `actual` may bind to a parameter (or a return) ANNOTATED `ann`.
+/// [`compatible`], with one edge: an `Int` annotation refuses a `Float`. The numeric tower
+/// makes Int and Float compatible so an unannotated program never rejects — but an annotation
+/// is the author saying which one, and `type_of(1.5)` is `"Float"`, so static and dynamic
+/// must agree (field build, 1.45c). A `Float` annotation still admits an Int, as arithmetic
+/// promotes one; `Num` admits both, as it says.
+pub fn annotation_admits(ann: &Type, actual: &Type) -> bool {
+    !matches!((ann, actual), (Type::Int, Type::Float)) && compatible(ann, actual)
 }
 
 /// The ONLY source of type errors. Symmetric. `Unknown`/`Missing` are compatible
@@ -120,6 +149,10 @@ pub fn compatible(a: &Type, b: &Type) -> bool {
             a.len() == b.len() && a.iter().zip(b).all(|(x, y)| compatible(x, y))
         }
         (Record(_), Record(_)) => true, // permissive; field access does the checking
+        // The open kinds: any value of the kind, and nothing else.
+        (AnyRecord, Record(_)) | (Record(_), AnyRecord) => true,
+        (AnyTuple, Tuple(_)) | (Tuple(_), AnyTuple) => true,
+        (AnyFunction, Function { .. }) | (Function { .. }, AnyFunction) => true,
 
         (
             Function { params: p1, ret: r1, .. },
@@ -672,7 +705,7 @@ impl Checker {
         let body_t = body_result?;
 
         if let Some(rt) = &ret_ann
-            && !compatible(&body_t, rt) {
+            && !annotation_admits(rt, &body_t) {
                 return Err(HelixError::new(
                     format!(
                         "function `{}` is declared to return {}, but its body produces {}",
@@ -837,7 +870,7 @@ impl Checker {
                     // opaque-type pattern), and its keys are not known statically, so a
                     // spread of one is a record whose field set cannot be proven —
                     // which is exactly what this arm already answers.
-                    Type::Unknown | Type::Missing => Ok(Type::Unknown),
+                    Type::Unknown | Type::Missing | Type::AnyRecord => Ok(Type::Unknown),
                     other => Err(HelixError::new(
                         format!("`...` record update needs a record, got {other}"),
                         *line,
@@ -859,7 +892,8 @@ impl Checker {
                         .find(|(k, _)| k == name)
                         .map(|(_, t)| t.clone())
                         .ok_or_else(|| record_has_no_field(fields, name, *line, *col)),
-                    Type::Unknown | Type::Missing => Ok(Type::Unknown),
+                    // An annotated `Record` (or `Any`) is open: the field's type is not known.
+                    Type::Unknown | Type::Missing | Type::AnyRecord => Ok(Type::Unknown),
                     other => Err(field_on_non_record(other, name, *line, *col)),
                 }
             }
@@ -876,7 +910,7 @@ impl Checker {
                         .find(|(k, _)| k == name)
                         .map(|(_, t)| t.clone())
                         .ok_or_else(|| record_has_no_field(fields, name, *line, *col)),
-                    Type::Unknown | Type::Missing => Ok(Type::Unknown),
+                    Type::Unknown | Type::Missing | Type::AnyRecord => Ok(Type::Unknown),
                     other => Err(HelixError::new(
                         format!(
                             "cannot destructure {}: it has no fields",
@@ -963,7 +997,7 @@ impl Checker {
                 // runtime.
                 if matches!(it, Type::String) {
                     return match rt {
-                        Type::Record(_) | Type::Unknown | Type::Missing => Ok(Type::Unknown),
+                        Type::Record(_) | Type::AnyRecord | Type::Dict | Type::Unknown | Type::Missing => Ok(Type::Unknown),
                         other => Err(HelixError::new(
                             format!("a value of type {} cannot be indexed by a string", other),
                             *line,
@@ -987,7 +1021,7 @@ impl Checker {
                     // `missing` if absent. The result type isn't known, so `Unknown`. (The
                     // static-string-key case is handled above.) The checker must not reject
                     // it: the identical access runs fine, per the never-reject-runnable rule.
-                    Type::Record(_) => Type::Unknown,
+                    Type::Record(_) | Type::AnyRecord | Type::Dict | Type::AnyTuple => Type::Unknown,
                     Type::Unknown | Type::Missing | Type::Tensor => Type::Unknown,
                     other => {
                         let err = HelixError::new(
@@ -1039,8 +1073,9 @@ impl Checker {
                     }
                 })
             }
-            Expr::Lambda { params, defaults, body, .. } => {
-                // Standalone lambda: params default to Unknown. Like a `fn`
+            Expr::Lambda { params, anns, defaults, body, .. } => {
+                // Standalone lambda: an annotated parameter takes its annotation (`(x: Int)
+                // => x`, field build 1.45b); the rest default to Unknown. Like a `fn`
                 // body (see `check_func`), the lambda body is deferred — a
                 // `mut` global read inside it types as Unknown, since the
                 // global may be rebound before the lambda is called.
@@ -1056,8 +1091,13 @@ impl Checker {
                     .iter()
                     .map(|n| (n.clone(), self.env.get(n).cloned()))
                     .collect();
-                for n in params {
-                    self.env.insert(n.clone(), Type::Unknown);
+                let param_types: Vec<Type> = params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| anns.get(i).and_then(|a| a.as_ref()).map(ann_to_type).unwrap_or(Type::Unknown))
+                    .collect();
+                for (n, t) in params.iter().zip(&param_types) {
+                    self.env.insert(n.clone(), t.clone());
                 }
                 let body_result = self.synth(body);
                 for (n, old) in saved {
@@ -1075,7 +1115,7 @@ impl Checker {
                 }
                 let body_t = body_result?;
                 Ok(Type::Function {
-                    params: params.iter().map(|_| Type::Unknown).collect(),
+                    params: param_types,
                     ret: Box::new(body_t),
                     required: params.len() - defaults.len(),
                 })

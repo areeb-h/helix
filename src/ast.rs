@@ -12,7 +12,7 @@ pub enum UnOp {
 /// A writable type annotation on a function signature (the surface grammar).
 /// Kept separate from the checker's richer internal `Type` (which also has
 /// `Num`/`Unknown`/`Missing`/`Function`/`GroupBy`, which users can't write).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum TypeAnn {
     Int,
     Float,
@@ -23,6 +23,16 @@ pub enum TypeAnn {
     Tensor,
     DataFrame,
     Dna,
+    /// The open kinds (field build, 1.45a): a wrong KIND of argument is refused at the
+    /// call, and the value stays open inside the body — its fields, elements and methods
+    /// answer `Unknown`, as an unannotated parameter's do. Every interesting parameter of a
+    /// library is one of these, and they were the ones that could not be declared.
+    Record,
+    Dict,
+    Tuple,
+    Function,
+    /// Explicitly anything — the checker's permissive top, written down.
+    Any,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,6 +285,11 @@ pub enum Expr {
     /// implicit one-parameter shorthand.
     Lambda {
         params: Vec<String>,
+        /// Parallel to `params`: the optional `: Type` on each — `(x: Int) => x` (field
+        /// build, 1.45b). Empty when none was written; the single-parameter `x => …` form
+        /// has no annotation syntax. Checked by `helix check` exactly as a `fn`'s are, and
+        /// inert at run time, exactly as a `fn`'s are.
+        anns: Vec<Option<TypeAnn>>,
         /// Trailing literal defaults — `(x, n = 10) => …` carries `[10]`. A call short of
         /// `params.len()` by at most this many is padded at run time (`settle_args` in the
         /// walker, `settle_short` in the VM); the checker knows the range as `required`.

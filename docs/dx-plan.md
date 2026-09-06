@@ -335,6 +335,15 @@ along; the documented signature `std()` made the checker refuse the argument —
 generated from `docs.rs`, so the fix was the entry. A quoted key in a record brace is a field
 (printed back quoted when not an identifier; `field_key_display`), the query-builder shape.
 
+**1.45a/b/c (2026-09-05) — annotations a library can use.** DONE: `Record`, `Dict`, `Tuple`,
+`Function`, `Any` are type names (`TypeAnn` + `TYPE_NAMES`; the checker's `Type` gained the open
+kinds `AnyRecord`/`Dict`/`AnyTuple`/`AnyFunction` — compatible with their kind and nothing else,
+open inside a body); a lambda's parameters carry `anns` (parallel to `params`; the parser already
+read them through `parse_params` and dropped them); `annotation_admits` makes an `Int` annotation
+refuse a Float at a call and at a `->` return (`Float` admits an Int, `Num` both). Still open:
+`Connection` and `Missing` as names (no ask yet), and structural depth — `Array` of what — which
+the annotation grammar does not have.
+
 **1.44 / 1.46b (2026-09-05) — an argument-dependent record shape through a call.** MEASURED,
 not fixed: on a clean build, `fn mk(s) = let m = {c: s.columns} in {...m, f: (x) => x}` followed
 by `mk({columns: {id: 1, name: 2}}).c.nmae` passes `helix check` SAME-FILE too (the field's

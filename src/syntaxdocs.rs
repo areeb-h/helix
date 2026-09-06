@@ -114,13 +114,28 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 Keywords: ternary, conditional, else, elif, branch, question mark.",
     },
     SyntaxDoc {
+        name: "fn",
+        form: "fn area(w: Int, h: Int) -> Int = w * h",
+        doc: "Define a function. Parameter and return annotations are optional, checked by `helix check` before the program runs, and cost nothing at run time.",
+        example: "fn area(w: Int, h: Int) -> Int = w * h\nprint(area(3, 4))",
+        example_out: "12",
+        notes: "Type names: `Int`, `Float`, `Num` (either), `String`, `Bool`, `Array`, `Record`, `Dict`, \
+                `Tuple`, `Function`, `DataFrame`, `Tensor`, `Dna`, `Any`. An `Int` annotation refuses a \
+                Float argument; a `Float` one accepts an Int. `Record`, `Dict`, `Tuple` and `Function` say \
+                what KIND of value arrives without fixing its shape: a wrong kind is refused at the call, \
+                and the value's fields and methods stay open inside the body. A lambda takes the same \
+                annotations: `(x: Int) => x + 1`. \
+                Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed.",
+    },
+    SyntaxDoc {
         name: "lambda",
         form: "(x) => expr",
         doc: "An anonymous function value, bindable to a name or passed to a method.",
         example: "double = (x) => x * 2\nprint([1, 2, 3].map(double(it)), [1,2,3].reduce(0, (acc, x) => acc + x))",
         example_out: "[2, 4, 6] 6",
         notes: "The form to use inside `do { }`, where `fn` is not allowed. A function stored in a \
-                record field is called parenthesized: `(rec.f)(x)`. \
+                record field is called as a method: `rec.f(x)`. Parameters take the annotations a `fn` \
+                does: `(x: Int, y: Int) => x + y`. \
                 Keywords: closure, anonymous, arrow, callback, function value, higher order.",
     },
     SyntaxDoc {

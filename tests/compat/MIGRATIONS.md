@@ -140,3 +140,11 @@ no entry. A source edit is not a behavior change.
   engine. A bare name that is NOT a function — `xs.reduce(0, k)` with `k = 5` — is refused as
   "`k` is an Int, not a function" instead of the old sentence. Message-only for that case; no
   corpus program or golden used either spelling.
+
+- **An `Int` annotation refuses a Float argument, and a `-> Int` return refuses a Float body**
+  (2026-09-05). `fn f(x: Int) = x` followed by `f(1.5)` passed `helix check` (the numeric tower
+  made Int and Float compatible); it is refused now, in the sentence the checker already used
+  for a String: "argument 1 of `f` should be Int, found a value of type Float". `Float` still
+  admits an Int, `Num` both. Additive otherwise: `Record`, `Dict`, `Tuple`, `Function` and
+  `Any` are accepted as type names, and a lambda's parameters may be annotated. No corpus
+  program or golden used an annotation that moved.

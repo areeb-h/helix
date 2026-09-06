@@ -1816,13 +1816,27 @@ The conditional EXPRESSION — it has a value, and `else` is required.
 big
 ```
 
+### `fn`
+
+Define a function. Parameter and return annotations are optional, checked by `helix check` before the program runs, and cost nothing at run time.
+
+`fn area(w: Int, h: Int) -> Int = w * h`
+
+**Note:** Type names: `Int`, `Float`, `Num` (either), `String`, `Bool`, `Array`, `Record`, `Dict`, `Tuple`, `Function`, `DataFrame`, `Tensor`, `Dna`, `Any`. An `Int` annotation refuses a Float argument; a `Float` one accepts an Int. `Record`, `Dict`, `Tuple` and `Function` say what KIND of value arrives without fixing its shape: a wrong kind is refused at the call, and the value's fields and methods stay open inside the body. A lambda takes the same annotations: `(x: Int) => x + 1`. Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed.
+
+```
+>>> fn area(w: Int, h: Int) -> Int = w * h
+>>> print(area(3, 4))
+12
+```
+
 ### `lambda`
 
 An anonymous function value, bindable to a name or passed to a method.
 
 `(x) => expr`
 
-**Note:** The form to use inside `do { }`, where `fn` is not allowed. A function stored in a record field is called parenthesized: `(rec.f)(x)`. Keywords: closure, anonymous, arrow, callback, function value, higher order.
+**Note:** The form to use inside `do { }`, where `fn` is not allowed. A function stored in a record field is called as a method: `rec.f(x)`. Parameters take the annotations a `fn` does: `(x: Int, y: Int) => x + y`. Keywords: closure, anonymous, arrow, callback, function value, higher order.
 
 ```
 >>> double = (x) => x * 2

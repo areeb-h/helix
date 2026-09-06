@@ -1337,7 +1337,7 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
                 rw(x, ctx, bound)?;
             }
         }
-        Expr::Lambda { params, defaults, bound: origin, body } => {
+        Expr::Lambda { params, defaults, bound: origin, body, .. } => {
             // The origin of a synthesized bound-function lambda (`xs.map(double)` reads as
             // `(it) => double(it)`; `R.all(U)` keeps `U`) and the defaults belong to the
             // ENCLOSING scope: a top-level name there mangles like any other reference and

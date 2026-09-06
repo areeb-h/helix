@@ -268,3 +268,37 @@ fn every_builtin_answers_the_signature_probe() {
         );
     }
 }
+
+    /// The annotation names a library actually needs — `Record`, `Dict`, `Tuple`, `Function`,
+    /// `Any` — and what they mean: a wrong KIND of argument is refused at the call; the value
+    /// stays open inside the body (field build, 1.45a).
+    #[test]
+    fn annotations_name_every_value_kind() {
+        ok("fn f(r: Record) = r.name\nf({name: \"x\"})");
+        ok("fn f(r: Record) = r.get(\"k\")\nf({k: 1})");
+        ok("fn f(r: Record) = {...r, z: 1}\nf({k: 1})");
+        ok("fn g(d: Dict) = d.get(\"k\")\ng([[\"k\", 1]].to_dict())");
+        ok("fn h(t: Tuple) = t[0]\nh((1, 2))");
+        ok("fn k(f: Function, x) = f(x)\nk((v) => v + 1, 1)");
+        ok("fn a(x: Any) = x\na(1)\na(\"s\")");
+        assert!(emsg("fn f(r: Record) = r\nf(1)").contains("should be Record"));
+        assert!(emsg("fn g(d: Dict) = d\ng({a: 1})").contains("should be Dict"));
+        assert!(emsg("fn h(t: Tuple) = t\nh([1, 2])").contains("should be Tuple"));
+        assert!(emsg("fn k(f: Function) = f\nk(3)").contains("should be Function"));
+        assert!(emsg("fn f(x: Rekord) = x").contains("unknown type"));
+    }
+
+    /// `(x: Int) => x` — a lambda's parameters take the annotations a `fn` does (1.45b), and
+    /// an `Int` annotation refuses a Float where the numeric tower used to wave it through
+    /// (1.45c): `type_of(1.5)` is `"Float"`, so static and dynamic agree. `Float` still admits
+    /// an Int, and `Num` both.
+    #[test]
+    fn lambda_annotations_and_int_means_int() {
+        ok("f = (x: Int, y: Int) => x + y\nf(1, 2)");
+        assert!(emsg("f = (x: Int) => x\nf(\"s\")").contains("should be Int"));
+        assert!(emsg("fn f(x: Int) = x\nf(1.5)").contains("should be Int"));
+        ok("fn f(x: Float) = x\nf(1)");
+        ok("fn f(x: Num) = x\nf(1)\nf(1.5)");
+        assert!(emsg("fn f() -> Int = 1.5").contains("declared to return Int"));
+        ok("fn f() -> Float = 1");
+    }

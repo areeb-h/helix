@@ -4,6 +4,20 @@
 
 ### Added
 
+- **`Record`, `Dict`, `Tuple`, `Function` and `Any` are type names, a lambda's parameters
+  take annotations, and `Int` means Int.** `fn f(x: Int)` was parsed and enforced all along,
+  but only `Int`, `Float`, `Num`, `String`, `Bool`, `Array`, `DataFrame`, `Tensor` and `Dna`
+  could be written — and every interesting parameter of a library is a record, a dict, a
+  tuple or a function (field build, 1.45a). The four open kinds refuse a wrong KIND of
+  argument at the call and stay open inside the body (fields, elements and methods answer as
+  an unannotated parameter's do); `Any` is the permissive top, written down. `(x: Int) => x`
+  annotates a lambda exactly as a `fn` (1.45b — the lambda parser already read the
+  annotation and dropped it). And an `Int` annotation refuses a Float where the numeric
+  tower waved it through: `type_of(1.5)` is `"Float"`, so static and dynamic agree; `Float`
+  still admits an Int and `Num` both (1.45c). The `fn` syntax entry documents the names.
+  Pinned by `annotations_name_every_value_kind`, `lambda_annotations_and_int_means_int` and
+  `annotated_lambdas_and_open_kinds_run_on_every_engine`.
+
 - **`xs.reduce(0, add)` and `xs.scan(0, f)` take a bare bound function.** The folding function
   is the second argument, and the bare-name rule (a bare bound name is the function it names)
   reached every single-function verb and `zipmap`'s pair but not the two folds: they were

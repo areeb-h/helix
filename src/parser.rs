@@ -244,6 +244,7 @@ fn desugar_sort_by(recv: Expr, args: Vec<Expr>, l: usize, c: usize) -> Result<Ex
     let order = Expr::Method { recv: Box::new(keys), name: "argsort".into(), args: vec![], named: vec![], ufcs: None, line: l, col: c };
     let gather = Expr::Lambda {
         params: vec!["$si".to_string()],
+        anns: Vec::new(),
         defaults: Vec::new(),
         bound: None,
         body: std::rc::Rc::new(Expr::Index {
@@ -412,6 +413,7 @@ fn wrap_bound_fn_arg(name: &str, args: Vec<Expr>, l: usize, c: usize) -> Vec<Exp
     let origin = args.into_iter().next().map(Box::new);
     vec![Expr::Lambda {
         params: vec!["it".to_string()],
+        anns: Vec::new(),
         defaults: Vec::new(),
         bound: origin,
         body: std::rc::Rc::new(body),
@@ -445,6 +447,7 @@ fn wrap_bound_pair_fn(f: Expr, l: usize, c: usize) -> Expr {
     };
     Expr::Lambda {
         params: vec!["$za".to_string(), "$zb".to_string()],
+        anns: Vec::new(),
         defaults: Vec::new(),
         bound: Some(Box::new(f)),
         body: std::rc::Rc::new(body),
@@ -572,7 +575,7 @@ fn desugar_order_by(
         let keys = Expr::Method {
             recv: Box::new(ident("$obe")),
             name: "map".to_string(),
-            args: vec![Expr::Lambda { params,defaults: Vec::new(), bound: None, body: std::rc::Rc::new(key) }],
+            args: vec![Expr::Lambda { params, anns: Vec::new(), defaults: Vec::new(), bound: None, body: std::rc::Rc::new(key) }],
             named: vec![],
             ufcs: None,
             line,
@@ -667,6 +670,7 @@ fn desugar_order_by(
     // ($a, $b) => if $b[key] OP $a[key] then $b else $a
     let cmp = Expr::Lambda {
         params: vec!["$ob_a".to_string(), "$ob_b".to_string()],
+        anns: Vec::new(),
         defaults: Vec::new(),
         bound: None,
         body: std::rc::Rc::new(Expr::If {
@@ -827,6 +831,7 @@ fn desugar_order_by(
                         name: "position".to_string(),
                         args: vec![Expr::Lambda {
                             params: vec!["$nanq".to_string()],
+                            anns: Vec::new(),
                             // `x != x` rather than `is_nan(x)`: this desugar is
                             // generated for EVERY receiver type, and `is_nan` on a
                             // String is a static type error — so spelling it that way
@@ -884,7 +889,8 @@ fn desugar_order_by(
 }
 
 const TYPE_NAMES: &[&str] = &[
-    "Int", "Float", "Num", "String", "Bool", "Array", "Tensor", "DataFrame", "Dna",
+    "Int", "Float", "Num", "String", "Bool", "Array", "Record", "Dict", "Tuple", "Function",
+    "Tensor", "DataFrame", "Dna", "Any",
 ];
 
 /// One user-written `do {}` binding: its name and where it was written.
@@ -1764,6 +1770,11 @@ impl Parser {
             "Tensor" => TypeAnn::Tensor,
             "DataFrame" => TypeAnn::DataFrame,
             "Dna" => TypeAnn::Dna,
+            "Record" => TypeAnn::Record,
+            "Dict" => TypeAnn::Dict,
+            "Tuple" => TypeAnn::Tuple,
+            "Function" => TypeAnn::Function,
+            "Any" => TypeAnn::Any,
             _ => {
                 let mut err =
                     HelixError::new(format!("unknown type `{}`", word), l, c);
@@ -1824,6 +1835,7 @@ impl Parser {
                 self.depth = saved;
                 return Ok(Some(Expr::Lambda {
                     params: vec![name],
+                    anns: Vec::new(),
                     defaults: Vec::new(),
                     bound: None,
                     body: std::rc::Rc::new(body),
@@ -1848,6 +1860,16 @@ impl Parser {
                         return Ok(None); // non-ident in param list — not a lambda
                     }
                     k += 1;
+                    // `x: Int` — an annotated parameter (field build, 1.45b). The type name is
+                    // one identifier, exactly what `parse_params` reads afterwards; anything
+                    // else after the colon is not a lambda's parameter list.
+                    if matches!(self.toks[k].tok, Tok::Colon) {
+                        k += 1;
+                        if !matches!(self.toks[k].tok, Tok::Ident(_)) {
+                            return Ok(None);
+                        }
+                        k += 1;
+                    }
                     if matches!(self.toks[k].tok, Tok::Eq) {
                         // `= …`: skip the default's tokens to the `,` or `)` that ends it,
                         // bracket-aware. What a default may BE is `parse_params`' decision
@@ -1889,8 +1911,12 @@ impl Parser {
             self.deepen()?;
             let body = self.expr()?;
             self.depth = saved;
+            // The annotations `parse_params` read — `(x: Int) => x` — ride along; they
+            // used to be dropped here, so a lambda's parameters could not be typed.
+            let anns: Vec<Option<TypeAnn>> = params.iter().map(|(_, a)| a.clone()).collect();
             return Ok(Some(Expr::Lambda {
                 params: params.into_iter().map(|(n, _)| n).collect(),
+                anns,
                 defaults: defaults.into_iter().flatten().collect(),
                 bound: None,
                 body: std::rc::Rc::new(body),

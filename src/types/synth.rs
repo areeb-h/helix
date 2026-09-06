@@ -189,7 +189,7 @@ impl super::Checker {
                 return Err(crate::interp::arity_err(name, required, params.len(), args.len(), line, col));
             }
             for (i, (p, a)) in params.iter().zip(args.iter()).enumerate() {
-                if !compatible(a, p) {
+                if !annotation_admits(p, a) {
                     return Err(HelixError::new(
                         format!(
                             "argument {} of `{}` should be {}, found a value of type {}",
@@ -210,7 +210,7 @@ impl super::Checker {
             // gradual checker can't assign a concrete arity/signature — is callable.
             // Permit it and yield `Unknown` (higher-order functions: `fn apply(f, x)
             // = f(x)`). Only a *known* non-function type is a hard error.
-            if matches!(t, Type::Unknown) {
+            if matches!(t, Type::Unknown | Type::AnyFunction) {
                 return Ok(Type::Unknown);
             }
             // THROUGH `with_article`, like the three runtime producers of this same
@@ -380,6 +380,15 @@ impl super::Checker {
                     }
                     Err(e) => Err(e),
                 }
+            }
+            // An ANNOTATED open kind — `r: Record`, `d: Dict`, `t: Tuple`, `f: Function`
+            // (field build, 1.45a): the value's shape is not known statically, so its
+            // methods answer `Unknown` once their arguments are checked, exactly as an
+            // `Unknown` receiver's do. What the annotation buys is the refusal of a wrong
+            // KIND at the call site, not a method table.
+            Type::AnyRecord | Type::Dict | Type::AnyTuple | Type::AnyFunction => {
+                self.synth_simple_args(args)?;
+                Ok(Type::Unknown)
             }
             // A scalar receiver (Int/Float/Bool/…) — no method table at all. This is
             // where `(-1).abs()` lands, so cross the namespace and say that `abs` is

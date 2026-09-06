@@ -16277,3 +16277,20 @@ fn a_bound_function_is_the_folding_function_of_reduce_and_scan() {
         assert_eq!(out, "6 6 4 true\n10 4.0 10.0\n", "{name}");
     }
 }
+
+/// Lambda parameter annotations and the open kinds run on every engine — they are checked
+/// before the program runs and cost nothing after (field build, 1.45a/b).
+#[test]
+fn annotated_lambdas_and_open_kinds_run_on_every_engine() {
+    let src = "add = (x: Int, y: Int) => x + y\nfn apply(f: Function, v: Int) -> Int = f(v)\nfn name_of(r: Record) -> String = r.name\nfn first(t: Tuple) = t[0]\nprint(add(1, 2), apply((n: Int) => n * 2, 21), name_of({name: \"ada\"}), first((7, 8)))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("ann_lambda_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "3 42 ada 7\n", "{name}");
+    }
+    // ...and `helix check` refuses the wrong kind, before anything runs.
+    let bad = "fn name_of(r: Record) -> String = r.name\nprint(name_of(\"ada\"))\n";
+    let (out, err, code) = run_source(bad, &[], "ann_lambda_bad");
+    assert_ne!(code, Some(0), "{out}");
+    assert!(err.contains("should be Record"), "{err}");
+}
