@@ -980,3 +980,14 @@ pub unsafe fn run_search_kernel_f64(ptr: *const u8, src: &[f64], caps: &[f64], w
     let r = f(src.as_ptr(), src.len() as i64, caps.as_ptr(), want as i64);
     if r < 0 { None } else { Some(r < src.len() as i64) }
 }
+
+/// Run the Int-SOURCE twin of a scalar `f64` fold over an `Int` buffer: `acc = init; for x in
+/// src { acc = body(acc, x as f64 where the body promotes) }`, left-to-right — bit-exact to the
+/// interpreter, which promotes at the same operations. SAFETY: `ptr` is a finalized
+/// `extern "C" fn(*const i64, i64, f64) -> f64` from an `int_src` `define_fused_kernel`,
+/// guaranteed by the VM's `Ints` source + `Float` init check.
+pub unsafe fn run_fused_reduce_f64_from_ints(ptr: *const u8, src: &[i64], init: f64) -> f64 {
+    note_native_call();
+    let f: extern "C" fn(*const i64, i64, f64) -> f64 = unsafe { std::mem::transmute(ptr) };
+    f(src.as_ptr(), src.len() as i64, init)
+}

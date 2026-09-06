@@ -4,6 +4,13 @@
 
 ### Added
 
+- **`xs.reduce(0, add)` and `xs.scan(0, f)` take a bare bound function.** The folding function
+  is the second argument, and the bare-name rule (a bare bound name is the function it names)
+  reached every single-function verb and `zipmap`'s pair but not the two folds: they were
+  refused with "name both binders". The pair rule now covers them — `($za, $zb) => add($za,
+  $zb)`, the same wrapper `zipmap` uses — on every engine. Pinned by
+  `a_bound_function_is_the_folding_function_of_reduce_and_scan`.
+
 - **`import lib.*`, and `import lib.* except {a, b}`.** Every export of a module, unqualified,
   minus the names declined — so a library that chains through unqualified imports (the only
   way a module's verbs reach method position) no longer costs an import list that grows with
@@ -499,6 +506,14 @@
   answer a type question with a build flag.
 
 ### Performance
+
+- **A Float accumulator over an Int array folds natively.** `xs.reduce(0.0, (acc, x) => acc +
+  x)` — the natural spelling of a running sum — ran the bytecode loop at 1.0× while every other
+  fold fused at 12 to 46×, because the fused f64 fold reads f64 elements and an Int array fell
+  through (field build, 1.46d — this is the `reduce` in their table). The scalar f64 fold now
+  has an Int-source twin that reads i64 and promotes exactly where the interpreter does.
+  [measured: 17.2x (12 ms JIT, 206 ms VM) over 200k Ints]. `jit-explain` says which source a fused fold serves
+  (`f64-source`, `int-source`).
 
 - **`Record.keys()` / `items()` allocate nothing per key.** Enumerating a record handed out a
   fresh `String` and `Rc` per field name on every call — each behind the interner's read lock —

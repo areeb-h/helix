@@ -134,3 +134,9 @@ no entry. A source edit is not a behavior change.
   digits the positional form padded), `examples__numerics__autodiff` (a loss of 4.4e-11) and
   `examples__statistics__statistics` (a p-value of 6.8e-5). The four corpus goldens were
   regenerated.
+
+- **`reduce`/`scan` take a bare bound function** (2026-09-05). `xs.reduce(0, add)` was refused
+  ("`reduce` needs an explicit accumulator function"); it folds with `add` now, on every
+  engine. A bare name that is NOT a function — `xs.reduce(0, k)` with `k = 5` — is refused as
+  "`k` is an Int, not a function" instead of the old sentence. Message-only for that case; no
+  corpus program or golden used either spelling.

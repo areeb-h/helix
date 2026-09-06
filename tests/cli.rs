@@ -16264,3 +16264,16 @@ fn jit_explain_lists_any_and_all_sites() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A bare bound function is the FOLDING function of `reduce` and `scan` — `xs.reduce(0, add)`
+/// — on every engine, exactly as it is the one argument of every single-function verb and
+/// `zipmap`'s pair. It was refused with "name both binders" (field build, alongside 1.46d).
+#[test]
+fn a_bound_function_is_the_folding_function_of_reduce_and_scan() {
+    let src = "fn add(a, b) = a + b\nfn mul(a, b) = a * b\nf = (a, b) => a - b\nxs = [1, 2, 3]\nprint(xs.reduce(0, add), xs.reduce(1, mul), xs.reduce(10, f), xs.scan(0, add) == xs.scan(0, (a, b) => a + b))\nprint((0..5).reduce(0, add), [1.5, 2.5].reduce(0.0, add), (0..5).map(it).reduce(0.0, add))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("fold_bound_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "6 6 4 true\n10 4.0 10.0\n", "{name}");
+    }
+}

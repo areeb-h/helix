@@ -2342,6 +2342,33 @@ impl Parser {
                             "flat_map" | "count_where" => {
                                 desugar_filter_compose(e, &name, args, l, c)?
                             }
+                            // `xs.reduce(0, add)` / `xs.scan(0, f)`: a bare bound name as the
+                            // FOLDING function is the function it names — the pair rule
+                            // `zipmap` already reads, for the two folds whose function is
+                            // the second argument (field build: refused with "name both
+                            // binders" while every single-function verb took a bare name).
+                            "reduce" | "scan" if args.len() == 2 => {
+                                let mut it = args.into_iter();
+                                let (init, f) = match (it.next(), it.next()) {
+                                    (Some(init), Some(f)) => (init, wrap_bound_pair_fn(f, l, c)),
+                                    _ => {
+                                        return Err(HelixError::new(
+                                            format!("`{name}` takes (init, fn)"),
+                                            l,
+                                            c,
+                                        ))
+                                    }
+                                };
+                                Expr::Method {
+                                    recv: Box::new(e),
+                                    name: name.clone(),
+                                    args: vec![init, f],
+                                    named: vec![],
+                                    ufcs: None,
+                                    line: l,
+                                    col: c,
+                                }
+                            }
                             // `a.zipmap(b, f)` == `a.zip(b).map(f)` — a paired
                             // elementwise map, desugared so both engines reuse the
                             // tested zip+map (parity by construction). For plain

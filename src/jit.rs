@@ -176,6 +176,9 @@ pub struct Jit {
     /// [`define_fused_kernel`]), indexed by [`crate::bytecode::Op::TryJitFused`]'s
     /// `kernel_idx`.
     fused_ptrs: Vec<Option<*const u8>>,
+    /// The Int-SOURCE twin of a scalar f64 fold (`fn(*const i64 src, i64 len, f64 init) ->
+    /// f64`), same index as `fused_ptrs`; `None` for every other shape.
+    fused_ptrs_isrc: Vec<Option<*const u8>>,
     /// Native `extern "C" fn(start, end, init, *mut i64 dst, *const i64 caps)` scan
     /// (prefix-fold) kernels, indexed by [`crate::bytecode::Op::TryJitScan`]'s `loop_idx`.
     scan_ptrs: Vec<Option<*const u8>>,
@@ -271,6 +274,10 @@ impl Jit {
     /// The native fused-pipeline kernel for site `idx`, if one compiled.
     pub fn fused_kernel(&self, idx: usize) -> Option<*const u8> {
         self.fused_ptrs.get(idx).copied().flatten()
+    }
+    /// The Int-source twin of site `idx`'s scalar f64 fold, if one compiled.
+    pub fn fused_kernel_int_src(&self, idx: usize) -> Option<*const u8> {
+        self.fused_ptrs_isrc.get(idx).copied().flatten()
     }
     /// The native scan (prefix-fold) kernel for site `idx`, if one compiled.
     pub fn scan_loop(&self, idx: usize) -> Option<*const u8> {

@@ -126,3 +126,10 @@ native SEARCH kernel — the same predicate shapes the filter kernels admit, ret
 index whose predicate equals the wanted value. They had no JIT site at all (field build,
 1.46.4: 1.0× where `filter` ran 16×). A Value array keeps the bytecode loop's three-valued
 logic; a NaN meeting an ordering comparison poisons the f64 kernel and the loop raises.
+
+## 2026-09-05 (later still) — a Float accumulator over an Int array
+
+`xs.reduce(0.0, (acc, x) => acc + x)` over an `Int` array fuses natively: the scalar f64 fold
+has an Int-source twin that reads i64 elements and promotes where the body does. It was the
+one `reduce` spelling with no kernel (field build, 1.46d). `jit-explain` lists a fused float
+fold's sources (`f64-source`, `int-source`).

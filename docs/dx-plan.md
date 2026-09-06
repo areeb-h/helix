@@ -361,8 +361,10 @@ source) and is open.
 (the filter analyses admit the predicate; `KernelShape::Search` in codegen returns the first
 index whose predicate equals `want`, or `len`; f64 twin poisons to -1). Measured on the
 field's shape (200k Ints): [all 12.50x, any 12.58x]; `reduce` over an array was already 15.8×
-here through the fused pipeline — the field's 1.0× must be a body shape the fusion declines
-(a Float init, a call, a captured index); ask for the program. Still open from 1.46: const
+here for an Int accumulator; the field's 1.0× IS the Float-init spelling (`xs.reduce(0.0, …)`
+over an Int array — the f64 fold read f64 elements), fused now through an Int-source twin
+(17.2x (12 ms JIT, 206 ms VM)). Found by the same probe: `xs.reduce(0, add)` with a bare function was refused
+("name both binders") — the pair rule covers `reduce`/`scan` now. Still open from 1.46: const
 folding of pure calls with literal arguments (1.46.1 — a language decision: when a call is
 foldable, what a fold-time error becomes; presented to the user), record shapes across the
 module boundary (1.44), Record iteration without materialising `keys()`/`items()` (1.46.3).

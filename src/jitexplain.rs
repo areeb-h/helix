@@ -175,11 +175,26 @@ pub fn sites(prog: &Program, jit: Option<&Jit>) -> Vec<Site> {
                             || j.filter_kernel_f64(*kernel_idx as usize).is_some()
                     }),
                 ),
-                Op::TryJitFused { kernel_idx, .. } => (
-                    "fused",
-                    *kernel_idx,
-                    jit.is_some_and(|j| j.fused_kernel(*kernel_idx as usize).is_some()),
-                ),
+                Op::TryJitFused { kernel_idx, .. } => {
+                    // A scalar f64 fold has two builds — the f64-source kernel and its
+                    // Int-source twin — and "compiled" alone hid which array it would serve.
+                    let idx = *kernel_idx as usize;
+                    if let Some(j) = jit
+                        && matches!(prog.fused_kernels[idx].sink, crate::bytecode::FusionSink::Reduce { float: true, .. })
+                    {
+                        if j.fused_kernel(idx).is_some() {
+                            specs.push("f64-source");
+                        }
+                        if j.fused_kernel_int_src(idx).is_some() {
+                            specs.push("int-source");
+                        }
+                    }
+                    (
+                        "fused",
+                        idx as u32,
+                        jit.is_some_and(|j| j.fused_kernel(idx).is_some() || j.fused_kernel_int_src(idx).is_some()),
+                    )
+                }
                 Op::TryJitScan { loop_idx, .. } => (
                     "scan",
                     *loop_idx,

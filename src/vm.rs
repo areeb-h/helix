@@ -2878,6 +2878,19 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                                         _ => None,
                                     }
                                 }
+                                // A FLOAT accumulator over an Int array — `xs.reduce(0.0, (acc,
+                                // x) => acc + x)`, the natural spelling of a running sum — ran
+                                // the bytecode loop at 1.0x while every other fold fused (field
+                                // build, 1.46d): the f64 kernel reads f64 elements. Its
+                                // Int-source twin reads i64 and promotes where the body does.
+                                FusionSink::Reduce { bodies, float: true, .. } if bodies.len() == 1 => {
+                                    match (&ops[1], jit.and_then(|j| j.fused_kernel_int_src(*kernel_idx as usize))) {
+                                        (Value::Float(init), Some(p)) => Some(Value::Float(unsafe {
+                                            crate::jit::run_fused_reduce_f64_from_ints(p, v, *init)
+                                        })),
+                                        _ => None,
+                                    }
+                                }
                                 // tuple/record accumulator: ops[1] is its N-Int value.
                                 FusionSink::Reduce { bodies, .. } => {
                                     acc_to_slots(&ops[1], bodies.len()).map(|mut buf| {

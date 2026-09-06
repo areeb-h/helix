@@ -8413,3 +8413,33 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         }
         assert!(crate::jit::native_call_count() > 0, "`log` never ran natively");
     }
+
+    /// A FLOAT accumulator over an Int array — `xs.reduce(0.0, (acc, x) => acc + x)`, the
+    /// natural spelling of a running sum — fuses natively where it ran the bytecode loop at
+    /// 1.0x (the f64 fold read f64 elements; field build, 1.46d). The Int-source twin promotes
+    /// exactly where the interpreter does, so the three engines agree bit for bit; the Floats
+    /// source and the Int accumulator keep their existing kernels.
+    #[test]
+    fn a_float_accumulator_over_an_int_array_folds_natively() {
+        crate::jit::reset_native_call_count();
+        for (src, want) in [
+            ("xs = (0..200000).map(it)\nxs.reduce(0.0, (acc, x) => acc + x)", Some("19999900000.0")),
+            ("xs = (0..10).map(it)\nxs.reduce(0.0, (acc, x) => acc + x * 0.5)", Some("22.5")),
+            ("xs = (0..10).map(it)\nxs.reduce(0.0, (acc, x) => acc + to_float(x))", Some("45.0")),
+            ("xs = (0..10).map(it)\nxs.reduce(0.0, (acc, x) => max(acc, to_float(x)))", Some("9.0")),
+            ("xs = (0..10).map(it)\nxs.reduce(1.0, (acc, x) => acc * 0.5 + x)", None),
+            ("xs = (0..10).map(it)\nxs.reduce(0.0, (acc, x) => acc + sqrt(to_float(x)))", None),
+            ("xs = (1..10).map(it)\nxs.reduce(0.0, (acc, x) => acc + 1.0 / to_float(x))", None),
+            ("xs = [].map(it)\nxs.reduce(0.0, (acc, x) => acc + x)", Some("0.0")),
+            ("ys = (0..10).map(it * 0.5)\nys.reduce(0.0, (acc, x) => acc + x)", Some("22.5")),
+            ("xs = (0..10).map(it)\nxs.reduce(0, (acc, x) => acc + x)", Some("45")),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+            if let Some(w) = want {
+                assert_eq!(jit, Ok(w.to_string()), "`{src}`");
+            }
+        }
+        assert!(crate::jit::native_call_count() > 0, "the Int-source f64 fold never ran natively");
+    }

@@ -557,7 +557,12 @@ pub fn build(
         &mut module, search_kernels, "searchf", KernelShape::Search, &fn_ids, &int_eligible, &user_fns, NumKind::Float,
         None, false, false, &msig_table, &mixed_ids, &host,
     );
-    let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns, &host);
+    let fused_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns, &host, false);
+    // The Int-SOURCE twin of a scalar f64 fold: `xs.reduce(0.0, (acc, x) => acc + x)` over an
+    // `Ints` array reads i64 elements and promotes where the body does. It had no kernel at all
+    // — the f64 fold reads f64 elements, so an Int array fell through to the bytecode loop at
+    // 1.0x while every other fold fused (field build, 1.46d).
+    let fused_isrc_ids = define_fused_kernels(&mut module, fused_kernels, &fn_ids, &int_eligible, &user_fns, &host, true);
 
     // `scan` (prefix-fold) loops — SERIAL kernels (see `define_scan_loop`). Same defensive
     // re-check discipline as the reduce loops: re-derive the capture list from the body with
@@ -672,6 +677,7 @@ pub fn build(
     let search_ptrs = finalize(search_ids, &module);
     let search_ptrs_f64 = finalize(search_f64_ids, &module);
     let fused_ptrs = finalize(fused_ids, &module);
+    let fused_ptrs_isrc = finalize(fused_isrc_ids, &module);
     let scan_ptrs = finalize(scan_ids, &module);
 
     Some(Jit {
@@ -698,6 +704,7 @@ pub fn build(
         search_ptrs,
         search_ptrs_f64,
         fused_ptrs,
+        fused_ptrs_isrc,
         scan_ptrs,
     })
 }
@@ -737,6 +744,9 @@ fn fusion_eligible(k: &crate::bytecode::FusedKernel, fns: &HashSet<&str>, user_f
 }
 
 /// Declare + define every fuseable pipeline kernel (one slot each, `None` if declined).
+/// `int_src` builds the Int-SOURCE twin of each scalar f64 fold — the same `(src, len, init)
+/// -> f64` signature over i64 elements — and declines every other shape.
+#[allow(clippy::too_many_arguments)] // the kernel's parts, and one shape flag
 fn define_fused_kernels(
     module: &mut JITModule,
     kernels: &[crate::bytecode::FusedKernel],
@@ -744,6 +754,7 @@ fn define_fused_kernels(
     eligible: &HashSet<&str>,
     user_fns: &HashSet<&str>,
     host: &HostFns,
+    int_src: bool,
 ) -> Vec<Option<FuncId>> {
     let mut ids: Vec<Option<FuncId>> = Vec::with_capacity(kernels.len());
     let mut ctx = module.make_context();
@@ -760,6 +771,28 @@ fn define_fused_kernels(
             crate::bytecode::FusionSink::Reduce { bodies, float: true, .. } if bodies.len() == 1);
         let tuple_reduce = matches!(&k.sink,
             crate::bytecode::FusionSink::Reduce { bodies, .. } if bodies.len() > 1);
+        // The Int-source twin exists only for a scalar f64 fold over an array with no stages
+        // (the shape the `enough` gate admits), and only when the body types with the
+        // element an Int — `acc + x`, `acc + x * 0.5`, `acc + to_float(x)`. Re-derived here
+        // from the stored body, the same drift guard every other twin build has.
+        if int_src {
+            let ok = float_reduce
+                && !k.source_is_range
+                && k.stages.is_empty()
+                && match &k.sink {
+                    crate::bytecode::FusionSink::Reduce { pa, pb, bodies, .. } => {
+                        let mut binders: HashMap<&str, NumKind> = HashMap::new();
+                        binders.insert(pa.as_str(), NumKind::Float);
+                        binders.insert(pb.as_str(), NumKind::Int);
+                        infer_f64_typed(&bodies[0], &binders, user_fns) == Some(NumKind::Float)
+                    }
+                    _ => false,
+                };
+            if !ok {
+                ids.push(None);
+                continue;
+            }
+        }
         let mut sig = module.make_signature();
         sig.call_conv = CallConv::SystemV;
         sig.params.push(AbiParam::new(I64)); // src pointer / range start
@@ -768,14 +801,15 @@ fn define_fused_kernels(
         if !tuple_reduce {
             sig.returns.push(AbiParam::new(if float_reduce { F64 } else { I64 }));
         }
-        let id = match module.declare_function(&format!("fused${i}"), Linkage::Local, &sig) {
+        let tag = if int_src { "fusedi" } else { "fused" };
+        let id = match module.declare_function(&format!("{tag}${i}"), Linkage::Local, &sig) {
             Ok(id) => id,
             Err(_) => {
                 ids.push(None);
                 continue;
             }
         };
-        ids.push(define_fused_kernel(module, &mut ctx, &mut bctx, id, k, fn_ids, host).map(|()| id));
+        ids.push(define_fused_kernel(module, &mut ctx, &mut bctx, id, k, fn_ids, host, int_src).map(|()| id));
     }
     ids
 }
@@ -1848,6 +1882,9 @@ fn define_array_kernel<'a>(
 /// acc). Source is an `Int` array (`src,…,len`) or a `range` counter (`start,end`).
 /// Signatures: array+Collect `fn(src,dst,len)->i64`; array+Reduce `fn(src,len,init)->i64`;
 /// range+Reduce `fn(start,end,init)->i64`. Integer arithmetic wraps, matching the oracle.
+/// `int_src`: the scalar f64 fold's Int-source twin — i64 elements, promoted where the body
+/// does, into an f64 accumulator (`xs.reduce(0.0, (acc, x) => acc + x)` over an Int array).
+#[allow(clippy::too_many_arguments)] // the kernel's parts, and one shape flag
 fn define_fused_kernel<'a>(
     module: &mut JITModule,
     ctx: &mut cranelift_codegen::Context,
@@ -1856,6 +1893,7 @@ fn define_fused_kernel<'a>(
     k: &'a crate::bytecode::FusedKernel,
     fn_ids: &HashMap<&'a str, FuncId>,
     host: &HostFns,
+    int_src: bool,
 ) -> Option<()> {
     use crate::bytecode::{FusionSink, FusionStage};
     let is_reduce = matches!(k.sink, FusionSink::Reduce { .. });
@@ -1872,7 +1910,8 @@ fn define_fused_kernel<'a>(
     let float_tuple = float_sink && n_acc > 1; // N-slot f64 accumulator
     let acc_ty = if float_reduce { F64 } else { I64 }; // scalar accumulator register
     let slot_ty = if float_tuple { F64 } else { I64 }; // tuple slot register
-    let elem_ty = if float_sink { F64 } else { I64 }; // Float-array element
+    // The Int-source twin reads i64 elements into the f64 fold.
+    let elem_ty = if float_sink && !int_src { F64 } else { I64 }; // Float-array element
 
     ctx.func.signature.call_conv = CallConv::SystemV;
     ctx.func.signature.params.push(AbiParam::new(I64)); // src pointer / range start
@@ -2055,7 +2094,9 @@ fn define_fused_kernel<'a>(
                 // `let` and negation compile here too. No poison: the gate admits no `/`.
                 let mut binders: HashMap<&str, (Variable, NumKind)> = HashMap::new();
                 binders.insert(pa.as_str(), (sink_var, NumKind::Float));
-                binders.insert(pb.as_str(), (cur_var, NumKind::Float));
+                // The element is an Int in the Int-source twin: the typed lowering promotes it
+                // exactly where the interpreter's `arith` does.
+                binders.insert(pb.as_str(), (cur_var, if int_src { NumKind::Int } else { NumKind::Float }));
                 let no_arrays: HashMap<&str, Variable> = HashMap::new();
                 let mut cx = F64Ctx {
                     binders: &mut binders,
