@@ -96,3 +96,14 @@ rule an assignment has — `mut`, `export` (each field, never the temp), rebindi
 immutable, the module's export list, the checker's shape refusal — applies per field on
 every engine, because each field binding *is* an assignment. Pinned by
 `record_destructuring_is_also_a_statement` and the corpus program.
+
+## Addendum 2026-09-06 — the refusal narrows to the literal
+
+"The checker refuses what it can prove" was written when a known shape at a destructure
+meant a record literal right there. Call-site specialization (the checker re-typing a
+function's body with what a call passes) made a constructor's result a known shape too — and
+there absence is the normal case, this ADR's own opening argument. So the refusal narrows:
+a destructure of a record LITERAL written right there is refused for a name it lacks (the
+typo, `limt` for `limit`, still caught with the did-you-mean); a destructure of any other
+known shape answers `missing` for an absent field, exactly as the form promises. The checker
+tracks the `$rec<N>` temporaries bound to a literal (`literal_temps`); nothing else changes.

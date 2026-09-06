@@ -42,6 +42,12 @@ pub enum Type {
         /// How many of `params` a call must supply; the rest have defaults. A call is
         /// refused outside `required..=params.len()`, in the runtime's words.
         required: usize,
+        /// The top-level `fn` this is the signature of, or `None` for a lambda or any other
+        /// function value. Call-site specialization re-types a BODY, so it must know the
+        /// call resolved to the function that owns it: a `let g = …` lambda shadowing a
+        /// top-level `fn g` was specialized with `g`'s body, by name, and refused a program
+        /// that ran. Identity travels with the type; nothing else reads it.
+        origin: Option<std::rc::Rc<str>>,
     },
     /// The OPEN kinds an annotation names (field build, 1.45a): a record, dict, tuple or
     /// function whose shape is not known statically. Compatible with every value of that
@@ -446,7 +452,44 @@ pub struct Checker {
     /// Shadowing is not read from here — `env` already answers it, because a later
     /// `where = 5` rebinds the name to a non-function type.
     fn_globals: FxHashSet<String>,
+    /// Every checked `fn`'s parameters and body, for CALL-SITE SPECIALIZATION (field build,
+    /// 1.44): a call whose arguments are informative re-types the body with them, so an
+    /// argument-dependent shape — `fn mk(s) = {c: s.columns}` — reaches the call site. Kept
+    /// behind an `Rc` so a specialization borrows nothing from the checker it mutates.
+    fn_bodies: FxHashMap<String, std::rc::Rc<FnBody>>,
+    /// Specializations already computed, by function and argument-type tuple: the precise
+    /// return type, or `None` when the body did not type under those arguments (the
+    /// definition's permissive answer stands — specialization adds precision, never a
+    /// refusal).
+    specialized: FxHashMap<String, Option<Type>>,
+    /// Specializations in progress, so a recursive call inside a body being specialized
+    /// answers the stored signature instead of recursing forever.
+    specializing: FxHashSet<String>,
+    /// How many specializations this check has run; past [`SPECIALIZATION_BUDGET`] the
+    /// stored signature answers, so a pathological program cannot make `check` quadratic.
+    specializations: usize,
+    /// Whether receiver types are being recorded into [`Checker::types`]. Off during a
+    /// specialization: the compiler routes each method call ONCE, by the definition's
+    /// typing, and a call-site type must never overwrite that (the divergence the
+    /// `mut_globals` note describes, arriving by another road).
+    recording: bool,
+    /// The destructure temporaries (`$rec<N>`) bound to a record LITERAL written right there.
+    /// A destructure of such a temp is refused for a name the literal lacks (a typo, the case
+    /// ADR 0046 wanted caught); a destructure of any other known shape answers `missing` for
+    /// an absent field, as the form promises — with call-site specialization, a constructor's
+    /// result is a known shape, and there absence is the normal case.
+    literal_temps: FxHashSet<String>,
 }
+
+/// A checked function's parameters and body (see [`Checker::fn_bodies`]).
+pub struct FnBody {
+    params: Vec<(String, Option<TypeAnn>)>,
+    body: Expr,
+}
+
+/// The most specializations one `check` runs. Each is one body typing; a real program uses
+/// a handful, so the cap only ever trips on adversarial input.
+const SPECIALIZATION_BUDGET: usize = 2_000;
 
 impl Default for Checker {
     fn default() -> Self {
@@ -473,6 +516,12 @@ impl Checker {
                 .map(|s| s.to_string())
                 .collect(),
             deferred_globals: FxHashSet::default(),
+            fn_bodies: FxHashMap::default(),
+            specialized: FxHashMap::default(),
+            specializing: FxHashSet::default(),
+            specializations: 0,
+            recording: true,
+            literal_temps: FxHashSet::default(),
             fn_globals: FxHashSet::default(),
         }
     }
@@ -480,6 +529,9 @@ impl Checker {
     pub fn exec_stmt(&mut self, s: &Stmt) -> Result<(), HelixError> {
         match s {
             Stmt::Assign { name, mutable, value, line, col, .. } => {
+                if name.starts_with("$rec") && matches!(value, Expr::Record(_)) {
+                    self.literal_temps.insert(name.clone());
+                }
                 let t = self.synth(value)?;
                 self.check_rebind(name, *mutable, *line, *col)?;
                 if *mutable {
@@ -661,15 +713,58 @@ impl Checker {
                 params: param_types.clone(),
                 ret: Box::new(ret_ann.clone().unwrap_or(Type::Unknown)),
                 required: params.len() - defaults.iter().flatten().count(),
+                origin: Some(std::rc::Rc::from(name)),
             },
         );
 
-        // A `mut` global types as Unknown inside the deferred body (see
-        // `mut_globals`): the body runs at call time, by which the global may
-        // hold a different type. The fn's own name is exempt — the definition
-        // rebinds it, and self-calls should see the provisional signature.
-        // Snapshot BEFORE the param save so a same-named param restores the
-        // Unknown we set here, and our restore below puts the real type back.
+        let body_t = self.type_body(name, params, &param_types, body)?;
+
+        if let Some(rt) = &ret_ann
+            && !annotation_admits(rt, &body_t) {
+                return Err(HelixError::new(
+                    format!(
+                        "function `{}` is declared to return {}, but its body produces {}",
+                        name, rt, body_t
+                    ),
+                    line,
+                    col,
+                )
+                .hint("make the body match the `->` return type, or drop the annotation."));
+            }
+
+        // Keep the body for call-site specialization (field build, 1.44).
+        self.fn_bodies.insert(
+            name.to_string(),
+            std::rc::Rc::new(FnBody { params: params.to_vec(), body: body.clone() }),
+        );
+        // Store the final signature (inferred return if not annotated).
+        let final_ret = ret_ann.unwrap_or(body_t);
+        self.env.insert(
+            name.to_string(),
+            Type::Function {
+                params: param_types,
+                ret: Box::new(final_ret),
+                required: params.len() - defaults.iter().flatten().count(),
+                origin: Some(std::rc::Rc::from(name)),
+            },
+        );
+        Ok(())
+    }
+
+    /// Type a function body with its parameters bound to `param_types` — the definition's
+    /// (annotations, else `Unknown`) from `check_func`, or a call site's from `specialize`.
+    /// A `mut` global types as Unknown inside the deferred body (see `mut_globals`): the
+    /// body runs at call time, by which the global may hold a different type. The fn's own
+    /// name is exempt — the definition rebinds it, and self-calls should see the provisional
+    /// signature. Snapshot BEFORE the param save so a same-named param restores the Unknown
+    /// set here, and the restore below puts the real type back.
+    fn type_body(
+        &mut self,
+        name: &str,
+        params: &[(String, Option<TypeAnn>)],
+        param_types: &[Type],
+        body: &Expr,
+    ) -> Result<Type, HelixError> {
         let saved_muts: Vec<(String, Type)> = self
             .mut_globals
             .iter()
@@ -679,7 +774,6 @@ impl Checker {
         for (n, _) in &saved_muts {
             self.env.insert(n.clone(), Type::Unknown);
         }
-
         // Bind params, snapshot/restore like the interpreter's call_function.
         let saved: Vec<(String, Option<Type>)> = params
             .iter()
@@ -702,32 +796,69 @@ impl Checker {
         for (n, t) in saved_muts {
             self.env.insert(n, t);
         }
-        let body_t = body_result?;
+        body_result
+    }
 
-        if let Some(rt) = &ret_ann
-            && !annotation_admits(rt, &body_t) {
-                return Err(HelixError::new(
-                    format!(
-                        "function `{}` is declared to return {}, but its body produces {}",
-                        name, rt, body_t
-                    ),
-                    line,
-                    col,
-                )
-                .hint("make the body match the `->` return type, or drop the annotation."));
-            }
-
-        // Store the final signature (inferred return if not annotated).
-        let final_ret = ret_ann.unwrap_or(body_t);
-        self.env.insert(
-            name.to_string(),
-            Type::Function {
-                params: param_types,
-                ret: Box::new(final_ret),
-                required: params.len() - defaults.iter().flatten().count(),
-            },
-        );
-        Ok(())
+    /// CALL-SITE SPECIALIZATION (field build, 1.44). A call to a checked `fn` whose
+    /// unannotated parameters receive informative argument types re-types the body with
+    /// those types bound (annotated parameters keep their annotation), and answers the
+    /// result when it is more precise than the stored return type. Memoized per function and
+    /// argument-type tuple; a recursive call inside the body being specialized answers the
+    /// stored signature (the in-progress guard); the receiver side-table is not written
+    /// (`recording`), so the compiler's routing stays the definition's. A body that does not
+    /// type under the call's arguments — a branch the arguments would never take, typed all
+    /// the same — answers `None`, and the caller keeps the definition's permissive return:
+    /// this adds precision, and never rejects a program that ran.
+    pub(super) fn specialize(
+        &mut self,
+        name: &str,
+        params: &[Type],
+        args: &[Type],
+        origin: &Option<std::rc::Rc<str>>,
+    ) -> Option<Type> {
+        // Only the function that OWNS the body: a local of the same name is not it.
+        if origin.as_deref() != Some(name) {
+            return None;
+        }
+        let fb = self.fn_bodies.get(name)?.clone();
+        let mut bind: Vec<Type> = Vec::with_capacity(params.len());
+        let mut informative = false;
+        for (i, p) in params.iter().enumerate() {
+            // An UNANNOTATED parameter takes the argument's type; an annotated one keeps its
+            // annotation — and `x: Any` is therefore the way to keep a function opaque on
+            // purpose (a laundering `fn launder(x: Any) = x` stays a laundering).
+            let unannotated = fb.params.get(i).is_some_and(|(_, ann)| ann.is_none());
+            bind.push(match (p, args.get(i)) {
+                (Type::Unknown, Some(a)) if unannotated && !matches!(a, Type::Unknown | Type::Missing) => {
+                    informative = true;
+                    a.clone()
+                }
+                _ => p.clone(),
+            });
+        }
+        if !informative {
+            return None;
+        }
+        let key = format!("{name}|{bind:?}");
+        if let Some(memo) = self.specialized.get(&key) {
+            return memo.clone();
+        }
+        if self.specializing.contains(&key) || self.specializations >= SPECIALIZATION_BUDGET {
+            return None;
+        }
+        self.specializations += 1;
+        self.specializing.insert(key.clone());
+        let was_recording = self.recording;
+        self.recording = false;
+        let result = self.type_body(name, &fb.params, &bind, &fb.body);
+        self.recording = was_recording;
+        self.specializing.remove(&key);
+        let out = match result {
+            Ok(t) if !matches!(t, Type::Unknown) => Some(t),
+            _ => None,
+        };
+        self.specialized.insert(key, out.clone());
+        out
     }
 
     fn synth(&mut self, e: &Expr) -> Result<Type, HelixError> {
@@ -898,18 +1029,23 @@ impl Checker {
                 }
             }
             // A destructured field (`let {a} = e in …`; see the parser's `destructure_record`).
-            // Where the record's shape is KNOWN, a name it cannot have is a mistake and is
-            // refused in the words `.a` uses; where it is not, the read is `Unknown` and
-            // answers `missing` at run time for an absent field. A receiver the checker can
-            // prove has no fields at all is refused here rather than at run time.
+            // Where the record is a LITERAL written right there, a name it lacks is a typo and
+            // is refused in the words `.a` uses; where the shape is known some other way — a
+            // constructor's result, through call-site specialization — an absent field is
+            // `missing`, as the form promises (absence is a spec record's normal case, ADR
+            // 0046's own words); where the shape is not known, the read is `Unknown`. A
+            // receiver the checker can prove has no fields at all is refused here rather than
+            // at run time.
             Expr::FieldOrMissing { recv, name, line, col } => {
                 let rt = self.synth(recv)?;
+                let from_literal =
+                    matches!(&**recv, Expr::Ident { name: t, .. } if self.literal_temps.contains(t));
                 match &rt {
-                    Type::Record(fields) => fields
-                        .iter()
-                        .find(|(k, _)| k == name)
-                        .map(|(_, t)| t.clone())
-                        .ok_or_else(|| record_has_no_field(fields, name, *line, *col)),
+                    Type::Record(fields) => match fields.iter().find(|(k, _)| k == name) {
+                        Some((_, t)) => Ok(t.clone()),
+                        None if from_literal => Err(record_has_no_field(fields, name, *line, *col)),
+                        None => Ok(Type::Missing),
+                    },
                     Type::Unknown | Type::Missing | Type::AnyRecord => Ok(Type::Unknown),
                     other => Err(HelixError::new(
                         format!(
@@ -1118,11 +1254,15 @@ impl Checker {
                     params: param_types,
                     ret: Box::new(body_t),
                     required: params.len() - defaults.len(),
+                    origin: None,
                 })
             }
             Expr::Let { bindings, body, .. } => {
                 let mut saved: Vec<(String, Option<Type>)> = Vec::with_capacity(bindings.len());
                 for (name, expr) in bindings {
+                    if name.starts_with("$rec") && matches!(expr, Expr::Record(_)) {
+                        self.literal_temps.insert(name.clone());
+                    }
                     let t = self.synth(expr)?;
                     let prev = self.env.insert(name.clone(), t);
                     saved.push((name.clone(), prev));
@@ -1305,6 +1445,7 @@ pub fn check(program: &[Stmt]) -> Result<TypeMap, HelixError> {
                     params: param_types,
                     ret: Box::new(ret_ty),
                     required: params.len() - defaults.iter().flatten().count(),
+                    origin: Some(std::rc::Rc::from(name.as_str())),
                 },
             );
             checker.fn_globals.insert(name.clone());

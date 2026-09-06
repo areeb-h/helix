@@ -124,7 +124,9 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 Float argument; a `Float` one accepts an Int. `Record`, `Dict`, `Tuple` and `Function` say \
                 what KIND of value arrives without fixing its shape: a wrong kind is refused at the call, \
                 and the value's fields and methods stay open inside the body. A lambda takes the same \
-                annotations: `(x: Int) => x + 1`. \
+                annotations: `(x: Int) => x + 1`. A call to a function with an UNANNOTATED parameter \
+                re-types its body with what the call passes, so a shape computed from an argument reaches \
+                the caller; `x: Any` opts a parameter out of that. \
                 Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed.",
     },
     SyntaxDoc {

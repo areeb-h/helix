@@ -7222,8 +7222,9 @@ s1 = try([variable(tensor([1.0])), 1.0].sum())
 print(s1.ok, s1.error)
 s2 = [variable(1.0), missing].sum()
 print(s2)
-# r1 checked statically — the laundered r2 below exercises the runtime path
-fn launder(x) = x
+# r1 checked statically — the laundered r2 below exercises the runtime path (`Any` keeps a
+# call from specializing on its argument, so the laundering stays a laundering)
+fn launder(x: Any) = x
 r2 = try(launder(true) < launder(false))
 print(r2.ok, r2.error)
 r3 = try(launder((1, 2)) < launder("a"))
@@ -15821,13 +15822,13 @@ fn count_where_refuses_in_its_own_name() {
     );
     for env in [&[][..], &[("HELIX_NOJIT", "1")][..], &[("HELIX_NOVM", "1")][..]] {
         let (_, err, code) =
-            run_source("fn f(x) = x\nxs = [1, 2]\nprint(f(xs).count_where(it * 2))\n", env, "cw_runtime");
+            run_source("fn f(x: Any) = x\nxs = [1, 2]\nprint(f(xs).count_where(it * 2))\n", env, "cw_runtime");
         assert_ne!(code, Some(0), "{env:?}");
         assert!(
             err.contains("`count_where` expects a yes/no test, but the expression produced an Int"),
             "{env:?}: {err}"
         );
-        let (_, err, code) = run_source("fn f(x) = x\nprint(f(5).count_where(it > 0))\n", env, "cw_recv");
+        let (_, err, code) = run_source("fn f(x: Any) = x\nprint(f(5).count_where(it > 0))\n", env, "cw_recv");
         assert_ne!(code, Some(0), "{env:?}");
         assert!(err.contains("an Int has no method `count_where`"), "{env:?}: {err}");
     }
@@ -16310,5 +16311,24 @@ fn group_agg_refuses_in_words() {
             assert_ne!(code, Some(0), "{name}: {src}");
             assert!(err.contains(want), "{name}: {src}\n--- wanted `{want}` in ---\n{err}");
         }
+    }
+}
+
+/// The shape a library constructor computes from its ARGUMENT reaches the caller — through
+/// `import`, which is the only way anyone calls a library (field build, 1.44): `helix check`
+/// refuses `User.c.nmae` at the call site, and the program with the right field runs on every
+/// engine.
+#[test]
+fn an_argument_dependent_shape_crosses_the_module_boundary() {
+    let lib = "export fn define(s) = {c: s.columns, name: s.name}\n";
+    let bad = "import lib\nUser = lib.define({name: \"user\", columns: {id: 1, name: 2}})\nprint(User.c.nmae)\n";
+    let (out, err, code) = run_modules(&[("lib.helix", lib), ("main.helix", bad)], "main.helix", &[], "shape_bad");
+    assert_ne!(code, Some(0), "{out}");
+    assert!(err.contains("no field `nmae`"), "{err}");
+    let good = "import lib\nUser = lib.define({name: \"user\", columns: {id: 1, name: 2}})\nprint(User.c.name, User.name)\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_modules(&[("lib.helix", lib), ("main.helix", good)], "main.helix", env, &format!("shape_good_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "2 user\n", "{name}");
     }
 }

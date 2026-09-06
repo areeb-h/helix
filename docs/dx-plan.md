@@ -360,12 +360,16 @@ by `mk({columns: {id: 1, name: 2}}).c.nmae` passes `helix check` SAME-FILE too (
 return (`fn lit() = {a: 1}`; `lit().b`) is refused same-file and through `import` alike. The
 checker types a function ONCE at its definition, with an unannotated parameter as `Unknown`,
 and `synth_call` answers the stored return type — there is no call-site specialization, so
-nothing crosses the module boundary that did not already fail to cross a call. The ask is
-therefore a checker feature — re-synthesizing an unannotated function's body with the call
-site's argument types (memoized per argument-type tuple, recursion-guarded, with the body's
-errors reported at the call site) — not a loader fix. Worth doing: it is what makes a
-library constructor's shape checkable; queued behind the perf items with a design note to
-write first (where a body error surfaces, and how deep re-synthesis goes).
+nothing crosses the module boundary that did not already fail to cross a call. The ask was
+therefore a checker feature, not a loader fix — DONE (2026-09-06): `Checker::specialize`
+re-types the body with the call's argument types (annotated parameters keep theirs), memoized
+per argument-type tuple, recursion-guarded, budgeted (2 000 per check), with the receiver
+side-table frozen (`recording`) so the compiler's routing stays the definition's. The design
+questions answered: a body error under specialization surfaces NOWHERE — the definition's
+permissive answer stands (precision only, never a refusal) — and re-synthesis goes as deep as
+the calls inside the body, each memoized. Open: a specialization is per argument-type tuple,
+so two record shapes at two call sites cost two typings (bounded by the budget); and the
+precision stops at a parameter the call leaves `Unknown`.
 
 **1.46.3 (2026-09-05) — Record enumeration cost.** DONE for the allocation half:
 `Symbol::as_rc_string` (a per-thread `FxHashMap<u32, Rc<String>>`) shares one allocation per

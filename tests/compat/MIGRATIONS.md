@@ -148,3 +148,15 @@ no entry. A source edit is not a behavior change.
   admits an Int, `Num` both. Additive otherwise: `Record`, `Dict`, `Tuple`, `Function` and
   `Any` are accepted as type names, and a lambda's parameters may be annotated. No corpus
   program or golden used an annotation that moved.
+
+- **A record returned by a function called with a known argument has a known shape at the
+  call** (2026-09-06). `u = mk({columns: {id: 1}})` followed by `u.c.nmae` is refused by `check`
+  as "record has no field `nmae`" — the sentence a literal record's missing field has always
+  drawn — where it used to pass and raise at run time. A program that probed such a field
+  dynamically (`if u.has("x") then u.x else 0`) is refused exactly as it already was for a
+  literal record; every other program is unchanged, because a body that does not type under
+  the call's arguments keeps the definition's permissive answer. `x: Any` on a parameter opts
+  it out. One refusal NARROWED at the same time: a destructure (`let {order} = spec in …`,
+  `{order} = spec`) of a known shape answers `missing` for an absent field, and is refused for
+  a name only when the record is a literal written right there — so a spec built by a
+  constructor destructures as it always did. No corpus program or golden moved.

@@ -182,7 +182,7 @@ impl super::Checker {
     ) -> Result<Type, HelixError> {
         // A user binding of this name shadows a builtin of the same name — defining
         // `fn sign(..)` checks against *your* signature, not the math builtin's.
-        if let Some(Type::Function { params, ret, required }) = self.env.get(name).cloned() {
+        if let Some(Type::Function { params, ret, required, origin }) = self.env.get(name).cloned() {
             // Outside `required..=params.len()` — and in the runtime's words, so the
             // refusal reads the same whether the checker or an engine gives it.
             if args.len() < required || args.len() > params.len() {
@@ -202,6 +202,12 @@ impl super::Checker {
                         col,
                     ));
                 }
+            }
+            // An argument-dependent return shape reaches the call (field build, 1.44):
+            // `mk({columns: {id: 1, name: 2}}).c.nmae` is refused because the body was
+            // re-typed with the record it was given. Precision only — see `specialize`.
+            if let Some(t) = self.specialize(name, &params, args, &origin) {
+                return Ok(t);
             }
             return Ok(*ret);
         }
@@ -272,8 +278,11 @@ impl super::Checker {
         }
         let rt = self.synth(recv)?;
         // Record the receiver's type so the bytecode compiler can route this method
-        // by the receiver's true type (DataFrame vs Array vs Tensor), not its name.
-        self.types.insert(recv as *const Expr, rt.clone());
+        // by the receiver's true type (DataFrame vs Array vs Tensor), not its name — from
+        // the definition's typing only, never from a call-site specialization.
+        if self.recording {
+            self.types.insert(recv as *const Expr, rt.clone());
+        }
         // `.is_missing()` is universal — and takes no arguments (matching the
         // runtime), so the checker agrees rather than waving the arity through.
         if name == "is_missing" {

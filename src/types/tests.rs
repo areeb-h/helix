@@ -302,3 +302,43 @@ fn every_builtin_answers_the_signature_probe() {
         assert!(emsg("fn f() -> Int = 1.5").contains("declared to return Int"));
         ok("fn f() -> Float = 1");
     }
+
+    /// An argument-dependent record shape crosses a CALL (field build, 1.44): the checker
+    /// re-types an unannotated function's body with the call site's argument types and uses
+    /// the answer only when it is more precise. A body that does not type under the
+    /// specialization keeps the definition's permissive answer, so nothing that ran is
+    /// refused; recursion terminates on the in-progress guard.
+    #[test]
+    fn a_call_specializes_an_unannotated_function_on_its_arguments() {
+        assert!(emsg("fn mk(s) = {c: s.columns}\nmk({columns: {id: 1, name: 2}}).c.nmae").contains("no field `nmae`"));
+        assert!(emsg("fn mk(s) = let m = {c: s.columns} in {...m, f: (x) => x}\nmk({columns: {id: 1, name: 2}}).c.nmae").contains("no field"));
+        assert!(emsg("fn id(s) = s\nid({id: 1}).nmae").contains("no field `nmae`"));
+        assert!(emsg("fn mk(s) = {c: s.columns}\nu = mk({columns: {id: 1, name: 2}})\nu.c.nmae").contains("no field `nmae`"));
+        ok("fn mk(s) = {c: s.columns}\nmk({columns: {id: 1, name: 2}}).c.name");
+        // A parameter the call leaves Unknown stays permissive.
+        ok("fn mk(s) = {c: s.columns}\nfn wrap(t) = mk(t).c.nmae\nwrap(1)");
+        // A body the specialization cannot type keeps the definition's answer: no refusal.
+        ok("fn pick(x) = if type_of(x) == \"Int\" then x + 1 else x.name\npick(1)\npick({name: \"a\"})");
+        // Recursion terminates and still answers.
+        ok("fn fact(n) = if n <= 1 then 1 else n * fact(n - 1)\nfact(5) + 1");
+        // Through a function-valued argument, the callee's own call types precisely.
+        ok("fn apply(f, x) = f(x)\napply((v) => v + 1, 1)");
+        // A body that fails only under the call's types is NOT surfaced — the definition's
+        // answer stands (the field might sit in a branch these arguments never take) …
+        ok("fn f(x: Int, r) = r.name\nf(1, {nmae: 2})");
+        // … while the annotated parameter keeps its annotation and the other specializes,
+        // so a shape refused at the CALLER is refused.
+        assert!(emsg("fn f(x: Int, r) = r\nf(1, {nmae: 2}).name").contains("no field `name`"));
+        // A local lambda shadowing a top-level fn of the same name is NOT that fn's body.
+        ok("fn g(x) = match x + 1 { x => (z => x + z) }\nfn m() = let g = (u => u + 1) in g(0) * 10\nm()");
+        // `Any` keeps a function opaque on purpose: the laundering stays a laundering.
+        ok("fn launder(x: Any) = x\nlaunder(true) < launder(false)");
+        assert!(emsg("fn launder(x) = x\nlaunder(true) < launder(false)").contains("cannot order a Bool"));
+        // A destructure of a constructor's (now known) shape answers `missing` for an absent
+        // field, as the form promises; a literal written right there is still refused for a
+        // name it lacks.
+        ok("fn mk(s) = {where: s}\n{where, order} = mk(1)\norder");
+        ok("fn mk(s) = {where: s}\nlet {where, order} = mk(1) in order");
+        assert!(emsg("{limt} = {limit: 1}").contains("no field `limt`"));
+        assert!(emsg("let {limt} = {limit: 1} in limt").contains("no field `limt`"));
+    }

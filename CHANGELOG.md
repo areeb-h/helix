@@ -155,6 +155,25 @@
 
 ### Changed
 
+- **An argument-dependent record shape reaches the call site.** `fn mk(s) = {c: s.columns}`
+  followed by `mk({columns: {id: 1, name: 2}}).c.nmae` passed `helix check`, same file or
+  through `import`: a function was typed once at its definition with an unannotated parameter
+  as `Unknown`, and every call answered that stored return type, so the one shape a library
+  constructor has — the one computed from its argument — never left the function (field build,
+  1.44). A call whose arguments are informative now re-types the body with them (annotated
+  parameters keep their annotation), memoized per argument-type tuple, recursion-guarded and
+  budgeted, with the compiler's receiver routing frozen so a call-site type never overwrites
+  the definition's. The answer is used only when it is more precise; a body that does not
+  type under the call's arguments keeps the definition's permissive answer, so this adds
+  precision and never rejects a program that ran. What it does refuse is what a literal
+  record already refused: a field the returned shape cannot have. `x: Any` opts a parameter
+  out (a laundering `fn launder(x: Any) = x` stays opaque on purpose). And because a
+  constructor's result is a known shape now, a destructure answers `missing` for an absent
+  field of any known shape — absence is a spec record's normal case — and refuses a name only
+  when the record is a literal written right there, the typo case ADR 0046 wanted. Pinned by
+  `a_call_specializes_an_unannotated_function_on_its_arguments` and
+  `an_argument_dependent_shape_crosses_the_module_boundary`.
+
 - **A Float of extreme magnitude prints in exponent form.** `print(1e21)` printed
   `1000000000000000000000.0`, `"{1.5e300}"` was a 303-character string, and a value past 2^53
   printed positional digits the double does not hold (`27021597764222980.0`); Helix parsed
