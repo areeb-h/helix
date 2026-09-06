@@ -1,0 +1,9 @@
+# GroupBy.agg (field build 1.37): several aggregates in one pass, the newer single-column
+# kinds, the missing/NaN doctrine, an expression inside an aggregate, and a bound output name.
+d = dataframe({k: ["a", "a", "b", "b", "b"], v: [1, 3, 2, 8, 5], w: [1.5, 2.5, missing, 4.0, 4.0]})
+print(d.group(@k).agg({n: count(), m: mean(@v), hi: max(@v * 2), lo: min(@v), s: sum(@v), sd: std(@v)}).sort(@k))
+print(d.group(@k).agg({med: median(@v), f: first(@v), u: nunique(@v), wm: mean(@w), wu: nunique(@w), wf: first(@w)}).sort(@k))
+print(d.group(@k).median(@v).sort(@k).column("v"), d.group(@k).first(@w).sort(@k).column("w"), d.group(@k).nunique(@v).sort(@k).column("v"))
+name = "total"
+print(d.group(@k).agg({name: sum(@v), rows: count(@v)}).sort(@k))
+print(dataframe({k: ["x"], v: [1.5]}).group(@k).agg({med: median(@v), n: count()}))

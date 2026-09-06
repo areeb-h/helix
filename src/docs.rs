@@ -3387,6 +3387,50 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
         },
     ),
     (
+        "GroupBy",
+        DocEntry {
+            name: "agg",
+            sig: "agg({name: aggregate(@col), ...})",
+            doc: "Several aggregates in ONE pass: a frame of the keys plus one column per field, in the order written.",
+            example: "dataframe({k: [\"a\",\"a\",\"b\"], v: [1,2,3]}).group(@k).agg({n: count(), m: mean(@v), hi: max(@v * 2)}).sort(@k).column(\"hi\")",
+            example_out: "[4, 6]",
+            notes: "The aggregates: count(), mean, sum, min, max, std, median, first, nunique — each over a column EXPRESSION (`mean(@v * 2)`), the syntax `where`/`with` read. A field's name is the output column (a binding in scope names it, as in `with`). `count` counts rows including missing; every other aggregate answers missing when the group holds one (an all-missing group is unknown), except `first`, whose first value is knowable. Keywords: aggregate, group by, summarise, summarize, pivot, multiple, several, one pass.",
+        },
+    ),
+    (
+        "GroupBy",
+        DocEntry {
+            name: "median",
+            sig: "median(@col)",
+            doc: "The per-group median of one column, as a Float (the mean of the two middles on an even count).",
+            example: "dataframe({k: [\"a\",\"a\",\"b\"], v: [1,2,3]}).group(@k).median(@v).sort(@k).column(\"v\")",
+            example_out: "[1.5, 3.0]",
+            notes: "",
+        },
+    ),
+    (
+        "GroupBy",
+        DocEntry {
+            name: "first",
+            sig: "first(@col)",
+            doc: "The first row's value in each group, in the frame's row order.",
+            example: "dataframe({k: [\"a\",\"a\",\"b\"], v: [1,2,3]}).group(@k).first(@v).sort(@k).column(\"v\")",
+            example_out: "[1, 3]",
+            notes: "The one aggregate a later `missing` does not make missing: the first value is knowable.",
+        },
+    ),
+    (
+        "GroupBy",
+        DocEntry {
+            name: "nunique",
+            sig: "nunique(@col)",
+            doc: "The number of distinct values in each group; missing when the group holds a missing.",
+            example: "dataframe({k: [\"a\",\"a\",\"b\"], v: [1,1,3]}).group(@k).nunique(@v).sort(@k).column(\"v\")",
+            example_out: "[1, 1]",
+            notes: "",
+        },
+    ),
+    (
         "Dict",
         DocEntry {
             name: "get",

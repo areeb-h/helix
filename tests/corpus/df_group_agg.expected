@@ -1,0 +1,23 @@
+exit: 0
+--- stdout ---
+k  n    m  hi  lo   s                  sd
+-  -  ---  --  --  --  ------------------
+a  2  2.0   6   1   4  1.4142135623730951
+b  3  5.0  16   2  15                 3.0
+(2 rows)
+k  med  f  u       wm       wu       wf
+-  ---  -  -  -------  -------  -------
+a  2.0  1  2      2.0        2      1.5
+b  5.0  2  3  missing  missing  missing
+(2 rows)
+[2.0, 5.0] [1.5, missing] [2, 3]
+k  total  rows
+-  -----  ----
+a      4     2
+b     15     3
+(2 rows)
+k  med  n
+-  ---  -
+x  1.5  1
+(1 row)
+--- stderr ---

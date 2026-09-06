@@ -1421,7 +1421,9 @@ pub(super) fn df_method_type(name: &str, line: usize, col: usize) -> Result<Type
 
 pub(super) fn groupby_method_type(name: &str, line: usize, col: usize) -> Result<Type, HelixError> {
     Ok(match name {
-        "mean" | "sum" | "min" | "max" | "count" | "std" => Type::DataFrame,
+        "mean" | "sum" | "min" | "max" | "count" | "std" | "median" | "first" | "nunique" | "agg" => {
+            Type::DataFrame
+        }
         _ => {
             return Err(unknown_method(
                 "GroupBy",

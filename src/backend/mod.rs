@@ -212,6 +212,70 @@ pub enum ColExpr {
     FloatPred(FloatPredKind, Box<ColExpr>),
 }
 
+/// One grouped aggregation (field build, 1.37). `count` counts rows, `missing` included; every
+/// other kind propagates a `missing` and a NaN, exactly as the single-column verbs do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggKind {
+    Count,
+    Mean,
+    Sum,
+    Min,
+    Max,
+    Std,
+    /// The middle value as a Float (the mean of the two middles on an even count) — the
+    /// Array `median()` rule.
+    Median,
+    /// The first row's value, verbatim (a `missing` first row answers `missing`; a later
+    /// one does not make it so — the first value is knowable).
+    First,
+    /// The number of distinct present values; `missing` when any value is missing (an
+    /// unknown value could be any of them, or a new one).
+    Nunique,
+}
+
+impl AggKind {
+    pub fn parse(name: &str) -> Option<AggKind> {
+        Some(match name {
+            "count" => AggKind::Count,
+            "mean" => AggKind::Mean,
+            "sum" => AggKind::Sum,
+            "min" => AggKind::Min,
+            "max" => AggKind::Max,
+            "std" => AggKind::Std,
+            "median" => AggKind::Median,
+            "first" => AggKind::First,
+            "nunique" => AggKind::Nunique,
+            _ => return None,
+        })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AggKind::Count => "count",
+            AggKind::Mean => "mean",
+            AggKind::Sum => "sum",
+            AggKind::Min => "min",
+            AggKind::Max => "max",
+            AggKind::Std => "std",
+            AggKind::Median => "median",
+            AggKind::First => "first",
+            AggKind::Nunique => "nunique",
+        }
+    }
+
+    /// Every name `agg` accepts, for the error that lists them.
+    pub const NAMES: &'static str = "count, mean, sum, min, max, std, median, first, nunique";
+}
+
+/// One output column of a grouped `agg`: its name, the aggregate, and the column expression it
+/// folds (`None` only for `count`, which counts rows).
+#[derive(Debug, Clone)]
+pub struct AggSpec {
+    pub name: String,
+    pub kind: AggKind,
+    pub expr: Option<ColExpr>,
+}
+
 /// The float predicates a query may ask. Deliberately a closed set: these are
 /// *classification* questions about a float, which is why they are the only unary
 /// float functions that do not need a NaN guard of their own.
@@ -410,6 +474,16 @@ pub trait DataHandle {
         keys: &[String],
         agg: &str,
         value_col: &str,
+        line: usize,
+        col: usize,
+    ) -> Result<Df, HelixError>;
+    /// Several aggregates in ONE grouping pass (`group(@k).agg({n: count(), m: mean(@v)})`):
+    /// a frame of the keys followed by one column per spec, in the order written. The
+    /// single-column `median`/`first`/`nunique` verbs are one-spec calls of this.
+    fn group_agg_many(
+        &self,
+        keys: &[String],
+        aggs: &[AggSpec],
         line: usize,
         col: usize,
     ) -> Result<Df, HelixError>;

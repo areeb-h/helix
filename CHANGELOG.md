@@ -4,6 +4,18 @@
 
 ### Added
 
+- **`group(@k).agg({n: count(), m: mean(@v), hi: max(@v * 2)})`, and grouped `median`,
+  `first`, `nunique`.** A GroupBy computed one aggregate of one column per call, so the ordinary
+  analytics query — count, mean and max of a group — was three group-bys and two joins (field
+  build, 1.37). `agg` takes a record whose values are aggregate calls over column expressions,
+  the syntax `where`/`with` already read, groups ONCE, and answers the keys plus one column per
+  field in the order written; a field's name is the output column, under the column-name rule
+  `with` uses. The doctrine is unchanged on both backends: `count` counts rows including
+  missing, every other aggregate answers missing when the group holds one, a NaN propagates,
+  groups come out in first-seen order. `first` answers the first row's value verbatim; `nunique`
+  counts distinct present values. Pinned by the corpus program `df_group_agg` (three engines and
+  both frame backends) and `group_agg_refuses_in_words`.
+
 - **`Record`, `Dict`, `Tuple`, `Function` and `Any` are type names, a lambda's parameters
   take annotations, and `Int` means Int.** `fn f(x: Int)` was parsed and enforced all along,
   but only `Int`, `Float`, `Num`, `String`, `Bool`, `Array`, `DataFrame`, `Tensor` and `Dna`

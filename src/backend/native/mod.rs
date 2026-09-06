@@ -415,6 +415,16 @@ impl DataHandle for NativeFrame {
         group::group_agg(self, keys, agg, value_col, line, col).map(|f| Rc::new(f) as Df)
     }
 
+    fn group_agg_many(
+        &self,
+        keys: &[String],
+        aggs: &[crate::backend::AggSpec],
+        line: usize,
+        col: usize,
+    ) -> Result<Df, HelixError> {
+        group::group_agg_many(self, keys, aggs, line, col).map(|f| Rc::new(f) as Df)
+    }
+
     fn row_count(&self, _line: usize, _col: usize) -> Result<usize, HelixError> {
         Ok(self.len())
     }

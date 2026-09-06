@@ -3822,6 +3822,17 @@ Write the frame to a tab-separated file at path.
 
 ## GroupBy methods
 
+### `agg({name: aggregate(@col), ...})`
+
+Several aggregates in ONE pass: a frame of the keys plus one column per field, in the order written.
+
+**Note:** The aggregates: count(), mean, sum, min, max, std, median, first, nunique — each over a column EXPRESSION (`mean(@v * 2)`), the syntax `where`/`with` read. A field's name is the output column (a binding in scope names it, as in `with`). `count` counts rows including missing; every other aggregate answers missing when the group holds one (an all-missing group is unknown), except `first`, whose first value is knowable. Keywords: aggregate, group by, summarise, summarize, pivot, multiple, several, one pass.
+
+```
+>>> dataframe({k: ["a","a","b"], v: [1,2,3]}).group(@k).agg({n: count(), m: mean(@v), hi: max(@v * 2)}).sort(@k).column("hi")
+[4, 6]
+```
+
 ### `count(@col)`
 
 The per-group row count, as a frame of keys plus the aggregate.
@@ -3831,6 +3842,17 @@ The per-group row count, as a frame of keys plus the aggregate.
 ```
 >>> dataframe({k: ["a","a","b"], v: [1,2,3]}).group(@k).count(@v).sort(@k).column("v")
 [2, 1]
+```
+
+### `first(@col)`
+
+The first row's value in each group, in the frame's row order.
+
+**Note:** The one aggregate a later `missing` does not make missing: the first value is knowable.
+
+```
+>>> dataframe({k: ["a","a","b"], v: [1,2,3]}).group(@k).first(@v).sort(@k).column("v")
+[1, 3]
 ```
 
 ### `max(@col)`
@@ -3851,6 +3873,15 @@ The per-group mean of one column, as a frame of keys plus the aggregate.
 [1.5, 3.0]
 ```
 
+### `median(@col)`
+
+The per-group median of one column, as a Float (the mean of the two middles on an even count).
+
+```
+>>> dataframe({k: ["a","a","b"], v: [1,2,3]}).group(@k).median(@v).sort(@k).column("v")
+[1.5, 3.0]
+```
+
 ### `min(@col)`
 
 The per-group minimum of one column, as a frame of keys plus the aggregate.
@@ -3858,6 +3889,15 @@ The per-group minimum of one column, as a frame of keys plus the aggregate.
 ```
 >>> dataframe({k: ["a","a","b"], v: [1,2,3]}).group(@k).min(@v).sort(@k).column("v")
 [1, 3]
+```
+
+### `nunique(@col)`
+
+The number of distinct values in each group; missing when the group holds a missing.
+
+```
+>>> dataframe({k: ["a","a","b"], v: [1,1,3]}).group(@k).nunique(@v).sort(@k).column("v")
+[1, 1]
 ```
 
 ### `std(@col)`

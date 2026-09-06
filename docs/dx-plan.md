@@ -335,6 +335,15 @@ along; the documented signature `std()` made the checker refuse the argument —
 generated from `docs.rs`, so the fix was the entry. A quoted key in a record brace is a field
 (printed back quoted when not an identifier; `field_key_display`), the query-builder shape.
 
+**1.37 (2026-09-05) — `GroupBy.agg`.** DONE: `AggKind`/`AggSpec` in `backend/mod.rs`, a
+`group_agg_many` trait method on both backends (native: groups discovered once, each spec's
+expression evaluated once through the `with` evaluator, `aggregate_kind` adds median/first/
+nunique under the missing/NaN doctrine; polars: one `group_by_stable(...).agg([...])` with the
+same guards), `groupby_agg` parses the record, the compiler routes the new names like the six,
+docs entries, a tracked corpus program (dfdiff holds both backends to one output). Not done:
+a fast path for `agg` (the single-column verbs keep theirs); `agg` on a frame without `group`
+(whole-frame summaries); `median` over a String column (refused, as the Array one is).
+
 **1.45a/b/c (2026-09-05) — annotations a library can use.** DONE: `Record`, `Dict`, `Tuple`,
 `Function`, `Any` are type names (`TypeAnn` + `TYPE_NAMES`; the checker's `Type` gained the open
 kinds `AnyRecord`/`Dict`/`AnyTuple`/`AnyFunction` — compatible with their kind and nothing else,

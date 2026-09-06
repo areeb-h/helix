@@ -1244,6 +1244,71 @@ impl DataHandle for PolarsFrame {
         ))
     }
 
+    /// Several aggregates in one `group_by_stable(...).agg([...])` (field build, 1.37). Each
+    /// spec's column expression lowers exactly as a `with` column does, and each aggregate
+    /// carries the same guards `group_agg` puts on the single-column verbs: `count` is the row
+    /// count, a `missing` in the group makes the answer NULL (except `first`, whose first
+    /// value is knowable, and `count`), a NaN in a float group propagates for the numeric
+    /// kinds. `nunique` counts distinct present values (`n_unique`), a NaN among them.
+    fn group_agg_many(
+        &self,
+        keys: &[String],
+        aggs: &[super::AggSpec],
+        line: usize,
+        col: usize,
+    ) -> Result<Df, HelixError> {
+        use super::AggKind;
+        let fields = schema_fields(&self.lf, line, col)?;
+        let key_exprs: Vec<Expr> = keys.iter().map(|k| pcol(k.as_str())).collect();
+        let Some(first_key) = keys.first() else {
+            return Err(HelixError::new("`agg` needs at least one key column", line, col));
+        };
+        let mut agg_exprs: Vec<Expr> = Vec::with_capacity(aggs.len());
+        for spec in aggs {
+            let e = match spec.kind {
+                AggKind::Count => pcol(first_key.as_str()).len(),
+                kind => {
+                    let Some(ce) = &spec.expr else {
+                        return Err(HelixError::new(
+                            format!("grouped `{}` needs a column", kind.label()),
+                            line,
+                            col,
+                        ));
+                    };
+                    let c = lower(ce, &fields, line, col)?;
+                    let floaty = may_be_float(ce, &fields);
+                    let inner = match kind {
+                        AggKind::Mean => c.clone().mean(),
+                        AggKind::Sum => c.clone().sum(),
+                        AggKind::Min => c.clone().min(),
+                        AggKind::Max => c.clone().max(),
+                        AggKind::Std => c.clone().std(1),
+                        AggKind::Median => c.clone().median(),
+                        AggKind::First => c.clone().first(),
+                        AggKind::Nunique => c.clone().n_unique(),
+                        AggKind::Count => unreachable!("handled above"),
+                    };
+                    // A NaN propagates through the numeric kinds (ADR 0036 policy 4);
+                    // `first` and `nunique` answer on the values as they are.
+                    let inner = if floaty
+                        && !matches!(kind, AggKind::First | AggKind::Nunique)
+                    {
+                        when(c.clone().is_nan().any(true)).then(lit(f64::NAN)).otherwise(inner)
+                    } else {
+                        inner
+                    };
+                    if matches!(kind, AggKind::First) {
+                        inner
+                    } else {
+                        when(c.null_count().gt(lit(0u32))).then(lit(NULL)).otherwise(inner)
+                    }
+                }
+            };
+            agg_exprs.push(e.alias(spec.name.as_str()));
+        }
+        Ok(self.derive(self.lf.clone().group_by_stable(key_exprs).agg(agg_exprs)))
+    }
+
     /// Row count via a `len()` pushdown — no column is materialized.
     ///
     /// **The count must come from the same read as the data.** A bare `select(len())`

@@ -387,6 +387,85 @@ pub(crate) fn groupby_agg(
             )?;
             Ok(Value::dataframe(handle.group_agg(keys, name, &value_col, line, col)?))
         }
+        // The single-column spellings of the three newer kinds ride the many-aggregate path.
+        "median" | "first" | "nunique" => {
+            if args.len() != 1 {
+                return Err(HelixError::new(format!("grouped `{}` takes one column", name), line, col)
+                    .hint(format!("e.g. `genes.group(species).{name}(expression)`.")));
+            }
+            let value_col = arg_as_column_name(&args[0], resolve_var, line, col)?;
+            crate::backend::validate_columns_exist(
+                handle,
+                std::slice::from_ref(&value_col),
+                line,
+                col,
+            )?;
+            let Some(kind) = crate::backend::AggKind::parse(name) else {
+                return Err(no_such_aggregation(name, line, col));
+            };
+            let spec = crate::backend::AggSpec {
+                name: value_col.clone(),
+                kind,
+                expr: Some(crate::backend::ColExpr::Col(value_col)),
+            };
+            Ok(Value::dataframe(handle.group_agg_many(keys, std::slice::from_ref(&spec), line, col)?))
+        }
+        // `agg({n: count(), m: mean(@v), hi: max(@v * 2)})` — several aggregates in ONE pass
+        // (field build, 1.37: `select g, count(*), mean(v), max(v) group by g` was three
+        // group-bys and two joins). The record's keys name the output columns (the column-name
+        // rule `with` uses); its values are aggregate calls over column expressions — the
+        // predicate syntax `where`/`with` already read — so `mean(@v * 2)` folds an expression
+        // no column holds.
+        "agg" => {
+            let fields = match args {
+                [Expr::Record(fields)] if !fields.is_empty() => fields,
+                _ => {
+                    return Err(HelixError::new("`agg` takes a record of aggregates", line, col)
+                        .hint("e.g. `df.group(@k).agg({n: count(), m: mean(@v), hi: max(@v)})`."))
+                }
+            };
+            let columns = handle.column_names(line, col)?;
+            let mut specs = Vec::with_capacity(fields.len());
+            for (cname, vexpr) in fields {
+                let Expr::Call { name: fname, args: fargs, .. } = vexpr else {
+                    return Err(HelixError::new(
+                        format!("`agg` field `{cname}` must be an aggregate call"),
+                        line,
+                        col,
+                    )
+                    .hint(format!("one of {}, e.g. `{cname}: mean(@v)`.", crate::backend::AggKind::NAMES)));
+                };
+                let Some(kind) = crate::backend::AggKind::parse(fname) else {
+                    return Err(HelixError::new(
+                        format!("`{fname}` is not a grouped aggregation"),
+                        line,
+                        col,
+                    )
+                    .hint(format!("`agg` knows {}.", crate::backend::AggKind::NAMES)));
+                };
+                let expr = match (kind, fargs.as_slice()) {
+                    // `count()` counts rows; `count(@v)` reads the same (a column cannot
+                    // change a row count, and `missing` is counted), so it is accepted.
+                    (crate::backend::AggKind::Count, []) => None,
+                    (crate::backend::AggKind::Count, [_]) => None,
+                    (_, [e]) => Some(dataframe::ast_to_colexpr(e, &columns, resolve_var)?),
+                    (k, got) => {
+                        return Err(HelixError::new(
+                            format!("grouped `{}` takes one column, got {}", k.label(), got.len()),
+                            line,
+                            col,
+                        )
+                        .hint(format!("e.g. `{cname}: {}(@v)`.", k.label())))
+                    }
+                };
+                specs.push(crate::backend::AggSpec {
+                    name: column_name_from_binding(cname, resolve_var),
+                    kind,
+                    expr,
+                });
+            }
+            Ok(Value::dataframe(handle.group_agg_many(keys, &specs, line, col)?))
+        }
         _ => Err(no_such_aggregation(name, line, col)),
     }
 }

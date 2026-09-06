@@ -16294,3 +16294,21 @@ fn annotated_lambdas_and_open_kinds_run_on_every_engine() {
     assert_ne!(code, Some(0), "{out}");
     assert!(err.contains("should be Record"), "{err}");
 }
+
+/// `agg`'s refusals name the mistake — a non-record argument, a non-aggregate field, a wrong
+/// column count — on every engine (field build, 1.37).
+#[test]
+fn group_agg_refuses_in_words() {
+    for (src, want) in [
+        ("d = dataframe({k: [\"a\"], v: [1]})\nprint(d.group(@k).agg(5))\n", "takes a record of aggregates"),
+        ("d = dataframe({k: [\"a\"], v: [1]})\nprint(d.group(@k).agg({m: foo(@v)}))\n", "`foo` is not a grouped aggregation"),
+        ("d = dataframe({k: [\"a\"], v: [1]})\nprint(d.group(@k).agg({m: mean()}))\n", "grouped `mean` takes one column"),
+        ("d = dataframe({k: [\"a\"], v: [1]})\nprint(d.group(@k).agg({m: @v}))\n", "must be an aggregate call"),
+    ] {
+        for (name, env) in ENGINES {
+            let (_, err, code) = run_source(src, env, &format!("agg_refuse_{name}"));
+            assert_ne!(code, Some(0), "{name}: {src}");
+            assert!(err.contains(want), "{name}: {src}\n--- wanted `{want}` in ---\n{err}");
+        }
+    }
+}

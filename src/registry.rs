@@ -423,7 +423,8 @@ pub static DF_METHODS: &[&str] = &[
 ];
 
 /// Grouped-DataFrame aggregations.
-pub static GROUPBY_METHODS: &[&str] = &["mean", "sum", "min", "max", "count", "std"];
+pub static GROUPBY_METHODS: &[&str] =
+    &["mean", "sum", "min", "max", "count", "std", "median", "first", "nunique", "agg"];
 
 /// Keyed-map (`Dict`) methods — O(log n) lookup, sorted (deterministic) enumeration.
 pub static DICT_METHODS: &[&str] = &[

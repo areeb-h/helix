@@ -1830,7 +1830,7 @@ impl Compiler {
                 // untyped parameter is unambiguously a GroupBy aggregation (the
                 // `@column` can't be a value), so don't let it fall to the
                 // value-method path, whose arg compile raises at runtime.
-                if matches!(n, "mean" | "sum" | "min" | "max" | "count" | "std")
+                if matches!(n, "mean" | "sum" | "min" | "max" | "count" | "std" | "agg" | "median" | "first" | "nunique")
                     && matches!(self.recv_type(recv), Some(Type::GroupBy))
                 {
                     return self
@@ -1842,7 +1842,7 @@ impl Compiler {
                 // which guessed "value method" and evaluated it. A `@column` argument used
                 // to be the only hint that switched the route, and an aggregation's column
                 // is normally written bare.
-                if matches!(n, "mean" | "sum" | "min" | "max" | "count" | "std")
+                if matches!(n, "mean" | "sum" | "min" | "max" | "count" | "std" | "agg" | "median" | "first" | "nunique")
                     && matches!(self.recv_type(recv), Some(Type::Unknown) | None)
                     && (args.iter().any(mentions_column) || !args.is_empty() || n == "count")
                 {

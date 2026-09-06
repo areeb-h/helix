@@ -30,7 +30,7 @@ pub fn group_agg(
     }
     if !matches!(agg, "count" | "mean" | "sum" | "min" | "max" | "std") {
         return Err(HelixError::new(format!("`{agg}` is not a grouped aggregation"), line, col)
-            .hint("try mean, sum, min, max, count, or std."));
+            .hint("try mean, sum, min, max, count, std, median, first, or nunique — or `agg({...})` for several at once."));
     }
     let key_cols: Vec<&Col> =
         keys.iter().map(|k| frame.col(k, line, col)).collect::<Result<_, _>>()?;
@@ -198,5 +198,159 @@ fn aggregate(
             Ok(Value::Float((ss / (n - 1.0)).sqrt()))
         }
         _ => unreachable!("agg validated by the caller"),
+    }
+}
+
+/// Several aggregates in ONE pass (field build, 1.37): the groups are discovered once, each
+/// spec's column expression is evaluated once over the frame (the `with` evaluator — typed
+/// fast path first, the boxed kernel as the semantics), and every group folds every spec.
+/// The frame is the keys followed by one column per spec, in the order written.
+pub fn group_agg_many(
+    frame: &NativeFrame,
+    keys: &[String],
+    aggs: &[crate::backend::AggSpec],
+    line: usize,
+    col: usize,
+) -> Result<NativeFrame, HelixError> {
+    use crate::backend::AggKind;
+    let key_cols: Vec<&Col> =
+        keys.iter().map(|k| frame.col(k, line, col)).collect::<Result<_, _>>()?;
+    let n = frame.len();
+    // Each spec's values: a materialized column per expression, or none for `count`.
+    let mut spec_cols: Vec<Option<Col>> = Vec::with_capacity(aggs.len());
+    for spec in aggs {
+        spec_cols.push(match &spec.expr {
+            None => None,
+            Some(expr) => Some(if let Some(r) = super::fast::eval_typed(frame, expr, line, col) {
+                r?
+            } else {
+                let cells = super::eval::eval(frame, expr, line, col)?.into_rows(n);
+                Col::from_values(&spec.name, &cells, line, col)?
+            }),
+        });
+    }
+    // First-seen group order, exactly as `group_agg`.
+    let mut index: HashMap<RowKey, usize> = HashMap::new();
+    let mut order: Vec<(RowKey, Vec<usize>)> = Vec::new();
+    for row in 0..n {
+        let key = RowKey::at(&key_cols, row);
+        match index.get(&key) {
+            Some(&g) => order[g].1.push(row),
+            None => {
+                index.insert(key.clone(), order.len());
+                order.push((key, vec![row]));
+            }
+        }
+    }
+    let mut out_keys: Vec<Vec<Value>> = vec![Vec::with_capacity(order.len()); keys.len()];
+    let mut out_aggs: Vec<Vec<Value>> = vec![Vec::with_capacity(order.len()); aggs.len()];
+    for (_, rows) in &order {
+        for (k, kc) in key_cols.iter().enumerate() {
+            out_keys[k].push(kc.get(rows[0]));
+        }
+        for (i, spec) in aggs.iter().enumerate() {
+            out_aggs[i].push(match (spec.kind, &spec_cols[i]) {
+                (AggKind::Count, _) => Value::Int(rows.len() as i64),
+                (kind, Some(vals)) => aggregate_kind(kind, vals, rows, line, col)?,
+                // Unreachable by construction (`count` is the one kind without a column,
+                // handled above); answering `missing` keeps this total rather than panicking.
+                (_, None) => Value::Missing,
+            });
+        }
+    }
+    let mut cols: Vec<(String, Col)> = Vec::with_capacity(keys.len() + aggs.len());
+    for (k, name) in keys.iter().enumerate() {
+        cols.push((name.clone(), Col::from_values(name, &out_keys[k], line, col)?));
+    }
+    for (i, spec) in aggs.iter().enumerate() {
+        cols.push((spec.name.clone(), Col::from_values(&spec.name, &out_aggs[i], line, col)?));
+    }
+    NativeFrame::new(cols, line, col)
+}
+
+/// One group's aggregate by kind: the six the single-column verbs have always answered go
+/// through [`aggregate`]; `median`, `first` and `nunique` are defined here, under the same
+/// doctrine (a `missing` in the group makes the answer missing — except `first`, whose
+/// answer is the first row's value and is knowable; a NaN propagates for the numeric ones).
+fn aggregate_kind(
+    kind: crate::backend::AggKind,
+    vals: &Col,
+    rows: &[usize],
+    line: usize,
+    col: usize,
+) -> Result<Value, HelixError> {
+    use crate::backend::AggKind;
+    match kind {
+        AggKind::First => Ok(rows.first().map(|&r| vals.get(r)).unwrap_or(Value::Missing)),
+        AggKind::Median => {
+            let cells: Vec<Value> = rows.iter().map(|&r| vals.get(r)).collect();
+            if cells.iter().any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            if cells.iter().any(|v| matches!(v, Value::Float(f) if f.is_nan())) {
+                return Ok(Value::Float(f64::NAN));
+            }
+            let mut xs: Vec<f64> = Vec::with_capacity(cells.len());
+            for v in &cells {
+                xs.push(match v {
+                    Value::Int(i) => *i as f64,
+                    Value::Float(x) => *x,
+                    other => {
+                        return Err(HelixError::new(
+                            format!("cannot take the median of a column of type {}", other.type_name()),
+                            line,
+                            col,
+                        ))
+                    }
+                });
+            }
+            if xs.is_empty() {
+                return Ok(Value::Missing);
+            }
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let m = xs.len() / 2;
+            Ok(Value::Float(if xs.len() % 2 == 1 { xs[m] } else { (xs[m - 1] + xs[m]) / 2.0 }))
+        }
+        AggKind::Nunique => {
+            let cells: Vec<Value> = rows.iter().map(|&r| vals.get(r)).collect();
+            if cells.iter().any(|v| matches!(v, Value::Missing)) {
+                return Ok(Value::Missing);
+            }
+            // Distinct by VALUE equality: an Int, a Bool, a String, or a Float by its bits
+            // with -0.0 folded into 0.0 (`0.0 == -0.0` holds) and every NaN one value. A
+            // Dict key would refuse a Float, and a group of floats is the common case.
+            #[derive(PartialEq, Eq, PartialOrd, Ord)]
+            enum Distinct {
+                Bool(bool),
+                Int(i64),
+                Float(u64),
+                Str(String),
+            }
+            let mut seen: std::collections::BTreeSet<Distinct> = std::collections::BTreeSet::new();
+            for v in &cells {
+                let k = match v {
+                    Value::Bool(b) => Distinct::Bool(*b),
+                    Value::Int(i) => Distinct::Int(*i),
+                    Value::Float(x) => Distinct::Float(if x.is_nan() {
+                        f64::NAN.to_bits()
+                    } else if *x == 0.0 {
+                        0.0f64.to_bits()
+                    } else {
+                        x.to_bits()
+                    }),
+                    Value::Str(s) => Distinct::Str((**s).clone()),
+                    other => {
+                        return Err(HelixError::new(
+                            format!("cannot count distinct values of type {}", other.type_name()),
+                            line,
+                            col,
+                        ))
+                    }
+                };
+                seen.insert(k);
+            }
+            Ok(Value::Int(seen.len() as i64))
+        }
+        other => aggregate(other.label(), vals, rows, line, col),
     }
 }
