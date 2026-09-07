@@ -4,6 +4,13 @@
 
 ### Added
 
+- **`HELIX_FOLD_DUMP` shows what the load-time passes made.** `HELIX_FOLD_DUMP=sql$ helix
+  run app.helix` prints, on stderr, every clone, seen-through closure and hoisted capture
+  whose name contains `sql$`, as the tree the compiler will see; `1` prints all of them and
+  `all` the whole program, rewritten call sites included. `jit-explain`'s twin for ADR 0050
+  and 0051 — it is what found the field build's starved call sites (§1.50). Documented with
+  the other switches: `helix doc HELIX_FOLD_DUMP`, and the reference's environment section.
+
 - **A function is compiled for what its call site knows (ADR 0051).** A call passing a
   record literal — `M.sql({where: {city: req.city}, limit: 10})`, the values still from the
   request — a top-level name the load-time sandbox holds, or a scalar literal, is pointed at
@@ -442,6 +449,30 @@
   anyone can rely on.
 
 ### Fixed
+
+- **Later call sites of a program were starved of their clones (field build, §1.50).** The
+  field's harness renders thirteen cases from one file, and its tenth, `page offset`, ran
+  SLOWER after the partial evaluator — 2.55 → 3.54 µs — while the same call in a file of
+  its own rendered in 1.28 µs; `keyset` and `OR` never reached a clone at all. Nothing about
+  those cases was the cause. The specializer capped clones by COUNT, sixty-four per program
+  and eight per function, and a reduced body reaches more callees, so the harness's count
+  ran out earlier in the file and everything after went through the generic `M$sql` — which
+  call site loses to a count is decided by its position in the file. A clone now costs its
+  body's size against one budget for the program, 262 144 nodes (sixty-four of the largest
+  body allowed — the same worst case; a helper's clone costs little), with no count per
+  function; and a clone in which nothing answered to what was known is not kept and returns
+  what it took. The harness, four binaries built fresh, interleaved, min of three runs of
+  its median of 5 trials of 2 000: `page offset` 3.570 → 1.318 µs, `keyset cursor`
+  7.146 → 4.871 µs, `OR two branches` 9.631 → 7.703 µs, `prepared bind only` 0.612 → 0.306 µs,
+  `where eq` 2.633 → 2.475 µs; the other cases within the ±2% two fresh builds of one source
+  show; the rendered statements identical; `helix check` of the harness 18.6 → 19.4 ms, the
+  price of the clones it now gets. Found
+  along the way: `count`, `first` and `last` are frame verbs, whose ARGUMENTS the pass
+  leaves as written, and the guard also left `ords.count()` on a `let`-bound `[]`
+  unanswered; with no arguments on a known sequence they are answered now, so
+  `if ords.count() == 0 then "" else …` is its branch. Pinned by
+  `specialization_is_transitive_and_budgeted` and
+  `a_frame_verb_with_no_arguments_on_a_known_sequence_is_answered`.
 
 - **A specialized clone could be typed through a freed address (field build, §1.51).** With
   five distinct closures reaching one higher-order function over the object API, `helix

@@ -1646,6 +1646,15 @@ Turns load-time specialization off (ADR 0051): no clone of a function is made fo
 
 **Note:** The A/B switch for what specialization saves. Same rule as HELIX_NOFOLD, which it rides on: speed changes, answers do not. Keywords: specialize, shape, clone, devirtualize, disable, oracle, differential, debug, load.
 
+### `HELIX_FOLD_DUMP`
+
+Prints, on stderr, every statement the load-time passes made (ADR 0050, 0051) — a clone of a function for what a call site knows, a closure seen through a held record, a hoisted capture; their names carry a `$` — whose name contains the value (`1` for all of them; `all` for every function and binding of the program, the rewritten call sites included), as the tree the compiler will see.
+
+- **Values:** 1, all, or a piece of a name
+- **Unset:** unset — nothing is printed
+
+**Note:** The developer's view of what a call site's knowledge produced, `jit-explain`'s twin for these passes: `HELIX_FOLD_DUMP=sql$ helix run app.helix` shows the clones of `sql`. Keywords: fold, specialize, clone, dump, explain, debug, load.
+
 ### `HELIX_DF_ENGINE`
 
 Selects the DataFrame backend in a build that carries more than one.

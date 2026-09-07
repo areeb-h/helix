@@ -456,6 +456,19 @@ a restored tree's root is never keyed. `every_type_the_fold_leaves_names_a_live_
 pins the invariant (after the checker and the fold, every key names a live node);
 `a_clone_is_typed_from_a_snapshot_not_from_addresses_a_fold_may_free` and the corpus's
 `specialize_snapshot_types` run the shape on every engine.
+**§1.50 (2026-09-08) — `page offset` slower after the partial evaluator, FIXED.** The field's
+harness renders thirteen cases from one file; its tenth ran 2.55 → 3.54 µs after `b21f428`
+while the same call alone rendered in 1.28. The clone caps were COUNTS (64 per program, 8
+per function) and a reduced body reaches more callees, so the count ran out earlier in the
+file and `page offset`, `keyset` and `OR` went through the generic `M$sql` — position in the
+file decided who lost. Now one budget of 262 144 nodes for the program's clones (a clone
+costs its body's size), no count per function, and a clone in which nothing changed is not
+kept. Harness (fresh builds, interleaved, min of 3): `page offset` 3.570 → 1.318, `keyset`
+7.146 → 4.871, `OR` 9.631 → 7.703, `prepared bind` 0.612 → 0.306, `where eq` 2.633 → 2.475 µs;
+`check` of the harness 18.6 → 19.4 ms. `HELIX_FOLD_DUMP=all` is the view that found it —
+dump the program the compiler sees before theorizing about a case; and measure FRESH
+builds against each other: an incremental gate build of the same source ran 5–7% slower
+than its fresh twin on every case, which read as a regression and was not one.
 
 **1.46a (2026-09-07) — const-fold a pure call with literal arguments.** DECIDED by the user
 and DONE: ADR 0050. `src/fold.rs` runs after the checker and the UFCS rewrite in every run, check

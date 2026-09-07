@@ -55,14 +55,20 @@ use crate::value::{FuncVal, Value};
 
 use super::{simplify, Outcome, Sandbox};
 
-/// The most clones one program may hold.
-const MAX_CLONES: usize = 64;
-/// The most clones one function may have.
-const MAX_PER_FN: usize = 8;
 /// How far a specialization may follow calls into callees.
 const MAX_DEPTH: usize = 4;
 /// A body larger than this (in nodes) is not cloned.
 const MAX_NODES: usize = 4_096;
+/// The nodes all of a program's clones may hold together: a clone costs its body's size,
+/// so a small helper's clone costs little and a large function's much — sixty-four of the
+/// largest body allowed. The first cut counted clones instead, sixty-four per program and
+/// eight per function, and the field build's harness — thirteen cases in one file —
+/// starved its later call sites: `page offset` ran through the generic clone at 3.7 µs
+/// while the same call alone ran at 1.3 µs (§1.50). A budget by size is what the cost
+/// actually is.
+const MAX_CLONE_NODES: usize = 64 * MAX_NODES;
+/// The most clones one program may hold — a sanity bound behind the budget.
+const MAX_CLONES: usize = 1_024;
 /// A record with more keys than this is `Any`.
 const MAX_KEYS: usize = 32;
 /// A literal array longer than this is not unrolled.
@@ -193,8 +199,13 @@ pub(crate) struct Specializer<'t> {
     types: &'t mut TypeMap,
     funcs: HashMap<String, FnDef>,
     memo: HashMap<(String, Vec<Binding>), Option<String>>,
-    per_fn: HashMap<String, usize>,
     total: usize,
+    /// The nodes the clones made so far hold, against `budget`.
+    nodes: usize,
+    budget: usize,
+    /// Whether the clone being made has been changed by what is known — set by every
+    /// rewrite; a clone nothing changed is the function under another name, and not kept.
+    changed: bool,
     next_id: usize,
     devirt: HashMap<(String, String), Option<String>>,
     /// Clones and devirtualized functions, to be appended to the program.
@@ -260,8 +271,10 @@ impl<'t> Specializer<'t> {
             types,
             funcs,
             memo: HashMap::new(),
-            per_fn: HashMap::new(),
             total: 0,
+            nodes: 0,
+            budget: MAX_CLONE_NODES,
+            changed: false,
             next_id: 1,
             devirt: HashMap::new(),
             pending: Vec::new(),
@@ -275,6 +288,11 @@ impl<'t> Specializer<'t> {
 
     pub(crate) fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// The nodes all clones may hold together — the tests shrink it.
+    pub(crate) fn set_budget(&mut self, nodes: usize) {
+        self.budget = nodes;
     }
 
     /// The checker's types, for the fold's own rewrites.
@@ -312,6 +330,7 @@ impl<'t> Specializer<'t> {
     /// expression still held, and the slot itself, which named the old node.
     pub(crate) fn set(&mut self, e: &mut Expr, new: Expr) {
         simplify::replace(e, new, self.types);
+        self.changed = true;
     }
 
     /// Forget the types of nodes by address — a sandbox copy that is going away.
@@ -398,20 +417,19 @@ impl<'t> Specializer<'t> {
             return r.clone();
         }
         let def = &self.funcs[fname];
-        let capped = self.total >= MAX_CLONES
-            || self.per_fn.get(fname).copied().unwrap_or(0) >= MAX_PER_FN
-            || def.types.len() > MAX_NODES;
-        if capped {
+        // A clone costs its body's size, against the program's budget.
+        let size = def.types.len();
+        if self.total >= MAX_CLONES || size > MAX_NODES || self.nodes + size > self.budget {
             self.memo.insert(key, None);
             return None;
         }
         let name = format!("{fname}${}", self.next_id);
         self.next_id += 1;
         self.total += 1;
-        *self.per_fn.entry(fname.to_string()).or_insert(0) += 1;
+        self.nodes += size;
         // Memoized BEFORE the body is rewritten, so a recursive call inside it reaches the
         // clone itself.
-        self.memo.insert(key, Some(name.clone()));
+        self.memo.insert(key.clone(), Some(name.clone()));
         let (params, defaults, ret, mut body, snapshot, line, col) = (
             def.params.clone(),
             def.defaults.clone(),
@@ -427,7 +445,19 @@ impl<'t> Specializer<'t> {
         for ((p, _), b) in params.iter().zip(known.iter()) {
             env.bind(p, b.clone());
         }
+        let outer = std::mem::replace(&mut self.changed, false);
         self.substitute(&mut body, &mut env, depth + 1, sb, done);
+        let reduced = std::mem::replace(&mut self.changed, outer);
+        if !reduced {
+            // Nothing in the body answered to what was known — it passes the record on, or
+            // reads only what the runtime values decide. The clone would be the function
+            // under another name: not kept, and the budget it took is returned.
+            forget_types(self.types, &body);
+            self.memo.insert(key, None);
+            self.total -= 1;
+            self.nodes -= size;
+            return None;
+        }
         self.pending.push(Stmt::Func { name: name.clone(), params, defaults, ret, exported: false, body, line, col });
         Some(name)
     }
@@ -476,9 +506,15 @@ impl<'t> Specializer<'t> {
             defaults.push(Some(crate::fold::to_expr(d, &mut budget)?));
         }
         let mut body = typed_clone(self.types, &fv.body);
+        let size = node_ptrs(&body).len();
+        if size > MAX_NODES || self.nodes + size > self.budget {
+            forget_types(self.types, &body);
+            return None;
+        }
         replace_idents(&mut body, &|n| renames.get(n).map(|to| Expr::Ident { name: to.clone(), line: 0, col: 0 }), &mut Vec::new());
         let params: Vec<(String, Option<TypeAnn>)> = fv.params.iter().map(|p| (p.clone(), None)).collect();
         self.total += 1;
+        self.nodes += size;
         self.funcs.insert(
             name.clone(),
             FnDef {
@@ -511,6 +547,7 @@ impl<'t> Specializer<'t> {
                         if let Expr::Ident { name, .. } = e {
                             *name = g;
                         }
+                        self.changed = true;
                     }
                     Some(Binding::Lit(l)) => {
                         let lit = l.to_expr();
@@ -601,13 +638,15 @@ impl<'t> Specializer<'t> {
                     let bindings: Vec<Binding> = args.iter().map(|a| self.known(a, env)).collect();
                     if let Some(n) = self.specialize(name, &bindings, depth, sb, done) {
                         *name = n;
+                        self.changed = true;
                     }
                 }
             }
             Expr::Method { recv, name, args, named, line, col, .. } => {
                 self.substitute(recv, env, depth, sb, done);
                 // A frame verb reads its arguments as written: a name in them stays a name.
-                if crate::interp::takes_unevaluated_args(name) {
+                // Called with none — `c.count()` — it is a question a known sequence answers.
+                if crate::interp::takes_unevaluated_args(name) && (!args.is_empty() || !named.is_empty()) {
                     return;
                 }
                 let mark = env.mark();
@@ -762,6 +801,7 @@ impl<'t> Specializer<'t> {
                     if !read && is_safe(&bindings[i].1, env) {
                         let (_, dropped) = bindings.remove(i);
                         forget_types(self.types, &dropped);
+                        self.changed = true;
                     }
                 }
                 if bindings.is_empty() {
@@ -792,7 +832,9 @@ impl<'t> Specializer<'t> {
             }
         }
         // A literal condition selects its branch.
-        while simplify::constant(e, self.types) {}
+        while simplify::constant(e, self.types) {
+            self.changed = true;
+        }
         // A sub-expression closed under the sandbox — a method on a literal or a held
         // value, an operator on literals, a field of a held record, an interpolation of
         // held names — is evaluated where it stands. A call to one of the program's own

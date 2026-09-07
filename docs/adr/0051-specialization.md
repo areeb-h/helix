@@ -93,13 +93,30 @@ without the other operand (`true and x` is not `x` for every `x`). And a name bo
 — a parameter, a `let`, a lambda's own — is never the global of that name: the first cut
 folded a parameter `M` as the top-level `M`.
 
-**Bounds.** Sixty-four clones per program, eight per function, none for a body past 4 096
-nodes or a record past 32 keys, four levels of transitive specialization. `HELIX_NOSPECIALIZE=1`
-turns the pass off for an A/B; `HELIX_NOFOLD=1` turns off the fold it rides on.
+**Bounds.** A budget of 262 144 nodes for all of a program's clones together — a clone
+costs its body's size, so a small helper's clone costs little and a large function's much;
+sixty-four of the largest body allowed — and at most 1 024 clones behind it; none for a
+body past 4 096 nodes or a record past 32 keys; four levels of transitive specialization;
+and a clone in which nothing was reduced — the function passes the record on, or reads
+only what the runtime values decide — is not kept, and returns what it took. The first
+cut counted clones instead, sixty-four per program and eight per function, and the field
+build's harness — thirteen cases in one file — starved its later call sites: `page
+offset` went through the generic clone at 3.7 µs while the same call alone rendered in
+1.3 µs, and `keyset` and `any_of` never reached theirs (§1.50). Which call site loses to
+a count is decided by its position in the file, which is no rule at all; a budget by
+size is what the cost actually is. `HELIX_NOSPECIALIZE=1` turns the pass off for an A/B;
+`HELIX_NOFOLD=1` turns off the fold it rides on; `HELIX_FOLD_DUMP=<name>` prints what the
+pass made (`1` for all of it, `all` for the whole program as the compiler sees it).
 
 ## Consequences
 
 - The field's rendered queries on this box, min of five trials of 2 000 (their harness), specialization off → on: `where eq` 5.362 → 3.542 µs, `where+limit` 5.531 → 4.831 µs, `keyset` 7.887 → 5.393 µs, `OR two branches` 10.260 → 8.485 µs, the fixed cost of an empty spec 3.304 → 1.118 µs; `helix check` over the corpus's 93 programs 436 → 433 ms (min of 5).
+- The budget by size, on the field's thirteen-case harness (four binaries built fresh,
+  interleaved, min of three runs of its median of 5 trials of 2 000): `page offset`
+  3.570 → 1.318 µs, `keyset cursor` 7.146 → 4.871 µs, `OR two branches` 9.631 → 7.703 µs,
+  `prepared bind only` 0.612 → 0.306 µs, `where eq` 2.633 → 2.475 µs; the other cases within
+  the noise, which two fresh builds of one source put at ±2%; the statements identical; the
+  harness's `helix check` 18.6 → 19.4 ms — the load-time price of the clones it now gets.
 - Every engine runs the one program the pass produced; the differential oracle holds it
   byte-identical with and without the pass (`a_call_site_is_specialized_for_what_it_knows_on_every_engine`).
 - A raise inside a literal receiver's body — `[1].map(chk(bad))` at the top level — is

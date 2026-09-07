@@ -392,11 +392,27 @@ pub fn fold_program(stmts: &mut Vec<Stmt>, types: &mut TypeMap) -> Result<(), He
 }
 
 pub(crate) fn fold_program_with(stmts: &mut Vec<Stmt>, types: &mut TypeMap, specialize: bool) -> Result<(), HelixError> {
+    fold_program_budgeted(stmts, types, specialize, None)
+}
+
+/// `fold_program_with`, with the clones' node budget set — the tests shrink it to see a
+/// call site past it stay generic.
+pub(crate) fn fold_program_budgeted(
+    stmts: &mut Vec<Stmt>,
+    types: &mut TypeMap,
+    specialize: bool,
+    budget: Option<usize>,
+) -> Result<(), HelixError> {
     if !stmts.iter().any(|s| matches!(s, Stmt::Func { .. })) {
         return Ok(());
     }
     let mut sp = Specializer::new(stmts, types, specialize);
+    if let Some(nodes) = budget {
+        sp.set_budget(nodes);
+    }
     let mut sb = Sandbox::new(stmts, &mut sp);
+    let dumping = std::env::var_os("HELIX_FOLD_DUMP").is_some();
+    let mut made: Vec<String> = Vec::new();
     let mut i = 0;
     // Clones are appended as they are made and folded when the walk reaches them.
     while i < stmts.len() {
@@ -423,6 +439,9 @@ pub(crate) fn fold_program_with(stmts: &mut Vec<Stmt>, types: &mut TypeMap, spec
         }
         let pending = sp.take_pending();
         if !pending.is_empty() {
+            if dumping {
+                made.extend(pending.iter().filter_map(stmt_name));
+            }
             move_stmts(stmts, sp.types(), |v| {
                 v.extend(pending);
                 0
@@ -438,13 +457,46 @@ pub(crate) fn fold_program_with(stmts: &mut Vec<Stmt>, types: &mut TypeMap, spec
     // may call it runs after them.
     let hoisted = sp.take_hoisted();
     if !hoisted.is_empty() {
+        if dumping {
+            made.extend(hoisted.iter().filter_map(stmt_name));
+        }
         move_stmts(stmts, sp.types(), |v| {
             let k = hoisted.len();
             v.splice(0..0, hoisted);
             k
         });
     }
+    if dumping {
+        dump(stmts, &made);
+    }
     Ok(())
+}
+
+fn stmt_name(s: &Stmt) -> Option<String> {
+    match s {
+        Stmt::Func { name, .. } | Stmt::Assign { name, .. } => Some(name.clone()),
+        _ => None,
+    }
+}
+
+/// `HELIX_FOLD_DUMP=<text>`: print, on stderr, every statement this pass made — a clone, a
+/// devirtualized closure, a hoisted capture — whose name contains `text` (`1` for all of
+/// them; `all` for every function and binding of the program, made or rewritten), as the
+/// tree the compiler will see. The developer's view of what a call site's knowledge
+/// produced; `jit-explain`'s twin for this pass.
+fn dump(stmts: &[Stmt], made: &[String]) {
+    let want = std::env::var_os("HELIX_FOLD_DUMP").unwrap_or_default().to_string_lossy().into_owned();
+    for s in stmts {
+        let (name, body): (&str, &Expr) = match s {
+            Stmt::Func { name, body, .. } => (name, body),
+            Stmt::Assign { name, value, .. } => (name, value),
+            _ => continue,
+        };
+        let mine = made.iter().any(|m| m == name);
+        if want == "all" || (mine && (want == "1" || name.contains(want.as_str()))) {
+            eprintln!("FOLD {}{name}: {body:?}", if mine { "" } else { "(program) " });
+        }
+    }
 }
 
 /// The root expression of a statement — inline in the statement, so it moves with it.
@@ -1206,20 +1258,39 @@ mod tests {
     /// Specialization follows a known argument into the callees a clone calls, and stops
     /// at its caps: eight clones per function, and no more.
     #[test]
-    fn specialization_is_transitive_and_capped() {
+    fn specialization_is_transitive_and_budgeted() {
         let s = folded_with("fn g(s) = s.get(\"b\")\nfn f(s) = g(s)\nmut RT = 1\ny = f({a: RT})", true);
         let clone = func(&s, "f$1");
         assert!(matches!(clone, Expr::Call { name, .. } if name == "g$2"), "{clone:?}");
         assert!(matches!(func(&s, "g$2"), Expr::Missing), "{:?}", func(&s, "g$2"));
+        // Nine call sites of one function, each with a shape of its own: every one has its
+        // clone — a count per function starved the later call sites of the field build's
+        // thirteen-case harness (§1.50).
         let mut src = String::from("fn f(s) = s.get(\"k\")\nmut RT = 1\n");
         for i in 0..9 {
             src.push_str(&format!("y{i} = f({{k{i}: RT}})\n"));
         }
+        let clones_in = |s: &[Stmt]| s.iter().filter(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("f$"))).count();
         let s = folded_with(&src, true);
-        let clones = s.iter().filter(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("f$"))).count();
-        assert_eq!(clones, 8);
-        let ninth = s.iter().find(|st| matches!(st, Stmt::Assign { name, .. } if name == "y8")).unwrap();
-        assert!(matches!(value_of(ninth), Expr::Call { name, .. } if name == "f"), "{:?}", value_of(ninth));
+        assert_eq!(clones_in(&s), 9);
+        // The clones share a budget of nodes, a clone costing its body's size: under two
+        // bodies' worth, two are made and the third site and the rest stay generic.
+        let mut stmts = parsed(&src);
+        let body_nodes = match &stmts[0] {
+            Stmt::Func { body, .. } => super::specialize::node_ptrs(body).len(),
+            other => panic!("{other:?}"),
+        };
+        let mut types = TypeMap::default();
+        fold_program_budgeted(&mut stmts, &mut types, true, Some(2 * body_nodes)).unwrap_or_else(|e| panic!("{}", e.message));
+        assert_eq!(clones_in(&stmts), 2);
+        let third = stmts.iter().find(|st| matches!(st, Stmt::Assign { name, .. } if name == "y2")).unwrap();
+        assert!(matches!(value_of(third), Expr::Call { name, .. } if name == "f"), "{:?}", value_of(third));
+        // A function in which nothing answers to the shape — it passes the record on — is
+        // not cloned: the clone would be the function under another name.
+        let s = folded_with("fn id(s) = s\nmut RT = 1\ny = id({a: RT})", true);
+        assert_eq!(clones_in(&s), 0);
+        assert!(!s.iter().any(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("id$"))), "{s:?}");
+        assert!(matches!(value_of(&s[2]), Expr::Call { name, .. } if name == "id"), "{:?}", s[2]);
     }
 
     /// A clause builder — `items()` of a shaped record, reduced with a lambda that reads
@@ -1238,6 +1309,19 @@ mod tests {
         assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Str(t) if t == "city = $1")), 1, "{clone:?}");
         assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Int(2))), 1, "{clone:?}");
         assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Field { name, .. } if name == "city")), 1, "{clone:?}");
+    }
+
+    /// `count`, `first` and `last` are frame verbs, whose ARGUMENTS the pass leaves as
+    /// written; called with none on a sequence a `let` bound to a literal, they are questions
+    /// the literal answers — `ords = []` then `if ords.count() == 0` is the branch.
+    #[test]
+    fn a_frame_verb_with_no_arguments_on_a_known_sequence_is_answered() {
+        let s = folded_with(
+            "mut RT = 1\nfn f(s) = let {order} = s in let ords = if order.is_missing() then [] else [order] in if ords.count() == 0 then \"\" else \" order by {ords.first()}\"\ny = f({page: RT})",
+            true,
+        );
+        let clone = func(&s, "f$1");
+        assert!(matches!(clone, Expr::Str(t) if t.is_empty()), "{clone:?}");
     }
 
     /// A program with no function of its own is untouched, cheaply.

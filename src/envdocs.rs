@@ -106,6 +106,13 @@ pub static ENV: &[EnvDoc] = &[
         notes: "The A/B switch for what specialization saves. Same rule as HELIX_NOFOLD, which it rides on: speed changes, answers do not. Keywords: specialize, shape, clone, devirtualize, disable, oracle, differential, debug, load.",
     },
     EnvDoc {
+        name: "HELIX_FOLD_DUMP",
+        values: "1, all, or a piece of a name",
+        default: "unset — nothing is printed",
+        doc: "Prints, on stderr, every statement the load-time passes made (ADR 0050, 0051) — a clone of a function for what a call site knows, a closure seen through a held record, a hoisted capture; their names carry a `$` — whose name contains the value (`1` for all of them; `all` for every function and binding of the program, the rewritten call sites included), as the tree the compiler will see.",
+        notes: "The developer's view of what a call site's knowledge produced, `jit-explain`'s twin for these passes: `HELIX_FOLD_DUMP=sql$ helix run app.helix` shows the clones of `sql`. Keywords: fold, specialize, clone, dump, explain, debug, load.",
+    },
+    EnvDoc {
         name: "HELIX_DF_ENGINE",
         values: "polars | native",
         default: "native (the shipped engine); polars only when explicitly asked for",
