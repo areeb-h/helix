@@ -53,6 +53,20 @@ shape rule then specializes. A capture with no literal (a frame) leaves the call
 Where the constructor call itself was specialized — `M = mk("z")` — the capture is
 already baked into the clone and nothing is hoisted.
 
+**Reduction.** A clone is reduced as far as what is known reaches, in one pass over its
+body — the pass is a partial evaluator over one function. A sub-expression closed under
+the sandbox — `"city".split_once(" ")`, `SEED.s == ""`, `m.columns.contains("city")` on
+the held model — is evaluated where it stands; a literal condition selects its branch; a
+`map` or a `reduce` over the small literal array a shape produces (`w.items()` on
+`{city: …}` is one element; eight at most) is unrolled, and a lambda applied to known
+arguments becomes the `let` that binds them; a `let` bound to a tuple or array of safe
+elements answers `c[0]`, `c[1]` and `c.count()`; a binding nothing reads whose value
+cannot raise is dropped. A frame verb reads its arguments as written (`l.join(r, k)` with
+`k` a name is a key column, `l.join(r, "id")` a join kind), so nothing inside such a
+method's arguments is rewritten. For the field build's where clause, what remains of
+`_where` is one branch on whether the value is `missing` and the parameter list — the
+text `city = $1` is a constant, as it is in their hand-written `prepare`.
+
 **Types.** The checker's type map is keyed by node address, and the compiler routes
 receiver-polymorphic verbs by it after the fold. A clone inherits the types of the nodes it
 was cloned from, node by node; the sandbox's own copies of the program's lambda bodies —
@@ -73,7 +87,7 @@ turns the pass off for an A/B; `HELIX_NOFOLD=1` turns off the fold it rides on.
 
 ## Consequences
 
-- The field's rendered queries on this box, min of five trials of 2 000 (their harness), specialization off → on: `where eq` 4.967 → 3.532 µs, `where+limit` 5.642 → 4.226 µs, `keyset` 7.949 → 6.021 µs, `OR two branches` 10.571 → 9.143 µs, the fixed cost of an empty spec 3.326 → 2.135 µs; `helix check` over the corpus's 93 programs 427 → 423 ms (min of 5).
+- The field's rendered queries on this box, min of five trials of 2 000 (their harness), specialization off → on: `where eq` 5.362 → 3.542 µs, `where+limit` 5.531 → 4.831 µs, `keyset` 7.887 → 5.393 µs, `OR two branches` 10.260 → 8.485 µs, the fixed cost of an empty spec 3.304 → 1.118 µs; `helix check` over the corpus's 93 programs 436 → 433 ms (min of 5).
 - Every engine runs the one program the pass produced; the differential oracle holds it
   byte-identical with and without the pass (`a_call_site_is_specialized_for_what_it_knows_on_every_engine`).
 - A raise inside a literal receiver's body — `[1].map(chk(bad))` at the top level — is

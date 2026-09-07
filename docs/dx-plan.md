@@ -437,7 +437,11 @@ the constant's questions are answered in place and the fold does the rest; `M.sq
 record the sandbox holds is devirtualized to a top-level `M$sql` with its captures hoisted
 first. `src/fold/simplify.rs` folds constant control flow. The fold's candidates grew literal
 receivers, literal operators, held fields and interpolations, and learned that a local is
-never the global of its name (a real bug in the first cut). Measured: `where eq` 4.967 → 3.532 µs, `where+limit` 5.642 → 4.226 µs, `OR two branches` 10.571 → 9.143 µs (min of five trials of 2 000); corpus check 427 → 423 ms.
+never the global of its name (a real bug in the first cut). The specializer is a partial
+evaluator over the clone: closed sub-expressions evaluated in place through the sandbox,
+`map`/`reduce` over a shape's one-element `items()` unrolled, lambda application reduced to
+`let`, tuple knowledge for `c[0]`/`c.count()`, dead safe bindings dropped — the where clause's
+text is a constant. Measured: `where eq` 5.362 → 3.542 µs, `where+limit` 5.531 → 4.831 µs, `OR two branches` 10.260 → 8.485 µs (min of five trials of 2 000); corpus check 436 → 433 ms.
 
 **1.46a (2026-09-07) — const-fold a pure call with literal arguments.** DECIDED by the user
 and DONE: ADR 0050. `src/fold.rs` runs after the checker and the UFCS rewrite in every run, check

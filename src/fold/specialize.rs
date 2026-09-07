@@ -10,32 +10,40 @@
 //! So a call whose arguments carry any of that is rewritten to call a CLONE of the callee,
 //! made once per function and per what is known (`sql$3`), in which every such question is
 //! answered in place: the absent key is `missing`, the constant name is the global, the
-//! literal is the literal. The fold then runs over the clone as over any function — a
-//! constant `if` selects its branch, a key check over a literal list folds to `true`, a
-//! field of a held global folds to its value — and what remains is the work the runtime
-//! values genuinely need. Nothing about the runtime values is assumed: a present key's value
-//! is still read at run time, and may be `missing`.
+//! literal is the literal. The clone is then reduced as far as what is known reaches — this
+//! is a partial evaluator over one function body. A sub-expression closed under the
+//! sandbox (`"city".split_once(" ")`, `SEED.s == ""`, `m.columns.contains("city")` on the
+//! held model) is evaluated where it stands; a literal condition selects its branch; a
+//! `map` or a `reduce` over the small literal array a shape produces (`w.items()` on
+//! `{city: …}` is one element) is unrolled, a lambda applied to known arguments becomes a
+//! `let`, and a `let` bound to a tuple of safe elements answers `c[0]` and `c.count()`. What
+//! remains is the work the runtime values genuinely need: for the field build's where
+//! clause, one branch on whether the value is `missing`, and the parameter list — the text
+//! `city = $1` is a constant. Nothing about the runtime values is assumed: a present key's
+//! value is still read at run time, and may be `missing`.
 //!
 //! A method through a record the sandbox holds — `M.sql(spec)`, the object API a library
 //! builds by closing over a model — is seen through the same way: the closure's body becomes
 //! a top-level function of its own, its captured values top-level bindings (with the literal
 //! the fold would write for them), and the call a direct one, which the shape rule then
-//! specializes. That is where the field build's renders live, and the field build's
-//! `prepare`/`bind` — render once, bind per request — is what the two rules together give
-//! every route without asking.
+//! specializes.
 //!
 //! What keeps it bounded: clones are memoized per (function, knowledge), capped per function
 //! and per program, and never made for a body past a size; the depth of transitive
-//! specialization is capped; a knowledge that folds nothing (a name the sandbox does not
-//! hold) is `Any`, so it fragments nothing. `HELIX_NOSPECIALIZE=1` turns the pass off for an
-//! A/B, as `HELIX_NOFOLD=1` turns off the fold it rides on.
+//! specialization is capped; only a shape or a held name earns a clone (a scalar literal
+//! alone costs ten nanoseconds to pass); unrolling stops at eight elements. A frame verb
+//! reads its arguments as written, so nothing inside them is rewritten.
+//! `HELIX_NOSPECIALIZE=1` turns the pass off for an A/B, as `HELIX_NOFOLD=1` turns off the
+//! fold it rides on.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::ast::{Expr, InterpPart, Stmt, TypeAnn};
+use crate::ast::{BinOp, Expr, InterpPart, Stmt, TypeAnn};
 use crate::types::TypeMap;
 use crate::value::{FuncVal, Value};
+
+use super::{simplify, Outcome, Sandbox};
 
 /// The most clones one program may hold.
 const MAX_CLONES: usize = 64;
@@ -47,6 +55,8 @@ const MAX_DEPTH: usize = 4;
 const MAX_NODES: usize = 4_096;
 /// A record with more keys than this is `Any`.
 const MAX_KEYS: usize = 32;
+/// A literal array longer than this is not unrolled.
+const MAX_UNROLL: usize = 8;
 
 /// A scalar literal, hashable so it can key a clone.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -102,9 +112,18 @@ impl Binding {
     }
 }
 
-/// The names bound in the body being rewritten, innermost last, and what is known of each.
+/// A name bound in the body being rewritten: what is known of it, and — for a `let` bound
+/// to a tuple or array literal of safe elements — the literal itself, so `c[0]` is its
+/// first element and `c.count()` its length.
+struct Local {
+    name: String,
+    b: Binding,
+    lit: Option<Expr>,
+}
+
+/// The names bound in the body being rewritten, innermost last.
 struct Env {
-    stack: Vec<(String, Binding)>,
+    stack: Vec<Local>,
 }
 
 impl Env {
@@ -118,13 +137,32 @@ impl Env {
         self.stack.truncate(mark);
     }
     fn bind(&mut self, name: &str, b: Binding) {
-        self.stack.push((name.to_string(), b));
+        self.bind_with(name, b, None);
+    }
+    /// Bind `name`; what earlier locals knew THROUGH that name is retired, since they would
+    /// now read the new binding.
+    fn bind_with(&mut self, name: &str, b: Binding, lit: Option<Expr>) {
+        for l in &mut self.stack {
+            if l.lit.as_ref().is_some_and(|e| mentions(e, name)) {
+                l.lit = None;
+            }
+            if matches!(&l.b, Binding::Global(g) if g == name) {
+                l.b = Binding::Any;
+            }
+        }
+        self.stack.push(Local { name: name.to_string(), b, lit });
     }
     fn shadow(&mut self, name: &str) {
         self.bind(name, Binding::Any);
     }
     fn lookup(&self, name: &str) -> Option<&Binding> {
-        self.stack.iter().rev().find(|(n, _)| n == name).map(|(_, b)| b)
+        self.stack.iter().rev().find(|l| l.name == name).map(|l| &l.b)
+    }
+    fn literal_of(&self, name: &str) -> Option<&Expr> {
+        self.stack.iter().rev().find(|l| l.name == name).and_then(|l| l.lit.as_ref())
+    }
+    fn names(&self) -> Vec<String> {
+        self.stack.iter().map(|l| l.name.clone()).collect()
     }
 }
 
@@ -156,8 +194,8 @@ pub(crate) struct Specializer<'t> {
     hoisted: Vec<Stmt>,
     /// The same values, for the sandbox to hold at once.
     held: Vec<(String, Value)>,
-    /// Top-level names the sandbox holds, as far as this pass has seen: what a call inside a
-    /// clone may know an argument to be.
+    /// Top-level names that are globals inside a clone: the program's immutable bindings,
+    /// and the ones this pass hoisted.
     globals: HashSet<String>,
     enabled: bool,
 }
@@ -223,26 +261,6 @@ impl<'t> Specializer<'t> {
         }
     }
 
-    /// What is known of `e` inside a clone: the names this pass has seen the sandbox hold
-    /// are globals there.
-    fn known(&self, e: &Expr, env: &Env) -> Binding {
-        binding_of(e, env, &|n| self.globals.contains(n))
-    }
-
-    fn note_globals(&mut self, b: &Binding) {
-        match b {
-            Binding::Global(g) => {
-                self.globals.insert(g.clone());
-            }
-            Binding::Shape(fs) => {
-                for (_, v) in fs {
-                    self.note_globals(v);
-                }
-            }
-            _ => {}
-        }
-    }
-
     pub(crate) fn enabled(&self) -> bool {
         self.enabled
     }
@@ -293,6 +311,26 @@ impl<'t> Specializer<'t> {
         node_ptrs(copy)
     }
 
+    /// What is known of `e` inside a clone: the names this pass has seen the sandbox hold
+    /// are globals there.
+    fn known(&self, e: &Expr, env: &Env) -> Binding {
+        binding_of(e, env, &|n| self.globals.contains(n))
+    }
+
+    fn note_globals(&mut self, b: &Binding) {
+        match b {
+            Binding::Global(g) => {
+                self.globals.insert(g.clone());
+            }
+            Binding::Shape(fs) => {
+                for (_, v) in fs {
+                    self.note_globals(v);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// What a call site outside any clone knows about `e`: `bound` are the names local to
     /// the site, `held` says whether the sandbox holds a top-level name.
     pub(crate) fn binding_at(&mut self, e: &Expr, bound: &[String], held: &dyn Fn(&str) -> bool) -> Binding {
@@ -306,8 +344,16 @@ impl<'t> Specializer<'t> {
     }
 
     /// The clone of `fname` for `args`, made if it does not exist yet; `None` when nothing is
-    /// known, the function is not the program's own, or a cap is reached.
-    pub(crate) fn specialize(&mut self, fname: &str, args: &[Binding], depth: usize) -> Option<String> {
+    /// known, the function is not the program's own, or a cap is reached. `sb` and `done`
+    /// are the sandbox and the program's prefix, for what the clone evaluates as it is made.
+    pub(crate) fn specialize(
+        &mut self,
+        fname: &str,
+        args: &[Binding],
+        depth: usize,
+        sb: &mut Sandbox,
+        done: &[Stmt],
+    ) -> Option<String> {
         // A scalar literal alone earns no clone — passing it costs ten nanoseconds, and a
         // library's own internal calls carry them everywhere. A shape or a held name does.
         if !self.enabled
@@ -364,7 +410,7 @@ impl<'t> Specializer<'t> {
         for ((p, _), b) in params.iter().zip(known.iter()) {
             env.bind(p, b.clone());
         }
-        self.substitute(&mut body, &mut env, depth + 1);
+        self.substitute(&mut body, &mut env, depth + 1, sb, done);
         self.pending.push(Stmt::Func { name: name.clone(), params, defaults, ret, exported: false, body, line, col });
         Some(name)
     }
@@ -415,7 +461,7 @@ impl<'t> Specializer<'t> {
         let mut body: Expr = (*fv.body).clone();
         crate::fold::unshare_lambdas(&mut body);
         copy_types(self.types, &node_ptrs(&fv.body), &body);
-        rename(&mut body, &renames, &mut Vec::new());
+        replace_idents(&mut body, &|n| renames.get(n).map(|to| Expr::Ident { name: to.clone(), line: 0, col: 0 }), &mut Vec::new());
         let params: Vec<(String, Option<TypeAnn>)> = fv.params.iter().map(|p| (p.clone(), None)).collect();
         self.total += 1;
         self.funcs.insert(
@@ -436,45 +482,50 @@ impl<'t> Specializer<'t> {
         Some(name)
     }
 
-    /// Rewrite `e` for what `env` knows: answer the questions a shape or a constant answers,
-    /// and specialize the calls that pass such knowledge on.
-    fn substitute(&mut self, e: &mut Expr, env: &mut Env, depth: usize) {
+    /// Rewrite `e` for what `env` knows — children first — then reduce it as far as what is
+    /// known reaches: the questions a shape or a constant answers, a comprehension over a
+    /// literal array unrolled, a lambda applied to known arguments made a `let`, a literal
+    /// condition's branch, and a sub-expression closed under the sandbox evaluated.
+    fn substitute(&mut self, e: &mut Expr, env: &mut Env, depth: usize, sb: &mut Sandbox, done: &[Stmt]) {
         match e {
-            Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing | Expr::Column { .. } => {}
-            Expr::Ident { name, .. } => match env.lookup(name) {
-                Some(Binding::Global(g)) => {
-                    let g = g.clone();
-                    if let Expr::Ident { name, .. } = e {
-                        *name = g;
+            Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing | Expr::Column { .. } => return,
+            Expr::Ident { name, .. } => {
+                match env.lookup(name) {
+                    Some(Binding::Global(g)) => {
+                        let g = g.clone();
+                        if let Expr::Ident { name, .. } = e {
+                            *name = g;
+                        }
                     }
+                    Some(Binding::Lit(l)) => *e = l.to_expr(),
+                    _ => {}
                 }
-                Some(Binding::Lit(l)) => *e = l.to_expr(),
-                _ => {}
-            },
+                return;
+            }
             Expr::Interp(parts) => {
                 for p in parts {
                     if let InterpPart::Expr(x, _) = p {
-                        self.substitute(x, env, depth);
+                        self.substitute(x, env, depth, sb, done);
                     }
                 }
             }
             Expr::Array(xs) | Expr::Tuple(xs) => {
                 for x in xs {
-                    self.substitute(x, env, depth);
+                    self.substitute(x, env, depth, sb, done);
                 }
             }
             Expr::Record(fields) => {
                 for (_, v) in fields {
-                    self.substitute(v, env, depth);
+                    self.substitute(v, env, depth, sb, done);
                 }
             }
             Expr::RecordUpdate { parts, .. } => {
                 for p in parts {
-                    self.substitute(p.expr_mut(), env, depth);
+                    self.substitute(p.expr_mut(), env, depth, sb, done);
                 }
             }
             Expr::Field { recv, name, .. } => {
-                self.substitute(recv, env, depth);
+                self.substitute(recv, env, depth, sb, done);
                 // A present key whose value the call site wrote as a literal or a held name.
                 let known = self.known(recv, env);
                 if let Some(fs) = known.shape() {
@@ -489,7 +540,7 @@ impl<'t> Specializer<'t> {
                 }
             }
             Expr::FieldOrMissing { recv, name, line, col } => {
-                self.substitute(recv, env, depth);
+                self.substitute(recv, env, depth, sb, done);
                 let known = self.known(recv, env);
                 if let Some(fs) = known.shape() {
                     let (line, col) = (*line, *col);
@@ -505,19 +556,19 @@ impl<'t> Specializer<'t> {
                     }
                 }
             }
-            Expr::Unary { expr, .. } => self.substitute(expr, env, depth),
+            Expr::Unary { expr, .. } => self.substitute(expr, env, depth, sb, done),
             Expr::Binary { op, left, right, .. } => {
-                self.substitute(left, env, depth);
-                self.substitute(right, env, depth);
+                self.substitute(left, env, depth, sb, done);
+                self.substitute(right, env, depth, sb, done);
                 // A record literal is never `missing`.
-                if matches!(op, crate::ast::BinOp::Coalesce) && self.known(left, env).shape().is_some() {
+                if matches!(op, BinOp::Coalesce) && self.known(left, env).shape().is_some() {
                     let taken = std::mem::replace(&mut **left, Expr::Missing);
                     *e = taken;
                 }
             }
             Expr::Call { name, args, .. } => {
                 for a in args.iter_mut() {
-                    self.substitute(a, env, depth);
+                    self.substitute(a, env, depth, sb, done);
                 }
                 if name == "type_of" && args.len() == 1 && self.known(&args[0], env).shape().is_some() {
                     *e = Expr::Str("Record".to_string());
@@ -525,13 +576,13 @@ impl<'t> Specializer<'t> {
                 }
                 if self.funcs.contains_key(name.as_str()) {
                     let bindings: Vec<Binding> = args.iter().map(|a| self.known(a, env)).collect();
-                    if let Some(n) = self.specialize(name, &bindings, depth) {
+                    if let Some(n) = self.specialize(name, &bindings, depth, sb, done) {
                         *name = n;
                     }
                 }
             }
             Expr::Method { recv, name, args, named, line, col, .. } => {
-                self.substitute(recv, env, depth);
+                self.substitute(recv, env, depth, sb, done);
                 // A frame verb reads its arguments as written: a name in them stays a name.
                 if crate::interp::takes_unevaluated_args(name) {
                     return;
@@ -539,120 +590,206 @@ impl<'t> Specializer<'t> {
                 let mark = env.mark();
                 env.shadow("it");
                 for a in args.iter_mut() {
-                    self.substitute(a, env, depth);
+                    self.substitute(a, env, depth, sb, done);
                 }
                 for (_, v) in named.iter_mut() {
-                    self.substitute(v, env, depth);
+                    self.substitute(v, env, depth, sb, done);
                 }
                 env.truncate(mark);
                 if !named.is_empty() {
                     return;
                 }
-                let known = self.known(recv, env);
-                let Some(fs) = known.shape() else { return };
                 let (line, col) = (*line, *col);
-                let field_of = |recv: &Expr, k: &str| Expr::Field { recv: Box::new(recv.clone()), name: k.to_string(), line, col };
-                // Only what a record ANSWERS: the methods its type owns, and the universal
-                // `is_missing`. (A record has no `count`; `keys().count()` folds on its own.)
-                match (name.as_str(), args.len()) {
-                    ("keys", 0) => *e = Expr::Array(fs.iter().map(|(k, _)| Expr::Str(k.clone())).collect()),
-                    ("is_missing", 0) => *e = Expr::Bool(false),
-                    ("values", 0) => *e = Expr::Array(fs.iter().map(|(k, _)| field_of(recv, k)).collect()),
-                    ("items", 0) => {
-                        *e = Expr::Array(
-                            fs.iter().map(|(k, _)| Expr::Tuple(vec![Expr::Str(k.clone()), field_of(recv, k)])).collect(),
-                        )
-                    }
-                    ("has", 1) => {
-                        if let Expr::Str(k) = &args[0] {
-                            *e = Expr::Bool(fs.iter().any(|(f, _)| f == k));
+                let known = self.known(recv, env);
+                if let Some(fs) = known.shape() {
+                    // Only what a record ANSWERS: the methods its type owns, and the
+                    // universal `is_missing`. (A record has no `count`; `keys().count()`
+                    // folds on its own.)
+                    let field_of = |recv: &Expr, k: &str| Expr::Field { recv: Box::new(recv.clone()), name: k.to_string(), line, col };
+                    match (name.as_str(), args.len()) {
+                        ("keys", 0) => *e = Expr::Array(fs.iter().map(|(k, _)| Expr::Str(k.clone())).collect()),
+                        ("is_missing", 0) => *e = Expr::Bool(false),
+                        ("values", 0) => *e = Expr::Array(fs.iter().map(|(k, _)| field_of(recv, k)).collect()),
+                        ("items", 0) => {
+                            *e = Expr::Array(
+                                fs.iter().map(|(k, _)| Expr::Tuple(vec![Expr::Str(k.clone()), field_of(recv, k)])).collect(),
+                            )
                         }
-                    }
-                    ("get", 1) | ("expect", 1) => {
-                        if let Expr::Str(k) = &args[0] {
-                            match fs.iter().find(|(f, _)| f == k) {
-                                Some((_, Binding::Lit(l))) => *e = l.to_expr(),
-                                Some((_, Binding::Global(g))) => *e = Expr::Ident { name: g.clone(), line, col },
-                                Some(_) => *e = field_of(recv, k),
-                                None if name == "get" => *e = Expr::Missing,
-                                None => {}
+                        ("has", 1) => {
+                            if let Expr::Str(k) = &args[0] {
+                                *e = Expr::Bool(fs.iter().any(|(f, _)| f == k));
                             }
                         }
-                    }
-                    ("get", 2) => {
-                        if let Expr::Str(k) = &args[0] {
-                            match fs.iter().find(|(f, _)| f == k) {
-                                Some((_, Binding::Lit(l))) => *e = l.to_expr(),
-                                Some((_, Binding::Global(g))) => *e = Expr::Ident { name: g.clone(), line, col },
-                                Some(_) => *e = field_of(recv, k),
-                                None => {
-                                    let d = std::mem::replace(&mut args[1], Expr::Missing);
-                                    *e = d;
+                        ("get", 1) | ("expect", 1) => {
+                            if let Expr::Str(k) = &args[0] {
+                                match fs.iter().find(|(f, _)| f == k) {
+                                    Some((_, Binding::Lit(l))) => *e = l.to_expr(),
+                                    Some((_, Binding::Global(g))) => *e = Expr::Ident { name: g.clone(), line, col },
+                                    Some(_) => *e = field_of(recv, k),
+                                    None if name == "get" => *e = Expr::Missing,
+                                    None => {}
                                 }
                             }
                         }
+                        ("get", 2) => {
+                            if let Expr::Str(k) = &args[0] {
+                                match fs.iter().find(|(f, _)| f == k) {
+                                    Some((_, Binding::Lit(l))) => *e = l.to_expr(),
+                                    Some((_, Binding::Global(g))) => *e = Expr::Ident { name: g.clone(), line, col },
+                                    Some(_) => *e = field_of(recv, k),
+                                    None => {
+                                        let d = std::mem::replace(&mut args[1], Expr::Missing);
+                                        *e = d;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
+                } else if let Some(items) = sequence_literal(recv, env) {
+                    // A tuple or array literal of safe elements — written here, or bound by
+                    // a `let` — answers its length, its ends, and unrolls a `map` or a
+                    // `reduce` over it: what a shape's `items()` hands to a clause builder.
+                    let n = items.len();
+                    match (name.as_str(), args.len()) {
+                        ("count", 0) | ("length", 0) => *e = Expr::Int(n as i64),
+                        ("first", 0) if n > 0 => *e = items[0].clone(),
+                        ("last", 0) if n > 0 => *e = items[n - 1].clone(),
+                        ("map", 1) if n <= MAX_UNROLL && matches!(recv_kind(recv, env), Some(Seq::Array)) => {
+                            if let Some(elems) = unrolled_map(self.types, &args[0], &items) {
+                                *e = Expr::Array(elems);
+                                self.substitute(e, env, depth, sb, done);
+                                return;
+                            }
+                        }
+                        ("reduce", 2) if n <= MAX_UNROLL && matches!(recv_kind(recv, env), Some(Seq::Array)) => {
+                            if let Some(folded) = unrolled_reduce(self.types, &args[0], &args[1], &items) {
+                                *e = folded;
+                                self.substitute(e, env, depth, sb, done);
+                                return;
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             Expr::CallValue { callee, args, .. } => {
-                self.substitute(callee, env, depth);
-                for a in args {
-                    self.substitute(a, env, depth);
+                self.substitute(callee, env, depth, sb, done);
+                for a in args.iter_mut() {
+                    self.substitute(a, env, depth, sb, done);
+                }
+                // A lambda applied to arguments is the `let` that binds them — when no
+                // argument reads a parameter bound before it.
+                if let Expr::Lambda { params, defaults, body, .. } = &**callee
+                    && defaults.is_empty()
+                    && params.len() == args.len()
+                    && args.iter().enumerate().all(|(i, a)| !params[..i].iter().any(|p| mentions(a, p)))
+                {
+                    let bindings: Vec<(String, Expr)> = params.iter().cloned().zip(std::mem::take(args)).collect();
+                    let body = typed_clone(self.types, body);
+                    *e = Expr::Let { bindings, body: Box::new(body), from_do: false };
+                    self.substitute(e, env, depth, sb, done);
+                    return;
                 }
             }
             Expr::Index { recv, index, .. } => {
-                self.substitute(recv, env, depth);
-                self.substitute(index, env, depth);
+                self.substitute(recv, env, depth, sb, done);
+                self.substitute(index, env, depth, sb, done);
+                if let Expr::Int(i) = **index
+                    && let Some(items) = sequence_literal(recv, env)
+                    && i >= 0
+                    && (i as usize) < items.len()
+                {
+                    *e = items[i as usize].clone();
+                    self.substitute(e, env, depth, sb, done);
+                    return;
+                }
             }
             Expr::Slice { recv, start, stop, step, .. } => {
-                self.substitute(recv, env, depth);
+                self.substitute(recv, env, depth, sb, done);
                 for part in [start, stop, step].into_iter().flatten() {
-                    self.substitute(part, env, depth);
+                    self.substitute(part, env, depth, sb, done);
                 }
             }
             Expr::Lambda { params, defaults, body, .. } => {
                 for d in defaults.iter_mut() {
-                    self.substitute(d, env, depth);
+                    self.substitute(d, env, depth, sb, done);
                 }
                 let mark = env.mark();
                 for p in params.iter() {
                     env.shadow(p);
                 }
                 if let Some(b) = Rc::get_mut(body) {
-                    self.substitute(b, env, depth);
+                    self.substitute(b, env, depth, sb, done);
                 }
                 env.truncate(mark);
+                return;
             }
             Expr::Let { bindings, body, .. } => {
                 let mark = env.mark();
                 for (n, v) in bindings.iter_mut() {
-                    self.substitute(v, env, depth);
+                    self.substitute(v, env, depth, sb, done);
                     let b = self.known(v, env);
-                    env.bind(n, b);
+                    let lit = if is_safe_sequence(v, env) { Some(v.clone()) } else { None };
+                    env.bind_with(n, b, lit);
                 }
-                self.substitute(body, env, depth);
+                self.substitute(body, env, depth, sb, done);
                 env.truncate(mark);
+                // A binding nothing reads, whose value has nothing to run and cannot raise,
+                // is dropped — the accumulator and the pair an unrolled `reduce` bound, once
+                // the body has taken what it needed from them.
+                let mut i = bindings.len();
+                while i > 0 {
+                    i -= 1;
+                    let read = mentions(body, &bindings[i].0)
+                        || bindings[i + 1..].iter().any(|(_, later)| mentions(later, &bindings[i].0));
+                    if !read && is_safe(&bindings[i].1, env) {
+                        let (_, dropped) = bindings.remove(i);
+                        forget_types(self.types, &dropped);
+                    }
+                }
+                if bindings.is_empty() {
+                    let taken = std::mem::replace(&mut **body, Expr::Missing);
+                    *e = taken;
+                }
+                return;
             }
             Expr::If { cond, then_branch, else_branch, .. } => {
-                self.substitute(cond, env, depth);
-                self.substitute(then_branch, env, depth);
-                self.substitute(else_branch, env, depth);
+                self.substitute(cond, env, depth, sb, done);
+                self.substitute(then_branch, env, depth, sb, done);
+                self.substitute(else_branch, env, depth, sb, done);
             }
-            Expr::Try { expr, .. } => self.substitute(expr, env, depth),
+            Expr::Try { expr, .. } => self.substitute(expr, env, depth, sb, done),
             Expr::Match { scrutinee, arms, .. } => {
-                self.substitute(scrutinee, env, depth);
+                self.substitute(scrutinee, env, depth, sb, done);
                 for arm in arms.iter_mut() {
                     let mark = env.mark();
                     for n in crate::interp::pattern_binding_names(&arm.pattern) {
                         env.shadow(&n);
                     }
                     if let Some(g) = &mut arm.guard {
-                        self.substitute(g, env, depth);
+                        self.substitute(g, env, depth, sb, done);
                     }
-                    self.substitute(&mut arm.body, env, depth);
+                    self.substitute(&mut arm.body, env, depth, sb, done);
                     env.truncate(mark);
                 }
+            }
+        }
+        // A literal condition selects its branch.
+        while simplify::constant(e) {}
+        // A sub-expression closed under the sandbox — a method on a literal or a held
+        // value, an operator on literals, a field of a held record, an interpolation of
+        // held names — is evaluated where it stands. A call to one of the program's own
+        // functions is not: that is a specialization, or the fold's, later.
+        let bound = env.names();
+        if let Some(label) = super::candidate_label(e, sb, &bound, done)
+            && (label.starts_with('#') || label.contains('.'))
+            && let Ok(Outcome::Value(v)) = sb.attempt(e, done)
+        {
+            let mut budget = crate::fold::MAX_LITERAL_NODES;
+            if let Some(lit) = crate::fold::to_expr(&v, &mut budget) {
+                let old = std::mem::replace(e, lit);
+                forget_types(self.types, &old);
             }
         }
     }
@@ -690,89 +827,205 @@ fn binding_of(e: &Expr, env: &Env, held: &dyn Fn(&str) -> bool) -> Binding {
     }
 }
 
-/// Rename free occurrences of the captured names in a closure body to their hoisted
-/// top-level bindings; a binder of the same name inside the body shadows it.
-fn rename(e: &mut Expr, map: &HashMap<String, String>, shadow: &mut Vec<String>) {
+#[derive(PartialEq)]
+enum Seq {
+    Array,
+    Tuple,
+}
+
+/// The elements of the tuple or array literal `e` is — written, or bound to a `let` name —
+/// when every element is safe to read more than once and in another place: a scalar
+/// literal, a name, a present key of a shaped name, or a tuple or array of those.
+fn sequence_literal(e: &Expr, env: &Env) -> Option<Vec<Expr>> {
+    let seq = match e {
+        Expr::Array(xs) | Expr::Tuple(xs) => xs,
+        Expr::Ident { name, .. } => match env.literal_of(name)? {
+            Expr::Array(xs) | Expr::Tuple(xs) => xs,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if seq.iter().all(|x| is_safe(x, env)) { Some(seq.clone()) } else { None }
+}
+
+fn recv_kind(e: &Expr, env: &Env) -> Option<Seq> {
+    match e {
+        Expr::Array(_) => Some(Seq::Array),
+        Expr::Tuple(_) => Some(Seq::Tuple),
+        Expr::Ident { name, .. } => match env.literal_of(name)? {
+            Expr::Array(_) => Some(Seq::Array),
+            Expr::Tuple(_) => Some(Seq::Tuple),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A tuple or array literal whose every element is safe (see `sequence_literal`).
+fn is_safe_sequence(e: &Expr, env: &Env) -> bool {
+    matches!(e, Expr::Array(_) | Expr::Tuple(_)) && sequence_literal(e, env).is_some()
+}
+
+/// An expression that may be read more than once, and in another place, for the one it
+/// stands in: it cannot raise and has nothing to run.
+fn is_safe(e: &Expr, env: &Env) -> bool {
+    match e {
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing | Expr::Ident { .. } => true,
+        Expr::Field { recv, name, .. } => match &**recv {
+            Expr::Ident { name: p, .. } => {
+                env.lookup(p).and_then(Binding::shape).is_some_and(|fs| fs.iter().any(|(k, _)| k == name))
+            }
+            _ => false,
+        },
+        Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().all(|x| is_safe(x, env)),
+        Expr::Record(fields) => fields.iter().all(|(_, v)| is_safe(v, env)),
+        _ => false,
+    }
+}
+
+/// `[e1, …].map(f)` as the array of `f` applied to each: `f` is a one-parameter lambda or an
+/// `it`-body.
+fn unrolled_map(types: &mut TypeMap, f: &Expr, items: &[Expr]) -> Option<Vec<Expr>> {
+    let (param, body): (&str, &Expr) = match f {
+        Expr::Lambda { params, defaults, body, .. } if params.len() == 1 && defaults.is_empty() => (&params[0], body),
+        Expr::Lambda { .. } => return None,
+        it_body => ("it", it_body),
+    };
+    Some(items.iter().map(|x| substituted(types, body, param, x)).collect())
+}
+
+/// `[e1, …].reduce(init, (a, c) => body)` as the `let`s that run it: `let a = init, c = e1 in
+/// body`, then that as the next `a` — when no element reads the accumulator's name.
+fn unrolled_reduce(types: &mut TypeMap, init: &Expr, f: &Expr, items: &[Expr]) -> Option<Expr> {
+    let Expr::Lambda { params, defaults, body, .. } = f else { return None };
+    if params.len() != 2 || !defaults.is_empty() || items.iter().any(|x| mentions(x, &params[0])) {
+        return None;
+    }
+    let mut acc = init.clone();
+    for x in items {
+        acc = Expr::Let {
+            bindings: vec![(params[0].clone(), acc), (params[1].clone(), x.clone())],
+            body: Box::new(typed_clone(types, body)),
+            from_do: false,
+        };
+    }
+    Some(acc)
+}
+
+/// `body` with every free occurrence of `name` replaced by `with`, carrying `body`'s types.
+fn substituted(types: &mut TypeMap, body: &Expr, name: &str, with: &Expr) -> Expr {
+    let mut out = typed_clone(types, body);
+    replace_idents(&mut out, &|n| (n == name).then(|| with.clone()), &mut Vec::new());
+    out
+}
+
+/// A copy of `body` that owns its lambda bodies and carries the checker's types of `body`'s
+/// nodes — the compiler routes a frame verb by its receiver's type, and a copy that lost it
+/// would route generically.
+fn typed_clone(types: &mut TypeMap, body: &Expr) -> Expr {
+    let mut out = body.clone();
+    crate::fold::unshare_lambdas(&mut out);
+    copy_types(types, &node_ptrs(body), &out);
+    out
+}
+
+/// Whether `e` mentions the name `name` at all (a binder of it inside counts too — a safe
+/// over-approximation of "reads it").
+fn mentions(e: &Expr, name: &str) -> bool {
+    let mut found = false;
+    crate::visit::walk_expr(e, &mut |x| {
+        if let Expr::Ident { name: n, .. } = x
+            && n == name
+        {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Replace free identifiers under `e` by what `with` gives for their name; a binder of the
+/// same name inside `e` shadows it.
+fn replace_idents(e: &mut Expr, with: &dyn Fn(&str) -> Option<Expr>, shadow: &mut Vec<String>) {
     match e {
         Expr::Ident { name, .. } => {
             if !shadow.iter().any(|s| s == name)
-                && let Some(to) = map.get(name)
+                && let Some(to) = with(name)
             {
-                *name = to.clone();
+                *e = to;
             }
         }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing | Expr::Column { .. } => {}
         Expr::Interp(parts) => {
             for p in parts {
                 if let InterpPart::Expr(x, _) = p {
-                    rename(x, map, shadow);
+                    replace_idents(x, with, shadow);
                 }
             }
         }
-        Expr::Array(xs) | Expr::Tuple(xs) => xs.iter_mut().for_each(|x| rename(x, map, shadow)),
-        Expr::Record(fields) => fields.iter_mut().for_each(|(_, v)| rename(v, map, shadow)),
-        Expr::RecordUpdate { parts, .. } => parts.iter_mut().for_each(|p| rename(p.expr_mut(), map, shadow)),
+        Expr::Array(xs) | Expr::Tuple(xs) => xs.iter_mut().for_each(|x| replace_idents(x, with, shadow)),
+        Expr::Record(fields) => fields.iter_mut().for_each(|(_, v)| replace_idents(v, with, shadow)),
+        Expr::RecordUpdate { parts, .. } => parts.iter_mut().for_each(|p| replace_idents(p.expr_mut(), with, shadow)),
         Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Unary { expr: recv, .. } | Expr::Try { expr: recv, .. } => {
-            rename(recv, map, shadow)
+            replace_idents(recv, with, shadow)
         }
         Expr::Binary { left, right, .. } => {
-            rename(left, map, shadow);
-            rename(right, map, shadow);
+            replace_idents(left, with, shadow);
+            replace_idents(right, with, shadow);
         }
-        Expr::Call { args, .. } => args.iter_mut().for_each(|a| rename(a, map, shadow)),
+        Expr::Call { args, .. } => args.iter_mut().for_each(|a| replace_idents(a, with, shadow)),
         Expr::Method { recv, args, named, .. } => {
-            rename(recv, map, shadow);
+            replace_idents(recv, with, shadow);
             shadow.push("it".to_string());
-            args.iter_mut().for_each(|a| rename(a, map, shadow));
-            named.iter_mut().for_each(|(_, v)| rename(v, map, shadow));
+            args.iter_mut().for_each(|a| replace_idents(a, with, shadow));
+            named.iter_mut().for_each(|(_, v)| replace_idents(v, with, shadow));
             shadow.pop();
         }
         Expr::CallValue { callee, args, .. } => {
-            rename(callee, map, shadow);
-            args.iter_mut().for_each(|a| rename(a, map, shadow));
+            replace_idents(callee, with, shadow);
+            args.iter_mut().for_each(|a| replace_idents(a, with, shadow));
         }
         Expr::Index { recv, index, .. } => {
-            rename(recv, map, shadow);
-            rename(index, map, shadow);
+            replace_idents(recv, with, shadow);
+            replace_idents(index, with, shadow);
         }
         Expr::Slice { recv, start, stop, step, .. } => {
-            rename(recv, map, shadow);
+            replace_idents(recv, with, shadow);
             for part in [start, stop, step].into_iter().flatten() {
-                rename(part, map, shadow);
+                replace_idents(part, with, shadow);
             }
         }
         Expr::Lambda { params, defaults, body, .. } => {
-            defaults.iter_mut().for_each(|d| rename(d, map, shadow));
+            defaults.iter_mut().for_each(|d| replace_idents(d, with, shadow));
             let mark = shadow.len();
             shadow.extend(params.iter().cloned());
             if let Some(b) = Rc::get_mut(body) {
-                rename(b, map, shadow);
+                replace_idents(b, with, shadow);
             }
             shadow.truncate(mark);
         }
         Expr::Let { bindings, body, .. } => {
             let mark = shadow.len();
             for (n, v) in bindings.iter_mut() {
-                rename(v, map, shadow);
+                replace_idents(v, with, shadow);
                 shadow.push(n.clone());
             }
-            rename(body, map, shadow);
+            replace_idents(body, with, shadow);
             shadow.truncate(mark);
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
-            rename(cond, map, shadow);
-            rename(then_branch, map, shadow);
-            rename(else_branch, map, shadow);
+            replace_idents(cond, with, shadow);
+            replace_idents(then_branch, with, shadow);
+            replace_idents(else_branch, with, shadow);
         }
         Expr::Match { scrutinee, arms, .. } => {
-            rename(scrutinee, map, shadow);
+            replace_idents(scrutinee, with, shadow);
             for arm in arms.iter_mut() {
                 let mark = shadow.len();
                 shadow.extend(crate::interp::pattern_binding_names(&arm.pattern));
                 if let Some(g) = &mut arm.guard {
-                    rename(g, map, shadow);
+                    replace_idents(g, with, shadow);
                 }
-                rename(&mut arm.body, map, shadow);
+                replace_idents(&mut arm.body, with, shadow);
                 shadow.truncate(mark);
             }
         }
@@ -781,7 +1034,7 @@ fn rename(e: &mut Expr, map: &HashMap<String, String>, shadow: &mut Vec<String>)
 
 /// The addresses of every node under `e`, preorder — the order `walk_expr` fixes, so two
 /// trees of one structure zip.
-fn node_ptrs(e: &Expr) -> Vec<*const Expr> {
+pub(super) fn node_ptrs(e: &Expr) -> Vec<*const Expr> {
     let mut out = Vec::new();
     crate::visit::walk_expr(e, &mut |x| out.push(x as *const Expr));
     out

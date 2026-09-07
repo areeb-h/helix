@@ -153,7 +153,7 @@ pub(crate) fn value_size(v: &Value) -> u64 {
 
 /// A sandboxed tree-walker holding the program's functions and the top-level values it
 /// has been asked for, plus the program's remaining budget.
-struct Sandbox {
+pub(super) struct Sandbox {
     interp: Interp,
     program_fuel: u64,
     /// Top-level immutable bindings the program has made so far and the sandbox has not
@@ -171,7 +171,7 @@ struct Sandbox {
 }
 
 /// How an attempt ended without the program's own raise.
-enum Outcome {
+pub(super) enum Outcome {
     Value(Value),
     /// The sandbox refused the evaluation itself — the callee is futile here.
     Abandoned,
@@ -631,7 +631,7 @@ fn specialize_site(e: &mut Expr, sb: &mut Sandbox, sp: &mut Specializer, done: &
         && sp.knows(name)
     {
         let bindings: Vec<Binding> = args.iter().map(|a| sp.binding_at(a, bound, &|n| sb.holds(n))).collect();
-        if let Some(n) = sp.specialize(name, &bindings, 0) {
+        if let Some(n) = sp.specialize(name, &bindings, 0, sb, done) {
             *name = n;
         }
     }
@@ -650,7 +650,7 @@ fn specialize_site(e: &mut Expr, sb: &mut Sandbox, sp: &mut Specializer, done: &
 /// callee; a method on a literal, an operator on literals, a field of a held record, an
 /// interpolation of held names, `type_of` of a literal are labelled `#…` and never
 /// remembered as futile. A name bound locally is never the global of that name.
-fn candidate_label(e: &Expr, sb: &mut Sandbox, bound: &[String], done: &[Stmt]) -> Option<String> {
+pub(super) fn candidate_label(e: &Expr, sb: &mut Sandbox, bound: &[String], done: &[Stmt]) -> Option<String> {
     let local = |n: &str| bound.iter().any(|b| b == n);
     let closed = |a: &Expr| {
         let mut b = bound.to_vec();
@@ -696,7 +696,7 @@ fn candidate_label(e: &Expr, sb: &mut Sandbox, bound: &[String], done: &[Stmt]) 
 
 /// An expression the sandbox can evaluate: no column reference, no free name it does not
 /// hold — a name bound locally (`bound`) counts as free, whatever global shares it.
-fn known_closed(e: &Expr, sb: &Sandbox, bound: &mut Vec<String>) -> bool {
+pub(super) fn known_closed(e: &Expr, sb: &Sandbox, bound: &mut Vec<String>) -> bool {
     match e {
         Expr::Column { .. } => false,
         Expr::Ident { name, .. } => {
@@ -1180,6 +1180,24 @@ mod tests {
         assert_eq!(clones, 8);
         let ninth = s.iter().find(|st| matches!(st, Stmt::Assign { name, .. } if name == "y8")).unwrap();
         assert!(matches!(value_of(ninth), Expr::Call { name, .. } if name == "f"), "{:?}", value_of(ninth));
+    }
+
+    /// A clause builder — `items()` of a shaped record, reduced with a lambda that reads
+    /// each pair — becomes its text: the `reduce` over the one element the shape produces is
+    /// unrolled to a `let`, the pair answers `c[0]` and `c[1]`, the accumulator's literal
+    /// answers `a.s` and `a.n`, and the interpolation of literals folds; only the value's
+    /// field read remains.
+    #[test]
+    fn a_clause_over_a_shape_becomes_its_text() {
+        let s = folded_with(
+            "mut RT = 1\nfn clause(w) = w.items().reduce({s: \"\", n: 1}, (a, c) => {s: \"{a.s}{c[0]} = ${a.n}\", n: a.n + 1, v: c[1]})\ny = clause({city: RT})",
+            true,
+        );
+        let clone = func(&s, "clause$1");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Method { .. })), 0, "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Str(t) if t == "city = $1")), 1, "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Int(2))), 1, "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Field { name, .. } if name == "city")), 1, "{clone:?}");
     }
 
     /// A program with no function of its own is untouched, cheaply.

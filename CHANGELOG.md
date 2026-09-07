@@ -12,7 +12,11 @@
   the model's `m.table` its string) and which the fold then reduces to the work the runtime
   values need. A method through a record built at load — the object API a library closes
   over a model — becomes a direct call of the closure it holds, so the rule reaches it. The
-  field build's rendered query: `where eq` 4.967 → 3.532 µs, `where+limit` 5.642 → 4.226 µs, `OR two branches` 10.571 → 9.143 µs (min of five trials of 2 000). `HELIX_NOSPECIALIZE=1` is the A/B switch.
+  clone is then reduced as far as what is known reaches: a sub-expression closed under the
+  sandbox is evaluated where it stands, a `map` or `reduce` over the one-element array a
+  shape's `items()` produces is unrolled, a lambda applied to known arguments becomes a
+  `let`, a tuple bound by one answers `c[0]` and `c.count()` — so the text of a where clause
+  is a constant and only the value's parameter is work. The field build's rendered query: `where eq` 5.362 → 3.542 µs, `where+limit` 5.531 → 4.831 µs, `OR two branches` 10.260 → 8.485 µs (min of five trials of 2 000). `HELIX_NOSPECIALIZE=1` is the A/B switch.
   Along the way the fold learned literal receivers, operators on literals, fields of held
   records, interpolations of held names and the branch a literal condition selects — and a
   name bound locally is never the global of that name.
