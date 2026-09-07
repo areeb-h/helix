@@ -723,6 +723,16 @@
 
 ### Performance
 
+- **The allocator holds a freed page for one millisecond before returning it.** mimalloc's
+  `purge_delay` was 0 — return at once — for peak RSS in short-lived processes. With
+  transparent huge pages allowed, a page reset the moment it is freed is re-faulted as a
+  2 MiB huge page the next time it is touched: two megabytes zeroed for the next iteration's
+  allocation. At 1 ms the map-chain workload runs 12 % faster, a 2M-row group-by 2.5 %, a
+  29 MB CSV read 3 %, `helix check` over the corpus 5 %, with peak RSS equal or lower on every
+  workload measured — and, unlike mimalloc's default 10 ms, without the 12 MB the
+  CSV-then-group-by shape gains at 10 ms. Measured on one box, interleaved, min of five; the
+  table is in `src/main.rs` beside the setting (ADR 0016).
+
 - **A Float accumulator over an Int array folds natively.** `xs.reduce(0.0, (acc, x) => acc +
   x)` — the natural spelling of a running sum — ran the bytecode loop at 1.0× while every other
   fold fused at 12 to 46×, because the fused f64 fold reads f64 elements and an Int array fell

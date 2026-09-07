@@ -197,16 +197,31 @@ fn run_cli() -> ExitCode {
         return ExitCode::FAILURE;
     }
     configure_thread_pool();
-    // Return freed memory to the OS promptly (mimalloc `purge_delay = 0`) instead of
-    // its default ~10 ms hold. Helix processes are typically short-lived (CLI,
-    // serverless), so they exit before that delay ever fires — leaving freed pages
-    // resident and inflating peak RSS by tens of MB. Immediate purging keeps the
-    // allocator's wall-time win while cutting peak RSS to ~system-allocator levels on
-    // the data workloads (measured: VCF read 1.48x->1.08x, group-by 1.77x->1.46x).
+    // Return freed memory to the OS after ONE millisecond (mimalloc `purge_delay = 1`)
+    // instead of its default ~10 ms hold — or the immediate purge this used to be. Helix
+    // processes are typically short-lived (CLI, serverless), so a 10 ms hold outlives most
+    // of them and stacks freed pages under the next phase's allocations: measured, a CSV
+    // read followed by a group-by peaks 12 MB higher at 10 ms than at 0 (the first setting
+    // measured VCF read 1.48x->1.08x, group-by 1.77x->1.46x against the system allocator).
+    // But an IMMEDIATE purge charges every reuse: mimalloc allows transparent huge pages,
+    // so a page reset the moment it is freed is re-faulted as a 2 MiB huge page — two
+    // megabytes zeroed, half a millisecond on this box — the next time that memory is
+    // touched, which in an allocation-heavy program is the very next iteration. One
+    // millisecond is the grace that lets the next phase of the same computation reuse the
+    // pages and lets nothing else keep them. Measured on one box, interleaved, min of 5,
+    // `purge_delay` 0 → 1 → 10 (2026-09-07):
+    //
+    //     map-chains 200k x 200        66.3 ms   58.5   61.0     RSS  47.0 MB  47.0  47.1
+    //     group-by, 2M rows           127.1 ms  123.9  123.1     RSS 176.7 MB 176.6 176.8
+    //     CSV 29 MB read + group-by   112.6 ms  109.0  108.0     RSS 224.7 MB 220.5 237.0
+    //     CSV read x 3                159.2 ms  155.3  155.3     RSS 301.0 MB 282.8 292.8
+    //     large array 20M              23.3 ms   24.0   23.6     RSS 190.4 MB 190.5 190.4
+    //     `helix check` x 93 (corpus)   432 ms    409    395
+    //
     // `15` is `mi_option_purge_delay` in mimalloc v3 (the version the crate builds);
     // the enum's `deprecated_*` placeholders keep that index stable across v3 releases.
-    // …but PURGE BY RESET, NOT BY DECOMMIT. `purge_delay = 0` above says "return pages
-    // immediately"; `purge_decommits = 1` (the default) says "and unmap them", so every freed
+    // …but PURGE BY RESET, NOT BY DECOMMIT. `purge_delay` above says WHEN to return pages;
+    // `purge_decommits = 1` (the default) says "and unmap them", so every freed
     // buffer over mimalloc's large-object threshold costs a full page-fault storm the next
     // time that memory is touched. Together they made ordinary allocation-heavy code 2.7x
     // slower and produced an undocumented ~10x cliff at exactly 65,536 i64 elements — 512 KiB,
@@ -226,12 +241,12 @@ fn run_cli() -> ExitCode {
     //
     // Reset keeps the RSS win this pair was added for, because the pages are still returned —
     // they are just madvised rather than unmapped. THE LAST ROW IS THE ONE THAT MATTERS: the
-    // large-array data workloads are why `purge_delay = 0` is here, and their peak RSS is
+    // large-array data workloads are why a prompt purge is here, and their peak RSS is
     // unchanged. The cost is ~4 MB on small programs, which is not a trade, it is a rounding
     // error.
     #[cfg(feature = "mimalloc")]
     unsafe {
-        libmimalloc_sys::mi_option_set(15, 0);
+        libmimalloc_sys::mi_option_set(15, 1);
         libmimalloc_sys::mi_option_set(5, 0);
     }
     // The bytecode VM — the default engine — recurses on the *heap* (frames in a

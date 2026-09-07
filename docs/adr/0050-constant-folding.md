@@ -94,9 +94,10 @@ see first.
   exposed: `reduce`/`scan` evaluated their body per element without charging (a
   100 000-element scan ran to completion in the sandbox, 4 ms), a frame built in the sandbox
   started the frame engine's thread pool (1.5 ms, six threads), and an abandoned callee was
-  tried again at every call. What remains on this box is a fault of the allocator's making,
-  not the fold's: with `mimalloc` purging freed pages at once, the first allocation after
-  the checker's frees can land on a fresh huge page, half a millisecond of zeroing that
-  `run` pays on its first allocation anyway.
+  tried again at every call. What remains on this box is the allocator's, not the fold's:
+  `mimalloc` allows transparent huge pages, so the first touch of a fresh 2 MiB block of
+  arena — a size class the checker never used — zeroes two megabytes, half a millisecond,
+  which `run` pays on its first allocation anyway (its A/B is flat) and `check` would not
+  have. The purge delay is not the mechanism; it measured the same at 0, 1 and 10 ms.
 - The walker gains one predictable branch on its call, builtin, comprehension and unknown-name
   paths; the other engines nothing.

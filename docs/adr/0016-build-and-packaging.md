@@ -40,11 +40,16 @@ Three facts shaped the design:
 
 1. **mimalloc as the global allocator, everywhere** (default-on `mimalloc` feature,
    `default-features = false` = the fast config, no `secure` hardening), **with
-   `purge_delay = 0`** set at startup (`libmimalloc-sys` `mi_option_set`, enum index 15
+   `purge_delay = 1`** set at startup (`libmimalloc-sys` `mi_option_set`, enum index 15
    in the v3 build). Helix processes are short-lived (CLI/serverless) and exit before
-   mimalloc's default ~10 ms purge fires, leaving freed pages resident; immediate
-   purging keeps the wall-time win while returning peak RSS to ~system-allocator levels
-   on the data workloads. One allocator across glibc/musl/macOS/Windows; the documented
+   mimalloc's default ~10 ms purge fires, leaving freed pages resident under the next
+   phase's allocations (a CSV read then a group-by peaks 12 MB higher at 10 ms than at
+   0). The first setting was 0, an immediate purge, which returned peak RSS to
+   ~system-allocator levels on the data workloads — and, with transparent huge pages
+   allowed, re-faulted every reused page as a 2 MiB huge page, costing allocation-heavy
+   programs 3–12 % (measured 2026-09-07; the table is beside the setting in
+   `src/main.rs`). One millisecond keeps the immediate purge's RSS and the delayed
+   purge's throughput. One allocator across glibc/musl/macOS/Windows; the documented
    fix for musl's malloc; safe with the `python` feature.
 2. **Profile-guided optimization on x86_64-unknown-linux-gnu only** — the sole target
    where the JIT exists and cargo-pgo is fully supported natively. Instrument with thin
