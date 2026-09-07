@@ -37,6 +37,7 @@ mod chart;
 mod dataframe;
 mod docs;
 mod effects;
+mod fold;
 mod visit;
 mod doctest;
 mod error;
@@ -916,6 +917,10 @@ fn cli_jit_explain(args: &[String]) -> ExitCode {
             }
         };
         ufcs::resolve_by_type(&mut loaded.stmts, &types);
+        if let Err(e) = fold::fold_program(&mut loaded.stmts) {
+            eprint!("{}", render_err(e, &loaded.spans, loaded.multi_module));
+            return ExitCode::FAILURE;
+        }
         let Ok(prog) = bytecode::compile_with_types(&loaded.stmts, Some(types)) else {
             eprintln!("internal error: the compiler could not lower a type-checked program (please report)");
             return ExitCode::FAILURE;
@@ -1923,8 +1928,12 @@ fn run_emit_hbc(args: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        // Compile to bytecode (total for any type-checked program).
         ufcs::resolve_by_type(&mut loaded.stmts, &types);
+        if let Err(e) = fold::fold_program(&mut loaded.stmts) {
+            eprint!("{}", render_err(e, &loaded.spans, loaded.multi_module));
+            return ExitCode::FAILURE;
+        }
+        // Compile to bytecode (total for any type-checked program).
         let program = match bytecode::compile_with_types(&loaded.stmts, Some(types)) {
             Ok(p) => p,
             Err(_) => {
@@ -2292,7 +2301,7 @@ fn diag_json(severity: &str, file: &str, d: &module::Diag) -> serde_json::Value 
 /// whole instead of rendering it. The rendering is identical because `Diag` carries the
 /// rendered text produced by the very same call.
 fn check_file_structured(path: &std::path::Path) -> Result<module::Loaded, module::Diag> {
-    let loaded = module::load_diag(path)?;
+    let mut loaded = module::load_diag(path)?;
     if let Some(e) = climain_violation(&loaded.stmts, loaded.entry_prefix.as_deref()) {
         let (src, filename, local) = module::locate(&loaded.spans, e.line);
         let mut e = e;
@@ -2304,36 +2313,51 @@ fn check_file_structured(path: &std::path::Path) -> Result<module::Loaded, modul
     // the combinator form could not, because the error arm borrows `loaded` while the ok
     // arm has to move it.
     if let Err(e) = types::check(&loaded.stmts) {
-        // The checker reports a GLOBAL line across concatenated modules; map it back to
-        // the file and local line a reader can open, exactly as `render_err` does.
-        let (src, filename, local_line) = module::locate(&loaded.spans, e.line);
-        let mut e = e;
-        e.line = local_line;
-        let rendered = if loaded.multi_module {
-            // The multi-module rewrite prefixes every imported name with `m<N>$` so two
-            // modules can define `double`. That prefix is an implementation detail, and
-            // the human output has always stripped it — but the STRUCTURED fields are a
-            // second copy of the same text, and stripping only the rendered half would
-            // hand a tool `m0$double` while showing the reader `double`. Two spellings of
-            // one name in one document is exactly the kind of drift this project treats
-            // as a bug; caught by asking the JSON what it said about an imported symbol.
-            e.message = strip_mangling(&e.message);
-            e.hint = e.hint.as_deref().map(strip_mangling);
-            strip_mangling(&e.render(src, filename))
-        } else {
-            e.render(src, filename)
-        };
-        return Err(module::Diag { rendered, filename: Some(filename.to_string()), err: Some(e) });
+        return Err(structured_diag(e, &loaded));
+    }
+    // What a run evaluates before it starts, `check` evaluates too (ADR 0050): a raise a
+    // pure call with literal arguments meets unconditionally at the top level is reported
+    // like the type error above — and only once the checker is satisfied, so a type error
+    // outranks it.
+    if let Err(e) = fold::fold_program(&mut loaded.stmts) {
+        return Err(structured_diag(e, &loaded));
     }
     Ok(loaded)
 }
 
+/// The checker's (or the fold's) error as a `Diag`. The pass reports a GLOBAL line across
+/// concatenated modules; map it back to the file and local line a reader can open, exactly
+/// as `render_err` does.
+fn structured_diag(mut e: HelixError, loaded: &module::Loaded) -> module::Diag {
+    let (src, filename, local_line) = module::locate(&loaded.spans, e.line);
+    e.line = local_line;
+    let rendered = if loaded.multi_module {
+        // The multi-module rewrite prefixes every imported name with `m<N>$` so two
+        // modules can define `double`. That prefix is an implementation detail, and
+        // the human output has always stripped it — but the STRUCTURED fields are a
+        // second copy of the same text, and stripping only the rendered half would
+        // hand a tool `m0$double` while showing the reader `double`. Two spellings of
+        // one name in one document is exactly the kind of drift this project treats
+        // as a bug; caught by asking the JSON what it said about an imported symbol.
+        e.message = strip_mangling(&e.message);
+        e.hint = e.hint.as_deref().map(strip_mangling);
+        strip_mangling(&e.render(src, filename))
+    } else {
+        e.render(src, filename)
+    };
+    module::Diag { rendered, filename: Some(filename.to_string()), err: Some(e) }
+}
+
 fn check_file_capture(path: &std::path::Path) -> Result<module::Loaded, String> {
-    let loaded = module::load(path)?;
+    let mut loaded = module::load(path)?;
     if let Some(e) = climain_violation(&loaded.stmts, loaded.entry_prefix.as_deref()) {
         return Err(render_err(e, &loaded.spans, loaded.multi_module));
     }
     if let Err(e) = types::check(&loaded.stmts) {
+        return Err(render_err(e, &loaded.spans, loaded.multi_module));
+    }
+    // The fold's raise, after the checker — see `check_file_structured`.
+    if let Err(e) = fold::fold_program(&mut loaded.stmts) {
         return Err(render_err(e, &loaded.spans, loaded.multi_module));
     }
     // Handed back for `--lint`'s import traversal — see `lint_units`.
@@ -3318,6 +3342,11 @@ fn run_program(program: &mut [ast::Stmt], spans: &[module::Span], multi: bool) -
     // The receiver decides where it is known (src/ufcs.rs); every engine below runs
     // the same rewritten program, the JIT included.
     ufcs::resolve_by_type(program, &types);
+    // A pure call with literal arguments is evaluated now, once, and replaced by its value
+    // (ADR 0050) — after the checker, so it typed the call the programmer wrote and a type
+    // error outranks a raise the fold would report; before the engines, so all three run
+    // the one program the fold produced.
+    fold::fold_program(program).map_err(|e| render_err(e, spans, multi))?;
 
     // The tree-walker now runs only under `HELIX_NOVM=1` (A/B benchmarking and the
     // engine-agreement oracle). `try` used to force the whole program here — and with

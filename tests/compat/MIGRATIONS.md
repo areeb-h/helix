@@ -200,6 +200,14 @@ no entry. A source edit is not a behavior change.
   to pass and raise at run time — the refusal the unannotated `define` already drew. `Any` still
   opts out. No corpus program or golden moved.
 
+- **A pure call with literal arguments at the top level that raises is refused before the
+  program runs** (2026-09-07, ADR 0050). `print("start")` followed by `print(chk({limit: "1;
+  drop"}))`, where `chk` raises on that spec, printed `start` and then raised; it reports the
+  raise and prints nothing now, the shape a type error has always had, and `helix check`
+  reports it too. Under `try`, `if`, `match`, in a lambda or inside a function the call runs at
+  run time exactly as before. Nothing else is observable: a fold replaces a call by the value
+  the call computes. No corpus program or golden moved.
+
 - **`std()`, `var()`, `cov(ys)` divide by n − 1** (2026-09-07, ADR 0049). Every spread the
   language computes is the sample estimate now: `[2, 4, 4, 4, 5, 5, 7, 9].std()` is
   `2.138089935299395` where it was `2.0`, `var()` `4.571428571428571` where it was `4.0`;

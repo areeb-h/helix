@@ -179,6 +179,10 @@ pub(crate) fn call_method(
     }
     match recv {
         Value::Array(items) => {
+            // The folding sandbox pays per element (ADR 0050).
+            if crate::fold::sandbox_active() && !crate::fold::charge(items.len() as u64) {
+                return Err(crate::fold::abort_err(line, col));
+            }
             // `enumerate()` wraps the receiver LAZILY: element `i` is `(i, items[i])`,
             // produced on demand by `ArrayData::Enumerate` (sharing the receiver's `Rc`),
             // so `xs.enumerate().map(...)` never materializes the O(N)-tuple `Vec`. Handled
@@ -467,8 +471,19 @@ pub(crate) fn call_method(
         Value::Dna(s) => dna_method(s, name, args, line, col),
         Value::Bytes(b) => bytes::bytes_method(b, name, args, line, col),
         Value::Node(n) => crate::autodiff::method(n, name, args, line, col),
-        Value::Tensor(t) => crate::tensor::method(t, name, args, line, col),
-        Value::PyObject(h) => crate::python::method(h, name, args, line, col),
+        Value::Tensor(t) => {
+            if crate::fold::sandbox_active() && !crate::fold::charge(t.len() as u64) {
+                return Err(crate::fold::abort_err(line, col));
+            }
+            crate::tensor::method(t, name, args, line, col)
+        }
+        // A Python object is never a fold: the bridge is the outside world.
+        Value::PyObject(h) => {
+            if crate::fold::sandbox_active() {
+                return Err(crate::fold::abort_err(line, col));
+            }
+            crate::python::method(h, name, args, line, col)
+        }
         Value::Dict(map) => dict_method(map, name, args, line, col),
         Value::Net(h) => net_method(h, name, args, line, col),
         Value::Db(c) => crate::pg::conn_method(c, name, args, line, col),

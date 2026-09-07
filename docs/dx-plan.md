@@ -429,6 +429,20 @@ Checker: known shapes merge in order; an unknown spread — a parameter, parsed 
 `Dict` annotation (which was refused outright: fixed) — makes the result Unknown; a keyless
 spread is refused wherever it stands. Reference: a `spread` syntax entry (the form had none).
 
+**1.46a (2026-09-07) — const-fold a pure call with literal arguments.** DECIDED by the user
+and DONE: ADR 0050. `src/fold.rs` runs after the checker and the UFCS rewrite in every run, check
+and bundle pipeline (the checker types the call, never the literal a fold produced; a type
+error outranks a raise): a call to a top-level `fn`, or through a record the sandbox holds, with arguments
+that mention nothing the sandbox lacks, is evaluated in `Interp::sandbox()` — a walker whose
+`fold_mode` refuses impure builtins (`registry::is_impure_builtin`), any gated authority
+(`capability::gate_effect` answers no inside a sandbox), Python, unknown names, writes to
+top-level `mut` names, depth past 256 and a fuel of 2 000 per attempt / 50 000 per load
+(calls, tail hops, comprehension elements, array elements to methods and builtins) — and a
+clean result with a literal (≤ 4 096 nodes) replaces the call. A raise at an unconditional
+top-level position is the program's error, reported at load. The field's `M.sql({…})` on a
+literal spec folds to its SQL string; `M = define({…})` stays (a record of lambdas has no
+literal) but is HELD, which is what lets the call through it fold.
+
 **1.30 (2026-09-07) — IEEE float division.** DECIDED by the user and DONE: ADR 0048. `/` is
 IEEE on every carrier and engine; `//` and `%` keep raising. The JIT's `body_raises` no longer
 counts `/`, the three `Div` codegen arms are a bare `fdiv`, the dividing f64 fold takes the

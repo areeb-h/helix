@@ -12814,8 +12814,11 @@ fn a_bundled_error_names_the_module_not_the_build_machine() {
     let dir = std::env::temp_dir().join(format!("hx_bundle_err_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("boom.helix"), "export fn go() = raise(\"from the module\")\n").unwrap();
-    std::fs::write(dir.join("main.helix"), "import boom\nboom.go()\n").unwrap();
+    // The raise takes an impure argument so it stays a RUN-time raise: a pure call with
+    // literal arguments is evaluated when the program is built (ADR 0050), and this test is
+    // about the artifact's error naming the module.
+    std::fs::write(dir.join("boom.helix"), "export fn go(t) = raise(\"from the module at {t}\")\n").unwrap();
+    std::fs::write(dir.join("main.helix"), "import boom\nboom.go(now())\n").unwrap();
 
     let out = dir.join("app");
     let (_, err, code) = run(
@@ -16500,4 +16503,38 @@ fn the_sample_estimate_is_the_default_on_every_engine() {
             "{name}"
         );
     }
+}
+
+/// Constant folding (ADR 0050): a pure call with literal arguments is evaluated when the
+/// program loads and every engine prints the same; what the sandbox refuses — a mutable
+/// global, an impure body — runs at run time exactly as written, once; and a call the callee
+/// refuses at an unconditional top-level position is reported before anything runs, as a
+/// type error is, while under `try` it is the program's to handle.
+#[test]
+fn constant_folding_is_invisible_except_where_it_refuses_early() {
+    let src = "fn render(spec) = \"select * from {spec.table} where {spec.cond}\"\nfn chk(spec) = if spec.limit == \"1; drop\" then raise(\"refused: `limit` must be a number\") else spec.limit\nprint(render({table: \"people\", cond: \"age > 1\"}), chk({limit: 10}))\nprint((try chk({limit: \"1; drop\"})).error)\nmut n = 0\nfn bump() = n + 1\nprint(bump())\nfn loud(x) = do {\n  print(\"side\")\n  x\n}\nprint(loud(1))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("fold_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "select * from people where age > 1 10\nrefused: `limit` must be a number\n1\nside\n1\n", "{name}");
+    }
+    let early = "print(\"start\")\nfn chk(spec) = if spec.limit == \"1; drop\" then raise(\"refused: `limit` must be a number\") else spec.limit\nprint(chk({limit: \"1; drop\"}))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(early, env, &format!("fold_early_{name}"));
+        assert_ne!(code, Some(0), "{name}: {out}");
+        assert!(err.contains("refused: `limit` must be a number"), "{name}: {err}");
+        assert!(!out.contains("start"), "{name}: the refusal comes before anything runs: {out:?}");
+    }
+    let path = std::env::temp_dir().join("helix_it_fold_check.helix");
+    std::fs::write(&path, early).unwrap();
+    let (_, err, code) = run(&["check", path.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("refused: `limit` must be a number"), "{err}");
+    // A type error outranks the raise: the fold runs only on a program the checker
+    // accepted, so the reader sees the error every other pipeline reports first.
+    let typed = "fn chk(spec) = if spec.limit == \"1; drop\" then raise(\"refused: `limit` must be a number\") else spec.limit\nprint(chk({limit: \"1; drop\"}))\nx = undefined_name_zz\n";
+    std::fs::write(&path, typed).unwrap();
+    let (_, err, code) = run(&["check", path.to_str().unwrap()], &[], "");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("undefined_name_zz") && !err.contains("refused"), "{err}");
 }

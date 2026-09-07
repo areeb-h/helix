@@ -92,6 +92,13 @@ pub static ENV: &[EnvDoc] = &[
         notes: "The slowest engine and the semantic reference the other two are held to. Same rule as HELIX_NOJIT: speed changes, answers do not. Keywords: interpreter, tree walker, disable, engine, oracle, differential, debug.",
     },
     EnvDoc {
+        name: "HELIX_NOFOLD",
+        values: "any value (presence is what counts)",
+        default: "unset — a pure call with literal arguments is evaluated once, before the program runs",
+        doc: "Turns constant folding off (ADR 0050), so every such call runs at run time.",
+        notes: "The A/B switch for what a fold costs before the program runs and saves while it runs. Same rule as HELIX_NOJIT: speed changes, answers do not — a fold replaces a call by the value the call computes. The one observable difference is WHEN a raise such a call meets unconditionally at the top level is reported: before anything runs, or when the call runs. Keywords: fold, constant folding, disable, load, oracle, differential, debug.",
+    },
+    EnvDoc {
         name: "HELIX_DF_ENGINE",
         values: "polars | native",
         default: "native (the shipped engine); polars only when explicitly asked for",

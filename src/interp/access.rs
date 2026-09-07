@@ -110,7 +110,12 @@ pub(crate) fn eval_slice(
             crate::autodiff::slice(n, &idxs, line, col)
         }
         // A Python handle slices via its own `__getitem__` (numpy/list semantics).
-        Value::PyObject(h) => crate::python::slice(h, start, stop, step, line, col),
+        Value::PyObject(h) => {
+            if crate::fold::sandbox_active() {
+                return Err(crate::fold::abort_err(line, col));
+            }
+            crate::python::slice(h, start, stop, step, line, col)
+        }
         Value::Missing => Ok(Value::Missing),
         other => Err(HelixError::new(
             format!("a value of type {} cannot be sliced", other.type_name()),
@@ -440,7 +445,12 @@ pub(crate) fn eval_field(r: &Value, name: Symbol, line: usize, col: usize) -> Re
                 err
             }),
         Value::Missing => Ok(Value::Missing), // propagate
-        Value::PyObject(h) => crate::python::getattr(h, name.as_str(), line, col),
+        Value::PyObject(h) => {
+            if crate::fold::sandbox_active() {
+                return Err(crate::fold::abort_err(line, col));
+            }
+            crate::python::getattr(h, name.as_str(), line, col)
+        }
         other => Err(HelixError::new(
             format!("a value of type {} has no field `{}`", other.type_name(), name),
             line,

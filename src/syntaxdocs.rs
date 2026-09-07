@@ -127,8 +127,13 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 annotations: `(x: Int) => x + 1`. A call to a function whose parameter is unannotated, or \
                 annotated with an open kind (`Record`, `Dict`, `Tuple`, `Function`, `Array`), re-types its \
                 body with what the call passes, so a shape computed from an argument reaches the caller; \
-                `x: Any` opts a parameter out of that. \
-                Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed.",
+                `x: Any` opts a parameter out of that. A call with literal arguments to one of the \
+                program's own functions is evaluated ONCE, before the program runs, and replaced by \
+                its value (ADR 0050) — a library's render of a literal spec costs nothing at run time, \
+                and a spec the library refuses is refused before the program runs, as a type error is. \
+                Anything impure (output, time, a file, the network, a mutable global) is left to run \
+                time exactly as written. \
+                Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed, constant folding, pure.",
     },
     SyntaxDoc {
         name: "destructure",

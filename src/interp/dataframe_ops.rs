@@ -485,7 +485,13 @@ impl super::Interp {
                 // A bare name in a predicate resolves like any other name:
                 // frame locals first, then globals (`df.where(@a > threshold)`
                 // with a top-level `threshold`).
-                let resolve = |n: &str| self.lookup(n).map(|b| b.value.clone());
+                let resolve = |n: &str| {
+                    let v = self.lookup(n).map(|b| b.value.clone());
+                    if v.is_none() {
+                        self.fold_unknown_name(n);
+                    }
+                    v
+                };
                 df_column_verb(&lf, name, args, &resolve, line, col)
             }
             "join" => {
@@ -506,7 +512,13 @@ impl super::Interp {
                     Value::DataFrame(lf) => lf,
                     v => return Err(join_operand_err(&v, line, col)),
                 };
-                let resolve = |n: &str| self.lookup(n).map(|b| b.value.clone());
+                let resolve = |n: &str| {
+                    let v = self.lookup(n).map(|b| b.value.clone());
+                    if v.is_none() {
+                        self.fold_unknown_name(n);
+                    }
+                    v
+                };
                 let (keys, how) = parse_join_spec(&args[1..], &resolve, line, col)?;
                 Ok(Value::dataframe(lf.join(&right, &keys, &how, line, col)?))
             }
@@ -537,7 +549,13 @@ impl super::Interp {
         // The same resolution a column verb gets: an aggregation's VALUE column is a column
         // name in exactly the same sense, so `group(@k).mean(v)` with `v` bound must mean
         // the column `v` names, not a column literally called `v`.
-        let resolve = |n: &str| self.lookup(n).map(|b| b.value.clone());
+        let resolve = |n: &str| {
+            let v = self.lookup(n).map(|b| b.value.clone());
+            if v.is_none() {
+                self.fold_unknown_name(n);
+            }
+            v
+        };
         groupby_agg(&handle, &keys, name, args, &resolve, line, col)
     }
 }

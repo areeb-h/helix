@@ -714,6 +714,10 @@ impl super::Interp {
     where
         F: FnMut(&Value, Value) -> Result<Option<Value>, HelixError>,
     {
+        // The folding sandbox pays for every element up front (ADR 0050).
+        if self.fold_mode && !crate::fold::charge(items.len() as u64 + 1) {
+            return Err(crate::fold::abort_err(line, col));
+        }
         let saved: Vec<Option<Binding>> = names.iter().map(|n| self.env.remove(n)).collect();
         for n in names.iter() {
             self.env

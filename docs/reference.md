@@ -1628,6 +1628,15 @@ Turns the bytecode VM off, so the tree-walking interpreter executes everything.
 
 **Note:** The slowest engine and the semantic reference the other two are held to. Same rule as HELIX_NOJIT: speed changes, answers do not. Keywords: interpreter, tree walker, disable, engine, oracle, differential, debug.
 
+### `HELIX_NOFOLD`
+
+Turns constant folding off (ADR 0050), so every such call runs at run time.
+
+- **Values:** any value (presence is what counts)
+- **Unset:** unset — a pure call with literal arguments is evaluated once, before the program runs
+
+**Note:** The A/B switch for what a fold costs before the program runs and saves while it runs. Same rule as HELIX_NOJIT: speed changes, answers do not — a fold replaces a call by the value the call computes. The one observable difference is WHEN a raise such a call meets unconditionally at the top level is reported: before anything runs, or when the call runs. Keywords: fold, constant folding, disable, load, oracle, differential, debug.
+
 ### `HELIX_DF_ENGINE`
 
 Selects the DataFrame backend in a build that carries more than one.
@@ -1826,7 +1835,7 @@ Define a function. Parameter and return annotations are optional, checked by `he
 
 `fn area(w: Int, h: Int) -> Int = w * h`
 
-**Note:** Type names: `Int`, `Float`, `Num` (either), `String`, `Bool`, `Array`, `Record`, `Dict`, `Tuple`, `Function`, `DataFrame`, `Tensor`, `Dna`, `Any`. An `Int` annotation refuses a Float argument; a `Float` one accepts an Int. `Record`, `Dict`, `Tuple` and `Function` say what KIND of value arrives without fixing its shape: a wrong kind is refused at the call, and inside the body the value's fields and methods are open. A lambda takes the same annotations: `(x: Int) => x + 1`. A call to a function whose parameter is unannotated, or annotated with an open kind (`Record`, `Dict`, `Tuple`, `Function`, `Array`), re-types its body with what the call passes, so a shape computed from an argument reaches the caller; `x: Any` opts a parameter out of that. Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed.
+**Note:** Type names: `Int`, `Float`, `Num` (either), `String`, `Bool`, `Array`, `Record`, `Dict`, `Tuple`, `Function`, `DataFrame`, `Tensor`, `Dna`, `Any`. An `Int` annotation refuses a Float argument; a `Float` one accepts an Int. `Record`, `Dict`, `Tuple` and `Function` say what KIND of value arrives without fixing its shape: a wrong kind is refused at the call, and inside the body the value's fields and methods are open. A lambda takes the same annotations: `(x: Int) => x + 1`. A call to a function whose parameter is unannotated, or annotated with an open kind (`Record`, `Dict`, `Tuple`, `Function`, `Array`), re-types its body with what the call passes, so a shape computed from an argument reaches the caller; `x: Any` opts a parameter out of that. A call with literal arguments to one of the program's own functions is evaluated ONCE, before the program runs, and replaced by its value (ADR 0050) — a library's render of a literal spec costs nothing at run time, and a spec the library refuses is refused before the program runs, as a type error is. Anything impure (output, time, a file, the network, a mutable global) is left to run time exactly as written. Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed, constant folding, pure.
 
 ```
 >>> fn area(w: Int, h: Int) -> Int = w * h

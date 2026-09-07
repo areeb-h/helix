@@ -26,6 +26,25 @@ impl super::Interp {
         // process authority first. A no-op under the default `Off` mode and for `pure`
         // builtins; logs (audit) or denies (enforce) an ungranted access otherwise.
         crate::capability::gate(name, &args, line, col)?;
+        // The folding sandbox (ADR 0050): an impure builtin — output, time, sleep, any
+        // reader or writer, an assertion — abandons the fold before it runs; a pure one
+        // costs a unit, plus one per element of an array it is handed. `raise` is the one
+        // impure-flagged builtin a fold runs: it is the program's own refusal, the thing a
+        // fold exists to surface early.
+        if self.fold_mode {
+            // `source_path` answers from where its call is written in the file that is
+            // running — context, not a value — so it is refused as well.
+            if (crate::registry::is_impure_builtin(name) && name != "raise") || name == "source_path" || !crate::fold::charge(1) {
+                return Err(crate::fold::abort_err(line, col));
+            }
+            for a in &args {
+                if let Value::Array(x) = a
+                    && !crate::fold::charge(x.len() as u64)
+                {
+                    return Err(crate::fold::abort_err(line, col));
+                }
+            }
+        }
         // Counted before the arm runs, so a FAILING assertion counts too: the file fails
         // on the raise, and "asserted nothing" must not also be reported about it.
         if matches!(name, "assert" | "assert_eq" | "assert_close" | "assert_error") {

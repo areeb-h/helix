@@ -55,6 +55,15 @@ pub struct Interp {
     /// reassignment of an immutable binding and error). See ADR 0027.
     hoisted: std::collections::HashSet<String>,
     depth: usize,
+    /// A constant-folding sandbox (ADR 0050): impure builtins, authority, unknown names,
+    /// writes to `fold_mut_names` and unbounded work abandon the evaluation instead of
+    /// running. Read on the call, builtin and comprehension paths only — one predictable
+    /// branch, false for every engine run.
+    fold_mode: bool,
+    fold_mut_names: std::collections::HashSet<String>,
+    /// Every top-level name the program binds — what a frame verb's resolver must tell from
+    /// a column's name when the sandbox does not hold it (`fold_unknown_name`).
+    fold_top_names: std::collections::HashSet<String>,
 }
 
 /// Result of running a statement: the value (for REPL auto-printing) and
@@ -288,7 +297,59 @@ impl Interp {
             fn_decls: std::collections::HashSet::new(),
             hoisted: std::collections::HashSet::new(),
             depth: 0,
+            fold_mode: false,
+            fold_mut_names: std::collections::HashSet::new(),
+            fold_top_names: std::collections::HashSet::new(),
         }
+    }
+
+    /// The constant-folding sandbox (ADR 0050): a walker that refuses to run anything a
+    /// load-time evaluation must not.
+    pub(crate) fn sandbox() -> Self {
+        let mut i = Self::new();
+        i.fold_mode = true;
+        i
+    }
+
+    /// The top-level `mut` names a sandbox refuses to write.
+    pub(crate) fn set_fold_mut_names(&mut self, names: std::collections::HashSet<String>) {
+        self.fold_mut_names = names;
+    }
+
+    /// Every top-level name the program binds (ADR 0050; see `fold_unknown_name`).
+    pub(crate) fn set_fold_top_names(&mut self, names: std::collections::HashSet<String>) {
+        self.fold_top_names = names;
+    }
+
+    /// A name a frame verb resolved and did not find (ADR 0050). In the sandbox, a
+    /// top-level name of the program — one not yet asked for, a mutable, one the sandbox
+    /// could not evaluate — abandons the attempt, remembering the name so a pending one is
+    /// bound on demand and the attempt retried; any other name is a column's, and the verb
+    /// answers exactly as it does for the engines.
+    pub(crate) fn fold_unknown_name(&self, name: &str) {
+        if self.fold_mode && self.fold_top_names.contains(name) {
+            crate::fold::refuse_name(name);
+        }
+    }
+
+    pub(crate) fn is_declared_fn(&self, name: &str) -> bool {
+        self.fn_decls.contains(name)
+    }
+
+    pub(crate) fn has_global(&self, name: &str) -> bool {
+        self.globals.contains_key(name)
+    }
+
+    pub(crate) fn global_is_record(&self, name: &str) -> bool {
+        matches!(self.globals.get(name), Some(Binding { value: Value::Record(_), .. }))
+    }
+
+    pub(crate) fn global_is_function(&self, name: &str) -> bool {
+        matches!(self.globals.get(name), Some(Binding { value: Value::Function(_), .. }))
+    }
+
+    pub(crate) fn forget_global(&mut self, name: &str) {
+        self.globals.remove(name);
     }
 
     /// Resolve a name: the current frame's locals first, then the globals —
@@ -444,6 +505,11 @@ impl Interp {
         line: usize,
         col: usize,
     ) -> Result<(), HelixError> {
+        // The folding sandbox never writes a top-level `mut` (ADR 0050): the write is the
+        // program's side effect, and a fold must not perform it.
+        if self.fold_mode && self.fold_mut_names.contains(name) {
+            return Err(crate::fold::abort_err(line, col));
+        }
         let immutable_err = || {
             let (msg, hint) = crate::error::immutable_reassign(name);
             Err(HelixError::new(msg, line, col).hint(hint))
@@ -539,6 +605,13 @@ impl Interp {
             Expr::Ident { name, line, col } => match self.lookup(name) {
                 Some(b) => Ok(b.value.clone()),
                 None => {
+                    // A name the folding sandbox does not hold — a mutable global, a binding
+                    // it could not evaluate, a parameter — abandons the fold (ADR 0050),
+                    // remembering the name: a top-level binding the program made earlier
+                    // is evaluated on demand and the fold retried.
+                    if self.fold_mode {
+                        crate::fold::refuse_name(name);
+                    }
                     let names: Vec<&str> = self
                         .env
                         .keys()
@@ -698,8 +771,15 @@ impl Interp {
                 if crate::registry::lookup(name).is_some() {
                     return self.call_builtin(name, vals, *line, *col);
                 }
-                // Unknown. The builtins are always in the suggester's universe, so
-                // only the user's own functions need collecting here.
+                // Unknown. In the folding sandbox that is a name it does not hold — a
+                // binding it could not evaluate, or one made earlier and not yet asked for,
+                // which is evaluated on demand and the fold retried — and the fold is
+                // abandoned, never reported.
+                if self.fold_mode {
+                    crate::fold::refuse_name(name);
+                }
+                // The builtins are always in the suggester's universe, so only the user's
+                // own functions need collecting here.
                 let cands: Vec<&str> = self
                     .env
                     .iter()
@@ -1125,9 +1205,16 @@ impl Interp {
         // call op, so a wrong-arity call sitting exactly at the depth boundary
         // must report the arity error on both engines.
         let args = settle_args(name, f.params.len(), &f.defaults, args, line, col)?;
+        if self.fold_mode && !crate::fold::charge(1) {
+            return Err(crate::fold::abort_err(line, col));
+        }
         self.depth += 1;
-        if self.depth > MAX_CALL_DEPTH {
+        if self.depth > MAX_CALL_DEPTH || (self.fold_mode && self.depth > crate::fold::MAX_DEPTH) {
             self.depth -= 1;
+            // In the sandbox the depth is a budget, not the program's error: abandon.
+            if self.fold_mode {
+                return Err(crate::fold::abort_err(line, col));
+            }
             return Err(crate::error::recursion_depth_err(MAX_CALL_DEPTH, line, col));
         }
         // THE FRAME BOUNDARY: swap the caller's locals out wholesale, so the
@@ -1170,6 +1257,9 @@ impl Interp {
             match self.eval_tail(&body) {
                 Ok(TailFlow::Value(v)) => break Ok(v),
                 Ok(TailFlow::Call { name: n, func, args: a, line: l, col: c }) => {
+                    if self.fold_mode && !crate::fold::charge(1) {
+                        break Err(crate::fold::abort_err(l, c));
+                    }
                     hop_name = Some(n);
                     cur_f = func;
                     cur_args = a;

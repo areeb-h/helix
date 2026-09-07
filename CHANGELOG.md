@@ -4,6 +4,23 @@
 
 ### Added
 
+- **A pure call with literal arguments is evaluated when the program loads (ADR 0050).** A
+  call to one of the program's own functions whose arguments are literals — or names bound to
+  literals at the top level — is evaluated once, in a sandboxed tree-walker, and replaced by
+  its value's literal; so is a call through a function-valued field of a record the sandbox
+  holds, `User.sql({where: {city: "oslo"}})`, a library's object API. The field build measured
+  its render at 4.2 µs whether the spec was literal or computed, and every spec key the library
+  grew taxed every query that ignored it (field build, 1.46a; the user's decision): a literal
+  render costs nothing at run time now. Purity is decided by running, not by analysis: the
+  sandbox refuses an impure builtin, any authority, a Python object, a name it does not hold, a
+  write to a mutable global, a recursion past 256 and more work than a budget, and a refusal
+  leaves the call exactly as written — a fold never changes what a program computes, only when.
+  A raise the program would meet unconditionally at the top level — a `limit: "1; drop"` the
+  library refuses — is reported before anything runs, as a type error is, and `helix check`
+  sees it; under `if`, `match`, `try`, a lambda or inside a function the call stays and raises
+  at run time as before. Pinned by the `fold` module's tests and
+  `constant_folding_is_invisible_except_where_it_refuses_early` (three engines).
+
 - **More than one `...spread` in a record literal, later ones winning.** `{...A, ...B}` was
   refused ("a record update takes one `...spread`, not two"), so two independent query fragments
   — Eloquent's scopes, GORM's chained conditions, here just records — could not be merged, and

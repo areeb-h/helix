@@ -327,6 +327,10 @@ impl From<String> for Diag {
     }
 }
 
+/// Constant folding (ADR 0050) runs on the assembled program, so every consumer of a load —
+/// `run`, `check`, the three engines, `effects`, the doc runner — sees one program. A fold
+/// that raises at a position the program runs unconditionally is the program's own error,
+/// reported where `check` reports one.
 /// `e.into_diag(&src, &fname)` — render exactly as before, and keep the structure.
 trait IntoDiag {
     fn into_diag(self, src: &str, fname: &str) -> Diag;

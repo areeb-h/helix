@@ -358,6 +358,11 @@ pub fn gate_effect(eff: Effect, name: &str, args: &[Value], line: usize, col: us
     if !eff.gated() {
         return Ok(());
     }
+    // A constant-folding sandbox (ADR 0050) holds no authority at all, whatever the
+    // process was granted: a load-time evaluation never touches the world.
+    if crate::fold::sandbox_active() {
+        return Err(crate::fold::abort_err(line, col));
+    }
     let auth = current();
     if auth.mode == Mode::Off || auth.allows(eff) {
         return Ok(());
