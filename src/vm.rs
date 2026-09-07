@@ -55,7 +55,7 @@ fn binary(op: &BinOp, a: Value, b: Value, line: usize, col: usize) -> Result<Val
                 // the tree-walker (ops.rs) so the differential oracle stays green.
                 Mod if y != 0 => return Ok(Value::Int(x.wrapping_rem_euclid(y))),
                 FloorDiv if y != 0 => return Ok(Value::Int(x.wrapping_div_euclid(y))),
-                Div if y != 0 => return Ok(Value::Float(x as f64 / y as f64)),
+                Div => return Ok(Value::Float(x as f64 / y as f64)),
                 // Integer bitwise — identical to `bitwise()` in ops.rs. Shifts only
                 // shortcut for an in-range amount; an out-of-range shift falls to the
                 // full path, which raises (never a panic/UB).
@@ -64,7 +64,7 @@ fn binary(op: &BinOp, a: Value, b: Value, line: usize, col: usize) -> Result<Val
                 BitXor => return Ok(Value::Int(x ^ y)),
                 Shl if (0..=63).contains(&y) => return Ok(Value::Int(x << y)),
                 Shr if (0..=63).contains(&y) => return Ok(Value::Int(x >> y)),
-                _ => {} // Div/Mod by zero, Pow, out-of-range shift → full path
+                _ => {} // Mod/FloorDiv by zero, Pow, out-of-range shift → full path
             }
         }
         (Value::Float(x), Value::Float(y)) => {
@@ -75,15 +75,15 @@ fn binary(op: &BinOp, a: Value, b: Value, line: usize, col: usize) -> Result<Val
                 Mul => return Ok(Value::Float(x * y)),
                 Eq => return Ok(Value::Bool(x == y)),
                 Ne => return Ok(Value::Bool(x != y)),
-                // `%` by zero falls through to the full path, which raises — as `/`
-                // by zero already did (ADR 0036 policy 2). Until v0.6.0 this arm
-                // returned NaN and its comment said that matched `eval_binary`; when
-                // the tree-walker started erroring, this line was what made the VM
-                // and JIT disagree with it. The differential fuzzer never generated
-                // `x % 0.0`, so nothing caught it.
+                // `%` and `//` by zero fall through to the full path, which raises (ADR
+                // 0036 policy 2). Until v0.6.0 the `%` arm returned NaN and its comment
+                // said that matched `eval_binary`; when the tree-walker started erroring,
+                // this line was what made the VM and JIT disagree with it. The
+                // differential fuzzer never generated `x % 0.0`, so nothing caught it.
+                // `/` is IEEE (ADR 0048): a zero divisor is inf/NaN here as everywhere.
                 Mod if y != 0.0 => return Ok(Value::Float(x.rem_euclid(y))),
                 FloorDiv if y != 0.0 => return Ok(Value::Float(x.div_euclid(y))),
-                Div if y != 0.0 => return Ok(Value::Float(x / y)),
+                Div => return Ok(Value::Float(x / y)),
                 // Float ordering can hit NaN, which the full path turns into an
                 // error — so don't shortcut comparisons here.
                 _ => {}
@@ -2040,14 +2040,14 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                         // a non-`Floats` array falls back to the exact-erroring bytecode loop).
                         if let Value::Float(init) = locals[slot] {
                             if n_caps == 0 {
-                                // A body containing `/` may divide by zero, where native `fdiv`
-                                // yields inf/nan but the interpreter RAISES. Such a kernel carries
-                                // a poison out-param the codegen sets on ANY zero divisor (every
-                                // iteration, every division — regardless of whether a later op or
-                                // iteration would rescue the inf); a set flag means fall back to
-                                // the exact-erroring bytecode loop, while an unset flag guarantees
-                                // no `/0` occurred so `r` is bit-exact to the interpreter. A
-                                // non-dividing reduce uses the plain, poison-free kernel.
+                                // A body that may POISON — a NaN meeting an ordering comparison,
+                                // a raising callee, a rounder leaving the i64 range (`body_raises`)
+                                // — carries a poison out-param; a set flag means fall back to the
+                                // exact-erroring bytecode loop, while an unset flag guarantees the
+                                // fold is bit-exact to the interpreter. A dividing body no longer
+                                // counts: `/` is IEEE on every engine (ADR 0048), and native
+                                // `fdiv` answers exactly what the walker does, so it takes the
+                                // plain, poison-free kernel.
                                 // The SAME field `define_reduce_loop` built the signature
                                 // from — not a second derivation that has to agree with it.
                                 if program.reduce_loops[*loop_idx as usize].raises {

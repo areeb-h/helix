@@ -1,0 +1,13 @@
+exit: 0
+--- stdout ---
+inf -inf inf true 3.5 0.0
+[inf, -inf, NaN] [inf, 2.0]
+ a  b     q     r
+--  -  ----  ----
+ 1  0   inf   0.5
+ 0  0   NaN   0.0
+-2  0  -inf  -1.0
+(3 rows)
+integer division by zero modulo by zero division by zero
+inf
+--- stderr ---

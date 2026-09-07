@@ -209,8 +209,6 @@ fn dtype_type_name(dt: &DataType) -> &'static str {
 /// message, and a frame that said it differently would be a divergence of its own.
 fn zero_divisor_error(op: &BinOp, line: usize, col: usize) -> HelixError {
     match op {
-        BinOp::Div => HelixError::new("division by zero", line, col)
-            .hint("guard the denominator, e.g. `if d != 0` or check your data."),
         BinOp::FloorDiv => HelixError::new("integer division by zero", line, col)
             .hint("guard the divisor, e.g. `if d != 0`."),
         _ => HelixError::new("modulo by zero", line, col),
@@ -282,11 +280,6 @@ fn guarded_arith(l: Expr, r: Expr, op: BinOp) -> Expr {
             // guard briefly introduced a divergence of its own.
             let zero = |row: usize| -> PolarsError {
                 match op {
-                    BinOp::Div => udf_error(
-                        "division by zero",
-                        "guard the denominator, e.g. `if d != 0` or check your data.",
-                        row,
-                    ),
                     BinOp::FloorDiv if out_int => udf_error(
                         "integer division by zero",
                         "guard the divisor, e.g. `if d != 0`.",
@@ -326,8 +319,10 @@ fn guarded_arith(l: Expr, r: Expr, op: BinOp) -> Expr {
                     match (x, y) {
                         (Some(x), Some(y)) => {
                             // `y == 0.0` is true for -0.0 and false for NaN, which is
-                            // exactly what the scalar kernel's `if b == 0.0` does.
-                            if y == 0.0 {
+                            // exactly what the scalar kernel's `if b == 0.0` does. `/` is
+                            // IEEE (ADR 0048): a zero divisor is inf/NaN, as on the scalar
+                            // kernel; `//` and `%` still raise, naming the row.
+                            if y == 0.0 && !matches!(op, BinOp::Div) {
                                 return Err(zero(i));
                             }
                             out.push(Some(match op {
@@ -716,14 +711,14 @@ fn lower(e: &ColExpr, fields: &[(String, DataType)], line: usize, col: usize) ->
             str_udf(lower(recv, fields, line, col)?, *f, needle.as_str().to_string())
         }
         ColExpr::Binary(op, l, r) => {
-            // A LITERAL zero divisor is decidable without touching a row, so it is
+            // A LITERAL zero modulus is decidable without touching a row, so it is
             // refused where it was written, with no `at row` hint — the same shape
             // the scalar kernel gives (ADR 0036 policy 1).
             // NOT `//`: its message depends on whether BOTH operands are Int
             // ("integer division by zero" vs "division by zero"), and the left one is
-            // a column whose dtype is not known here. `/` and `%` say the same thing
-            // either way, so they can still be refused at the source position.
-            if matches!(op, BinOp::Div | BinOp::Mod)
+            // a column whose dtype is not known here. NOT `/`: it is IEEE (ADR 0048)
+            // and a zero divisor is inf/NaN, not an error.
+            if matches!(op, BinOp::Mod)
                 && matches!(
                     &**r,
                     ColExpr::Lit(Value::Int(0)) | ColExpr::Lit(Value::Float(0.0))

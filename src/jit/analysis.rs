@@ -468,10 +468,8 @@ fn infer_reduce_f64_kind<'e>(
             })
         }
         // `/` is ALWAYS float division in Helix (even `Int / Int`), matching the interpreter's
-        // `Div`. Both operands must be eligible; the result is `f64`. The interpreter RAISES on a
-        // zero divisor while native `fdiv` yields inf/nan — so this only JITs under the caller's
-        // `min`/`max` exclusion (see `f64_range_body_eligible`) + the VM's `is_finite` guard, which
-        // together make a division-by-zero fall back to the exact-erroring bytecode loop.
+        // `Div`. Both operands must be eligible; the result is `f64`. A zero divisor is inf/NaN
+        // on every engine (ADR 0048), exactly what native `fdiv` answers, so `/` needs no guard.
         Expr::Binary { op: BinOp::Div, left, right, .. } => {
             infer_reduce_f64_kind(left, pa, pb, locals, fns, user_fns, msigs)?;
             infer_reduce_f64_kind(right, pa, pb, locals, fns, user_fns, msigs)?;
@@ -1804,9 +1802,8 @@ pub fn body_raises(e: &Expr, user_fns: &HashSet<&str>, msigs: &MixedSigTable) ->
                     && !user_fns.contains(name.as_str()))
                 || args.iter().any(|a| body_raises(a, user_fns, msigs))
         }
-        // Any `/`: the interpreter raises on a zero divisor. Over-approximates on a nonzero
-        // literal divisor (which cannot raise) — that costs a dead poison slot, nothing else.
-        Expr::Binary { op: BinOp::Div, .. } => true,
+        // `/` does not raise: a zero divisor is inf/NaN on every engine (ADR 0048), exactly
+        // what native `fdiv` answers, so a dividing body needs no poison slot.
         Expr::Binary { left, right, .. } => {
             body_raises(left, user_fns, msigs) || body_raises(right, user_fns, msigs)
         }
@@ -2115,11 +2112,10 @@ fn infer_mixed_kind(
                 NumKind::Int
             })
         }
-        // `/` is always float division and always yields Float, for ANY eligible divisor —
-        // admissible because `body_raises` counts every `/`, so the kernel carries the
-        // poison accumulator `gen_value_typed`'s Div arm ORs `divisor == 0.0` into (the
-        // interpreter raises on `/0` where native `fdiv` yields inf). This is what lets
-        // `ceil(to_float(i) / 4.0)` compile instead of forcing the `* 0.25` spelling.
+        // `/` is always float division and always yields Float, for ANY eligible divisor: a
+        // zero divisor is inf/NaN on every engine (ADR 0048), exactly what native `fdiv`
+        // answers. This is what lets `ceil(to_float(i) / 4.0)` compile instead of forcing
+        // the `* 0.25` spelling.
         Expr::Binary { op: BinOp::Div, left, right, .. } => {
             infer_mixed_kind(left, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
             infer_mixed_kind(right, binder, bk, ck, uses_binder, caps, fns, user_fns, msigs)?;
@@ -2556,9 +2552,8 @@ fn infer_mixed_kind_indexed(
         // `/` promotes BOTH operands in BOTH engines (even `Int / Int` is a float divide,
         // `10 / 2 == 5.0`), so unlike `+ - *` it is safe for ANY operand mix — including an
         // unpromoted value scalar, which is precisely the promotion the interpreter also
-        // performs at this node. Result is a genuine float. A zero divisor poisons
-        // (`body_raises` counts every `/`, so a dividing kernel always carries the
-        // poison accumulator `gen_value_typed`'s Div arm ORs into).
+        // performs at this node. Result is a genuine float; a zero divisor is inf/NaN on
+        // every engine (ADR 0048), exactly what native `fdiv` answers.
         Expr::Binary { op: BinOp::Div, left, right, .. } => {
             infer_mixed_kind_indexed(left, binder, bk, out, fns, user_fns, msigs)?;
             infer_mixed_kind_indexed(right, binder, bk, out, fns, user_fns, msigs)?;

@@ -42,8 +42,10 @@ layer. Every finding below is fixed and regression-tested unless marked otherwis
    x86-64 Linux and forces `CallConv::SystemV` explicitly; elsewhere it declines and
    the VM runs everything.
 7. **Float division by zero** (JIT `fdiv` returns inf versus the interpreter's
-   error). Fix: `/` is excluded from JIT eligibility, so division runs on the
-   interpreter's zero-checked path. Test: `division_by_zero_is_not_jitted_to_inf`.
+   error). Fixed first by excluding `/` from JIT eligibility, then by a poison out-param
+   that re-ran the bytecode loop to raise; resolved for good by ADR 0048 (2026-09-07):
+   `/` is IEEE on every engine, so `fdiv`'s inf IS the language's answer. Test:
+   `division_by_zero_is_ieee_under_the_jit`.
 
 ## Medium — fixed
 

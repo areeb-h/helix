@@ -802,9 +802,9 @@ fn type_error_aborts_before_running() {
 
 #[test]
 fn runtime_error_exits_nonzero() {
-    let (_, stderr, code) = run_source("print(1 / 0)\n", &[], "divzero");
+    let (_, stderr, code) = run_source("print(1 % 0)\n", &[], "modzero");
     assert_ne!(code, Some(0));
-    assert!(stderr.contains("division by zero"), "stderr: {stderr:?}");
+    assert!(stderr.contains("modulo by zero"), "stderr: {stderr:?}");
 }
 
 #[test]
@@ -1793,7 +1793,7 @@ fn match_nested_patterns_on_both_engines() {
         "print(match {a: 1, b: 2} { {b: x} => x, _ => 0 })\n",
         "fn unwrap(r) = match r { {ok: true, value: v} => v, _ => -1 }\n",
         "print(unwrap(try (20 / 4)))\n",
-        "print(unwrap(try (1 / 0)))\n",
+        "print(unwrap(try (1 // 0)))\n",
     );
     let (vm, e1, c1) = run_source(src, &[], "matchn_vm");
     assert_eq!(c1, Some(0), "stderr:\n{e1}");
@@ -3407,7 +3407,7 @@ fn assert_error_checks_the_failure_and_shows_it() {
     for src in [
         "assert_error(try raise(\"boom\"))\n",
         "assert_error(try raise(\"boom\"), \"oo\")\n",
-        "assert_error(try (1 / 0), \"division by zero\")\n",
+        "assert_error(try (1 % 0), \"modulo by zero\")\n",
     ] {
         for (engine, env) in ENGINES {
             let (_, err, code) = run_source(src, env, &format!("aeok_{}_{engine}", src.len()));
@@ -8299,13 +8299,14 @@ fn let_bodies_carry_their_poison_cell() {
         assert_eq!(out, "14.0\n", "{name}");
     }
 
-    // The silent-inf shape: the division must RAISE, identically.
+    // The dividing shape: `/` is IEEE on every engine (ADR 0048), so the zero divisor at
+    // i = 50 makes the fold `inf` — identically, natively, with no poison and no re-run.
     let div = "print(range(0, 100).reduce(0.0, (a, i) => \
                let inv = 1.0 / ((i - 50) * 1.0) in a + inv))\n";
     for (name, env) in ENGINES {
-        let (_, err, code) = run_source(div, env, &format!("poison_div_{name}"));
-        assert_eq!(code, Some(1), "{name}: div-by-zero must raise, not print inf");
-        assert!(err.contains("division by zero"), "{name}: {err}");
+        let (out, err, code) = run_source(div, env, &format!("poison_div_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "inf\n", "{name}");
     }
 
     // Try-visibility and the rounder family, value-pinned across engines.
@@ -8315,10 +8316,12 @@ print(q.ok)
 r = try range(0, 4).reduce(0.0, (a, i) => let d = floor(exp(700.0 + i * 100.0)) in a + d)
 print(r.ok)
 "#;
+    // The dividing fold succeeds (its `1.0 / 0.0` at i = 0 is inf — ADR 0048); the rounder's
+    // out-of-range result still fails under `try`, on every engine.
     for (name, env) in ENGINES {
         let (out, err, code) = run_source(sem, env, &format!("poison_sem_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
-        assert_eq!(out, "false\nfalse\n", "{name}");
+        assert_eq!(out, "true\nfalse\n", "{name}");
     }
 }
 
@@ -8811,7 +8814,7 @@ fn try_refuses_a_function_literal() {
         }
         // Everything `try` is FOR still works, including expressions that contain
         // lambdas of their own — the guard is about `try`'s own operand, nothing else.
-        let ok = "r = try (1 / 0)\n\
+        let ok = "r = try (1 % 0)\n\
                   print(r.ok)\n\
                   print(r.error)\n\
                   m = try [1, 2].map(x => x * 2)\n\
@@ -8822,7 +8825,7 @@ fn try_refuses_a_function_literal() {
                   print(f(1))\n";
         let (out, err, code) = run_source(ok, env, &format!("try_ok_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
-        assert_eq!(out, "false\ndivision by zero\n[2, 4]\n3\n2\n", "{name}");
+        assert_eq!(out, "false\nmodulo by zero\n[2, 4]\n3\n2\n", "{name}");
     }
 }
 
@@ -16454,4 +16457,21 @@ fn two_spreads_merge_on_every_engine() {
     let (out, err, code) = run_source(&bad, &[], "two_spreads_typo");
     assert_ne!(code, Some(0), "{out}");
     assert!(err.contains("no field `limit`"), "{err}");
+}
+
+/// `/` is IEEE 754 division on every carrier and every engine (ADR 0048): a zero divisor is
+/// ±inf, `0 / 0` is NaN, never an error — on scalars, on arrays, on a frame column — while
+/// `//` and `%` still raise on zero. The dividing fold runs natively with no poison.
+#[test]
+fn division_is_ieee_on_every_engine() {
+    let src = "print(1 / 0, -1 / 0, 1.5 / 0.0, is_nan(0 / 0), 7 / 2, 1 / inf)\nprint([1, -2, 0] / 0)\nprint((try (1 // 0)).error, (try (1 % 0)).error, (try (1.0 % 0.0)).error)\nprint(range(1, 4).reduce(0.0, (a, i) => a + 1.0 / ((i - 2) * 1.0)))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("ieee_div_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(
+            out,
+            "inf -inf inf true 3.5 0.0\n[inf, -inf, NaN]\ninteger division by zero modulo by zero modulo by zero\ninf\n",
+            "{name}"
+        );
+    }
 }

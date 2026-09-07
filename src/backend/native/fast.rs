@@ -200,8 +200,8 @@ enum TOp {
 /// Evaluate an arithmetic ColExpr tree over numeric columns without boxing.
 /// `None` = a shape outside the covered set (the boxed evaluator, which DEFINES
 /// the semantics, takes over). Covered: Col/Lit leaves (i64/f64), Add/Sub/Mul
-/// (int wraps, exactly the kernel), Div (always Float; a zero divisor delegates
-/// that cell to the kernel so the ERROR is byte-identical, row named).
+/// (int wraps, exactly the kernel), Div (always Float; a zero divisor is inf/NaN,
+/// IEEE, exactly the kernel — ADR 0048).
 pub fn eval_typed(
     frame: &NativeFrame,
     expr: &ColExpr,
@@ -243,7 +243,7 @@ fn tev(
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
-            Some(apply(*op, l, r, line, col))
+            Some(apply(*op, l, r))
         }
         _ => None,
     }
@@ -266,23 +266,13 @@ fn fop(op: BinOp, x: f64, y: f64) -> f64 {
     }
 }
 
-/// The kernel's own error for this cell — so the typed path's failure bytes match
-/// the boxed path exactly (message, advice AND at-row hint).
-///
-/// Through `at_row`, which APPENDS the row to the kernel's advice. This used to call
-/// `.hint(...)` directly, which replaced it — so the typed fast path silently dropped
-/// "guard the denominator, e.g. `if d != 0`" and printed only a row number. Two code
-/// paths for the same error, and the faster one said less.
-fn cell_err(op: BinOp, a: Value, b: Value, row: usize, line: usize, col: usize) -> HelixError {
-    match crate::interp::ops::eval_binary(&op, a, b, line, col) {
-        Err(e) => super::eval::at_row(e, row),
-        Ok(_) => HelixError::new("internal: typed path expected a kernel error", line, col),
-    }
-}
-
-fn apply(op: BinOp, l: TOp, r: TOp, line: usize, col: usize) -> Result<TOp, HelixError> {
+/// The four covered operators over promoted operands. Nothing here can fail: `+ - *` wrap
+/// exactly as the kernel does, and `/` is IEEE (ADR 0048) — a zero divisor is inf/NaN, as on
+/// the scalar kernel, so the typed path and the boxed path answer the same bytes with no
+/// error path to keep aligned (the cell error that used to live here is gone with it).
+fn apply(op: BinOp, l: TOp, r: TOp) -> Result<TOp, HelixError> {
     use TOp::*;
-    // Division is ALWAYS float (true division, ADR 0034) and checks its divisor.
+    // Division is ALWAYS float (true division, ADR 0034); Int operands promote first.
     let div = op == BinOp::Div;
     let as_f = |t: TOp| -> TOp {
         match t {
@@ -323,56 +313,25 @@ fn apply(op: BinOp, l: TOp, r: TOp, line: usize, col: usize) -> Result<TOp, Heli
     let (l, r) = (as_f(l), as_f(r));
     Ok(match (l, r) {
         (F(mut v, m), FScalar(k)) => {
-            if div && k == 0.0 {
-                // Every present cell divides by zero — the FIRST one errors.
-                if let Some(row) = m.iter().position(|ok| *ok) {
-                    return Err(cell_err(op, Value::Float(v[row]), Value::Float(k), row, line, col));
-                }
-            }
             for x in v.iter_mut() {
                 *x = fop(op, *x, k);
             }
             F(v, m)
         }
         (FScalar(k), F(mut v, m)) => {
-            if div
-                && let Some(row) = v.iter().zip(&m).position(|(y, ok)| *ok && *y == 0.0)
-            {
-                return Err(cell_err(op, Value::Float(k), Value::Float(v[row]), row, line, col));
-            }
             for x in v.iter_mut() {
                 *x = fop(op, k, *x);
             }
             F(v, m)
         }
         (F(mut v, m), F(v2, m2)) => {
-            if div
-                && let Some(row) = v2
-                    .iter()
-                    .zip(m.iter().zip(&m2))
-                    .position(|(y, (a, b))| *a && *b && *y == 0.0)
-            {
-                return Err(cell_err(
-                    op,
-                    Value::Float(v[row]),
-                    Value::Float(v2[row]),
-                    row,
-                    line,
-                    col,
-                ));
-            }
             for (x, y) in v.iter_mut().zip(&v2) {
                 *x = fop(op, *x, *y);
             }
             let m: Vec<bool> = m.iter().zip(&m2).map(|(a, b)| *a && *b).collect();
             F(v, m)
         }
-        (FScalar(a), FScalar(b)) => {
-            if div && b == 0.0 {
-                return Err(cell_err(op, Value::Float(a), Value::Float(b), 0, line, col));
-            }
-            FScalar(fop(op, a, b))
-        }
+        (FScalar(a), FScalar(b)) => FScalar(fop(op, a, b)),
         _ => unreachable!("promoted above"),
     })
 }

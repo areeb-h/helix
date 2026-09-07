@@ -69,13 +69,14 @@ every builtin's cost is `JIT time ≈ NOJIT time` (it blocks) versus a large rat
 
 **They raise, and native code cannot — so the kernel reports it.** `floor`/`ceil`/`round`/`trunc`
 return an `Int` and raise when the result leaves the 64-bit range (`floor(1.0e30)` is an error,
-not a saturation); `clamp` raises when `lo > hi`; `/` raises on a zero divisor where `fdiv`
-yields inf. The **poison out-param** answers all of them: the kernel ORs a flag on the failing
-case, the VM discards the whole output and re-runs the checked bytecode loop, which raises the
-interpreter's exact error at the exact element. It began as the dividing f64 reduce's
-(`call_reduce_f64_div`) and `MixedFn`'s NaN-comparison bail, and now carries the four rounders
-and `/` through every typed map kernel (`mapm`, `mapmi`, `mapmv`, and the Floats-source
-`mapft` family) and the f64 filter's NaN comparisons. `clamp` is the one still waiting.
+not a saturation); `clamp` raises when `lo > hi`. The **poison out-param** answers them: the
+kernel ORs a flag on the failing case, the VM discards the whole output and re-runs the checked
+bytecode loop, which raises the interpreter's exact error at the exact element. It began as the
+dividing f64 reduce's (`call_reduce_f64_div`) and `MixedFn`'s NaN-comparison bail, and now
+carries the four rounders through every typed map kernel (`mapm`, `mapmi`, `mapmv`, and the
+Floats-source `mapft` family) and the f64 filter's NaN comparisons. `/` no longer needs it: it
+is IEEE on every engine (ADR 0048, 2026-09-07), so `fdiv`'s inf/NaN is the language's own
+answer and a dividing kernel is a plain one. `clamp` is the one still waiting.
 
 `to_int` is the instructive contrast: it **saturates** instead of raising (NaN → 0, ±inf → the
 i64 extremes), which is exactly `fcvt_to_sint_sat`, so it needed no bail at all. The dividing

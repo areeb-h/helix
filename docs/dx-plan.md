@@ -429,6 +429,12 @@ Checker: known shapes merge in order; an unknown spread — a parameter, parsed 
 `Dict` annotation (which was refused outright: fixed) — makes the result Unknown; a keyless
 spread is refused wherever it stands. Reference: a `spread` syntax entry (the form had none).
 
+**1.30 (2026-09-07) — IEEE float division.** DECIDED by the user and DONE: ADR 0048. `/` is
+IEEE on every carrier and engine; `//` and `%` keep raising. The JIT's `body_raises` no longer
+counts `/`, the three `Div` codegen arms are a bare `fdiv`, the dividing f64 fold takes the
+plain kernel, and both frame backends drop their per-cell division guard. Ten tests that used a
+zero divisor as a poison source moved to a NaN comparison or a rounder.
+
 **1.44b + 1.45e (2026-09-07) — annotations that filter, and calls that check.** DONE. 1.44b:
 `Checker::specialize` binds an annotated OPEN kind (`Record`/`Dict`/`Tuple`/`Function`/`Array`
 — `TypeAnn` names) to the argument's type when the annotation admits it and it is more

@@ -1911,9 +1911,9 @@ Run an expression that may raise, answering {ok, value, error} instead.
 **Note:** It binds TIGHTER than operators, so write `try (a + b)` — never `try a + b`. Do not use it as a type test: it is far more expensive than `type_of`. Keywords: error, exception, catch, rescue, result, fallible, handle, recover, panic.
 
 ```
->>> r = try (1 / 0)
+>>> r = try (1 % 0)
 >>> print(r.ok, r.error)
-false division by zero
+false modulo by zero
 ```
 
 ### `mut`

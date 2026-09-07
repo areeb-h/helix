@@ -200,6 +200,18 @@ no entry. A source edit is not a behavior change.
   to pass and raise at run time — the refusal the unannotated `define` already drew. `Any` still
   opts out. No corpus program or golden moved.
 
+- **`x / 0` is `inf`, `0 / 0` is NaN — `/` no longer raises** (2026-09-07, ADR 0048). A
+  program that caught the division error — `try (a / b)`, `assert_error(try (1 / 0), …)` — reads
+  a value now: `{ok: true, value: inf}`. `//` and `%` by zero still raise, in their old words,
+  and so does exact rational division. On a frame column both backends answer inf/NaN where they
+  raised naming the row. The reference's `try` example and four tests that used `1 / 0` as their
+  sample error use `1 % 0` now; the JIT tests that used a zero divisor as their poison source
+  use a NaN comparison or a rounder. Two example programs demonstrated `try` on `a / b` and
+  read `inf` now, so they demonstrate it on `a // b`, which still raises: the compat baselines
+  `examples__language__control-flow` (`safe_div: 5 0` where it printed `5.0 0.0`) and
+  `examples__language__match` (`5` and `0` where it printed `5.0` and `0`) move with them. No
+  corpus golden moved.
+
 - **A record literal takes more than one `...spread`** (2026-09-07). `{...a, ...b}` was a parse
   error ("a record update takes one `...spread`, not two"); it is a merge now, later parts
   winning. Additive: the sentence is gone, nothing that parsed reads differently, and a spread

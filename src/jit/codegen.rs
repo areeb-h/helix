@@ -2366,21 +2366,10 @@ fn gen_value_env<'a>(
                     BinOp::Add => b.ins().fadd(lf, rf),
                     BinOp::Sub => b.ins().fsub(lf, rf),
                     BinOp::Mul => b.ins().fmul(lf, rf),
-                    // Any eligible divisor. The interpreter RAISES on a zero divisor while
-                    // native `fdiv` would yield inf/nan — so bail IMMEDIATELY to the poison
-                    // block, exactly like the NaN-compare bail and for the same reason: a
-                    // tail loop can be infinite, so the error cannot wait for an
-                    // accumulate-and-store. `rf == 0.0` also catches `-0.0`, matching the
-                    // interpreter's `b == 0.0` divisor check bit for bit.
-                    BinOp::Div => {
-                        let zero = b.ins().f64const(0.0);
-                        let is_zero = b.ins().fcmp(FloatCC::Equal, rf, zero);
-                        let cont = b.create_block();
-                        b.ins().brif(is_zero, tl.poison_blk, &[], cont, &[]);
-                        b.switch_to_block(cont);
-                        b.seal_block(cont);
-                        b.ins().fdiv(lf, rf)
-                    }
+                    // Any eligible divisor: a zero one is inf/NaN on every engine (ADR 0048),
+                    // exactly what `fdiv` answers, so there is nothing to bail on — unlike the
+                    // NaN-compare bail, which stays immediate for the reason it always had.
+                    BinOp::Div => b.ins().fdiv(lf, rf),
                     // `**`: the walker's `powi`/`powf` rule, as a host call. Never raises.
                     BinOp::Pow => tl.host.call_pow(module, b, lf, rf),
                     _ => unreachable!("ineligible operator reached mixed-env codegen"),
@@ -3133,23 +3122,9 @@ fn gen_value_typed<'a>(
                     BinOp::Add => b.ins().fadd(lf, rf),
                     BinOp::Sub => b.ins().fsub(lf, rf),
                     BinOp::Mul => b.ins().fmul(lf, rf),
-                    // The interpreter RAISES on a zero divisor where native `fdiv` yields
-                    // inf/nan — so OR `divisor == 0.0` into the poison accumulator (this is
-                    // a MAP body: the loop always terminates, so accumulate-and-store is
-                    // sound, unlike the mixed-FUNCTION tail loop whose bail must be
-                    // immediate). The VM discards the whole output on poison and the
-                    // bytecode loop re-runs to raise the exact error. `body_raises`
-                    // counts any `/`, so a dividing kernel always has the poison signature.
-                    // `rf == 0.0` also catches `-0.0`, matching the interpreter's check.
-                    BinOp::Div => {
-                        let zero = b.ins().f64const(0.0);
-                        let is_zero = b.ins().fcmp(FloatCC::Equal, rf, zero);
-                        let bad = b.ins().uextend(I64, is_zero);
-                        let pv = b.use_var(cx.poison);
-                        let npv = b.ins().bor(pv, bad);
-                        b.def_var(cx.poison, npv);
-                        b.ins().fdiv(lf, rf)
-                    }
+                    // A zero divisor is inf/NaN on every engine (ADR 0048), exactly what
+                    // `fdiv` answers: no poison, no re-run.
+                    BinOp::Div => b.ins().fdiv(lf, rf),
                     // `**`: the walker's `powi`/`powf` rule, as a host call. Never raises.
                     BinOp::Pow => {
                         let host = cx.host;
@@ -3753,23 +3728,9 @@ fn gen_f64_typed<'a>(
                     BinOp::Add => b.ins().fadd(lf, rf),
                     BinOp::Sub => b.ins().fsub(lf, rf),
                     BinOp::Mul => b.ins().fmul(lf, rf),
-                    // Native `fdiv` yields inf/nan on a zero divisor where the interpreter RAISES.
-                    // Record it: OR `divisor == 0.0` into the cx.poison flag (accumulated across all
-                    // iterations), which the VM checks after the loop and, if set, falls back to
-                    // the exact-erroring bytecode loop. `rf == 0.0` is bit-identical to the
-                    // interpreter's `b == 0.0` divisor check (and catches −0.0 too), so the
-                    // fallback fires on exactly the `/0` the interpreter reports — regardless of
-                    // whether a later op or iteration would "rescue" the resulting inf/nan.
-                    BinOp::Div => {
-                        if let Some(p) = cx.poison {
-                            let zero = b.ins().f64const(0.0);
-                            let is_zero = b.ins().fcmp(FloatCC::Equal, rf, zero);
-                            let cur = b.use_var(p);
-                            let next = b.ins().bor(cur, is_zero);
-                            b.def_var(p, next);
-                        }
-                        b.ins().fdiv(lf, rf)
-                    }
+                    // A zero divisor is inf/NaN on every engine (ADR 0048), exactly what
+                    // `fdiv` answers: no poison, no re-run.
+                    BinOp::Div => b.ins().fdiv(lf, rf),
                     // `**`: the walker's `powi`/`powf` rule, as a host call. Never raises.
                     BinOp::Pow => {
                         let host = cx.host;

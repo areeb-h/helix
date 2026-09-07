@@ -1274,7 +1274,12 @@
 
     #[test]
     fn division_by_zero() {
-        assert!(last("1 / 0").unwrap_err().message.contains("division by zero"));
+        // `/` is IEEE (ADR 0048): a zero divisor is inf, `0 / 0` NaN; `//` and `%` raise.
+        assert!(matches!(last("1 / 0").unwrap(), Value::Float(f) if f == f64::INFINITY));
+        assert!(matches!(last("-1 / 0").unwrap(), Value::Float(f) if f == f64::NEG_INFINITY));
+        assert!(matches!(last("0 / 0").unwrap(), Value::Float(f) if f.is_nan()));
+        assert!(last("1 // 0").unwrap_err().message.contains("integer division by zero"));
+        assert!(last("1 % 0").unwrap_err().message.contains("modulo by zero"));
     }
 
     #[test]

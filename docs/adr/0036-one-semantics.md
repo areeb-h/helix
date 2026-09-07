@@ -333,3 +333,11 @@ conclusion by the same reasoning, since a frame column is homogeneous.
 - The differential fuzzer's literal pool still does not generate near-`i64::MAX`
   values, which is why the overflow family survived 40,000 fuzzed programs. That is
   open, and it means the `**` pins are the only coverage for that delta.
+
+## Addendum (2026-09-07) — `/` is IEEE, by ADR 0048
+
+Policy 1's "division and modulo by zero are errors … for Int and Float alike" is superseded
+for `/` only: a zero divisor answers ±inf or NaN on every carrier and engine (ADR 0048). `//`
+and `%` keep raising, so policy 2's sentence — the last silent NaN channel closed — now
+describes them alone, and policy 5's comparison error is the guard that catches a `0 / 0`
+where it would become a wrong answer. Policies 3 and 4 are unchanged.

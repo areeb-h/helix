@@ -88,10 +88,12 @@ pub unsafe fn call_reduce_f64(ptr: *const u8, start: i64, end: i64, init: f64) -
     }
 }
 
-/// Call a scalar `f64` range reduce whose body **divides** — `fn(start, end, init, *mut i8) -> f64`.
-/// `*poison` is set non-zero iff some iteration divided by zero (where the interpreter raises), so
-/// the VM discards the result and falls back to the exact-erroring bytecode loop. When it stays
-/// zero the fold is bit-exact to the interpreter (no `/0` occurred).
+/// Call a scalar `f64` range reduce whose body may **poison** — `fn(start, end, init, *mut i8)
+/// -> f64`. `*poison` is set non-zero iff some iteration hit a case the interpreter raises on (a
+/// NaN meeting an ordering comparison, a raising callee, a rounder out of range), so the VM
+/// discards the result and falls back to the exact-erroring bytecode loop. When it stays zero
+/// the fold is bit-exact to the interpreter. (It began as the dividing reduce's kernel; `/` is
+/// IEEE on every engine since ADR 0048 and no longer poisons.)
 /// SAFETY: the VM guarantees `ptr` is a finalized dividing `float` scalar [`define_reduce_loop`]
 /// kernel and `poison` points to a writable `i8`.
 pub unsafe fn call_reduce_f64_div(ptr: *const u8, start: i64, end: i64, init: f64, poison: *mut i8) -> f64 {

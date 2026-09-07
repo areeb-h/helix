@@ -33,7 +33,7 @@ Cranelift's `sdiv`/`srem` raise a hardware trap (SIGFPE) on divide-by-zero **and
 
 | expression | result |
 |---|---|
-| `1 / 0` | `error: division by zero` |
+| `1 / 0` | `inf` — `/` is IEEE 754 division (ADR 0048): `-1 / 0` is `-inf`, `0 / 0` is NaN, never an error |
 | `1 % 0` | `error: modulo by zero` |
 | `x // 0`, divisor arriving as array data | `error: integer division by zero` |
 | `MIN // -1` | `-9223372036854775808` (wraps, consistent with `*`) |

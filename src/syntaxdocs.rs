@@ -195,8 +195,8 @@ pub static SYNTAX: &[SyntaxDoc] = &[
         name: "try",
         form: "try (expr)",
         doc: "Run an expression that may raise, answering {ok, value, error} instead.",
-        example: "r = try (1 / 0)\nprint(r.ok, r.error)",
-        example_out: "false division by zero",
+        example: "r = try (1 % 0)\nprint(r.ok, r.error)",
+        example_out: "false modulo by zero",
         notes: "It binds TIGHTER than operators, so write `try (a + b)` — never `try a + b`. Do not \
                 use it as a type test: it is far more expensive than `type_of`. \
                 Keywords: error, exception, catch, rescue, result, fallible, handle, recover, panic.",

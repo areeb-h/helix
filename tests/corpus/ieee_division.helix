@@ -1,0 +1,8 @@
+# `/` is IEEE 754 division (ADR 0048): a zero divisor is ±inf, `0 / 0` is NaN, never an error —
+# on scalars, arrays and frame columns alike; `//` and `%` still raise on zero.
+print(1 / 0, -1 / 0, 1.5 / 0.0, is_nan(0 / 0), 7 / 2, 1 / inf)
+print([1, -2, 0] / 0, [4, 6] / [0, 3])
+df = dataframe({a: [1, 0, -2], b: [0, 0, 0]})
+print(df.with({q: a / b, r: a / 2}))
+print((try (1 // 0)).error, (try (1 % 0)).error, (try (1.0 // 0.0)).error)
+print(range(1, 4).reduce(0.0, (a, i) => a + 1.0 / ((i - 2) * 1.0)))

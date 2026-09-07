@@ -210,6 +210,19 @@
 
 ### Changed
 
+- **`/` is IEEE 754 division: `x / 0` is `inf`, `0 / 0` is NaN, never an error (ADR 0048).**
+  The same arithmetic had two answers by carrier — `tensor([1.0, 0.0]) / 0` was `[inf, NaN]`
+  while `1.0 / 0.0` raised — and the raise was the one thing that kept `/` off the native path:
+  a JIT kernel with a division carried a poison out-param, a compare per element, a flag, and on
+  any zero a discarded result and a re-run on bytecode to raise the walker's sentence (field
+  build, 1.30; the user's decision). A zero divisor now answers ±inf or NaN on scalars, arrays,
+  tensors, frame columns on both backends and in native code alike; the dividing kernels are
+  plain `fdiv`; `//` and `%` keep raising on zero, and so does an exact rational. A NaN reaching
+  an ordering comparison still raises with the `is_nan` hint (ADR 0036 policy 5) — the guard
+  moved from the division to the comparison, where a NaN would become a wrong answer. Pinned by
+  the corpus program `ieee_division` (three engines, both frame backends),
+  `division_is_ieee_on_every_engine` and `division_by_zero_is_ieee_under_the_jit`.
+
 - **An open-kind annotation filters the kind and keeps the argument's shape.** `fn define(spec:
   Record) = {c: spec.columns}` refused `define(["id", "name"])` — the wrong kind, a real
   beginner's mistake — and, under call-site specialization, erased the shape it had just

@@ -178,13 +178,12 @@ pub(crate) fn eval_binary(
     }
     match op {
         Add | Sub | Mul => arith(op, &l, &r, line, col),
+        // `/` is IEEE 754 division (ADR 0048): a zero divisor answers ±inf, `0 / 0` NaN —
+        // never an error — on every carrier (scalar, array, tensor, column) and in native
+        // code, where `fdiv` says the same. `//` and `%` keep raising on zero.
         Div => {
             let a = num_operand(op, &l, line, col)?;
             let b = num_operand(op, &r, line, col)?;
-            if b == 0.0 {
-                return Err(HelixError::new("division by zero", line, col)
-                    .hint("guard the denominator, e.g. `if d != 0` or check your data."));
-            }
             Ok(Value::Float(a / b))
         }
         Mod => match (&l, &r) {
@@ -204,11 +203,11 @@ pub(crate) fn eval_binary(
                 let b = num_operand(op, &r, line, col)?;
                 // Float `% 0` used to answer NaN, on scalars, arrays AND both frame
                 // backends — no divergence, but ADR 0034 policy 1's own sentence
-                // ("modulo by zero is an error") was simply false of Floats, and
-                // `1.0 / 0.0` had errored the whole time. This was the last silent
-                // NaN-producing arithmetic channel in the language (ADR 0036 policy 2),
-                // and closing it is what makes the NaN comparison error affordable:
-                // a NaN now almost always means a genuine computation failure.
+                // ("modulo by zero is an error") was simply false of Floats; it errors
+                // since ADR 0036 policy 2. `/` went the other way in ADR 0048 — IEEE,
+                // inf/NaN, never an error — so `%` and `//` are the raising operators
+                // now, and the NaN comparison error (policy 5) is the guard that catches
+                // a `0 / 0` the moment it would become a wrong answer.
                 if b == 0.0 {
                     return Err(HelixError::new("modulo by zero", line, col));
                 }
@@ -1104,12 +1103,7 @@ fn float_binary_result(op: &BinOp, a: f64, b: f64, line: usize, col: usize) -> R
         Add => Value::Float(a + b),
         Sub => Value::Float(a - b),
         Mul => Value::Float(a * b),
-        Div => {
-            if b == 0.0 {
-                return Err(HelixError::new("division by zero", line, col));
-            }
-            Value::Float(a / b)
-        }
+        Div => Value::Float(a / b),
         FloorDiv => {
             if b == 0.0 {
                 return Err(HelixError::new("division by zero", line, col));

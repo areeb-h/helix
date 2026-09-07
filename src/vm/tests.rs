@@ -665,19 +665,24 @@
             assert_eq!(tw, run_vm(&src), "tw vs vm: {body}");
             assert_eq!(tw, run_vm_jit(&src), "tw vs jit: {body}");
         }
-        // A raising body: the poison path discards the native output and the bytecode loop
-        // re-runs to the walker's exact error — identical on every engine.
-        for src in [
-            "xs = [1.0, 0.0, 2.0]\nxs.map(1.0 / it)",
-            "xs = [1.0e30, 2.0]\nxs.map(floor(it))",
-            "xs = [1.5, 2.5]\nd = 0.0\nxs.map(it / d)",
-            "xs = [1.5, 2.5]\nn = 0\nxs.map(it / n)",
+        // A dividing body is IEEE on every engine (ADR 0048): inf/NaN, no poison, no re-run.
+        for (src, want) in [
+            ("xs = [1.0, 0.0, 2.0]\nxs.map(1.0 / it)", "[1.0, inf, 0.5]"),
+            ("xs = [1.5, 2.5]\nd = 0.0\nxs.map(it / d)", "[inf, inf]"),
+            ("xs = [1.5, 2.5]\nn = 0\nxs.map(it / n)", "[inf, inf]"),
         ] {
             let tw = run_tw(src);
-            assert!(tw.is_err(), "{src}");
+            assert_eq!(tw.as_deref(), Ok(want), "{src}");
             assert_eq!(tw, run_vm(src), "tw vs vm: {src}");
             assert_eq!(tw, run_vm_jit(src), "tw vs jit: {src}");
         }
+        // A raising body: the poison path discards the native output and the bytecode loop
+        // re-runs to the walker's exact error — identical on every engine.
+        let src = "xs = [1.0e30, 2.0]\nxs.map(floor(it))";
+        let tw = run_tw(src);
+        assert!(tw.is_err(), "{src}");
+        assert_eq!(tw, run_vm(src), "tw vs vm: {src}");
+        assert_eq!(tw, run_vm_jit(src), "tw vs jit: {src}");
         // ENGAGEMENT, per shape: nothing else in these programs can run native, so a moving
         // counter is this kernel. Both capture variants (an Int `n`, a Float `s`) and both
         // roots are among them.
@@ -2263,17 +2268,16 @@
             assert_eq!(jit.as_deref(), Ok(want), "`{src}`");
         }
 
-        // ERROR ORDER: unfused, every `f(x)` runs before any `g`. A raise from either side must
-        // surface identically on all three engines — the folded kernel poisons and falls back to
-        // the original chain rather than reporting a different error.
+        // A `/0` inside either stage is IEEE on all three engines (ADR 0048): the folded kernel
+        // answers the same inf the unfused chain does, with no poison and no fallback.
         for src in [
             "xs = [1.5, 2.5, 3.5]\nxs.map(1.0 / (it - 1.5)).reduce(0.0, (a, x) => a + x)",
             "xs = [1.5, 2.5, 3.5]\nxs.map(it * 2.0).reduce(0.0, (a, x) => a + 1.0 / (x - 3.0))",
         ] {
-            let e = run_vm_jit(src);
-            assert!(e.is_err(), "expected a raise on `{src}`");
-            assert_eq!(e, run_tw(src), "error text vs walker on `{src}`");
-            assert_eq!(e, run_vm(src), "error text vs VM on `{src}`");
+            let jit = run_vm_jit(src);
+            assert_eq!(jit.as_deref(), Ok("inf"), "`{src}`");
+            assert_eq!(jit, run_tw(src), "folded vs walker on `{src}`");
+            assert_eq!(jit, run_vm(src), "folded vs VM on `{src}`");
         }
     }
 
@@ -3800,8 +3804,9 @@
             let e = s + (next(rng) % 12) as i64;
             format!("range({}, {}).reduce({}, (acc, x) => ({}))", s, e, flit(rng), expr(rng, 3))
         });
-        // Focused: series sums JIT to the right value; a `/0` errors on all engines; the excluded
-        // rescue shapes (nested division / min-of-a-division) fall back but stay correct.
+        // Focused: series sums JIT to the right value, and a `/0` is IEEE on all engines (ADR
+        // 0048) — the shapes that used to be the poison fallbacks now simply agree, inf, NaN
+        // and the rescued values alike.
         let basel = "(range(0, 2000)).reduce(0.0, (c, k) => c + 1.0/((k+1)*(k+1)))";
         assert_eq!(run_vm_jit(basel), run_tw(basel), "basel JIT ≠ tree-walker");
         assert_eq!(run_vm_jit(basel), run_vm_no_jit(basel), "basel JIT ≠ bytecode VM");
@@ -3811,8 +3816,9 @@
             "(range(0, 5)).reduce(0.0, (c, k) => c + min(1.0/k, 0.5))", // min rescue shape
             "range(0, 4).reduce(4.925, (acc, x) => (x - sqrt(abs(x))/x))", // acc-ignoring overwrite
         ] {
-            assert!(run_vm_jit(div0).is_err(), "expected /0 error on `{div0}`");
-            assert!(run_tw(div0).is_err(), "tree-walker must also error on `{div0}`");
+            assert!(run_tw(div0).is_ok(), "`{div0}` is IEEE, not an error: {:?}", run_tw(div0));
+            assert_eq!(run_vm_jit(div0), run_tw(div0), "JIT ≠ tree-walker on `{div0}`");
+            assert_eq!(run_vm_jit(div0), run_vm_no_jit(div0), "JIT ≠ bytecode VM on `{div0}`");
         }
     }
 
@@ -4751,11 +4757,11 @@
         }
     }
 
-    /// Division must never be JIT-compiled: native `fdiv` returns inf on /0,
-    /// but the interpreter errors — so a `/`-using function falls back and
-    /// division by zero still raises (rather than silently producing inf).
+    /// `/` is IEEE on every engine (ADR 0048): a zero divisor is inf under the JIT's native
+    /// `fdiv` exactly as under the walker, so a dividing function compiles natively with no
+    /// poison and no re-run — and the two agree bit for bit.
     #[test]
-    fn division_by_zero_is_not_jitted_to_inf() {
+    fn division_by_zero_is_ieee_under_the_jit() {
         let toks = lexer::lex("fn f(x) = 10.0 / x\nf(0.0)").unwrap();
         let ast = parser::parse(toks).unwrap();
         let prog = bytecode::compile_with_types(&ast, None).unwrap();
@@ -4768,8 +4774,12 @@
             &prog.fused_kernels,
             &prog.scan_loops,
         );
-        let err = exec(&prog, jit.as_ref()).unwrap_err();
-        assert!(err.message.contains("division by zero"), "got: {}", err.message);
+        assert!(exec(&prog, jit.as_ref()).is_ok());
+        for src in ["fn f(x) = 10.0 / x\nf(0.0)", "fn f(x) = 10.0 / x\nf(-0.0)", "fn f(x) = 0.0 / x\nf(0.0)"] {
+            assert_eq!(run_vm_jit(src), run_tw(src), "JIT ≠ tree-walker on `{src}`");
+        }
+        assert_eq!(run_vm_jit("fn f(x) = 10.0 / x\nf(0.0)"), Ok("inf".to_string()));
+        assert_eq!(run_vm_jit("fn f(x) = 10.0 / x\nf(-0.0)"), Ok("-inf".to_string()));
     }
 
     /// Runtime errors must still surface (and match the tree-walker's wording). The depth
@@ -5053,16 +5063,25 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
     /// raises only on a chosen index range, and all of them fail under that sabotage.
     #[test]
     fn the_parallel_poison_reduce_never_loses_a_chunks_bail() {
-        // `floor(x * 1e14)` leaves i64 range at x >= 92234, so the plain counter raises in
-        // the LATE chunks and the reversed one in the EARLY chunks. A division raises at
-        // exactly one index — the sharpest single-chunk case.
+        // A division at exactly one index used to be the sharpest single-chunk poison case;
+        // it is IEEE now (ADR 0048): one inf among 200000 values, no poison, the count intact.
         for src in [
-            "(0..200000).map(i => floor(to_float(i) * 100000000000000.0)).count()",
-            "(0..200000).map(i => floor(to_float(200000 - i) * 100000000000000.0)).count()",
             "(0..200000).map(i => 1.0 / to_float(100000 - i)).count()",
             "(0..200000).map(i => 1.0 / to_float(100 - i)).count()",
             "(0..200000).map(i => 1.0 / to_float(199999 - i)).count()",
             "fn g(x: Float, d: Float) = x / d\n(0..200000).map(i => g(1.0, to_float(100000 - i))).count()",
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw.as_deref(), Ok("200000"), "`{src}`");
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+        }
+        // `floor(x * 1e14)` leaves i64 range at x >= 92234, so the plain counter raises in
+        // the LATE chunks and the reversed one in the EARLY chunks; a NaN comparison raises at
+        // exactly one index — the sharpest single-chunk case.
+        for src in [
+            "(0..200000).map(i => floor(to_float(i) * 100000000000000.0)).count()",
+            "(0..200000).map(i => floor(to_float(200000 - i) * 100000000000000.0)).count()",
             "fn g(x: Float) = if x > 1.0 then 1.0 else 0.0\n(0..200000).map(i => g(sqrt(to_float(100000 - i)))).count()",
             // A materialized (non-range) source takes the other wrapper.
             "src = (0..200000).map(i => i * 2)\nsrc.map(i => floor(to_float(i) * 100000000000000.0)).count()",
@@ -5132,11 +5151,20 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
             assert_eq!(vm, Ok(want.to_string()), "`{src}`");
         }
-        // The callee raises: `/0` at every element and at one element, a NaN comparison, and
-        // a rounder out of range. Each must surface the interpreter's exact error.
+        // The callee divides by zero, at every element and at one: IEEE on every engine
+        // (ADR 0048), the value-scalar kernel answering exactly what the walker does.
+        for (src, want) in [
+            ("fn g(x: Float, d: Float) = x / d\n(0..6).map(i => g(to_float(i), 0.0))", "[NaN, inf, inf, inf, inf, inf]"),
+            ("fn g(x: Float, d: Float) = x / d\n(0..6).map(i => g(1.0, to_float(3 - i)))", "[0.3333333333333333, 0.5, 1.0, inf, -1.0, -0.5]"),
+        ] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw.as_deref(), Ok(want), "`{src}`");
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+        }
+        // The callee raises: a NaN comparison, and a rounder out of range. Each must surface
+        // the interpreter's exact error.
         for src in [
-            "fn g(x: Float, d: Float) = x / d\n(0..6).map(i => g(to_float(i), 0.0))",
-            "fn g(x: Float, d: Float) = x / d\n(0..6).map(i => g(1.0, to_float(3 - i)))",
             "fn g(x: Float) = if x > 1.0 then 1.0 else 0.0\n(0..4).map(i => g(sqrt(-to_float(i + 1))))",
             "fn g(x: Float) = to_float(floor(x))\n(0..4).map(i => g(to_float(i) * 1e19))",
         ] {
@@ -5281,11 +5309,11 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
             assert_eq!(vm, Ok(want.to_string()), "`{src}`");
         }
-        // A Float capture with a zero divisor still raises exactly (poison through the
-        // value-scalar kernel).
+        // A Float capture with a zero divisor is IEEE on every engine (ADR 0048): inf/NaN
+        // through the value-scalar kernel, no poison, no re-run.
         let src = "d = 0.0\n(0..4).map(i => to_float(i) / d)";
         let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
-        assert!(tw.is_err(), "`{src}` should raise");
+        assert_eq!(tw.as_deref(), Ok("[NaN, inf, inf, inf]"), "`{src}`");
         assert_eq!(tw, vm);
         assert_eq!(vm, jit);
 
@@ -5309,7 +5337,7 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
     /// removing the bail makes `f(1.5, 0.0)` return `inf` on the JIT where both other
     /// engines raise "division by zero".
     #[test]
-    fn non_literal_float_divisors_compile_and_zero_divisors_raise_exactly() {
+    fn non_literal_float_divisors_compile_and_zero_divisors_are_ieee_exactly() {
         for (src, want) in [
             // The k2 shape: a tail loop dividing by a parameter.
             (
@@ -5337,23 +5365,24 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
             assert_eq!(vm, Ok(want.to_string()), "`{src}`");
         }
-        // The raises: exact error text everywhere. The billion-iteration loop is the
-        // immediate-bail case — accumulate-and-store would spin natively for minutes.
-        for src in [
-            "fn f(x: Float, d: Float) = x / d\nf(1.5, 0.0)",
-            "fn f(x: Float, d: Float) = x / d\nf(1.5, -0.0)",
-            "fn f(a, b) = a / b\nf(10, 0)",
-            "fn f(a: Float, n: Int) =\n  if n >= 1000000000 then a\n  else f(a / to_float(0), n + 1)\nf(1.0, 0)",
-            "fn f(x: Int, n: Int, acc: Float) =\n  if x >= n then acc\n  else f(x + 1, n, acc + 1.0 / to_float(3 - x))\nf(0, 6, 0.0)",
-            "fn inner(x: Float, d: Float) = x / d\nfn outer(i: Int, n: Int, acc: Float, d: Float) =\n  if i >= n then acc\n  else outer(i + 1, n, acc + inner(to_float(i), d), d)\nouter(0, 5, 0.0, 0.0)",
-            "fn f(x: Float, d: Float) = if x / d > 1.0 then 1 else 0\nf(3.0, 0.0)",
-            "d = 0.0\n(0..6).map(i => to_float(i) / d)",
-            "(0..6).map(i => 6.0 / to_float(3 - i))",
+        // The zero divisors: IEEE values everywhere (ADR 0048), ±inf by the divisor's sign,
+        // NaN for `0 / 0`, a tail loop that keeps dividing its inf, and a division whose inf
+        // feeds a comparison without ever being a NaN.
+        for (src, want) in [
+            ("fn f(x: Float, d: Float) = x / d\nf(1.5, 0.0)", "inf"),
+            ("fn f(x: Float, d: Float) = x / d\nf(1.5, -0.0)", "-inf"),
+            ("fn f(a, b) = a / b\nf(10, 0)", "inf"),
+            ("fn f(a: Float, n: Int) =\n  if n >= 100000 then a\n  else f(a / to_float(0), n + 1)\nf(1.0, 0)", "inf"),
+            ("fn f(x: Int, n: Int, acc: Float) =\n  if x >= n then acc\n  else f(x + 1, n, acc + 1.0 / to_float(3 - x))\nf(0, 6, 0.0)", "inf"),
+            ("fn inner(x: Float, d: Float) = x / d\nfn outer(i: Int, n: Int, acc: Float, d: Float) =\n  if i >= n then acc\n  else outer(i + 1, n, acc + inner(to_float(i), d), d)\nouter(0, 5, 0.0, 0.0)", "NaN"),
+            ("fn f(x: Float, d: Float) = if x / d > 1.0 then 1 else 0\nf(3.0, 0.0)", "1"),
+            ("d = 0.0\n(0..6).map(i => to_float(i) / d)", "[NaN, inf, inf, inf, inf, inf]"),
+            ("(0..6).map(i => 6.0 / to_float(3 - i))", "[2.0, 3.0, 6.0, inf, -6.0, -3.0]"),
         ] {
             let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
-            assert!(tw.is_err(), "`{src}` should raise");
-            assert_eq!(tw, vm, "tree-walker and VM disagree on the error for `{src}`");
-            assert_eq!(vm, jit, "VM and JIT disagree on the error for `{src}`");
+            assert_eq!(tw.as_deref(), Ok(want), "`{src}`");
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
         }
         // Engagement: the dividing map kernel must actually run natively. The divisor is an
         // INT variable deliberately — the plain mixed analysis carries captures as
@@ -5942,11 +5971,17 @@ a = f({k})\ng = {g1}\n(a * 1000000) + f({k})"
             assert_eq!(vm, jit, "VM and JIT disagree on `{expr}`");
             assert_eq!(vm, Ok(want.to_string()), "`{expr}`");
         }
-        // Divide-by-zero raises rather than trapping — checked with the divisor arriving
+        // `//` and `%` by zero raise rather than trapping — checked with the divisor arriving
         // as ARRAY DATA so constant folding cannot mask it, and in the map / reduce /
-        // compiled-function positions where a native kernel is what actually runs.
+        // compiled-function positions where a native kernel is what actually runs. `/` is
+        // IEEE (ADR 0048): a zero divisor is inf, never a trap, on every engine.
+        for (src, want) in [("1 / 0", "inf"), ("d = (0..3).map(it - 1)\nd.map(100 / it)", "[-100.0, inf, 100.0]")] {
+            let (tw, vm, jit) = (run_tw(src), run_vm(src), run_vm_jit(src));
+            assert_eq!(tw.as_deref(), Ok(want), "`{src}`");
+            assert_eq!(tw, vm, "tree-walker and VM disagree on `{src}`");
+            assert_eq!(vm, jit, "VM and JIT disagree on `{src}`");
+        }
         for src in [
-            "1 / 0",
             "1 % 0",
             "d = (0..3).map(it - 1)\nd.map(100 // it).sum()",
             "d = (0..3).map(it - 1)\nd.map(100 % it).sum()",

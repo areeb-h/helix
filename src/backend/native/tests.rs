@@ -246,11 +246,11 @@ mod against_the_oracle {
         }
     }
 
-    /// Division by zero errors and names the row — on BOTH engines now (ADR 0036).
-    /// The polars backend used to answer `missing`, which this test recorded as a
-    /// delta and which was, in practice, a wrong number with exit 0.
+    /// Division by zero is IEEE on BOTH engines (ADR 0048): `1 / 0` is inf, never an error
+    /// and never a silent `missing` — which is what the polars backend answered before ADR
+    /// 0036 made the two agree, first on an error naming the row, now on the value.
     #[test]
-    fn division_by_zero_errors_with_the_row() {
+    fn division_by_zero_is_ieee_on_both_engines() {
         let mk = |native: bool| -> Df {
             let cols = vec![
                 ("x".to_string(), ColData::Int(vec![1, 2])),
@@ -264,22 +264,9 @@ mod against_the_oracle {
         };
         let divexpr = vec![("d".to_string(), bin(BinOp::Div, col("x"), col("y")))];
         for (label, native) in [("native", true), ("polars", false)] {
-            // The polars backend is LAZY, so its error may surface at the verb or at
-            // materialization — ADR 0036's declared caret delta. The MESSAGE and the
-            // ROW must be identical either way, and that is what is asserted.
-            let err = match mk(native).with_columns(&divexpr, 0, 0) {
-                Err(e) => e,
-                Ok(built) => match built.column_values("d", 0, 0) {
-                    Err(e) => e,
-                    Ok(v) => panic!("[{label}] dividing by zero must error, got {:?}", reprs(&v)),
-                },
-            };
-            assert!(err.message.contains("division by zero"), "[{label}] {}", err.message);
-            assert!(
-                err.hint.as_deref().unwrap_or("").contains("row 0"),
-                "[{label}] the row is named: {:?}",
-                err.hint
-            );
+            let got =
+                mk(native).with_columns(&divexpr, 0, 0).unwrap().column_values("d", 0, 0).unwrap();
+            assert_eq!(reprs(&got), vec!["Float:inf", "Float:1.0"], "[{label}] `/ 0` is inf");
         }
     }
 }
@@ -818,9 +805,10 @@ mod one_semantics {
         }
     }
 
-    /// A zero divisor is an error naming the 0-based row, on BOTH engines, for `/ % //`.
-    /// polars used to answer three different silent things: `missing` for Int `/0`,
-    /// `inf` for Float `/0`, `NaN` for `0.0 / 0.0`.
+    /// A zero divisor is an error naming the 0-based row, on BOTH engines, for `%` and `//`;
+    /// `/` is IEEE (ADR 0048) and answers inf on both. polars used to answer three different
+    /// silent things: `missing` for Int `/0`, `inf` for Float `/0`, `NaN` for `0.0 / 0.0`;
+    /// ADR 0036 made the engines agree, and ADR 0048 chose the value for `/`.
     #[test]
     fn zero_divisor_errors_with_the_row_on_both_engines() {
         let mk = || {
@@ -829,7 +817,16 @@ mod one_semantics {
                 ("z".to_string(), ColData::Int(vec![1, 1, 0])),
             ]
         };
-        for op in [BinOp::Div, BinOp::Mod, BinOp::FloorDiv] {
+        {
+            let e = vec![("r".to_string(), bin(BinOp::Div, col("a"), col("z")))];
+            let n = crate::backend::native::build_frame(mk(), 0, 0).unwrap();
+            let p = crate::backend::polars::build_frame(mk(), 0, 0).unwrap();
+            for (label, f) in [("native", &n), ("polars", &p)] {
+                let got = f.with_columns(&e, 0, 0).unwrap().column_values("r", 0, 0).unwrap();
+                assert_eq!(reprs(&got), vec!["Float:1.0", "Float:2.0", "Float:inf"], "[{label}] `/ 0` is inf");
+            }
+        }
+        for op in [BinOp::Mod, BinOp::FloorDiv] {
             let n = crate::backend::native::build_frame(mk(), 0, 0).unwrap();
             let p = crate::backend::polars::build_frame(mk(), 0, 0).unwrap();
             let e = vec![("r".to_string(), bin(op, col("a"), col("z")))];
