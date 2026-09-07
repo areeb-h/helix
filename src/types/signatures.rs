@@ -1349,6 +1349,10 @@ pub(super) fn record_method_type(
                     // purpose: this arm receives no argument types, and checking here for
                     // one spelling would make `rec.f(x)` and `(rec.f)(x)` disagree.
                     Type::Function { ret, .. } => Ok((**ret).clone()),
+                    // A field the checker cannot type may hold a function — `fn mk(f: Any) =
+                    // {f: f}` then `mk(g).f(1)` ran and was refused — so the call is
+                    // permissive, as a call through any Unknown is.
+                    Type::Unknown | Type::AnyFunction | Type::Never => Ok(Type::Unknown),
                     _ => Err(HelixError::new(
                         format!("`{other}` is a field of this record, not a method"),
                         line,

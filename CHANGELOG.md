@@ -4,6 +4,24 @@
 
 ### Added
 
+- **`rec.map_values(f)` and `dict.map_values(f)`: the same keys, each value replaced.** The
+  binder is the value; a second binder is the key, `(v, k) => …` (lodash's `mapValues`
+  order), so `{id: "int", name: "text"}.map_values((v, k) => k)` turns a column spec into a
+  record of column NAMES with the same shape — the one shape-preserving construction a
+  library needed for compile-time column checking and did not have (field build, 1.44a's
+  second half: `items().map(…).to_dict()` answers a Dict, a different type in a different
+  order). A dict maps in key order; `missing` propagates; a bare function name is applied,
+  `rec.map_values(upper)`; a same-named field does not shadow it — a record's own method wins
+  over a field of the name, as `keys` does (ADR 0045's order: method, field, free fn). On both
+  engines it is a keyed comprehension — the values, or
+  `(value, key)` pairs, through the same binder loop as `map`, rebuilt under the original
+  keys — and the checker types the body ONCE PER FIELD, so the result keeps the record's
+  shape, a typo after it is refused before anything runs, and a body that fails for one field
+  is refused in the body's own words. The shape rule (one argument; one or two binders) is
+  one function the walker, the compiler and the checker share. Pinned by the corpus program
+  `record_map_values` (three engines), `map_values_agrees_on_both_engines`,
+  `map_values_types_the_body_once_per_field` and `map_values_keeps_the_keys_on_every_engine`.
+
 - **A destructure may rename a field: `let {select: sel, limit} = spec in …`.** `{a: x}` was
   refused and pointed at `x = spec.a`; in the module that defines the verbs a spec names,
   `let {select} = spec` bound the Array over the function, so the query builder shaped
@@ -323,6 +341,13 @@
   anyone can rely on.
 
 ### Fixed
+
+- **A record field the checker could not type was refused when called.** `fn mk(f: Any) =
+  {f: f, a: 1}` followed by `mk(g).f(1)` ran — the field holds a function — and `check`
+  refused it as "`f` is a field of this record, not a method", the sentence meant for a field
+  holding a number. A field typed `Unknown` (or `Function`, or `Never`) is callable and
+  answers Unknown, as a call through any Unknown does; a field the checker KNOWS holds a
+  non-function is still refused. Pinned by `an_unknown_field_may_be_called`.
 
 - **`helix check` on a precedence-climbing parser took 3.7 s and 3.2 GB; it takes 9 ms and
   25 MB.** Call-site specialization guarded recursion by function AND argument tuple, and a

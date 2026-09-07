@@ -785,6 +785,11 @@ impl Interp {
                     && (crate::bytecode::RecvClass::Iterable.holds(&recv_v)
                         || self.ufcs_decl_fn(free).is_none()))
                     || name.as_str() == "position"
+                    // `map_values` is a keyed receiver's comprehension (a record, a dict,
+                    // `missing`); anything else takes the method path — a declared fn by
+                    // UFCS, or the receiver's own refusal — exactly as the VM's split does.
+                    || (name.as_str() == "map_values"
+                        && crate::bytecode::RecvClass::Keyed.holds(&recv_v))
                 {
                     return self.eval_comprehension(&recv_v, name, args, *line, *col);
                 }
@@ -2095,4 +2100,4 @@ pub(crate) use builtins::ASSERTIONS_RUN;
 pub(crate) use builtins::{capture_begin, capture_take};
 
 mod comprehensions;
-pub(crate) use comprehensions::not_an_array;
+pub(crate) use comprehensions::{map_values_elements, map_values_rebuild, map_values_shape, not_an_array};

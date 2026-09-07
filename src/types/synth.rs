@@ -269,6 +269,38 @@ impl super::Checker {
         })
     }
 
+    /// `map_values`, typed once per field (field build, 1.44a's second half): the body is
+    /// typed with the binder bound to each field's type in turn — and a second binder to
+    /// String, the field's name — and the answer is the record's shape with each field's type
+    /// replaced by the body's. `{id: "int", name: "text"}.map_values((v, k) => k)` is
+    /// `{id: String, name: String}`, so a typo after it is refused, and a body that fails for
+    /// one field is the refusal, in the body's own words. Without a known shape (a Dict, an
+    /// annotated `Record`) the body is typed once with an Unknown binder and the answer is
+    /// Unknown. The shape rule is the runtime's own (`map_values_shape`).
+    fn map_values_type(
+        &mut self,
+        fields: Option<&[(String, Type)]>,
+        args: &[Expr],
+        line: usize,
+        col: usize,
+    ) -> Result<Type, HelixError> {
+        let (params, body) = crate::interp::map_values_shape(args, line, col)?;
+        let Some(fields) = fields else {
+            self.with_pattern(&params, Type::Unknown, body)?;
+            return Ok(Type::Unknown);
+        };
+        let mut out = Vec::with_capacity(fields.len());
+        for (name, held) in fields {
+            let element = if params.len() == 2 {
+                Type::Tuple(vec![held.clone(), Type::String])
+            } else {
+                held.clone()
+            };
+            out.push((name.clone(), self.with_pattern(&params, element, body)?));
+        }
+        Ok(Type::Record(out))
+    }
+
     /// A LITERAL key on a known shape reads the field the way `rec.k` does (field build,
     /// 1.44a): `spec.get("columns")` has the field's type, and `missing` — or the default's
     /// type — when the shape lacks the name; `expect("k")` has the field's type on a hit and
@@ -425,6 +457,12 @@ impl super::Checker {
                 // The receiver answers first here too (field build, 1.40): a name that is
                 // neither a record method nor a field is refused before its arguments are
                 // read, so `{a: 1}.nonexistent(it * 2)` names the method, not `it`.
+                // The record's OWN methods answer first — a same-named field does not shadow
+                // `map_values` or `get`, as it does not shadow `keys` (ADR 0045's order:
+                // method, field, free fn; the walker's arm checks `type_owns_method` first).
+                if name == "map_values" {
+                    return self.map_values_type(Some(&fields), args, line, col);
+                }
                 // A LITERAL key reads the shape the way `.k` does (field build, 1.44a).
                 if let Some(t) = self.literal_key_read(name, &fields, args)? {
                     return Ok(t);
@@ -448,6 +486,11 @@ impl super::Checker {
             // `Unknown` receiver's do. What the annotation buys is the refusal of a wrong
             // KIND at the call site, not a method table.
             Type::AnyRecord | Type::Dict | Type::AnyTuple | Type::AnyFunction => {
+                // `map_values` binds its binders even without a shape: the body is typed
+                // once with an Unknown value, and the answer is as open as the receiver.
+                if name == "map_values" && matches!(rt, Type::AnyRecord | Type::Dict) {
+                    return self.map_values_type(None, args, line, col);
+                }
                 self.synth_simple_args(args)?;
                 Ok(Type::Unknown)
             }

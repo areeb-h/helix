@@ -15859,7 +15859,7 @@ fn an_unknown_method_is_reported_before_its_it_argument() {
     for (src, want) in [
         ("print({a: 1}.nonexistent(it * 2))\n", "a Record has no method `nonexistent`"),
         ("print([1].nonexistent(it * 2))\n", "an Array has no method `nonexistent`"),
-        ("r = {a: 1}\nprint(r.map_values(it * 2))\n", "a Record has no method `map_values`"),
+        ("r = {a: 1}\nprint(r.map_keys(it * 2))\n", "a Record has no method `map_keys`"),
     ] {
         let (_, err, code) = run_source(src, &[], "unknown_first");
         assert_ne!(code, Some(0), "{src}");
@@ -16392,6 +16392,24 @@ fn a_constructor_that_validates_inline_keeps_its_shape() {
     }
     let bad = format!("{src}print(M.c.nmae)\n");
     let (out, err, code) = run_source(&bad, &[], "inline_guard_bad");
+    assert_ne!(code, Some(0), "{out}");
+    assert!(err.contains("no field `nmae`"), "{err}");
+}
+
+/// `map_values` keeps the keys on every engine (field build, 1.44a's second half): the
+/// value is the binder, a second binder is the key, and a dict maps in key order. The
+/// checker types the body once per field, so the column-name record a model builds is a
+/// known shape and a typo after it is refused before anything runs.
+#[test]
+fn map_values_keeps_the_keys_on_every_engine() {
+    let src = "cols = {id: \"int\", name: \"text\"}\nnames = cols.map_values((v, k) => k)\nprint(names.id, names.name, {x: 1, y: 2}.map_values(it * 10), {\"b\": 2, \"a\": 1}.map_values(it + 1).items())\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("map_values_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "id name {x: 10, y: 20} [(\"a\", 2), (\"b\", 3)]\n", "{name}");
+    }
+    let bad = "fn define(spec) = {table: spec.table, c: spec.columns.map_values((v, k) => k)}\nM = define({table: \"people\", columns: {id: \"int\", name: \"text\"}})\nprint(M.c.nmae)\n";
+    let (out, err, code) = run_source(bad, &[], "map_values_typo");
     assert_ne!(code, Some(0), "{out}");
     assert!(err.contains("no field `nmae`"), "{err}");
 }

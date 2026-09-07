@@ -168,6 +168,14 @@ pub enum Op {
     /// Finish a `reduce`: pop the iterator (its result, the accumulator, is loaded
     /// separately).
     CompEndDiscard,
+    /// `map_values`, before its map loop: pop the keyed receiver (a record, a dict) and push
+    /// the elements the loop maps — its values, or `(value, key)` pairs when the flag is
+    /// set; `missing` pushes `missing` (the loop propagates it), anything else raises the
+    /// receiver's own "has no method" sentence.
+    MapValuesInit(bool),
+    /// `map_values`, after its map loop: pop the receiver (reloaded from its local) and the
+    /// mapped array, and push the receiver's keys, in its order, over the mapped values.
+    MapValuesFinish,
     /// `acc = acc.concat(<popped>)` for a reduce accumulator held in local `slot`, as ONE
     /// indivisible take-append-store. Emitted only for the body shape `acc.concat(e)` where
     /// `acc` is the fold's own accumulator binder (see `emit_reduce_body_and_store`).
@@ -367,6 +375,9 @@ pub enum RecvClass {
     Frame,
     /// What a comprehension accepts: an array, or a `missing` that propagates (ADR 0001).
     Iterable,
+    /// What `map_values` accepts: a receiver with keys — a record or a dict — or a `missing`
+    /// that propagates.
+    Keyed,
     /// A DataFrame, and only that — for a call site whose other branch already handles
     /// `missing` (a comprehension carries ADR 0001's propagation itself, so sending
     /// `missing` down the column-verb route as well would be two answers to one question)
@@ -392,6 +403,7 @@ impl RecvClass {
                 matches!(v, Value::DataFrame(_) | Value::GroupBy(_) | Value::Missing)
             }
             RecvClass::Iterable => matches!(v, Value::Array(_) | Value::Missing),
+            RecvClass::Keyed => matches!(v, Value::Record(_) | Value::Dict(_) | Value::Missing),
             RecvClass::DataFrameOnly => matches!(v, Value::DataFrame(_)),
             RecvClass::GroupByOnly => matches!(v, Value::GroupBy(_)),
             RecvClass::FieldFn(sym) => matches!(

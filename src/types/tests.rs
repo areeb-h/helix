@@ -437,3 +437,42 @@ p_expr(toks, 0).node.k
         ok("r = {a: missing}\n(r.a ?? {c: 2}).c");
         ok("fn f(r) = (r.a ?? {c: 2}).c\nf(1)");
     }
+
+    /// `map_values` types its body once per field (field build, 1.44a's second half): the
+    /// result keeps the record's shape with each field's type replaced by the body's, so a
+    /// typo after it is refused — and the key binder is a String. Without a known shape the
+    /// body is typed once with an Unknown binder. The shape rule is the runtime's own.
+    #[test]
+    fn map_values_types_the_body_once_per_field() {
+        assert!(emsg("{id: \"int\", name: \"text\"}.map_values((v, k) => k).nmae").contains("no field `nmae`"));
+        ok("{id: \"int\", name: \"text\"}.map_values((v, k) => k).name.upper()");
+        ok("{x: 1, y: 2}.map_values(it * 10).x + 1");
+        assert!(emsg("{x: 1, y: 2}.map_values(it * 10).x.upper()").contains("upper"));
+        // One field's body failing is the refusal, in the body's own words.
+        assert!(emsg("{x: 1, y: \"s\"}.map_values(it * 10)").contains("String"));
+        // Through a constructor: the column names as a record of the columns' shape.
+        assert!(emsg("fn define(spec) = {c: spec.columns.map_values((v, k) => k)}\ndefine({columns: {id: \"int\", name: \"text\"}}).c.nmae").contains("no field `nmae`"));
+        ok("fn define(spec) = {c: spec.columns.map_values((v, k) => k)}\ndefine({columns: {id: \"int\", name: \"text\"}}).c.name.upper()");
+        // Without a known shape: Unknown, the binders bound.
+        ok("fn f(d: Dict) = d.map_values(it * 2)\nf({\"a\": 1})");
+        ok("fn f(r: Record) = r.map_values((v, k) => k)\nf({a: 1})");
+        ok("fn f(r) = r.map_values(it)\nf(1)");
+        // A bare function name is applied; a same-named field does not shadow the method.
+        ok("fn double(x) = x * 2\n{x: 1}.map_values(double).x + 1");
+        ok("r = {map_values: (f) => 7}\nr.map_values(1).map_values + 1");
+        // The shape rule, in the runtime's sentences.
+        assert!(emsg("{x: 1}.map_values()").contains("takes exactly one expression"));
+        assert!(emsg("{x: 1}.map_values(() => 1)").contains("needs at least one parameter"));
+        assert!(emsg("{x: 1}.map_values((a, b, c) => a)").contains("takes the value and, optionally, the key"));
+        // A receiver without keys has no such method.
+        assert!(emsg("[1, 2].map_values(x => x)").contains("no method `map_values`"));
+    }
+
+    /// A field whose type the checker does not know may hold a function: calling it is
+    /// permissive, not "a field, not a method" — `fn mk(f: Any) = {f: f}` followed by
+    /// `mk(g).f(1)` ran and was refused.
+    #[test]
+    fn an_unknown_field_may_be_called() {
+        ok("fn mk(f: Any) = {f: f, a: 1}\nmk((x) => x + 1).f(1) + 1");
+        assert!(emsg("{a: 1}.a()").contains("not a method"));
+    }

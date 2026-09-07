@@ -404,9 +404,23 @@ specializations (≤ 60 for a 14-function parser; the unfixed checker overflows 
 bottom of `join`; read as Unknown everywhere else), so `if bad then raise(…) else {rec}` keeps
 the shape and the field's `_def_check` hoist is no longer needed; `get("k")` / `expect("k")`
 with a literal key read a known shape as `.k` does; `x ?? d` on a provably present field is
-`x`'s type. Still open from 1.44a's second half: a shape-preserving map over a record's fields
-(`Record.map_values`, keys kept — the checker would type the mapped value per field), a
-language decision; `{...dict}` stays a runtime shape.
+`x`'s type. The second half — a shape-preserving map over a record's fields — is DONE
+(2026-09-07): `rec.map_values(f)` / `dict.map_values(f)`, the binder the value and a second
+binder the key, a keyed comprehension on both engines (walker: the elements a `map` would see
+through `eval_pattern_loop`, rebuilt under the keys; VM: `MapValuesInit` + the shared map loop
+`emit_comp_loop` + `MapValuesFinish`, routed by `compile_map_values_split`: `RecvClass::Keyed`
+takes the comprehension — a record OWNS the name, so a same-named field does not shadow it, ADR
+0045's method-field-fn order — else the method path; the receiver is addressed by SLOT, never by
+the hidden local's name, because a nested call inside the argument declares its own and an
+`Ident` resolved after it read the inner slot, `Unit`), the shape rule
+(`interp::map_values_shape`) shared with the checker, which types the body once per field
+(`Checker::map_values_type`). Found on the way: a field typed Unknown was refused when called
+("a field, not a method") though it held a function — fixed in `record_method_type`.
+`{...dict}` stays a runtime shape. Filed by the field on 47f5cf8 and OPEN: 1.44b (an open-kind
+annotation should filter the kind and keep the argument's shape under specialization), 1.45e
+(a call through a function-valued field, `rec.f("s")`, and through a function value,
+`(rec.f)("s")`, should check the lambda's annotations and arity as a call by name does), 1.49
+(more than one `...spread` in a record literal, later ones winning).
 
 **1.46.3 (2026-09-05) — Record enumeration cost.** DONE for the allocation half:
 `Symbol::as_rc_string` (a per-thread `FxHashMap<u32, Rc<String>>`) shares one allocation per

@@ -110,6 +110,71 @@ fn comp_shape_check(
 /// only discover at run time that the receiver is not a frame either — the walker reaches
 /// this same sentence for that program, and one definition is how they stay the same
 /// sentence.
+/// `map_values`'s hint — the one sentence the engines and the checker share.
+const MAP_VALUES_HINT: &str = "e.g. `rec.map_values(it * 2)` or `rec.map_values((v, k) => k)`.";
+
+/// `map_values`'s SHAPE: one argument, whose function binds the value and, optionally, the
+/// key — one or two binders. Shared by the walker, the compiler and the checker, so a
+/// malformed call is refused in one sentence whoever sees it first (the rule the other
+/// comprehensions restate per engine, `comp_shape_check`'s own concern).
+pub(crate) fn map_values_shape(
+    args: &[Expr],
+    line: usize,
+    col: usize,
+) -> Result<(Vec<String>, &Expr), HelixError> {
+    if args.len() != 1 {
+        return Err(HelixError::new("`map_values` takes exactly one expression", line, col)
+            .hint(MAP_VALUES_HINT));
+    }
+    let (params, body) = comprehension_params(&args[0]);
+    comp_needs_binder(&params, "map_values", MAP_VALUES_HINT, line, col)?;
+    if params.len() > 2 {
+        return Err(HelixError::new(
+            format!(
+                "`map_values`'s function takes the value and, optionally, the key, but got {} parameters",
+                params.len()
+            ),
+            line,
+            col,
+        )
+        .hint(MAP_VALUES_HINT));
+    }
+    Ok((params, body))
+}
+
+/// The elements `map_values` maps: a keyed receiver's values — or its `(value, key)` pairs
+/// when the function binds two names — in the receiver's own order (declaration order for
+/// a record, key order for a dict). `None` for a receiver that has no keys.
+pub(crate) fn map_values_elements(recv: &Value, with_keys: bool) -> Option<Vec<Value>> {
+    let element = |v: &Value, key: Value| {
+        if with_keys {
+            Value::Tuple(std::rc::Rc::new(vec![v.clone(), key]))
+        } else {
+            v.clone()
+        }
+    };
+    match recv {
+        Value::Record(fields) => {
+            Some(fields.iter().map(|(s, v)| element(v, Value::Str(s.as_rc_string()))).collect())
+        }
+        Value::Dict(d) => Some(d.map().iter().map(|(k, v)| element(v, k.to_value())).collect()),
+        _ => None,
+    }
+}
+
+/// What `map_values` answers: the receiver's keys, in its order, over the mapped values —
+/// one per key, as `map_values_elements` produced them. A receiver without keys (`missing`)
+/// answers itself.
+pub(crate) fn map_values_rebuild(recv: &Value, mapped: Vec<Value>) -> Value {
+    match recv {
+        Value::Record(fields) => {
+            Value::Record(std::rc::Rc::new(fields.iter().map(|(s, _)| *s).zip(mapped).collect()))
+        }
+        Value::Dict(d) => Value::dict(d.map().keys().cloned().zip(mapped).collect()),
+        other => other.clone(),
+    }
+}
+
 pub(crate) fn not_an_array(recv: &Value, name: &str, line: usize, col: usize) -> HelixError {
     HelixError::new(
         // The article, like every other no-method sentence. This is a RUNTIME path that
@@ -132,6 +197,11 @@ impl super::Interp {
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
+        // `map_values` is the keyed twin of `map`: a record's or a dict's values, under its
+        // keys. Dispatched here so `it`-bodies and binder patterns read as they do for `map`.
+        if name == "map_values" {
+            return self.eval_map_values(recv, args, line, col);
+        }
         let items = match recv {
             Value::Array(items) => items.clone(),
             // `missing.map(...)` etc. propagate rather than erroring (ADR 0001) — but only
@@ -599,6 +669,37 @@ impl super::Interp {
             }
             Ok(Value::Str(std::rc::Rc::new(s)))
         }
+    }
+
+    /// `rec.map_values(f)` / `dict.map_values(f)`: the same keys, in the same order, each value
+    /// replaced by the body's. The binder is the value; a second binder is the key (`(v, k) =>
+    /// …`, lodash's order). The elements a `map` would see — the values, or `(value, key)`
+    /// pairs — go through the one binder loop, and the result is rebuilt under the original
+    /// keys; the VM does exactly this in two ops around its own map loop. A receiver without
+    /// keys never arrives: the `Expr::Method` arm sends it down the method path, as the VM's
+    /// split does.
+    fn eval_map_values(
+        &mut self,
+        recv: &Value,
+        args: &[Expr],
+        line: usize,
+        col: usize,
+    ) -> Result<Value, HelixError> {
+        if !crate::bytecode::RecvClass::Keyed.holds(recv) {
+            return Err(not_an_array(recv, "map_values", line, col));
+        }
+        let (params, body) = map_values_shape(args, line, col)?;
+        let Some(elements) = map_values_elements(recv, params.len() == 2) else {
+            // `missing.map_values(…)` propagates, as every comprehension's does (ADR 0001).
+            return Ok(Value::Missing);
+        };
+        let items = crate::value::ArrayData::Values(elements);
+        let mut out = Vec::with_capacity(items.len());
+        self.eval_pattern_loop(&params, &items, body, line, col, |_el, v| {
+            out.push(v);
+            Ok(None)
+        })?;
+        Ok(map_values_rebuild(recv, out))
     }
 
     fn eval_pattern_loop<F>(

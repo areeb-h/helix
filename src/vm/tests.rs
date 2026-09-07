@@ -8443,3 +8443,44 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         }
         assert!(crate::jit::native_call_count() > 0, "the Int-source f64 fold never ran natively");
     }
+
+    /// `map_values` on both engines: the same keys over the mapped values, a second binder
+    /// the key, a dict in key order, `missing` propagated, a bare function applied, a
+    /// same-named field not shadowing the method, a nested call inside an `it`-body (a first
+    /// cut resolved the hidden receiver local by NAME and read the inner slot), a declared
+    /// `fn map_values` reached by UFCS from a keyless receiver only, and the refusals in
+    /// one sentence.
+    #[test]
+    fn map_values_agrees_on_both_engines() {
+        let programs = [
+            "{x: 1, y: 2}.map_values(it * 10)",
+            "{id: \"int\", name: \"text\"}.map_values((v, k) => k)",
+            "{id: \"int\", name: \"text\"}.map_values((v, k) => \"{k}:{v}\")",
+            "{\"b\": 2, \"a\": 1}.map_values(it + 1)",
+            "{\"b\": 2, \"a\": 1}.map_values((v, k) => k)",
+            "missing.map_values(it * 2)",
+            "fn double(x) = x * 2\n{x: 1, y: 2}.map_values(double)",
+            "r = {map_values: (f) => 7, a: 1}\nr.map_values(x => x)",
+            "{x: {y: 1}}.map_values(it.map_values(it + 1))",
+            "{x: {y: 1}}.map_values(it.map_values(w => w + 1))",
+            "{x: {y: {z: 1}}}.map_values(it.map_values(it.map_values(it + 1)))",
+            "s = 5\n{x: 1}.map_values(it + s)",
+            "{x: 1}.map_values()",
+            "{x: 1}.map_values(() => 1)",
+            "{x: 1}.map_values((a, b, c) => a)",
+            "[1, 2].map_values(x => x)",
+            "(5).map_values(x => x)",
+            "fn map_values(x, f) = 42\n[1].map_values(x => x)",
+            "fn map_values(x, f) = 42\n{x: 1}.map_values(it * 2)",
+        ];
+        for p in programs {
+            assert_eq!(run_vm(p), run_tw(p), "{p}");
+        }
+        assert_eq!(run_vm("{x: 1, y: 2}.map_values(it * 10)").as_deref(), Ok("{x: 10, y: 20}"));
+        assert_eq!(
+            run_vm("{id: \"int\", name: \"text\"}.map_values((v, k) => k)").as_deref(),
+            Ok("{id: \"id\", name: \"name\"}")
+        );
+        assert_eq!(run_vm("missing.map_values(it * 2)").as_deref(), Ok("missing"));
+        assert_eq!(run_vm("fn map_values(x, f) = 42\n[1].map_values(x => x)").as_deref(), Ok("42"));
+    }

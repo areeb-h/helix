@@ -218,11 +218,44 @@ impl super::Compiler {
             None
         };
 
+        let done_at = self.emit_comp_loop(b, kind, &params, body, line, col)?;
+
+        // The native kernel pushes its result array and lands here, where both the
+        // bytecode-loop and missing-source paths converge with the result on the stack.
+        if let Some((at, idx)) = kernel_guard {
+            b.code[at] = if is_map {
+                Op::TryJitMap { kernel_idx: idx, after: done_at }
+            } else {
+                Op::TryJitFilter { kernel_idx: idx, after: done_at }
+            };
+        }
+        // #31: the nested-reduce guard converges at the SAME point (result on the stack) — on
+        // success the parallel path jumps here, skipping the fallback map it wraps.
+        if let Some((gpos, inner_idx)) = nested_guard {
+            b.code[gpos] = Op::TryJitNestedReduce { inner_loop_idx: inner_idx, after: done_at };
+        }
+        Ok(())
+    }
+
+    /// The bytecode loop of a `map`/`filter` comprehension over the array on the stack:
+    /// `CompInit` … `CompEnd`, with the `missing`-source landing, converging with the result
+    /// on the stack at the returned position. Shared with `map_values`, whose receiver is
+    /// keyed: it puts the elements on the stack first and rebuilds under the keys after.
+    fn emit_comp_loop(
+        &mut self,
+        b: &mut Builder,
+        kind: CompKind,
+        params: &[String],
+        body: &Expr,
+        line: usize,
+        col: usize,
+    ) -> R<u32> {
+        let is_map = matches!(kind, CompKind::Map);
         let init_at = b.emit(Op::CompInit(kind, 0), line, col);
 
         b.scopes.push(Vec::new());
         let saved_next = b.next_slot;
-        let (binder, destruct) = Self::declare_binder_pattern(b, &params);
+        let (binder, destruct) = Self::declare_binder_pattern(b, params);
 
         let loop_start = b.code.len() as u32;
         // Only `filter`/`where` (not `map`) read `cur_val` via `CompFilterPush`.
@@ -233,11 +266,7 @@ impl super::Compiler {
         }
         self.compile_expr(b, body)?;
         b.emit(
-            if matches!(kind, CompKind::Map) {
-                Op::CompMapPush
-            } else {
-                Op::CompFilterPush(kind)
-            },
+            if is_map { Op::CompMapPush } else { Op::CompFilterPush(kind) },
             line,
             col,
         );
@@ -257,23 +286,45 @@ impl super::Compiler {
         let done_at = b.code.len() as u32;
         b.code[jump_done] = Op::Jump(done_at);
 
-        // The native kernel pushes its result array and lands here, where both the
-        // bytecode-loop and missing-source paths converge with the result on the stack.
-        if let Some((at, idx)) = kernel_guard {
-            b.code[at] = if is_map {
-                Op::TryJitMap { kernel_idx: idx, after: done_at }
-            } else {
-                Op::TryJitFilter { kernel_idx: idx, after: done_at }
-            };
-        }
-        // #31: the nested-reduce guard converges at the SAME point (result on the stack) — on
-        // success the parallel path jumps here, skipping the fallback map it wraps.
-        if let Some((gpos, inner_idx)) = nested_guard {
-            b.code[gpos] = Op::TryJitNestedReduce { inner_loop_idx: inner_idx, after: done_at };
-        }
-
         b.scopes.pop();
         b.next_slot = saved_next;
+        Ok(done_at)
+    }
+
+    /// `map_values` over the keyed receiver held in local `slot` (a record, a dict, `missing`
+    /// — the split in `bytecode.rs` sends nothing else here, and it has evaluated the
+    /// receiver already): `MapValuesInit` turns it into the elements a `map` would see, the
+    /// shared map loop maps them, and `MapValuesFinish` rebuilds under the original keys. The
+    /// shape rule is the walker's own (`map_values_shape`), raised after the receiver is
+    /// evaluated, as the walker does. The slot is used directly — see the split for why an
+    /// `Ident` of the hidden local would not do.
+    pub(super) fn compile_map_values_at(
+        &mut self,
+        b: &mut Builder,
+        slot: u32,
+        args: &[Expr],
+        line: usize,
+        col: usize,
+    ) -> R<()> {
+        let (params, body) = match crate::interp::map_values_shape(args, line, col) {
+            Ok(shape) => shape,
+            Err(e) => {
+                b.emit(
+                    Op::raise(
+                        std::rc::Rc::new(e.message),
+                        std::rc::Rc::new(e.hint.unwrap_or_default()),
+                    ),
+                    line,
+                    col,
+                );
+                return Ok(());
+            }
+        };
+        b.emit(Op::LoadLocal(slot), line, col);
+        b.emit(Op::MapValuesInit(params.len() == 2), line, col);
+        self.emit_comp_loop(b, CompKind::Map, &params, body, line, col)?;
+        b.emit(Op::LoadLocal(slot), line, col);
+        b.emit(Op::MapValuesFinish, line, col);
         Ok(())
     }
 

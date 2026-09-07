@@ -428,14 +428,15 @@ pub static GROUPBY_METHODS: &[&str] =
 
 /// Keyed-map (`Dict`) methods — O(log n) lookup, sorted (deterministic) enumeration.
 pub static DICT_METHODS: &[&str] = &[
-    "get", "expect", "contains", "has", "keys", "values", "items", "insert", "remove", "count", "length",
+    "get", "expect", "contains", "has", "keys", "values", "items", "map_values", "insert", "remove",
+    "count", "length",
 ];
 
 /// Record methods for **dynamic** field access — `get(k[, default])` (value or missing/
 /// default), `has(k)`, `keys()`/`values()`/`items()`. The escape hatch for consuming
 /// unknown-shape data (a parsed JSON response) where a static `rec.field` would be a compile
 /// error. Static field access is the normal path; these are for runtime-unknown shapes.
-pub static RECORD_METHODS: &[&str] = &["get", "expect", "has", "keys", "values", "items"];
+pub static RECORD_METHODS: &[&str] = &["get", "expect", "has", "keys", "values", "items", "map_values"];
 
 /// Tuple methods — the two STRUCTURAL questions, named as Record and Dict name them.
 ///

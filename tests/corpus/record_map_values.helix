@@ -1,0 +1,18 @@
+# `map_values`: the same keys, in the same order, over the mapped values. The binder is the
+# value; a second binder is the key. A dict maps in key order; `missing` propagates; a bare
+# function name is applied; a nested `it` is the inner binder.
+cols = {id: "int", name: "text", age: "int"}
+print(cols.map_values((v, k) => k))
+print(cols.map_values(it.upper()))
+print(cols.map_values((v, k) => "{k}={v}"))
+print({x: 1, y: 2}.map_values(it * 10))
+print({"b": 2, "a": 1}.map_values(it + 1))
+print({"b": 2, "a": 1}.map_values((v, k) => "{k}={v}"))
+print(missing.map_values(it * 2))
+fn double(x) = x * 2
+print({x: 1, y: 2}.map_values(double))
+print({x: {y: 1}}.map_values(it.map_values(it + 1)))
+s = 5
+print({x: 1}.map_values(it + s))
+r = {map_values: (f) => 7, a: 1}
+print(r.map_values(x => x))

@@ -353,7 +353,7 @@ fn desugar_take_drop_while(recv: Expr, name: &str, mut args: Vec<Expr>, l: usize
 /// it names (`wrap_bound_fn_arg`), for the array reading of every one of them.
 pub(crate) const BOUND_FN_VERBS: &[&str] = &[
     "map", "any", "all", "filter", "where", "count_where", "flat_map", "take_while",
-    "drop_while", "position", "sort_by", "min_by", "max_by",
+    "drop_while", "position", "sort_by", "min_by", "max_by", "map_values",
 ];
 
 /// Let a higher-order method take a *named function* as its single argument:

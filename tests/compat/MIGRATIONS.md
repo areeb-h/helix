@@ -173,3 +173,12 @@ no entry. A source edit is not a behavior change.
   validates inline (`if bad then raise(…) else {rec}`) now hands its callers a known shape, so
   the same refusal reaches a typo after such a call. Additive otherwise; no corpus program or
   golden moved.
+
+- **`map_values` is a Record and Dict method** (2026-09-07). Additive: a program that declared
+  its own `fn map_values(x, f)` still reaches it from any receiver WITHOUT keys (an array, a
+  number) by UFCS, but a record or dict receiver now answers with its own `map_values` — the
+  receiver-owns-the-name rule every method follows (ADR 0045: method, then field, then free
+  fn). A record FIELD named `map_values` holding a function no longer answers `rec.map_values(…)`
+  — the method does, exactly as a field named `keys` never answered `rec.keys()`; read the
+  field without parentheses, or call it as `(rec.map_values)(x)`. No corpus program or golden
+  used the name.

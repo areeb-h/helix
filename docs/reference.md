@@ -4067,6 +4067,17 @@ The number of entries (alias of count).
 2
 ```
 
+### `map_values(f)`
+
+The same keys, each value replaced by f's result; a second binder is the key.
+
+**Note:** The sibling of Record.map_values, in sorted key order like every Dict enumeration. The binder is the value; a second binder, `(v, k) => …`, is the key. `missing` propagates. Keywords: transform values, keep keys, mapValues.
+
+```
+>>> {"a": 1, "b": 2}.map_values(it * 10)
+{"a" => 10, "b" => 20}
+```
+
 ### `remove(k)`
 
 A new dict without the key (absent key is a no-op); the original is unchanged.
@@ -4294,6 +4305,17 @@ The field names as an array of strings, in declaration order.
 ```
 >>> {x: 1, y: 2}.keys()
 ["x", "y"]
+```
+
+### `map_values(f)`
+
+The same fields, in order, each value replaced by f's result; a second binder is the field's name.
+
+**Note:** The binder is the value; a second binder, `(v, k) => …`, is the field's NAME (lodash's mapValues order), which is how `{id: "int", name: "text"}.map_values((v, k) => k)` turns a column spec into a record of column names with the same shape. The checker types the body once per field, so the result keeps the record's shape and a typo after it is refused before anything runs. A bare function name is applied, `rec.map_values(upper)`; `missing` propagates; a field named map_values does not shadow it — a record's own method wins over a same-named field, as `keys` does. Keywords: transform values, keep keys, per-field, record map, mapValues.
+
+```
+>>> {x: 1, y: 2}.map_values(it * 10)
+{x: 10, y: 20}
 ```
 
 ### `values()`

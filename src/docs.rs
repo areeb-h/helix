@@ -3554,6 +3554,17 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
     (
         "Dict",
         DocEntry {
+            name: "map_values",
+            sig: "map_values(f)",
+            doc: "The same keys, each value replaced by f's result; a second binder is the key.",
+            example: "{\"a\": 1, \"b\": 2}.map_values(it * 10)",
+            example_out: "{\"a\" => 10, \"b\" => 20}",
+            notes: "The sibling of Record.map_values, in sorted key order like every Dict enumeration. The binder is the value; a second binder, `(v, k) => …`, is the key. `missing` propagates. Keywords: transform values, keep keys, mapValues.",
+        },
+    ),
+    (
+        "Dict",
+        DocEntry {
             name: "insert",
             sig: "insert(k, v)",
             doc: "A new dict with the pair added (replacing k's value); the original is unchanged.",
@@ -3692,6 +3703,17 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             example: "{x: 1, y: 2}.items()",
             example_out: "[(\"x\", 1), (\"y\", 2)]",
             notes: "",
+        },
+    ),
+    (
+        "Record",
+        DocEntry {
+            name: "map_values",
+            sig: "map_values(f)",
+            doc: "The same fields, in order, each value replaced by f's result; a second binder is the field's name.",
+            example: "{x: 1, y: 2}.map_values(it * 10)",
+            example_out: "{x: 10, y: 20}",
+            notes: "The binder is the value; a second binder, `(v, k) => …`, is the field's NAME (lodash's mapValues order), which is how `{id: \"int\", name: \"text\"}.map_values((v, k) => k)` turns a column spec into a record of column names with the same shape. The checker types the body once per field, so the result keeps the record's shape and a typo after it is refused before anything runs. A bare function name is applied, `rec.map_values(upper)`; `missing` propagates; a field named map_values does not shadow it — a record's own method wins over a same-named field, as `keys` does. Keywords: transform values, keep keys, per-field, record map, mapValues.",
         },
     ),
     (

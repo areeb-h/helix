@@ -52,6 +52,7 @@ use crate::capability::Effect;
 pub(crate) const HIGHER_ORDER_VERBS: &[&str] = &[
     "map", "any", "all", "filter", "where", "count_where", "flat_map", "take_while",
     "drop_while", "position", "sort_by", "min_by", "max_by", "reduce", "scan", "zipmap",
+    "map_values",
 ];
 
 /// The argument positions a higher-order verb calls, or `None` for any other name.

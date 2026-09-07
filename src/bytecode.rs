@@ -819,6 +819,40 @@ impl Compiler {
     /// call re-decided it, and got it wrong: `xs.join(",")` on an untyped parameter went to
     /// a user's `fn join` even though `Array` owns `join` — the walker answered and the VM
     /// raised, which is the divergence class this project treats as worst.
+    /// `map_values` — the keyed twin of `compile_comprehension_split`: a keyed receiver (a
+    /// record, a dict, `missing`) takes the comprehension, and anything else goes to the
+    /// dynamic op — a declared `fn map_values` by UFCS, or the receiver's own "has no method"
+    /// sentence. A record OWNS the name, so a same-named field does not shadow it (ADR 0045's
+    /// order: method, field, free fn — the walker's `Expr::Method` arm decides the same way).
+    ///
+    /// The receiver is addressed by its SLOT throughout, never by the hidden local's name: a
+    /// nested `map_values` inside the argument declares its own `$splitrecv`, and an `Ident`
+    /// resolved after that would read the inner slot — a first cut did, and read `Unit`.
+    fn compile_map_values_split(
+        &mut self,
+        b: &mut Builder,
+        recv: &Expr,
+        args: &[Expr],
+        ufcs: Option<u32>,
+        line: usize,
+        col: usize,
+    ) -> R<()> {
+        self.compile_expr(b, recv)?;
+        let slot = b.declare_local(Self::SPLIT_RECV);
+        b.emit(Op::StoreLocal(slot), line, col);
+        b.emit(Op::LoadLocal(slot), line, col);
+        b.emit(Op::ReceiverIs(RecvClass::Keyed), line, col);
+        let jdyn = b.emit(Op::JumpIfFalse(0), line, col);
+        self.compile_map_values_at(b, slot, args, line, col)?;
+        let jend = b.emit(Op::Jump(0), line, col);
+        let dyn_at = b.code.len() as u32;
+        b.code[jdyn] = Op::JumpIfFalse(dyn_at);
+        self.method_with_fallback(b, slot, "map_values", args, ufcs, line, col)?;
+        let end = b.code.len() as u32;
+        b.code[jend] = Op::Jump(end);
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn method_with_fallback(
         &mut self,
@@ -1987,6 +2021,10 @@ impl Compiler {
                 }
                 if n == "position" {
                     return self.compile_position(b, recv, args, *line, *col);
+                }
+                if n == "map_values" {
+                    let ufcs_fn = self.ufcs_fn_slot(b, free);
+                    return self.compile_map_values_split(b, recv, args, ufcs_fn, *line, *col);
                 }
 
                 // 3. `select`/`group` are DataFrame-only column verbs. A

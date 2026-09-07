@@ -3190,6 +3190,28 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
             Op::CompEndDiscard => {
                 iters.pop();
             }
+            Op::MapValuesInit(with_keys) => {
+                let Some(recv) = stack.pop() else {
+                    return Err(HelixError::new("internal: `map_values` found no receiver", line, col));
+                };
+                match crate::interp::map_values_elements(&recv, *with_keys) {
+                    Some(elements) => stack.push(Value::array(elements)),
+                    None if matches!(recv, Value::Missing) => stack.push(Value::Missing),
+                    None => return Err(crate::interp::not_an_array(&recv, "map_values", line, col)),
+                }
+            }
+            Op::MapValuesFinish => {
+                let (Some(recv), Some(mapped)) = (stack.pop(), stack.pop()) else {
+                    return Err(HelixError::new("internal: `map_values` found no result", line, col));
+                };
+                stack.push(match mapped {
+                    Value::Array(a) => {
+                        crate::interp::map_values_rebuild(&recv, a.to_values().into_owned())
+                    }
+                    // `missing`, propagated by the loop's own landing.
+                    other => other,
+                });
+            }
             Op::CompFindTest { want, idx_slot, short_target } => {
                 // ADR 0024: this `unwrap` cannot fire. `CompFindTest` is emitted at
                 // exactly one site — `compile_position`, immediately after
