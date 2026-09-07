@@ -182,3 +182,20 @@ no entry. A source edit is not a behavior change.
   — the method does, exactly as a field named `keys` never answered `rec.keys()`; read the
   field without parentheses, or call it as `(rec.map_values)(x)`. No corpus program or golden
   used the name.
+
+- **A call through a function-valued field or a function value is checked** (2026-09-07).
+  `r = {f: (x: Int) => x}` then `r.f("s")`, `(r.f)("s")`, `r.f(1, 2)` or `(fs[0])("s")` is refused
+  by `check` in the sentence a call by name draws — "argument 1 of `f` should be Int, found a
+  value of type String", "`f` takes 1 argument, got 2" — where the first two used to pass and
+  run (an annotation is a check-time contract, not a run-time guard, so a body that happened not
+  to mind the wrong type ran). This is the rule 1.45c set for named functions, reaching the
+  other two spellings; a lambda without annotations is unchanged, and so is a field the checker
+  cannot type. One corpus program moved: `t11_diag` reached the runtime's arity sentence through
+  `try (fs[0])(1, 2)`, which is refused statically now, and launders the value through `Any` so
+  the sentence it pins stays the runtime's. No golden moved.
+
+- **An annotated `Record`/`Dict`/`Tuple`/`Function`/`Array` parameter keeps the argument's
+  shape under specialization** (2026-09-07). `fn define(spec: Record) = {c: spec.columns}` then
+  `define({columns: {id: 1}}).c.nmae` is refused as "record has no field `nmae`" where it used
+  to pass and raise at run time — the refusal the unannotated `define` already drew. `Any` still
+  opts out. No corpus program or golden moved.

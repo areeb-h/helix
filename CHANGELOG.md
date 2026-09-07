@@ -192,6 +192,29 @@
 
 ### Changed
 
+- **An open-kind annotation filters the kind and keeps the argument's shape.** `fn define(spec:
+  Record) = {c: spec.columns}` refused `define(["id", "name"])` — the wrong kind, a real
+  beginner's mistake — and, under call-site specialization, erased the shape it had just
+  admitted, so `define({columns: …}).c.nmae` passed while the unannotated `define` refused it:
+  a library had to choose which mistake to catch (field build, 1.44b). `Record`, `Dict`,
+  `Tuple`, `Function` and `Array` now FILTER at the call and then take the argument's shape into
+  the body, exactly as an unannotated parameter does; `Any` stays the opt-out, and a closed
+  annotation (`Int`, `Float`, `String`, …) keeps itself. Precision only, as before: a body that
+  does not type under the argument keeps the definition's answer. Pinned by
+  `an_open_kind_annotation_filters_the_kind_and_keeps_the_shape`.
+
+- **A call through a function-valued field, or a function value, checks the lambda's
+  annotations and arity.** `r = {f: (x: Int) => x}` followed by `r.f("s")` passed `helix check`
+  where `g = (x: Int) => x; g("s")` was refused — the annotations vanished the moment the lambda
+  was stored in a record, and a record of lambdas called as methods is the recommended way to
+  build a library here (field build, 1.45e: 25 annotated exports, 15 annotated field lambdas,
+  none of them enforced through `M.sql(…)`). `rec.f(x)` and `(rec.f)(x)` are checked as a call
+  by name is — one `check_call` for all three spellings — in the runtime's own words: "`f` takes
+  1 argument, got 2", "argument 1 of `f` should be Int, found a value of type String"; a value
+  the checker cannot type stays permissive, and a record's own method still wins over a field
+  of its name. Pinned by `a_call_through_a_field_or_a_value_checks_the_lambda` and
+  `a_field_call_and_an_open_kind_annotation_are_checked_on_every_engine` (three engines).
+
 - **`raise` has the type `Never`.** `if bad then raise("…") else {rec}` typed as Unknown —
   `raise` was `Unknown`, and Unknown absorbs every join — so a constructor that validates
   inline lost the shape call-site specialization had just given it, and the field build hoisted

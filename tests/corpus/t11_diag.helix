@@ -3,6 +3,9 @@ print((try ((1, "a") < (1, 2))).error)
 print(round(tensor([1.0e30]))[0])
 r = try [3, missing, 1].sort()
 print(r.error)
-fs = [(x => x)]
+# The arity sentence under test is the RUNTIME's: a value the checker can type is refused
+# before it runs, so the function goes through `Any` first.
+fn launder(f: Any) = f
+fs = [launder(x => x)]
 a2 = try (fs[0])(1, 2)
 print(a2.error)

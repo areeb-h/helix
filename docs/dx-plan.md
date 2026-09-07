@@ -416,11 +416,20 @@ the hidden local's name, because a nested call inside the argument declares its 
 (`interp::map_values_shape`) shared with the checker, which types the body once per field
 (`Checker::map_values_type`). Found on the way: a field typed Unknown was refused when called
 ("a field, not a method") though it held a function — fixed in `record_method_type`.
-`{...dict}` stays a runtime shape. Filed by the field on 47f5cf8 and OPEN: 1.44b (an open-kind
-annotation should filter the kind and keep the argument's shape under specialization), 1.45e
-(a call through a function-valued field, `rec.f("s")`, and through a function value,
-`(rec.f)("s")`, should check the lambda's annotations and arity as a call by name does), 1.49
-(more than one `...spread` in a record literal, later ones winning).
+`{...dict}` stays a runtime shape. Filed by the field on 47f5cf8: 1.44b and 1.45e DONE
+(below); 1.49 (more than one `...spread` in a record literal, later ones winning) is a
+language change, presented to the user.
+
+**1.44b + 1.45e (2026-09-07) — annotations that filter, and calls that check.** DONE. 1.44b:
+`Checker::specialize` binds an annotated OPEN kind (`Record`/`Dict`/`Tuple`/`Function`/`Array`
+— `TypeAnn` names) to the argument's type when the annotation admits it and it is more
+precise, so `spec: Record` refuses a wrong kind at the call AND hands the body the shape
+(precision only, as for an unannotated parameter); `Any` opts out; a closed annotation keeps
+itself. 1.45e: one `Checker::check_call(name, params, required, args)` — arity in the
+runtime's words via `interp::arity_err`, then `annotation_admits` per argument — used by
+`synth_call`, by the Record arm of `synth_method` for a field holding `Type::Function` (only
+where the record does not own the name), and by `Expr::CallValue` under `callee.call_label()`,
+the label the walker's own arity error uses. A field the checker cannot type stays permissive.
 
 **1.46.3 (2026-09-05) — Record enumeration cost.** DONE for the allocation half:
 `Symbol::as_rc_string` (a per-thread `FxHashMap<u32, Rc<String>>`) shares one allocation per

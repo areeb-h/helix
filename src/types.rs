@@ -823,7 +823,8 @@ impl Checker {
 
     /// CALL-SITE SPECIALIZATION (field build, 1.44). A call to a checked `fn` whose
     /// unannotated parameters receive informative argument types re-types the body with
-    /// those types bound (annotated parameters keep their annotation), and answers the
+    /// those types bound (an open-kind annotation filters the kind and then takes the
+    /// argument's shape too; a closed one keeps itself — 1.44b), and answers the
     /// result when it is more precise than the stored return type. Memoized per function and
     /// argument-type tuple; a call to a function whose body is being specialized — under any
     /// arguments — answers the stored signature (the in-progress guard, by name: see
@@ -847,12 +848,27 @@ impl Checker {
         let mut bind: Vec<Type> = Vec::with_capacity(params.len());
         let mut informative = false;
         for (i, p) in params.iter().enumerate() {
-            // An UNANNOTATED parameter takes the argument's type; an annotated one keeps its
-            // annotation — and `x: Any` is therefore the way to keep a function opaque on
-            // purpose (a laundering `fn launder(x: Any) = x` stays a laundering).
-            let unannotated = fb.params.get(i).is_some_and(|(_, ann)| ann.is_none());
-            bind.push(match (p, args.get(i)) {
-                (Type::Unknown, Some(a)) if unannotated && !matches!(a, Type::Unknown | Type::Missing | Type::Never) => {
+            // An UNANNOTATED parameter takes the argument's type. An annotated OPEN KIND —
+            // `Record`, `Dict`, `Tuple`, `Function`, `Array` — FILTERS the kind at the call
+            // and then takes the argument's shape too (field build, 1.44b: `spec: Record`
+            // refused a wrong kind AND erased the shape it had just admitted, so a library
+            // had to choose which mistake to catch). A closed annotation keeps itself:
+            // `x: Any` is the opt-out (a laundering `fn launder(x: Any) = x` stays a
+            // laundering), and `x: Int` already says everything a call could.
+            let refines = fb.params.get(i).is_some_and(|(_, ann)| match ann {
+                None => true,
+                Some(a) => matches!(
+                    a,
+                    TypeAnn::Record | TypeAnn::Dict | TypeAnn::Tuple | TypeAnn::Function | TypeAnn::Array
+                ),
+            });
+            bind.push(match args.get(i) {
+                Some(a)
+                    if refines
+                        && !matches!(a, Type::Unknown | Type::Missing | Type::Never)
+                        && a != p
+                        && annotation_admits(p, a) =>
+                {
                     informative = true;
                     a.clone()
                 }
@@ -1165,16 +1181,24 @@ impl Checker {
                 }
                 self.synth_method(recv, name, ufcs.as_deref(), args, *line, *col)
             }
-            Expr::CallValue { callee, args, .. } => {
-                // Calling a first-class function *value* — its parameter/return types
-                // aren't tracked statically (functions live in records/arrays as opaque
-                // values). Check the callee and args for their own errors, then yield
-                // Unknown, matching the permissive treatment of dynamic access.
-                self.synth(callee)?;
+            Expr::CallValue { callee, args, line, col } => {
+                // Calling a function VALUE. Where the checker knows the value's type — a
+                // lambda held in a record field, `(rec.f)(x)`, or in an array — the call is
+                // checked as a call by name is, arity and annotations, under the label the
+                // runtime's own arity error uses (field build, 1.45e). Anything else stays
+                // permissive: Unknown.
+                let ct = self.synth(callee)?;
+                let mut ats = Vec::with_capacity(args.len());
                 for a in args {
-                    self.synth(a)?;
+                    ats.push(self.synth(a)?);
                 }
-                Ok(Type::Unknown)
+                match ct {
+                    Type::Function { params, ret, required, .. } => {
+                        self.check_call(&callee.call_label(), &params, required, &ats, *line, *col)?;
+                        Ok(*ret)
+                    }
+                    _ => Ok(Type::Unknown),
+                }
             }
             Expr::Index {
                 recv,

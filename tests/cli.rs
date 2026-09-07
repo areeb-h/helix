@@ -16413,3 +16413,28 @@ fn map_values_keeps_the_keys_on_every_engine() {
     assert_ne!(code, Some(0), "{out}");
     assert!(err.contains("no field `nmae`"), "{err}");
 }
+
+/// A call through a function-valued field is checked before anything runs (field build,
+/// 1.45e), and an open-kind annotation keeps the argument's shape (1.44b): a model's object
+/// API, `M.sql(…)`, is refused for a wrong argument the way `sql(M, …)` by name is, and its
+/// column record is a known shape through `spec: Record`. The valid program runs on every
+/// engine.
+#[test]
+fn a_field_call_and_an_open_kind_annotation_are_checked_on_every_engine() {
+    let src = "sep = \" and \"\nfn define(spec: Record) = {table: spec.table, c: spec.columns.map_values((v, k) => k), sql: (conds: Array) => \"select * from {spec.table} where {conds.join(sep)}\"}\nM = define({table: \"people\", columns: {id: \"int\", name: \"text\"}})\nprint(M.c.name, M.sql([\"age > 1\"]))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("field_call_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "name select * from people where age > 1\n", "{name}");
+    }
+    for (tag, extra, want) in [
+        ("typo", "print(M.c.nmae)\n", "no field `nmae`"),
+        ("kind", "print(M.sql(\"age > 1\"))\n", "argument 1 of `sql` should be Array, found a value of type String"),
+        ("arity", "print(M.sql())\n", "`sql` takes 1 argument, got 0"),
+        ("spec", "print(define([\"id\"]))\n", "should be Record"),
+    ] {
+        let (out, err, code) = run_source(&format!("{src}{extra}"), &[], &format!("field_call_{tag}"));
+        assert_ne!(code, Some(0), "{tag}: {out}");
+        assert!(err.contains(want), "{tag}: {err}");
+    }
+}

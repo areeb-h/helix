@@ -476,3 +476,47 @@ p_expr(toks, 0).node.k
         ok("fn mk(f: Any) = {f: f, a: 1}\nmk((x) => x + 1).f(1) + 1");
         assert!(emsg("{a: 1}.a()").contains("not a method"));
     }
+
+    /// An open-kind annotation FILTERS the kind and keeps the argument's shape (field build,
+    /// 1.44b): `spec: Record` refused a wrong kind and, under call-site specialization,
+    /// erased the shape it had just admitted, so a library had to choose which mistake to
+    /// catch. `Any` stays the opt-out; a closed annotation keeps itself.
+    #[test]
+    fn an_open_kind_annotation_filters_the_kind_and_keeps_the_shape() {
+        assert!(emsg("fn define(spec: Record) = {c: spec.columns}\ndefine({columns: {id: 1, name: 2}}).c.nmae").contains("no field `nmae`"));
+        ok("fn define(spec: Record) = {c: spec.columns}\ndefine({columns: {id: 1, name: 2}}).c.name");
+        assert!(emsg("fn define(spec: Record) = {c: spec.columns}\ndefine([\"id\", \"name\"])").contains("should be Record"));
+        assert!(emsg("fn first(t: Tuple) = t[0]\nfirst(({a: 1}, {a: 2})).nmae").contains("no field `nmae`"));
+        assert!(emsg("fn heads(xs: Array) = xs.map(it.a)\nheads([{a: {b: 1}}])[0].nmae").contains("no field `nmae`"));
+        assert!(emsg("fn call(f: Function) = f(1)\ncall((x: Int) => {v: x}).nmae").contains("no field `nmae`"));
+        // A body that does not type under the argument keeps the definition's answer.
+        ok("fn heads(xs: Array) = xs.map(it + 1)\nheads([\"a\"])");
+        // `Any` still opts out; a closed annotation keeps itself.
+        ok("fn launder(x: Any) = x\nlaunder({a: 1}).nmae");
+        ok("fn half(x: Float) = x / 2\nhalf(1) + 1");
+    }
+
+    /// A call through a function-valued field, `rec.f(x)`, and through a function value,
+    /// `(rec.f)(x)`, checks the lambda's annotations and arity as a call by name does, in the
+    /// runtime's words (field build, 1.45e: the annotations vanished the moment the lambda
+    /// was stored in a record, and the field call is how a library is built here).
+    #[test]
+    fn a_call_through_a_field_or_a_value_checks_the_lambda() {
+        let r = "r = {f: (x: Int) => x + 1, g: (a, b: String) => a}\n";
+        assert!(emsg(&format!("{r}r.f(\"s\")")).contains("argument 1 of `f` should be Int, found a value of type String"));
+        assert!(emsg(&format!("{r}(r.f)(\"s\")")).contains("argument 1 of `f` should be Int"));
+        assert!(emsg(&format!("{r}r.f(1, 2)")).contains("`f` takes 1 argument, got 2"));
+        assert!(emsg(&format!("{r}(r.f)()")).contains("`f` takes 1 argument, got 0"));
+        assert!(emsg(&format!("{r}r.g(1, 2)")).contains("argument 2 of `g` should be String"));
+        ok(&format!("{r}r.f(1) + r.g(1, \"s\")"));
+        // Through a constructor, and through a spread.
+        ok("fn mk() = {f: (x: Int) => x}\nmk().f(1)");
+        assert!(emsg("fn mk() = {f: (x: Int) => x}\nmk().f(\"s\")").contains("should be Int"));
+        assert!(emsg("base = {f: (x: Int) => x}\nr = {...base, n: 1}\nr.f(\"s\")").contains("should be Int"));
+        // A field the record's OWN method name shadows is the method, not the field.
+        ok("r = {keys: (x: Int) => x}\nr.keys()");
+        // A value the checker cannot type stays permissive; one it can is checked under the
+        // label the runtime's arity error uses.
+        ok("fn mk(f: Any) = {f: f}\nmk((x: Int) => x).f(\"s\")");
+        assert!(emsg("fs = [(x: Int) => x]\n(fs[0])(\"s\")").contains("argument 1 of `fs[0]` should be Int"));
+    }

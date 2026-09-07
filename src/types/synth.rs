@@ -179,6 +179,41 @@ impl super::Checker {
         }
     }
 
+    /// What a call checks against a function TYPE — the arity, in the runtime's words, then
+    /// each argument against its parameter's annotation — the same for a call by name, a call
+    /// through a function-valued field (`rec.f(x)`) and a call through a function value
+    /// (`(rec.f)(x)`) (field build, 1.45e: a lambda's annotations stopped being enforced the
+    /// moment it was stored in a record, and the field call is how a library is built here).
+    pub(super) fn check_call(
+        &self,
+        name: &str,
+        params: &[Type],
+        required: usize,
+        args: &[Type],
+        line: usize,
+        col: usize,
+    ) -> Result<(), HelixError> {
+        if args.len() < required || args.len() > params.len() {
+            return Err(crate::interp::arity_err(name, required, params.len(), args.len(), line, col));
+        }
+        for (i, (p, a)) in params.iter().zip(args.iter()).enumerate() {
+            if !annotation_admits(p, a) {
+                return Err(HelixError::new(
+                    format!(
+                        "argument {} of `{}` should be {}, found a value of type {}",
+                        i + 1,
+                        name,
+                        p,
+                        a
+                    ),
+                    line,
+                    col,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn synth_call(
         &mut self,
         name: &str,
@@ -203,24 +238,7 @@ impl super::Checker {
         if let Some(Type::Function { params, ret, required, origin }) = self.env.get(name).cloned() {
             // Outside `required..=params.len()` — and in the runtime's words, so the
             // refusal reads the same whether the checker or an engine gives it.
-            if args.len() < required || args.len() > params.len() {
-                return Err(crate::interp::arity_err(name, required, params.len(), args.len(), line, col));
-            }
-            for (i, (p, a)) in params.iter().zip(args.iter()).enumerate() {
-                if !annotation_admits(p, a) {
-                    return Err(HelixError::new(
-                        format!(
-                            "argument {} of `{}` should be {}, found a value of type {}",
-                            i + 1,
-                            name,
-                            p,
-                            a
-                        ),
-                        line,
-                        col,
-                    ));
-                }
-            }
+            self.check_call(name, &params, required, args, line, col)?;
             // An argument-dependent return shape reaches the call (field build, 1.44):
             // `mk({columns: {id: 1, name: 2}}).c.nmae` is refused because the body was
             // re-typed with the record it was given. Precision only — see `specialize`.
@@ -466,6 +484,21 @@ impl super::Checker {
                 // A LITERAL key reads the shape the way `.k` does (field build, 1.44a).
                 if let Some(t) = self.literal_key_read(name, &fields, args)? {
                     return Ok(t);
+                }
+                // A FUNCTION-VALUED FIELD called as a method is checked as a call by name is
+                // (field build, 1.45e): its lambda's annotations and arity, in the same
+                // words. Only where the record does not own the name — its own methods win.
+                if let Some((_, Type::Function { params, ret, required, .. })) =
+                    fields.iter().find(|(f, _)| f == name)
+                    && !crate::registry::type_owns_method("Record", name)
+                {
+                    let (params, ret, required) = (params.clone(), ret.clone(), *required);
+                    let mut ats = Vec::with_capacity(args.len());
+                    for a in args {
+                        ats.push(self.synth(a.bound_origin())?);
+                    }
+                    self.check_call(name, &params, required, &ats, line, col)?;
+                    return Ok(*ret);
                 }
                 match record_method_type(name, &fields, line, col) {
                     Ok(t) => {

@@ -1826,7 +1826,7 @@ Define a function. Parameter and return annotations are optional, checked by `he
 
 `fn area(w: Int, h: Int) -> Int = w * h`
 
-**Note:** Type names: `Int`, `Float`, `Num` (either), `String`, `Bool`, `Array`, `Record`, `Dict`, `Tuple`, `Function`, `DataFrame`, `Tensor`, `Dna`, `Any`. An `Int` annotation refuses a Float argument; a `Float` one accepts an Int. `Record`, `Dict`, `Tuple` and `Function` say what KIND of value arrives without fixing its shape: a wrong kind is refused at the call, and the value's fields and methods stay open inside the body. A lambda takes the same annotations: `(x: Int) => x + 1`. A call to a function with an UNANNOTATED parameter re-types its body with what the call passes, so a shape computed from an argument reaches the caller; `x: Any` opts a parameter out of that. Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed.
+**Note:** Type names: `Int`, `Float`, `Num` (either), `String`, `Bool`, `Array`, `Record`, `Dict`, `Tuple`, `Function`, `DataFrame`, `Tensor`, `Dna`, `Any`. An `Int` annotation refuses a Float argument; a `Float` one accepts an Int. `Record`, `Dict`, `Tuple` and `Function` say what KIND of value arrives without fixing its shape: a wrong kind is refused at the call, and inside the body the value's fields and methods are open. A lambda takes the same annotations: `(x: Int) => x + 1`. A call to a function whose parameter is unannotated, or annotated with an open kind (`Record`, `Dict`, `Tuple`, `Function`, `Array`), re-types its body with what the call passes, so a shape computed from an argument reaches the caller; `x: Any` opts a parameter out of that. Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed.
 
 ```
 >>> fn area(w: Int, h: Int) -> Int = w * h
@@ -1854,7 +1854,7 @@ An anonymous function value, bindable to a name or passed to a method.
 
 `(x) => expr`
 
-**Note:** The form to use inside `do { }`, where `fn` is not allowed. A function stored in a record field is called as a method: `rec.f(x)`. Parameters take the annotations a `fn` does: `(x: Int, y: Int) => x + y`. Keywords: closure, anonymous, arrow, callback, function value, higher order.
+**Note:** The form to use inside `do { }`, where `fn` is not allowed. A function stored in a record field is called as a method: `rec.f(x)`. Parameters take the annotations a `fn` does: `(x: Int, y: Int) => x + y` — and they hold wherever the lambda is called from: by name, as a record field `rec.f(x)`, or as a value `(rec.f)(x)`, `helix check` refuses a wrong argument or count the same way. Keywords: closure, anonymous, arrow, callback, function value, higher order.
 
 ```
 >>> double = (x) => x * 2
