@@ -924,18 +924,18 @@ fn cli_jit_explain(args: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-        let types = match types::check(&loaded.stmts) {
+        let mut types = match types::check(&loaded.stmts) {
             Ok(t) => t,
             Err(e) => {
                 eprint!("{}", render_err(e, &loaded.spans, loaded.multi_module));
                 return ExitCode::FAILURE;
             }
         };
-        ufcs::resolve_by_type(&mut loaded.stmts, &types);
-        if let Err(e) = fold::fold_program(&mut loaded.stmts) {
+        if let Err(e) = fold::fold_program(&mut loaded.stmts, &mut types) {
             eprint!("{}", render_err(e, &loaded.spans, loaded.multi_module));
             return ExitCode::FAILURE;
         }
+        ufcs::resolve_by_type(&mut loaded.stmts, &types);
         let Ok(prog) = bytecode::compile_with_types(&loaded.stmts, Some(types)) else {
             eprintln!("internal error: the compiler could not lower a type-checked program (please report)");
             return ExitCode::FAILURE;
@@ -1936,18 +1936,18 @@ fn run_emit_hbc(args: &[String]) -> ExitCode {
             }
         };
         // Type-check so the compiler routes receiver-polymorphic methods correctly.
-        let types = match types::check(&loaded.stmts) {
+        let mut types = match types::check(&loaded.stmts) {
             Ok(t) => t,
             Err(e) => {
                 eprint!("{}", render_err(e, &loaded.spans, loaded.multi_module));
                 return ExitCode::FAILURE;
             }
         };
-        ufcs::resolve_by_type(&mut loaded.stmts, &types);
-        if let Err(e) = fold::fold_program(&mut loaded.stmts) {
+        if let Err(e) = fold::fold_program(&mut loaded.stmts, &mut types) {
             eprint!("{}", render_err(e, &loaded.spans, loaded.multi_module));
             return ExitCode::FAILURE;
         }
+        ufcs::resolve_by_type(&mut loaded.stmts, &types);
         // Compile to bytecode (total for any type-checked program).
         let program = match bytecode::compile_with_types(&loaded.stmts, Some(types)) {
             Ok(p) => p,
@@ -2327,14 +2327,15 @@ fn check_file_structured(path: &std::path::Path) -> Result<module::Loaded, modul
     // The loaded graph is handed back so `--lint` can walk the imports (`lint_units`);
     // the combinator form could not, because the error arm borrows `loaded` while the ok
     // arm has to move it.
-    if let Err(e) = types::check(&loaded.stmts) {
-        return Err(structured_diag(e, &loaded));
-    }
+    let mut types = match types::check(&loaded.stmts) {
+        Ok(t) => t,
+        Err(e) => return Err(structured_diag(e, &loaded)),
+    };
     // What a run evaluates before it starts, `check` evaluates too (ADR 0050): a raise a
     // pure call with literal arguments meets unconditionally at the top level is reported
     // like the type error above — and only once the checker is satisfied, so a type error
     // outranks it.
-    if let Err(e) = fold::fold_program(&mut loaded.stmts) {
+    if let Err(e) = fold::fold_program(&mut loaded.stmts, &mut types) {
         return Err(structured_diag(e, &loaded));
     }
     Ok(loaded)
@@ -2368,11 +2369,12 @@ fn check_file_capture(path: &std::path::Path) -> Result<module::Loaded, String> 
     if let Some(e) = climain_violation(&loaded.stmts, loaded.entry_prefix.as_deref()) {
         return Err(render_err(e, &loaded.spans, loaded.multi_module));
     }
-    if let Err(e) = types::check(&loaded.stmts) {
-        return Err(render_err(e, &loaded.spans, loaded.multi_module));
-    }
+    let mut types = match types::check(&loaded.stmts) {
+        Ok(t) => t,
+        Err(e) => return Err(render_err(e, &loaded.spans, loaded.multi_module)),
+    };
     // The fold's raise, after the checker — see `check_file_structured`.
-    if let Err(e) = fold::fold_program(&mut loaded.stmts) {
+    if let Err(e) = fold::fold_program(&mut loaded.stmts, &mut types) {
         return Err(render_err(e, &loaded.spans, loaded.multi_module));
     }
     // Handed back for `--lint`'s import traversal — see `lint_units`.
@@ -3345,7 +3347,7 @@ fn strip_mangling(s: &str) -> String {
 
 /// Type-check and run an already-loaded program. On failure returns the rendered,
 /// caret-annotated error (with namespacing prefixes stripped for multi-file runs).
-fn run_program(program: &mut [ast::Stmt], spans: &[module::Span], multi: bool) -> Result<(), String> {
+fn run_program(program: &mut Vec<ast::Stmt>, spans: &[module::Span], multi: bool) -> Result<(), String> {
     // Publish "which file is this line in?" for `source_path`, which a builtin cannot work
     // out for itself: it is dispatched by name and receives only its call position.
     module::set_file_lines(
@@ -3353,15 +3355,17 @@ fn run_program(program: &mut [ast::Stmt], spans: &[module::Span], multi: bool) -
     );
     // The inferred receiver types feed the compiler so it can route
     // receiver-polymorphic methods (DataFrame/Tensor column-verbs) correctly.
-    let types = types::check(program).map_err(|e| render_err(e, spans, multi))?;
+    let mut types = types::check(program).map_err(|e| render_err(e, spans, multi))?;
+    // A pure call with literal arguments is evaluated now, once, and replaced by its value
+    // (ADR 0050), and a call is specialized for what its site knows (ADR 0051) — after the
+    // checker, so it typed the call the programmer wrote and a type error outranks a raise
+    // the fold would report; before the receiver-directed rewrite, which needs the types the
+    // fold gives the nodes it makes; before the engines, so all three run the one program
+    // the fold produced.
+    fold::fold_program(program, &mut types).map_err(|e| render_err(e, spans, multi))?;
     // The receiver decides where it is known (src/ufcs.rs); every engine below runs
     // the same rewritten program, the JIT included.
     ufcs::resolve_by_type(program, &types);
-    // A pure call with literal arguments is evaluated now, once, and replaced by its value
-    // (ADR 0050) — after the checker, so it typed the call the programmer wrote and a type
-    // error outranks a raise the fold would report; before the engines, so all three run
-    // the one program the fold produced.
-    fold::fold_program(program).map_err(|e| render_err(e, spans, multi))?;
 
     // The tree-walker now runs only under `HELIX_NOVM=1` (A/B benchmarking and the
     // engine-agreement oracle). `try` used to force the whole program here — and with

@@ -99,6 +99,13 @@ pub static ENV: &[EnvDoc] = &[
         notes: "The A/B switch for what a fold costs before the program runs and saves while it runs. Same rule as HELIX_NOJIT: speed changes, answers do not — a fold replaces a call by the value the call computes. The one observable difference is WHEN a raise such a call meets unconditionally at the top level is reported: before anything runs, or when the call runs. Keywords: fold, constant folding, disable, load, oracle, differential, debug.",
     },
     EnvDoc {
+        name: "HELIX_NOSPECIALIZE",
+        values: "any value (presence is what counts)",
+        default: "unset — a call is specialized for what its site knows",
+        doc: "Turns load-time specialization off (ADR 0051): no clone of a function is made for a call site's record shape or constants, and a method through a held record is not seen through.",
+        notes: "The A/B switch for what specialization saves. Same rule as HELIX_NOFOLD, which it rides on: speed changes, answers do not. Keywords: specialize, shape, clone, devirtualize, disable, oracle, differential, debug, load.",
+    },
+    EnvDoc {
         name: "HELIX_DF_ENGINE",
         values: "polars | native",
         default: "native (the shipped engine); polars only when explicitly asked for",

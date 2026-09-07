@@ -352,6 +352,18 @@ impl Interp {
         self.globals.remove(name);
     }
 
+    /// The value a top-level name holds, if any.
+    pub(crate) fn global_value(&self, name: &str) -> Option<&Value> {
+        self.globals.get(name).map(|b| &b.value)
+    }
+
+    /// Hold `value` under a top-level immutable name — a binding hoisted for a
+    /// devirtualized closure (ADR 0051), given to the sandbox directly as the engines will
+    /// be given it by the statement placed first.
+    pub(crate) fn hold_global(&mut self, name: String, value: Value) {
+        self.globals.insert(name, Binding { value, mutable: false });
+    }
+
     /// Resolve a name: the current frame's locals first, then the globals —
     /// the VM's local→upvalue→`LoadGlobal` order.
     fn lookup(&self, name: &str) -> Option<&Binding> {

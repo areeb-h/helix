@@ -1,4 +1,5 @@
-//! Constant folding of pure calls with literal arguments (ADR 0050).
+//! Constant folding of pure calls with literal arguments (ADR 0050), and the specialization
+//! that rides on it (ADR 0051, `specialize`).
 //!
 //! A call to one of the program's own functions whose arguments are literals — or names
 //! bound to literals at the top level — is evaluated ONCE, before the program runs, in a
@@ -10,9 +11,9 @@
 //! mutable global, a binding it could not evaluate, a parameter), a write to a mutable
 //! global, a recursion deeper than [`MAX_DEPTH`], and more work than a budget of calls and
 //! elements — handed to a loop, a method or a builtin, or produced by one. A callee the
-//! sandbox abandoned is not tried again in that program. A refusal abandons the fold and the call stays
-//! exactly as written — the runtime runs it as it always did, so a fold can never change what
-//! a program computes, only when.
+//! sandbox abandoned is not tried again in that program. A refusal abandons the fold and the
+//! call stays exactly as written — the runtime runs it as it always did, so a fold can never
+//! change what a program computes, only when.
 //!
 //! A GENUINE raise during a fold — the callee refusing its argument — is the program's own
 //! error. At a position that runs unconditionally at the top level it is reported before
@@ -20,18 +21,28 @@
 //! `match`, `try`, `and`/`or`/`??`, in a lambda or a method's body, inside a function — the
 //! call stays and raises at run time as before.
 //!
-//! The pass runs AFTER the checker and the receiver-directed rewrite (`ufcs`), in every
-//! pipeline that runs, checks or bundles a program (`main::run_program`, the compile paths,
-//! `check_file_structured`/`check_file_capture`, `bundle::build`). The checker types what the
-//! programmer wrote — a fold never adds precision a call lacked, so `launder(true)` typed
-//! `Any` stays `Any`, and a type error outranks a raise, since the fold only runs on a
-//! program the checker accepted — and every engine runs the one program the fold produced.
+//! The pass runs AFTER the checker, before the receiver-directed rewrite (`ufcs`), in every
+//! pipeline that runs, checks or bundles a program. The checker types what the programmer
+//! wrote — a fold never adds precision a call lacked, so `launder(true)` typed `Any` stays
+//! `Any`, and a type error outranks a raise, since the fold only runs on a program the
+//! checker accepted — and every engine runs the one program the fold produced. The
+//! checker's types are keyed by node address: a node this pass makes from a typed one
+//! inherits its types, and a node it drops is forgotten.
+//!
+//! What folds besides a call: a method on a literal receiver (`missing.is_missing()`,
+//! `["a", "b"].all(…)`), an operator on literals, a field of a record the sandbox holds, an
+//! interpolation of held names — and the branch a literal condition selects (`simplify`).
+//! These are what make a specialized clone collapse to the work its runtime values need.
 //!
 //! Two rules keep the pass cheap and honest. A top-level binding is evaluated ON DEMAND —
 //! when an attempt meets its name — never eagerly, so a program whose calls fold nothing
 //! pays for nothing but the walk. And a fold rewrites IN PLACE: it replaces one node by its
-//! literal and never re-allocates another, because the checker's type map names nodes by
-//! address and the compiler reads receiver types from it after the fold.
+//! literal and never re-allocates another. A name bound locally — a parameter, a `let`, a
+//! lambda's own — is never the global of that name, so a body reading its parameter `M`
+//! folds nothing of a top-level `M`.
+
+mod simplify;
+mod specialize;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -40,7 +51,10 @@ use std::rc::Rc;
 use crate::ast::{BinOp, Expr, InterpPart, Stmt};
 use crate::error::HelixError;
 use crate::interp::Interp;
-use crate::value::Value;
+use crate::types::TypeMap;
+use crate::value::{FuncVal, Value};
+
+use specialize::{Binding, Specializer};
 
 thread_local! {
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
@@ -67,7 +81,7 @@ const FUEL_PER_PROGRAM: u64 = 10_000;
 /// for the walker's depth.
 pub(crate) const MAX_DEPTH: usize = 256;
 /// The largest literal a fold writes back, in AST nodes; a larger value stays a call.
-const MAX_LITERAL_NODES: usize = 4_096;
+pub(super) const MAX_LITERAL_NODES: usize = 4_096;
 
 /// Whether a sandboxed evaluation is under way — the hooks outside the interpreter (the
 /// authority gate, the Python bridge, the array and tensor method entries) consult this.
@@ -150,6 +164,10 @@ struct Sandbox {
     /// budget — by the label `candidate_label` gives them: not tried again in this program,
     /// so a benchmark's `fib(30)` costs one abandoned attempt, not one per call.
     futile: HashSet<String>,
+    /// The nodes of the sandbox's copies of the program's lambda bodies. A copy outlives
+    /// the copying — the walker's closures hold it — so it is given the checker's types of
+    /// the body it was copied from, and those are forgotten when the sandbox is.
+    typed_copies: Vec<Vec<*const Expr>>,
 }
 
 /// How an attempt ended without the program's own raise.
@@ -163,7 +181,7 @@ enum Outcome {
 }
 
 impl Sandbox {
-    fn new(program: &[Stmt]) -> Self {
+    fn new(program: &[Stmt], sp: &mut Specializer) -> Self {
         let mut interp = Interp::sandbox();
         let muts: HashSet<String> = program
             .iter()
@@ -195,22 +213,53 @@ impl Sandbox {
                 _ => Vec::new(),
             })
             .collect();
-        let mut funcs: Vec<Stmt> = program
-            .iter()
-            .filter(|s| matches!(s, Stmt::Func { name, .. } if !assigned.contains(name.as_str())))
-            .cloned()
-            .collect();
-        // The sandbox's copies own their lambda bodies. `fold_expr` rewrites the program's
-        // bodies in place, and a body shared with the sandbox would have to be re-allocated
-        // to be written — moving every node inside it away from the address the checker's
-        // type map knows it by.
-        for f in &mut funcs {
-            if let Stmt::Func { body, .. } = f {
-                unshare_lambdas(body);
+        let mut sb = Sandbox {
+            interp,
+            program_fuel: FUEL_PER_PROGRAM,
+            pending: HashMap::new(),
+            futile: HashSet::new(),
+            typed_copies: Vec::new(),
+        };
+        for s in program {
+            if matches!(s, Stmt::Func { name, .. } if !assigned.contains(name.as_str())) {
+                sb.hoist_fn(s, sp);
             }
         }
-        let _ = interp.run(&funcs);
-        Sandbox { interp, program_fuel: FUEL_PER_PROGRAM, pending: HashMap::new(), futile: HashSet::new() }
+        sb
+    }
+
+    /// Define a top-level function in the sandbox, from a copy that owns its lambda bodies.
+    /// `fold_expr` rewrites the program's bodies in place, and a body shared with the
+    /// sandbox would have to be re-allocated to be written — moving every node inside it
+    /// away from the address the checker's type map knows it by. The copy's lambda bodies
+    /// are what the walker's closures will hold, so they are given the types of the bodies
+    /// they were copied from — a closure devirtualized later is typed through them.
+    fn hoist_fn(&mut self, stmt: &Stmt, sp: &mut Specializer) {
+        let mut copy = stmt.clone();
+        if let (Stmt::Func { body: original, .. }, Stmt::Func { body, .. }) = (stmt, &mut copy) {
+            let originals = lambda_bodies(original);
+            unshare_lambdas(body);
+            for (o, c) in originals.iter().zip(lambda_bodies(body)) {
+                self.typed_copies.push(sp.type_copy(o, &c));
+            }
+        }
+        let _ = self.interp.run(std::slice::from_ref(&copy));
+    }
+
+    /// Hold a value under a top-level name, as the engines will from a hoisted binding.
+    fn hold(&mut self, name: String, value: Value) {
+        self.interp.hold_global(name, value);
+    }
+
+    /// The closure held as field `field` of the record the top-level `name` holds.
+    fn closure_field(&self, name: &str, field: &str) -> Option<Rc<FuncVal>> {
+        match self.interp.global_value(name)? {
+            Value::Record(fields) => match fields.iter().find(|(s, _)| s.as_str() == field) {
+                Some((_, Value::Function(f))) => Some(f.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Run `f` under the sandbox's guards: `Ok(Some(_))` on a clean evaluation, `Ok(None)`
@@ -294,10 +343,15 @@ impl Sandbox {
 
     /// Whether `name` is a record the sandbox holds — binding it on demand first.
     fn holds_record(&mut self, name: &str, done: &[Stmt]) -> bool {
+        self.holds_value(name, done) && self.interp.global_is_record(name)
+    }
+
+    /// Whether the sandbox holds a value under `name` — binding it on demand first.
+    fn holds_value(&mut self, name: &str, done: &[Stmt]) -> bool {
         if self.pending.contains_key(name) {
             self.ensure(name, done);
         }
-        self.interp.global_is_record(name)
+        self.interp.has_global(name)
     }
 
     /// A name the sandbox holds, or could on demand.
@@ -314,191 +368,351 @@ fn stmt_names(stmt: &Stmt) -> Vec<String> {
     }
 }
 
-/// Fold every foldable call in `stmts`, in program order. `Err` is a raise the program would
-/// meet unconditionally at the top level.
-pub fn fold_program(stmts: &mut [Stmt]) -> Result<(), HelixError> {
+/// The body of every lambda under `e`, preorder.
+fn lambda_bodies(e: &Expr) -> Vec<Rc<Expr>> {
+    let mut out = Vec::new();
+    crate::visit::walk_expr(e, &mut |x| {
+        if let Expr::Lambda { body, .. } = x {
+            out.push(body.clone());
+        }
+    });
+    out
+}
+
+/// Fold every foldable call in `stmts`, in program order, and specialize what a call site
+/// knows (ADR 0051) unless `HELIX_NOSPECIALIZE` is set. `types` are the checker's, keyed by
+/// node address: kept true for the nodes this pass makes and drops. `Err` is a raise the
+/// program would meet unconditionally at the top level.
+pub fn fold_program(stmts: &mut Vec<Stmt>, types: &mut TypeMap) -> Result<(), HelixError> {
     // `HELIX_NOFOLD=1` runs every call at run time, for an A/B — `HELIX_NOJIT`'s twin.
-    if std::env::var_os("HELIX_NOFOLD").is_some() || !stmts.iter().any(|s| matches!(s, Stmt::Func { .. })) {
+    if std::env::var_os("HELIX_NOFOLD").is_some() {
         return Ok(());
     }
-    let mut sb = Sandbox::new(stmts);
-    for i in 0..stmts.len() {
-        // The statements before this one are where a name the sandbox is asked for is bound.
-        let (done, rest) = stmts.split_at_mut(i);
-        let stmt = &mut rest[0];
-        match stmt {
-            Stmt::Func { body, .. } => fold_expr(body, &mut sb, done, false)?,
-            Stmt::Assign { value, .. } | Stmt::Destructure { value, .. } => fold_expr(value, &mut sb, done, true)?,
-            Stmt::Expr(e) => fold_expr(e, &mut sb, done, true)?,
-            Stmt::Import { .. } => {}
+    fold_program_with(stmts, types, std::env::var_os("HELIX_NOSPECIALIZE").is_none())
+}
+
+pub(crate) fn fold_program_with(stmts: &mut Vec<Stmt>, types: &mut TypeMap, specialize: bool) -> Result<(), HelixError> {
+    if !stmts.iter().any(|s| matches!(s, Stmt::Func { .. })) {
+        return Ok(());
+    }
+    let mut sp = Specializer::new(stmts, types, specialize);
+    let mut sb = Sandbox::new(stmts, &mut sp);
+    let mut i = 0;
+    // Clones are appended as they are made and folded when the walk reaches them.
+    while i < stmts.len() {
+        {
+            // The statements before this one are where a name the sandbox is asked for is
+            // bound.
+            let (done, rest) = stmts.split_at_mut(i);
+            let stmt = &mut rest[0];
+            let mut bound: Vec<String> = Vec::new();
+            match stmt {
+                Stmt::Func { params, body, .. } => {
+                    bound.extend(params.iter().map(|(n, _)| n.clone()));
+                    fold_expr(body, &mut sb, &mut sp, done, &mut bound, false)?;
+                }
+                Stmt::Assign { value, .. } | Stmt::Destructure { value, .. } => {
+                    fold_expr(value, &mut sb, &mut sp, done, &mut bound, true)?
+                }
+                Stmt::Expr(e) => fold_expr(e, &mut sb, &mut sp, done, &mut bound, true)?,
+                Stmt::Import { .. } => {}
+            }
+            if matches!(stmt, Stmt::Assign { mutable: false, .. } | Stmt::Destructure { mutable: false, .. }) {
+                sb.note_top(i, stmt);
+            }
         }
-        if matches!(stmt, Stmt::Assign { mutable: false, .. } | Stmt::Destructure { mutable: false, .. }) {
-            sb.note_top(i, stmt);
-        }
+        stmts.extend(sp.take_pending());
+        i += 1;
+    }
+    // The sandbox's copies go with it; so do their types.
+    for ptrs in std::mem::take(&mut sb.typed_copies) {
+        sp.forget_ptrs(&ptrs);
+    }
+    // Captured values hoisted for a devirtualized closure come first: every statement that
+    // may call it runs after them.
+    let hoisted = sp.take_hoisted();
+    if !hoisted.is_empty() {
+        stmts.splice(0..0, hoisted);
     }
     Ok(())
 }
 
-/// Fold inside `e` (children first), then `e` itself where it is a candidate.
-/// `unconditional`: whether this position runs whenever its top-level statement does.
-fn fold_expr(e: &mut Expr, sb: &mut Sandbox, done: &[Stmt], unconditional: bool) -> Result<(), HelixError> {
+/// Fold inside `e` (children first), then `e` itself where it is a candidate, then
+/// specialize the call it may be. `bound`: the names local to this position, which are
+/// never the globals of those names. `unconditional`: whether this position runs whenever
+/// its top-level statement does.
+fn fold_expr(
+    e: &mut Expr,
+    sb: &mut Sandbox,
+    sp: &mut Specializer,
+    done: &[Stmt],
+    bound: &mut Vec<String>,
+    unconditional: bool,
+) -> Result<(), HelixError> {
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing
         | Expr::Ident { .. } | Expr::Column { .. } => {}
         Expr::Interp(parts) => {
             for p in parts {
                 if let InterpPart::Expr(x, _) = p {
-                    fold_expr(x, sb, done, unconditional)?;
+                    fold_expr(x, sb, sp, done, bound, unconditional)?;
                 }
             }
         }
         Expr::Array(xs) | Expr::Tuple(xs) => {
             for x in xs {
-                fold_expr(x, sb, done, unconditional)?;
+                fold_expr(x, sb, sp, done, bound, unconditional)?;
             }
         }
         Expr::Record(fields) => {
             for (_, v) in fields {
-                fold_expr(v, sb, done, unconditional)?;
+                fold_expr(v, sb, sp, done, bound, unconditional)?;
             }
         }
         Expr::RecordUpdate { parts, .. } => {
             for p in parts {
-                fold_expr(p.expr_mut(), sb, done, unconditional)?;
+                fold_expr(p.expr_mut(), sb, sp, done, bound, unconditional)?;
             }
         }
-        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => fold_expr(recv, sb, done, unconditional)?,
-        Expr::Unary { expr, .. } => fold_expr(expr, sb, done, unconditional)?,
+        Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => {
+            fold_expr(recv, sb, sp, done, bound, unconditional)?
+        }
+        Expr::Unary { expr, .. } => fold_expr(expr, sb, sp, done, bound, unconditional)?,
         Expr::Binary { op, left, right, .. } => {
-            fold_expr(left, sb, done, unconditional)?;
+            fold_expr(left, sb, sp, done, bound, unconditional)?;
             let right_runs = unconditional && !matches!(op, BinOp::And | BinOp::Or | BinOp::Coalesce);
-            fold_expr(right, sb, done, right_runs)?;
+            fold_expr(right, sb, sp, done, bound, right_runs)?;
         }
         Expr::Call { args, .. } => {
             for a in args {
-                fold_expr(a, sb, done, unconditional)?;
+                fold_expr(a, sb, sp, done, bound, unconditional)?;
             }
         }
         // A method's arguments may be bodies run per element (`it`-forms), so nothing in
-        // them is unconditional.
-        Expr::Method { recv, args, named, .. } => {
-            fold_expr(recv, sb, done, unconditional)?;
-            for a in args {
-                fold_expr(a, sb, done, false)?;
-            }
-            for (_, v) in named {
-                fold_expr(v, sb, done, false)?;
+        // them is unconditional, and `it` is bound in them. A frame verb reads its arguments
+        // as written (`takes_unevaluated_args`), so nothing inside them is rewritten.
+        Expr::Method { recv, name, args, named, .. } => {
+            fold_expr(recv, sb, sp, done, bound, unconditional)?;
+            if !crate::interp::takes_unevaluated_args(name) {
+                bound.push("it".to_string());
+                for a in args {
+                    fold_expr(a, sb, sp, done, bound, false)?;
+                }
+                for (_, v) in named {
+                    fold_expr(v, sb, sp, done, bound, false)?;
+                }
+                bound.pop();
             }
         }
         Expr::CallValue { callee, args, .. } => {
-            fold_expr(callee, sb, done, unconditional)?;
+            fold_expr(callee, sb, sp, done, bound, unconditional)?;
             for a in args {
-                fold_expr(a, sb, done, unconditional)?;
+                fold_expr(a, sb, sp, done, bound, unconditional)?;
             }
         }
         Expr::Index { recv, index, .. } => {
-            fold_expr(recv, sb, done, unconditional)?;
-            fold_expr(index, sb, done, unconditional)?;
+            fold_expr(recv, sb, sp, done, bound, unconditional)?;
+            fold_expr(index, sb, sp, done, bound, unconditional)?;
         }
         Expr::Slice { recv, start, stop, step, .. } => {
-            fold_expr(recv, sb, done, unconditional)?;
+            fold_expr(recv, sb, sp, done, bound, unconditional)?;
             for part in [start, stop, step].into_iter().flatten() {
-                fold_expr(part, sb, done, unconditional)?;
+                fold_expr(part, sb, sp, done, bound, unconditional)?;
             }
         }
-        Expr::Lambda { defaults, body, .. } => {
+        Expr::Lambda { params, defaults, body, .. } => {
             for d in defaults {
-                fold_expr(d, sb, done, false)?;
+                fold_expr(d, sb, sp, done, bound, false)?;
             }
+            let mark = bound.len();
+            bound.extend(params.iter().cloned());
             // In place or not at all: a body another owner shares (the sandbox holds a
             // closure over it) would be re-allocated by `make_mut`, and the checker's type
             // map knows every node inside by its address.
             if let Some(b) = Rc::get_mut(body) {
-                fold_expr(b, sb, done, false)?;
+                fold_expr(b, sb, sp, done, bound, false)?;
             }
+            bound.truncate(mark);
         }
         Expr::Let { bindings, body, .. } => {
-            for (_, v) in bindings {
-                fold_expr(v, sb, done, unconditional)?;
+            let mark = bound.len();
+            for (n, v) in bindings {
+                fold_expr(v, sb, sp, done, bound, unconditional)?;
+                bound.push(n.clone());
             }
-            fold_expr(body, sb, done, unconditional)?;
+            fold_expr(body, sb, sp, done, bound, unconditional)?;
+            bound.truncate(mark);
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
-            fold_expr(cond, sb, done, unconditional)?;
-            fold_expr(then_branch, sb, done, false)?;
-            fold_expr(else_branch, sb, done, false)?;
+            fold_expr(cond, sb, sp, done, bound, unconditional)?;
+            fold_expr(then_branch, sb, sp, done, bound, false)?;
+            fold_expr(else_branch, sb, sp, done, bound, false)?;
         }
-        Expr::Try { expr, .. } => fold_expr(expr, sb, done, false)?,
+        Expr::Try { expr, .. } => fold_expr(expr, sb, sp, done, bound, false)?,
         Expr::Match { scrutinee, arms, .. } => {
-            fold_expr(scrutinee, sb, done, unconditional)?;
+            fold_expr(scrutinee, sb, sp, done, bound, unconditional)?;
             for arm in arms {
+                let mark = bound.len();
+                bound.extend(crate::interp::pattern_binding_names(&arm.pattern));
                 if let Some(g) = &mut arm.guard {
-                    fold_expr(g, sb, done, false)?;
+                    fold_expr(g, sb, sp, done, bound, false)?;
                 }
-                fold_expr(&mut arm.body, sb, done, false)?;
+                fold_expr(&mut arm.body, sb, sp, done, bound, false)?;
+                bound.truncate(mark);
             }
         }
     }
-    let Some(label) = candidate_label(e, sb, done) else {
-        return Ok(());
-    };
-    if sb.futile.contains(&label) {
-        return Ok(());
+    // A literal that decides an `if`, an `and`, an `or`, a `??` selects its branch.
+    while simplify::constant(e) {}
+    // A call the sandbox evaluated in full whose value has no literal — a record of
+    // closures — ran once here and runs once there; it earns no clone.
+    let mut evaluated = false;
+    if let Some(label) = candidate_label(e, sb, bound, done) {
+        // The futility memo is for callees: a literal receiver or operator is its own case.
+        let memo = !label.starts_with('#');
+        if !(memo && sb.futile.contains(&label)) {
+            match sb.attempt(e, done) {
+                Ok(Outcome::Value(v)) => {
+                    let mut budget = MAX_LITERAL_NODES;
+                    if let Some(lit) = to_expr(&v, &mut budget) {
+                        let old = std::mem::replace(e, lit);
+                        sp.forget(&old);
+                        return Ok(());
+                    }
+                    evaluated = true;
+                }
+                Ok(Outcome::Abandoned) => {
+                    if memo {
+                        sb.futile.insert(label);
+                    }
+                }
+                Ok(Outcome::Unheld) => {}
+                Err(raise) => {
+                    if unconditional {
+                        return Err(raise);
+                    }
+                }
+            }
+        }
     }
-    match sb.attempt(e, done) {
-        Ok(Outcome::Value(v)) => {
-            let mut budget = MAX_LITERAL_NODES;
-            if let Some(lit) = to_expr(&v, &mut budget) {
-                *e = lit;
-            }
-        }
-        Ok(Outcome::Abandoned) => {
-            sb.futile.insert(label);
-        }
-        Ok(Outcome::Unheld) => {}
-        Err(raise) => {
-            if unconditional {
-                return Err(raise);
-            }
-        }
+    if sp.enabled() && !evaluated {
+        specialize_site(e, sb, sp, done, bound);
     }
     Ok(())
 }
 
-/// A call to one of the program's own functions, or a call through a record the sandbox
-/// holds — with arguments that mention nothing the sandbox lacks — and its label for the
-/// futility memo: the function's name, or `record.method`.
-fn candidate_label(e: &Expr, sb: &mut Sandbox, done: &[Stmt]) -> Option<String> {
-    match e {
-        Expr::Call { name, args, .. } if sb.is_user_fn(name) && args.iter().all(|a| foldable_arg(a, sb)) => {
-            Some(name.clone())
+/// The specialization rules at one call site (ADR 0051): a method through a record the
+/// sandbox holds becomes a direct call of the closure it holds there, and a call to one of
+/// the program's functions that passes a literal shape, a held name or a scalar literal is
+/// pointed at the clone made for exactly that.
+fn specialize_site(e: &mut Expr, sb: &mut Sandbox, sp: &mut Specializer, done: &[Stmt], bound: &[String]) {
+    if let Expr::Method { recv, name, args, named, line, col, .. } = e
+        && named.is_empty()
+        && let Expr::Ident { name: g, .. } = &**recv
+        && !bound.iter().any(|b| b == g)
+        && !crate::registry::type_owns_method("Record", name)
+        && sb.holds_record(g, done)
+        && let Some(fv) = sb.closure_field(g, name)
+        && let Some(fname) = sp.devirtualize(g, name, &fv)
+    {
+        let (line, col) = (*line, *col);
+        // A function-valued field receives the ORIGIN of a lambda the parser synthesized
+        // from a bare bound name (ADR 0045) — as the walker and the VM hand it over.
+        let args: Vec<Expr> = std::mem::take(args)
+            .into_iter()
+            .map(|a| match a {
+                Expr::Lambda { bound: Some(origin), .. } => *origin,
+                other => other,
+            })
+            .collect();
+        *e = Expr::Call { name: fname, args, line, col };
+    }
+    if let Expr::Call { name, args, .. } = e
+        && sp.knows(name)
+    {
+        let bindings: Vec<Binding> = args.iter().map(|a| sp.binding_at(a, bound, &|n| sb.holds(n))).collect();
+        if let Some(n) = sp.specialize(name, &bindings, 0) {
+            *name = n;
         }
-        Expr::Method { recv, name, args, named, .. }
-            if named.is_empty() && args.iter().all(|a| foldable_arg(a, sb)) =>
+    }
+    let made: Vec<Stmt> = sp.new_pending().to_vec();
+    for st in &made {
+        sb.hoist_fn(st, sp);
+    }
+    for (n, v) in sp.take_held() {
+        sb.hold(n, v);
+    }
+}
+
+/// What the sandbox may evaluate here, and the label the futility memo keeps for it: a
+/// call to one of the program's own functions, or a method on a value the sandbox
+/// holds — with arguments that mention nothing the sandbox lacks — is labelled by its
+/// callee; a method on a literal, an operator on literals, a field of a held record, an
+/// interpolation of held names, `type_of` of a literal are labelled `#…` and never
+/// remembered as futile. A name bound locally is never the global of that name.
+fn candidate_label(e: &Expr, sb: &mut Sandbox, bound: &[String], done: &[Stmt]) -> Option<String> {
+    let local = |n: &str| bound.iter().any(|b| b == n);
+    let closed = |a: &Expr| {
+        let mut b = bound.to_vec();
+        known_closed(a, sb, &mut b)
+    };
+    match e {
+        Expr::Call { name, args, .. } if !local(name) && sb.is_user_fn(name) && args.iter().all(closed) => Some(name.clone()),
+        Expr::Call { name, args, .. } if name == "type_of" && args.len() == 1 && simplify::is_literal(&args[0]) => {
+            Some("#type_of".to_string())
+        }
+        Expr::Method { recv, name, args, named, .. } if named.is_empty() && args.iter().all(closed) => match &**recv {
+            Expr::Ident { name: r, .. } if !local(r) && sb.holds_value(r, done) => Some(format!("{r}.{name}")),
+            recv if simplify::is_literal(recv) => Some("#literal".to_string()),
+            _ => None,
+        },
+        Expr::Field { recv, .. } => match &**recv {
+            Expr::Ident { name: r, .. } if !local(r) && sb.holds(r) => Some("#field".to_string()),
+            _ => None,
+        },
+        Expr::Binary { op, left, right, .. }
+            if !matches!(op, BinOp::And | BinOp::Or | BinOp::Coalesce)
+                && simplify::is_literal(left)
+                && simplify::is_literal(right) =>
         {
-            match &**recv {
-                Expr::Ident { name: r, .. } if sb.holds_record(r, done) => Some(format!("{r}.{name}")),
-                _ => None,
-            }
+            Some("#operator".to_string())
+        }
+        Expr::Unary { expr, .. } if simplify::is_literal(expr) => Some("#operator".to_string()),
+        Expr::Index { recv, index, .. } if simplify::is_literal(recv) && simplify::is_literal(index) => {
+            Some("#operator".to_string())
+        }
+        Expr::Interp(parts)
+            if parts.iter().any(|p| matches!(p, InterpPart::Expr(..)))
+                && parts.iter().all(|p| match p {
+                    InterpPart::Expr(x, _) => closed(x),
+                    InterpPart::Lit(_) => true,
+                }) =>
+        {
+            Some("#interp".to_string())
         }
         _ => None,
     }
 }
 
-/// An argument the sandbox can evaluate: no column reference, no free name it does not hold.
-fn foldable_arg(a: &Expr, sb: &Sandbox) -> bool {
-    let mut bound: Vec<String> = Vec::new();
-    known_closed(a, sb, &mut bound)
-}
-
+/// An expression the sandbox can evaluate: no column reference, no free name it does not
+/// hold — a name bound locally (`bound`) counts as free, whatever global shares it.
 fn known_closed(e: &Expr, sb: &Sandbox, bound: &mut Vec<String>) -> bool {
     match e {
         Expr::Column { .. } => false,
-        Expr::Ident { name, .. } => bound.iter().any(|b| b == name) || sb.holds(name) || sb.is_user_fn(name),
+        Expr::Ident { name, .. } => {
+            if bound.iter().any(|b| b == name) {
+                // A local of this position: the sandbox holds the global of that name, if
+                // any, and that is not this.
+                return false;
+            }
+            sb.holds(name) || sb.is_user_fn(name)
+        }
         Expr::Lambda { params, defaults, body, .. } => {
             let mark = bound.len();
-            bound.extend(params.iter().cloned());
-            let ok = defaults.iter().all(|d| known_closed(d, sb, bound)) && known_closed(body, sb, bound);
+            let ok = defaults.iter().all(|d| known_closed(d, sb, bound)) && {
+                bound.extend(params.iter().cloned());
+                known_closed(body, sb, bound)
+            };
             bound.truncate(mark);
             ok
         }
@@ -565,9 +779,9 @@ fn known_closed(e: &Expr, sb: &Sandbox, bound: &mut Vec<String>) -> bool {
     }
 }
 
-/// Give every lambda under `e` a body of its own — the sandbox's copy of a function must
-/// not share the program's nodes (see [`Sandbox::new`]).
-fn unshare_lambdas(e: &mut Expr) {
+/// Give every lambda under `e` a body of its own — a copy of a function must not share the
+/// program's nodes (see [`Sandbox::hoist_fn`]).
+pub(super) fn unshare_lambdas(e: &mut Expr) {
     match e {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing
         | Expr::Ident { .. } | Expr::Column { .. } => {}
@@ -635,10 +849,10 @@ fn unshare_lambdas(e: &mut Expr) {
     }
 }
 
-/// The literal for a value, when it has one: numbers, strings, booleans, `missing`, and
-/// arrays, tuples and records of those — within `budget` nodes. A function, a frame, a
-/// tensor, a dict, a rational, bytes: no literal, no fold.
-fn to_expr(v: &Value, budget: &mut usize) -> Option<Expr> {
+/// The literal for a value, when it has one: numbers, strings, booleans, `missing`, arrays,
+/// tuples and records of those, and a dict as the pairs that rebuild it — within `budget`
+/// nodes. A function, a frame, a tensor, a rational, bytes: no literal, no fold.
+pub(super) fn to_expr(v: &Value, budget: &mut usize) -> Option<Expr> {
     if *budget == 0 {
         return None;
     }
@@ -657,6 +871,31 @@ fn to_expr(v: &Value, budget: &mut usize) -> Option<Expr> {
                 .map(|(s, x)| Some((s.as_str().to_string(), to_expr(x, budget)?)))
                 .collect::<Option<Vec<_>>>()?,
         ),
+        // A dict has no literal of its own; the pairs that rebuild it, in its own key order,
+        // evaluate to an equal dict wherever the fold writes them.
+        Value::Dict(d) => {
+            use crate::value::DictKey;
+            let map = d.map();
+            let mut pairs = Vec::with_capacity(map.len());
+            for (k, x) in map.iter() {
+                let key = match k {
+                    DictKey::Bool(b) => Expr::Bool(*b),
+                    DictKey::Int(i) => Expr::Int(*i),
+                    DictKey::Str(s) => Expr::Str((**s).clone()),
+                    DictKey::Dna(_) => return None,
+                };
+                pairs.push(Expr::Tuple(vec![key, to_expr(x, budget)?]));
+            }
+            Expr::Method {
+                recv: Box::new(Expr::Array(pairs)),
+                name: "to_dict".to_string(),
+                args: Vec::new(),
+                named: Vec::new(),
+                ufcs: None,
+                line: 0,
+                col: 0,
+            }
+        }
         _ => return None,
     })
 }
@@ -669,14 +908,19 @@ mod tests {
         let toks = crate::lexer::lex(src).unwrap_or_else(|e| panic!("{}", e.message));
         crate::parser::parse(toks).unwrap_or_else(|e| panic!("{}", e.message))
     }
-    fn folded(src: &str) -> Vec<Stmt> {
+    fn folded_with(src: &str, specialize: bool) -> Vec<Stmt> {
         let mut stmts = parsed(src);
-        fold_program(&mut stmts).unwrap_or_else(|e| panic!("{}", e.message));
+        let mut types = TypeMap::default();
+        fold_program_with(&mut stmts, &mut types, specialize).unwrap_or_else(|e| panic!("{}", e.message));
         stmts
+    }
+    fn folded(src: &str) -> Vec<Stmt> {
+        folded_with(src, false)
     }
     fn fold_err(src: &str) -> String {
         let mut stmts = parsed(src);
-        match fold_program(&mut stmts) {
+        let mut types = TypeMap::default();
+        match fold_program_with(&mut stmts, &mut types, false) {
             Ok(()) => panic!("expected a fold-time raise for {src:?}"),
             Err(e) => e.message,
         }
@@ -687,6 +931,24 @@ mod tests {
             Stmt::Expr(e) => e,
             other => panic!("not a value statement: {other:?}"),
         }
+    }
+    fn func<'a>(stmts: &'a [Stmt], name: &str) -> &'a Expr {
+        stmts
+            .iter()
+            .find_map(|s| match s {
+                Stmt::Func { name: n, body, .. } if n == name => Some(body),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no function `{name}` in {stmts:?}"))
+    }
+    fn count_nodes(e: &Expr, pred: impl Fn(&Expr) -> bool) -> usize {
+        let mut n = 0;
+        crate::visit::walk_expr(e, &mut |x| {
+            if pred(x) {
+                n += 1;
+            }
+        });
+        n
     }
 
     /// A pure call with literal arguments becomes its value; through a record the sandbox
@@ -704,11 +966,7 @@ mod tests {
         assert!(matches!(value_of(&s[4]), Expr::Array(_)), "{:?}", s[4]);
         // Inside a body, a call with literal arguments folds; one with a parameter cannot.
         let s = folded("fn g(y) = y + 1\nfn f(x) = g(1) + g(x)");
-        if let Stmt::Func { body, .. } = &s[1] {
-            assert!(matches!(body, Expr::Binary { left, right, .. } if matches!(**left, Expr::Int(2)) && matches!(**right, Expr::Call { .. })), "{body:?}");
-        } else {
-            panic!();
-        }
+        assert!(matches!(func(&s, "f"), Expr::Binary { left, right, .. } if matches!(**left, Expr::Int(2)) && matches!(**right, Expr::Call { .. })));
         // A fn shadowed by a top-level assignment is not a function at run time, so not here.
         let s = folded("fn f(x) = x + 1\nf = 5\ny = f(1)");
         assert!(matches!(value_of(&s[2]), Expr::Call { .. }), "{:?}", s[2]);
@@ -766,6 +1024,33 @@ mod tests {
         }
     }
 
+    /// A name bound locally is never the global of that name: a body reading its own
+    /// parameter `M` folds nothing of a top-level `M`, and a body reading the global does.
+    #[test]
+    fn a_local_shadowing_a_held_global_is_never_folded() {
+        let s = folded("M = {a: 1}\nfn f(M) = M.keys().count()\nfn g(x) = x + M.keys().count()\nfn h(x) = let M = x in M.keys().count()\nfn k(xs) = xs.map(M.keys().count())");
+        assert!(matches!(func(&s, "f"), Expr::Method { name, .. } if name == "count"), "{:?}", func(&s, "f"));
+        assert!(matches!(func(&s, "g"), Expr::Binary { right, .. } if matches!(**right, Expr::Int(1))), "{:?}", func(&s, "g"));
+        assert!(matches!(func(&s, "h"), Expr::Let { body, .. } if matches!(**body, Expr::Method { .. })), "{:?}", func(&s, "h"));
+        // `M` in a method body is the global — `it` is the binder there, not `M`.
+        assert_eq!(count_nodes(func(&s, "k"), |e| matches!(e, Expr::Int(1))), 1, "{:?}", func(&s, "k"));
+    }
+
+    /// A literal receiver, an operator on literals, a field of a held record, an
+    /// interpolation of held names, and the branch a literal condition selects all fold.
+    #[test]
+    fn a_literal_receiver_and_a_constant_branch_fold() {
+        let s = folded(
+            "fn f() = 1\nM = {t: \"people\", n: 3}\nx = if missing.is_missing() then [1, 2].count() else 0\ny = M.t\nz = \"from {M.t} limit {M.n}\"\nw = 2 * 3 + M.n\nv = missing ?? 7\nu = true or f()",
+        );
+        assert!(matches!(value_of(&s[2]), Expr::Int(2)), "{:?}", s[2]);
+        assert!(matches!(value_of(&s[3]), Expr::Str(t) if t == "people"), "{:?}", s[3]);
+        assert!(matches!(value_of(&s[4]), Expr::Str(t) if t == "from people limit 3"), "{:?}", s[4]);
+        assert!(matches!(value_of(&s[5]), Expr::Int(9)), "{:?}", s[5]);
+        assert!(matches!(value_of(&s[6]), Expr::Int(7)), "{:?}", s[6]);
+        assert!(matches!(value_of(&s[7]), Expr::Bool(true)), "{:?}", s[7]);
+    }
+
     /// A genuine raise at an unconditional top-level position is the program's own error,
     /// reported before anything runs; under `if`, `try`, a lambda, a method body or inside
     /// a function it stays a call.
@@ -775,19 +1060,24 @@ mod tests {
         assert_eq!(fold_err(&format!("{chk}y = chk({{limit: \"bad\"}})")), "refused");
         assert_eq!(fold_err(&format!("{chk}print(chk({{limit: \"bad\"}}))")), "refused");
         assert_eq!(fold_err(&format!("{chk}y = [chk({{limit: \"bad\"}})]")), "refused");
+        // A literal receiver runs its body for each of its elements — `[1].map(…)` meets the
+        // raise as surely as `[chk(…)]` does.
+        assert_eq!(fold_err(&format!("{chk}y = [1].map(chk({{limit: \"bad\"}}))")), "refused");
         for src in [
             "y = try chk({limit: \"bad\"})",
             "y = if false then chk({limit: \"bad\"}) else 1",
             "y = false and chk({limit: \"bad\"}) == 1",
             "y = 1 ?? chk({limit: \"bad\"})",
             "f = () => chk({limit: \"bad\"})",
-            "y = [1].map(chk({limit: \"bad\"}))",
             "fn g() = chk({limit: \"bad\"})",
             "y = match 1 { 2 => chk({limit: \"bad\"}), _ => 0 }",
         ] {
             let s = folded(&format!("{chk}{src}"));
             assert!(s.len() == 2, "{src}");
         }
+        // A receiver the sandbox does not hold may be empty: the body's raise is the run's.
+        let s = folded(&format!("{chk}mut xs = [1]\ny = xs.map(chk({{limit: \"bad\"}}))"));
+        assert!(matches!(value_of(&s[2]), Expr::Method { .. }), "{:?}", s[2]);
         // The good spelling folds.
         let s = folded(&format!("{chk}y = chk({{limit: 10}})"));
         assert!(matches!(value_of(&s[1]), Expr::Int(10)), "{:?}", s[1]);
@@ -810,7 +1100,8 @@ mod tests {
         }
         let mut stmts = parsed("fn g(y) = y + 1\nfn on(l, k) = ((x) => g(1) + x + k)(l)\nprint(on(2, 3))");
         let before = Rc::as_ptr(lambda_body(&stmts[1]));
-        fold_program(&mut stmts).unwrap_or_else(|e| panic!("{}", e.message));
+        let mut types = TypeMap::default();
+        fold_program_with(&mut stmts, &mut types, false).unwrap_or_else(|e| panic!("{}", e.message));
         let body = lambda_body(&stmts[1]);
         assert_eq!(before, Rc::as_ptr(body), "the lambda body moved");
         // …and the call inside it still folded: `g(1) + x + k` is `(2 + x) + k`.
@@ -818,6 +1109,77 @@ mod tests {
             matches!(&**body, Expr::Binary { left, .. } if matches!(&**left, Expr::Binary { left: l2, .. } if matches!(**l2, Expr::Int(2)))),
             "{body:?}"
         );
+    }
+
+    /// A call handed a record literal is pointed at a clone made for that shape, in which
+    /// the questions the shape answers are answered: an absent key is `missing`, so the
+    /// branch on it is gone; `keys()` is a literal; a present key is a plain field read.
+    #[test]
+    fn a_call_is_specialized_for_the_shape_it_is_handed() {
+        let s = folded_with(
+            "mut RT = 5\nfn f(s) = let {a, limit} = s in if limit.is_missing() then a else a + limit\nfn n(s) = s.keys().count() * (if s.has(\"zz\") then 10 else 2)\ny = f({a: RT})\nz = n({a: RT, b: RT})",
+            true,
+        );
+        assert!(matches!(value_of(&s[3]), Expr::Call { name, .. } if name == "f$1"), "{:?}", s[3]);
+        let clone = func(&s, "f$1");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::FieldOrMissing { .. } | Expr::If { .. })), 0, "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Field { name, .. } if name == "a")), 1, "{clone:?}");
+        assert!(matches!(value_of(&s[4]), Expr::Call { name, .. } if name == "n$2"), "{:?}", s[4]);
+        assert!(matches!(func(&s, "n$2"), Expr::Int(4)), "{:?}", func(&s, "n$2"));
+        // The generic function is untouched, for every other caller.
+        assert_eq!(count_nodes(func(&s, "f"), |e| matches!(e, Expr::If { .. })), 1);
+    }
+
+    /// A method through a record the sandbox holds — the object API — becomes a direct call
+    /// of the closure held there, its captured values hoisted to top-level bindings placed
+    /// first, and that call is then specialized for the shape it is handed.
+    #[test]
+    fn a_method_through_a_held_record_is_seen_through() {
+        // `t` is baked into the clone `mk` is specialized to for `"z"`; `d`, a dict computed
+        // in the body, is what the closure captures — hoisted as the pairs that rebuild it.
+        let s = folded_with(
+            "fn mk(t) = let d = [[t, 1]].to_dict() in {t: t, go: (s) => \"{d.get(t)}:{s.get(\"x\")}:{s.get(\"y\")}\"}\nM = mk(\"z\")\nmut RT = 1\ny = M.go({x: RT})",
+            true,
+        );
+        assert!(
+            matches!(&s[0], Stmt::Assign { name, value: Expr::Method { name: m, .. }, .. } if name == "M$go$d" && m == "to_dict"),
+            "the captured value comes first: {:?}",
+            s[0]
+        );
+        let last = s.iter().rev().find(|st| matches!(st, Stmt::Assign { name, .. } if name == "y")).unwrap();
+        assert!(matches!(value_of(last), Expr::Call { name, .. } if name.starts_with("M$go$")), "{:?}", value_of(last));
+        let name = match value_of(last) {
+            Expr::Call { name, .. } => name.clone(),
+            _ => unreachable!(),
+        };
+        let clone = func(&s, &name);
+        // `s.get("y")` on the shape `{x}` is `missing`, `s.get("x")` a field read, and
+        // `d.get("z")` — the hoisted dict, a literal key — folded to its value.
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Method { name, .. } if name == "get")), 0, "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Int(1))), 1, "{clone:?}");
+        // A field the record's own type owns is not a closure call: `keys` stays a method.
+        let s = folded_with("fn mk(t) = {t: t}\nM = mk(\"z\")\nmut RT = 1\ny = M.keys().map(it + RT)", true);
+        let last = s.iter().rev().find(|st| matches!(st, Stmt::Assign { name, .. } if name == "y")).unwrap();
+        assert!(matches!(value_of(last), Expr::Method { .. }), "{:?}", value_of(last));
+    }
+
+    /// Specialization follows a known argument into the callees a clone calls, and stops
+    /// at its caps: eight clones per function, and no more.
+    #[test]
+    fn specialization_is_transitive_and_capped() {
+        let s = folded_with("fn g(s) = s.get(\"b\")\nfn f(s) = g(s)\nmut RT = 1\ny = f({a: RT})", true);
+        let clone = func(&s, "f$1");
+        assert!(matches!(clone, Expr::Call { name, .. } if name == "g$2"), "{clone:?}");
+        assert!(matches!(func(&s, "g$2"), Expr::Missing), "{:?}", func(&s, "g$2"));
+        let mut src = String::from("fn f(s) = s.get(\"k\")\nmut RT = 1\n");
+        for i in 0..9 {
+            src.push_str(&format!("y{i} = f({{k{i}: RT}})\n"));
+        }
+        let s = folded_with(&src, true);
+        let clones = s.iter().filter(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("f$"))).count();
+        assert_eq!(clones, 8);
+        let ninth = s.iter().find(|st| matches!(st, Stmt::Assign { name, .. } if name == "y8")).unwrap();
+        assert!(matches!(value_of(ninth), Expr::Call { name, .. } if name == "f"), "{:?}", value_of(ninth));
     }
 
     /// A program with no function of its own is untouched, cheaply.

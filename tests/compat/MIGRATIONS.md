@@ -200,6 +200,14 @@ no entry. A source edit is not a behavior change.
   to pass and raise at run time — the refusal the unannotated `define` already drew. `Any` still
   opts out. No corpus program or golden moved.
 
+- **A raise inside a literal receiver's body at the top level is refused before the program
+  runs** (2026-09-07, ADR 0051). `print("start")` followed by `[1].map(chk({limit: "1;
+  drop"}))`, where `chk` raises on that spec, printed `start` and then raised; it reports the
+  raise and prints nothing now — the receiver has an element, so the program meets the raise
+  as surely as `[chk(…)]` does, which ADR 0050 already refused early. A receiver the sandbox
+  does not hold (`xs.map(…)` with `xs` read at run time) may be empty, and its raise stays the
+  run's. Nothing else is observable.
+
 - **A pure call with literal arguments at the top level that raises is refused before the
   program runs** (2026-09-07, ADR 0050). `print("start")` followed by `print(chk({limit: "1;
   drop"}))`, where `chk` raises on that spec, printed `start` and then raised; it reports the

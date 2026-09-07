@@ -4,6 +4,19 @@
 
 ### Added
 
+- **A function is compiled for what its call site knows (ADR 0051).** A call passing a
+  record literal — `M.sql({where: {city: req.city}, limit: 10})`, the values still from the
+  request — a top-level name the load-time sandbox holds, or a scalar literal, is pointed at
+  a clone of the callee made once for exactly that, in which every question the shape or the
+  constant answers is answered in place (`spec.limit?` is `missing`, `spec.keys()` a literal,
+  the model's `m.table` its string) and which the fold then reduces to the work the runtime
+  values need. A method through a record built at load — the object API a library closes
+  over a model — becomes a direct call of the closure it holds, so the rule reaches it. The
+  field build's rendered query: `where eq` 4.967 → 3.532 µs, `where+limit` 5.642 → 4.226 µs, `OR two branches` 10.571 → 9.143 µs (min of five trials of 2 000). `HELIX_NOSPECIALIZE=1` is the A/B switch.
+  Along the way the fold learned literal receivers, operators on literals, fields of held
+  records, interpolations of held names and the branch a literal condition selects — and a
+  name bound locally is never the global of that name.
+
 - **A pure call with literal arguments is evaluated when the program loads (ADR 0050).** A
   call to one of the program's own functions whose arguments are literals — or names bound to
   literals at the top level — is evaluated once, in a sandboxed tree-walker, and replaced by

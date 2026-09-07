@@ -247,7 +247,7 @@ pub fn build(
     })?;
 
     // Type-check up front: a standalone exe that only fails when run would be a trap.
-    crate::types::check(&loaded.stmts).map_err(|mut e| {
+    let mut types = crate::types::check(&loaded.stmts).map_err(|mut e| {
         let (src, filename, local) = crate::module::locate(&loaded.spans, e.line);
         e.line = local;
         mkerr(format!("the program does not type-check:\n{}", e.render(src, filename)))
@@ -255,7 +255,7 @@ pub fn build(
     // And evaluate what a run evaluates before it starts (ADR 0050): a raise a pure call
     // with literal arguments meets unconditionally at the top level fails the build, as it
     // fails `check` — the same trap, caught the same way.
-    crate::fold::fold_program(&mut loaded.stmts).map_err(|mut e| {
+    crate::fold::fold_program(&mut loaded.stmts, &mut types).map_err(|mut e| {
         let (src, filename, local) = crate::module::locate(&loaded.spans, e.line);
         e.line = local;
         mkerr(format!("the program raises before it runs:\n{}", e.render(src, filename)))

@@ -470,6 +470,20 @@ pub(crate) fn groupby_agg(
     }
 }
 
+/// The methods whose arguments are read as they are WRITTEN — a column reference, a name that
+/// is a binding or a column, a trailing string that is a join kind — rather than as values:
+/// the frame verbs and every grouped aggregation. The load-time passes (ADR 0050, ADR 0051)
+/// rewrite nothing inside their arguments, because a literal in place of a name would read
+/// as a different thing: `l.join(r, k)` with `k` bound to `"id"` joins on `id`, and
+/// `l.join(r, "id")` asks for a join kind called `id`.
+pub(crate) fn takes_unevaluated_args(name: &str) -> bool {
+    matches!(
+        name,
+        "where" | "filter" | "drop_missing" | "drop_nan" | "select" | "sort" | "group" | "with" | "join"
+            | "count" | "mean" | "sum" | "min" | "max" | "std" | "median" | "first" | "nunique" | "agg"
+    )
+}
+
 impl super::Interp {
     pub(super) fn eval_df_method(
         &mut self,

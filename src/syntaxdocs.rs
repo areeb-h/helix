@@ -131,6 +131,9 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 program's own functions is evaluated ONCE, before the program runs, and replaced by \
                 its value (ADR 0050) — a library's render of a literal spec costs nothing at run time, \
                 and a spec the library refuses is refused before the program runs, as a type error is. \
+                A call whose arguments carry a record literal's keys, a top-level constant or a scalar \
+                literal runs a clone of the function made for exactly that (ADR 0051), so a render on a \
+                literal shape with request values pays only for the keys it was given. \
                 Anything impure (output, time, a file, the network, a mutable global) is left to run \
                 time exactly as written. \
                 Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed, constant folding, pure.",

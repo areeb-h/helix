@@ -16538,3 +16538,28 @@ fn constant_folding_is_invisible_except_where_it_refuses_early() {
     assert_ne!(code, Some(0));
     assert!(err.contains("undefined_name_zz") && !err.contains("refused"), "{err}");
 }
+
+/// A call site's record shape, a held name and a scalar literal reach the callee as a clone
+/// made for them, and a method through a record built at load is a direct call (ADR 0051):
+/// the object API a library builds renders the same on every engine, with and without the
+/// pass, and a frame verb inside a specialized function keeps its receiver type on the VM.
+#[test]
+fn a_call_site_is_specialized_for_what_it_knows_on_every_engine() {
+    let src = "fn define(spec) = {table: spec.table, sql: (s) => sql(spec.table, s)}\n\
+fn sql(t, s) = let {where, limit, order} = s in do {\n  wh = if where.is_missing() then \"\" else \" where {where.keys().map(\"{it} = ${1}\").join(\" and \")}\"\n  lm = if limit.is_missing() then \"\" else \" limit {limit}\"\n  ob = if order.is_missing() then \"\" else \" order by {order.join(\", \")}\"\n  bad = s.keys().where(it != \"where\" and it != \"limit\" and it != \"order\")\n  if bad.count() > 0 then raise(\"unknown key {bad[0]}\") else \"select * from {t}{wh}{ob}{lm}\"\n}\n\
+M = define({table: \"people\"})\n\
+RT = if now() > 0.0 then \"oslo\" else \"x\"\n\
+print(M.sql({where: {city: RT}, limit: 10}))\nprint(M.sql({order: [\"-id\"]}))\nprint(M.sql({where: {name: RT}}))\nprint((try M.sql({wehre: RT})).error)\n\
+D = dataframe({ts: [1, 5, 9]})\nfn q(d, s) = let lo = s.lo in d.where(@ts > lo).count()\nprint(q(D, {lo: 4}))\n";
+    let want = "select * from people where city = $1 limit 10\nselect * from people order by -id\nselect * from people where name = $1\nunknown key wehre\n2\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("spec_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+    for (label, env) in [("nospecialize", &[("HELIX_NOSPECIALIZE", "1")][..]), ("nofold", &[("HELIX_NOFOLD", "1")][..])] {
+        let (out, err, code) = run_source(src, env, &format!("spec_{label}"));
+        assert_eq!(code, Some(0), "{label}: {err}");
+        assert_eq!(out, want, "{label}");
+    }
+}

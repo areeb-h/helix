@@ -429,6 +429,16 @@ Checker: known shapes merge in order; an unknown spread — a parameter, parsed 
 `Dict` annotation (which was refused outright: fixed) — makes the result Unknown; a keyless
 spread is refused wherever it stands. Reference: a `spread` syntax entry (the form had none).
 
+**ORM render (2026-09-07) — a function compiled for what its call site knows.** DECIDED by
+the user on the measurement and DONE: ADR 0051. `src/fold/specialize.rs`: a call passing a
+record literal's keys, a held global or a scalar literal runs a clone of the callee (memoized
+per function and knowledge; 64 per program, 8 per function, 4 deep) in which the shape's and
+the constant's questions are answered in place and the fold does the rest; `M.sql(spec)` on a
+record the sandbox holds is devirtualized to a top-level `M$sql` with its captures hoisted
+first. `src/fold/simplify.rs` folds constant control flow. The fold's candidates grew literal
+receivers, literal operators, held fields and interpolations, and learned that a local is
+never the global of its name (a real bug in the first cut). Measured: `where eq` 4.967 → 3.532 µs, `where+limit` 5.642 → 4.226 µs, `OR two branches` 10.571 → 9.143 µs (min of five trials of 2 000); corpus check 427 → 423 ms.
+
 **1.46a (2026-09-07) — const-fold a pure call with literal arguments.** DECIDED by the user
 and DONE: ADR 0050. `src/fold.rs` runs after the checker and the UFCS rewrite in every run, check
 and bundle pipeline (the checker types the call, never the literal a fold produced; a type

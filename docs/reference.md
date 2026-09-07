@@ -1637,6 +1637,15 @@ Turns constant folding off (ADR 0050), so every such call runs at run time.
 
 **Note:** The A/B switch for what a fold costs before the program runs and saves while it runs. Same rule as HELIX_NOJIT: speed changes, answers do not — a fold replaces a call by the value the call computes. The one observable difference is WHEN a raise such a call meets unconditionally at the top level is reported: before anything runs, or when the call runs. Keywords: fold, constant folding, disable, load, oracle, differential, debug.
 
+### `HELIX_NOSPECIALIZE`
+
+Turns load-time specialization off (ADR 0051): no clone of a function is made for a call site's record shape or constants, and a method through a held record is not seen through.
+
+- **Values:** any value (presence is what counts)
+- **Unset:** unset — a call is specialized for what its site knows
+
+**Note:** The A/B switch for what specialization saves. Same rule as HELIX_NOFOLD, which it rides on: speed changes, answers do not. Keywords: specialize, shape, clone, devirtualize, disable, oracle, differential, debug, load.
+
 ### `HELIX_DF_ENGINE`
 
 Selects the DataFrame backend in a build that carries more than one.
@@ -1835,7 +1844,7 @@ Define a function. Parameter and return annotations are optional, checked by `he
 
 `fn area(w: Int, h: Int) -> Int = w * h`
 
-**Note:** Type names: `Int`, `Float`, `Num` (either), `String`, `Bool`, `Array`, `Record`, `Dict`, `Tuple`, `Function`, `DataFrame`, `Tensor`, `Dna`, `Any`. An `Int` annotation refuses a Float argument; a `Float` one accepts an Int. `Record`, `Dict`, `Tuple` and `Function` say what KIND of value arrives without fixing its shape: a wrong kind is refused at the call, and inside the body the value's fields and methods are open. A lambda takes the same annotations: `(x: Int) => x + 1`. A call to a function whose parameter is unannotated, or annotated with an open kind (`Record`, `Dict`, `Tuple`, `Function`, `Array`), re-types its body with what the call passes, so a shape computed from an argument reaches the caller; `x: Any` opts a parameter out of that. A call with literal arguments to one of the program's own functions is evaluated ONCE, before the program runs, and replaced by its value (ADR 0050) — a library's render of a literal spec costs nothing at run time, and a spec the library refuses is refused before the program runs, as a type error is. Anything impure (output, time, a file, the network, a mutable global) is left to run time exactly as written. Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed, constant folding, pure.
+**Note:** Type names: `Int`, `Float`, `Num` (either), `String`, `Bool`, `Array`, `Record`, `Dict`, `Tuple`, `Function`, `DataFrame`, `Tensor`, `Dna`, `Any`. An `Int` annotation refuses a Float argument; a `Float` one accepts an Int. `Record`, `Dict`, `Tuple` and `Function` say what KIND of value arrives without fixing its shape: a wrong kind is refused at the call, and inside the body the value's fields and methods are open. A lambda takes the same annotations: `(x: Int) => x + 1`. A call to a function whose parameter is unannotated, or annotated with an open kind (`Record`, `Dict`, `Tuple`, `Function`, `Array`), re-types its body with what the call passes, so a shape computed from an argument reaches the caller; `x: Any` opts a parameter out of that. A call with literal arguments to one of the program's own functions is evaluated ONCE, before the program runs, and replaced by its value (ADR 0050) — a library's render of a literal spec costs nothing at run time, and a spec the library refuses is refused before the program runs, as a type error is. A call whose arguments carry a record literal's keys, a top-level constant or a scalar literal runs a clone of the function made for exactly that (ADR 0051), so a render on a literal shape with request values pays only for the keys it was given. Anything impure (output, time, a file, the network, a mutable global) is left to run time exactly as written. Keywords: function, define, signature, type, annotation, parameter, return, static, check, typed, constant folding, pure.
 
 ```
 >>> fn area(w: Int, h: Int) -> Int = w * h
