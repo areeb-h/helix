@@ -16,7 +16,7 @@ pub(super) fn comprehension_params(args: &[Expr]) -> (Vec<String>, &Expr) {
 }
 
 pub(super) fn require_boolish(t: &Type, name: &str, line: usize, col: usize) -> Result<(), HelixError> {
-    if matches!(t, Type::Bool | Type::Missing | Type::Unknown) {
+    if matches!(t, Type::Bool | Type::Missing | Type::Unknown | Type::Never) {
         Ok(())
     } else {
         Err(HelixError::new(
@@ -145,8 +145,9 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
             }
             Ok(Type::Unit)
         }
-        // `raise(message[, help])` never returns, so it is compatible with any context —
-        // `Unknown`, not `Unit`, or `if bad then raise("…") else x` would not type.
+        // `raise(message[, help])` never returns: its type is `Never`, the bottom every
+        // `join` drops, so `if bad then raise("…") else x` has x's type and `x ?? raise("…")`
+        // has x's (field build, 1.44a) — and anywhere else it is read as `Unknown`.
         "raise" => {
             if args.is_empty() || args.len() > 2 {
                 return Err(HelixError::new(
@@ -164,7 +165,7 @@ pub(super) fn builtin_type(name: &str, args: &[Type], line: usize, col: usize) -
                     return Err(type_err("raise", what, a, line, col));
                 }
             }
-            Ok(Type::Unknown)
+            Ok(Type::Never)
         }
         "source_path" => {
             if args.len() != 1 {
@@ -1317,7 +1318,8 @@ pub(super) fn dna_method_type(name: &str, line: usize, col: usize) -> Result<Typ
 /// Type of a record **dynamic-access** method (`get`/`expect`/`has`/`keys`/`values`/`items`, see
 /// `record_method`). `get` is permissive (Unknown — the field value's type isn't statically
 /// known); `has` is Bool; the enumerators are arrays. Static `rec.field` access is typed the
-/// normal way (this is the escape hatch for runtime-unknown shapes).
+/// normal way (this is the escape hatch for runtime-unknown shapes), and a LITERAL key is
+/// answered before this table is consulted (`Checker::literal_key_read`, field build 1.44a).
 pub(super) fn record_method_type(
     name: &str,
     fields: &[(String, Type)],

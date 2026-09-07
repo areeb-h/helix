@@ -64,6 +64,14 @@ pub enum Type {
     Missing,
     /// Permissive TOP (Any/Dynamic): compatible with everything; NEVER errors.
     Unknown,
+    /// No value at all — the type of `raise(…)`. BOTTOM for control flow: compatible with
+    /// everything (what follows never runs) and dropped under `join`, so `if bad then
+    /// raise("…") else {rec}` has the record's shape and `x ?? raise("…")` has `x`'s (field
+    /// build, 1.44a: a constructor that validated inline widened to Unknown, and the
+    /// specialization answered nothing). Where `Missing` is a VALUE that is absent, `Never`
+    /// is the absence of a value; everywhere but `join` it is read as `Unknown` is, so
+    /// nothing that ran is refused for standing after a raise.
+    Never,
 }
 
 impl fmt::Display for Type {
@@ -88,6 +96,7 @@ impl fmt::Display for Type {
             Type::AnyFunction => write!(f, "Function"),
             Type::Unit => write!(f, "Unit"),
             Type::Missing => write!(f, "Missing"),
+            Type::Never => write!(f, "Never"),
             Type::Unknown => write!(f, "Unknown"),
         }
     }
@@ -148,6 +157,7 @@ pub fn compatible(a: &Type, b: &Type) -> bool {
     match (a, b) {
         (Unknown, _) | (_, Unknown) => true,
         (Missing, _) | (_, Missing) => true,
+        (Never, _) | (_, Never) => true,
         _ if a == b => true,
         _ if is_numeric(a) && is_numeric(b) => true,
         (Array(x), Array(y)) => compatible(x, y),
@@ -173,11 +183,13 @@ pub fn compatible(a: &Type, b: &Type) -> bool {
 }
 
 /// Least-upper-bound. TOTAL — never errors; incompatible pairs widen to
-/// `Unknown`. Used for `if` branches and array elements so they never reject.
+/// `Unknown`. Used for `if` branches and array elements so they never reject. `Never` (a
+/// branch that raises) contributes no value and drops first; `Missing` drops next.
 pub fn join(a: &Type, b: &Type) -> Type {
     use Type::*;
     match (a, b) {
         _ if a == b => a.clone(),
+        (Never, t) | (t, Never) => t.clone(),
         (Unknown, _) | (_, Unknown) => Unknown,
         (Missing, t) | (t, Missing) => t.clone(),
         (Int, Float) | (Float, Int) | (Num, _) | (_, Num) if is_numeric(a) && is_numeric(b) => Num,
@@ -462,8 +474,18 @@ pub struct Checker {
     /// definition's permissive answer stands — specialization adds precision, never a
     /// refusal).
     specialized: FxHashMap<String, Option<Type>>,
-    /// Specializations in progress, so a recursive call inside a body being specialized
-    /// answers the stored signature instead of recursing forever.
+    /// The functions whose bodies are being specialized right now, by NAME: a call to one —
+    /// under ANY argument types — answers the stored signature. By name and not by argument
+    /// tuple because a structurally recursive function hands itself a strictly larger type
+    /// each level (`_lassoc(ts, {node: {l: s.node, …}, …}, …)`, a precedence-climbing
+    /// parser's left-association loop; field build, 1.48): a per-tuple guard never tripped,
+    /// the nesting ran to the budget with linearly growing record types, and `helix check`
+    /// went 18 ms → 3.7 s and 3.2 GB on a 617-line file. Monomorphic recursion is the
+    /// classic rule (Hindley–Milner refuses polymorphic recursion without an annotation for
+    /// the same reason); the answer at the cut is the permissive one, so nothing loses a
+    /// program — only the precision a diverging recursion could never reach. The nesting is
+    /// thereby bounded by the number of functions, and every type by the program's own
+    /// structure. Pinned by `a_growing_recursion_is_specialized_once_per_chain`.
     specializing: FxHashSet<String>,
     /// How many specializations this check has run; past [`SPECIALIZATION_BUDGET`] the
     /// stored signature answers, so a pathological program cannot make `check` quadratic.
@@ -582,7 +604,7 @@ impl Checker {
                             self.env.insert(n.clone(), (**el).clone());
                         }
                     }
-                    Type::Unknown | Type::Missing => {
+                    Type::Unknown | Type::Missing | Type::Never => {
                         for n in names {
                             self.env.insert(n.clone(), Type::Unknown);
                         }
@@ -803,8 +825,9 @@ impl Checker {
     /// unannotated parameters receive informative argument types re-types the body with
     /// those types bound (annotated parameters keep their annotation), and answers the
     /// result when it is more precise than the stored return type. Memoized per function and
-    /// argument-type tuple; a recursive call inside the body being specialized answers the
-    /// stored signature (the in-progress guard); the receiver side-table is not written
+    /// argument-type tuple; a call to a function whose body is being specialized — under any
+    /// arguments — answers the stored signature (the in-progress guard, by name: see
+    /// `specializing`); the receiver side-table is not written
     /// (`recording`), so the compiler's routing stays the definition's. A body that does not
     /// type under the call's arguments — a branch the arguments would never take, typed all
     /// the same — answers `None`, and the caller keeps the definition's permissive return:
@@ -829,7 +852,7 @@ impl Checker {
             // purpose (a laundering `fn launder(x: Any) = x` stays a laundering).
             let unannotated = fb.params.get(i).is_some_and(|(_, ann)| ann.is_none());
             bind.push(match (p, args.get(i)) {
-                (Type::Unknown, Some(a)) if unannotated && !matches!(a, Type::Unknown | Type::Missing) => {
+                (Type::Unknown, Some(a)) if unannotated && !matches!(a, Type::Unknown | Type::Missing | Type::Never) => {
                     informative = true;
                     a.clone()
                 }
@@ -843,22 +866,50 @@ impl Checker {
         if let Some(memo) = self.specialized.get(&key) {
             return memo.clone();
         }
-        if self.specializing.contains(&key) || self.specializations >= SPECIALIZATION_BUDGET {
+        if self.specializing.contains(name) || self.specializations >= SPECIALIZATION_BUDGET {
             return None;
         }
         self.specializations += 1;
-        self.specializing.insert(key.clone());
+        self.specializing.insert(name.to_string());
         let was_recording = self.recording;
         self.recording = false;
         let result = self.type_body(name, &fb.params, &bind, &fb.body);
         self.recording = was_recording;
-        self.specializing.remove(&key);
+        self.specializing.remove(name);
         let out = match result {
             Ok(t) if !matches!(t, Type::Unknown) => Some(t),
             _ => None,
         };
         self.specialized.insert(key, out.clone());
         out
+    }
+
+    /// Whether `e` reads a field a known record shape PROVABLY holds a value for — `r.k`, or
+    /// `r.get("k")`, with `r` a name bound to a Record whose `k` is a value type (not
+    /// Missing, Unknown or Never). Such a read never answers `missing`, so a `?? d` after it
+    /// never applies and the whole has the field's type: `spec.columns ?? []` keeps the
+    /// shape `spec.columns` has (field build, 1.44a). Anything else joins with the default,
+    /// as before — the checker does not track which OTHER reads may answer `missing`.
+    fn reads_present_field(&self, e: &Expr) -> bool {
+        let (recv, key): (&Expr, &str) = match e {
+            Expr::Field { recv, name, .. } => (recv, name.as_str()),
+            Expr::Method { recv, name, args, .. } if name == "get" && args.len() <= 2 => {
+                match args.first() {
+                    Some(Expr::Str(k)) => (recv, k.as_str()),
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        };
+        let Expr::Ident { name: r, .. } = recv else {
+            return false;
+        };
+        match self.env.get(r) {
+            Some(Type::Record(fields)) => fields
+                .iter()
+                .any(|(f, t)| f == key && !matches!(t, Type::Missing | Type::Unknown | Type::Never)),
+            _ => false,
+        }
     }
 
     fn synth(&mut self, e: &Expr) -> Result<Type, HelixError> {
@@ -1001,7 +1052,7 @@ impl Checker {
                     // opaque-type pattern), and its keys are not known statically, so a
                     // spread of one is a record whose field set cannot be proven —
                     // which is exactly what this arm already answers.
-                    Type::Unknown | Type::Missing | Type::AnyRecord => Ok(Type::Unknown),
+                    Type::Unknown | Type::Missing | Type::AnyRecord | Type::Never => Ok(Type::Unknown),
                     other => Err(HelixError::new(
                         format!("`...` record update needs a record, got {other}"),
                         *line,
@@ -1024,7 +1075,7 @@ impl Checker {
                         .map(|(_, t)| t.clone())
                         .ok_or_else(|| record_has_no_field(fields, name, *line, *col)),
                     // An annotated `Record` (or `Any`) is open: the field's type is not known.
-                    Type::Unknown | Type::Missing | Type::AnyRecord => Ok(Type::Unknown),
+                    Type::Unknown | Type::Missing | Type::AnyRecord | Type::Never => Ok(Type::Unknown),
                     other => Err(field_on_non_record(other, name, *line, *col)),
                 }
             }
@@ -1046,7 +1097,7 @@ impl Checker {
                         None if from_literal => Err(record_has_no_field(fields, name, *line, *col)),
                         None => Ok(Type::Missing),
                     },
-                    Type::Unknown | Type::Missing | Type::AnyRecord => Ok(Type::Unknown),
+                    Type::Unknown | Type::Missing | Type::AnyRecord | Type::Never => Ok(Type::Unknown),
                     other => Err(HelixError::new(
                         format!(
                             "cannot destructure {}: it has no fields",
@@ -1070,6 +1121,12 @@ impl Checker {
             } => {
                 let lt = self.synth(left)?;
                 let rt = self.synth(right)?;
+                // `x ?? d` where `x` reads a field the shape provably holds a value for: the
+                // default never applies, so the whole has the field's type (field build,
+                // 1.44a — `spec.columns ?? []` keeps the shape `spec.columns` has).
+                if matches!(op, BinOp::Coalesce) && self.reads_present_field(left) {
+                    return Ok(lt);
+                }
                 self.synth_binary(op, &lt, &rt, *line, *col)
                     .map_err(|e| try_binds_tighter_hint(e, op, left, right))
             }
@@ -1133,7 +1190,7 @@ impl Checker {
                 // runtime.
                 if matches!(it, Type::String) {
                     return match rt {
-                        Type::Record(_) | Type::AnyRecord | Type::Dict | Type::Unknown | Type::Missing => Ok(Type::Unknown),
+                        Type::Record(_) | Type::AnyRecord | Type::Dict | Type::Unknown | Type::Missing | Type::Never => Ok(Type::Unknown),
                         other => Err(HelixError::new(
                             format!("a value of type {} cannot be indexed by a string", other),
                             *line,
@@ -1158,7 +1215,7 @@ impl Checker {
                     // static-string-key case is handled above.) The checker must not reject
                     // it: the identical access runs fine, per the never-reject-runnable rule.
                     Type::Record(_) | Type::AnyRecord | Type::Dict | Type::AnyTuple => Type::Unknown,
-                    Type::Unknown | Type::Missing | Type::Tensor => Type::Unknown,
+                    Type::Unknown | Type::Missing | Type::Tensor | Type::Never => Type::Unknown,
                     other => {
                         let err = HelixError::new(
                             format!("a value of type {} cannot be indexed", other),
@@ -1198,7 +1255,7 @@ impl Checker {
                 // slicing preserves the collection type
                 Ok(match rt {
                     Type::Array(_) | Type::String | Type::Dna => rt,
-                    Type::Unknown | Type::Missing | Type::Tensor => Type::Unknown,
+                    Type::Unknown | Type::Missing | Type::Tensor | Type::Never => Type::Unknown,
                     other => {
                         return Err(HelixError::new(
                             format!("a value of type {} cannot be sliced", other),
@@ -1288,7 +1345,7 @@ impl Checker {
                 col,
             } => {
                 let ct = self.synth(cond)?;
-                if !matches!(ct, Type::Bool | Type::Missing | Type::Unknown) {
+                if !matches!(ct, Type::Bool | Type::Missing | Type::Unknown | Type::Never) {
                     return Err(HelixError::new(
                         format!("`if` condition must be a boolean, found a value of type {}", ct),
                         *line,
@@ -1420,6 +1477,12 @@ use signatures::*;
 /// A later `fn` of the same name still wins, as it did before: the second registration
 /// overwrites the first, in source order, in both passes.
 pub fn check(program: &[Stmt]) -> Result<TypeMap, HelixError> {
+    check_program(program).map(|c| c.types)
+}
+
+/// [`check`]'s driver, answering the checker itself: its `specializations` counter is what
+/// the test of the specialization's bound reads.
+fn check_program(program: &[Stmt]) -> Result<Checker, HelixError> {
     let mut checker = Checker::new();
     // Declare every top-level `fn` before checking any body, so a body may reference a peer
     // defined below it (`fn even` calling `fn odd`) without the checker rejecting the file
@@ -1464,7 +1527,7 @@ pub fn check(program: &[Stmt]) -> Result<TypeMap, HelixError> {
     for s in program {
         checker.exec_stmt(s)?;
     }
-    Ok(checker.types)
+    Ok(checker)
 }
 
 

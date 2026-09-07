@@ -342,3 +342,98 @@ fn every_builtin_answers_the_signature_probe() {
         assert!(emsg("{limt} = {limit: 1}").contains("no field `limt`"));
         assert!(emsg("let {limt} = {limit: 1} in limt").contains("no field `limt`"));
     }
+
+    /// The checker itself after a whole program (`check`'s driver), for the counter below.
+    fn checked(src: &str) -> Checker {
+        let toks = crate::lexer::lex(src).unwrap_or_else(|e| panic!("{}", e.message));
+        let prog = crate::parser::parse(toks).unwrap_or_else(|e| panic!("{}", e.message));
+        check_program(&prog).unwrap_or_else(|e| panic!("{}", e.message))
+    }
+
+    /// A structurally recursive function — one that hands itself a strictly larger type each
+    /// level, `lassoc(ts, {node: {l: s.node, …}, …}, …)` in a precedence-climbing parser — is
+    /// specialized ONCE per chain, not once per level (field build, 1.48). The in-progress
+    /// guard is by function NAME: a per-argument-tuple guard never trips on a growing key,
+    /// so the nesting ran to the budget with linearly growing record types, and `helix
+    /// check` went 18 ms → 3.7 s and 3.2 GB on a 617-line file. The count is the proof; the
+    /// answer at the cut is the stored signature, so nothing is refused.
+    #[test]
+    fn a_growing_recursion_is_specialized_once_per_chain() {
+        let src = r#"fn peek(ts, i) = if i < ts.count() then ts[i] else {t: "eof", v: ""}
+fn isop(ts, i, o) = let t = peek(ts, i) in t.t == "op" and t.v == o
+fn p_prim(ts, i) = let t = peek(ts, i) in
+  if t.t == "op" and t.v == "(" then let e = p_expr(ts, i + 1) in {node: e.node, i: e.i + 1}
+  else {node: {k: "lit", v: t.v}, i: i + 1}
+fn p_post(ts, s) = if isop(ts, s.i, "[")
+  then let e = p_expr(ts, s.i + 1) in p_post(ts, {node: {k: "idx", recv: s.node, at: e.node}, i: e.i + 1})
+  else s
+fn p_un(ts, i) = if isop(ts, i, "!") then let e = p_un(ts, i + 1) in {node: {k: "not", e: e.node}, i: e.i}
+  else p_post(ts, p_prim(ts, i))
+fn lassoc(ts, s, ops, sub) = let t = peek(ts, s.i) in
+  if t.t != "op" or ops.contains(t.v) == false then s
+  else let r = sub(ts, s.i + 1) in
+  lassoc(ts, {node: {k: "bin", op: t.v, l: s.node, r: r.node}, i: r.i}, ops, sub)
+fn p_mul(ts, i) = lassoc(ts, p_un(ts, i), ["*", "/"], p_un)
+fn p_add(ts, i) = lassoc(ts, p_mul(ts, i), ["+", "-"], p_mul)
+fn p_rel(ts, i) = lassoc(ts, p_add(ts, i), ["<", ">"], p_add)
+fn p_eq(ts, i) = lassoc(ts, p_rel(ts, i), ["=="], p_rel)
+fn p_and(ts, i) = lassoc(ts, p_eq(ts, i), ["&&"], p_eq)
+fn p_or(ts, i) = lassoc(ts, p_and(ts, i), ["||"], p_and)
+fn p_tern(ts, i) = let c = p_or(ts, i) in
+  if isop(ts, c.i, "?") == false then c
+  else let a = p_expr(ts, c.i + 1) in let b = p_expr(ts, a.i + 1) in
+  {node: {k: "tern", c: c.node, a: a.node, b: b.node}, i: b.i}
+fn p_expr(ts, i) = p_tern(ts, i)
+toks = [{t: "num", v: "1"}, {t: "op", v: "+"}, {t: "num", v: "2"}]
+p_expr(toks, 0).node.k
+"#;
+        let n = checked(src).specializations;
+        assert!(n <= 60, "{n} specializations for a 14-function parser: the guard is by name");
+    }
+
+    /// `raise(…)` has the type `Never` — no value at all, dropped under `join` — so a
+    /// constructor that validates inline keeps its shape (field build, 1.44a: `if bad then
+    /// raise("…") else {rec}` widened to Unknown and the specialization answered nothing),
+    /// `x ?? raise("…")` has `x`'s type, and everything else reads it as Unknown: nothing
+    /// that ran is refused for standing after a raise.
+    #[test]
+    fn raise_has_the_type_never_and_vanishes_under_join() {
+        assert!(emsg("fn mk(s) = if s.t.is_missing() then raise(\"no\") else {c: s.columns}\nmk({t: 1, columns: {id: 1}}).c.nmae").contains("no field `nmae`"));
+        assert!(emsg("fn mk(s) = if s.t.is_missing() then raise(\"no\") else if s.key.is_missing() then raise(\"no key\") else {c: s.columns}\nmk({t: 1, key: 1, columns: {id: 1}}).c.nmae").contains("no field `nmae`"));
+        ok("fn mk(s) = if s.t.is_missing() then raise(\"no\") else {c: s.columns}\nmk({t: 1, columns: {id: 1}}).c.id");
+        // The required-field idiom keeps the field's type.
+        assert!(emsg("fn mk(s) = {c: s.columns ?? raise(\"columns required\")}\nmk({columns: {id: 1}}).c.nmae").contains("no field `nmae`"));
+        // A declared return admits a body that never returns; a raise in a branch leaves the
+        // other branch's type; and in every operand position a raise reads as Unknown.
+        ok("fn todo() -> Int = raise(\"todo\")\ntodo() + 1");
+        ok("fn f(x) = if x > 0 then x else raise(\"neg\")\n-f(1) + f(2) * 2");
+        ok("x = raise(\"stop\")\nx + 1\nx < 1\n-x\nx.upper()\nx[0]\nx[\"k\"]\nx[0:1]\nsqrt(x)\n[x, 1].sum()\nif x then 1 else 2\nx and true\n{a: x}.a.b\n{...x, b: 1}\nlet {a} = x in a\nx ?? 1");
+    }
+
+    /// A literal key reads a known shape the way `.k` does (field build, 1.44a): `get("k")`
+    /// has the field's type — `missing`, or the default's type, when the shape lacks it —
+    /// `expect("k")` likewise on a hit, and `x ?? d` on a field the shape PROVABLY holds is
+    /// `x`'s type, because the default never applies. A dynamic key stays Unknown.
+    #[test]
+    fn a_literal_key_reads_the_field_the_way_a_dot_does() {
+        assert!(emsg("fn mk(s) = let cs = s.get(\"columns\") in {c: cs}\nmk({columns: {id: 1}}).c.nmae").contains("no field `nmae`"));
+        assert!(emsg("fn mk(s) = let cs = s.expect(\"columns\") in {c: cs}\nmk({columns: {id: 1}}).c.nmae").contains("no field `nmae`"));
+        assert!(emsg("fn mk(s) = let cs = s.columns ?? [] in {c: cs}\nmk({columns: {id: 1}}).c.nmae").contains("no field `nmae`"));
+        assert!(emsg("fn mk(s) = {c: s.get(\"columns\") ?? []}\nmk({columns: {id: 1}}).c.nmae").contains("no field `nmae`"));
+        assert!(emsg("{a: {b: 1}}.get(\"a\").c").contains("no field `c`"));
+        assert!(emsg("{a: {b: 1}}.expect(\"a\").c").contains("no field `c`"));
+        // An absent key: `missing`, or the default — whose own errors still surface.
+        ok("{a: 1}.get(\"z\").is_missing()");
+        assert!(emsg("{a: 1}.get(\"z\", {b: 1}).c").contains("no field `c`"));
+        assert!(emsg("{a: 1}.get(\"z\", nope)").contains("nope"));
+        // `expect` of an absent key raises at run time; the checker stays permissive.
+        ok("{a: 1}.expect(\"z\").c");
+        // A dynamic key is Unknown, as before.
+        ok("k = \"a\"\n{a: {b: 1}}.get(k).c");
+        // A present field of a value type needs no default: `?? d` is the field's type …
+        assert!(emsg("r = {a: {b: 1}}\n(r.a ?? {c: 2}).d").contains("no field `d`"));
+        assert!(emsg("r = {a: {b: 1}}\n(r.get(\"a\") ?? {c: 2}).d").contains("no field `d`"));
+        // … while a field holding `missing`, or an unknown receiver, joins with the default.
+        ok("r = {a: missing}\n(r.a ?? {c: 2}).c");
+        ok("fn f(r) = (r.a ?? {c: 2}).c\nf(1)");
+    }

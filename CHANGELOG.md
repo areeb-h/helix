@@ -174,6 +174,26 @@
 
 ### Changed
 
+- **`raise` has the type `Never`.** `if bad then raise("…") else {rec}` typed as Unknown —
+  `raise` was `Unknown`, and Unknown absorbs every join — so a constructor that validates
+  inline lost the shape call-site specialization had just given it, and the field build hoisted
+  its guards into a helper to get it back (1.44a). `Never` is the bottom of every `join`: the
+  branch that raises contributes no value, `x ?? raise("k required")` has `x`'s type, a `-> Int`
+  body may be a raise, and in every other position a `Never` reads as Unknown does, so nothing
+  that ran is refused. Pinned by `raise_has_the_type_never_and_vanishes_under_join` and
+  `a_constructor_that_validates_inline_keeps_its_shape` (three engines).
+
+- **A literal key reads a known shape the way `.k` does, and `x ?? d` on a present field is
+  `x`'s type.** `spec.get("columns")`, `spec.expect("columns")` and `spec.columns ?? []` all
+  answered Unknown where `spec.columns` answered the field's type (field build, 1.44a) — and a
+  library reads an OPTIONAL spec field with exactly those, which is where every constructor
+  lost the shape it was handed. `get("k")` now has the field's type, and `missing` — or the
+  default's type — when the shape lacks the name; `expect("k")` the field's type on a hit (a
+  miss raises at run time and is not refused); and `x ?? d` where `x` is `r.k` or `r.get("k")`
+  on a shape that provably holds `k` as a value is `x`'s type, since the default never applies.
+  A key held in a variable stays Unknown, as the shape is. Pinned by
+  `a_literal_key_reads_the_field_the_way_a_dot_does`.
+
 - **An argument-dependent record shape reaches the call site.** `fn mk(s) = {c: s.columns}`
   followed by `mk({columns: {id: 1, name: 2}}).c.nmae` passed `helix check`, same file or
   through `import`: a function was typed once at its definition with an unannotated parameter
@@ -303,6 +323,23 @@
   anyone can rely on.
 
 ### Fixed
+
+- **`helix check` on a precedence-climbing parser took 3.7 s and 3.2 GB; it takes 9 ms and
+  25 MB.** Call-site specialization guarded recursion by function AND argument tuple, and a
+  structurally recursive function hands itself a strictly larger type each level —
+  `_lassoc(ts, {node: {l: s.node, …}, …}, …)`, the left-association loop of the field build's
+  expression parser — so the guard never tripped and the nesting ran to the 2 000 budget with
+  linearly growing record types (field build, 1.48; found when the field's gate stopped fitting
+  two minutes: `ui/expr.helix` 18 ms → 3 721 ms and 42 MB → 3.2 GB, every module importing it
+  likewise, all three engines alike because it is the checker; in a test thread's smaller stack
+  the same program overflows the stack). The in-progress guard is by NAME now: a call to a
+  function whose body is being specialized, under any arguments, answers the stored signature —
+  the monomorphic-recursion rule — so nesting is bounded by the number of functions and every
+  type by the program's own structure. Measured on the field's file: 3.1–4.7 s and 3.5 GB → 9 ms
+  and 25 MB; `import ui.compile` 3 854 → 11 ms; the field's `ui_test` suite 13.9 s → 0.28 s; a
+  sweep of all 79 field files finds none over 50 ms; the corpus check control 358 → 343 ms (min
+  of 5). Nothing is refused that was not: the answer at the cut is the permissive one. Pinned
+  by `a_growing_recursion_is_specialized_once_per_chain`, which counts specializations.
 
 - **`helix effects` no longer fails open, and separates what a function does from what it
   carries.** A function that received an effectful function by name (`apply1(slurp, p)` with

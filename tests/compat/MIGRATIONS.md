@@ -164,3 +164,12 @@ no entry. A source edit is not a behavior change.
 - **`{a: x}` in a destructure is the rename form** (2026-09-06). It was refused ("`a:` — a
   destructured field binds under its own name"); it reads `a` and binds `x` now. Additive: no
   program that ran used the spelling.
+
+- **A field read after `get("k")`, `expect("k")` or `?? default` on a known shape is checked**
+  (2026-09-07). `(spec.columns ?? []).nmae`, `spec.get("columns").nmae` and
+  `spec.expect("columns").nmae`, with `spec` a record the checker knows holds `columns`, are
+  refused by `check` as "record has no field `nmae`" where they used to pass and raise at run
+  time with the same sentence. And because `raise` has the type `Never`, a constructor that
+  validates inline (`if bad then raise(…) else {rec}`) now hands its callers a known shape, so
+  the same refusal reaches a typo after such a call. Additive otherwise; no corpus program or
+  golden moved.

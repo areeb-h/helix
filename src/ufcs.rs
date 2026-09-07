@@ -218,10 +218,11 @@ fn call_reading(e: &mut Expr, cx: &Cx, bound: &HashSet<String>) -> Option<Expr> 
     let t = cx.types.get(&(&**recv as *const Expr))?;
     // The receivers whose method reading the type does NOT rule out: an unknown one, a
     // record (a field of this name may hold a function), and the frame types, which route
-    // by their own rules. `Missing` is bottom and left to the engines on principle.
+    // by their own rules. `Missing` is bottom and left to the engines on principle; `Never`
+    // (a raise) never reaches a dispatch, and is left alone for the same reason.
     if matches!(
         t,
-        Type::Unknown | Type::Missing | Type::Record(_) | Type::DataFrame | Type::GroupBy
+        Type::Unknown | Type::Missing | Type::Never | Type::Record(_) | Type::DataFrame | Type::GroupBy
     ) {
         return None;
     }

@@ -1333,7 +1333,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "Raise an error with a message and optional help line; caught by try like any error.",
         example: "raise(\"k must be positive\", \"pass k >= 1\")",
         example_out: "",
-        notes: "",
+        notes: "NEVER RETURNS, and the checker knows it: `raise` has the type Never, which every join drops, so `if bad then raise(\"…\") else rec` has rec's type and `x ?? raise(\"…\")` has x's — a constructor that validates inline keeps the shape it builds, and a required field reads as `spec.k ?? raise(\"k required\")`. Keywords: error, throw, abort, guard, never, required.",
     },
     DocEntry {
         name: "sleep",
@@ -3636,7 +3636,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "A field's value by runtime name; missing (or the default) when the field is absent.",
             example: "{x: 1}.get(\"z\", 0)",
             example_out: "0",
-            notes: "",
+            notes: "With a LITERAL key on a record whose shape the checker knows, `get(\"k\")` has the field's type — missing, or the default's type, when the shape lacks the name — exactly as `.k` would; a key held in a variable is Unknown to the checker, as the shape is not. ABSENCE IS NOT A MISSING VALUE: a field whose value IS missing answers missing, not the default, as Dict.get does. Keywords: default, fallback, absent, lookup, optional field.",
         },
     ),
     (
@@ -3647,7 +3647,7 @@ pub static METHOD_DOCS: &[(&str, DocEntry)] = &[
             doc: "A field's value by runtime name, raising when the record lacks the field.",
             example: "{x: 1}.expect(\"x\")",
             example_out: "1",
-            notes: "",
+            notes: "With a literal key on a known shape the checker gives the field's type on a hit; a miss raises at run time, and the checker does not refuse it. Keywords: required field, loud lookup, raise.",
         },
     ),
     (

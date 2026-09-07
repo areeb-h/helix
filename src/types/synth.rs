@@ -16,7 +16,7 @@ impl super::Checker {
         let t = self.synth(expr)?;
         match op {
             UnOp::Neg => match &t {
-                Type::Int | Type::Float | Type::Num | Type::Missing | Type::Unknown => Ok(t),
+                Type::Int | Type::Float | Type::Num | Type::Missing | Type::Unknown | Type::Never => Ok(t),
                 Type::Tensor | Type::Array(_) => Ok(Type::Unknown),
                 other => Err(HelixError::new(
                     format!("cannot negate a value of type {}", other),
@@ -25,7 +25,7 @@ impl super::Checker {
                 )),
             },
             UnOp::Not => match &t {
-                Type::Bool | Type::Missing | Type::Unknown => Ok(t),
+                Type::Bool | Type::Missing | Type::Unknown | Type::Never => Ok(t),
                 Type::Array(_) | Type::Tensor => Ok(Type::Unknown),
                 other => Err(HelixError::new(
                     format!("expected a boolean, found a value of type {}", other),
@@ -45,6 +45,12 @@ impl super::Checker {
         col: usize,
     ) -> Result<Type, HelixError> {
         use BinOp::*;
+        // An operand that never arrives (`raise(…)`, type `Never`): the operation never
+        // runs, so it is read as an Unknown one would be — except under `??`, where the
+        // raise IS the default and the other side is the answer (`join` drops it).
+        if !matches!(op, Coalesce) && (matches!(lt, Type::Never) || matches!(rt, Type::Never)) {
+            return Ok(Type::Unknown);
+        }
         match op {
             // `a ?? b` — result is whichever side survives; never errors.
             Coalesce => Ok(join(lt, rt)),
@@ -180,6 +186,18 @@ impl super::Checker {
         line: usize,
         col: usize,
     ) -> Result<Type, HelixError> {
+        // An argument that never arrives (`raise(…)`, type `Never`) is checked as an unknown
+        // one: the call never runs, so nothing about it is refused.
+        let normalized: Vec<Type>;
+        let args: &[Type] = if args.iter().any(|a| matches!(a, Type::Never)) {
+            normalized = args
+                .iter()
+                .map(|a| if matches!(a, Type::Never) { Type::Unknown } else { a.clone() })
+                .collect();
+            &normalized
+        } else {
+            args
+        };
         // A user binding of this name shadows a builtin of the same name — defining
         // `fn sign(..)` checks against *your* signature, not the math builtin's.
         if let Some(Type::Function { params, ret, required, origin }) = self.env.get(name).cloned() {
@@ -251,6 +269,36 @@ impl super::Checker {
         })
     }
 
+    /// A LITERAL key on a known shape reads the field the way `rec.k` does (field build,
+    /// 1.44a): `spec.get("columns")` has the field's type, and `missing` — or the default's
+    /// type — when the shape lacks the name; `expect("k")` has the field's type on a hit and
+    /// stays Unknown on a miss (it raises at run time, and the checker does not refuse). A
+    /// key that is not a literal keeps the dynamic answer: `None` leaves the call to
+    /// `record_method_type`. The default's own errors surface, as an argument's do.
+    fn literal_key_read(
+        &mut self,
+        method: &str,
+        fields: &[(String, Type)],
+        args: &[Expr],
+    ) -> Result<Option<Type>, HelixError> {
+        let key = match (method, args.first()) {
+            ("get", Some(Expr::Str(k))) if args.len() <= 2 => k,
+            ("expect", Some(Expr::Str(k))) if args.len() == 1 => k,
+            _ => return Ok(None),
+        };
+        let held = fields.iter().find(|(f, _)| f == key).map(|(_, t)| t.clone());
+        let default = match args.get(1) {
+            Some(d) => Some(self.synth(d)?),
+            None => None,
+        };
+        Ok(Some(match (held, default) {
+            (Some(t), _) => t,
+            (None, Some(d)) => d,
+            (None, None) if method == "get" => Type::Missing,
+            (None, None) => Type::Unknown,
+        }))
+    }
+
     pub(super) fn synth_method(
         &mut self,
         recv: &Expr,
@@ -318,8 +366,8 @@ impl super::Checker {
             return Ok(Type::Int);
         }
         let result = match &rt {
-            // Permissive: any method on Unknown/Missing receiver is Unknown.
-            Type::Unknown | Type::Missing => Ok(Type::Unknown),
+            // Permissive: any method on an Unknown/Missing/Never receiver is Unknown.
+            Type::Unknown | Type::Missing | Type::Never => Ok(Type::Unknown),
             // DataFrame / GroupBy: args are the runtime schema boundary — UNCHECKED.
             Type::DataFrame => df_method_type(name, line, col),
             Type::GroupBy => groupby_method_type(name, line, col),
@@ -377,6 +425,10 @@ impl super::Checker {
                 // The receiver answers first here too (field build, 1.40): a name that is
                 // neither a record method nor a field is refused before its arguments are
                 // read, so `{a: 1}.nonexistent(it * 2)` names the method, not `it`.
+                // A LITERAL key reads the shape the way `.k` does (field build, 1.44a).
+                if let Some(t) = self.literal_key_read(name, &fields, args)? {
+                    return Ok(t);
+                }
                 match record_method_type(name, &fields, line, col) {
                     Ok(t) => {
                         // A field holding a function receives the ORIGIN of a synthesized
@@ -435,7 +487,7 @@ impl super::Checker {
         if result.is_err()
             && self.fn_globals.contains(free)
             && matches!(self.env.get(free), Some(Type::Function { .. }))
-            && !matches!(rt, Type::Unknown | Type::Missing | Type::DataFrame | Type::GroupBy)
+            && !matches!(rt, Type::Unknown | Type::Missing | Type::Never | Type::DataFrame | Type::GroupBy)
             && !crate::registry::type_owns_method(&Self::receiver_table_name(&rt), name)
         {
             let mut ats = Vec::with_capacity(args.len() + 1);
@@ -456,7 +508,7 @@ impl super::Checker {
         // time: Unknown covers PyObject and Node, which are opaque to the checker.
         if result.is_err()
             && crate::registry::is_builtin_name(name)
-            && !matches!(rt, Type::Unknown | Type::Missing | Type::DataFrame | Type::GroupBy)
+            && !matches!(rt, Type::Unknown | Type::Missing | Type::Never | Type::DataFrame | Type::GroupBy)
             && !crate::registry::type_owns_method(&Self::receiver_table_name(&rt), name)
         {
             let mut bts = Vec::with_capacity(args.len() + 1);

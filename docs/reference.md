@@ -44,6 +44,8 @@ Raise unless a `try` FAILED — and, given a substring, unless its message conta
 
 Raise an error with a message and optional help line; caught by try like any error.
 
+**Note:** NEVER RETURNS, and the checker knows it: `raise` has the type Never, which every join drops, so `if bad then raise("…") else rec` has rec's type and `x ?? raise("…")` has x's — a constructor that validates inline keeps the shape it builds, and a required field reads as `spec.k ?? raise("k required")`. Keywords: error, throw, abort, guard, never, required.
+
 ```
 >>> raise("k must be positive", "pass k >= 1")
 ```
@@ -4249,6 +4251,8 @@ Run one read-only statement on this connection; returns a DataFrame.
 
 A field's value by runtime name, raising when the record lacks the field.
 
+**Note:** With a literal key on a known shape the checker gives the field's type on a hit; a miss raises at run time, and the checker does not refuse it. Keywords: required field, loud lookup, raise.
+
 ```
 >>> {x: 1}.expect("x")
 1
@@ -4257,6 +4261,8 @@ A field's value by runtime name, raising when the record lacks the field.
 ### `get(k, default?)`
 
 A field's value by runtime name; missing (or the default) when the field is absent.
+
+**Note:** With a LITERAL key on a record whose shape the checker knows, `get("k")` has the field's type — missing, or the default's type, when the shape lacks the name — exactly as `.k` would; a key held in a variable is Unknown to the checker, as the shape is not. ABSENCE IS NOT A MISSING VALUE: a field whose value IS missing answers missing, not the default, as Dict.get does. Keywords: default, fallback, absent, lookup, optional field.
 
 ```
 >>> {x: 1}.get("z", 0)

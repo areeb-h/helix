@@ -383,6 +383,31 @@ the calls inside the body, each memoized. Open: a specialization is per argument
 so two record shapes at two call sites cost two typings (bounded by the budget); and the
 precision stops at a parameter the call leaves `Unknown`.
 
+**1.48 (2026-09-07) — the specialization's recursion guard: a REGRESSION, fixed.** The field's
+gate stopped fitting two minutes: `helix check ui/expr.helix` 18 ms → 3 721 ms and 42 MB →
+3.2 GB, all three engines alike (it is the checker), every module importing `ui.expr` likewise,
+the trigger bisected to closing the `_p_tern` → `_p_expr` cycle. Mechanism: the in-progress
+guard was keyed by function AND argument tuple, and `_lassoc(ts, s, ops, sub)` recurses with
+`s` wrapped one record deeper each level, so every recursive call had a new key, nothing
+tripped, and the nesting ran to the budget (2 000) with linearly growing record types —
+quadratic memory in the memo keys and the bodies' environments, and in a 2 MB test-thread
+stack a stack overflow. FIXED: the guard is by NAME — a call to a function whose body is being
+specialized, under any arguments, answers the stored signature (monomorphic recursion, the
+Hindley–Milner rule; the answer at the cut is the permissive one). Measured: the field file
+3.1–4.7 s / 3.5 GB → 9 ms / 25 MB; `import ui.compile` 3 854 → 11 ms; the field's `ui_test`
+suite 13.9 s → 0.28 s; a sweep of all 79 field files has none over 50 ms; the corpus check
+control 358 → 343 ms (min of 5). The field's own synthetic did not reproduce because it lacked
+the GROWING argument; `a_growing_recursion_is_specialized_once_per_chain` has it and counts
+specializations (≤ 60 for a 14-function parser; the unfixed checker overflows the stack).
+
+**1.44a (2026-09-07) — the optional-field reads.** DONE: `raise` has the type `Never` (the
+bottom of `join`; read as Unknown everywhere else), so `if bad then raise(…) else {rec}` keeps
+the shape and the field's `_def_check` hoist is no longer needed; `get("k")` / `expect("k")`
+with a literal key read a known shape as `.k` does; `x ?? d` on a provably present field is
+`x`'s type. Still open from 1.44a's second half: a shape-preserving map over a record's fields
+(`Record.map_values`, keys kept — the checker would type the mapped value per field), a
+language decision; `{...dict}` stays a runtime shape.
+
 **1.46.3 (2026-09-05) — Record enumeration cost.** DONE for the allocation half:
 `Symbol::as_rc_string` (a per-thread `FxHashMap<u32, Rc<String>>`) shares one allocation per
 distinct name, so `keys()`/`items()` allocate only their result array (and `items`' tuples).

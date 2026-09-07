@@ -16377,3 +16377,21 @@ fn a_destructure_may_rename_a_field() {
     assert_ne!(code, Some(0));
     assert!(err.contains("to bind the field under"), "{err}");
 }
+
+/// A constructor that validates inline keeps its argument-dependent shape (field build,
+/// 1.44a): `raise` has the type `Never`, so a guard's branch no longer widens the return, and
+/// `spec.get("columns") ?? …` reads the field the way `spec.columns` does. The refusal is at
+/// `check`, before anything runs; the valid program runs on every engine.
+#[test]
+fn a_constructor_that_validates_inline_keeps_its_shape() {
+    let src = "fn define(spec) = if spec.table.is_missing() then raise(\"a model needs a `table`\")\n  else {table: spec.table, c: spec.get(\"columns\") ?? {id: \"int\"}}\nM = define({table: \"people\", columns: {id: \"int\", name: \"text\"}})\nprint(M.table, M.c.name, (try define({key: 1})).ok)\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("inline_guard_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "people text false\n", "{name}");
+    }
+    let bad = format!("{src}print(M.c.nmae)\n");
+    let (out, err, code) = run_source(&bad, &[], "inline_guard_bad");
+    assert_ne!(code, Some(0), "{out}");
+    assert!(err.contains("no field `nmae`"), "{err}");
+}
