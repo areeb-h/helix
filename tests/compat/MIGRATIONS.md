@@ -200,6 +200,21 @@ no entry. A source edit is not a behavior change.
   to pass and raise at run time — the refusal the unannotated `define` already drew. `Any` still
   opts out. No corpus program or golden moved.
 
+- **`std()`, `var()`, `cov(ys)` divide by n − 1** (2026-09-07, ADR 0049). Every spread the
+  language computes is the sample estimate now: `[2, 4, 4, 4, 5, 5, 7, 9].std()` is
+  `2.138089935299395` where it was `2.0`, `var()` `4.571428571428571` where it was `4.0`;
+  `summary().std`, `zscores()`, `normalize()`, `standard_error()` and
+  `coefficient_of_variation()` move with them (`[10, 20, 30].zscores()` is `[-1.0, 0.0, 1.0]`).
+  `std(0)` / `var(0)` / `cov(ys, 0)` answer exactly what the old defaults did. A spread over one
+  value is `missing` where `std(1)` used to raise "needs more than 1 value(s)"; `[5].std()` is
+  `missing` where it was `0.0`. The grouped frame `std` is unchanged. One corpus golden moved:
+  `df_records_schema` (its `cov` default); the reference's examples for these verbs moved, and
+  so do four compat baselines that print a spread: `examples__language__functions` (its
+  `normalize` is written with `xs.std()` and prints the sample z-scores now,
+  `±1.161895003862225` where it printed `±1.3416407864998738`), `examples__language__records`
+  (`std 2.138089935299395` where it printed `std 2.0`), `examples__language__tour` (`std` and
+  `normalized`) and `examples__numerics__vectors` (`normalize` and `zscores`).
+
 - **`x / 0` is `inf`, `0 / 0` is NaN — `/` no longer raises** (2026-09-07, ADR 0048). A
   program that caught the division error — `try (a / b)`, `assert_error(try (1 / 0), …)` — reads
   a value now: `{ok: true, value: inf}`. `//` and `%` by zero still raise, in their old words,

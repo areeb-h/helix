@@ -662,7 +662,8 @@ fn empty_guard(xs: &[f64], who: &str, line: usize, col: usize) -> Result<(), Hel
 /// `0` (population, the default), an integer → that `ddof` (`1` = sample / Bessel's correction).
 fn parse_ddof(name: &str, args: &[Value], line: usize, col: usize) -> Result<usize, HelixError> {
     match args {
-        [] => Ok(0),
+        // The SAMPLE estimate is the default (ADR 0049).
+        [] => Ok(1),
         [Value::Int(d)] if *d >= 0 => Ok(*d as usize),
         [Value::Int(d)] => Err(HelixError::new(
             format!("`{name}` ddof must be >= 0, got {d}"),
@@ -670,12 +671,12 @@ fn parse_ddof(name: &str, args: &[Value], line: usize, col: usize) -> Result<usi
             col,
         )),
         [_] => Err(HelixError::new(
-            format!("`{name}` ddof must be an integer (0 = population, 1 = sample)"),
+            format!("`{name}` ddof must be an integer (1 = sample, the default; 0 = population)"),
             line,
             col,
         )),
         _ => Err(HelixError::new(
-            format!("`{name}` takes an optional ddof (0 = population, 1 = sample), got {} arguments", args.len()),
+            format!("`{name}` takes an optional ddof (1 = sample, the default; 0 = population), got {} arguments", args.len()),
             line,
             col,
         )),
@@ -684,17 +685,11 @@ fn parse_ddof(name: &str, args: &[Value], line: usize, col: usize) -> Result<usi
 
 /// A `var`/`std` with `ddof` needs strictly more than `ddof` values (else it would divide by a
 /// zero or negative count). Raises a precise error instead of returning `inf`/`NaN`.
-fn ddof_fits(xs: &[f64], ddof: usize, name: &str, line: usize, col: usize) -> Result<(), HelixError> {
-    if xs.len() <= ddof {
-        Err(HelixError::new(
-            format!("`{name}` with ddof = {ddof} needs more than {ddof} value(s), got {}", xs.len()),
-            line,
-            col,
-        )
-        .hint("ddof = 0 (population, the default) divides by n; ddof = 1 (sample) divides by n−1."))
-    } else {
-        Ok(())
-    }
+/// Whether a spread with `ddof` is defined over `xs`: `n > ddof`. One that is not — a single
+/// value under the sample estimate — is `missing`, the answer a one-row group has always
+/// given (ADR 0049): no spread is an absent datum, not a mistake.
+fn ddof_fits(xs: &[f64], ddof: usize) -> bool {
+    xs.len() > ddof
 }
 
 /// Neumaier's improved Kahan compensated summation — bounds the rounding error of
@@ -742,13 +737,6 @@ fn neumaier_seq(xs: &[f64]) -> f64 {
     } else {
         sum
     }
-}
-
-fn population_std(xs: &[f64]) -> f64 {
-    let mean = neumaier_sum(xs) / xs.len() as f64;
-    let sq: Vec<f64> = xs.iter().map(|x| (x - mean).powi(2)).collect();
-    let var = neumaier_sum(&sq) / xs.len() as f64;
-    var.sqrt()
 }
 
 /// Pull argument `i` as a `&str`, with a clean type error otherwise.

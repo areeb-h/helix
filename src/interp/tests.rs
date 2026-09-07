@@ -410,7 +410,7 @@
     #[test]
     fn array_stats() {
         assert_eq!(float("[1, 2, 3, 4].mean()"), 2.5);
-        assert!((float("[1, 2, 3, 4].std()") - 1.118033988749895).abs() < 1e-12);
+        assert!((float("[1, 2, 3, 4].std()") - 1.2909944487358056).abs() < 1e-12); // sample (ADR 0049)
         assert!(matches!(last("[1, 2, 3, 4].sum()").unwrap(), Value::Int(10)));
     }
 
@@ -2319,19 +2319,19 @@
         assert_eq!(format!("{}", last("[1, 5, 9].clamp(2, 7)").unwrap()), "[2, 5, 7]"); // method intact
     }
 
-    /// `.var()`/`.std()` default to POPULATION statistics (÷n); an optional `ddof` gives sample
-    /// statistics (`.var(1)` divides by n−1, Bessel's correction). The default (ddof 0) path is
-    /// unchanged. `ddof` must be a non-negative integer strictly less than the element count.
+    /// `.var()`/`.std()` default to the SAMPLE estimate (÷(n−1), Bessel's correction — ADR
+    /// 0049); an optional `ddof` selects the population's (`.var(0)` divides by n). `ddof` must
+    /// be a non-negative integer; a spread over no more than `ddof` values is `missing`.
     #[test]
     fn var_std_ddof_sample_option() {
-        // classic dataset: mean 5, SS 32 → population var 4 / std 2, sample var 32/7.
+        // classic dataset: mean 5, SS 32 → sample var 32/7, population var 4 / std 2.
         let d = "[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]";
-        assert!((float(&format!("{d}.var()")) - 4.0).abs() < 1e-12); // population default
-        assert!((float(&format!("{d}.std()")) - 2.0).abs() < 1e-12);
+        assert!((float(&format!("{d}.var()")) - 32.0 / 7.0).abs() < 1e-12); // sample default
+        assert!((float(&format!("{d}.std()")) - (32.0_f64 / 7.0).sqrt()).abs() < 1e-12);
         assert!((float(&format!("{d}.var(0)")) - 4.0).abs() < 1e-12); // ddof 0 == population
-        assert!((float(&format!("{d}.var(1)")) - 32.0 / 7.0).abs() < 1e-12); // sample
+        assert!((float(&format!("{d}.var(1)")) - 32.0 / 7.0).abs() < 1e-12); // sample, explicitly
         assert!((float(&format!("{d}.std(1)")) - (32.0_f64 / 7.0).sqrt()).abs() < 1e-12);
-        assert!(last("[3.0].var(1)").is_err()); // n <= ddof
+        assert!(matches!(last("[3.0].var(1)").unwrap(), Value::Missing)); // n <= ddof: no spread
         assert!(last("[1.0, 2.0].var(-1)").is_err()); // negative ddof
         assert!(last("[1.0, 2.0].std(2, 3)").is_err()); // too many args
     }

@@ -2048,11 +2048,11 @@ Bound every element into [lo, hi]; an all-Int array stays Int.
 
 ### `coefficient_of_variation()`
 
-The population standard deviation divided by the mean.
+The sample standard deviation divided by the mean; missing for a single value.
 
 ```
 >>> [2.0, 4.0, 6.0].coefficient_of_variation()
-0.408248290463863
+0.5
 ```
 
 ### `concat(other, ...)`
@@ -2104,7 +2104,7 @@ The number of elements for which the predicate is true.
 
 ### `cov(ys, ddof?)`
 
-The covariance of this array with another of the same length: population (divide by n) by default; `cov(ys, 1)` divides by n−1 for the sample estimator.
+The covariance of this array with another of the same length: the sample estimator (divide by n−1) by default; `cov(ys, 0)` divides by n for the population's.
 
 **Note:** The same ddof rule as `var`; a missing anywhere makes the answer missing. Keywords: covariance, joint variance, spread, relationship.
 
@@ -2377,11 +2377,11 @@ The Euclidean (L2) norm: the square root of the sum of squares.
 
 ### `normalize()`
 
-Z-score rescale: subtract the mean, divide by the population std.
+Z-score rescale: subtract the mean, divide by the sample std.
 
 ```
 >>> [1, 2, 3].normalize()
-[-1.224744871391589, 0.0, 1.224744871391589]
+[-1.0, 0.0, 1.0]
 ```
 
 ### `position(p)`
@@ -2515,22 +2515,22 @@ The range of the values: max minus min, as a Float.
 
 ### `standard_error()`
 
-The standard error of the mean: population std divided by sqrt(n).
+The standard error of the mean: sample std divided by sqrt(n); missing for a single value.
 
 ```
 >>> [2, 4, 4, 4, 5, 5, 7, 9].standard_error()
-0.7071067811865475
+0.7559289460184544
 ```
 
 ### `std(ddof?)`
 
-The standard deviation of the numeric values: population (divide by n) by default; `std(1)` divides by n−1 for the sample estimate — `ddof` is the delta degrees of freedom, as in NumPy.
+The standard deviation of the numeric values: the sample estimate (divide by n−1) by default; `std(0)` divides by n for the population's — `ddof` is the delta degrees of freedom, as in NumPy.
 
-**Note:** POPULATION std (divide by n), not the sample std (n-1) most stats libraries default to. The underlying summation is COMPENSATED, as in `sum()`.
+**Note:** SAMPLE std (n−1), the pandas, R and Excel default — and the grouped `std(@col)`'s, so the language has one `std` (ADR 0049); NumPy's default is the population's, `std(0)`. A single value has no spread: `missing`, never an error. The underlying summation is COMPENSATED, as in `sum()`. Keywords: standard deviation, spread, sample, population, ddof, Bessel.
 
 ```
 >>> [2, 4, 4, 4, 5, 5, 7, 9].std()
-2.0
+2.138089935299395
 ```
 
 ### `sum()`
@@ -2550,7 +2550,7 @@ A descriptive-stats record: count, mean, std, min, median, max.
 
 ```
 >>> [1, 3].summary()
-{count: 2, max: 3.0, mean: 2.0, median: 2.0, min: 1.0, std: 1.0}
+{count: 2, max: 3.0, mean: 2.0, median: 2.0, min: 1.0, std: 1.4142135623730951}
 ```
 
 ### `svg_bar(labels?)`
@@ -2660,13 +2660,13 @@ The distinct values, in first-seen order.
 
 ### `var(ddof?)`
 
-The variance of the numeric values: population (divide by n) by default; `var(1)` divides by n−1 for the sample estimate — `ddof` is the delta degrees of freedom, as in NumPy.
+The variance of the numeric values: the sample estimate (divide by n−1) by default; `var(0)` divides by n for the population's — `ddof` is the delta degrees of freedom, as in NumPy.
 
-**Note:** POPULATION variance (divide by n), matching `Array.std()` and unlike the DataFrame aggregates, which use n-1. Both passes use the same COMPENSATED summation as `sum()`, so this is not the naive two-pass formula.
+**Note:** SAMPLE variance (n−1), matching `Array.std()` and the grouped frame aggregates (ADR 0049); `var(0)` is the population's. A single value has no spread: `missing`. Both passes use the same COMPENSATED summation as `sum()`, so this is not the naive two-pass formula. Keywords: variance, spread, sample, population, ddof, Bessel.
 
 ```
 >>> [2, 4, 4, 4, 5, 5, 7, 9].var()
-4.0
+4.571428571428571
 ```
 
 ### `where(p)`
@@ -2749,11 +2749,11 @@ Pair with other positionally and map f over the pairs: zip(other).map(f).
 
 ### `zscores()`
 
-Each value's z-score: (x - mean) / population std.
+Each value's z-score: (x - mean) / sample std.
 
 ```
 >>> [10, 20, 30].zscores()
-[-1.224744871391589, 0.0, 1.224744871391589]
+[-1.0, 0.0, 1.0]
 ```
 
 ## String methods
@@ -3980,7 +3980,7 @@ The number of distinct values in each group; missing when the group holds a miss
 
 The per-group standard deviation of one column.
 
-**Note:** SAMPLE std (n-1 divisor), unlike Array .std() (population); a 1-row group gives missing.
+**Note:** SAMPLE std (n−1), as `Array.std()` is (ADR 0049); a 1-row group gives missing, as a single value's `std()` does.
 
 ```
 >>> dataframe({k: ["a","a","b"], v: [1,2,3]}).group(@k).std(@v).sort(@k).column("v")

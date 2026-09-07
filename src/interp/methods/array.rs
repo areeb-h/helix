@@ -539,8 +539,11 @@ pub(crate) fn float_stat(xs: &[f64], name: &str, line: usize, col: usize) -> Res
     empty_guard(xs, name, line, col)?;
     Ok(match name {
         "mean" => Value::Float(neumaier_sum(xs) / xs.len() as f64),
-        "std" => Value::Float(population_std(xs)),
-        "var" => Value::Float(crate::stats::variance(xs)),
+        // The sample estimate (ddof 1, ADR 0049); one value has no spread: `missing`.
+        "std" if xs.len() < 2 => Value::Missing,
+        "var" if xs.len() < 2 => Value::Missing,
+        "std" => Value::Float(crate::stats::std_ddof(xs, 1)),
+        "var" => Value::Float(crate::stats::variance_ddof(xs, 1)),
         "median" => Value::Float(crate::stats::median(xs)),
         _ => unreachable!("float_stat only handles mean/std/var/median"),
     })
@@ -613,21 +616,22 @@ pub(crate) fn array_method(
             Ok(Value::Float(neumaier_sum(&xs) / xs.len() as f64))
         }
         "std" => {
-            // Optional `ddof`: `std()` = population (÷n, default), `std(1)` = sample (÷n−1).
+            // Optional `ddof`: `std()` = sample (÷n−1, the default — ADR 0049), `std(0)` = population.
             let ddof = parse_ddof(name, args, line, col)?;
             if let Some(v) = degenerate_reduction(items) {
                 return Ok(v);
             }
             let xs = numeric_vec(items, "std", line, col)?;
             empty_guard(&xs, "std", line, col)?;
-            ddof_fits(&xs, ddof, "std", line, col)?;
-            // ddof == 0 keeps the exact existing population path (bit-identical to before).
-            let v = if ddof == 0 {
-                population_std(&xs)
+            if !ddof_fits(&xs, ddof) {
+                return Ok(Value::Missing);
+            }
+            // ddof == 0 keeps the exact population path (bit-identical to what `std()` was).
+            Ok(Value::Float(if ddof == 0 {
+                crate::stats::population_std(&xs)
             } else {
-                crate::stats::variance_ddof(&xs, ddof).sqrt()
-            };
-            Ok(Value::Float(v))
+                crate::stats::std_ddof(&xs, ddof)
+            }))
         }
         "median" => {
             no_args(name)?;
@@ -639,21 +643,22 @@ pub(crate) fn array_method(
             Ok(Value::Float(crate::stats::median(&xs)))
         }
         "var" => {
-            // Optional `ddof`: `var()` = population (÷n, default), `var(1)` = sample (÷n−1).
+            // Optional `ddof`: `var()` = sample (÷n−1, the default — ADR 0049), `var(0)` = population.
             let ddof = parse_ddof(name, args, line, col)?;
             if let Some(v) = degenerate_reduction(items) {
                 return Ok(v);
             }
             let xs = numeric_vec(items, "var", line, col)?;
             empty_guard(&xs, "var", line, col)?;
-            ddof_fits(&xs, ddof, "var", line, col)?;
-            // ddof == 0 keeps the exact existing population path (bit-identical to before).
-            let v = if ddof == 0 {
-                crate::stats::variance(&xs)
+            if !ddof_fits(&xs, ddof) {
+                return Ok(Value::Missing);
+            }
+            // ddof == 0 keeps the exact population path (bit-identical to what `var()` was).
+            Ok(Value::Float(if ddof == 0 {
+                crate::stats::population_variance(&xs)
             } else {
                 crate::stats::variance_ddof(&xs, ddof)
-            };
-            Ok(Value::Float(v))
+            }))
         }
         "quantile" => {
             // One argument: the probability `p` in [0, 1] (e.g. `xs.quantile(0.95)`).
@@ -732,7 +737,9 @@ pub(crate) fn array_method(
                     .hint("a constant series has no spread to correlate.")),
                 };
             }
-            ddof_fits(&xs, ddof, name, line, col)?;
+            if !ddof_fits(&xs, ddof) {
+                return Ok(Value::Missing);
+            }
             Ok(Value::Float(crate::stats::covariance(&xs, &ys, ddof)))
         }
         "summary" => {
@@ -748,7 +755,10 @@ pub(crate) fn array_method(
             let fields = vec![
                 (Symbol::intern("count"), Value::Int(xs.len() as i64)),
                 (Symbol::intern("mean"), Value::Float(crate::stats::mean(&xs))),
-                (Symbol::intern("std"), Value::Float(crate::stats::std(&xs))),
+                (
+                    Symbol::intern("std"),
+                    if xs.len() > 1 { Value::Float(crate::stats::std_ddof(&xs, 1)) } else { Value::Missing },
+                ),
                 (Symbol::intern("min"), Value::Float(xs[0])),
                 (Symbol::intern("median"), Value::Float(crate::stats::quantile_sorted(&xs, 0.5))),
                 (Symbol::intern("max"), Value::Float(xs[xs.len() - 1])),
@@ -895,7 +905,9 @@ pub(crate) fn array_method(
             let xs = numeric_vec(items, "normalize", line, col)?;
             empty_guard(&xs, "normalize", line, col)?;
             let mean = neumaier_sum(&xs) / xs.len() as f64;
-            let sd = population_std(&xs);
+            // The sample std (ADR 0049); a single value has no spread, which the zero-spread
+            // refusal below already names.
+            let sd = if xs.len() > 1 { crate::stats::std_ddof(&xs, 1) } else { 0.0 };
             if sd == 0.0 {
                 return Err(HelixError::new(
                     "cannot normalize: all values are identical (standard deviation is 0)",
@@ -1305,9 +1317,11 @@ pub(crate) fn array_method(
                 ));
             }
             match name {
-                "standard_error" => {
-                    Ok(Value::Float(crate::stats::std(&xs) / (xs.len() as f64).sqrt()))
-                }
+                "standard_error" => Ok(if xs.len() > 1 {
+                    Value::Float(crate::stats::std_ddof(&xs, 1) / (xs.len() as f64).sqrt())
+                } else {
+                    Value::Missing
+                }),
                 "coefficient_of_variation" => {
                     let m = crate::stats::mean(&xs);
                     if m == 0.0 {
@@ -1317,7 +1331,11 @@ pub(crate) fn array_method(
                             col,
                         ));
                     }
-                    Ok(Value::Float(crate::stats::std(&xs) / m))
+                    Ok(if xs.len() > 1 {
+                        Value::Float(crate::stats::std_ddof(&xs, 1) / m)
+                    } else {
+                        Value::Missing
+                    })
                 }
                 "iqr" => Ok(Value::Float(
                     crate::stats::quantile(&xs, 0.75) - crate::stats::quantile(&xs, 0.25),
@@ -1331,7 +1349,9 @@ pub(crate) fn array_method(
                     Ok(Value::Float(hi - lo))
                 }
                 _ => {
-                    let (m, sd) = (crate::stats::mean(&xs), crate::stats::std(&xs));
+                    // The sample std (ADR 0049); one value has no spread — the refusal below.
+                    let sd = if xs.len() > 1 { crate::stats::std_ddof(&xs, 1) } else { 0.0 };
+                    let m = crate::stats::mean(&xs);
                     if sd == 0.0 {
                         return Err(HelixError::new(
                             "cannot compute z-scores: the values have zero spread",

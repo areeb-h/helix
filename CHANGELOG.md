@@ -210,6 +210,18 @@
 
 ### Changed
 
+- **`std()`, `var()` and `cov(ys)` are the sample estimate by default (ADR 0049).** Two
+  defaults disagreed inside one language: the array verbs divided by n while the grouped frame
+  `std(@col)` divided by n − 1 on both backends, so the same column answered two numbers (the
+  field build's population-versus-sample question; the user's decision). Everything that
+  computes a spread now divides by n − 1 — `std`, `var`, `cov`, `summary().std`, `zscores()`,
+  `normalize()`, `standard_error()`, `coefficient_of_variation()` — the pandas, R and Excel
+  default and the one the grouped verb always had; `std(0)`, `var(0)`, `cov(ys, 0)` are the
+  population's. A spread over one value is `missing`, never an error (the answer a one-row
+  group already gave; the old "needs more than 1 value(s)" refusal is gone). Pinned by
+  `the_sample_estimate_is_the_default_on_every_engine` (three engines) and the corpus program
+  `df_records_schema` (both frame backends).
+
 - **`/` is IEEE 754 division: `x / 0` is `inf`, `0 / 0` is NaN, never an error (ADR 0048).**
   The same arithmetic had two answers by carrier — `tensor([1.0, 0.0]) / 0` was `[inf, NaN]`
   while `1.0 / 0.0` raised — and the raise was the one thing that kept `/` off the native path:

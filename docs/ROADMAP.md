@@ -240,8 +240,9 @@ Lexer → parser → AST → tree-walking interpreter.
 
 ## Phase 3.6 — Statistics core (descriptive, bivariate, inferential shipped)
 The "R-for-statistics" surface (`src/stats.rs`). Descriptive statistics are
-missing-propagating and population-based so `var == std²` and array verbs agree with
-the DataFrame group aggregations; inferential statistics use the sample (`n - 1`)
+missing-propagating and sample-based by default (÷(n−1), ADR 0049 — `var == std²` still,
+and the array verbs agree with the DataFrame group aggregations, which always were);
+`std(0)`/`var(0)` are the population's, and inferential statistics use the sample
 estimators they require.
 - [x] Descriptive array methods: `median`, `var`, `quantile(p)` (type-7 linear
       interpolation), and `summary()` → a `{count, mean, std, min, median, max}`

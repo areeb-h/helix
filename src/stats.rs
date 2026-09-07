@@ -4,11 +4,12 @@
 //! enforce that and handle `missing` propagation); they never allocate a `Value`
 //! or touch a source position, so they stay trivially unit-testable and reusable.
 //!
-//! Helix uses **population** statistics (variance/standard deviation divide by `n`,
-//! not `n - 1`), so `var(xs) == std(xs).powi(2)` holds exactly and the array verbs
-//! agree with the Polars group aggregations. Sample (`n - 1`) variants can be added
-//! later as explicitly named functions if the inferential-statistics layer needs
-//! them. Summation routes through Neumaier compensation to bound rounding error.
+//! Helix's `std`/`var`/`cov` are the **sample** estimates by default (divide by `n - 1`,
+//! Bessel's correction — ADR 0049, the pandas/R/Excel default), with `ddof` selecting the
+//! population's (`ddof = 0`); the grouped frame `std` has always been the sample one, so
+//! the language has one `std`. `var(xs) == std(xs).powi(2)` holds exactly either way. A
+//! spread over fewer than `ddof + 1` values is undefined and the callers answer `missing`.
+//! Summation routes through Neumaier compensation to bound rounding error.
 
 use crate::interp::neumaier_sum;
 
@@ -18,15 +19,21 @@ pub fn mean(xs: &[f64]) -> f64 {
 }
 
 /// Population variance (divides by `n`). Precondition: `xs` is non-empty.
-pub fn variance(xs: &[f64]) -> f64 {
+pub fn population_variance(xs: &[f64]) -> f64 {
     let m = mean(xs);
     let sq: Vec<f64> = xs.iter().map(|x| (x - m).powi(2)).collect();
     neumaier_sum(&sq) / xs.len() as f64
 }
 
 /// Population standard deviation. Precondition: `xs` is non-empty.
-pub fn std(xs: &[f64]) -> f64 {
-    variance(xs).sqrt()
+pub fn population_std(xs: &[f64]) -> f64 {
+    population_variance(xs).sqrt()
+}
+
+/// Standard deviation with an explicit `ddof` — `1` is the sample estimate, Helix's default
+/// (ADR 0049); `0` the population's. Precondition: `n > ddof`.
+pub fn std_ddof(xs: &[f64], ddof: usize) -> f64 {
+    variance_ddof(xs, ddof).sqrt()
 }
 
 /// The `p`-quantile (`p` in `[0, 1]`) by linear interpolation between order
@@ -111,8 +118,8 @@ pub fn sample_variance(xs: &[f64]) -> f64 {
 }
 
 /// Variance with an explicit **delta degrees of freedom** (`ddof`): the sum of squared deviations
-/// divided by `n - ddof`. `ddof = 0` is the population variance (Helix's default — see the module
-/// note); `ddof = 1` is the sample variance (Bessel's correction). Powers `var(ddof)` / `std(ddof)`.
+/// divided by `n - ddof`. `ddof = 1` is the sample variance (Bessel's correction — Helix's
+/// default, ADR 0049); `ddof = 0` is the population's. Powers `var(ddof)` / `std(ddof)`.
 /// Precondition: `n > ddof` (the caller checks and raises a precise error otherwise).
 pub fn variance_ddof(xs: &[f64], ddof: usize) -> f64 {
     let m = mean(xs);
@@ -545,13 +552,15 @@ mod tests {
     }
 
     #[test]
-    fn mean_variance_std_are_population() {
+    fn population_and_sample_estimates() {
         let xs = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
         assert!(approx(mean(&xs), 5.0));
-        assert!(approx(variance(&xs), 4.0)); // population variance
-        assert!(approx(std(&xs), 2.0));
-        // The defining identity: var == std^2.
-        assert!(approx(variance(&xs), std(&xs).powi(2)));
+        assert!(approx(population_variance(&xs), 4.0)); // population variance
+        assert!(approx(population_std(&xs), 2.0));
+        // The defining identity: var == std^2, for either estimate.
+        assert!(approx(population_variance(&xs), population_std(&xs).powi(2)));
+        assert!(approx(variance_ddof(&xs, 1), 32.0 / 7.0)); // the sample estimate, the default
+        assert!(approx(variance_ddof(&xs, 1), std_ddof(&xs, 1).powi(2)));
     }
 
     #[test]

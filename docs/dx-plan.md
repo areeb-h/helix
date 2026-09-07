@@ -506,12 +506,13 @@ grapheme-aware `graphemes()` and a width-aware `ljust`/`fit` for terminal column
 shape as the braille-width bug `HELIX_PLOT` exists for; needs `unicode-segmentation` and
 `unicode-width`), and `bytes()`.
 
-**OPEN, a design question, not a bug:** the Array `std`/`var` default is the POPULATION
-estimator (÷n) and the grouped `DataFrame.group(k).std(@v)` is the SAMPLE one (÷(n−1)); the
-field build noted pandas, R and Excel default to the sample and NumPy to the population. Helix
-now lets you ask for either on arrays, but the two defaults disagree with each other. Aligning
-them is a semantic change to one of them; decide before 1.0. Also absent: `DataFrame.std()`
-(ungrouped), `corr`, `cov`, `percentile`, `diff`, `mode`, `rank`.
+**DECIDED (2026-09-07, ADR 0049):** the SAMPLE estimator (÷(n−1)) is the default everywhere a
+spread is computed — `std`, `var`, `cov`, `summary`, `zscores`, `normalize`, `standard_error`,
+`coefficient_of_variation` — as the grouped `DataFrame.group(k).std(@v)` always was; `std(0)`
+is the population's, and a spread over one value is `missing`. (The field build had noted
+pandas, R and Excel default to the sample and NumPy to the population.) Still absent:
+`DataFrame.std()` (ungrouped), `percentile` (declined: `quantile(p)`), `diff`, `mode`, `rank`;
+`corr`/`cov` landed in `55ef367`.
 
 **do_later — the perf gate measures a profile that moves by itself.** `scripts/perf-verify.sh`
 compares two `gate`-profile builds: opt-3, no LTO, 16 codegen units, incremental. Between two

@@ -2160,12 +2160,12 @@ fn missing_module_on_search_path_is_a_clean_error() {
 
 #[test]
 fn descriptive_statistics_and_correlation() {
-    // Population statistics (so var == std^2) plus Pearson correlation, with the
-    // missing-propagation rule: a `missing` in either series yields `missing`.
+    // Sample statistics by default (ADR 0049; var == std^2 still) plus Pearson correlation,
+    // with the missing-propagation rule: a `missing` in either series yields `missing`.
     let src = "xs = [2, 4, 4, 4, 5, 5, 7, 9]\nprint(xs.median())\nprint(xs.var())\nprint(xs.std())\nprint(correlation([1, 2, 3, 4], [2, 4, 6, 8]))\nprint(correlation([1, 2, 3], [1, missing, 3]))\n";
     let (out, stderr, code) = run_source(src, &[], "stats");
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
-    assert_eq!(out.trim(), "4.5\n4.0\n2.0\n1.0\nmissing");
+    assert_eq!(out.trim(), "4.5\n4.571428571428571\n2.138089935299395\n1.0\nmissing");
 }
 
 #[test]
@@ -15978,10 +15978,17 @@ fn std_and_var_take_a_ddof() {
     for (name, env) in ENGINES {
         let (out, err, code) = run_source(src, env, &format!("ddof_{name}"));
         assert_eq!(code, Some(0), "{name}: {err}");
-        assert_eq!(out, "1.118033988749895 1.118033988749895 1.2909944487358056 1.25 1.6666666666666667\n", "{name}");
+        assert_eq!(out, "1.2909944487358056 1.118033988749895 1.2909944487358056 1.6666666666666667 1.6666666666666667\n", "{name}");
+    }
+    // A spread that is not defined is `missing`, never an error (ADR 0049): one value under
+    // the sample default, two under `ddof = 2`.
+    let src = "print([5].std(), [5].var(), [1, 2].std(2), [1, 2].std(0))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("ddof_missing_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "missing missing missing 0.5\n", "{name}");
     }
     for (src, want) in [
-        ("print([1, 2].std(2))\n", "needs more than 2 value(s)"),
         ("print([1, 2].var(-1))\n", "ddof must be >= 0"),
         ("print([1, 2].std(1, 2))\n", "`std` takes 0 to 1 arguments"),
     ] {
@@ -16338,7 +16345,8 @@ fn an_argument_dependent_shape_crosses_the_module_boundary() {
 }
 
 /// The primitives' refusals, in words, on every engine: a bad base, a prefixed string in a base,
-/// unequal lengths for `corr`, a constant series, a ddof too large for `cov`.
+/// unequal lengths for `corr`, a constant series, a negative ddof for `cov` (a too-large one is
+/// `missing`, not an error — ADR 0049).
 #[test]
 fn the_pair_statistics_and_based_to_int_refuse_in_words() {
     for (src, want) in [
@@ -16347,7 +16355,7 @@ fn the_pair_statistics_and_based_to_int_refuse_in_words() {
         ("print(to_int(3, 16))\n", "a string when a base is given"),
         ("print([1, 2].corr([1, 2, 3]))\n", "same length"),
         ("print([1, 1].corr([1, 2]))\n", "zero variance"),
-        ("print([1, 2].cov([1, 2], 2))\n", "ddof"),
+        ("print([1, 2].cov([1, 2], -1))\n", "ddof must be >= 0"),
     ] {
         for (name, env) in ENGINES {
             let (_, err, code) = run_source(src, env, &format!("prims_{name}"));
@@ -16471,6 +16479,24 @@ fn division_is_ieee_on_every_engine() {
         assert_eq!(
             out,
             "inf -inf inf true 3.5 0.0\n[inf, -inf, NaN]\ninteger division by zero modulo by zero modulo by zero\ninf\n",
+            "{name}"
+        );
+    }
+}
+
+/// The sample estimate is the default everywhere a spread is computed (ADR 0049): `std`, `var`,
+/// `cov`, `summary`, `zscores`, `normalize`, `standard_error`, `coefficient_of_variation` —
+/// and the grouped frame `std`, which always was, so the language has one `std`. A spread
+/// over one value is `missing`, never an error.
+#[test]
+fn the_sample_estimate_is_the_default_on_every_engine() {
+    let src = "xs = [2, 4, 4, 4, 5, 5, 7, 9]\nprint(xs.std(), xs.var(), xs.std(0), xs.var(0))\nprint([1, 3].summary().std, [10, 20, 30].zscores(), [1, 2, 3].normalize())\nprint([1, 2, 3].cov([2, 4, 6]), [1, 2, 3].cov([2, 4, 6], 0), [2.0, 4.0, 6.0].coefficient_of_variation(), xs.standard_error())\nprint([5].std(), [5].var(), [5].summary().std, [5].standard_error(), [7].cov([1]))\nprint(dataframe({k: [\"a\", \"a\", \"b\"], v: [1, 3, 5]}).group(@k).std(@v).sort(@k).column(\"v\"))\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("sample_std_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(
+            out,
+            "2.138089935299395 4.571428571428571 2.0 4.0\n1.4142135623730951 [-1.0, 0.0, 1.0] [-1.0, 0.0, 1.0]\n2.0 1.3333333333333333 0.5 0.7559289460184544\nmissing missing missing missing missing\n[1.4142135623730951, missing]\n",
             "{name}"
         );
     }

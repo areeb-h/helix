@@ -8347,7 +8347,7 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             ("[3, 1, 2].sort().join(\"-\")", "1-2-3"),
             ("[3, 1, 2].sort().enumerate().first()", "(0, 1)"),
             ("[3, 1, 2].reverse().zip([1, 2, 3])", "[(2, 1), (1, 2), (3, 3)]"),
-            ("[3.5, 1.5].sort().std()", "1.0"),
+            ("[3.5, 1.5].sort().std()", "1.4142135623730951"),
             ("[1.0, 3.0].reverse().median()", "2.0"),
             ("[[3, 1].sort(), [2].sort()].flatten()", "[1, 3, 2]"),
             // the mapped-range shapes the regression was measured on

@@ -13,11 +13,11 @@ fn area(w, h) = w * h
 ## and standard deviation 1. Note that the arithmetic is written as if `xs` were a scalar:
 ## `-` and `/` broadcast across the array.
 ##
-## `std()` here is the POPULATION standard deviation (dividing by n). Pass `std(1)` for the
-## sample one — which is why the values below are not the z-scores a spreadsheet would give:
+## `std()` is the SAMPLE standard deviation (dividing by n − 1, as a spreadsheet does); pass
+## `std(0)` for the population one:
 ##
 ##     >>> normalize([1, 2, 3, 4])
-##     [-1.3416407864998738, -0.4472135954999579, 0.4472135954999579, 1.3416407864998738]
+##     [-1.161895003862225, -0.3872983346207417, 0.3872983346207417, 1.161895003862225]
 fn normalize(xs) = (xs - xs.mean()) / xs.std()
 
 print("square 7:", square(7))
