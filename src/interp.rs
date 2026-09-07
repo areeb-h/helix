@@ -966,7 +966,14 @@ impl Interp {
                     return self.call_function(name, &g, fargs, *line, *col);
                 }
                 match call_method(&recv_v, name, &vals, *line, *col) {
-                    Ok(v) => Ok(v),
+                    // The folding sandbox pays for what a method PRODUCES as well as what
+                    // it is handed (ADR 0050): `"x".repeat(n)` is bounded like a loop.
+                    Ok(v) => {
+                        if self.fold_mode && !crate::fold::charge(crate::fold::value_size(&v)) {
+                            return Err(crate::fold::abort_err(*line, *col));
+                        }
+                        Ok(v)
+                    }
                     Err(e) if ufcs_fallback_applies(&recv_v, name) => {
                         // Dispatch failed on a type that does not own the name, and NO
                         // `fn` of this name is declared — that case never gets here, the

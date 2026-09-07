@@ -22,6 +22,23 @@ impl super::Interp {
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
+        let out = self.call_builtin_arm(name, args, line, col)?;
+        // The folding sandbox pays for what a builtin PRODUCES as well as what it is
+        // handed (ADR 0050): `to_array(range(0, n))` costs `n`, so no attempt holds more
+        // than its budget. A field read, nothing on an engine's path.
+        if self.fold_mode && !crate::fold::charge(crate::fold::value_size(&out)) {
+            return Err(crate::fold::abort_err(line, col));
+        }
+        Ok(out)
+    }
+
+    fn call_builtin_arm(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        line: usize,
+        col: usize,
+    ) -> Result<Value, HelixError> {
         // Capability gate (ADR 0021): authority-bearing builtins (fs/net) consult the
         // process authority first. A no-op under the default `Off` mode and for `pure`
         // builtins; logs (audit) or denies (enforce) an ungranted access otherwise.
@@ -33,8 +50,13 @@ impl super::Interp {
         // fold exists to surface early.
         if self.fold_mode {
             // `source_path` answers from where its call is written in the file that is
-            // running — context, not a value — so it is refused as well.
-            if (crate::registry::is_impure_builtin(name) && name != "raise") || name == "source_path" || !crate::fold::charge(1) {
+            // running — context, not a value — so it is refused as well. A frame is never
+            // built: it has no literal, and the frame engine's machinery (its thread pool)
+            // is not for a load-time evaluation.
+            if (crate::registry::is_impure_builtin(name) && name != "raise")
+                || matches!(name, "source_path" | "dataframe" | "to_dataframe")
+                || !crate::fold::charge(1)
+            {
                 return Err(crate::fold::abort_err(line, col));
             }
             for a in &args {

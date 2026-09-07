@@ -6,9 +6,11 @@
 //! function-valued field of a record the sandbox already holds (`User.sql({…})`, the object
 //! API a library exposes). What the sandbox REFUSES decides what folds: an impure builtin
 //! (`print`, `now`, `sleep`), any authority (a file, the network, a database), a Python
-//! object, a name it does not hold (a mutable global, a binding it could not evaluate, a
-//! parameter), a write to a mutable global, a recursion deeper than [`MAX_DEPTH`], and more
-//! work than a budget of calls and elements. A refusal abandons the fold and the call stays
+//! object, a frame (no literal, and an engine of its own), a name it does not hold (a
+//! mutable global, a binding it could not evaluate, a parameter), a write to a mutable
+//! global, a recursion deeper than [`MAX_DEPTH`], and more work than a budget of calls and
+//! elements — handed to a loop, a method or a builtin, or produced by one. A callee the
+//! sandbox abandoned is not tried again in that program. A refusal abandons the fold and the call stays
 //! exactly as written — the runtime runs it as it always did, so a fold can never change what
 //! a program computes, only when.
 //!
@@ -50,15 +52,16 @@ thread_local! {
     static MISSING: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-/// The most work one attempt may do — a call, a tail hop, a comprehension element and an
-/// array element handed to a method or a builtin each cost one. A render of a literal spec
-/// costs tens. The budget is small on purpose: the one cost a fold can ADD is the walker
-/// evaluating, before the run, a numeric call the JIT would have run faster, and at this
-/// size that is well under a millisecond — a benchmark's `fib(30)` at the top level is
-/// abandoned almost at once and runs natively as before.
-const FUEL_PER_ATTEMPT: u64 = 2_000;
+/// The most work one attempt may do — a call, a tail hop, a comprehension element, and an
+/// element handed to a loop, a method or a builtin or produced by one each cost one. The
+/// field build's render of a literal spec costs on the order of a hundred; its model's
+/// constructor a few hundred. The budget is small on purpose: the one cost a fold can ADD
+/// is the walker running, before the program does, a call it then abandons — a benchmark's
+/// `fib(30)` at the top level — and a unit is a microsecond or two at the worst, so an
+/// abandoned attempt costs a millisecond at most, and its callee is not tried again.
+const FUEL_PER_ATTEMPT: u64 = 1_000;
 /// The most work one program's folding may spend altogether.
-const FUEL_PER_PROGRAM: u64 = 50_000;
+const FUEL_PER_PROGRAM: u64 = 10_000;
 /// The deepest call chain an attempt may reach. Deeper is abandoned, so a fold never needs
 /// the big stack the engines run on, and a program the VM runs on the heap is never refused
 /// for the walker's depth.
@@ -122,6 +125,18 @@ pub(crate) fn charge(n: u64) -> bool {
     })
 }
 
+/// What a value costs to hold, in units: an array's or a tensor's elements, a string's
+/// 64-byte blocks; a scalar is free. Charged for what a builtin or a method PRODUCES, so
+/// `to_array(range(0, n))` and `"x".repeat(n)` are bounded like a loop.
+pub(crate) fn value_size(v: &Value) -> u64 {
+    match v {
+        Value::Array(a) => a.len() as u64,
+        Value::Tensor(t) => t.len() as u64,
+        Value::Str(s) => (s.len() / 64) as u64,
+        _ => 0,
+    }
+}
+
 /// A sandboxed tree-walker holding the program's functions and the top-level values it
 /// has been asked for, plus the program's remaining budget.
 struct Sandbox {
@@ -131,6 +146,20 @@ struct Sandbox {
     /// evaluated: name → the index of the statement that binds it, in the program's prefix
     /// (`done` below).
     pending: HashMap<String, usize>,
+    /// Callees the sandbox abandoned — for impurity, a write, a frame, the depth or the
+    /// budget — by the label `candidate_label` gives them: not tried again in this program,
+    /// so a benchmark's `fib(30)` costs one abandoned attempt, not one per call.
+    futile: HashSet<String>,
+}
+
+/// How an attempt ended without the program's own raise.
+enum Outcome {
+    Value(Value),
+    /// The sandbox refused the evaluation itself — the callee is futile here.
+    Abandoned,
+    /// A name the sandbox does not hold and could not bind — the callee may be fine with
+    /// other arguments.
+    Unheld,
 }
 
 impl Sandbox {
@@ -181,7 +210,7 @@ impl Sandbox {
             }
         }
         let _ = interp.run(&funcs);
-        Sandbox { interp, program_fuel: FUEL_PER_PROGRAM, pending: HashMap::new() }
+        Sandbox { interp, program_fuel: FUEL_PER_PROGRAM, pending: HashMap::new(), futile: HashSet::new() }
     }
 
     /// Run `f` under the sandbox's guards: `Ok(Some(_))` on a clean evaluation, `Ok(None)`
@@ -208,14 +237,17 @@ impl Sandbox {
 
     /// Evaluate the candidate `e`, binding on demand each top-level name it turns out to
     /// need and retrying; `done` is the program's prefix, where those names are bound.
-    fn attempt(&mut self, e: &Expr, done: &[Stmt]) -> Result<Option<Value>, HelixError> {
+    fn attempt(&mut self, e: &Expr, done: &[Stmt]) -> Result<Outcome, HelixError> {
         let stmt = Stmt::Expr(e.clone());
         loop {
             take_missing();
             let r = self.guarded(|i| i.exec(&stmt));
-            match (r, take_missing()) {
-                (Ok(None), names) if names.iter().any(|n| self.ensure(n, done)) => continue,
-                (r, _) => return r.map(|o| o.map(|out| out.value)),
+            let names = take_missing();
+            match r {
+                Ok(Some(out)) => return Ok(Outcome::Value(out.value)),
+                Ok(None) if names.iter().any(|n| self.ensure(n, done)) => continue,
+                Ok(None) => return Ok(if names.is_empty() { Outcome::Abandoned } else { Outcome::Unheld }),
+                Err(e) => return Err(e),
             }
         }
     }
@@ -407,17 +439,23 @@ fn fold_expr(e: &mut Expr, sb: &mut Sandbox, done: &[Stmt], unconditional: bool)
             }
         }
     }
-    if !is_candidate(e, sb, done) {
+    let Some(label) = candidate_label(e, sb, done) else {
+        return Ok(());
+    };
+    if sb.futile.contains(&label) {
         return Ok(());
     }
     match sb.attempt(e, done) {
-        Ok(Some(v)) => {
+        Ok(Outcome::Value(v)) => {
             let mut budget = MAX_LITERAL_NODES;
             if let Some(lit) = to_expr(&v, &mut budget) {
                 *e = lit;
             }
         }
-        Ok(None) => {}
+        Ok(Outcome::Abandoned) => {
+            sb.futile.insert(label);
+        }
+        Ok(Outcome::Unheld) => {}
         Err(raise) => {
             if unconditional {
                 return Err(raise);
@@ -428,16 +466,22 @@ fn fold_expr(e: &mut Expr, sb: &mut Sandbox, done: &[Stmt], unconditional: bool)
 }
 
 /// A call to one of the program's own functions, or a call through a record the sandbox
-/// holds — with arguments that mention nothing the sandbox lacks.
-fn is_candidate(e: &Expr, sb: &mut Sandbox, done: &[Stmt]) -> bool {
+/// holds — with arguments that mention nothing the sandbox lacks — and its label for the
+/// futility memo: the function's name, or `record.method`.
+fn candidate_label(e: &Expr, sb: &mut Sandbox, done: &[Stmt]) -> Option<String> {
     match e {
-        Expr::Call { name, args, .. } => sb.is_user_fn(name) && args.iter().all(|a| foldable_arg(a, sb)),
-        Expr::Method { recv, args, named, .. } => {
-            named.is_empty()
-                && args.iter().all(|a| foldable_arg(a, sb))
-                && matches!(&**recv, Expr::Ident { name, .. } if sb.holds_record(name, done))
+        Expr::Call { name, args, .. } if sb.is_user_fn(name) && args.iter().all(|a| foldable_arg(a, sb)) => {
+            Some(name.clone())
         }
-        _ => false,
+        Expr::Method { recv, name, args, named, .. }
+            if named.is_empty() && args.iter().all(|a| foldable_arg(a, sb)) =>
+        {
+            match &**recv {
+                Expr::Ident { name: r, .. } if sb.holds_record(r, done) => Some(format!("{r}.{name}")),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -673,7 +717,9 @@ mod tests {
     /// What the sandbox refuses stays a call: an impure builtin, an authority, a mutable
     /// global read or written, a name it does not hold, a Python object, too much work, too
     /// deep a recursion, a value with no literal, a literal too large, a builtin that answers
-    /// from context — and a method on a binding that is not a record.
+    /// from context, a loop over more elements than the budget (`reduce` charges up front,
+    /// as every comprehension does), a frame, a value too big to hold — and a method on a
+    /// binding that is not a record.
     #[test]
     fn what_the_sandbox_refuses_stays_a_call() {
         for src in [
@@ -688,6 +734,9 @@ mod tests {
             "fn big() = range(0, 5000).map(it)\ny = big()",
             "fn now_ish() = now()\ny = now_ish()",
             "fn here() = source_path()\ny = here()",
+            "fn big() = range(0, 5000).reduce(0, (s, x) => s + x)\ny = big()",
+            "fn n() = dataframe({a: [1, 2, 3]}).count()\ny = n()",
+            "fn s() = \"x\".repeat(100000)\ny = s()",
         ] {
             let s = folded(src);
             let last = s.iter().rev().find(|st| matches!(st, Stmt::Assign { name, .. } if name == "y")).unwrap();

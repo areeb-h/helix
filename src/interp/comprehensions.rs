@@ -375,6 +375,12 @@ impl super::Interp {
                         .hint("name both binders: `xs.reduce(0, (acc, x) => acc + x)`."))
                     }
                 };
+                // The folding sandbox pays for every element up front (ADR 0050), as
+                // `eval_pattern_loop` does for the other comprehensions: this loop evaluates
+                // its body itself, so nothing below charges per step.
+                if self.fold_mode && !crate::fold::charge(items.len() as u64 + 1) {
+                    return Err(crate::fold::abort_err(line, col));
+                }
                 let mut acc = self.eval(&args[0])?; // init: evaluated in the OUTER scope
                 // Bind the accumulator and element names ONCE for the whole fold, then
                 // rewrite just their `.value` each step — instead of a remove/insert plus

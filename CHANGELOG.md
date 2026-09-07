@@ -12,9 +12,10 @@
   its render at 4.2 µs whether the spec was literal or computed, and every spec key the library
   grew taxed every query that ignored it (field build, 1.46a; the user's decision): a literal
   render costs nothing at run time now. Purity is decided by running, not by analysis: the
-  sandbox refuses an impure builtin, any authority, a Python object, a name it does not hold, a
-  write to a mutable global, a recursion past 256 and more work than a budget, and a refusal
-  leaves the call exactly as written — a fold never changes what a program computes, only when.
+  sandbox refuses an impure builtin, any authority, a Python object, a frame, a name it does
+  not hold, a write to a mutable global, a recursion past 256 and more work than a budget —
+  what a loop, a method or a builtin is handed or produces — and a refusal leaves the call
+  exactly as written — a fold never changes what a program computes, only when.
   A raise the program would meet unconditionally at the top level — a `limit: "1; drop"` the
   library refuses — is reported before anything runs, as a type error is, and `helix check`
   sees it; under `if`, `match`, `try`, a lambda or inside a function the call stays and raises

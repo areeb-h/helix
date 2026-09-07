@@ -436,7 +436,9 @@ error outranks a raise): a call to a top-level `fn`, or through a record the san
 that mention nothing the sandbox lacks, is evaluated in `Interp::sandbox()` — a walker whose
 `fold_mode` refuses impure builtins (`registry::is_impure_builtin`), any gated authority
 (`capability::gate_effect` answers no inside a sandbox), Python, unknown names, writes to
-top-level `mut` names, depth past 256 and a fuel of 2 000 per attempt / 50 000 per load
+top-level `mut` names, depth past 256 and a fuel of 1 000 per attempt / 10 000 per program
+(every loop, method and builtin charges what it is handed and what it produces; a frame is
+never built; an abandoned callee is not retried)
 (calls, tail hops, comprehension elements, array elements to methods and builtins) — and a
 clean result with a literal (≤ 4 096 nodes) replaces the call. A raise at an unconditional
 top-level position is the program's error, reported at load. The field's `M.sql({…})` on a

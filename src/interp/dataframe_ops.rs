@@ -479,6 +479,11 @@ impl super::Interp {
         line: usize,
         col: usize,
     ) -> Result<Value, HelixError> {
+        // The folding sandbox holds no frame (ADR 0050): whatever engine a verb would reach,
+        // a load-time evaluation must not.
+        if self.fold_mode {
+            return Err(crate::fold::abort_err(line, col));
+        }
         match name {
             "where" | "filter" | "drop_missing" | "drop_nan" | "select" | "sort"
             | "group" | "with" => {

@@ -36,11 +36,15 @@ flag. It refuses — and abandons the attempt, leaving the call as written — a
 was granted (the capability gate answers "no" inside a sandbox), a Python object, a name it
 does not hold (a mutable global, a binding it could not itself evaluate, a parameter), a
 write to a mutable global, a recursion deeper than 256, and more work than a budget of
-2 000 units per attempt and 50 000 per load — a call, a tail hop, a comprehension element
-and an array element handed to a method or a builtin each cost one. The budget is small on
-purpose: the one cost a fold can add is the walker evaluating, at load, a numeric call the
-JIT would have run faster, and at this size that is well under a millisecond, while a
-render costs tens of units. The refusal is sticky, so
+1 000 units per attempt and 10 000 per program — a call, a tail hop, a comprehension
+element, and an element handed to a loop, a method or a builtin or produced by one each
+cost one. The budget is small on purpose: the one cost a fold can add is the walker running,
+before the program does, a call it then abandons, and a unit is a microsecond or two at the
+worst, so an abandoned attempt costs a millisecond at most — and its callee is not tried
+again in that program, so a benchmark's `fib(30)` costs one such attempt, not one per call.
+The field's render of a literal spec costs on the order of a hundred units, its model's
+constructor a few hundred. A frame is never built: it has no literal, and the frame engine's
+machinery — its thread pool — is not for a load-time evaluation. The refusal is sticky, so
 a `try` inside the evaluated code cannot swallow it. Determinism holds because Helix's
 `random` family is hash-seeded and stateless. The static analysis `memoizable_fns` was the
 alternative; it marks any function containing a method call impure, which is every render.
@@ -84,8 +88,15 @@ see first.
 - A program whose output preceded a run-time raise from such a call now shows the raise and
   nothing else — the same shape a type error has always had. `MIGRATIONS.md` records it.
 - Loading costs what the folds cost, bounded by the budgets; a benchmark's `fib(30)` at the
-  top level is abandoned after 2 000 calls, well under a millisecond, and runs natively as
-  before. Measured on one binary with the A/B switch `HELIX_NOFOLD=1`: no per-process cost,
-  no per-call cost on 200 literal calls, and the corpus's 93 programs check within noise.
+  top level is abandoned after 1 000 calls and runs natively as before. Measured on one
+  binary with the A/B switch `HELIX_NOFOLD=1`, `helix check` over the corpus's 93 programs:
+  408 ms without folding, 434 ms with it (min of 5). The first cut's measurement hid three costs the per-program table
+  exposed: `reduce`/`scan` evaluated their body per element without charging (a
+  100 000-element scan ran to completion in the sandbox, 4 ms), a frame built in the sandbox
+  started the frame engine's thread pool (1.5 ms, six threads), and an abandoned callee was
+  tried again at every call. What remains on this box is a fault of the allocator's making,
+  not the fold's: with `mimalloc` purging freed pages at once, the first allocation after
+  the checker's frees can land on a fresh huge page, half a millisecond of zeroing that
+  `run` pays on its first allocation anyway.
 - The walker gains one predictable branch on its call, builtin, comprehension and unknown-name
   paths; the other engines nothing.
