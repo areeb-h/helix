@@ -102,6 +102,10 @@ pub enum Op {
     /// record beneath them, and push a new record = base with each named field set (override)
     /// or appended. Errors if the base isn't a record.
     UpdateRecord(std::rc::Rc<Vec<crate::symbol::Symbol>>),
+    /// A further `...spread` in a record update (field build, 1.49): pop the spread value (a
+    /// record or a dict), then the record built so far beneath it, and push the record with
+    /// each of the spread's fields set (override) or appended — a later part wins.
+    SpreadRecord,
     /// Pop a receiver; push `recv.<name>` (record field access). The field name is
     /// an interned `Symbol`, so the lookup compares a `u32` against the record keys.
     GetField(crate::symbol::Symbol),

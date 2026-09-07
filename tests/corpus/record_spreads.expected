@@ -1,0 +1,9 @@
+exit: 0
+--- stdout ---
+{l: 20, o: "-age", w: "age >= 18"}
+{l: 5, o: "-age", w: "age >= 18"}
+2 9
+{j: 0, k: 2}
+1
+{t: 2, u: 3}
+--- stderr ---

@@ -3078,12 +3078,11 @@ impl Parser {
                     Self::relocate(v, l, c);
                 }
             }
-            Expr::RecordUpdate { base, fields, line, col } => {
+            Expr::RecordUpdate { parts, line, col } => {
                 *line = l;
                 *col = c;
-                Self::relocate(base, l, c);
-                for (_, v) in fields {
-                    Self::relocate(v, l, c);
+                for p in parts {
+                    Self::relocate(p.expr_mut(), l, c);
                 }
             }
             Expr::Field { recv, line, col, .. } | Expr::FieldOrMissing { recv, line, col, .. } => {
@@ -3434,32 +3433,24 @@ impl Parser {
                 // starts with a spread: `{ ...base, status: 500 }`.
                 let (l, c) = self.pos();
                 self.advance();
-                // A leading `...expr` makes this a record update: clone `expr`, then apply the
-                // fields that follow. The spread must come first (there is one base).
+                // A leading `...expr` makes this a record update: its parts — spreads and
+                // named fields — apply in written order, a later one winning. The spread
+                // comes first; any number may follow (field build, 1.49: `{...ADULTS,
+                // ...NEWEST}` merges two query fragments, which had no spelling at all).
                 if matches!(self.peek(), Tok::DotDotDot) {
                     self.advance();
-                    let base = self.expr()?;
-                    let mut fields: Vec<(String, Expr)> = Vec::new();
+                    let mut parts: Vec<crate::ast::RecordPart> =
+                        vec![crate::ast::RecordPart::Spread(self.expr()?)];
+                    let mut named: Vec<String> = Vec::new();
                     while matches!(self.peek(), Tok::Comma) {
                         self.advance();
                         if matches!(self.peek(), Tok::RBrace) {
                             break; // trailing comma
                         }
-                        // A SECOND spread lands here, and used to report "expected a name
-                        // as a record field name, found `...`" — which describes the token
-                        // rather than the problem. One base, so `{...a, ...b}` has no
-                        // meaning to give it.
                         if matches!(self.peek(), Tok::DotDotDot) {
-                            let (sl, sc) = self.pos();
-                            return Err(HelixError::new(
-                                "a record update takes one `...spread`, not two",
-                                sl,
-                                sc,
-                            )
-                            .hint(
-                                "`{ ...base, field: value }` updates ONE record; there is no \
-                                 merge form, so name the fields you want from the second.",
-                            ));
+                            self.advance();
+                            parts.push(crate::ast::RecordPart::Spread(self.expr()?));
+                            continue;
                         }
                         let (kl, kc) = self.pos();
                         let key = self.member_name("as a record field name")?;
@@ -3473,8 +3464,8 @@ impl Parser {
                         // Overriding a field that came from the BASE is untouched: that is
                         // the entire purpose of an update, and `{...b, y: 9}` where `b` has
                         // a `y` stays legal. Only a repeat within THIS field list is a
-                        // duplicate.
-                        if fields.iter().any(|(k, _)| k == &key) {
+                        // duplicate — a spread's fields are not in it.
+                        if named.contains(&key) {
                             return Err(HelixError::new(
                                 format!("duplicate field `{}` in record update", key),
                                 kl,
@@ -3483,10 +3474,11 @@ impl Parser {
                             .hint("each field may be given once; the later value would silently win."));
                         }
                         self.eat(&Tok::Colon, &format!("after field `{}`", key))?;
-                        fields.push((key, self.expr()?));
+                        named.push(key.clone());
+                        parts.push(crate::ast::RecordPart::Field(key, self.expr()?));
                     }
                     self.eat(&Tok::RBrace, "to close the record update")?;
-                    return Ok(Expr::RecordUpdate { base: Box::new(base), fields, line: l, col: c });
+                    return Ok(Expr::RecordUpdate { parts, line: l, col: c });
                 }
                 let mut fields: Vec<(String, Expr)> = Vec::new();
                 // A QUOTED key makes this a DICT literal rather than a record: a record

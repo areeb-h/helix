@@ -7037,10 +7037,8 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
             // the case that exposed it
             ("r = {x: 5}\n(r.x)(1)", "is an Int, not a function"),
             ("f = 1.5\nf(1)", "is a Float, not a function"),
-            // a second spread names the real problem
-            ("a = {x: 1}\nb = {y: 2}\n{...a, ...b}", "takes one `...spread`, not two"),
-            // ...and a MISPLACED spread keeps its own, different message: these are two
-            // distinct mistakes and the reader should be told which one they made
+            // a MISPLACED spread has its own message (a second spread is a merge now — 1.49,
+            // `record_spreads_apply_in_order_on_both_engines`)
             ("a = {x: 1}\n{q: 1, ...a}", "must be the first element"),
             // the spread base still has to be something with fields. A DICT is now one
             // of those (its string keys become fields — the request-builder shape), so
@@ -8483,4 +8481,32 @@ fn dd(i: Int, d: Int, acc: Float) = if i >= 1 then acc else dd(i + 1, d, acc + t
         );
         assert_eq!(run_vm("missing.map_values(it * 2)").as_deref(), Ok("missing"));
         assert_eq!(run_vm("fn map_values(x, f) = 42\n[1].map_values(x => x)").as_deref(), Ok("42"));
+    }
+
+    /// More than one `...spread` in a record literal, later winning (field build, 1.49): both
+    /// engines fold the parts in written order — a record's fields, a dict's keys, a named
+    /// field — through one routine, and refuse a keyless spread wherever it stands.
+    #[test]
+    fn record_spreads_apply_in_order_on_both_engines() {
+        let programs = [
+            "a = {x: 1}\nb = {y: 2}\n{...a, ...b}",
+            "a = {x: 1, y: 1}\nb = {y: 2}\n{...a, ...b}.y",
+            "a = {x: 1}\nb = {x: 2}\n{...a, x: 9, ...b}.x",
+            "a = {x: 1}\nb = {x: 2}\n{...a, ...b, x: 9}.x",
+            "a = {x: 1}\n{...a, ...{y: 2}, z: 3, ...{z: 4, w: 5}}",
+            "{...{\"k\": 1}, ...{k: 2, j: 3}}",
+            "{...{k: 2}, ...{\"k\": 1}}.k",
+            "fn mk() = {t: 1}\n{...mk(), ...mk()}",
+            "a = {x: 1}\n{...a, ...[1]}",
+            "a = {x: 1}\n{...a, y: 1, ...5}",
+            "a = {x: 1}\n{...missing, ...a}",
+        ];
+        for p in programs {
+            assert_eq!(run_vm(p), run_tw(p), "{p}");
+        }
+        assert_eq!(run_vm("a = {x: 1}\nb = {y: 2}\n{...a, ...b}").as_deref(), Ok("{x: 1, y: 2}"));
+        assert_eq!(run_vm("a = {x: 1}\nb = {x: 2}\n{...a, x: 9, ...b}.x").as_deref(), Ok("2"));
+        assert_eq!(run_vm("a = {x: 1}\nb = {x: 2}\n{...a, ...b, x: 9}.x").as_deref(), Ok("9"));
+        assert_eq!(run_vm("{...{k: 2}, ...{\"k\": 1}}.k").as_deref(), Ok("1"));
+        assert!(run_vm("a = {x: 1}\n{...a, ...[1]}").unwrap_err().contains("needs a record"));
     }

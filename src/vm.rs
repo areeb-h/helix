@@ -1586,31 +1586,22 @@ fn exec(program: &Program, jit: Option<&crate::jit::Jit>) -> Result<Vec<Value>, 
                 let start = stack.len() - names.len();
                 let vals: Vec<Value> = stack.split_off(start);
                 let base = stack.pop().unwrap();
-                let base_fields: std::rc::Rc<Vec<(crate::symbol::Symbol, Value)>> = match &base {
-                    Value::Record(f) => f.clone(),
-                    // A DICT spreads too — same helper as the tree-walker, so the two
-                    // engines cannot disagree about what came out.
-                    Value::Dict(map) => std::rc::Rc::new(
-                        crate::value::dict_as_record_fields(map)
-                            .map_err(|m| HelixError::new(m, line, col))?,
-                    ),
-                    other => {
-                        return Err(HelixError::new(
-                            format!("`...` record update needs a record, got {}", crate::value::with_article(other.type_name())),
-                            line,
-                            col,
-                        )
-                        .hint("the spread base must be a record or a dict, e.g. `{ ...resp, status: 500 }`."))
-                    }
-                };
-                // Clone the base, then set (override) or append each update field, in order.
-                let mut out: Vec<(crate::symbol::Symbol, Value)> = (*base_fields).clone();
+                // The walker's own fold: the base's fields (a record's, or a dict's), then
+                // each named field set (override) or appended, in order.
+                let mut out: Vec<(crate::symbol::Symbol, Value)> = Vec::new();
+                crate::interp::spread_into(&mut out, &base, line, col)?;
                 for (name, val) in names.iter().copied().zip(vals) {
-                    match out.iter_mut().find(|(s, _)| *s == name) {
-                        Some(slot) => slot.1 = val,
-                        None => out.push((name, val)),
-                    }
+                    crate::interp::set_field(&mut out, name, val);
                 }
+                stack.push(Value::Record(std::rc::Rc::new(out)));
+            }
+            Op::SpreadRecord => {
+                let (Some(extra), Some(acc)) = (stack.pop(), stack.pop()) else {
+                    return Err(HelixError::new("internal: `...spread` found no record", line, col));
+                };
+                let mut out: Vec<(crate::symbol::Symbol, Value)> = Vec::new();
+                crate::interp::spread_into(&mut out, &acc, line, col)?;
+                crate::interp::spread_into(&mut out, &extra, line, col)?;
                 stack.push(Value::Record(std::rc::Rc::new(out)));
             }
             Op::GetField(name) => {

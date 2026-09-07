@@ -199,3 +199,8 @@ no entry. A source edit is not a behavior change.
   `define({columns: {id: 1}}).c.nmae` is refused as "record has no field `nmae`" where it used
   to pass and raise at run time — the refusal the unannotated `define` already drew. `Any` still
   opts out. No corpus program or golden moved.
+
+- **A record literal takes more than one `...spread`** (2026-09-07). `{...a, ...b}` was a parse
+  error ("a record update takes one `...spread`, not two"); it is a merge now, later parts
+  winning. Additive: the sentence is gone, nothing that parsed reads differently, and a spread
+  that is not the first element keeps its own refusal. No corpus program or golden moved.

@@ -16438,3 +16438,20 @@ fn a_field_call_and_an_open_kind_annotation_are_checked_on_every_engine() {
         assert!(err.contains(want), "{tag}: {err}");
     }
 }
+
+/// Two reusable query fragments merge as `{...ADULTS, ...NEWEST}` (field build, 1.49): the
+/// parts apply in written order, a later one winning, on every engine, and the checker
+/// follows the merged shape.
+#[test]
+fn two_spreads_merge_on_every_engine() {
+    let src = "ADULTS = {w: \"age >= 18\"}\nNEWEST = {o: \"-age\", l: 20}\nprint({...ADULTS, ...NEWEST}, {...{x: 1}, ...{x: 2}, ...{y: 3}}, {...ADULTS, ...NEWEST, l: 5}.l)\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("two_spreads_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, "{l: 20, o: \"-age\", w: \"age >= 18\"} {x: 2, y: 3} 5\n", "{name}");
+    }
+    let bad = format!("{src}print({{...ADULTS, ...NEWEST}}.limit)\n");
+    let (out, err, code) = run_source(&bad, &[], "two_spreads_typo");
+    assert_ne!(code, Some(0), "{out}");
+    assert!(err.contains("no field `limit`"), "{err}");
+}

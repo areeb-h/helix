@@ -1,0 +1,11 @@
+# More than one `...spread` in a record literal: the parts apply in written order, a later
+# one winning — a record's fields, a dict's keys, a named field — on every engine.
+ADULTS = {w: "age >= 18"}
+NEWEST = {o: "-age", l: 20}
+print({...ADULTS, ...NEWEST})
+print({...ADULTS, ...NEWEST, l: 5})
+print({...{x: 1}, x: 9, ...{x: 2}}.x, {...{x: 1}, ...{x: 2}, x: 9}.x)
+print({...{"k": 1, "j": 0}, ...{k: 2}})
+print({...{k: 2}, ...{"k": 1}}.k)
+fn mk(n) = {t: n}
+print({...mk(1), ...mk(2), ...{u: 3}})

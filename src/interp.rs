@@ -86,6 +86,59 @@ enum TailFlow {
 /// arguments` for a function with defaults. It used to read `expects` for user functions
 /// (and for the builtins that came through here) and `takes` for the rest: two spellings
 /// of one refusal, which a field build noticed.
+/// The fields a `...spread` contributes: a record's, or a dict's string keys as fields (the
+/// request-builder shape — known typed fields plus a bag of caller options). Anything else has
+/// no fields to give.
+pub(crate) fn spread_fields(
+    v: &Value,
+    line: usize,
+    col: usize,
+) -> Result<Rc<Vec<(Symbol, Value)>>, HelixError> {
+    match v {
+        Value::Record(f) => Ok(f.clone()),
+        Value::Dict(map) => Ok(Rc::new(
+            crate::value::dict_as_record_fields(map).map_err(|m| HelixError::new(m, line, col))?,
+        )),
+        other => Err(HelixError::new(
+            format!(
+                "`...` record update needs a record, got {}",
+                crate::value::with_article(other.type_name())
+            ),
+            line,
+            col,
+        )
+        .hint("the spread base must be a record or a dict, e.g. `{ ...resp, status: 500 }`.")),
+    }
+}
+
+/// Set (override) or append one field of a record being built — a later part wins.
+pub(crate) fn set_field(out: &mut Vec<(Symbol, Value)>, sym: Symbol, val: Value) {
+    match out.iter_mut().find(|(s, _)| *s == sym) {
+        Some(slot) => slot.1 = val,
+        None => out.push((sym, val)),
+    }
+}
+
+/// Spread `v`'s fields into a record being built, each winning over a same-named earlier
+/// one. Shared by the walker's fold and the VM's `UpdateRecord`/`SpreadRecord`, so the
+/// engines cannot disagree about what came out.
+pub(crate) fn spread_into(
+    out: &mut Vec<(Symbol, Value)>,
+    v: &Value,
+    line: usize,
+    col: usize,
+) -> Result<(), HelixError> {
+    let fields = spread_fields(v, line, col)?;
+    if out.is_empty() {
+        out.extend(fields.iter().cloned());
+        return Ok(());
+    }
+    for (s, val) in fields.iter() {
+        set_field(out, *s, val.clone());
+    }
+    Ok(())
+}
+
 pub(crate) fn arity_err(name: &str, min: usize, max: usize, got: usize, line: usize, col: usize) -> HelixError {
     let want = if min == max {
         format!("{min} argument{}", if min == 1 { "" } else { "s" })
@@ -526,35 +579,21 @@ impl Interp {
                 }
                 Ok(Value::Record(Rc::new(vals)))
             }
-            Expr::RecordUpdate { base, fields, line, col } => {
-                let base_v = self.eval(base)?;
-                let base_fields: Rc<Vec<(Symbol, Value)>> = match &base_v {
-                    Value::Record(f) => f.clone(),
-                    // A DICT spreads too: its string keys become fields. That is the
-                    // request-builder shape — known typed fields plus a bag of caller
-                    // options — which otherwise needs one `if opts.has(…)` per field.
-                    Value::Dict(map) => Rc::new(
-                        crate::value::dict_as_record_fields(map)
-                            .map_err(|m| HelixError::new(m, *line, *col))?,
-                    ),
-                    other => {
-                        return Err(HelixError::new(
-                            format!("`...` record update needs a record, got {}", crate::value::with_article(other.type_name())),
-                            *line,
-                            *col,
-                        )
-                        .hint("the spread base must be a record or a dict, e.g. `{ ...resp, status: 500 }`."))
-                    }
-                };
-                // Clone the base fields, then set (override) or append each update field, in
-                // order — a later field wins over a same-named base field or earlier update.
-                let mut out: Vec<(Symbol, Value)> = (*base_fields).clone();
-                for (k, ve) in fields {
-                    let sym = Symbol::intern(k);
-                    let val = self.eval(ve)?;
-                    match out.iter_mut().find(|(s, _)| *s == sym) {
-                        Some(slot) => slot.1 = val,
-                        None => out.push((sym, val)),
+            Expr::RecordUpdate { parts, line, col } => {
+                // The parts in written order, a later one winning: each spread's fields (a
+                // record's, or a dict's — the request-builder shape), each named field's
+                // value. `spread_into`/`set_field` are the VM's ops' routine too.
+                let mut out: Vec<(Symbol, Value)> = Vec::new();
+                for part in parts {
+                    match part {
+                        crate::ast::RecordPart::Spread(e) => {
+                            let v = self.eval(e)?;
+                            spread_into(&mut out, &v, *line, *col)?;
+                        }
+                        crate::ast::RecordPart::Field(k, ve) => {
+                            let val = self.eval(ve)?;
+                            set_field(&mut out, Symbol::intern(k), val);
+                        }
                     }
                 }
                 Ok(Value::Record(Rc::new(out)))

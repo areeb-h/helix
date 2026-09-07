@@ -416,9 +416,18 @@ the hidden local's name, because a nested call inside the argument declares its 
 (`interp::map_values_shape`) shared with the checker, which types the body once per field
 (`Checker::map_values_type`). Found on the way: a field typed Unknown was refused when called
 ("a field, not a method") though it held a function — fixed in `record_method_type`.
-`{...dict}` stays a runtime shape. Filed by the field on 47f5cf8: 1.44b and 1.45e DONE
-(below); 1.49 (more than one `...spread` in a record literal, later ones winning) is a
-language change, presented to the user.
+`{...dict}` stays a runtime shape. Filed by the field on 47f5cf8: 1.44b, 1.45e and 1.49 DONE
+(below).
+
+**1.49 (2026-09-07) — more than one `...spread`, later winning.** DONE: `Expr::RecordUpdate
+{ parts: Vec<RecordPart> }` (`Spread(e)` | `Field(name, e)`, written order, the parser
+guarantees a leading spread and still refuses a misplaced one and a field named twice).
+Walker: a fold through `interp::spread_into` / `set_field` (a record's fields, a dict's keys,
+one value; later wins). VM: the same two helpers under `UpdateRecord` (named fields batched, so
+a single-spread program compiles as before) and the new `SpreadRecord` op per further spread.
+Checker: known shapes merge in order; an unknown spread — a parameter, parsed JSON, a dict, the
+`Dict` annotation (which was refused outright: fixed) — makes the result Unknown; a keyless
+spread is refused wherever it stands. Reference: a `spread` syntax entry (the form had none).
 
 **1.44b + 1.45e (2026-09-07) — annotations that filter, and calls that check.** DONE. 1.44b:
 `Checker::specialize` binds an annotated OPEN kind (`Record`/`Dict`/`Tuple`/`Function`/`Array`

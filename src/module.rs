@@ -1245,10 +1245,9 @@ fn rw(e: &mut Expr, ctx: &Ctx, bound: &HashSet<String>) -> Result<(), HelixError
                 rw(v, ctx, bound)?;
             }
         }
-        Expr::RecordUpdate { base, fields, .. } => {
-            rw(base, ctx, bound)?;
-            for (_, v) in fields {
-                rw(v, ctx, bound)?;
+        Expr::RecordUpdate { parts, .. } => {
+            for p in parts {
+                rw(p.expr_mut(), ctx, bound)?;
             }
         }
         Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => rw(recv, ctx, bound)?,

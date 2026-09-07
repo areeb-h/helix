@@ -157,6 +157,21 @@ pub static SYNTAX: &[SyntaxDoc] = &[
                 Keywords: closure, anonymous, arrow, callback, function value, higher order.",
     },
     SyntaxDoc {
+        name: "spread",
+        form: "{...base, field: value, ...more}",
+        doc: "A record built from other records: each `...spread` contributes a record's (or a dict's) fields, each named field one value, and a later part wins.",
+        example: "base = {name: \"Ada\", age: 41}\nprint({...base, age: 42}, {...base, ...{city: \"oslo\", age: 43}})",
+        example_out: "{age: 42, name: \"Ada\"} {age: 43, city: \"oslo\", name: \"Ada\"}",
+        notes: "The one way to derive a record from an immutable one, and the one way to MERGE two: \
+                `{...ADULTS, ...NEWEST}` combines two reusable query fragments, later fields winning, \
+                exactly as `{...base, field: value}` lets a named field win. The spread comes first; \
+                any number of spreads and fields may follow, in written order. A dict spreads as its \
+                string keys. The checker follows a spread of a known record, so a typo after a merge is \
+                refused; a spread whose shape it cannot see (a parameter, parsed JSON, a dict) makes \
+                the result an open record. A field named twice in one literal is refused. \
+                Keywords: spread, merge, update, copy with, combine records, object spread, scope.",
+    },
+    SyntaxDoc {
         name: "it",
         form: "xs.map(it * 2)",
         doc: "The current element inside a comprehension — no parameter to name.",

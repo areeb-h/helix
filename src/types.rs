@@ -1043,39 +1043,49 @@ impl Checker {
                 }
                 Ok(Type::Record(tys))
             }
-            Expr::RecordUpdate { base, fields, line, col } => {
-                let base_t = self.synth(base)?;
-                let mut updates = Vec::with_capacity(fields.len());
-                for (k, v) in fields {
-                    updates.push((k.clone(), self.synth(v)?));
-                }
-                match base_t {
-                    // A statically-known record: merge the update fields (override or extend)
-                    // so field access on the result is still precisely checked.
-                    Type::Record(mut tys) => {
-                        for (name, ty) in updates {
-                            match tys.iter_mut().find(|(k, _)| *k == name) {
+            Expr::RecordUpdate { parts, line, col } => {
+                // The parts in order, a later one winning. A spread of a KNOWN record merges
+                // its fields, so field access on the result stays precisely checked; one whose
+                // shape is not known — a parameter, a `parse_json` result, a dict (Unknown to
+                // the checker, or the `Dict` annotation) — makes the whole field set
+                // unprovable: Unknown, exactly as for dynamic field access. Every part is
+                // still typed for its own errors, and a spread of something without fields is
+                // refused.
+                let mut tys: Vec<(String, Type)> = Vec::new();
+                let mut known = true;
+                for part in parts {
+                    match part {
+                        crate::ast::RecordPart::Spread(e) => match self.synth(e)? {
+                            Type::Record(fields) => {
+                                for (name, ty) in fields {
+                                    match tys.iter_mut().find(|(k, _)| *k == name) {
+                                        Some(slot) => slot.1 = ty,
+                                        None => tys.push((name, ty)),
+                                    }
+                                }
+                            }
+                            Type::Unknown | Type::Missing | Type::AnyRecord | Type::Dict | Type::Never => {
+                                known = false;
+                            }
+                            other => {
+                                return Err(HelixError::new(
+                                    format!("`...` record update needs a record, got {other}"),
+                                    *line,
+                                    *col,
+                                )
+                                .hint("the spread base must be a record or a dict, e.g. `{ ...resp, status: 500 }`."))
+                            }
+                        },
+                        crate::ast::RecordPart::Field(name, e) => {
+                            let ty = self.synth(e)?;
+                            match tys.iter_mut().find(|(k, _)| k == name) {
                                 Some(slot) => slot.1 = ty,
-                                None => tys.push((name, ty)),
+                                None => tys.push((name.clone(), ty)),
                             }
                         }
-                        Ok(Type::Record(tys))
                     }
-                    // The base's shape isn't known (a `parse_json` result, a parameter, …).
-                    // The result is a record, but its full field set can't be proven — stay
-                    // permissive, exactly as for dynamic field access.
-                    // A DICT lands here too: it is `Unknown` to the checker (the
-                    // opaque-type pattern), and its keys are not known statically, so a
-                    // spread of one is a record whose field set cannot be proven —
-                    // which is exactly what this arm already answers.
-                    Type::Unknown | Type::Missing | Type::AnyRecord | Type::Never => Ok(Type::Unknown),
-                    other => Err(HelixError::new(
-                        format!("`...` record update needs a record, got {other}"),
-                        *line,
-                        *col,
-                    )
-                    .hint("the spread base must be a record or a dict, e.g. `{ ...resp, status: 500 }`.")),
                 }
+                Ok(if known { Type::Record(tys) } else { Type::Unknown })
             }
             Expr::Field {
                 recv,

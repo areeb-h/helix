@@ -4,6 +4,24 @@
 
 ### Added
 
+- **More than one `...spread` in a record literal, later ones winning.** `{...A, ...B}` was
+  refused ("a record update takes one `...spread`, not two"), so two independent query fragments
+  — Eloquent's scopes, GORM's chained conditions, here just records — could not be merged, and
+  there was no workaround: `Record` has no `merge`, and `items().concat(…).to_dict()` answers a
+  Dict, a different type in sorted rather than written order (field build, 1.49, found by
+  writing ordinary ORM code). A record update is now its PARTS in written order — the spread
+  first, then any number of spreads and named fields — each spread contributing a record's (or
+  a dict's) fields, each named field one value, a later part winning, which is what
+  `{...base, field: value}` already meant for a field. Both engines fold the parts through one
+  routine; the VM batches named fields into the existing `UpdateRecord` (a single-spread program
+  compiles exactly as before) and emits `SpreadRecord` for each further spread; the checker
+  merges known shapes in order, so a typo after a merge is refused, and answers an open record
+  once a spread's shape is unknown. A field named twice in one literal is still refused; a
+  spread that is not first still is. The reference gained a `spread` entry (the form had none).
+  Pinned by the corpus program `record_spreads` (three engines),
+  `record_spreads_apply_in_order_on_both_engines`, `two_spreads_merge_their_shapes_later_winning`
+  and `two_spreads_merge_on_every_engine`.
+
 - **`rec.map_values(f)` and `dict.map_values(f)`: the same keys, each value replaced.** The
   binder is the value; a second binder is the key, `(v, k) => …` (lodash's `mapValues`
   order), so `{id: "int", name: "text"}.map_values((v, k) => k)` turns a column spec into a
@@ -364,6 +382,12 @@
   anyone can rely on.
 
 ### Fixed
+
+- **A spread of a `Dict`-annotated parameter was refused by `check`.** `fn f(d: Dict) =
+  {...d, x: 1}` drew "`...` record update needs a record, got Dict" while the program ran (a
+  dict spreads as its string keys on every engine): the checker's spread arm admitted `Unknown`
+  and `Record` and refused every other type, and the `Dict` annotation is neither. It answers
+  an open record now, as a dict literal's spread always did.
 
 - **A record field the checker could not type was refused when called.** `fn mk(f: Any) =
   {f: f, a: 1}` followed by `mk(g).f(1)` ran — the field holds a function — and `check`

@@ -520,3 +520,25 @@ p_expr(toks, 0).node.k
         ok("fn mk(f: Any) = {f: f}\nmk((x: Int) => x).f(\"s\")");
         assert!(emsg("fs = [(x: Int) => x]\n(fs[0])(\"s\")").contains("argument 1 of `fs[0]` should be Int"));
     }
+
+    /// Two spreads merge their shapes, a later one winning (field build, 1.49), so a typo after
+    /// a merge is refused; a spread whose shape is unknown — a `Dict` annotation included, which
+    /// used to be refused outright — makes the result open; a keyless spread is refused wherever
+    /// it stands.
+    #[test]
+    fn two_spreads_merge_their_shapes_later_winning() {
+        let ab = "a = {x: 1}\nb = {y: \"s\"}\n";
+        ok(&format!("{ab}{{...a, ...b}}.y.upper()"));
+        assert!(emsg(&format!("{ab}{{...a, ...b}}.z")).contains("no field `z`"));
+        ok("a = {x: 1}\n{...a, ...{x: \"s\"}}.x.upper()");
+        assert!(emsg("a = {x: \"s\"}\n{...a, ...{x: 1}}.x.upper()").contains("upper"));
+        ok("a = {x: 1}\n{...a, x: \"s\", ...{y: 2}}.x.upper()");
+        assert!(emsg("a = {x: 1}\n{...a, ...{x: \"s\"}, x: 1}.x.upper()").contains("upper"));
+        // An unknown shape anywhere makes the result open, never refused.
+        ok("fn f(r) = {...{x: 1}, ...r}.z\nf({z: 1})");
+        ok("fn f(d: Dict) = {...d, x: 1}.x + {...{y: 1}, ...d}.y\nf({\"a\": 1})");
+        ok("fn f(r: Record) = {...r, ...{x: 1}}.zz\nf({x: 2})");
+        // Something without fields is refused, wherever it stands.
+        assert!(emsg("a = {x: 1}\n{...a, ...[1]}").contains("needs a record"));
+        assert!(emsg("{...[1], ...{x: 1}}").contains("needs a record"));
+    }

@@ -34,10 +34,9 @@ pub fn walk_expr(e: &Expr, f: &mut impl FnMut(&Expr)) {
                 walk_expr(v, f);
             }
         }
-        Expr::RecordUpdate { base, fields, .. } => {
-            walk_expr(base, f);
-            for (_, v) in fields {
-                walk_expr(v, f);
+        Expr::RecordUpdate { parts, .. } => {
+            for p in parts {
+                walk_expr(p.expr(), f);
             }
         }
         Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => walk_expr(recv, f),

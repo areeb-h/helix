@@ -106,10 +106,9 @@ fn walk(e: &mut Expr, cx: &Cx, bound: &HashSet<String>) {
                 walk(v, cx, bound);
             }
         }
-        Expr::RecordUpdate { base, fields, .. } => {
-            walk(base, cx, bound);
-            for (_, v) in fields {
-                walk(v, cx, bound);
+        Expr::RecordUpdate { parts, .. } => {
+            for p in parts {
+                walk(p.expr_mut(), cx, bound);
             }
         }
         Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => walk(recv, cx, bound),

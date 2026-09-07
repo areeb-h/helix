@@ -310,9 +310,7 @@ fn mentions_column(e: &Expr) -> bool {
         }),
         Expr::Array(items) | Expr::Tuple(items) => items.iter().any(mentions_column),
         Expr::Record(fields) => fields.iter().any(|(_, v)| mentions_column(v)),
-        Expr::RecordUpdate { base, fields, .. } => {
-            mentions_column(base) || fields.iter().any(|(_, v)| mentions_column(v))
-        }
+        Expr::RecordUpdate { parts, .. } => parts.iter().any(|p| mentions_column(p.expr())),
         Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } => mentions_column(recv),
         Expr::Unary { expr, .. } => mentions_column(expr),
         Expr::Binary { left, right, .. } => mentions_column(left) || mentions_column(right),
@@ -1777,16 +1775,38 @@ impl Compiler {
                     fields.iter().map(|(k, _)| crate::symbol::Symbol::intern(k)).collect();
                 b.emit(Op::MakeRecord(std::rc::Rc::new(names)), 0, 0);
             }
-            Expr::RecordUpdate { base, fields, line, col } => {
-                // Base first (it sits below the field values), then each update value in
-                // order — same evaluation order as the tree-walker, so side effects match.
-                self.compile_expr(b, base)?;
-                for (_, v) in fields {
-                    self.compile_expr(b, v)?;
+            Expr::RecordUpdate { parts, line, col } => {
+                // The parts in written order — the tree-walker's evaluation order, so side
+                // effects match. The first is the base; named fields batch into one
+                // `UpdateRecord` (a single-spread program compiles exactly as before), and
+                // each further spread is a `SpreadRecord` after any batch before it.
+                let mut pending: Vec<crate::symbol::Symbol> = Vec::new();
+                let mut normalized = false;
+                for (i, part) in parts.iter().enumerate() {
+                    match part {
+                        // The base. The parser guarantees a leading spread; a leading named
+                        // field would build on an empty record, so the fold stays total.
+                        crate::ast::RecordPart::Spread(e) if i == 0 => self.compile_expr(b, e)?,
+                        crate::ast::RecordPart::Spread(e) => {
+                            if !pending.is_empty() {
+                                b.emit(Op::UpdateRecord(std::rc::Rc::new(std::mem::take(&mut pending))), *line, *col);
+                            }
+                            self.compile_expr(b, e)?;
+                            b.emit(Op::SpreadRecord, *line, *col);
+                            normalized = true;
+                        }
+                        crate::ast::RecordPart::Field(k, v) => {
+                            if i == 0 {
+                                b.emit(Op::MakeRecord(std::rc::Rc::new(Vec::new())), *line, *col);
+                            }
+                            self.compile_expr(b, v)?;
+                            pending.push(crate::symbol::Symbol::intern(k));
+                        }
+                    }
                 }
-                let names: Vec<crate::symbol::Symbol> =
-                    fields.iter().map(|(k, _)| crate::symbol::Symbol::intern(k)).collect();
-                b.emit(Op::UpdateRecord(std::rc::Rc::new(names)), *line, *col);
+                if !pending.is_empty() || !normalized {
+                    b.emit(Op::UpdateRecord(std::rc::Rc::new(pending)), *line, *col);
+                }
             }
             Expr::Field { recv, name, line, col } => {
                 self.compile_expr(b, recv)?;

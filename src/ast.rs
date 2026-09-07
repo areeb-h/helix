@@ -149,6 +149,28 @@ pub struct MatchArm {
     pub body: Expr,
 }
 
+/// One part of a record update, in written order: a `...spread`, or a named field.
+#[derive(Debug, Clone)]
+pub enum RecordPart {
+    Spread(Expr),
+    Field(String, Expr),
+}
+
+impl RecordPart {
+    /// The expression a part evaluates: the spread's, or the field's value.
+    pub fn expr(&self) -> &Expr {
+        match self {
+            RecordPart::Spread(e) | RecordPart::Field(_, e) => e,
+        }
+    }
+
+    pub fn expr_mut(&mut self) -> &mut Expr {
+        match self {
+            RecordPart::Spread(e) | RecordPart::Field(_, e) => e,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64),
@@ -180,13 +202,14 @@ pub enum Expr {
     Tuple(Vec<Expr>),
     /// A record literal: `{name: "Ada", age: 41}` (ordered, identifier keys).
     Record(Vec<(String, Expr)>),
-    /// A record update: `{ ...base, status: 500 }` — clone `base` (a record), then set/append
-    /// each field (a later field overrides a same-named one from `base`). The one clean way to
-    /// derive a modified record from an immutable one (add a header, bump a status). `fields`
-    /// may be empty (`{ ...base }` is a shallow copy).
+    /// A record update: `{ ...base, status: 500, ...more }` — its PARTS in written order, the
+    /// first a spread. Each spread contributes a record's (or a dict's) fields, each named
+    /// field one value, and a later part wins over an earlier one for the same name (field
+    /// build, 1.49: two reusable query fragments merge as `{...ADULTS, ...NEWEST}`). The one
+    /// clean way to derive a modified record from an immutable one; `{ ...base }` is a shallow
+    /// copy.
     RecordUpdate {
-        base: Box<Expr>,
-        fields: Vec<(String, Expr)>,
+        parts: Vec<RecordPart>,
         line: usize,
         col: usize,
     },
