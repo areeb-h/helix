@@ -16563,3 +16563,38 @@ D = dataframe({ts: [1, 5, 9]})\nfn q(d, s) = let lo = s.lo in d.where(@ts > lo).
         assert_eq!(out, want, "{label}");
     }
 }
+
+/// The field build's §1.51: five distinct closures reaching one higher-order function over
+/// an object API, and a clause builder whose `c.count()` sits beside a module `count` of
+/// three parameters. The first specializer typed a clone through the original body's
+/// addresses; a fold had freed one and a typed node reused it, so the clone's `c` took that
+/// node's type and `c.count()` became `count(c)` — "`count` takes 3 arguments, got 1" at
+/// run time, after a clean `check`. Every engine, with and without each pass, prints the same.
+#[test]
+fn a_clone_is_typed_from_a_snapshot_not_from_addresses_a_fold_may_free() {
+    let src = "fn count(m, spec, target) = \"select count(*) from {m.table}\"\n\
+fn clauses(w) = w.items().map((p) => \"{p[0]} = ?\")\n\
+fn sql(m, spec) = let {where} = spec in let w = where ?? {} in let c = clauses(w) in let two = c.count() == 2 in if c.count() == 0 then {sql: \"select * from {m.table}\", two: two} else {sql: \"select * from {m.table} where {c.join(\" and \")}\", two: two}\n\
+fn define(spec) = let m = {table: spec.table, columns: spec.columns} in {table: m.table, columns: m.columns, by_key: \"select * from {m.table} where id = $1\", sql: (spec) => sql(m, spec), prepare: (spec) => {sql: sql(m, spec).sql}, count: (spec) => count(m, spec, \"n\")}\n\
+M = define({table: \"people\", columns: [\"id\", \"name\", \"age\", \"city\"]})\n\
+mut RC = \"x\"\n\
+EMPTY = {}\n\
+fn t(label, f) = do {\n  _ = range(0, 3).map(f()).last()\n  ms = range(0, 2).map(let k = it in do {\n    _ = range(0, 3).map(f()).last()\n    1.0\n  })\n  print(\"{label} {ms.count()} {f()}\")\n}\n\
+fn main() = do {\n  _ = t(\"by_key\", () => M.by_key)\n  _ = t(\"prepare\", () => M.prepare({where: {city: \"x\"}}).sql)\n  _ = t(\"empty\", () => M.sql(EMPTY).sql)\n  _ = t(\"1 clause\", () => M.sql({where: {city: RC}}).sql)\n  _ = t(\"count\", () => M.count({where: {city: RC}}))\n  t(\"2 clauses\", () => let r = M.sql({where: {city: RC, age: 30}}) in \"{r.sql} {r.two}\")\n}\n";
+    let want = "by_key 2 select * from people where id = $1\n\
+prepare 2 select * from people where city = ?\n\
+empty 2 select * from people\n\
+1 clause 2 select * from people where city = ?\n\
+count 2 select count(*) from people\n\
+2 clauses 2 select * from people where city = ? and age = ? true\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("snapshot_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+    for (label, env) in [("nospecialize", &[("HELIX_NOSPECIALIZE", "1")][..]), ("nofold", &[("HELIX_NOFOLD", "1")][..])] {
+        let (out, err, code) = run_source(src, env, &format!("snapshot_{label}"));
+        assert_eq!(code, Some(0), "{label}: {err}");
+        assert_eq!(out, want, "{label}");
+    }
+}

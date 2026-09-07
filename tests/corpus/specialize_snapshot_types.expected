@@ -1,0 +1,9 @@
+exit: 0
+--- stdout ---
+by_key 2 select * from people where id = $1
+prepare 2 select * from people where city = ?
+empty 2 select * from people
+1 clause 2 select * from people where city = ?
+count 2 select count(*) from people
+2 clauses 2 select * from people where city = ? and age = ? true
+--- stderr ---

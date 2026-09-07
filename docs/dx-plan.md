@@ -442,6 +442,20 @@ evaluator over the clone: closed sub-expressions evaluated in place through the 
 `map`/`reduce` over a shape's one-element `items()` unrolled, lambda application reduced to
 `let`, tuple knowledge for `c[0]`/`c.count()`, dead safe bindings dropped — the where clause's
 text is a constant. Measured: `where eq` 5.362 → 3.542 µs, `where+limit` 5.531 → 4.831 µs, `OR two branches` 10.260 → 8.485 µs (min of five trials of 2 000); corpus check 436 → 433 ms.
+**§1.51 (2026-09-08) — a clone typed through a freed address, FIXED.** With five distinct
+closures reaching one higher-order function over the object API, `check` said ok and the
+run died with "`count` takes 3 arguments, got 1" at `c.count()` on a two-element array —
+for that program and for no smaller one. The type map is keyed by node address; the
+specializer copied a function's types through the addresses it recorded up front, and a
+fold had freed one of them and a typed node reused it, so the clone's `c` carried that
+node's type and the receiver-directed rewrite made `c.count()` the module's `count(c)`. A function's types
+are snapshotted by value when it is recorded now (`FnDef.types`), a clone takes them from
+the snapshot, every node any pass drops or replaces goes through one `set` that forgets the
+subtree and the slot, a statement's root is re-keyed when the program grows around it, and
+a restored tree's root is never keyed. `every_type_the_fold_leaves_names_a_live_node`
+pins the invariant (after the checker and the fold, every key names a live node);
+`a_clone_is_typed_from_a_snapshot_not_from_addresses_a_fold_may_free` and the corpus's
+`specialize_snapshot_types` run the shape on every engine.
 
 **1.46a (2026-09-07) — const-fold a pure call with literal arguments.** DECIDED by the user
 and DONE: ADR 0050. `src/fold.rs` runs after the checker and the UFCS rewrite in every run, check

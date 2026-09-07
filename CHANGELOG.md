@@ -443,6 +443,22 @@
 
 ### Fixed
 
+- **A specialized clone could be typed through a freed address (field build, §1.51).** With
+  five distinct closures reaching one higher-order function over the object API, `helix
+  check` said ok and the program died at run time with "`count` takes 3 arguments, got 1"
+  at a `c.count()` on a two-element array — for that program and for no smaller one. The
+  checker's type map is keyed by node address; the specializer recorded the addresses of a
+  function's nodes when it started and copied types through them whenever a clone was made,
+  and by then a fold had freed one of those nodes and a typed node had been allocated there,
+  so the clone's `c` received that node's type — one under which `count` is not a method —
+  and the receiver-directed rewrite made `c.count()` the module's `count(c)`. A function's types are snapshotted by value when it
+  is recorded now, a clone takes them from the snapshot, and every node any pass drops or
+  replaces is forgotten, the slot included — after the checker and the fold, every entry of
+  the map names a live node (`every_type_the_fold_leaves_names_a_live_node`; the
+  reproducer's shape runs on every engine in
+  `a_clone_is_typed_from_a_snapshot_not_from_addresses_a_fold_may_free`).
+  Measured against the previous commit's binary, both passes on, interleaved, min: `where eq` 2.631 → 2.625 µs, `where+limit` 3.341 → 3.288 µs, `keyset` 4.815 → 4.859 µs, `OR two branches` 7.702 → 7.712 µs, empty spec 1.056 → 1.060 µs (the field's harness, min of five trials of 2 000); `helix check` of the field's harness 18268 → 17950 µs, of their reproducer 14895 → 15284 µs, of the corpus program 5956 → 5702 µs (min of 30 launches), and over the corpus's 194 programs 340 → 347 ms (min of 5, six rounds).
+
 - **A spread of a `Dict`-annotated parameter was refused by `check`.** `fn f(d: Dict) =
   {...d, x: 1}` drew "`...` record update needs a record, got Dict" while the program ran (a
   dict spreads as its string keys on every engine): the checker's spread arm admitted `Unknown`

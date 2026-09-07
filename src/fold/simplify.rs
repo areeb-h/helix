@@ -6,51 +6,59 @@
 //! literal. `true and x` is NOT `x` for every `x` — the walker's three-valued `and` errors
 //! on a non-boolean right side where the bare `x` would not — so that one is rewritten only
 //! when `x` is itself a literal the rule can settle.
+//!
+//! What a rewrite drops is forgotten in the checker's type map, which is keyed by node
+//! address: an entry left behind would answer for whatever node is next allocated there.
 
 use crate::ast::{BinOp, Expr, UnOp};
+use crate::types::TypeMap;
+
+use super::specialize::forget_types;
 
 /// Simplify `e` in place where a literal decides it; `true` when something changed.
-pub(crate) fn constant(e: &mut Expr) -> bool {
+pub(crate) fn constant(e: &mut Expr, types: &mut TypeMap) -> bool {
     match e {
         Expr::If { cond, then_branch, else_branch, .. } => match **cond {
             Expr::Bool(true) => {
                 let taken = std::mem::replace(&mut **then_branch, Expr::Missing);
-                *e = taken;
+                replace(e, taken, types);
                 true
             }
             Expr::Bool(false) => {
                 let taken = std::mem::replace(&mut **else_branch, Expr::Missing);
-                *e = taken;
+                replace(e, taken, types);
                 true
             }
             _ => false,
         },
         Expr::Binary { op: BinOp::And, left, right, .. } => match (&**left, &**right) {
             (Expr::Bool(false), _) => {
-                *e = Expr::Bool(false);
+                replace(e, Expr::Bool(false), types);
                 true
             }
             (Expr::Bool(true), Expr::Bool(b)) => {
-                *e = Expr::Bool(*b);
+                let b = *b;
+                replace(e, Expr::Bool(b), types);
                 true
             }
             (Expr::Bool(true), Expr::Missing) => {
-                *e = Expr::Missing;
+                replace(e, Expr::Missing, types);
                 true
             }
             _ => false,
         },
         Expr::Binary { op: BinOp::Or, left, right, .. } => match (&**left, &**right) {
             (Expr::Bool(true), _) => {
-                *e = Expr::Bool(true);
+                replace(e, Expr::Bool(true), types);
                 true
             }
             (Expr::Bool(false), Expr::Bool(b)) => {
-                *e = Expr::Bool(*b);
+                let b = *b;
+                replace(e, Expr::Bool(b), types);
                 true
             }
             (Expr::Bool(false), Expr::Missing) => {
-                *e = Expr::Missing;
+                replace(e, Expr::Missing, types);
                 true
             }
             _ => false,
@@ -58,11 +66,11 @@ pub(crate) fn constant(e: &mut Expr) -> bool {
         Expr::Binary { op: BinOp::Coalesce, left, right, .. } => {
             if matches!(**left, Expr::Missing) {
                 let taken = std::mem::replace(&mut **right, Expr::Missing);
-                *e = taken;
+                replace(e, taken, types);
                 true
             } else if is_present_literal(left) {
                 let taken = std::mem::replace(&mut **left, Expr::Missing);
-                *e = taken;
+                replace(e, taken, types);
                 true
             } else {
                 false
@@ -70,13 +78,22 @@ pub(crate) fn constant(e: &mut Expr) -> bool {
         }
         Expr::Unary { op: UnOp::Not, expr, .. } => match **expr {
             Expr::Bool(b) => {
-                *e = Expr::Bool(!b);
+                replace(e, Expr::Bool(!b), types);
                 true
             }
             _ => false,
         },
         _ => false,
     }
+}
+
+/// Put `new` where `e` is, and forget what was there: the nodes the old expression still
+/// held (a part moved out first is not among them), and the slot itself, which named the
+/// old node.
+pub(crate) fn replace(e: &mut Expr, new: Expr, types: &mut TypeMap) {
+    let old = std::mem::replace(e, new);
+    forget_types(types, &old);
+    types.remove(&(e as *const Expr));
 }
 
 /// A literal that is never `missing`: a number, a string, a boolean, or an array, tuple or
@@ -115,6 +132,7 @@ mod tests {
     /// Each rule rewrites exactly the decided shapes and leaves the undecided ones.
     #[test]
     fn a_literal_decides_only_what_the_language_decides_without_the_other_operand() {
+        let mut types = TypeMap::default();
         for (src, want) in [
             ("if true then 1 else 2", "1"),
             ("if false then 1 else 2", "2"),
@@ -127,13 +145,13 @@ mod tests {
             ("not true", "false"),
         ] {
             let mut e = parsed(src);
-            assert!(constant(&mut e), "{src}");
+            assert!(constant(&mut e, &mut types), "{src}");
             let w = parsed(want);
             assert_eq!(format!("{e:?}"), format!("{w:?}"), "{src}");
         }
         for src in ["true and x", "false or x", "if c then 1 else 2", "x ?? 3", "not x", "missing and x"] {
             let mut e = parsed(src);
-            assert!(!constant(&mut e), "{src} must stay");
+            assert!(!constant(&mut e, &mut types), "{src} must stay");
         }
     }
 }

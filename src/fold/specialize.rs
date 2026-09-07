@@ -28,6 +28,16 @@
 //! the fold would write for them), and the call a direct one, which the shape rule then
 //! specializes.
 //!
+//! THE TYPE MAP IS KEYED BY NODE ADDRESS, and the compiler routes a frame verb, and the
+//! receiver-directed rewrite a method call, by what it says of a receiver. So a function's
+//! types are snapshotted BY VALUE when the function is recorded, before any fold frees a
+//! node of it, and a clone takes them from that snapshot; a body this pass copies takes the
+//! types of the live body it was copied from; and every node this pass drops or replaces is
+//! forgotten, the slot it occupied included. The first cut kept the original body's
+//! addresses instead: a fold freed one, a later typed node was allocated there, and a
+//! clone's `c` received that node's type — `c.count()` became the module's `count(c)`,
+//! deterministically for one program and for no smaller one (the field build's §1.51).
+//!
 //! What keeps it bounded: clones are memoized per (function, knowledge), capped per function
 //! and per program, and never made for a body past a size; the depth of transitive
 //! specialization is capped; only a shape or a held name earns a clone (a scalar literal
@@ -40,7 +50,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{BinOp, Expr, InterpPart, Stmt, TypeAnn};
-use crate::types::TypeMap;
+use crate::types::{Type, TypeMap};
 use crate::value::{FuncVal, Value};
 
 use super::{simplify, Outcome, Sandbox};
@@ -167,13 +177,14 @@ impl Env {
 }
 
 /// One of the program's own functions, as it was before any fold: what a clone is made
-/// from, and the addresses of its nodes, under which the checker recorded its types.
+/// from, and the checker's types of its nodes, snapshotted by value in the order
+/// `walk_expr` fixes — never by address, which a fold may free and a later node reuse.
 struct FnDef {
     params: Vec<(String, Option<TypeAnn>)>,
     defaults: Vec<Option<Expr>>,
     ret: Option<TypeAnn>,
     body: Expr,
-    ptrs: Vec<*const Expr>,
+    types: Vec<Option<Type>>,
     line: usize,
     col: usize,
 }
@@ -227,7 +238,8 @@ impl<'t> Specializer<'t> {
                 && !assigned.contains(name.as_str())
             {
                 // The snapshot owns its lambda bodies: a body shared with the program would
-                // keep the fold from rewriting the program's own in place.
+                // keep the fold from rewriting the program's own in place. Its types are
+                // taken now, by value, while every node of the original is still alive.
                 let mut own = body.clone();
                 crate::fold::unshare_lambdas(&mut own);
                 funcs.insert(
@@ -236,8 +248,8 @@ impl<'t> Specializer<'t> {
                         params: params.clone(),
                         defaults: defaults.clone(),
                         ret: ret.clone(),
+                        types: snapshot_types(types, body),
                         body: own,
-                        ptrs: node_ptrs(body),
                         line: *line,
                         col: *col,
                     },
@@ -263,6 +275,11 @@ impl<'t> Specializer<'t> {
 
     pub(crate) fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// The checker's types, for the fold's own rewrites.
+    pub(crate) fn types(&mut self) -> &mut TypeMap {
+        self.types
     }
 
     /// Whether `name` is a function a clone can be made of.
@@ -291,10 +308,10 @@ impl<'t> Specializer<'t> {
         std::mem::take(&mut self.held)
     }
 
-    /// Forget the checker's types of every node under `e` — it is about to be dropped, and
-    /// the map is keyed by address, which a later node could reuse.
-    pub(crate) fn forget(&mut self, e: &Expr) {
-        forget_types(self.types, e);
+    /// Put `new` where `e` is, forgetting the types of what was there — the nodes the old
+    /// expression still held, and the slot itself, which named the old node.
+    pub(crate) fn set(&mut self, e: &mut Expr, new: Expr) {
+        simplify::replace(e, new, self.types);
     }
 
     /// Forget the types of nodes by address — a sandbox copy that is going away.
@@ -307,7 +324,7 @@ impl<'t> Specializer<'t> {
     /// Give `copy`, a tree of `original`'s structure, `original`'s types; the copy's node
     /// addresses, to forget them by later.
     pub(crate) fn type_copy(&mut self, original: &Expr, copy: &Expr) -> Vec<*const Expr> {
-        copy_types(self.types, &node_ptrs(original), copy);
+        copy_types(self.types, original, copy);
         node_ptrs(copy)
     }
 
@@ -383,7 +400,7 @@ impl<'t> Specializer<'t> {
         let def = &self.funcs[fname];
         let capped = self.total >= MAX_CLONES
             || self.per_fn.get(fname).copied().unwrap_or(0) >= MAX_PER_FN
-            || def.ptrs.len() > MAX_NODES;
+            || def.types.len() > MAX_NODES;
         if capped {
             self.memo.insert(key, None);
             return None;
@@ -395,17 +412,17 @@ impl<'t> Specializer<'t> {
         // Memoized BEFORE the body is rewritten, so a recursive call inside it reaches the
         // clone itself.
         self.memo.insert(key, Some(name.clone()));
-        let (params, defaults, ret, mut body, ptrs, line, col) = (
+        let (params, defaults, ret, mut body, snapshot, line, col) = (
             def.params.clone(),
             def.defaults.clone(),
             def.ret.clone(),
             def.body.clone(),
-            def.ptrs.clone(),
+            def.types.clone(),
             def.line,
             def.col,
         );
         crate::fold::unshare_lambdas(&mut body);
-        copy_types(self.types, &ptrs, &body);
+        restore_types(self.types, &snapshot, &body);
         let mut env = Env::new();
         for ((p, _), b) in params.iter().zip(known.iter()) {
             env.bind(p, b.clone());
@@ -458,9 +475,7 @@ impl<'t> Specializer<'t> {
             let mut budget = crate::fold::MAX_LITERAL_NODES;
             defaults.push(Some(crate::fold::to_expr(d, &mut budget)?));
         }
-        let mut body: Expr = (*fv.body).clone();
-        crate::fold::unshare_lambdas(&mut body);
-        copy_types(self.types, &node_ptrs(&fv.body), &body);
+        let mut body = typed_clone(self.types, &fv.body);
         replace_idents(&mut body, &|n| renames.get(n).map(|to| Expr::Ident { name: to.clone(), line: 0, col: 0 }), &mut Vec::new());
         let params: Vec<(String, Option<TypeAnn>)> = fv.params.iter().map(|p| (p.clone(), None)).collect();
         self.total += 1;
@@ -470,8 +485,8 @@ impl<'t> Specializer<'t> {
                 params: params.clone(),
                 defaults: defaults.clone(),
                 ret: None,
+                types: snapshot_types(self.types, &body),
                 body: body.clone(),
-                ptrs: node_ptrs(&body),
                 line: 0,
                 col: 0,
             },
@@ -497,7 +512,10 @@ impl<'t> Specializer<'t> {
                             *name = g;
                         }
                     }
-                    Some(Binding::Lit(l)) => *e = l.to_expr(),
+                    Some(Binding::Lit(l)) => {
+                        let lit = l.to_expr();
+                        self.set(e, lit);
+                    }
                     _ => {}
                 }
                 return;
@@ -530,10 +548,14 @@ impl<'t> Specializer<'t> {
                 let known = self.known(recv, env);
                 if let Some(fs) = known.shape() {
                     match fs.iter().find(|(k, _)| k == name).map(|(_, b)| b) {
-                        Some(Binding::Lit(l)) => *e = l.to_expr(),
+                        Some(Binding::Lit(l)) => {
+                            let lit = l.to_expr();
+                            self.set(e, lit);
+                        }
                         Some(Binding::Global(g)) => {
                             let (line, col) = crate::visit::expr_pos(e).unwrap_or((0, 0));
-                            *e = Expr::Ident { name: g.clone(), line, col };
+                            let g = Expr::Ident { name: g.clone(), line, col };
+                            self.set(e, g);
                         }
                         _ => {}
                     }
@@ -544,16 +566,17 @@ impl<'t> Specializer<'t> {
                 let known = self.known(recv, env);
                 if let Some(fs) = known.shape() {
                     let (line, col) = (*line, *col);
-                    match fs.iter().find(|(k, _)| k == name).map(|(_, b)| b) {
-                        None => *e = Expr::Missing,
-                        Some(Binding::Lit(l)) => *e = l.to_expr(),
-                        Some(Binding::Global(g)) => *e = Expr::Ident { name: g.clone(), line, col },
+                    let new = match fs.iter().find(|(k, _)| k == name).map(|(_, b)| b) {
+                        None => Expr::Missing,
+                        Some(Binding::Lit(l)) => l.to_expr(),
+                        Some(Binding::Global(g)) => Expr::Ident { name: g.clone(), line, col },
                         Some(_) => {
                             let name = name.clone();
                             let recv = std::mem::replace(&mut **recv, Expr::Missing);
-                            *e = Expr::Field { recv: Box::new(recv), name, line, col };
+                            Expr::Field { recv: Box::new(recv), name, line, col }
                         }
-                    }
+                    };
+                    self.set(e, new);
                 }
             }
             Expr::Unary { expr, .. } => self.substitute(expr, env, depth, sb, done),
@@ -563,7 +586,7 @@ impl<'t> Specializer<'t> {
                 // A record literal is never `missing`.
                 if matches!(op, BinOp::Coalesce) && self.known(left, env).shape().is_some() {
                     let taken = std::mem::replace(&mut **left, Expr::Missing);
-                    *e = taken;
+                    self.set(e, taken);
                 }
             }
             Expr::Call { name, args, .. } => {
@@ -571,7 +594,7 @@ impl<'t> Specializer<'t> {
                     self.substitute(a, env, depth, sb, done);
                 }
                 if name == "type_of" && args.len() == 1 && self.known(&args[0], env).shape().is_some() {
-                    *e = Expr::Str("Record".to_string());
+                    self.set(e, Expr::Str("Record".to_string()));
                     return;
                 }
                 if self.funcs.contains_key(name.as_str()) {
@@ -606,70 +629,62 @@ impl<'t> Specializer<'t> {
                     // universal `is_missing`. (A record has no `count`; `keys().count()`
                     // folds on its own.)
                     let field_of = |recv: &Expr, k: &str| Expr::Field { recv: Box::new(recv.clone()), name: k.to_string(), line, col };
-                    match (name.as_str(), args.len()) {
-                        ("keys", 0) => *e = Expr::Array(fs.iter().map(|(k, _)| Expr::Str(k.clone())).collect()),
-                        ("is_missing", 0) => *e = Expr::Bool(false),
-                        ("values", 0) => *e = Expr::Array(fs.iter().map(|(k, _)| field_of(recv, k)).collect()),
-                        ("items", 0) => {
-                            *e = Expr::Array(
-                                fs.iter().map(|(k, _)| Expr::Tuple(vec![Expr::Str(k.clone()), field_of(recv, k)])).collect(),
-                            )
-                        }
-                        ("has", 1) => {
-                            if let Expr::Str(k) = &args[0] {
-                                *e = Expr::Bool(fs.iter().any(|(f, _)| f == k));
-                            }
-                        }
-                        ("get", 1) | ("expect", 1) => {
-                            if let Expr::Str(k) = &args[0] {
-                                match fs.iter().find(|(f, _)| f == k) {
-                                    Some((_, Binding::Lit(l))) => *e = l.to_expr(),
-                                    Some((_, Binding::Global(g))) => *e = Expr::Ident { name: g.clone(), line, col },
-                                    Some(_) => *e = field_of(recv, k),
-                                    None if name == "get" => *e = Expr::Missing,
-                                    None => {}
-                                }
-                            }
-                        }
-                        ("get", 2) => {
-                            if let Expr::Str(k) = &args[0] {
-                                match fs.iter().find(|(f, _)| f == k) {
-                                    Some((_, Binding::Lit(l))) => *e = l.to_expr(),
-                                    Some((_, Binding::Global(g))) => *e = Expr::Ident { name: g.clone(), line, col },
-                                    Some(_) => *e = field_of(recv, k),
-                                    None => {
-                                        let d = std::mem::replace(&mut args[1], Expr::Missing);
-                                        *e = d;
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
+                    let new = match (name.as_str(), args.len()) {
+                        ("keys", 0) => Some(Expr::Array(fs.iter().map(|(k, _)| Expr::Str(k.clone())).collect())),
+                        ("is_missing", 0) => Some(Expr::Bool(false)),
+                        ("values", 0) => Some(Expr::Array(fs.iter().map(|(k, _)| field_of(recv, k)).collect())),
+                        ("items", 0) => Some(Expr::Array(
+                            fs.iter().map(|(k, _)| Expr::Tuple(vec![Expr::Str(k.clone()), field_of(recv, k)])).collect(),
+                        )),
+                        ("has", 1) => match &args[0] {
+                            Expr::Str(k) => Some(Expr::Bool(fs.iter().any(|(f, _)| f == k))),
+                            _ => None,
+                        },
+                        ("get", 1) | ("expect", 1) => match &args[0] {
+                            Expr::Str(k) => match fs.iter().find(|(f, _)| f == k) {
+                                Some((_, Binding::Lit(l))) => Some(l.to_expr()),
+                                Some((_, Binding::Global(g))) => Some(Expr::Ident { name: g.clone(), line, col }),
+                                Some(_) => Some(field_of(recv, k)),
+                                None if name == "get" => Some(Expr::Missing),
+                                None => None,
+                            },
+                            _ => None,
+                        },
+                        ("get", 2) => match &args[0] {
+                            Expr::Str(k) => match fs.iter().find(|(f, _)| f == k) {
+                                Some((_, Binding::Lit(l))) => Some(l.to_expr()),
+                                Some((_, Binding::Global(g))) => Some(Expr::Ident { name: g.clone(), line, col }),
+                                Some(_) => Some(field_of(recv, k)),
+                                None => Some(std::mem::replace(&mut args[1], Expr::Missing)),
+                            },
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(new) = new {
+                        self.set(e, new);
                     }
                 } else if let Some(items) = sequence_literal(recv, env) {
                     // A tuple or array literal of safe elements — written here, or bound by
                     // a `let` — answers its length, its ends, and unrolls a `map` or a
                     // `reduce` over it: what a shape's `items()` hands to a clause builder.
                     let n = items.len();
-                    match (name.as_str(), args.len()) {
-                        ("count", 0) | ("length", 0) => *e = Expr::Int(n as i64),
-                        ("first", 0) if n > 0 => *e = items[0].clone(),
-                        ("last", 0) if n > 0 => *e = items[n - 1].clone(),
-                        ("map", 1) if n <= MAX_UNROLL && matches!(recv_kind(recv, env), Some(Seq::Array)) => {
-                            if let Some(elems) = unrolled_map(self.types, &args[0], &items) {
-                                *e = Expr::Array(elems);
-                                self.substitute(e, env, depth, sb, done);
-                                return;
-                            }
+                    let is_array = matches!(recv_kind(recv, env), Some(Seq::Array));
+                    let new = match (name.as_str(), args.len()) {
+                        ("count", 0) | ("length", 0) => Some(Expr::Int(n as i64)),
+                        ("first", 0) if n > 0 => Some(items[0].clone()),
+                        ("last", 0) if n > 0 => Some(items[n - 1].clone()),
+                        ("map", 1) if is_array && n <= MAX_UNROLL => unrolled_map(self.types, &args[0], &items).map(Expr::Array),
+                        ("reduce", 2) if is_array && n <= MAX_UNROLL => unrolled_reduce(self.types, &args[0], &args[1], &items),
+                        _ => None,
+                    };
+                    if let Some(new) = new {
+                        let again = matches!(name.as_str(), "map" | "reduce" | "first" | "last");
+                        self.set(e, new);
+                        if again {
+                            self.substitute(e, env, depth, sb, done);
                         }
-                        ("reduce", 2) if n <= MAX_UNROLL && matches!(recv_kind(recv, env), Some(Seq::Array)) => {
-                            if let Some(folded) = unrolled_reduce(self.types, &args[0], &args[1], &items) {
-                                *e = folded;
-                                self.substitute(e, env, depth, sb, done);
-                                return;
-                            }
-                        }
-                        _ => {}
+                        return;
                     }
                 }
             }
@@ -687,7 +702,7 @@ impl<'t> Specializer<'t> {
                 {
                     let bindings: Vec<(String, Expr)> = params.iter().cloned().zip(std::mem::take(args)).collect();
                     let body = typed_clone(self.types, body);
-                    *e = Expr::Let { bindings, body: Box::new(body), from_do: false };
+                    self.set(e, Expr::Let { bindings, body: Box::new(body), from_do: false });
                     self.substitute(e, env, depth, sb, done);
                     return;
                 }
@@ -700,7 +715,8 @@ impl<'t> Specializer<'t> {
                     && i >= 0
                     && (i as usize) < items.len()
                 {
-                    *e = items[i as usize].clone();
+                    let elem = items[i as usize].clone();
+                    self.set(e, elem);
                     self.substitute(e, env, depth, sb, done);
                     return;
                 }
@@ -750,7 +766,7 @@ impl<'t> Specializer<'t> {
                 }
                 if bindings.is_empty() {
                     let taken = std::mem::replace(&mut **body, Expr::Missing);
-                    *e = taken;
+                    self.set(e, taken);
                 }
                 return;
             }
@@ -776,7 +792,7 @@ impl<'t> Specializer<'t> {
             }
         }
         // A literal condition selects its branch.
-        while simplify::constant(e) {}
+        while simplify::constant(e, self.types) {}
         // A sub-expression closed under the sandbox — a method on a literal or a held
         // value, an operator on literals, a field of a held record, an interpolation of
         // held names — is evaluated where it stands. A call to one of the program's own
@@ -788,8 +804,7 @@ impl<'t> Specializer<'t> {
         {
             let mut budget = crate::fold::MAX_LITERAL_NODES;
             if let Some(lit) = crate::fold::to_expr(&v, &mut budget) {
-                let old = std::mem::replace(e, lit);
-                forget_types(self.types, &old);
+                self.set(e, lit);
             }
         }
     }
@@ -919,13 +934,13 @@ fn substituted(types: &mut TypeMap, body: &Expr, name: &str, with: &Expr) -> Exp
     out
 }
 
-/// A copy of `body` that owns its lambda bodies and carries the checker's types of `body`'s
-/// nodes — the compiler routes a frame verb by its receiver's type, and a copy that lost it
-/// would route generically.
+/// A copy of `body` — a live, typed tree — that owns its lambda bodies and carries the
+/// checker's types of `body`'s nodes: the compiler routes a frame verb by its receiver's
+/// type, and a copy that lost it would route generically.
 fn typed_clone(types: &mut TypeMap, body: &Expr) -> Expr {
     let mut out = body.clone();
     crate::fold::unshare_lambdas(&mut out);
-    copy_types(types, &node_ptrs(body), &out);
+    copy_types(types, body, &out);
     out
 }
 
@@ -1040,17 +1055,32 @@ pub(super) fn node_ptrs(e: &Expr) -> Vec<*const Expr> {
     out
 }
 
-/// Give a clone of a typed tree the types of the tree it was cloned from.
-fn copy_types(types: &mut TypeMap, original: &[*const Expr], clone: &Expr) {
-    let mine = node_ptrs(clone);
-    if mine.len() != original.len() {
+/// The checker's types of every node under `e`, by value, in `walk_expr`'s order — taken
+/// while every node is alive, so no address in it can be a reused one.
+fn snapshot_types(types: &TypeMap, e: &Expr) -> Vec<Option<Type>> {
+    node_ptrs(e).iter().map(|p| types.get(p).cloned()).collect()
+}
+
+/// Give `tree`, of the structure a snapshot was taken from, the snapshot's types — all but
+/// the root's: a root is inline in the statement, the box or the slot that holds it, and
+/// moves with it, while every other node is where its parent's box or vector put it. A
+/// root is never a receiver, so nothing reads its type.
+fn restore_types(types: &mut TypeMap, snapshot: &[Option<Type>], tree: &Expr) {
+    let mine = node_ptrs(tree);
+    if mine.len() != snapshot.len() {
         return;
     }
-    for (o, c) in original.iter().zip(mine) {
-        if let Some(t) = types.get(o).cloned() {
-            types.insert(c, t);
+    for (p, t) in mine.into_iter().zip(snapshot).skip(1) {
+        if let Some(t) = t {
+            types.insert(p, t.clone());
         }
     }
+}
+
+/// Give `copy`, a tree of `original`'s structure, `original`'s types — `original` alive.
+fn copy_types(types: &mut TypeMap, original: &Expr, copy: &Expr) {
+    let snapshot = snapshot_types(types, original);
+    restore_types(types, &snapshot, copy);
 }
 
 pub(crate) fn forget_types(types: &mut TypeMap, e: &Expr) {

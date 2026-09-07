@@ -67,11 +67,23 @@ method's arguments is rewritten. For the field build's where clause, what remain
 `_where` is one branch on whether the value is `missing` and the parameter list — the
 text `city = $1` is a constant, as it is in their hand-written `prepare`.
 
-**Types.** The checker's type map is keyed by node address, and the compiler routes
-receiver-polymorphic verbs by it after the fold. A clone inherits the types of the nodes it
-was cloned from, node by node; the sandbox's own copies of the program's lambda bodies —
-what its closures hold — carry them too and are forgotten with the sandbox; a node the
-pass drops is forgotten, so a reused address never answers for it.
+**Types.** The checker's type map is keyed by node address, and after the fold the
+compiler routes a frame verb, and the receiver-directed rewrite a method call, by what it
+says of a receiver. So a function's types are snapshotted BY VALUE when the specializer
+records it, before any fold frees a node of it, and a clone takes them from the snapshot; a
+body the pass copies — for an unrolled `map`, a `let` made of a lambda application, a
+devirtualized closure — takes the types of the live body it was copied from; the sandbox's
+own copies of the program's lambda bodies (what its closures hold) carry them too and are
+forgotten with the sandbox; and every node any pass drops or replaces is forgotten, the
+slot it occupied included, as is a statement's root when the program grows around it (a
+root is inline in its statement and moves with it — and is never a receiver). Pinned by
+`every_type_the_fold_leaves_names_a_live_node`: after the checker and the fold, every key
+of the map names a node alive in the program. The first cut kept the original body's
+addresses and copied through them when a clone was made: the field build's §1.51 — a fold
+had freed one, a typed node was allocated there, the clone's `c` received that node's
+type — one under which `count` is not a method — and `c.count()` was rewritten to the
+module's three-argument `count`, after a clean `check`, for one program and for no
+smaller one.
 
 **What the fold gained for this.** A method on a literal receiver (`missing.is_missing()`,
 `["a"].count()`), an operator on literals, a field of a held record, an interpolation of held

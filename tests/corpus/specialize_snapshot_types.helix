@@ -1,0 +1,39 @@
+# A specialized clone is typed from a snapshot of the checker's types, never through the
+# addresses of the original body (ADR 0051, the field build's §1.51). Five distinct closures
+# reach one higher-order function over an object API, and the clause builder's `c.count()`
+# sits beside a module `count` of three parameters: the first specializer copied types
+# through addresses a fold had freed and a typed node had reused, so the clone's `c` took
+# that node's type and `c.count()` became `count(c)` — "`count` takes 3 arguments, got 1"
+# at run time, after a clean `check`, for this shape and for no smaller one.
+fn count(m, spec, target) = "select count(*) from {m.table}"
+fn clauses(w) = w.items().map((p) => "{p[0]} = ?")
+fn sql(m, spec) = let {where} = spec in let w = where ?? {} in let c = clauses(w) in let two = c.count() == 2 in
+  if c.count() == 0 then {sql: "select * from {m.table}", two: two}
+  else {sql: "select * from {m.table} where {c.join(" and ")}", two: two}
+fn define(spec) = let m = {table: spec.table, columns: spec.columns} in {
+  table: m.table,
+  columns: m.columns,
+  by_key: "select * from {m.table} where id = $1",
+  sql: (spec) => sql(m, spec),
+  prepare: (spec) => {sql: sql(m, spec).sql},
+  count: (spec) => count(m, spec, "n"),
+}
+M = define({table: "people", columns: ["id", "name", "age", "city"]})
+mut RC = "x"
+EMPTY = {}
+fn t(label, f) = do {
+  _ = range(0, 3).map(f()).last()
+  ms = range(0, 2).map(let k = it in do {
+    _ = range(0, 3).map(f()).last()
+    1.0
+  })
+  print("{label} {ms.count()} {f()}")
+}
+fn main() = do {
+  _ = t("by_key", () => M.by_key)
+  _ = t("prepare", () => M.prepare({where: {city: "x"}}).sql)
+  _ = t("empty", () => M.sql(EMPTY).sql)
+  _ = t("1 clause", () => M.sql({where: {city: RC}}).sql)
+  _ = t("count", () => M.count({where: {city: RC}}))
+  t("2 clauses", () => let r = M.sql({where: {city: RC, age: 30}}) in "{r.sql} {r.two}")
+}

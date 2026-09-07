@@ -421,7 +421,13 @@ pub(crate) fn fold_program_with(stmts: &mut Vec<Stmt>, types: &mut TypeMap, spec
                 sb.note_top(i, stmt);
             }
         }
-        stmts.extend(sp.take_pending());
+        let pending = sp.take_pending();
+        if !pending.is_empty() {
+            move_stmts(stmts, sp.types(), |v| {
+                v.extend(pending);
+                0
+            });
+        }
         i += 1;
     }
     // The sandbox's copies go with it; so do their types.
@@ -432,9 +438,37 @@ pub(crate) fn fold_program_with(stmts: &mut Vec<Stmt>, types: &mut TypeMap, spec
     // may call it runs after them.
     let hoisted = sp.take_hoisted();
     if !hoisted.is_empty() {
-        stmts.splice(0..0, hoisted);
+        move_stmts(stmts, sp.types(), |v| {
+            let k = hoisted.len();
+            v.splice(0..0, hoisted);
+            k
+        });
     }
     Ok(())
+}
+
+/// The root expression of a statement — inline in the statement, so it moves with it.
+fn root_of(s: &Stmt) -> Option<*const Expr> {
+    match s {
+        Stmt::Assign { value, .. } | Stmt::Destructure { value, .. } | Stmt::Expr(value) => Some(value as *const Expr),
+        Stmt::Func { body, .. } => Some(body as *const Expr),
+        Stmt::Import { .. } => None,
+    }
+}
+
+/// Move the statements with `f`, carrying the checker's types of their roots to where they
+/// land — the map is keyed by address, a root lives inline in its statement, and a vector
+/// that grows or is spliced moves every statement in it. `f` returns the index at which
+/// the first of the statements it was handed now sits. Every other node is where its
+/// parent's box or vector put it, and stays there.
+fn move_stmts(stmts: &mut Vec<Stmt>, types: &mut TypeMap, f: impl FnOnce(&mut Vec<Stmt>) -> usize) {
+    let saved: Vec<Option<crate::types::Type>> = stmts.iter().map(|s| root_of(s).and_then(|p| types.remove(&p))).collect();
+    let at = f(stmts);
+    for (s, t) in stmts[at..].iter().zip(saved) {
+        if let (Some(p), Some(t)) = (root_of(s), t) {
+            types.insert(p, t);
+        }
+    }
 }
 
 /// Fold inside `e` (children first), then `e` itself where it is a candidate, then
@@ -563,7 +597,7 @@ fn fold_expr(
         }
     }
     // A literal that decides an `if`, an `and`, an `or`, a `??` selects its branch.
-    while simplify::constant(e) {}
+    while simplify::constant(e, sp.types()) {}
     // A call the sandbox evaluated in full whose value has no literal — a record of
     // closures — ran once here and runs once there; it earns no clone.
     let mut evaluated = false;
@@ -575,8 +609,7 @@ fn fold_expr(
                 Ok(Outcome::Value(v)) => {
                     let mut budget = MAX_LITERAL_NODES;
                     if let Some(lit) = to_expr(&v, &mut budget) {
-                        let old = std::mem::replace(e, lit);
-                        sp.forget(&old);
+                        sp.set(e, lit);
                         return Ok(());
                     }
                     evaluated = true;
@@ -617,15 +650,22 @@ fn specialize_site(e: &mut Expr, sb: &mut Sandbox, sp: &mut Specializer, done: &
     {
         let (line, col) = (*line, *col);
         // A function-valued field receives the ORIGIN of a lambda the parser synthesized
-        // from a bare bound name (ADR 0045) — as the walker and the VM hand it over.
-        let args: Vec<Expr> = std::mem::take(args)
+        // from a bare bound name (ADR 0045) — as the walker and the VM hand it over. The
+        // lambda shell around it is dropped, so its type is forgotten with the call's.
+        for a in args.iter() {
+            if matches!(a, Expr::Lambda { bound: Some(_), .. }) {
+                sp.types().remove(&(a as *const Expr));
+            }
+        }
+        let unwrapped: Vec<Expr> = std::mem::take(args)
             .into_iter()
             .map(|a| match a {
                 Expr::Lambda { bound: Some(origin), .. } => *origin,
                 other => other,
             })
             .collect();
-        *e = Expr::Call { name: fname, args, line, col };
+        let call = Expr::Call { name: fname, args: unwrapped, line, col };
+        sp.set(e, call);
     }
     if let Expr::Call { name, args, .. } = e
         && sp.knows(name)
@@ -1205,5 +1245,62 @@ mod tests {
     fn nothing_to_fold_is_nothing_done() {
         let s = folded("x = 1 + 2\nprint(x)");
         assert!(matches!(value_of(&s[0]), Expr::Binary { .. }));
+    }
+
+    /// Every entry the fold leaves in the checker's type map names a node alive in the
+    /// program. The map is keyed by address, the compiler routes a method call by its
+    /// receiver's entry, and an entry for a freed node answers for whatever is allocated
+    /// there next. (The field build's §1.51: a clone took its types through the original
+    /// body's addresses, one of which a fold had freed and a typed node reused, so the
+    /// clone's `c` took that node's type and `c.count()` became the module's three-argument `count`
+    /// — for one program, and for no smaller one.) So a function's types are snapshotted
+    /// by value when it is recorded, a clone takes them from the snapshot, and every node a
+    /// rewrite drops or moves — the slot included, and a statement's root when the program
+    /// grows — is forgotten or re-keyed.
+    #[test]
+    fn every_type_the_fold_leaves_names_a_live_node() {
+        // The object API over a model, five distinct closures reaching one higher-order
+        // function, and a clause builder's `c.count()` beside a module `count` of three
+        // parameters — the reproducer's shape, without its ORM.
+        let orm = "fn count(m, spec, target) = \"select count(*) from {m.table}\"\n\
+            fn clauses(w) = w.items().map((p) => \"{p[0]} = ?\")\n\
+            fn sql(m, spec) = let {where} = spec in let w = where ?? {} in let c = clauses(w) in let two = c.count() == 2 in \
+            if c.count() == 0 then {sql: \"select * from {m.table}\", two: two} \
+            else {sql: \"select * from {m.table} where {c.join(\\\" and \\\")}\", two: two}\n\
+            fn define(spec) = let m = {table: spec.table, columns: spec.columns} in \
+            {table: m.table, columns: m.columns, by_key: \"select * from {m.table} where id = $1\", \
+            sql: (spec) => sql(m, spec), prepare: (spec) => {sql: sql(m, spec).sql}, count: (spec) => count(m, spec, \"n\")}\n\
+            M = define({table: \"people\", columns: [\"id\", \"name\", \"age\", \"city\"]})\n\
+            mut RC = \"x\"\n\
+            EMPTY = {}\n\
+            fn t(label, f) = do {\n  _ = range(0, 3).map(f()).last()\n  \
+            ms = range(0, 2).map(let k = it in do {\n    _ = range(0, 3).map(f()).last()\n    1.0\n  })\n  \
+            print(\"{label} {ms.count()} {f()}\")\n}\n\
+            fn main() = do {\n  _ = t(\"by_key\", () => M.by_key)\n  \
+            _ = t(\"prepare\", () => M.prepare({where: {city: \"x\"}}).sql)\n  \
+            _ = t(\"empty\", () => M.sql(EMPTY).sql)\n  \
+            _ = t(\"1 clause\", () => M.sql({where: {city: RC}}).sql)\n  \
+            _ = t(\"count\", () => M.count({where: {city: RC}}))\n  \
+            t(\"2 clauses\", () => M.sql({where: {city: RC, \"age >\": 30}}).sql)\n}";
+        for src in [
+            "mut RT = 5\nfn f(s) = let {a, limit} = s in if limit.is_missing() then a else a + limit\nfn n(s) = s.keys().count() * (if s.has(\"zz\") then 10 else 2)\ny = f({a: RT})\nz = n({a: RT, b: RT})",
+            "fn mk(t) = let d = [[t, 1]].to_dict() in {t: t, go: (s) => \"{d.get(t)}:{s.get(\"x\")}:{s.get(\"y\")}\"}\nM = mk(\"z\")\nmut RT = 1\ny = M.go({x: RT})",
+            "mut RT = 1\nfn clause(w) = w.items().reduce({s: \"\", n: 1}, (a, c) => {s: \"{a.s}{c[0]} = ${a.n}\", n: a.n + 1, v: c[1]})\ny = clause({city: RT})",
+            orm,
+        ] {
+            let mut stmts = parsed(src);
+            let mut types = crate::types::check(&stmts).unwrap_or_else(|e| panic!("{src}: {}", e.message));
+            let before = types.len();
+            assert!(before > 0, "the checker typed nothing in {src}");
+            fold_program_with(&mut stmts, &mut types, true).unwrap_or_else(|e| panic!("{}", e.message));
+            let mut live = std::collections::HashSet::new();
+            for s in &stmts {
+                crate::visit::walk_stmt(s, &mut |x| {
+                    live.insert(x as *const Expr);
+                });
+            }
+            let stale = types.keys().filter(|k| !live.contains(*k)).count();
+            assert_eq!(stale, 0, "{src}: {stale} of {} entries name a freed node ({before} before the fold)", types.len());
+        }
     }
 }
