@@ -4,6 +4,28 @@
 
 ### Added
 
+- **An array literal at a call site is knowledge its elements carry into the callee (ADR
+  0051, field build §1.50a).** `sql({order: ["-age"], any_of: [{city: v}, {age: w}]})`
+  says how many elements `order` and `any_of` have and what each one is, so inside the
+  clone a comprehension over them is unrolled — `order.map(_ord1(m, it))` over the strings
+  the site wrote, `any_of.reduce(…)` over `any_of[0]`, `any_of[1]` whose shapes reach the
+  clause builder they are handed to — the same idea one level down. A call of the
+  program's own function with literal arguments is evaluated where it stands, so the
+  unrolled map is the array of what `_ord1` answers, and a method on a name bound to a
+  literal — the `join` over that array — is the method on the literal. A clone that
+  reduces to one of its parameters or to a literal is not kept: the call site becomes the
+  argument or the literal, so a validating wrapper (`_wants_rec("page", p, eg)` is `p`) is
+  seen through and a clause builder that became `["city = $1"]` is that array where it is
+  called; the alias a `let` then binds is the name it aliases. And a name an expression
+  binds itself — a lambda's parameter, the `it` of a method's body — is the sandbox's own,
+  so `["page"].all(SPEC_KEYS.contains(it))` folds; no comprehension with a parameter ever
+  had. `order by`, `any_of` and `page` clauses render as constants now, as `where` did.
+  Pinned by `an_array_literal_at_a_call_site_reaches_the_comprehension_inside`,
+  `a_clone_that_is_its_parameter_or_a_literal_is_inlined`,
+  `a_comprehension_with_a_parameter_over_a_literal_receiver_folds`, and
+  `element_knowledge_reaches_a_comprehension_on_every_engine` (three engines, each pass off).
+  Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
+
 - **`HELIX_FOLD_DUMP` shows what the load-time passes made.** `HELIX_FOLD_DUMP=sql$ helix
   run app.helix` prints, on stderr, every clone, seen-through closure and hoisted capture
   whose name contains `sql$`, as the tree the compiler will see; `1` prints all of them and

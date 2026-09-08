@@ -54,7 +54,7 @@ use crate::interp::Interp;
 use crate::types::TypeMap;
 use crate::value::{FuncVal, Value};
 
-use specialize::{Binding, Specializer};
+use specialize::{Binding, Made, Specializer};
 
 thread_local! {
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
@@ -723,8 +723,20 @@ fn specialize_site(e: &mut Expr, sb: &mut Sandbox, sp: &mut Specializer, done: &
         && sp.knows(name)
     {
         let bindings: Vec<Binding> = args.iter().map(|a| sp.binding_at(a, bound, &|n| sb.holds(n))).collect();
-        if let Some(n) = sp.specialize(name, &bindings, 0, sb, done) {
-            *name = n;
+        match sp.specialize(name, &bindings, 0, sb, done) {
+            Some(Made::Fn(n)) => *name = n,
+            // The clone is its parameter, or a literal: the call is that, when the arguments
+            // it drops have nothing to run.
+            Some(Made::Param(i))
+                if i < args.len() && args.iter().enumerate().all(|(j, a)| j == i || specialize::is_trivially_safe(a)) =>
+            {
+                let taken = std::mem::replace(&mut args[i], Expr::Missing);
+                sp.set(e, taken);
+            }
+            Some(Made::Lit(lit)) if args.iter().all(specialize::is_trivially_safe) => {
+                sp.set(e, lit);
+            }
+            _ => {}
         }
     }
     let made: Vec<Stmt> = sp.new_pending().to_vec();
@@ -744,16 +756,18 @@ fn specialize_site(e: &mut Expr, sb: &mut Sandbox, sp: &mut Specializer, done: &
 /// remembered as futile. A name bound locally is never the global of that name.
 pub(super) fn candidate_label(e: &Expr, sb: &mut Sandbox, bound: &[String], done: &[Stmt]) -> Option<String> {
     let local = |n: &str| bound.iter().any(|b| b == n);
-    let closed = |a: &Expr| {
-        let mut b = bound.to_vec();
-        known_closed(a, sb, &mut b)
+    let closed = |a: &Expr| known_closed(a, sb, bound);
+    // A comprehension verb's argument reads the verb's own `it`: closed with it in scope.
+    let closed_arg_of = |verb: &str, a: &Expr| {
+        let mut inner = if crate::parser::BOUND_FN_VERBS.contains(&verb) { vec!["it".to_string()] } else { Vec::new() };
+        known_closed_in(a, sb, bound, &mut inner)
     };
     match e {
         Expr::Call { name, args, .. } if !local(name) && sb.is_user_fn(name) && args.iter().all(closed) => Some(name.clone()),
         Expr::Call { name, args, .. } if name == "type_of" && args.len() == 1 && simplify::is_literal(&args[0]) => {
             Some("#type_of".to_string())
         }
-        Expr::Method { recv, name, args, named, .. } if named.is_empty() && args.iter().all(closed) => match &**recv {
+        Expr::Method { recv, name, args, named, .. } if named.is_empty() && args.iter().all(|a| closed_arg_of(name, a)) => match &**recv {
             Expr::Ident { name: r, .. } if !local(r) && sb.holds_value(r, done) => Some(format!("{r}.{name}")),
             recv if simplify::is_literal(recv) => Some("#literal".to_string()),
             _ => None,
@@ -786,12 +800,66 @@ pub(super) fn candidate_label(e: &Expr, sb: &mut Sandbox, bound: &[String], done
     }
 }
 
+/// The literal `e` evaluates to, when it is a candidate the sandbox can evaluate now —
+/// with the futility memo the fold keeps for callees, so an abandoned callee is not run
+/// again at every site. A raise leaves `e` as written: the run meets it where the program
+/// does.
+pub(super) fn closed_literal(e: &Expr, sb: &mut Sandbox, bound: &[String], done: &[Stmt]) -> Option<Expr> {
+    let label = candidate_label(e, sb, bound, done)?;
+    let memo = !label.starts_with('#');
+    if memo && sb.futile.contains(&label) {
+        return None;
+    }
+    let outcome = sb.attempt(e, done);
+    if dumping() {
+        let what = match &outcome {
+            Ok(Outcome::Value(v)) => format!("value {v:?}"),
+            Ok(Outcome::Abandoned) => "abandoned".to_string(),
+            Ok(Outcome::Unheld) => "unheld".to_string(),
+            Err(err) => format!("raise {}", err.message),
+        };
+        eprintln!("FOLD attempt {label} on {e:?}: {what}");
+    }
+    match outcome {
+        Ok(Outcome::Value(v)) => {
+            let mut budget = MAX_LITERAL_NODES;
+            to_expr(&v, &mut budget)
+        }
+        Ok(Outcome::Abandoned) => {
+            if memo {
+                sb.futile.insert(label);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Whether `HELIX_FOLD_DUMP` is set — read once.
+fn dumping() -> bool {
+    static DUMPING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DUMPING.get_or_init(|| std::env::var_os("HELIX_FOLD_DUMP").is_some())
+}
+
 /// An expression the sandbox can evaluate: no column reference, no free name it does not
-/// hold — a name bound locally (`bound`) counts as free, whatever global shares it.
-pub(super) fn known_closed(e: &Expr, sb: &Sandbox, bound: &mut Vec<String>) -> bool {
+/// hold — a name bound locally (`bound`) counts as free, whatever global shares it. A name
+/// the expression binds ITSELF — a lambda's parameter, a `let`'s name, the `it` of a
+/// method's body — is the sandbox's own to bind, so `["a"].all(KEYS.contains(it))` and
+/// `[1, 2].map((x) => x * 2)` are closed. (The first cut counted those as locals too, and
+/// no comprehension with a parameter ever folded.)
+pub(super) fn known_closed(e: &Expr, sb: &Sandbox, bound: &[String]) -> bool {
+    known_closed_in(e, sb, bound, &mut Vec::new())
+}
+
+/// `known_closed`, with `inner` the names bound by the expression itself so far.
+fn known_closed_in(e: &Expr, sb: &Sandbox, bound: &[String], inner: &mut Vec<String>) -> bool {
     match e {
         Expr::Column { .. } => false,
         Expr::Ident { name, .. } => {
+            if inner.iter().any(|b| b == name) {
+                // Bound within the expression: the sandbox binds it as it evaluates.
+                return true;
+            }
             if bound.iter().any(|b| b == name) {
                 // A local of this position: the sandbox holds the global of that name, if
                 // any, and that is not this.
@@ -800,72 +868,77 @@ pub(super) fn known_closed(e: &Expr, sb: &Sandbox, bound: &mut Vec<String>) -> b
             sb.holds(name) || sb.is_user_fn(name)
         }
         Expr::Lambda { params, defaults, body, .. } => {
-            let mark = bound.len();
-            let ok = defaults.iter().all(|d| known_closed(d, sb, bound)) && {
-                bound.extend(params.iter().cloned());
-                known_closed(body, sb, bound)
+            let mark = inner.len();
+            let ok = defaults.iter().all(|d| known_closed_in(d, sb, bound, inner)) && {
+                inner.extend(params.iter().cloned());
+                known_closed_in(body, sb, bound, inner)
             };
-            bound.truncate(mark);
+            inner.truncate(mark);
             ok
         }
         Expr::Let { bindings, body, .. } => {
-            let mark = bound.len();
+            let mark = inner.len();
             let mut ok = true;
             for (n, v) in bindings {
-                ok = ok && known_closed(v, sb, bound);
-                bound.push(n.clone());
+                ok = ok && known_closed_in(v, sb, bound, inner);
+                inner.push(n.clone());
             }
-            ok = ok && known_closed(body, sb, bound);
-            bound.truncate(mark);
+            ok = ok && known_closed_in(body, sb, bound, inner);
+            inner.truncate(mark);
             ok
         }
         Expr::Match { scrutinee, arms, .. } => {
-            if !known_closed(scrutinee, sb, bound) {
+            if !known_closed_in(scrutinee, sb, bound, inner) {
                 return false;
             }
             arms.iter().all(|arm| {
-                let mark = bound.len();
-                bound.extend(crate::interp::pattern_binding_names(&arm.pattern));
-                let ok = arm.guard.as_ref().is_none_or(|g| known_closed(g, sb, bound))
-                    && known_closed(&arm.body, sb, bound);
-                bound.truncate(mark);
+                let mark = inner.len();
+                inner.extend(crate::interp::pattern_binding_names(&arm.pattern));
+                let ok = arm.guard.as_ref().is_none_or(|g| known_closed_in(g, sb, bound, inner))
+                    && known_closed_in(&arm.body, sb, bound, inner);
+                inner.truncate(mark);
                 ok
             })
         }
-        // A method argument may be an `it`-body: its binder is the method's own.
-        Expr::Method { recv, args, named, .. } => {
-            known_closed(recv, sb, bound)
+        // A comprehension verb's argument is an `it`-body: its binder is the verb's own. Any
+        // other method's `it` is an enclosing comprehension's.
+        Expr::Method { recv, name, args, named, .. } => {
+            known_closed_in(recv, sb, bound, inner)
                 && {
-                    let mark = bound.len();
-                    bound.push("it".to_string());
-                    let ok = args.iter().all(|a| known_closed(a, sb, bound))
-                        && named.iter().all(|(_, v)| known_closed(v, sb, bound));
-                    bound.truncate(mark);
+                    let mark = inner.len();
+                    if crate::parser::BOUND_FN_VERBS.contains(&name.as_str()) {
+                        inner.push("it".to_string());
+                    }
+                    let ok = args.iter().all(|a| known_closed_in(a, sb, bound, inner))
+                        && named.iter().all(|(_, v)| known_closed_in(v, sb, bound, inner));
+                    inner.truncate(mark);
                     ok
                 }
         }
         Expr::Interp(parts) => parts.iter().all(|p| match p {
-            InterpPart::Expr(x, _) => known_closed(x, sb, bound),
+            InterpPart::Expr(x, _) => known_closed_in(x, sb, bound, inner),
             _ => true,
         }),
-        Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().all(|x| known_closed(x, sb, bound)),
-        Expr::Record(fields) => fields.iter().all(|(_, v)| known_closed(v, sb, bound)),
-        Expr::RecordUpdate { parts, .. } => parts.iter().all(|p| known_closed(p.expr(), sb, bound)),
+        Expr::Array(xs) | Expr::Tuple(xs) => xs.iter().all(|x| known_closed_in(x, sb, bound, inner)),
+        Expr::Record(fields) => fields.iter().all(|(_, v)| known_closed_in(v, sb, bound, inner)),
+        Expr::RecordUpdate { parts, .. } => parts.iter().all(|p| known_closed_in(p.expr(), sb, bound, inner)),
         Expr::Field { recv, .. } | Expr::FieldOrMissing { recv, .. } | Expr::Unary { expr: recv, .. } | Expr::Try { expr: recv, .. } => {
-            known_closed(recv, sb, bound)
+            known_closed_in(recv, sb, bound, inner)
         }
-        Expr::Binary { left, right, .. } => known_closed(left, sb, bound) && known_closed(right, sb, bound),
-        Expr::Call { args, .. } => args.iter().all(|a| known_closed(a, sb, bound)),
+        Expr::Binary { left, right, .. } => known_closed_in(left, sb, bound, inner) && known_closed_in(right, sb, bound, inner),
+        Expr::Call { args, .. } => args.iter().all(|a| known_closed_in(a, sb, bound, inner)),
         Expr::CallValue { callee, args, .. } => {
-            known_closed(callee, sb, bound) && args.iter().all(|a| known_closed(a, sb, bound))
+            known_closed_in(callee, sb, bound, inner) && args.iter().all(|a| known_closed_in(a, sb, bound, inner))
         }
-        Expr::Index { recv, index, .. } => known_closed(recv, sb, bound) && known_closed(index, sb, bound),
+        Expr::Index { recv, index, .. } => known_closed_in(recv, sb, bound, inner) && known_closed_in(index, sb, bound, inner),
         Expr::Slice { recv, start, stop, step, .. } => {
-            known_closed(recv, sb, bound)
-                && [start, stop, step].into_iter().flatten().all(|x| known_closed(x, sb, bound))
+            known_closed_in(recv, sb, bound, inner)
+                && [start, stop, step].into_iter().flatten().all(|x| known_closed_in(x, sb, bound, inner))
         }
         Expr::If { cond, then_branch, else_branch, .. } => {
-            known_closed(cond, sb, bound) && known_closed(then_branch, sb, bound) && known_closed(else_branch, sb, bound)
+            known_closed_in(cond, sb, bound, inner)
+                && known_closed_in(then_branch, sb, bound, inner)
+                && known_closed_in(else_branch, sb, bound, inner)
         }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Missing => true,
     }
@@ -1216,8 +1289,9 @@ mod tests {
         let clone = func(&s, "f$1");
         assert_eq!(count_nodes(clone, |e| matches!(e, Expr::FieldOrMissing { .. } | Expr::If { .. })), 0, "{clone:?}");
         assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Field { name, .. } if name == "a")), 1, "{clone:?}");
-        assert!(matches!(value_of(&s[4]), Expr::Call { name, .. } if name == "n$2"), "{:?}", s[4]);
-        assert!(matches!(func(&s, "n$2"), Expr::Int(4)), "{:?}", func(&s, "n$2"));
+        // `n`'s clone reduced to the literal `4`: the call site IS `4`, and no clone is kept.
+        assert!(matches!(value_of(&s[4]), Expr::Int(4)), "{:?}", s[4]);
+        assert!(!s.iter().any(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("n$"))), "{s:?}");
         // The generic function is untouched, for every other caller.
         assert_eq!(count_nodes(func(&s, "f"), |e| matches!(e, Expr::If { .. })), 1);
     }
@@ -1259,16 +1333,17 @@ mod tests {
     /// at its caps: eight clones per function, and no more.
     #[test]
     fn specialization_is_transitive_and_budgeted() {
+        // `g`'s clone is `missing` for the shape, so `f`'s clone — `g$…(s)` — is `missing`
+        // too: both are inlined, transitively, and the call site is `missing`.
         let s = folded_with("fn g(s) = s.get(\"b\")\nfn f(s) = g(s)\nmut RT = 1\ny = f({a: RT})", true);
-        let clone = func(&s, "f$1");
-        assert!(matches!(clone, Expr::Call { name, .. } if name == "g$2"), "{clone:?}");
-        assert!(matches!(func(&s, "g$2"), Expr::Missing), "{:?}", func(&s, "g$2"));
+        assert!(matches!(value_of(&s[3]), Expr::Missing), "{:?}", s[3]);
+        assert!(!s.iter().any(|st| matches!(st, Stmt::Func { name, .. } if name.contains('$'))), "{s:?}");
         // Nine call sites of one function, each with a shape of its own: every one has its
         // clone — a count per function starved the later call sites of the field build's
         // thirteen-case harness (§1.50).
-        let mut src = String::from("fn f(s) = s.get(\"k\")\nmut RT = 1\n");
+        let mut src = String::from("fn f(s) = if s.has(\"k\") then s.k else s.a\nmut RT = 1\n");
         for i in 0..9 {
-            src.push_str(&format!("y{i} = f({{k{i}: RT}})\n"));
+            src.push_str(&format!("y{i} = f({{a: RT, k{i}: RT}})\n"));
         }
         let clones_in = |s: &[Stmt]| s.iter().filter(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("f$"))).count();
         let s = folded_with(&src, true);
@@ -1285,12 +1360,17 @@ mod tests {
         assert_eq!(clones_in(&stmts), 2);
         let third = stmts.iter().find(|st| matches!(st, Stmt::Assign { name, .. } if name == "y2")).unwrap();
         assert!(matches!(value_of(third), Expr::Call { name, .. } if name == "f"), "{:?}", value_of(third));
-        // A function in which nothing answers to the shape — it passes the record on — is
-        // not cloned: the clone would be the function under another name.
+        // A function that passes the record on is its parameter: no clone, and the call
+        // site is the record literal itself.
         let s = folded_with("fn id(s) = s\nmut RT = 1\ny = id({a: RT})", true);
         assert_eq!(clones_in(&s), 0);
         assert!(!s.iter().any(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("id$"))), "{s:?}");
-        assert!(matches!(value_of(&s[2]), Expr::Call { name, .. } if name == "id"), "{:?}", s[2]);
+        assert!(matches!(value_of(&s[2]), Expr::Record(_)), "{:?}", s[2]);
+        // A function in which nothing answers to the shape — it reads only what the runtime
+        // values decide — is not cloned: the clone would be the function under another name.
+        let s = folded_with("fn plus(s) = s.a + s.b\nmut RT = 1\ny = plus({a: RT, b: RT})", true);
+        assert!(!s.iter().any(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("plus$"))), "{s:?}");
+        assert!(matches!(value_of(&s[2]), Expr::Call { name, .. } if name == "plus"), "{:?}", s[2]);
     }
 
     /// A clause builder — `items()` of a shaped record, reduced with a lambda that reads
@@ -1320,8 +1400,70 @@ mod tests {
             "mut RT = 1\nfn f(s) = let {order} = s in let ords = if order.is_missing() then [] else [order] in if ords.count() == 0 then \"\" else \" order by {ords.first()}\"\ny = f({page: RT})",
             true,
         );
+        // …and the clone, reduced to `""`, is inlined: the call site is the empty string.
+        assert!(matches!(value_of(&s[2]), Expr::Str(t) if t.is_empty()), "{:?}", s[2]);
+    }
+
+    /// An array literal at a call site is knowledge its elements carry into the callee: the
+    /// comprehension over it is unrolled, each element's call is evaluated, and the `join`
+    /// over the array the map produced — a method on a name bound to a literal — is its
+    /// text (the field build's §1.50a: `{order: ["-age"]}` mapped through `_ord1`).
+    #[test]
+    fn an_array_literal_at_a_call_site_reaches_the_comprehension_inside() {
+        let s = folded_with(
+            "mut RT = 1\nfn ord1(o) = if o.starts_with(\"-\") then \"{o.replace(\"-\", \"\")} desc\" else \"{o} asc\"\nfn sql(spec) = let {order, limit} = spec in let ords = if order.is_missing() then [] else order.map(ord1(it)) in \"select{if ords.count() == 0 then \"\" else \" order by {ords.join(\", \")}\"} limit {limit}\"\ny = sql({order: [\"-age\", \"name\"], limit: RT})",
+            true,
+        );
+        let clone = func(&s, "sql$1");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Method { .. })), 0, "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Str(t) if t == " order by age desc, name asc")), 1, "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Field { name, .. } if name == "limit")), 1, "{clone:?}");
+    }
+
+    /// A clone that reduces to one of its parameters is not a function worth calling: the
+    /// call site becomes the argument, so a validating wrapper is seen through; the alias
+    /// the `let` then binds is the name it aliases; and a clone that reduces to a literal
+    /// array is the array at its call site, so the count and the join over it fold.
+    #[test]
+    fn a_clone_that_is_its_parameter_or_a_literal_is_inlined() {
+        let s = folded_with(
+            "mut RT = 1\nfn wants_rec(key, v, eg) = if type_of(v) == \"Record\" then v else raise(\"{key} must be a Record; e.g. {eg}\")\nfn page(p0) = let p = wants_rec(\"page\", p0, \"{{n: 2}}\") in (p.get(\"n\") ?? 1) * 10\ny = page({n: RT})",
+            true,
+        );
+        let clone = func(&s, "page$1");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Call { .. } | Expr::Let { .. } | Expr::Method { .. })), 0, "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Field { recv, name, .. } if name == "n" && matches!(**recv, Expr::Ident { name: ref p, .. } if p == "p0"))), 1, "{clone:?}");
+        assert!(!s.iter().any(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("wants_rec$"))), "{s:?}");
+        let s = folded_with(
+            "mut RT = 1\nfn clause(w, n) = w.keys().map(\"{it} = ${n}\")\nfn any_of(bs) = bs.reduce({s: \"\", n: 1}, (a, b) => let c = clause(b, a.n) in {s: if a.s == \"\" then c.join(\" and \") else \"{a.s} or {c.join(\" and \")}\", n: a.n + c.count()})\nfn sql(spec) = let {any_of: alts} = spec in \" where {any_of(alts).s}\"\ny = sql({any_of: [{city: RT}, {age: RT, name: RT}]})",
+            true,
+        );
+        // …all the way out: `sql`'s clone is the text, so the call site is the text.
+        assert!(matches!(value_of(&s[4]), Expr::Str(t) if t == " where city = $1 or age = $2 and name = $2"), "{:?}", s[4]);
+    }
+
+    /// Only a comprehension verb binds `it`: `cols.map(cur.get(it))` unrolled over a known
+    /// `cols` replaces the `it` inside `get`'s argument, which is the map's — the first cut
+    /// shadowed `it` under every method with arguments, and the unrolled body reached the
+    /// engines with an `it` no binder owned (the field build's `_keyset`).
+    #[test]
+    fn only_a_comprehension_verb_binds_it() {
+        let s = folded_with("mut RT = 1\nfn f(cols, cur) = cols.map(cur.get(it))\ny = f([\"a\", \"b\"], {a: RT, b: RT})", true);
         let clone = func(&s, "f$1");
-        assert!(matches!(clone, Expr::Str(t) if t.is_empty()), "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Ident { name, .. } if name == "it")), 0, "{clone:?}");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Field { name, .. } if name == "a" || name == "b")), 2, "{clone:?}");
+    }
+
+    /// A name an expression binds itself — a lambda's parameter, the `it` of a method's
+    /// body — is the sandbox's own to bind, so the expression is closed and folds; the
+    /// first cut counted such names as locals and no comprehension with a parameter ever
+    /// folded.
+    #[test]
+    fn a_comprehension_with_a_parameter_over_a_literal_receiver_folds() {
+        let s = folded_with("mut RT = 1\nKEYS = [\"a\", \"b\"]\nfn f(s) = if s.keys().all(KEYS.contains(it)) then 0 else 1\ny = f({a: RT})", true);
+        assert!(matches!(value_of(&s[3]), Expr::Int(0)), "{:?}", s[3]);
+        let s = folded("fn h() = 0\ny = [1, 2].map((x) => x * 2).sum() + 1");
+        assert!(matches!(value_of(&s[1]), Expr::Int(7)), "{:?}", s[1]);
     }
 
     /// A program with no function of its own is untouched, cheaply.

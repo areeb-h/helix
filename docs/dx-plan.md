@@ -469,6 +469,18 @@ kept. Harness (fresh builds, interleaved, min of 3): `page offset` 3.570 → 1.3
 dump the program the compiler sees before theorizing about a case; and measure FRESH
 builds against each other: an incremental gate build of the same source ran 5–7% slower
 than its fresh twin on every case, which read as a regression and was not one.
+**§1.50a (2026-09-08) — an element's shape reaches a comprehension's lambda, DONE.** The
+field's residual after the budget was a difference in kind: scalar-valued keys gained
+~1.85×, array-valued keys (`order`, `select`, `any_of`) 1.3–1.6× — all of them `.map` or
+`.reduce` over the array. Now `Binding::Seq` carries an array literal's elements from the
+call site; inside the clone the comprehension over it is unrolled over `xs[i]` (or the
+scalar the site wrote), each element's knowledge reaching the lambda and the callees it
+calls; a call of the program's own function with literal arguments is evaluated in place;
+a method on a name bound to a literal is the method on the literal; a clone that reduces to
+a parameter or a literal is inlined (the validating wrappers, the clause builders); a `let`
+alias is propagated; and a name an expression binds itself is closed for the sandbox, so
+`["page"].all(SPEC_KEYS.contains(it))` folds. Pinned by three fold tests and
+`element_knowledge_reaches_a_comprehension_on_every_engine`. Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
 
 **1.46a (2026-09-07) — const-fold a pure call with literal arguments.** DECIDED by the user
 and DONE: ADR 0050. `src/fold.rs` runs after the checker and the UFCS rewrite in every run, check

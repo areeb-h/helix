@@ -16598,3 +16598,36 @@ count 2 select count(*) from people\n\
         assert_eq!(out, want, "{label}");
     }
 }
+
+/// The field build's §1.50a: an array literal at a call site is knowledge its elements
+/// carry into the callee's comprehensions — `order.map(ord1(it))` unrolled over what the
+/// site wrote, `any_of.reduce(…)` over records whose shapes reach the clause builder — a
+/// validating wrapper that reduces to its parameter is seen through, and a call that
+/// reduces to a literal is the literal. Every engine, with and without each pass, prints
+/// the same; the pass rewrites elements as `xs[i]`, so the engines must agree on those.
+#[test]
+fn element_knowledge_reaches_a_comprehension_on_every_engine() {
+    let src = "fn ord1(o) = if o.starts_with(\"-\") then \"{o.replace(\"-\", \"\")} desc\" else \"{o} asc\"\n\
+fn wants_rec(key, v, eg) = if type_of(v) == \"Record\" then v else raise(\"`{key}` must be a Record; e.g. {eg}\")\n\
+fn clause(w, n) = w.keys().map(\"{it} = ${n}\")\n\
+fn any_of(bs) = bs.reduce({s: \"\", n: 1}, (a, b) => let c = clause(b, a.n) in {s: if a.s == \"\" then c.join(\" and \") else \"{a.s} or {c.join(\" and \")}\", n: a.n + c.count()})\n\
+fn page(p0) = let p = wants_rec(\"page\", p0, \"{{n: 2, size: 20}}\") in \" limit {p.get(\"size\")} offset {(p.get(\"n\") ?? 1) - 1}\"\n\
+fn sql(spec) = let {order, page: pg, any_of: alts} = spec in do {\n  ords = if order.is_missing() then [] else order.map(ord1(it))\n  ob = if ords.count() == 0 then \"\" else \" order by {ords.join(\", \")}\"\n  wh = if alts.is_missing() then \"\" else \" where {any_of(alts).s}\"\n  lm = if pg.is_missing() then \"\" else page(pg)\n  \"select * from t{wh}{ob}{lm}\"\n}\n\
+RT = if now() > 0.0 then 7 else 0\n\
+print(sql({order: [\"-age\", \"name\"]}))\nprint(sql({any_of: [{city: RT}, {age: RT, name: RT}]}))\nprint(sql({page: {n: 3, size: RT}}))\nprint(sql({order: [\"id\"], page: {n: RT, size: 5}}))\nprint((try sql({page: 5})).error)\n";
+    let want = "select * from t order by age desc, name asc\n\
+select * from t where city = $1 or age = $2 and name = $2\n\
+select * from t limit 7 offset 2\n\
+select * from t order by id asc limit 5 offset 6\n\
+`page` must be a Record; e.g. {n: 2, size: 20}\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("elements_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+    for (label, env) in [("nospecialize", &[("HELIX_NOSPECIALIZE", "1")][..]), ("nofold", &[("HELIX_NOFOLD", "1")][..])] {
+        let (out, err, code) = run_source(src, env, &format!("elements_{label}"));
+        assert_eq!(code, Some(0), "{label}: {err}");
+        assert_eq!(out, want, "{label}");
+    }
+}

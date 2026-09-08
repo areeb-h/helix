@@ -28,9 +28,12 @@ point of this decision is that a route author never has to know it exists.
 ## The design
 
 **Knowledge.** What a call site knows about an argument, as a `Binding`: `Shape` — a record
-literal's keys, in order, and recursively what is known of each value; `Global` — the
+literal's keys, in order, and recursively what is known of each value; `Seq` — an array
+literal of at most eight elements, and recursively what is known of each; `Global` — the
 argument IS a top-level immutable name the sandbox holds; `Lit` — a scalar literal; or
 `Any`. A name the sandbox does not hold is `Any`: it folds nothing, so it keys nothing.
+Knowledge reads through a value's parts: `spec.page` of a shape is the shape of that key,
+`xs[1]` of a sequence is what is known of its second element.
 
 **The clone.** Made once per (function, knowledge) and memoized: a copy of the function's
 body in which, scope-aware, a parameter known as `Global` or `Lit` is the global or the
@@ -67,6 +70,31 @@ method's arguments is rewritten. For the field build's where clause, what remain
 `_where` is one branch on whether the value is `missing` and the parameter list — the
 text `city = $1` is a constant, as it is in their hand-written `prepare`.
 
+**Elements.** An array the call site wrote — `{order: ["-age"]}`, `{any_of: [{city: v},
+{age: w}]}` — is a sequence inside the clone: `order.count()` is its length, and a `map` or
+a `reduce` over it is unrolled over its elements, each written as the scalar the site
+wrote or as `order[i]`, so what is known of the element — a literal, a record's shape —
+reaches the lambda's body and, through it, the callees it calls (`clause(b, n)` with
+`b` a branch's shape): the same idea one level down (the field build's §1.50a). A call of
+the program's own function with literal arguments is evaluated where it stands, through
+the same candidate rules and futility memo as the fold's, so `[ord1("-age"), ord1("name")]`
+is the array of what `ord1` answers; and a method on a name bound to a literal — the
+`join` over that array — is evaluated as the method on the literal. Only a comprehension
+verb (`BOUND_FN_VERBS`) binds `it`: `cur.get(it)` inside a `map` reads the map's `it`, and
+the unrolling replaces it — the first cut shadowed `it` under every method with arguments,
+and `_keyset`'s unrolled body reached the engines with an `it` no binder owned. What the
+field build's `order by`, `any_of` and `page` clauses render is then a constant.
+
+**Inlining.** A clone that reduces to one of its parameters, or to a literal — a scalar,
+or an array or record of literals — is not a function worth calling: the call site becomes
+the argument, or the literal, when the arguments it drops have nothing to run; the clone
+is not kept. That is what a validating wrapper becomes for a record literal —
+`_wants_rec("page", p, eg)` is `p` — so what it wrapped is seen through; and what a clause
+builder becomes for a shape — `_clauses(w)` is `["city = $1"]` — so its count and its join
+fold at the site. An alias a `let` then binds — `let p = q`, the destructuring desugar's
+own `$rec0 = spec` — is the name it aliases, read where the alias was, unless a later
+binding or the body rebinds either name.
+
 **Types.** The checker's type map is keyed by node address, and after the fold the
 compiler routes a frame verb, and the receiver-directed rewrite a method call, by what it
 says of a receiver. So a function's types are snapshotted BY VALUE when the specializer
@@ -91,7 +119,11 @@ names, `type_of` of a literal fold; the branch a literal condition selects repla
 `if`, `and`, `or`, `??` or `not` — exactly and only where the language's own rule decides
 without the other operand (`true and x` is not `x` for every `x`). And a name bound locally
 — a parameter, a `let`, a lambda's own — is never the global of that name: the first cut
-folded a parameter `M` as the top-level `M`.
+folded a parameter `M` as the top-level `M`. A name an expression binds ITSELF — a
+lambda's parameter, a `let`'s name, the `it` of a method's body — is the sandbox's own to
+bind, so `["page"].all(SPEC_KEYS.contains(it))` and `[1, 2].map((x) => x * 2)` are closed
+and fold; the first cut counted those as locals too, and no comprehension with a
+parameter ever folded.
 
 **Bounds.** A budget of 262 144 nodes for all of a program's clones together — a clone
 costs its body's size, so a small helper's clone costs little and a large function's much;
@@ -117,6 +149,8 @@ pass made (`1` for all of it, `all` for the whole program as the compiler sees i
   `prepared bind only` 0.612 → 0.306 µs, `where eq` 2.633 → 2.475 µs; the other cases within
   the noise, which two fresh builds of one source put at ±2%; the statements identical; the
   harness's `helix check` 18.6 → 19.4 ms — the load-time price of the clones it now gets.
+- Elements (§1.50a), on the field's harness, the budget commit against this one (fresh builds, interleaved, min of three):
+  Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
 - Every engine runs the one program the pass produced; the differential oracle holds it
   byte-identical with and without the pass (`a_call_site_is_specialized_for_what_it_knows_on_every_engine`).
 - A raise inside a literal receiver's body — `[1].map(chk(bad))` at the top level — is
