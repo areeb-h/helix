@@ -480,7 +480,19 @@ a method on a name bound to a literal is the method on the literal; a clone that
 a parameter or a literal is inlined (the validating wrappers, the clause builders); a `let`
 alias is propagated; and a name an expression binds itself is closed for the sandbox, so
 `["page"].all(SPEC_KEYS.contains(it))` folds. Pinned by three fold tests and
-`element_knowledge_reaches_a_comprehension_on_every_engine`. Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
+`element_knowledge_reaches_a_comprehension_on_every_engine`.
+**§1.53 (2026-09-08) — a binding called by name lost its binding, FIXED.** Their renderer's
+`fs.map(let f = it in f(p, s, c))` died with "`f` is not a known function" after `fdbe2b4`,
+for templates of eight or more instructions (the size at which `link` reaches that arm),
+on every engine with the pass on, after a clean `check`. A call's callee is a name field,
+not an identifier node, so the alias rule replaced the identifiers, dropped the binding and
+left the call; the dead-binding rule had the same blind spot. `mentions` counts a call by
+name (and a method's free spelling) as a read, and `replace_idents` turns a call by name of
+a replaced name into a call through the value — `it(p, s, c)`. Their reproducer
+(`specialize_bug2.helix`), test files and `engine_diff` all pass on every engine with the
+pass on and off. RULE for this pass: any walker that asks "is this name read" must look at
+call names too, and the field's reproducers and twelve-way oracle run before every commit
+that touches the fold — the library finds what synthetic tests do not. Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
 
 **1.46a (2026-09-07) — const-fold a pure call with literal arguments.** DECIDED by the user
 and DONE: ADR 0050. `src/fold.rs` runs after the checker and the UFCS rewrite in every run, check

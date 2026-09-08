@@ -1442,6 +1442,41 @@ mod tests {
         assert!(matches!(value_of(&s[4]), Expr::Str(t) if t == " where city = $1 or age = $2 and name = $2"), "{:?}", s[4]);
     }
 
+    /// A name is read by a call BY NAME too — `let f = it in f(p, s, c)`, the field build's
+    /// renderer fanning out over an array of closures (§1.53) — and the first cut saw only
+    /// identifier nodes: the alias rule replaced the identifiers, dropped the binding and left
+    /// the call, and the dead-binding rule would have dropped `let a = fs[0] in a(p)` as
+    /// unread. A call by name of a replaced name is a call through the value.
+    #[test]
+    fn a_name_called_by_name_is_read_and_replaced_as_a_value() {
+        let s = folded_with(
+            "mut RT = 1\nfn inc(x) = x + 1\nfn dbl(x) = x * 2\nfn app(fs, p) = fs.map(let f = it in f(p))\nfn app2(g, p) = let f = g in f(p)\nfn named(fs, p) = let a = fs[0] in a(p)\nINC = inc\ny = app([inc, dbl], RT)\nz = app2(INC, RT)\nw = named([inc, dbl], RT)",
+            true,
+        );
+        // `let f = it in f(p)` is `it(p)`, a call through the element, and unrolled over the
+        // two elements each is called directly: `[fs[0](p), fs[1](p)]`.
+        let clone = func(&s, "app$1");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Let { .. })), 0, "{clone:?}");
+        assert_eq!(
+            count_nodes(clone, |e| matches!(e, Expr::CallValue { callee, .. } if matches!(**callee, Expr::Index { .. }))),
+            2,
+            "{clone:?}"
+        );
+        // The alias of a global is the global, called as a value.
+        let clone = func(&s, "app2$2");
+        assert_eq!(count_nodes(clone, |e| matches!(e, Expr::Let { .. })), 0, "{clone:?}");
+        assert_eq!(
+            count_nodes(clone, |e| matches!(e, Expr::CallValue { callee, .. } if matches!(**callee, Expr::Ident { name: ref n, .. } if n == "INC"))),
+            1,
+            "{clone:?}"
+        );
+        // A safe binding called by name is read, and stays — so nothing in `named` changes
+        // for the shape, and no clone is kept; the first cut dropped the binding as unread
+        // and kept a clone that could not run.
+        assert!(!s.iter().any(|st| matches!(st, Stmt::Func { name, .. } if name.starts_with("named$"))), "{s:?}");
+        assert!(matches!(value_of(&s[9]), Expr::Call { name, .. } if name == "named"), "{:?}", s[9]);
+    }
+
     /// Only a comprehension verb binds `it`: `cols.map(cur.get(it))` unrolled over a known
     /// `cols` replaces the `it` inside `get`'s argument, which is the map's — the first cut
     /// shadowed `it` under every method with arguments, and the unrolled body reached the

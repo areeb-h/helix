@@ -1207,14 +1207,19 @@ fn literal_receiver(recv: &Expr, env: &Env, globals: &HashSet<String>) -> Option
     lits.map(Expr::Array)
 }
 
-/// Whether `e` mentions the name `name` at all (a binder of it inside counts too — a safe
-/// over-approximation of "reads it").
+/// Whether `e` mentions the name `name` at all — as an identifier, as the callee of a
+/// call by name (`f(p)` reads `f`: the field build's renderer binds `let f = it` and calls
+/// it so, and the first cut dropped the binding as unread), or as the free spelling of a
+/// method. A binder of it inside counts too — a safe over-approximation of "reads it".
 fn mentions(e: &Expr, name: &str) -> bool {
     let mut found = false;
     crate::visit::walk_expr(e, &mut |x| {
-        if let Expr::Ident { name: n, .. } = x
-            && n == name
-        {
+        let here = match x {
+            Expr::Ident { name: n, .. } | Expr::Call { name: n, .. } => n == name,
+            Expr::Method { ufcs: Some(u), .. } => u == name,
+            _ => false,
+        };
+        if here {
             found = true;
         }
     });
@@ -1250,7 +1255,18 @@ fn replace_idents(e: &mut Expr, with: &dyn Fn(&str) -> Option<Expr>, shadow: &mu
             replace_idents(left, with, shadow);
             replace_idents(right, with, shadow);
         }
-        Expr::Call { args, .. } => args.iter_mut().for_each(|a| replace_idents(a, with, shadow)),
+        Expr::Call { name, args, line, col } => {
+            args.iter_mut().for_each(|a| replace_idents(a, with, shadow));
+            // A call BY NAME of the replaced name — `let f = it in f(p)` under an unrolled
+            // map, `(f) => f(p)` with the element in for `f` — is a call through the value.
+            if !shadow.iter().any(|s| s == name)
+                && let Some(to) = with(name)
+            {
+                let (line, col) = (*line, *col);
+                let args = std::mem::take(args);
+                *e = Expr::CallValue { callee: Box::new(to), args, line, col };
+            }
+        }
         Expr::Method { recv, name, args, named, .. } => {
             replace_idents(recv, with, shadow);
             // Only a comprehension verb binds `it` for its body; `cur.get(it)` inside a

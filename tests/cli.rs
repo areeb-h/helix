@@ -16631,3 +16631,32 @@ select * from t order by id asc limit 5 offset 6\n\
         assert_eq!(out, want, "{label}");
     }
 }
+
+/// The field build's §1.53: their renderer fans out over an array of closures with
+/// `fs.map(let f = it in f(p, s, c))`, and the first element-knowledge pass dropped the
+/// binding — it saw a name read only through identifier nodes, and a call by name is not
+/// one — so "`f` is not a known function" was the run's answer after a clean `check`. A
+/// binding called by name is read; a call by name of a replaced name is a call through
+/// the value. Every engine, with and without each pass.
+#[test]
+fn a_binding_called_by_name_survives_specialization_on_every_engine() {
+    let src = "fn inc(x) = x + 1\nfn dbl(x) = x * 2\n\
+fn app(fs, p) = fs.map(let f = it in f(p))\n\
+fn app2(g, p) = let f = g in f(p)\n\
+fn app3(fs, p) = fs.map((f) => f(p))\n\
+fn named(fs, p) = let a = fs[0] in let b = fs[1] in \"{a(p)} {b(p)}\"\n\
+INC = inc\n\
+RT = if now() > 0.0 then 5 else 0\n\
+print(app([inc, dbl], RT))\nprint(app2(INC, RT))\nprint(app3([inc, dbl], RT))\nprint(named([inc, dbl], RT))\n";
+    let want = "[6, 10]\n6\n[6, 10]\n6 10\n";
+    for (name, env) in ENGINES {
+        let (out, err, code) = run_source(src, env, &format!("byname_{name}"));
+        assert_eq!(code, Some(0), "{name}: {err}");
+        assert_eq!(out, want, "{name}");
+    }
+    for (label, env) in [("nospecialize", &[("HELIX_NOSPECIALIZE", "1")][..]), ("nofold", &[("HELIX_NOFOLD", "1")][..])] {
+        let (out, err, code) = run_source(src, env, &format!("byname_{label}"));
+        assert_eq!(code, Some(0), "{label}: {err}");
+        assert_eq!(out, want, "{label}");
+    }
+}

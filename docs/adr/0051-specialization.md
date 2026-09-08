@@ -93,7 +93,12 @@ is not kept. That is what a validating wrapper becomes for a record literal —
 builder becomes for a shape — `_clauses(w)` is `["city = $1"]` — so its count and its join
 fold at the site. An alias a `let` then binds — `let p = q`, the destructuring desugar's
 own `$rec0 = spec` — is the name it aliases, read where the alias was, unless a later
-binding or the body rebinds either name.
+binding or the body rebinds either name. A name is read by a call BY NAME too — the field
+build's renderer binds `let f = it` over an array of closures and calls `f(p, s, c)` — and
+a call by name of a replaced name is a call through the value, `it(p, s, c)`: the first
+cut saw a name read only through identifier nodes, replaced those, dropped the binding and
+left the call, and "`f` is not a known function" was the run's answer after a clean
+`check` (§1.53).
 
 **Types.** The checker's type map is keyed by node address, and after the fold the
 compiler routes a frame verb, and the receiver-directed rewrite a method call, by what it

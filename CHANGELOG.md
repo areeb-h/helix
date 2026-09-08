@@ -472,6 +472,19 @@
 
 ### Fixed
 
+- **A binding called by name lost its binding under specialization (field build, §1.53).**
+  Their renderer fans out over an array of closures with `fs.map(let f = it in f(p, s, c))`,
+  and `helix check` said ok while the run died with "`f` is not a known function" on every
+  engine, with the pass on, for any template of eight or more instructions — the size at
+  which `link` reaches that arm. The element-knowledge pass saw a name read only through
+  identifier nodes, and a call's callee is a name, not a node: the alias rule replaced the
+  identifiers, dropped the binding and left the call; the dead-binding rule would have
+  dropped `let a = fs[0] in a(p)` as unread once `fs` was known. A name is read by a call
+  of it now, and a call by name of a replaced name is a call through the value —
+  `it(p, s, c)`, `(f) => f(p)` with the element in for `f`. Pinned by
+  `a_name_called_by_name_is_read_and_replaced_as_a_value` and
+  `a_binding_called_by_name_survives_specialization_on_every_engine`.
+
 - **Later call sites of a program were starved of their clones (field build, §1.50).** The
   field's harness renders thirteen cases from one file, and its tenth, `page offset`, ran
   SLOWER after the partial evaluator — 2.55 → 3.54 µs — while the same call in a file of
