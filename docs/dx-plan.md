@@ -508,7 +508,17 @@ and two known arrays `concat` — so a recursive `render(p, n)` over a predicate
 load time. The argument list of a frame verb's NAME stays the frame's, on any receiver: a
 record's `where` receives a predicate through a binding, and the check-time message says
 so. Pinned by the `predicate` tests, `a_predicate_at_a_call_site_renders_to_its_text`,
-`a_column_expression_is_a_value_on_every_engine` and the corpus's `predicates_are_values`. Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
+`a_column_expression_is_a_value_on_every_engine` and the corpus's `predicates_are_values`.
+**Tape: axis reductions (2026-09-12) — DONE.** The nn field build's one ask after building
+`nn/tensor_layers` on the tensor tape (20 training steps of a [16,16,1] net: scalar tape
+83 s, tensor tape ~2 ms; gradients bit-identical): `variable(x).sum(1)` was refused, so a
+row-wise softmax was not differentiable. `sum(k)`/`mean(k)`/`max(k)`/`min(k)` and
+`reshape`/`flatten` are on the tape (`src/autodiff.rs`: `sum_axis`, `mean_axis`,
+`extreme_axis`, `reshape_node`; `tensor::axis_arg`/`shape_arg` shared). An integer
+argument to a tracked `max`/`min` is an axis now, as on a plain tensor. Their two notes:
+`shape()` on a tracked value already works on main (their binary predated it); `e` is
+refused only as a TOP-LEVEL reassignment (`e = 2`), a `let e = …` inside a function is
+fine — whether a program may shadow a builtin constant at the top level is the user's call. Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
 
 **1.46a (2026-09-07) — const-fold a pure call with literal arguments.** DECIDED by the user
 and DONE: ADR 0050. `src/fold.rs` runs after the checker and the UFCS rewrite in every run, check

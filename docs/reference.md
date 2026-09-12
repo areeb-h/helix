@@ -75,6 +75,8 @@ The forward (plain) value of a tracked value; a plain value passes through.
 
 Wraps a number or tensor as a tracked autodiff leaf for gradient().
 
+**Note:** A tracked tensor carries the whole plain surface on the tape: matmul/dot, sum/mean/max/min whole or along an axis (`sum(1)`, `max(0)` — an integer argument is an axis, a number or tensor the elementwise twin), t/transpose, reshape/flatten, the elementwise functions and the arithmetic operators with broadcasting; shape/count/ndim read the value. `gradient(loss, w)` on a tensor leaf returns the whole tensor's gradient from one reverse sweep. A row-wise softmax is `exp(x) / exp(x).sum(1).reshape([n, 1])`, and differentiates.
+
 ```
 >>> variable(2.0)
 2.0

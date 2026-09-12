@@ -18,6 +18,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use ndarray::Dimension;
 use ndarray::{ArrayD, Axis, Ix1, Ix2, IxDyn, Zip};
 
 use crate::ast::BinOp;
@@ -217,6 +218,98 @@ fn mean(a: &Rc<Node>) -> Rc<Node> {
         let s = *g.first().unwrap_or(&0.0) / n;
         vec![ArrayD::from_elem(shape.clone(), s)]
     }))
+}
+
+// ---------- reductions along an axis ----------
+//
+// The plain tensor answers `sum(1)`, `mean(0)`, `max(1)`, `min(0)`; the tape answered only
+// the whole-tensor forms, so a row-wise softmax — `exp(x) / exp(x).sum(1).reshape([n, 1])`,
+// which is batched cross-entropy and attention — was one `sum` away from differentiable
+// (a field build's finding). The forward is the plain tensor's; the backward puts the
+// reduced axis back: every element of a lane shares the lane's gradient (`sum`), divided
+// by the lane's length (`mean`), or all of it goes to the lane's first extreme (`max`/`min`,
+// ties-to-first in logical order, as the whole-tensor pair).
+
+/// `g`, of the shape a reduction along `k` left, stretched back along `k` to `shape`.
+fn expand_axis(g: &Arr, k: usize, shape: &IxDyn) -> Arr {
+    let with_axis = g.clone().insert_axis(Axis(k));
+    match with_axis.broadcast(shape.clone()) {
+        Some(view) => view.to_owned(),
+        None => ArrayD::zeros(shape.clone()),
+    }
+}
+
+fn sum_axis(a: &Rc<Node>, k: usize) -> Rc<Node> {
+    let value = a.value.sum_axis(Axis(k));
+    let shape = a.value.raw_dim();
+    make(value, vec![a.clone()], Box::new(move |g| vec![expand_axis(g, k, &shape)]))
+}
+
+fn mean_axis(a: &Rc<Node>, k: usize) -> Rc<Node> {
+    let n = a.value.shape()[k].max(1) as f64;
+    let value = a.value.sum_axis(Axis(k)).mapv(|x| x / n);
+    let shape = a.value.raw_dim();
+    make(value, vec![a.clone()], Box::new(move |g| vec![expand_axis(g, k, &shape).mapv(|x| x / n)]))
+}
+
+/// `max(k)` / `min(k)`: the extreme of each lane along `k`; its gradient reaches the
+/// lane's FIRST extreme element in logical order.
+fn extreme_axis(a: &Rc<Node>, k: usize, want_max: bool) -> Rc<Node> {
+    let init = if want_max { f64::NEG_INFINITY } else { f64::INFINITY };
+    let value = a.value.fold_axis(Axis(k), init, |&acc, &x| if want_max { acc.max(x) } else { acc.min(x) });
+    // For every output position, the input position of its lane's first extreme.
+    let mut chosen: Vec<(IxDyn, IxDyn, f64)> = Vec::new();
+    for (idx, &x) in a.value.indexed_iter() {
+        let out: Vec<usize> = idx.slice().iter().enumerate().filter(|(i, _)| *i != k).map(|(_, &d)| d).collect();
+        match chosen.iter_mut().find(|(o, _, _)| o.slice() == out.as_slice()) {
+            Some(entry) => {
+                let better = if want_max { x > entry.2 } else { x < entry.2 };
+                if better {
+                    entry.1 = idx.clone();
+                    entry.2 = x;
+                }
+            }
+            None => chosen.push((IxDyn(&out), idx.clone(), x)),
+        }
+    }
+    let shape = a.value.raw_dim();
+    make(
+        value,
+        vec![a.clone()],
+        Box::new(move |g| {
+            let mut grad = ArrayD::zeros(shape.clone());
+            for (out, at, _) in &chosen {
+                grad[at] += g[out];
+            }
+            vec![grad]
+        }),
+    )
+}
+
+/// `reshape(shape)` / `flatten()`: metadata on the tape — the same numbers in another
+/// shape, and the gradient reshaped back.
+fn reshape_node(a: &Rc<Node>, shape: Vec<usize>, line: usize, col: usize) -> Result<Rc<Node>, HelixError> {
+    let count: usize = shape.iter().product();
+    if count != a.value.len() {
+        return Err(HelixError::new(
+            format!("cannot reshape {} elements into shape {:?} ({} elements)", a.value.len(), shape, count),
+            line,
+            col,
+        ));
+    }
+    let value = a
+        .value
+        .to_shape(IxDyn(&shape))
+        .map_err(|e| HelixError::new(format!("could not reshape tensor: {e}"), line, col))?
+        .to_owned();
+    let back = a.value.raw_dim();
+    Ok(make(
+        value,
+        vec![a.clone()],
+        Box::new(move |g| {
+            vec![g.to_shape(back.clone()).map(|v| v.to_owned()).unwrap_or_else(|_| ArrayD::zeros(back.clone()))]
+        }),
+    ))
 }
 
 // ---------- matmul ----------
@@ -862,6 +955,8 @@ pub fn is_tape_method(name: &str) -> bool {
             | "shape"
             | "count"
             | "ndim"
+            | "reshape"
+            | "flatten"
     )
 }
 
@@ -877,13 +972,26 @@ pub fn method(n: &Rc<Node>, name: &str, args: &[Value], line: usize, col: usize)
             })?;
             Ok(Value::Node(matmul(n, &other, line, col)?))
         }
-        "sum" => {
-            no_method_args(name, args, line, col)?;
-            Ok(Value::Node(sum(n)))
+        // The reductions a plain tensor answers, whole or along an axis, on the tape.
+        "sum" => match crate::tensor::axis_arg(args, n.value.ndim(), line, col)? {
+            None => Ok(Value::Node(sum(n))),
+            Some(k) => Ok(Value::Node(sum_axis(n, k))),
+        },
+        "mean" => match crate::tensor::axis_arg(args, n.value.ndim(), line, col)? {
+            None => Ok(Value::Node(mean(n))),
+            Some(k) if n.value.shape()[k] == 0 => Err(HelixError::new("cannot take `mean` of an empty axis", line, col)),
+            Some(k) => Ok(Value::Node(mean_axis(n, k))),
+        },
+        // Metadata on the tape: the same numbers in another shape, the gradient reshaped
+        // back — what puts a reduced axis back for a row-wise softmax.
+        "reshape" => {
+            let shape = crate::tensor::shape_arg(args, line, col)?;
+            Ok(Value::Node(reshape_node(n, shape, line, col)?))
         }
-        "mean" => {
+        "flatten" => {
             no_method_args(name, args, line, col)?;
-            Ok(Value::Node(mean(n)))
+            let len = n.value.len();
+            Ok(Value::Node(reshape_node(n, vec![len], line, col)?))
         }
         "t" | "transpose" => {
             no_method_args(name, args, line, col)?;
@@ -901,11 +1009,15 @@ pub fn method(n: &Rc<Node>, name: &str, args: &[Value], line: usize, col: usize)
         // 0 args = the reduction — gradient 1 to the FIRST extreme element in
         // logical order, ties-to-first like the scalar pair; 1 arg = the
         // elementwise binary twin, exactly `max(v, other)`.
+        // An INTEGER argument is an axis, as on a plain tensor; a number or tensor is the
+        // elementwise twin.
         "max" | "min" => {
-            if args.len() == 1 {
+            if args.len() == 1 && !matches!(args[0], Value::Int(_)) {
                 return binary_builtin(name, &Value::Node(n.clone()), &args[0], line, col);
             }
-            no_method_args(name, args, line, col)?;
+            if let Some(k) = crate::tensor::axis_arg(args, n.value.ndim(), line, col)? {
+                return Ok(Value::Node(extreme_axis(n, k, name == "max")));
+            }
             if n.value.is_empty() {
                 return Err(HelixError::new(
                     format!("cannot take the `{name}` of an empty tensor"),
@@ -976,9 +1088,10 @@ pub fn method(n: &Rc<Node>, name: &str, args: &[Value], line: usize, col: usize)
             col,
         )
         .hint(
-            "methods: matmul/dot, sum, mean, t/transpose, relu, sigmoid, tanh, exp, ln, \
-             sqrt, sin, cos, abs; shape/count/ndim read the value. Any free builtin also \
-             chains — `v.tan()` means `tan(v)`.",
+            "methods: matmul/dot, sum/mean/max/min (whole, or along an axis: `sum(1)`), \
+             t/transpose, reshape/flatten, relu, sigmoid, tanh, exp, ln, sqrt, sin, cos, \
+             abs; shape/count/ndim read the value. Any free builtin also chains — \
+             `v.tan()` means `tan(v)`.",
         )),
     }
 }
@@ -1091,5 +1204,46 @@ mod tests {
         }
         assert!(differentiable_builtin("clamp"), "clamp is min(max(x, lo), hi) on the tape");
         assert!(!differentiable_builtin("floor"), "floor must stay refused (zero derivative)");
+    }
+
+    /// A reduction along an axis carries its gradient back along the axis: `sum(1)` hands
+    /// a lane's gradient to every element, `mean(0)` divides it by the lane's length,
+    /// `max(1)` sends it to the lane's first extreme (ties-to-first), and `reshape` hands it
+    /// back in the leaf's shape.
+    #[test]
+    fn a_reduction_along_an_axis_puts_the_axis_back_in_its_gradient() {
+        let leaf = variable(
+            &Value::Tensor(Rc::new(ArrayD::from_shape_vec(IxDyn(&[2, 3]), vec![1.0, 2.0, 3.0, 0.5, 0.5, 4.0]).unwrap())),
+            0,
+            0,
+        )
+        .expect("leaf");
+        let node = |v: &Value| to_node(v).expect("a tracked value");
+        let grad_of = |reduced: Value| {
+            let loss = method(&node(&reduced), "sum", &[], 0, 0).expect("whole sum");
+            match gradient(&loss, &leaf, 0, 0).expect("gradient") {
+                Value::Tensor(t) => t.iter().copied().collect::<Vec<f64>>(),
+                other => panic!("{other:?}"),
+            }
+        };
+        let s = method(&node(&leaf), "sum", &[Value::Int(1)], 0, 0).expect("sum(1)");
+        assert_eq!(node(&s).value.iter().copied().collect::<Vec<f64>>(), vec![6.0, 5.0]);
+        assert_eq!(grad_of(s), vec![1.0; 6]);
+        let m = method(&node(&leaf), "mean", &[Value::Int(0)], 0, 0).expect("mean(0)");
+        assert_eq!(node(&m).value.iter().copied().collect::<Vec<f64>>(), vec![0.75, 1.25, 3.5]);
+        assert_eq!(grad_of(m), vec![0.5; 6]);
+        let mx = method(&node(&leaf), "max", &[Value::Int(1)], 0, 0).expect("max(1)");
+        assert_eq!(node(&mx).value.iter().copied().collect::<Vec<f64>>(), vec![3.0, 4.0]);
+        assert_eq!(grad_of(mx), vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]);
+        // Ties go to the first extreme in logical order: the second row's `0.5, 0.5`.
+        let mn = method(&node(&leaf), "min", &[Value::Int(1)], 0, 0).expect("min(1)");
+        assert_eq!(grad_of(mn), vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        let r = method(&node(&leaf), "reshape", &[Value::array(vec![Value::Int(3), Value::Int(2)])], 0, 0).expect("reshape");
+        assert_eq!(node(&r).value.shape(), &[3, 2]);
+        assert_eq!(grad_of(r), vec![1.0; 6]);
+        // An integer is an axis; a number is the elementwise twin.
+        let twin = method(&node(&leaf), "max", &[Value::Float(2.5)], 0, 0).expect("max(2.5)");
+        assert_eq!(node(&twin).value.iter().copied().collect::<Vec<f64>>(), vec![2.5, 2.5, 3.0, 2.5, 2.5, 4.0]);
+        assert!(method(&node(&leaf), "sum", &[Value::Int(2)], 0, 0).unwrap_err().message.contains("out of range"));
     }
 }

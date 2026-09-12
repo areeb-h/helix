@@ -368,7 +368,23 @@ fn as_usize_shape(v: &Value, line: usize, col: usize) -> Result<Vec<usize>, Heli
 }
 
 /// Parse an optional axis index argument for a reduction (`sum()` vs `sum(0)`).
-fn axis_arg(
+/// The one shape array `reshape` takes, its dimensions checked not to overflow — shared
+/// with the tape, so `reshape([n, 1])` reads the same on a tracked tensor as on a plain one.
+pub(crate) fn shape_arg(args: &[Value], line: usize, col: usize) -> Result<Vec<usize>, HelixError> {
+    if args.len() != 1 {
+        return Err(HelixError::new("`reshape` takes one shape array", line, col).hint("e.g. `t.reshape([3, 2])`."));
+    }
+    let shape = as_usize_shape(&args[0], line, col)?;
+    if shape.iter().try_fold(1usize, |acc, &d| acc.checked_mul(d)).is_none() {
+        return Err(HelixError::new(format!("cannot reshape into {shape:?}: the element count overflows"), line, col)
+            .hint("the requested shape is far too large."));
+    }
+    Ok(shape)
+}
+
+/// The optional axis a reduction takes — shared with the tape, so `sum(1)` reads the same
+/// on a tracked tensor as on a plain one.
+pub(crate) fn axis_arg(
     args: &[Value],
     ndim: usize,
     line: usize,

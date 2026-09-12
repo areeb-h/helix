@@ -659,7 +659,7 @@ pub static BUILTIN_DOCS: &[DocEntry] = &[
         doc: "Wraps a number or tensor as a tracked autodiff leaf for gradient().",
         example: "variable(2.0)",
         example_out: "2.0",
-        notes: "",
+        notes: "A tracked tensor carries the whole plain surface on the tape: matmul/dot, sum/mean/max/min whole or along an axis (`sum(1)`, `max(0)` — an integer argument is an axis, a number or tensor the elementwise twin), t/transpose, reshape/flatten, the elementwise functions and the arithmetic operators with broadcasting; shape/count/ndim read the value. `gradient(loss, w)` on a tensor leaf returns the whole tensor's gradient from one reverse sweep. A row-wise softmax is `exp(x) / exp(x).sum(1).reshape([n, 1])`, and differentiates.",
     },
     DocEntry {
         name: "value_of",

@@ -4,6 +4,24 @@
 
 ### Added
 
+- **Reductions along an axis on the tape, and `reshape`/`flatten`.** A tracked tensor
+  answered `sum()` and `mean()` whole; `variable(x).sum(1)` was "`sum` takes no arguments
+  on a tracked value", so a row-wise softmax — batched cross-entropy, attention — was one
+  `sum` away from differentiable (a field build's finding, after `gradient(loss, w)` on a
+  tensor leaf trained a 66 049-parameter network in less time than the scalar tape needed
+  for 41). `sum(k)`, `mean(k)`, `max(k)` and `min(k)` carry gradients now — the forward is
+  the plain tensor's; the backward puts the axis back: a lane's gradient to every element
+  (`sum`), over the lane's length (`mean`), or all of it to the lane's first extreme
+  (`max`/`min`, ties-to-first as the whole-tensor pair). `reshape(shape)` and `flatten()`
+  join the tape as metadata, the gradient reshaped back, so `exp(x) / exp(x).sum(1).reshape([n, 1])`
+  is a differentiable row-wise softmax. On a tracked tensor an integer argument to
+  `max`/`min` is an axis, as on a plain one; a number or tensor is the elementwise twin
+  (`v.max(2.0)`, `max(v, other)`). Pinned by the tape's unit tests and
+  `axis_reductions_carry_gradients_on_every_engine`. Along the way the panicking-call
+  ratchet learned that an inline `#[cfg(test)]` module is test code: it had counted
+  `vm.rs`'s tests as sixty-two of its sixty-five budgeted calls, and four budgets fell to
+  their true counts.
+
 - **A column expression is a value (ADR 0052).** `@age > lo and @city == c` — how a frame
   verb's condition was always spelled — is a value anywhere else: the record that describes
   it, `{kind: "bin", op: "and", left: {kind: "bin", op: ">", left: {kind: "col", name: "age"},
