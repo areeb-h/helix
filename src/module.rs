@@ -105,6 +105,34 @@ pub fn file_of_line(line: usize) -> Option<String> {
         .map(|(_, name)| name.clone())
 }
 
+/// The bare spelling of a possibly module-namespaced name: `m0$tag` is `tag`, as the
+/// program wrote it.
+pub fn bare_name(name: &str) -> &str {
+    match name.split_once('$') {
+        Some((prefix, rest))
+            if prefix.len() > 1 && prefix.starts_with('m') && prefix[1..].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            rest
+        }
+        _ => name,
+    }
+}
+
+/// A global line as a person reads it — `line 65` in a single-file program, or the file
+/// and its own line once the loader has published the map for a multi-file one. Before the
+/// map is published (the check runs first), the global line is the answer, which for the
+/// main file is its own.
+pub fn describe_line(line: usize) -> String {
+    if let Ok(files) = FILE_LINES.read()
+        && files.len() > 1
+        && let Some((start, name)) = files.iter().rev().find(|(s, _)| *s <= line)
+    {
+        let file = std::path::Path::new(name).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_else(|| name.clone());
+        return format!("{file} line {}", line.saturating_sub(*start).saturating_add(1).max(1));
+    }
+    format!("line {line}")
+}
+
 /// The directories searched for a non-local import (`import std.stats`), in priority
 /// order after the importing file's own directory: every `HELIX_PATH` entry, then the
 /// install-relative standard-library locations beside the executable. A stdlib module

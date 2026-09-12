@@ -518,7 +518,18 @@ row-wise softmax was not differentiable. `sum(k)`/`mean(k)`/`max(k)`/`min(k)` an
 argument to a tracked `max`/`min` is an axis now, as on a plain tensor. Their two notes:
 `shape()` on a tracked value already works on main (their binary predated it); `e` is
 refused only as a TOP-LEVEL reassignment (`e = 2`), a `let e = …` inside a function is
-fine — whether a program may shadow a builtin constant at the top level is the user's call. Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
+fine — whether a program may shadow a builtin constant at the top level is the user's call.
+**§1.59 (2026-09-12) — a duplicate top-level `fn` refused, DONE.** The web field build's
+`fn tag(n)` at line 65 and `fn tag(v)` at line 606, same arity, no diagnostic: the first
+won and a test asserted against a function three lines above its own; with a different
+arity, an arity error at a call in the callee's module on a comment line. `types::check`
+refuses the second definition now, naming the first (`module::describe_line` gives the
+file and its own line once the loader's map is published, the global line before), with
+the value-binding rule as the hint. `fn f` then `f = 5` (corpus `t8_fn_rebind`) was
+already refused as a reassignment, so every top-level name follows one rule now; modules
+are namespaced, so only a file's own duplicates are caught. Their
+third point stands as OPEN: an arity error should name the DEFINITION it resolved, not
+only the call. Measured on the field's harness, the budget commit's binary against this one, both built fresh, interleaved, min of three runs of its median of 5 trials of 2 000: `order+limit+offset` 2.698 → 0.702 µs, `OR two branches` 7.666 → 6.454 µs, `keyset cursor` 4.848 → 1.600 µs, `page offset` 1.326 → 0.682 µs, `where eq` 2.498 → 2.118 µs, `where+limit` 3.170 → 2.684 µs, `update` 3.302 → 1.933 µs; `helix check` of the harness 18.4 → 19.7 ms; the rendered statements identical.
 
 **1.46a (2026-09-07) — const-fold a pure call with literal arguments.** DECIDED by the user
 and DONE: ADR 0050. `src/fold.rs` runs after the checker and the UFCS rewrite in every run, check

@@ -1,0 +1,10 @@
+exit: 1
+--- stdout ---
+
+--- stderr ---
+error: `tag` is defined twice: first at line 5, and again here
+  --> <src>:7:1
+  |
+7 | fn tag(v) = "X-Tag"
+  | ^
+help: a top-level name is bound once — `x = 1` then `x = 2` is refused the same way. Rename one of them, or delete the one the program does not mean.

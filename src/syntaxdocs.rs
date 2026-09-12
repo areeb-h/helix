@@ -116,7 +116,7 @@ pub static SYNTAX: &[SyntaxDoc] = &[
     SyntaxDoc {
         name: "fn",
         form: "fn area(w: Int, h: Int) -> Int = w * h",
-        doc: "Define a function. Parameter and return annotations are optional, checked by `helix check` before the program runs, and cost nothing at run time.",
+        doc: "Define a function. Parameter and return annotations are optional, checked by `helix check` before the program runs, and cost nothing at run time. A top-level name is bound once: a second `fn` of the same name is refused by `check`, naming the first — as `x = 1` then `x = 2` is refused.",
         example: "fn area(w: Int, h: Int) -> Int = w * h\nprint(area(3, 4))",
         example_out: "12",
         notes: "Type names: `Int`, `Float`, `Num` (either), `String`, `Bool`, `Array`, `Record`, `Dict`, \

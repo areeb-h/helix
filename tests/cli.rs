@@ -10218,16 +10218,22 @@ fn check_catches_constant_and_fn_reassignment() {
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("immutable"), "{err}");
 
+    // A duplicate `fn` used to be a legal idiom here ("first wins"). It was a silent trap
+    // — the field build's `fn tag` defined twice in one file, same arity, no diagnostic,
+    // a test asserting against a function three lines above its own (§1.59) — and is
+    // refused now, naming the first definition.
+    let (_, err, code) = check_source("fn g() = 1\nfn g() = 2\n", "ck_dupfn");
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("`g` is defined twice: first at line 1"), "{err}");
+
     // The legal idioms, all in one program: a mut rebind chain, re-declaring
-    // mut, `mut` BEFORE a same-named fn (the definition rebinds it), a
-    // duplicate fn (first wins), a plain assign over a `fn` (a fn name is not
-    // a value global, so the assign shadows it — corpus `m1b_assign_over_fn`),
-    // and an explicit `mut e` shadow.
+    // mut, `mut` BEFORE a same-named fn (the definition rebinds it), a plain assign
+    // over a `fn` (a fn name is not a value global, so the assign shadows it — corpus
+    // `m1b_assign_over_fn`), and an explicit `mut e` shadow.
     let legal = "mut x = 1\nx = 2\nmut x = 3\nx = 4\n\
                  mut f = 1\nfn f() = 2\n\
-                 fn g() = 1\nfn g() = 2\n\
                  fn h() = 1\nh = 5\n\
-                 mut e = 5\nprint(x, f(), g(), h, e)\n";
+                 mut e = 5\nprint(x, f(), h, e)\n";
     let (out, _, code) = check_source(legal, "ck_legal");
     assert_eq!(code, Some(0), "legal shadowing idioms must stay legal: {out}");
 }
@@ -16738,4 +16744,34 @@ cannot reshape 6 elements into shape [4, 2] (8 elements)\n";
         assert_eq!(code, Some(0), "{name}: {err}");
         assert_eq!(out, want, "{name}");
     }
+}
+
+/// A top-level `fn` is bound once (field build §1.59): a second definition of the same
+/// name — same arity or not — is refused by `check` and by `run`, at the second
+/// definition, naming the first; the first used to win in silence. Rebinding a function's
+/// name with a value stays the program's to make.
+#[test]
+fn a_duplicate_top_level_fn_is_refused_naming_the_first() {
+    let same = "fn tag(n) = \"X-{n}\"\n# a comment\nfn tag(v) = \"X-Tag\"\nprint(tag(1))\n";
+    let (out, err, code) = run_source(same, &[], "dup_fn_same");
+    assert_ne!(code, Some(0), "{out}");
+    assert!(err.contains("`tag` is defined twice: first at line 1, and again here"), "{err}");
+    assert!(err.contains(":3:1"), "the second definition is the site: {err}");
+    assert!(err.contains("bound once"), "{err}");
+    let path = std::env::temp_dir().join("helix_it_dup_fn_check.helix");
+    std::fs::write(&path, same).unwrap();
+    let (_, err, code) = run(&["check", path.to_str().unwrap()], &[], "");
+    let _ = std::fs::remove_file(&path);
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`tag` is defined twice"), "check: {err}");
+    let arity = "fn bump(a) = 1\nfn bump(a, b) = 2\nprint(bump(1))\n";
+    let (_, err, code) = run_source(arity, &[], "dup_fn_arity");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`bump` is defined twice: first at line 1"), "{err}");
+    // A value rebinding a function's name was already refused as a reassignment (the
+    // corpus's `t8_fn_rebind`): every top-level name follows the one rule now.
+    let rebind = "fn f(x) = x\nf = 5\nprint(f)\n";
+    let (_, err, code) = run_source(rebind, &[], "dup_fn_rebind");
+    assert_ne!(code, Some(0));
+    assert!(err.contains("`f` is immutable and cannot be reassigned"), "{err}");
 }

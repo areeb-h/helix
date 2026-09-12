@@ -1,0 +1,8 @@
+# A top-level `fn` is bound once (field build §1.59): a second definition of the same name
+# is refused before anything runs, naming the first — as `x = 1` then `x = 2` is refused.
+# The first used to win in silence: a test asserted against a function three lines above
+# the one it defined, and nothing said so.
+fn tag(n) = "X-{n}"
+# a comment between them, as in the file that found it
+fn tag(v) = "X-Tag"
+print(tag(1))

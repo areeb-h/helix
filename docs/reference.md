@@ -1851,7 +1851,7 @@ big
 
 ### `fn`
 
-Define a function. Parameter and return annotations are optional, checked by `helix check` before the program runs, and cost nothing at run time.
+Define a function. Parameter and return annotations are optional, checked by `helix check` before the program runs, and cost nothing at run time. A top-level name is bound once: a second `fn` of the same name is refused by `check`, naming the first — as `x = 1` then `x = 2` is refused.
 
 `fn area(w: Int, h: Int) -> Int = w * h`
 

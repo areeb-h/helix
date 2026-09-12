@@ -1527,6 +1527,31 @@ fn check_program(program: &[Stmt]) -> Result<Checker, HelixError> {
     // skips it: the shadow is not retroactive, and declaring it here would type calls ABOVE
     // the definition against the user's function — a wrong type handed to the JIT, not just a
     // permissive check.
+    //
+    // A TOP-LEVEL `fn` IS BOUND ONCE, as a value binding is (`x = 1` then `x = 2` is
+    // refused). A second `fn` of the same name used to be dropped in silence, the first
+    // winning: the field build's `fn tag(n)` at line 65 and a `fn tag(v)` at line 606, same
+    // arity, no diagnostic at all — a header never set, and a test asserting against a
+    // function three lines above the one it defined (§1.59); with a different arity, an
+    // arity error at a call, in the callee's module, on a comment line. The loader
+    // namespaces each module's names, so only one file's own duplicates reach this.
+    let mut defined: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for s in program {
+        if let Stmt::Func { name, line, col, .. } = s {
+            if let Some(first) = defined.get(name.as_str()) {
+                let shown = crate::module::bare_name(name);
+                return Err(HelixError::new(
+                    format!("`{shown}` is defined twice: first at {}, and again here", crate::module::describe_line(*first)),
+                    *line,
+                    *col,
+                )
+                .hint(
+                    "a top-level name is bound once — `x = 1` then `x = 2` is refused the same way. Rename one of them, or delete the one the program does not mean.",
+                ));
+            }
+            defined.insert(name.as_str(), *line);
+        }
+    }
     for s in program {
         if let Stmt::Func { name, params, defaults, ret, .. } = s
             && crate::registry::lookup(name).is_none()

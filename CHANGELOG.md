@@ -516,6 +516,21 @@
 
 ### Fixed
 
+- **A duplicate top-level `fn` was accepted in silence, the first one winning (field
+  build, §1.59).** `fn tag(n)` at line 65 and a new `fn tag(v)` at line 606 of a 900-line
+  test file, same arity: no diagnostic anywhere — the header the second one set was never
+  set, and a test asserted against a function three lines above the one it defined. With a
+  different arity the symptom was an arity error at a call site in the callee's module,
+  pointing at a comment line. It bit the same file twice in an hour. A second `fn` of a
+  name is refused by `check` now — and so by `run` and `bundle`, which check first —
+  naming the first: "`tag` is defined twice: first at line 65, and again here", at the
+  second definition; the rule a top-level VALUE binding always had (`x = 1` then `x = 2` is
+  refused as a reassignment). Rebinding a function's name with a value (`fn f(x) = x` then
+  `f = 5`) was already refused the same way, so every top-level name follows one rule now;
+  each module's names are its own. Pinned by
+  `a_duplicate_top_level_fn_is_refused_naming_the_first` and the corpus's
+  `dup_fn_refused.helix`.
+
 - **A binding called by name lost its binding under specialization (field build, §1.53).**
   Their renderer fans out over an array of closures with `fs.map(let f = it in f(p, s, c))`,
   and `helix check` said ok while the run died with "`f` is not a known function" on every
